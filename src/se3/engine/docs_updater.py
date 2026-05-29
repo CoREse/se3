@@ -10,6 +10,51 @@ from datetime import datetime
 import re
 
 
+def _versions_md_template_path() -> Path:
+    """Return the path to the packaged ``versions_md.md`` template.
+
+    Resolved relative to this module so it works regardless of the
+    project being operated on (mirrors
+    ``version_script_interface._load_template``). Factored out as a
+    module-level function so tests can monkeypatch the location.
+    """
+    return Path(__file__).parent.parent / "templates" / "versions_md.md"
+
+
+def _versions_entry_template_from_file() -> Optional[str]:
+    """Read the first ``##`` section block of the ``versions_md.md`` template.
+
+    Used as a fallback ``versions_entry`` template when the caller's
+    config does not supply ``versions_entry_template``. Returns the block
+    spanning the first ``## `` heading through the line before the next
+    ``## `` heading (or end of file), or ``None`` when the template file
+    is absent / unreadable / contains no ``## `` heading. Never raises.
+    """
+    template_path = _versions_md_template_path()
+    try:
+        text = template_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    lines = text.split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            start = i
+            break
+    if start is None:
+        return None
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+
+    block = "\n".join(lines[start:end]).strip("\n")
+    return block if block.strip() else None
+
+
 class Template:
     """Template configuration for documentation updates."""
 
@@ -83,8 +128,16 @@ class DocumentationUpdater:
         if "readme_header_template" in self.config:
             templates["readme_header"] = Template(self.config["readme_header_template"])
 
-        # VERSIONS entry template
-        versions_entry = self.config.get("versions_entry_template", self.DEFAULT_VERSIONS_ENTRY_TEMPLATE)
+        # VERSIONS entry template. Precedence:
+        #   1. config["versions_entry_template"] (explicit override)
+        #   2. first ## block of the packaged versions_md.md template
+        #   3. DEFAULT_VERSIONS_ENTRY_TEMPLATE (built-in fallback)
+        if "versions_entry_template" in self.config:
+            versions_entry = self.config["versions_entry_template"]
+        else:
+            versions_entry = _versions_entry_template_from_file()
+            if versions_entry is None:
+                versions_entry = self.DEFAULT_VERSIONS_ENTRY_TEMPLATE
         templates["versions_entry"] = Template(versions_entry)
 
         return templates
@@ -183,15 +236,55 @@ class DocumentationUpdater:
             if re.search(pattern, content, re.IGNORECASE):
                 return re.sub(pattern, new_badge, content, count=1, flags=re.IGNORECASE)
 
-        # No existing badge found - insert after first heading or at top
+        # No existing badge found. Find the insertion point by skipping a
+        # leading YAML front-matter block and any leading HTML comment
+        # lines, so the badge lands after the real title heading instead
+        # of breaking front-matter or sitting above a license comment.
         lines = content.split('\n')
-        if lines and lines[0].startswith('#'):
-            # Insert after first line (title)
-            lines.insert(1, '')
-            lines.insert(2, new_badge)
+        n = len(lines)
+        idx = 0
+
+        # Skip a leading YAML front-matter block (--- ... ---). Only when
+        # the very first line is a bare --- and a closing --- follows.
+        if idx < n and lines[idx].strip() == '---':
+            close = None
+            for j in range(idx + 1, n):
+                if lines[j].strip() == '---':
+                    close = j
+                    break
+            if close is not None:
+                idx = close + 1
+
+        # Skip leading blank lines and whole-line HTML comments (which may
+        # span multiple lines, e.g. a license header).
+        while idx < n:
+            stripped = lines[idx].strip()
+            if stripped == '':
+                idx += 1
+            elif stripped.startswith('<!--'):
+                if stripped.endswith('-->'):
+                    idx += 1
+                else:
+                    closed = False
+                    for j in range(idx + 1, n):
+                        if lines[j].strip().endswith('-->'):
+                            idx = j + 1
+                            closed = True
+                            break
+                    if not closed:
+                        break
+            else:
+                break
+
+        if idx < n and lines[idx].startswith('#'):
+            # First real content line is a markdown heading — insert the
+            # badge right after it (blank line + badge), preserving the
+            # heading and any front-matter / comments above it.
+            lines.insert(idx + 1, '')
+            lines.insert(idx + 2, new_badge)
             return '\n'.join(lines)
         else:
-            # Insert at top
+            # No heading at the top — prepend the badge.
             return new_badge + '\n\n' + content
 
     def _replace_version_header(self, content: str, version: str, context: Dict[str, str]) -> str:

@@ -495,6 +495,85 @@ class VersionConfig:
 
 
 @dataclass
+class DocsConfig:
+    """Documentation auto-update configuration.
+
+    Loads the optional ``documentation:`` section of the active project
+    YAML. This section lets a project override the templates that
+    :class:`se3.engine.docs_updater.DocumentationUpdater` uses when it is
+    wired into the commit pipeline, WITHOUT touching the legacy
+    ``version.templates`` block (which keeps its own behavior).
+
+    Supported keys (all optional, all natural ``DocumentationUpdater``
+    config keys so :meth:`to_updater_config` can forward them verbatim):
+
+    - ``readme_badge_template``
+    - ``versions_entry_template``
+    - ``readme_header_template``
+
+    Absent / non-string values are dropped so that
+    :meth:`to_updater_config` only ever surfaces real overrides and an
+    empty ``documentation:`` section yields ``{}`` (the updater then
+    keeps its built-in defaults).
+    """
+
+    readme_badge_template: Optional[str] = None
+    versions_entry_template: Optional[str] = None
+    readme_header_template: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DocsConfig":
+        """Create a DocsConfig from a loaded project-YAML mapping.
+
+        Reads the nested ``documentation:`` section. A missing or
+        non-mapping section yields an all-``None`` config; non-string
+        values for any key are ignored (left as ``None``).
+        """
+        if not data:
+            return cls()
+        section = data.get("documentation", {})
+        if not isinstance(section, dict):
+            return cls()
+
+        def _str_or_none(key: str) -> Optional[str]:
+            val = section.get(key)
+            return val if isinstance(val, str) else None
+
+        return cls(
+            readme_badge_template=_str_or_none("readme_badge_template"),
+            versions_entry_template=_str_or_none("versions_entry_template"),
+            readme_header_template=_str_or_none("readme_header_template"),
+        )
+
+    @classmethod
+    def load(cls, project_root: Path) -> "DocsConfig":
+        """Load documentation configuration from the active project YAML.
+
+        Uses :func:`load_project_yaml`, which applies the worktree-aware
+        ``se3.local.yaml`` → ``se3.yaml`` lookup, so no new file-discovery
+        logic is introduced here.
+        """
+        data, _src = load_project_yaml(project_root)
+        return cls.from_dict(data)
+
+    def to_updater_config(self) -> dict:
+        """Return only the set (non-``None``) keys as a plain dict.
+
+        The returned mapping is directly consumable as the ``config``
+        argument of :class:`DocumentationUpdater`. When no overrides are
+        configured the result is ``{}``.
+        """
+        result: dict = {}
+        if self.readme_badge_template is not None:
+            result["readme_badge_template"] = self.readme_badge_template
+        if self.versions_entry_template is not None:
+            result["versions_entry_template"] = self.versions_entry_template
+        if self.readme_header_template is not None:
+            result["readme_header_template"] = self.readme_header_template
+        return result
+
+
+@dataclass
 class Config:
     """Main SE3 configuration.
 
@@ -538,6 +617,25 @@ def load_version_config(project_root: Optional[Path] = None) -> VersionConfig:
         project_root = Path.cwd()
     
     return VersionConfig.load(project_root)
+
+
+def load_docs_config(project_root: Optional[Path] = None) -> DocsConfig:
+    """Load documentation auto-update configuration from project.
+
+    Reads the optional ``documentation:`` section of the active project
+    YAML (see :class:`DocsConfig`). When that section is absent the
+    returned config is all-``None`` and ``to_updater_config()`` is ``{}``.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        DocsConfig instance with loaded or default (empty) settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+
+    return DocsConfig.load(project_root)
 
 
 def load_config(project_root: Optional[Path] = None) -> Config:
