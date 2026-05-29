@@ -8,7 +8,7 @@
 
 > **A project-level, cross-session flow framework where the program — not the human — supervises the AI agent. You prompt once, walk away, and come back to a finished deliverable.**
 
-SE3 is not a single-session prompting tool, a skill, a subagent, or a dynamic workflow. Those are *in-session* aids that augment one human-in-the-loop turn. SE3 sits one layer above: it is a CLI engine + persistent state machine + spec-driven contracts that drive an AI coding agent across many sessions, on many machines, until the work is actually done.
+SE3 is not a single-session prompting tool, a skill, a subagent, or a dynamic workflow. Those are *in-session* aids that augment one human-in-the-loop turn. SE3 sits one layer above: it is a CLI engine + persistent state machine + code-first code↔spec governance that supervises an AI coding agent across many sessions, on many machines, until the work is actually done.
 
 ---
 
@@ -43,7 +43,7 @@ Steps 1 and 2 are the only places where human attention is genuinely required. E
 A program-as-supervisor paradigm only holds up if the framework provides four things that in-session tools cannot:
 
 - **Cross-session state machine** — `se3/state/engine.json` persists the exact step, attempt, context, and fix-loop history of every flow. `se3 daemon` keeps a resident process supervising local `se3 run` flows; `se3-server` aggregates many daemons into one web view; `se3 run --loop` chains tasks autonomously on isolated git worktrees. The flow survives terminal exits, machine restarts, and hand-offs between machines. *Why this paradigm needs it:* without durable state, "walking away" loses the work.
-- **Spec ↔ code two-way governance** — `se3/specs/*/spec.md` is a documented snapshot of the code, maintained by `se3 sync` (code → spec). Existing spec requirements are protected during implementation by `se3 guardrails` (spec → code), which blocks silent weakening or deletion of SHALL/MUST clauses. *Why this paradigm needs it:* a long-running unattended agent will otherwise drift; the spec is the implementation contract for the duration of a flow.
+- **Spec ↔ code two-way governance (asymmetric)** — `se3/specs/*/spec.md` is a documented snapshot of the code. The two directions are deliberately not equal. **code → spec is primary:** `se3 sync` regenerates the spec from the current code, and when the two disagree the code wins and the spec is updated — never the reverse. **spec → code is only a bounded, within-flow drift guard:** for the duration of a single flow, `se3 guardrails` treats the already-recorded SHALL/MUST requirements as the implementation contract *for that flow*, blocking silent weakening or deletion mid-flow; it does not make the spec authoritative over the code in general. *Why this paradigm needs it:* a long-running unattended agent will otherwise drift; the spec is the implementation contract for the duration of a flow.
 - **Failure recovery built in** — `se3 salvage` rescues a crashed session by committing dangling changes, filing follow-up issues, and archiving the state. `se3/state/known_test_failures.json` distinguishes a new regression from a pre-existing red test. Issue discovery promotes any unresolved concern into a tracked `se3/issues/` record. *Why this paradigm needs it:* when no human is watching, the framework must catch its own failures rather than leak them.
 - **Portable substrate** — the engine is pure Python over the file system. The LLM call layer is a thin `AgentRunner` adapter; today's concrete runner is the Claude Code CLI, but the abstraction (`AgentRunner` / `RunResult` / `InfraErrorType`) is provider-neutral. *Why this paradigm needs it:* a paradigm bet should not be a single-vendor bet.
 
@@ -51,7 +51,7 @@ A program-as-supervisor paradigm only holds up if the framework provides four th
 
 Dynamic Workflows solve *in-session* parallelism: deterministic fan-out, judge panels, pipelines, all inside one orchestrating conversation. They make a single turn comprehensive and confident.
 
-SE3 solves *cross-session* project governance: persistent state, spec contracts, failure recovery, and a portable substrate that outlives any single conversation.
+SE3 solves *cross-session* project governance: persistent state, code↔spec governance, failure recovery, and a portable substrate that outlives any single conversation.
 
 The two compose. A future SE3 step can delegate its in-step parallel work to a Dynamic Workflow without changing SE3's outer state machine. We deliberately do not pin to specific DW API names here, because DW is still in research preview and its surface will evolve.
 
@@ -197,9 +197,10 @@ your-project/
 
 ## Specs Catalog
 
-SE3 ships 22 self-describing specs under `se3/specs/`. They are both the
-project's living documentation and the implementation contract enforced by
-`se3 guardrails`. Use this as your index into the codebase.
+SE3 ships 22 self-describing specs under `se3/specs/`. They are the project's
+living documentation — a code-first snapshot of what the code currently does —
+which `se3 guardrails` protects from silent weakening within a flow. Use this
+as your index into the codebase.
 
 | Spec | One-line purpose |
 |------|------------------|

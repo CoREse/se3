@@ -6,9 +6,9 @@
 
 [English](README.md) | **中文**
 
-> **一个项目级、跨 session 的流程框架——由程序而非人作监工驱动 AI agent。你只 prompt 一次，走开，回来时交付物已经躺在 commit 里。**
+> **一个项目级、跨 session 的流程框架——由程序而非人作监工来监管 AI agent。你只 prompt 一次，走开，回来时交付物已经躺在 commit 里。**
 
-SE3 不是单次会话的 prompting 工具，不是 skill、subagent，也不是 dynamic workflow。后者是*单 session*内的增强手段，作用是放大一次"人在回路"的对话。SE3 在它们上一层：一个 CLI 引擎 + 持久化状态机 + spec 驱动的契约系统，驱动 AI coding agent 跨多个 session、跨多台机器，直到项目级任务真正做完。
+SE3 不是单次会话的 prompting 工具，不是 skill、subagent，也不是 dynamic workflow。后者是*单 session*内的增强手段，作用是放大一次"人在回路"的对话。SE3 在它们上一层：一个 CLI 引擎 + 持久化状态机 + code-first 的 code↔spec 治理，监管 AI coding agent 跨多个 session、跨多台机器，直到项目级任务真正做完。
 
 ---
 
@@ -43,7 +43,7 @@ LLM 不是瓶颈，*人的注意力*才是。任何 agentic 系统的成本，�
 只有在框架本身具备以下四件套时，"程序作监工"的范式才立得住——这正是 session 内工具做不到的事：
 
 - **跨 session 状态机** — `se3/state/engine.json` 持久化每个 flow 的精确 step、attempt、上下文与 fix-loop 历史；`se3 daemon` 提供一个常驻进程监管本机所有 `se3 run` flow；`se3-server` 把多台 daemon 聚合成一个网页视图；`se3 run --loop` 在隔离的 git worktree 上自动串起多次任务。flow 跨终端退出、机器重启、跨机器接管依然存活。*这一范式为何离不开它：* 没有持久化状态，"走开再回来"就等于丢工作。
-- **spec ↔ code 双向治理** — `se3/specs/*/spec.md` 是项目代码的文档化快照，由 `se3 sync` 维护（code → spec）；同一份 spec 在 implement 期间被 `se3 guardrails` 守住（spec → code），任何对既有 SHALL/MUST 的悄悄弱化或删除都会被拦下。*这一范式为何离不开它：* 一个长时间无人盯着的 agent 必然会漂移；spec 是这一次 flow 的实现契约。
+- **spec ↔ code 双向治理（非对称）** — `se3/specs/*/spec.md` 是项目代码的文档化快照，两个方向并不对等。**code → spec 是第一性方向：** `se3 sync` 以当前代码为准重新生成 spec，二者不一致时以代码为准、更新 spec，绝不反向。**spec → code 仅是 flow 内有界的防漂移护栏：** 在单次 flow 期间，`se3 guardrails` 把已记录的 SHALL/MUST requirement 视为*该 flow 期间*的实现契约，拦下进行中实现对它的悄悄弱化或删除；这并不使 spec 在一般意义上凌驾于代码之上。*这一范式为何离不开它：* 一个长时间无人盯着的 agent 必然会漂移；spec 是这一次 flow 的实现契约。
 - **失败回收内建** — `se3 salvage` 在 session 异常崩溃后做尽力抢救：commit 未提交改动、为遗留问题补 issue、归档 session；`se3/state/known_test_failures.json` 区分"新引入的回归"与"历史既存的红测试"；issue discovery 把任何未解决的隐患落成 `se3/issues/` 记录。*这一范式为何离不开它：* 没人盯着的时候，框架必须自己接住自己的失败，而不是把脏状态留给下一次。
 - **底座可移植性** — 引擎本身是纯 Python + 文件系统；LLM 调用层是一层薄薄的 `AgentRunner` 适配；当前的具体 runner 是 Claude Code CLI，但抽象（`AgentRunner` / `RunResult` / `InfraErrorType`）是 provider-neutral 的。*这一范式为何离不开它：* 押在一种范式上，不应同时押在单一供应商上。
 
@@ -51,7 +51,7 @@ LLM 不是瓶颈，*人的注意力*才是。任何 agentic 系统的成本，�
 
 Dynamic Workflows 解决的是*单 session 内*的并行编排：确定性 fan-out、judge panel、pipeline，都在一次对话里完成。它把"一次对话"做得更全、更可信。
 
-SE3 解决的是*跨 session*的项目治理：持久化状态、spec 契约、失败回收，以及一个能跨越任何单次对话的可移植底座。
+SE3 解决的是*跨 session*的项目治理：持久化状态、code↔spec 治理、失败回收，以及一个能跨越任何单次对话的可移植底座。
 
 两者可以叠加。未来某个 SE3 step 可以把它在 step 内部的并行工作委托给一次 Dynamic Workflow 调用，外层的状态机不变。我们故意不在 README 里钉死 DW 的具体 API 名字——DW 仍在 research preview，API 还会演进。
 
@@ -185,7 +185,7 @@ your-project/
 
 ## Specs 索引
 
-SE3 在 `se3/specs/` 下自带 22 份 spec，它们既是项目的活文档，也是被 `se3 guardrails` 强制执行的实现契约。可以作为深入代码的索引。
+SE3 在 `se3/specs/` 下自带 22 份 spec，它们是项目的活文档——代码当前行为的 code-first 快照——并在 flow 内被 `se3 guardrails` 守护、防止被悄悄弱化。可以作为深入代码的索引。
 
 | Spec | 一句话用途 |
 |------|-----------|
