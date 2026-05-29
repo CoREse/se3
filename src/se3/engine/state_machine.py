@@ -1083,6 +1083,11 @@ class StateMachine:
                     inputs["confidence"] = step.outputs.get("confidence")
                     inputs["suggested_version"] = step.outputs.get("suggested_version")
                     inputs["commit_message"] = step.outputs.get("commit_message")
+                    # Forward changelog bullets so the commit step's
+                    # DocumentationUpdater wiring can write VERSIONS.md. Absent on
+                    # older persisted flows -> [] (commit falls back to the commit
+                    # message subject).
+                    inputs["versions_changes"] = step.outputs.get("versions_changes", [])
                 elif step.step_type == StepType.COMMIT:
                     inputs["commit_hash"] = step.outputs.get("commit_hash")
                 elif step.step_type == StepType.CONFIRM:

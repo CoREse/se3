@@ -103,6 +103,19 @@ Analyze the changes above and produce:
    - Be specific but brief — describe what was done, not what was planned
    - Do NOT include the task type prefix (like "feat:" or "fix:")
 
+6. **versions_changes**: A list of 3-8 changelog-grade bullet strings describing
+   this release's actual user-facing changes, written for the project's
+   `VERSIONS.md` changelog.
+   - Each entry is an imperative sentence (e.g., "Add localized README naming
+     convention", "Fix badge insertion under YAML front-matter").
+   - Audience is the end user / downstream reader — describe what changed and
+     why it matters, not internal mechanics.
+   - This is DISTINCT from `commit_message` (a single 72-char subject line) and
+     from `reasoning` (the SemVer rating justification). Do NOT just repeat the
+     commit subject; enumerate the concrete changes that went into this version.
+   - Provide between 3 and 8 entries; if the change is genuinely tiny, fewer is
+     acceptable, but prefer enumerating distinct user-visible effects.
+
 Respond in valid JSON format:
 
 ```json
@@ -111,7 +124,11 @@ Respond in valid JSON format:
   "bump_type": "major|minor|patch|none",
   "reasoning": "Detailed explanation referencing the active rules and specific changes",
   "confidence": "high|medium|low",
-  "commit_message": "Concise imperative commit summary (max 72 chars)"
+  "commit_message": "Concise imperative commit summary (max 72 chars)",
+  "versions_changes": [
+    "Imperative changelog bullet describing one user-facing change",
+    "Another distinct user-facing change in this version"
+  ]
 }}
 ```
 
@@ -264,6 +281,16 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         result.get("commit_message")
         or _fallback_commit_message(task_type, task_description)
     )
+
+    # versions_changes feeds the commit step's DocumentationUpdater wiring
+    # (VERSIONS.md changelog entry). _validate_result has already filtered to
+    # non-empty strings; when nothing usable survives, fall back to a single
+    # entry equal to the authoritative commit_message so VERSIONS.md still
+    # records a bullet for this version. .get keeps the access defensive.
+    versions_changes = result.get("versions_changes") or []
+    if not versions_changes:
+        versions_changes = [step.outputs["commit_message"]]
+    step.outputs["versions_changes"] = versions_changes
 
     logger.info(
         "Version analysis complete: suggested_version=%s (current=%s), "
@@ -632,12 +659,26 @@ def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
     if confidence not in ("high", "medium", "low"):
         confidence = "medium"
 
+    # versions_changes: changelog-grade bullets for VERSIONS.md. Only string
+    # elements are kept (non-string entries are dropped); empty / whitespace-only
+    # strings are also discarded. A missing or non-list value yields an empty
+    # list here; the handler applies the `[commit_message]` fallback once the
+    # authoritative commit_message is known. Using .get keeps older persisted
+    # payloads (which never carried this key) safe.
+    raw_changes = result.get("versions_changes")
+    versions_changes: list[str] = []
+    if isinstance(raw_changes, list):
+        versions_changes = [
+            c.strip() for c in raw_changes if isinstance(c, str) and c.strip()
+        ]
+
     return {
         "bump_type": bump_type,
         "reasoning": result.get("reasoning", "No reasoning provided"),
         "confidence": confidence,
         "suggested_version": suggested_version,
         "commit_message": result.get("commit_message", ""),
+        "versions_changes": versions_changes,
     }
 
 
