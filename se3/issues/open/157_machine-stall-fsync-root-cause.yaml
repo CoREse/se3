@@ -1,0 +1,37 @@
+id: '157'
+title: Machine stall fsync root cause
+description: "Symptom\n-------\nDuring a DAG parallel implement run with 4 concurrent\
+  \ groups, the host\nmachine became severely sluggish: disk monitoring showed the\
+  \ volume was\nNOT full, yet writing files (incl. the merge LLM trace jsonl and engine\n\
+  state) became extremely slow. Pausing the flow made the stall disappear\nalmost\
+  \ immediately, which points at write/IO pressure from the running\nflow rather than\
+  \ a steady-state resource exhaustion.\n\nSuspected root cause\n--------------------\n\
+  fsync IO amplification: several parallel groups stream trace/state\nrecords while\
+  \ the daemon stats every file under se3/state|logs|calls|\nissues once per second.\
+  \ The per-record os.fsync in the merge LLM trace\nwriter (commands/merge/llm_trace.py)\
+  \ plus dirty-page writeback from the\nconcurrent streaming writers is the leading\
+  \ hypothesis for the stall.\n\nMitigations already applied (this change)\n-----------------------------------------\n\
+  \  * llm_trace.py: per-record fsync replaced with batched/throttled fsync\n    (every\
+  \ N records or T seconds), still forcing fsync at\n    stop()/__exit__/rotation\
+  \ so no tail record is lost.\n  * implement.py leaf merge: rev-parse --verify the\
+  \ target branch ref\n    before git merge, so an IO-stall / concurrent-delete missing\
+  \ ref\n    fails diagnosably instead of with the opaque\n    'not something we can\
+  \ merge' error.\n\nWhy this is only an issue, not a full fix\n-----------------------------------------\n\
+  The deep root cause (whether the stall is truly fsync amplification, a\nfilesystem/kernel\
+  \ writeback config issue, or daemon stat-storm\ncontention) cannot be confirmed\
+  \ without a reliable reproduction and IO\nprofiling (iostat/blktrace, dirty-page\
+  \ ratios, fs type). It is therefore\nNOT addressed in this change beyond the low-risk\
+  \ mitigations above. Next\nstep: capture a reproducible workload + IO trace before\
+  \ committing to a\ndeeper fix."
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- performance
+- fsync
+- io
+- needs-repro
+- daemon
+created_at: '2026-05-29T14:36:10.551194'
+updated_at: '2026-05-29T14:36:10.551194'

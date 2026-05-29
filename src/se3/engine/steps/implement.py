@@ -1526,6 +1526,25 @@ def _attempt_merge_with_resolution(
     rare — disk full, git lock contention, etc.) or if the merge failed
     for a non-conflict reason that ``--abort`` reverted.
     """
+    # Validate the target branch ref BEFORE attempting the merge. Under IO
+    # stall or a concurrent branch deletion the leaf ref can be missing, and
+    # ``git merge <missing>`` reports the opaque
+    # "merge: <branch> - not something we can merge" error. Probe with
+    # ``rev-parse --verify`` so the failure is diagnosable and no in-progress
+    # merge state is left behind (nothing to abort — we never ran the merge).
+    ref_check = _run_git(
+        project_root, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}",
+        check=False,
+    )
+    if ref_check.returncode != 0:
+        logger.error(
+            "Leaf merge aborted: target branch ref %r does not resolve to a "
+            "commit (git rev-parse --verify failed: %s). Skipping merge to "
+            "avoid an opaque 'not something we can merge' error.",
+            branch, ref_check.stderr.strip(),
+        )
+        return False
+
     result = _run_git(
         project_root, "merge", branch, "--no-edit",
         "-m", f"Merge leaf branch {branch}",

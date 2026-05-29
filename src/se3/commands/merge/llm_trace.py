@@ -31,6 +31,16 @@ _DEFAULT_TRACE_DIR = Path("se3/logs/llm")
 # Rotate to a new file when the current one exceeds this size.
 _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
 
+# Batched-fsync defaults.  Every record is still ``flush()``ed so it is
+# immediately visible to readers via the OS page cache, but the expensive
+# ``os.fsync`` (which forces dirty pages to physical disk) is throttled to
+# avoid the write-amplification stall observed when several parallel DAG
+# groups stream trace records while a daemon stats every file each second.
+# fsync still fires unconditionally at every stop()/__exit__/rotation point,
+# so no tail record is ever lost on a clean shutdown or file rotation.
+_DEFAULT_FSYNC_EVERY_N = 25
+_DEFAULT_FSYNC_INTERVAL_SEC = 5.0
+
 
 @dataclass
 class LLMCallRecord:
@@ -95,12 +105,24 @@ class LLMTrace:
         project_root: Path,
         trace_dir: Optional[Path] = None,
         max_file_bytes: int = _MAX_FILE_BYTES,
+        fsync_every_n: int = _DEFAULT_FSYNC_EVERY_N,
+        fsync_interval_sec: float = _DEFAULT_FSYNC_INTERVAL_SEC,
     ) -> None:
         self.project_root = project_root
         self.trace_dir = trace_dir or _DEFAULT_TRACE_DIR
         if not self.trace_dir.is_absolute():
             self.trace_dir = self.project_root / self.trace_dir
         self.max_file_bytes = max_file_bytes
+        # fsync is forced once at least ``fsync_every_n`` records OR
+        # ``fsync_interval_sec`` seconds have elapsed since the last fsync,
+        # whichever comes first.  A non-positive ``fsync_every_n`` restores
+        # per-record fsync (every record forces a sync).
+        self.fsync_every_n = fsync_every_n
+        self.fsync_interval_sec = fsync_interval_sec
+        # Records written since the last fsync, and the monotonic clock value
+        # at the last fsync — both reset by ``_fsync_now``.
+        self._records_since_fsync: int = 0
+        self._last_fsync_monotonic: float = time.monotonic()
         self._seq: int = 0
         # Per-file rotation counter, incremented on every new path.
         # Decoupling this from ``self._seq`` (which counts records, not
@@ -141,13 +163,26 @@ class LLMTrace:
         self._file = open(self._current_path, "w", encoding="utf-8")
         logger.debug("Opened LLM trace: %s", self._current_path)
 
+    def _fsync_now(self) -> None:
+        """Force a flush + fsync of the current file and reset the throttle.
+
+        Caller must hold ``self._lock`` and have a live ``self._file``.
+        """
+        if self._file is None:
+            return
+        try:
+            self._file.flush()
+            os.fsync(self._file.fileno())
+        except OSError:
+            pass
+        self._records_since_fsync = 0
+        self._last_fsync_monotonic = time.monotonic()
+
     def _close_file(self) -> None:
         if self._file is not None:
-            try:
-                self._file.flush()
-                os.fsync(self._file.fileno())
-            except OSError:
-                pass
+            # Force the tail to disk before closing so no record buffered
+            # under the batched-fsync throttle is lost on shutdown/rotation.
+            self._fsync_now()
             try:
                 self._file.close()
             except OSError:
@@ -218,9 +253,18 @@ class LLMTrace:
             # the new file, not the old one).
             self._rotate_if_needed()
             self._file.write(line)
-            # Per-record fsync for durability.
+            # Always flush so the record is immediately visible to other
+            # readers via the OS page cache (preserves append-only
+            # readability), but throttle the costly fsync to disk.
             self._file.flush()
-            os.fsync(self._file.fileno())
+            self._records_since_fsync += 1
+            elapsed = time.monotonic() - self._last_fsync_monotonic
+            if (
+                self.fsync_every_n <= 0
+                or self._records_since_fsync >= self.fsync_every_n
+                or elapsed >= self.fsync_interval_sec
+            ):
+                self._fsync_now()
             return seq
 
     def __enter__(self) -> LLMTrace:

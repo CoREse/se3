@@ -813,10 +813,11 @@ class TestConflictResolution:
         no_stash = MagicMock(
             returncode=0, stdout="No local changes to save", stderr="",
         )
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         conflict_merge = MagicMock(
             returncode=1, stdout="CONFLICT in file.py", stderr="",
         )
-        mock_git.side_effect = [no_stash, conflict_merge]
+        mock_git.side_effect = [no_stash, ref_ok, conflict_merge]
 
         mock_conflict_files.return_value = ["file.py"]
         mock_resolve.return_value = True  # LLM resolves it
@@ -889,11 +890,12 @@ class TestConflictResolution:
         no_stash = MagicMock(
             returncode=0, stdout="No local changes", stderr="",
         )
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         conflict_merge = MagicMock(
             returncode=1, stdout="CONFLICT in file.py", stderr="",
         )
         ok = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [no_stash, conflict_merge, ok, ok, ok]
+        mock_git.side_effect = [no_stash, ref_ok, conflict_merge, ok, ok, ok]
 
         mock_conflict_files.return_value = ["file.py"]
         mock_resolve.return_value = False  # LLM cannot resolve

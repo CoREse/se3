@@ -242,8 +242,9 @@ class TestMergeLeafBranch:
         """Conflict resolved by LLM returns True; take-theirs fallback not invoked."""
         mock_branch.return_value = "main"
         no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         merge_result = MagicMock(returncode=1, stdout="CONFLICT", stderr="")
-        mock_git.side_effect = [no_stash, merge_result]
+        mock_git.side_effect = [no_stash, ref_ok, merge_result]
         mock_conflict.return_value = ["file.py"]
         mock_resolve.return_value = True
 
@@ -270,9 +271,10 @@ class TestMergeLeafBranch:
         """
         mock_branch.return_value = "main"
         no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         merge_result = MagicMock(returncode=1, stdout="CONFLICT", stderr="")
         ok = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [no_stash, merge_result, ok, ok, ok]
+        mock_git.side_effect = [no_stash, ref_ok, merge_result, ok, ok, ok]
         mock_conflict.return_value = ["file.py"]
         mock_resolve.return_value = False  # LLM exhausted
 
@@ -301,12 +303,13 @@ class TestMergeLeafBranch:
         """If take-theirs commit itself fails (extremely rare), abort + False."""
         mock_branch.return_value = "main"
         no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         merge_result = MagicMock(returncode=1, stdout="CONFLICT", stderr="")
         ok = MagicMock(returncode=0, stdout="", stderr="")
         commit_fail = MagicMock(returncode=1, stdout="", stderr="commit blocked")
         abort_ok = MagicMock(returncode=0, stdout="", stderr="")
         mock_git.side_effect = [
-            no_stash, merge_result, ok, ok, commit_fail, abort_ok,
+            no_stash, ref_ok, merge_result, ok, ok, commit_fail, abort_ok,
         ]
         mock_conflict.return_value = ["file.py"]
         mock_resolve.return_value = False
@@ -327,11 +330,12 @@ class TestMergeLeafBranch:
         """Non-conflict merge failure aborts and returns False."""
         mock_branch.return_value = "main"
         no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         merge_fail = MagicMock(
             returncode=1, stdout="fatal: error", stderr="not a conflict",
         )
         abort_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [no_stash, merge_fail, abort_result]
+        mock_git.side_effect = [no_stash, ref_ok, merge_fail, abort_result]
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
@@ -352,8 +356,9 @@ class TestMergeLeafBranch:
         mock_branch.return_value = "impl/flow/G3"  # Not on original branch
         checkout_result = MagicMock(returncode=0, stdout="", stderr="")
         no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        ref_ok = MagicMock(returncode=0, stdout="abc123", stderr="")
         merge_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [checkout_result, no_stash, merge_result]
+        mock_git.side_effect = [checkout_result, no_stash, ref_ok, merge_result]
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
