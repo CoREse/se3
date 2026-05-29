@@ -85,3 +85,14 @@ test:
 
 workflow:
   max_fix_iterations: 30
+
+# Preset Prompts (common-task library)
+# Project-level presets override the built-in presets shipped with se3
+# (read at runtime from the package, never copied by `se3 init`). Each
+# entry carries its task type and points at a prompt file committed with
+# the project. Run with `se3 run --preset <name>`; list with
+# `se3 run --preset list`.
+presets:
+  doc-sync:
+    type: feature
+    prompt_file: se3/prompts/doc-sync.md
