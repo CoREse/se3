@@ -27,8 +27,20 @@ def _versions_entry_template_from_file() -> Optional[str]:
     Used as a fallback ``versions_entry`` template when the caller's
     config does not supply ``versions_entry_template``. Returns the block
     spanning the first ``## `` heading through the line before the next
-    ``## `` heading (or end of file), or ``None`` when the template file
-    is absent / unreadable / contains no ``## `` heading. Never raises.
+    ``## `` heading (or end of file).
+
+    The block is only returned when it is a genuine *entry template* — it
+    MUST contain both the ``{{version}}`` and ``{{changes}}`` placeholders
+    that :class:`Template` substitutes. The packaged ``versions_md.md`` is
+    an *init* template whose first section is a concrete release entry
+    (single-brace ``{date}``, a hardcoded version, and no ``{{changes}}``);
+    treating that as an entry template would silently discard the new
+    version, date, and changelog bullets, so such a block is rejected here
+    and the caller falls through to ``DEFAULT_VERSIONS_ENTRY_TEMPLATE``.
+
+    Returns ``None`` when the template file is absent / unreadable /
+    contains no ``## `` heading, or when the first section is not a valid
+    placeholder-based entry template. Never raises.
     """
     template_path = _versions_md_template_path()
     try:
@@ -52,7 +64,16 @@ def _versions_entry_template_from_file() -> Optional[str]:
             break
 
     block = "\n".join(lines[start:end]).strip("\n")
-    return block if block.strip() else None
+    if not block.strip():
+        return None
+
+    # Only accept the section as an entry template when it actually carries
+    # the dynamic placeholders. Otherwise it is a concrete entry (e.g. the
+    # init template's "## 0.1.0 - {date}" block) that render() cannot fill.
+    if "{{version}}" not in block or "{{changes}}" not in block:
+        return None
+
+    return block
 
 
 class Template:

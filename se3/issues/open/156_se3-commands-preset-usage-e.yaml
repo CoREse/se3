@@ -1,0 +1,24 @@
+id: '156'
+title: 'se3-commands (--preset usage/exclusion/list, error handling) and se3-config
+  (presets: and documentation: schema) spec sections are not yet updated. These are
+  the declared Planned Spec Changes ''[modify_requirement] se3-commands'' and ''[modify_requirement]
+  se3-config'', applied by update_spec after verify_spec. The corresponding CLI/config
+  code and tests are complete and passing.'
+description: 'se3-commands (--preset usage/exclusion/list, error handling) and se3-config
+  (presets: and documentation: schema) spec sections are not yet updated. These are
+  the declared Planned Spec Changes ''[modify_requirement] se3-commands'' and ''[modify_requirement]
+  se3-config'', applied by update_spec after verify_spec. The corresponding CLI/config
+  code and tests are complete and passing.
+
+
+  Suggestion: update_spec step applies these spec edits as declared in the plan.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-29T13:54:00.454476'
+updated_at: '2026-05-29T13:54:00.454476'

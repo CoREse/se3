@@ -17,6 +17,9 @@ project/
 ├── se3.yaml               # Framework configuration (optional)
 ├── se3.local.yaml         # Optional developer-local override (gitignored)
 ├── README.md              # Project documentation
+├── README.<lang>.md       # Optional localized READMEs (e.g. README.zh.md)
+├── VERSIONS.md            # Optional version-history changelog (init-seeded,
+│                          # maintained by version_analyze + commit)
 ├── se3/                   # SE3 runtime directory
 │   ├── specs/             # Documented snapshot of code (spec-assistant)
 │   │   ├── base/          # Base project specification
@@ -28,6 +31,25 @@ project/
 ├── src/                   # Source code (conventional)
 └── tests/                 # Test files (conventional)
 ```
+
+**Optional file — `VERSIONS.md`:** A project-root version-history
+changelog. It is OPTIONAL (it is NOT in Required Files), but `se3 init`
+seeds an initial `VERSIONS.md` (see *Project Initialization via
+se3 init*) and the `version_analyze` + `commit` pipeline maintains it on
+each version bump (the `documentation-updater` subsystem prepends a new
+`## <version> - <date>` entry). When absent, the commit pipeline creates
+it on the first bump.
+
+**Localized README naming:** Translations of `README.md` SHALL follow
+the BCP 47 short form `README.<lang>.md` by default — e.g.
+`README.zh.md`, `README.ja.md`, `README.fr.md`. Only when two or more
+regional variants of the *same* language must coexist is the
+region-qualified form `README.<lang>-<REGION>.md` used — e.g.
+`README.zh-CN.md` alongside `README.zh-TW.md`. The short form is the
+default; the region form is an upgrade reserved for the multi-region
+case. Underscore or main-name-hyphen spellings are NOT permitted as
+counter-examples: do NOT use `README_zh.md`, `README-zh.md`, or
+`README_zh_CN.md`.
 
 **Optional file — `se3/version-rules.md`:** When this file exists, its
 plain-Markdown contents are injected into the `version_analyze` LLM
@@ -129,6 +151,12 @@ corresponding short options.
 **Created Files:**
 1. **se3.yaml** — Project configuration
 2. **se3/specs/base/spec.md** — Base specification template
+3. **VERSIONS.md** — Initial version-history changelog, rendered from the
+   packaged `src/se3/templates/versions_md.md` template (starts with a
+   `# Version History` title and a `## 0.1.0 - <date>` initial entry).
+   Skipped when a `VERSIONS.md` already exists unless `--force` is
+   passed; its create/skip state is reported distinctly from the other
+   created/skipped files.
 
 #### Scenario: Initialize new project
 - **GIVEN** a clean project directory without SE3 configuration
@@ -147,6 +175,15 @@ corresponding short options.
 - **GIVEN** a project with existing se3.yaml
 - **WHEN** user runs `se3 init --force`
 - **THEN** existing files are overwritten with fresh templates
+
+#### Scenario: Initial VERSIONS.md created
+- **GIVEN** a clean project directory without a `VERSIONS.md`
+- **WHEN** a user runs `se3 init`
+- **THEN** a `VERSIONS.md` is created from the packaged template
+- **AND** its first line is `# Version History`
+- **AND** it contains an initial `## 0.1.0 - <date>` entry
+- **AND** an existing `VERSIONS.md` is left untouched unless `--force`
+  is passed
 
 #### Scenario: Initialize using short option aliases
 - **GIVEN** a clean project directory
@@ -507,19 +544,27 @@ The base specification template SHALL include the following sections:
 
 ### Requirement: Version Management
 
-项目 SHALL 使用语义化版本控制（Semantic Versioning 2.0.0）。
+项目 SHALL 使用语义化版本控制（Semantic Versioning 2.0.0）作为版本管理标准。
 
-**版本格式:** `MAJOR.MINOR.PATCH`
+**版本格式:** 遵循 SemVer 2.0.0 `MAJOR.MINOR.PATCH[-prerelease][+build]`
 - MAJOR: 不兼容的 API 修改
 - MINOR: 向下兼容的功能添加
 - PATCH: 向下兼容的问题修复
 
-**版本更新规则:**
-- `feature` 任务 → bump minor 版本
-- `bugfix` 任务 → bump patch 版本
+**版本决策模型:**
+- `version_analyze` 步骤的 `suggested_version` 字段是新版本号的唯一权威来源。
+- 可选自定义规则: 在 `se3/version-rules.md` 写入自然语言规则，
+  `version_analyze` 会将其注入 LLM prompt 作为决策依据；文件不存在时
+  回落到默认 SemVer 2.0.0 规则。
 
 #### Scenario: 版本自动更新
 - **GIVEN** 当前版本为 1.2.3
 - **WHEN** 完成 feature 任务并执行 commit 步骤
 - **THEN** 版本自动更新为 1.3.0
 ```
+
+The generated base spec template (`src/se3/templates/base_spec.md`) is
+the single source of truth for this section; `se3 init` renders it
+rather than emitting a hardcoded copy, so the `se3/version-rules.md`
+custom-rules mechanism is always disclosed to newly initialized
+projects.

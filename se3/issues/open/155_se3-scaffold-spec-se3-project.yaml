@@ -1,0 +1,30 @@
+id: '155'
+title: 'se3-scaffold spec ''SE3 Project Structure'' tree does not yet list VERSIONS.md
+  (optional) nor a ''Localized README naming'' rule. These are the declared Planned
+  Spec Changes ''[modify_requirement] se3-scaffold :: SE3 Project Structure'' covering
+  both subtask 3.1 and 4.1/4.2, applied by update_spec after verify_spec. VERSIONS.md
+  generation code (init_cmd.py:450-457) and its test (test_init_cmd.py:235-277) are
+  already complete and passing.'
+description: 'se3-scaffold spec ''SE3 Project Structure'' tree does not yet list VERSIONS.md
+  (optional) nor a ''Localized README naming'' rule. These are the declared Planned
+  Spec Changes ''[modify_requirement] se3-scaffold :: SE3 Project Structure'' covering
+  both subtask 3.1 and 4.1/4.2, applied by update_spec after verify_spec. VERSIONS.md
+  generation code (init_cmd.py:450-457) and its test (test_init_cmd.py:235-277) are
+  already complete and passing.
+
+
+  Suggestion: update_spec step should add VERSIONS.md (marked optional, not in Required
+  Files) and the ''Localized README naming'' rule (BCP 47 short form README.<lang>.md
+  default, README.<lang>-<REGION>.md only for same-language multi-region, counter-examples
+  for README_zh.md/README-zh.md) to se3/specs/se3-scaffold/spec.md, plus reference
+  VERSIONS.md in the ''Created Files'' list / init scenario.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-29T13:54:00.451501'
+updated_at: '2026-05-29T13:54:00.451501'

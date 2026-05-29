@@ -38,12 +38,19 @@ se3 run --from-issue <issue-id>
 # Attach a named "change" label to the flow
 se3 run "Implement feature X" --change feature-x
 se3 run "Implement feature X" -c feature-x
+
+# Run a preset prompt task by name (the preset carries its own type)
+se3 run --preset doc-sync
+
+# List all available presets (built-in + project)
+se3 run --preset list
 ```
 
 **Top-level options:**
 | Option | Default | Behavior |
 |--------|---------|----------|
 | `--type, -t` | `feature` | Task type (see Task Types table). |
+| `--preset` | none | Run a *preset prompt* task by name (see the `preset-prompts` spec). A preset carries its own task type and full prompt text, so the invocation is equivalent to `se3 run --type <preset.type> --description "<preset prompt full text>"`. `--preset` is **mutually exclusive with `--type`**: supplying both on the command line raises a `BadParameter` error (the preset already determines the type). The reserved value `--preset list` (rather than running a flow) lists every available preset — built-in and project — with each one's type and source layer, then exits with code 0. An unknown preset name raises an error whose message includes the list of available preset names; a preset whose declared `prompt_file` is missing raises an error rather than being silently swallowed. |
 | `--flow-id` | none | Resume a specific flow by its ID, independent of the generic `--resume` interactive selector. When supplied, the command loads the named flow and resumes it directly without prompting; when both `--flow-id` and `--resume` are given, `--flow-id` takes precedence and the interactive selector is skipped. When `--flow-id` is supplied alone (without `--resume`) the behavior is identical to `--resume --flow-id <id>` — resume of the named flow is implied. |
 | `--change, -c` | none | Optional human-readable change name attached to the new flow. The change name is recorded on the flow record (`change_name`) at creation time and displayed in the "New Flow" startup panel as `Change: <name>` when set. The option applies to standard `se3 run "<task>"` invocations as well as to `se3 run --from-issue`; it does NOT apply to `--resume` (resuming a flow does not relabel it) and does NOT alter task-type selection. When omitted, no change label is attached to the flow. |
 | `--output-format` | `cli` | Outermost event-stream sink selection. `cli` (default) hangs the existing Rich rendering sink and produces output byte-for-byte identical to current `se3 run`. `json` hangs the structured NDJSON sink — the form a daemon uses when it spawns a flow. `se3 run` itself does not branch on the caller; only the tail sink differs. An unrecognized value is rejected with a clear error and a non-zero exit. (See the *Event Stream and Sink Interface* requirement in the `flow-engine` spec.) |
@@ -123,6 +130,30 @@ The short aliases are interchangeable with their long forms (e.g. `se3 run -r` i
 - **THEN** the flow is started with its task type set to the literal string `"discovery"`
 - **AND** the `"discovery"` task type is a discovery-mode-only task type, distinct from the standard task-type set of `feature` / `bugfix` / `review` / `small` / `directive` in the Task Types table
 - **AND** the standard Task Types step-skipping rules do NOT apply to the `"discovery"` task type; the flow is governed by the flow engine's discovery-mode handling
+
+#### Scenario: Run a preset prompt by name
+- **WHEN** user executes `se3 run --preset doc-sync`
+- **THEN** the preset is resolved to its task type and full prompt text
+- **AND** a flow is started as if the user had run
+  `se3 run --type <preset.type> --description "<preset prompt full text>"`
+
+#### Scenario: --preset and --type are mutually exclusive
+- **WHEN** user executes `se3 run --preset doc-sync --type bugfix`
+- **THEN** the command raises a `BadParameter` error stating the two
+  options are mutually exclusive
+- **AND** no flow is started
+
+#### Scenario: Unknown preset reports available names
+- **WHEN** user executes `se3 run --preset does-not-exist`
+- **THEN** the command prints an error whose message lists the available
+  preset names
+- **AND** exits with a non-zero exit code without starting a flow
+
+#### Scenario: --preset list enumerates built-in and project presets
+- **WHEN** user executes `se3 run --preset list`
+- **THEN** the command prints every available preset (built-in and
+  project layers) with each preset's task type and source layer
+- **AND** exits with code 0 without starting a flow
 
 ### Requirement: `se3 run --from-issue` Option
 

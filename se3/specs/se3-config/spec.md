@@ -146,6 +146,74 @@ would silently ignore the developer's main-repo override.
 - `test.min_dynamic_timeout`: Lower bound (seconds) on the computed dynamic timeout (default: 30)
 - `test.max_dynamic_timeout`: Upper bound (seconds) on the computed dynamic timeout, preventing runaway escalation in the timeout fix loop (default: 14400)
 - `test.phases`: Additional test phases (list of phase configs; each phase's own `timeout` is always used and is NOT affected by the dynamic timeout)
+- `presets.<name>.type`: Task type for a project-level preset prompt (default: `feature`); see the `presets:` section below and the `preset-prompts` spec.
+- `presets.<name>.prompt_file`: Path (relative to project root) to the markdown prompt body for a project-level preset.
+- `documentation.readme_badge_template` / `documentation.versions_entry_template` / `documentation.readme_header_template`: Template overrides for the `DocumentationUpdater` wiring used by the `commit` pipeline (see the `documentation:` section below).
+
+**`presets:` section — project-level preset prompts:**
+
+The optional `presets:` section declares project-local preset prompt
+metadata consumed by `se3 run --preset <name>`. Each entry is keyed by
+preset name:
+
+```yaml
+presets:
+  doc-sync:
+    type: feature                 # task type the preset runs as (default: feature)
+    prompt_file: se3/prompts/doc-sync.md  # path (relative to project root) to the prompt body
+```
+
+- `type` is the task type the preset's flow runs as; when omitted it
+  defaults to `feature`.
+- `prompt_file` redirects the preset to a specific markdown file. When
+  omitted, the loader uses the matching `se3/prompts/<name>.md` file.
+- The `presets:` section carries ONLY project-level metadata/overrides;
+  the built-in preset library ships as package data and is not declared
+  here. A project preset whose name matches a built-in one overrides the
+  built-in. See the `preset-prompts` spec for the full two-layer
+  registry semantics.
+
+**`documentation:` section — DocumentationUpdater template overrides:**
+
+The optional `documentation:` section overrides the templates the
+`DocumentationUpdater` uses when it is wired into the `commit` pipeline
+to maintain `README.md` and `VERSIONS.md`:
+
+```yaml
+documentation:
+  readme_badge_template: "![Version](https://img.shields.io/badge/version-{{version}}-blue)"
+  versions_entry_template: "## {{version}} - {{date}}\n\n{{changes}}\n"
+  readme_header_template: "# Project (v{{version}})"
+```
+
+- All three keys are optional and use `{{placeholder}}` substitution
+  (`{{version}}`, `{{date}}`, `{{changes}}`, …). A missing or non-string
+  value is dropped, so an absent or empty `documentation:` section
+  leaves the updater on its built-in defaults.
+- `documentation:` is the authoritative configuration source for the
+  commit-pipeline `DocumentationUpdater` wiring. It is deliberately
+  separate from the legacy `version.templates` block (see Version
+  Configuration): `version.templates` retains its own existing behavior
+  for the version bumper and is NOT modified or read by this wiring.
+
+#### Scenario: Project preset metadata is read from presets:
+- **GIVEN** `se3.yaml` declares `presets: { doc-sync: { type: feature, prompt_file: se3/prompts/doc-sync.md } }`
+- **WHEN** `se3 run --preset doc-sync` resolves the preset
+- **THEN** the preset's task type is `feature`
+- **AND** the prompt body is read from `se3/prompts/doc-sync.md`
+
+#### Scenario: documentation: overrides DocumentationUpdater templates
+- **GIVEN** `se3.yaml` declares `documentation: { versions_entry_template: "## {{version}}\n\n{{changes}}\n" }`
+- **WHEN** the commit pipeline constructs the `DocumentationUpdater`
+- **THEN** the updater renders VERSIONS.md entries using the supplied
+  `versions_entry_template`
+- **AND** the legacy `version.templates` block is unaffected
+
+#### Scenario: Empty documentation section keeps built-in defaults
+- **GIVEN** `se3.yaml` has no `documentation:` section (or an empty one)
+- **WHEN** the commit pipeline constructs the `DocumentationUpdater`
+- **THEN** the updater uses its built-in `readme_badge` / `versions_entry`
+  defaults and registers no `readme_header` template
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project

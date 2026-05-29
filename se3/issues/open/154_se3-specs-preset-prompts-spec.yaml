@@ -1,0 +1,28 @@
+id: '154'
+title: 'se3/specs/preset-prompts/spec.md does not yet exist (preset two-layer registry
+  spec). This is the declared Planned Spec Change ''[add_requirement] preset-prompts
+  :: Preset Prompt Two-Layer Registry'' and is applied by the update_spec step, which
+  runs AFTER verify_spec. Not a regression; code + tests for the mechanism are complete
+  and passing.'
+description: 'se3/specs/preset-prompts/spec.md does not yet exist (preset two-layer
+  registry spec). This is the declared Planned Spec Change ''[add_requirement] preset-prompts
+  :: Preset Prompt Two-Layer Registry'' and is applied by the update_spec step, which
+  runs AFTER verify_spec. Not a regression; code + tests for the mechanism are complete
+  and passing.
+
+
+  Suggestion: update_spec step should create se3/specs/preset-prompts/spec.md (spec-format
+  v1: ''<!-- spec-format: v1 -->'', ''# Preset Prompts Specification'', ## Purpose,
+  ## Requirements) describing the built-in (runtime package-data, never copied by
+  init) vs project (se3/prompts/*.md + se3.yaml presets:) layers, merge/override order
+  (project overrides built-in), and error handling, with scenarios.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-29T13:54:00.446987'
+updated_at: '2026-05-29T13:54:00.446987'

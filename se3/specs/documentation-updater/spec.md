@@ -66,6 +66,23 @@ templates with caller overrides.
 - When `config` provides `"readme_badge_template"` or
   `"versions_entry_template"`, those values SHALL replace the defaults
   for `"readme_badge"` and `"versions_entry"` respectively.
+- The `"versions_entry"` template SHALL be resolved using a three-step
+  precedence so that a project's packaged `versions_md.md` template can
+  act as the default changelog-entry shape without an explicit config
+  override:
+  1. `config["versions_entry_template"]` when present (explicit
+     override).
+  2. Otherwise, the first `## ` section block of the packaged
+     `src/se3/templates/versions_md.md` file, but ONLY when that block
+     is a genuine *entry template* — it MUST contain both the
+     `{{version}}` and `{{changes}}` placeholders. The packaged init
+     template's first section is a concrete release entry (a hardcoded
+     version, single-brace `{date}`, and no `{{changes}}`); such a block
+     is rejected to avoid silently discarding the new version, date, and
+     changelog bullets. Reading the file never raises — a missing,
+     unreadable, heading-less, or non-placeholder block yields no
+     fallback template.
+  3. Otherwise, the built-in `DEFAULT_VERSIONS_ENTRY_TEMPLATE`.
 - A `"readme_header"` template SHALL be installed ONLY when
   `config["readme_header_template"]` is present; absent that key, the
   registry MUST NOT contain a `"readme_header"` entry.
@@ -108,12 +125,19 @@ falls back to one of two insertion modes.
 - The first pattern that matches the file SHALL be replaced exactly
   once with the rendered `readme_badge` template; the remaining
   patterns MUST NOT be applied in the same call.
-- If NONE of the three patterns match:
-  - If the first non-empty line starts with `#` (markdown heading), the
-    new badge SHALL be inserted as the third line (blank line, then
-    badge) so the existing title is preserved.
-  - Otherwise, the new badge SHALL be prepended to the file followed
-    by a blank line.
+- If NONE of the three patterns match, the insertion point is located
+  by first skipping any leading non-content prologue:
+  - A leading YAML front-matter block (a first line that is a bare
+    `---` together with the next closing `---`) SHALL be skipped, so
+    the badge is not inserted inside the front-matter.
+  - Following blank lines and whole-line HTML comments (e.g. a license
+    header comment, which may span multiple lines) SHALL be skipped.
+  - If the first real content line after that prologue starts with `#`
+    (markdown heading), the new badge SHALL be inserted right after that
+    heading (blank line, then badge), preserving the heading and any
+    front-matter / comments above it.
+  - Otherwise, the new badge SHALL be inserted at the top of the
+    remaining content followed by a blank line.
 - After badge replacement (or insertion), `_replace_version_header`
   SHALL run ONLY when `"readme_header"` is present in the templates
   registry; absent that key, the header step is a no-op.
@@ -132,6 +156,18 @@ falls back to one of two insertion modes.
 - **WHEN** `update_readme("1.0.0")` is invoked
 - **THEN** the rendered badge appears as the third line of the file,
   preceded by a blank line and the original `# My Project` heading
+
+#### Scenario: README with YAML front-matter gets badge after the heading
+- **GIVEN** a `README.md` that opens with a `---` … `---` YAML
+  front-matter block, optionally followed by an HTML comment, then a
+  `# My Project` heading
+- **AND** the file contains no version badge
+- **WHEN** `update_readme("1.0.0")` is invoked
+- **THEN** the front-matter block and any leading HTML comment are left
+  intact
+- **AND** the rendered badge is inserted immediately after the
+  `# My Project` heading rather than inside the front-matter or above
+  the comment
 
 #### Scenario: README without title gets badge prepended
 - **GIVEN** a `README.md` whose first line is plain prose (no leading `#`)

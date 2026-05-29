@@ -190,17 +190,20 @@ class TestConfigCustomEntryTemplate:
 
 class TestVersionsTemplateFileFallback:
     def test_fallback_reads_first_section_block(self, tmp_path, monkeypatch):
+        # A versions_md.md whose first ## block is a genuine entry template
+        # (carries {{version}}/{{date}}/{{changes}}) is adopted as the
+        # versions_entry fallback when config supplies no override.
         template_file = tmp_path / "versions_md.md"
         template_file.write_text(
             "# {project_name} Version History\n"
             "\n"
-            "## Current Version\n"
+            "## {{version}} - {{date}}\n"
             "\n"
-            "**0.1.0** — Initial release.\n"
+            "{{changes}}\n"
             "\n"
-            "## Version History\n"
+            "## Older\n"
             "\n"
-            "| Version | Date |\n",
+            "history...\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(
@@ -211,8 +214,56 @@ class TestVersionsTemplateFileFallback:
         # first ## block.
         updater = DocumentationUpdater(tmp_path, config={})
         assert updater.templates["versions_entry"].content == (
-            "## Current Version\n\n**0.1.0** — Initial release."
+            "## {{version}} - {{date}}\n\n{{changes}}"
         )
+
+        # End-to-end: the fallback template must actually substitute the
+        # real version and the forwarded changes into VERSIONS.md.
+        updater.update_versions_md("0.2.0", ["Real change A", "Real change B"])
+        content = (tmp_path / "VERSIONS.md").read_text(encoding="utf-8")
+        assert "## 0.2.0 - " in content
+        assert "- Real change A" in content
+        assert "- Real change B" in content
+        # The literal template tokens must not leak into the output.
+        assert "{{version}}" not in content
+        assert "{{changes}}" not in content
+
+    def test_concrete_first_block_rejected_falls_back_to_default(
+        self, tmp_path, monkeypatch
+    ):
+        # The packaged init template's first ## block is a CONCRETE entry
+        # (single-brace {date}, hardcoded version, no {{changes}}). It must
+        # NOT be adopted as an entry template — doing so would discard the
+        # new version/date/changes. Instead, fall back to the DEFAULT
+        # placeholder template so rendering works.
+        template_file = tmp_path / "versions_md.md"
+        template_file.write_text(
+            "# {project_name} Version History\n"
+            "\n"
+            "## 0.1.0 - {date}\n"
+            "\n"
+            "- Initial release.\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            docs_updater, "_versions_md_template_path", lambda: template_file
+        )
+
+        assert _versions_entry_template_from_file() is None
+
+        updater = DocumentationUpdater(tmp_path, config={})
+        assert updater.templates["versions_entry"].content == (
+            DocumentationUpdater.DEFAULT_VERSIONS_ENTRY_TEMPLATE
+        )
+
+        # End-to-end: the new version's changelog bullets are written, not
+        # the template's hardcoded "0.1.0 / Initial release." entry.
+        updater.update_versions_md("0.3.0", ["Synthesized bullet"])
+        content = (tmp_path / "VERSIONS.md").read_text(encoding="utf-8")
+        assert "## 0.3.0 - " in content
+        assert "- Synthesized bullet" in content
+        assert "Initial release." not in content
+        assert "{date}" not in content
 
     def test_fallback_to_default_when_file_absent(self, tmp_path, monkeypatch):
         missing = tmp_path / "does-not-exist.md"
