@@ -221,6 +221,10 @@ class SyncAnalyzer:
         )
         if deps and all_deps_missing:
             base_prompt += _CODE_ABSENCE_PROMPT
+        # The diff descriptions produced here are written into spec files by
+        # the resolve path, so they must follow spec_language. No-op when unset.
+        from .context_builder import get_spec_language_instruction
+        base_prompt += get_spec_language_instruction(self.project_root)
         return base_prompt
 
     def analyze_spec(
@@ -381,6 +385,10 @@ class SyncAnalyzer:
             LLMCallError: If LLM call fails after retries.
         """
         prompt = _BASE_SPEC_PROMPT_TEMPLATE.format(project_context=project_context)
+
+        # Base spec is written to disk by this path — honor spec_language.
+        from .context_builder import get_spec_language_instruction
+        prompt += get_spec_language_instruction(self.project_root)
 
         response = self.llm_caller.call(
             prompt=prompt,
