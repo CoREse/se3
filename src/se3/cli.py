@@ -166,6 +166,7 @@ def _handle_list_loops(project_root) -> None:
 
 @app.command(name="run")
 def run_cmd(
+    ctx: typer.Context,
     task: Optional[str] = typer.Argument(None, help="Task description"),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume interrupted flow"),
     loop: bool = typer.Option(False, "--loop", "-l", help="Loop mode (continuous task execution)"),
@@ -179,6 +180,7 @@ def run_cmd(
     list_loops: bool = typer.Option(False, "--list-loops", help="List existing unmerged loop branches"),
     from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection)"),
     output_format: str = typer.Option("cli", "--output-format", help="Output sink: 'cli' (Rich rendering, default) or 'json' (structured NDJSON event stream)"),
+    preset: Optional[str] = typer.Option(None, "--preset", help="Run a preset prompt task by name (mutually exclusive with --type; the preset carries its own type). Use '--preset list' to list available presets."),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -212,6 +214,44 @@ def run_cmd(
     se3_dir.mkdir(exist_ok=True)
     (se3_dir / "state").mkdir(exist_ok=True)
     (se3_dir / "cache").mkdir(exist_ok=True)
+
+    # Handle preset prompts (common-task library). A preset carries its own
+    # task type, so it is mutually exclusive with an explicit --type.
+    if preset is not None:
+        import click
+
+        from .preset_loader import PresetError, list_presets, resolve
+
+        if ctx.get_parameter_source("type") == click.core.ParameterSource.COMMANDLINE:
+            raise typer.BadParameter(
+                "--preset and --type are mutually exclusive; a preset carries "
+                "its own task type.",
+                param_hint="--preset",
+            )
+
+        if preset == "list":
+            presets = list_presets(project_root)
+            if not presets:
+                render_full("No presets available.", title="Presets")
+            else:
+                lines = ["Available presets:", ""]
+                for entry in presets:
+                    lines.append(
+                        f"  {entry.name}  (type={entry.type}, source={entry.layer})"
+                    )
+                render_full("\n".join(lines), title="Presets")
+            raise typer.Exit(0)
+
+        try:
+            preset_type, preset_prompt, _layer = resolve(preset, project_root)
+        except PresetError as exc:
+            render_full(f"Error: {exc}", title="Error")
+            raise typer.Exit(1)
+
+        # A preset is equivalent to `se3 run --type <preset.type>
+        # --description "<preset prompt full text>"`.
+        type = preset_type
+        task = preset_prompt
 
     # Handle discovery mode - force task_type to "discovery"
     if discover:
