@@ -1,6 +1,16 @@
 # SE3 Framework Version History
 
 
+
+## 7.10.0 - 2026-05-30
+
+- Establish a single authoritative code-first / spec-assistant role definition and inject it into discovery, analyze, and plan prompts so specs are treated as a read-only reference to current code rather than a driver
+- Demote 'Available Specifications' in discovery to a read-only reference of current code state and forbid discovery from proposing new or rewritten specs (deferred to update_spec / se3 sync)
+- Inject language instructions into the se3 sync spec-writing paths (sync_engine, sync_discovery, sync_analyzer) so regenerated specs honor language.spec_language
+- Strengthen language-instruction wording to preserve technical symbols (code identifiers, command and API names, paths) verbatim and to treat spec_language as authoritative for the spec body
+- Add a repository-level anti-regression guardrail test that scans prompts and docs for curated spec-driven framing phrases while excluding compliant terms (contract, source of truth, two-way governance)
+- Clean up residual spec-driven framing in README.md, README.zh.md, and base/spec.md while preserving the compliant asymmetric within-flow drift-guard wording
+- Converge verify_spec and merge guardrails wording to a within-flow drift-prevention framing without making the spec authoritative over code
 ## 7.9.1 - 2026-05-29
 
 - Pause on step failure through both channels: always write the retry_decision call file and emit FLOW_PAUSED so the web console shows the failure and Retry/Skip/Abort, with the CLI prompt and web response racing whoever-first-wins under a TTY

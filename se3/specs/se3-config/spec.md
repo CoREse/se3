@@ -1035,6 +1035,8 @@ The system SHALL support two-tier language configuration for controlling output 
 
 When a language is set, a language instruction is appended to the LLM prompt for applicable steps. When null (default), no language instruction is added and the LLM freely chooses language.
 
+**Language instruction content:** Every language-restricted instruction SHALL additionally direct the LLM to preserve all technical symbols verbatim — code identifiers, function/class names, command names, API names, file paths, and literal config keys/values MUST NOT be translated. For spec-writing paths the instruction SHALL additionally state that the configured `spec_language` is authoritative for the written spec body — both prose and every SHALL/MUST requirement statement — so the generated spec does not mirror the source code's incidental language. The `get_language_instruction(language, context, *, for_spec=False)` helper carries this: `for_spec=True` selects the spec-flavored wording. The `language is None`/empty → `""` ("no config → no injection") contract is preserved regardless of `for_spec`.
+
 **Affected steps by `language.language`:**
 - `summarize` — always affected
 - `discovery` — always affected
@@ -1042,9 +1044,12 @@ When a language is set, a language instruction is appended to the LLM prompt for
 
 **Affected steps by `language.spec_language`:**
 - `update_spec` — always affected
+- The `se3 sync` spec-writing paths — `sync_engine` (Way A edits + Way B rewrites), `sync_discovery` (new-spec generation), and `sync_analyzer` (diff descriptions written into specs, plus base-spec generation) — always affected. These are not `se3 run` state-machine steps, so they obtain the spec-flavored instruction via `get_spec_language_instruction(project_root)` (a `context_builder` helper that wraps `get_language_instruction(spec_language, for_spec=True)`) rather than `get_step_language_instruction`. When `spec_language` is unset they inject nothing, preserving prior sync behavior.
 
 **Unaffected steps (LLM decides language):**
 - `analyze`, `plan`, `implement`, `test`, `verify_spec`, `commit`
+
+`analyze` and `verify_spec` are read-only and `implement` writes code rather than spec, so none of them is a spec-writing path; their non-injection is intentional, not a gap. The genuine spec-writing language gap lived in the `sync_*` modules above, which now inject via `get_spec_language_instruction`.
 
 **Example configuration:**
 ```yaml
@@ -1078,6 +1083,17 @@ language:
 - **WHEN** summarize step runs, it uses zh-CN
 - **AND** when update_spec step runs, it uses English
 - **AND** when implement step runs, no language instruction is added
+
+#### Scenario: sync write paths honor spec_language
+- **GIVEN** `language.spec_language: en` in se3.yaml
+- **WHEN** `se3 sync` regenerates or edits a spec via `sync_engine`, `sync_discovery`, or `sync_analyzer`
+- **THEN** the prompt includes the spec-flavored language instruction stating English is authoritative for the spec body
+- **AND** when `spec_language` is unset, none of these sync paths add a language instruction
+
+#### Scenario: Technical symbols preserved under language restriction
+- **GIVEN** any language-restricted prompt (a human-facing step, `update_spec`, or a `sync_*` write path)
+- **WHEN** the language instruction is appended
+- **THEN** it directs the LLM to keep code identifiers, command names, API names, and file paths verbatim in their original form rather than translating them
 
 ### Requirement: Agent Registry
 

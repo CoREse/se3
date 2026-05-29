@@ -44,13 +44,31 @@ def _scanned_source_files() -> list[Path]:
 
     Scope (per G5 task): step prompts, the README mirrors, ``docs/`` markdown,
     the project-init markdown templates, and the runtime-environment injection
-    markdown. The authoritative-definition module ``spec_role.py`` is
-    intentionally NOT scanned — it is the single place that legitimately stores
-    the curated phrases (the rejected framing it scans *for*), so scanning it
-    would be a guaranteed self-match.
+    markdown.
+
+    Crucially, the scope ALSO covers the LLM-prompt-bearing modules that live
+    *outside* ``engine/steps/``: the sync engine/discovery/analyzer modules and
+    the ``engine/merge/`` package. These embed the spec-update,
+    base-spec-generation and conflict-resolution prompt templates that write or
+    regenerate spec bodies — exactly the prompts where a reintroduced
+    "spec-driven" / "must align with the spec" framing would do the most harm.
+    Leaving them out would let such a residual ship undetected, so they are in
+    scope alongside the step prompts.
+
+    The authoritative-definition module ``spec_role.py`` is intentionally NOT
+    scanned — it is the single place that legitimately stores the curated
+    phrases (the rejected framing it scans *for*), so scanning it would be a
+    guaranteed self-match.
     """
     files: list[Path] = []
     files += sorted((_REPO_ROOT / "src/se3/engine/steps").glob("*.py"))
+    # Prompt-bearing modules outside steps/ that emit spec-writing prompts.
+    files += [
+        _REPO_ROOT / "src/se3/engine/sync_engine.py",
+        _REPO_ROOT / "src/se3/engine/sync_discovery.py",
+        _REPO_ROOT / "src/se3/engine/sync_analyzer.py",
+    ]
+    files += sorted((_REPO_ROOT / "src/se3/engine/merge").glob("*.py"))
     files += [_REPO_ROOT / "README.md", _REPO_ROOT / "README.zh.md"]
     files += sorted((_REPO_ROOT / "docs").glob("*.md"))
     files += sorted((_REPO_ROOT / "src/se3/templates").glob("*.md"))
@@ -71,6 +89,14 @@ def test_scan_scope_is_non_empty():
     assert "README.zh.md" in names
     assert "discovery.py" in names
     assert "runtime_environment.md" in names
+    # The spec-writing prompt modules outside steps/ must be in scope too — they
+    # carry the prompts that regenerate spec bodies, so a residual reintroduced
+    # there must still trip the guardrail.
+    assert "sync_engine.py" in names
+    assert "sync_discovery.py" in names
+    assert "sync_analyzer.py" in names
+    # At least the merge guardrails/conflict prompt modules must be picked up.
+    assert "conflict_resolver.py" in names
 
 
 def test_no_spec_driven_framing_in_prompt_and_doc_source():
