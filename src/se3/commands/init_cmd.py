@@ -2,6 +2,7 @@
 
 import fnmatch
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +10,25 @@ import typer
 
 # Note: This module exports the init function directly to be registered by cli.py
 # Not using app.command() here because cli.py registers it directly
+
+# Directory holding the project-init template files (base_spec.md,
+# versions_md.md, …). Resolved relative to this module so it works
+# regardless of the current working directory or install location.
+TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+
+
+def _render_template(template_name: str, **values: str) -> str:
+    """Load a template file from ``TEMPLATES_DIR`` and substitute placeholders.
+
+    Each ``{key}`` token in the template is replaced with the corresponding
+    ``values[key]``. A literal ``.replace`` (rather than ``str.format``) is
+    used so that any incidental braces in the template body — e.g. inside a
+    fenced code block — are left untouched and never raise ``KeyError``.
+    """
+    content = (TEMPLATES_DIR / template_name).read_text(encoding="utf-8")
+    for key, value in values.items():
+        content = content.replace("{" + key + "}", value)
+    return content
 
 DEFAULT_SE3_YAML = """# SE3 Project Configuration
 # https://github.com/Fission-AI/SE3
@@ -323,59 +343,50 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
 
 
 def _get_base_spec_template(project_name: str) -> str:
-    """Generate base spec content."""
-    return f"""# {project_name} — Base Specification
+    """Generate base spec content from the ``base_spec.md`` template.
 
-## Purpose
+    Reads ``src/se3/templates/base_spec.md`` as the single source of truth
+    (replacing the previously-hardcoded f-string, which had drifted out of
+    sync and never mentioned the ``se3/version-rules.md`` custom-rules
+    mechanism). The fill-in placeholders are seeded with the same
+    please-fill-this-in prompts the old hardcoded template used, so a fresh
+    project still gets a guided skeleton — while the Version Management
+    section now authoritatively documents ``se3/version-rules.md``.
+    """
+    return _render_template(
+        "base_spec.md",
+        project_name=project_name,
+        project_description="（请填写项目简述）",
+        languages_and_frameworks="（请填写语言和框架）",
+        directory_structure=(
+            "`src/` — 源码目录\n"
+            "- `tests/` — 测试目录\n"
+            "- `se3/specs/` — SE3 规范目录"
+        ),
+        coding_conventions="（请填写代码规范）",
+        key_constraints="（请填写关键约束）",
+        workflow_conventions=(
+            '使用 `se3 run "task description"` 启动开发流程\n'
+            "- 运行测试后才可标记功能完成\n"
+            "- 主分支保持可运行状态"
+        ),
+    )
 
-项目基础约定。此 spec 由 `se3 init` 生成，在所有 `se3 run` 流程中自动加载。
 
-## Requirements
+def _get_versions_md_template(project_name: str) -> str:
+    """Generate the initial ``VERSIONS.md`` content from its template.
 
-### Requirement: Project Identity
-
-- **项目名称**: {project_name}
-- **简述**: （请填写项目简述）
-- **主要语言/框架**: （请填写语言和框架）
-
-### Requirement: Directory Structure
-
-- `src/` — 源码目录
-- `tests/` — 测试目录
-- `se3/specs/` — SE3 规范目录
-
-### Requirement: Coding Conventions
-
-- （请填写代码规范）
-
-### Requirement: Key Constraints
-
-- （请填写关键约束）
-
-### Requirement: Workflow Conventions
-
-- 使用 `se3 run "task description"` 启动开发流程
-- 运行测试后才可标记功能完成
-- 主分支保持可运行状态
-
-### Requirement: Version Management
-
-项目 SHALL 使用语义化版本控制（Semantic Versioning 2.0.0）。
-
-**版本格式:** `MAJOR.MINOR.PATCH`
-- MAJOR: 不兼容的 API 修改
-- MINOR: 向下兼容的功能添加  
-- PATCH: 向下兼容的问题修复
-
-**版本更新规则:**
-- `feature` 任务 → bump minor 版本
-- `bugfix` 任务 → bump patch 版本
-
-#### Scenario: 版本自动更新
-- **GIVEN** 当前版本为 1.2.3
-- **WHEN** 完成 feature 任务并执行 commit 步骤
-- **THEN** 版本自动更新为 1.3.0
-"""
+    Reads ``src/se3/templates/versions_md.md`` and fills the
+    ``{project_name}`` / ``{date}`` placeholders. The rendered file starts
+    with a ``# Version History`` title and a ``## 0.1.0 - <date>`` entry,
+    matching the changelog shape the documentation-updater pipeline inserts
+    into on subsequent commits.
+    """
+    return _render_template(
+        "versions_md.md",
+        project_name=project_name,
+        date=datetime.now().strftime("%Y-%m-%d"),
+    )
 
 
 def run_init(project_root: Path, project_name: str, force: bool = False) -> dict:
@@ -431,6 +442,20 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     else:
         skipped.append(f"{base_spec.relative_to(root)} already exists (use --force to overwrite)")
 
+    # Create initial VERSIONS.md from template (skip if it already exists,
+    # unless --force). Tracked via dedicated flags rather than the
+    # created/skipped lists — mirroring how .gitignore is handled — so the
+    # changelog state is reported distinctly and existing skipped-count
+    # expectations are preserved.
+    versions_md = root / "VERSIONS.md"
+    versions_md_created = False
+    versions_md_already_existed = False
+    if not versions_md.exists() or force:
+        versions_md.write_text(_get_versions_md_template(project_name), encoding="utf-8")
+        versions_md_created = True
+    else:
+        versions_md_already_existed = True
+
     # Initialize git repository if not already in one
     git_initialized = False
     git_already_existed = False
@@ -461,6 +486,8 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     return {
         "created": created,
         "skipped": skipped,
+        "versions_md_created": versions_md_created,
+        "versions_md_already_existed": versions_md_already_existed,
         "git_initialized": git_initialized,
         "git_already_existed": git_already_existed,
         "git_message": git_message,
@@ -498,6 +525,12 @@ def init_cmd(
         typer.echo(f"✓ Created {path}")
     for msg in result["skipped"]:
         typer.echo(f"⚠ {msg}")
+
+    # Display VERSIONS.md status (tracked separately from created/skipped)
+    if result.get("versions_md_created"):
+        typer.echo("✓ Created VERSIONS.md")
+    elif result.get("versions_md_already_existed"):
+        typer.echo("⚠ VERSIONS.md already exists (use --force to overwrite)")
 
     # Display git initialization status
     if result.get("git_initialized"):
