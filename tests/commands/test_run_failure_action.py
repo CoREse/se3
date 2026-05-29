@@ -82,11 +82,13 @@ def test_interactive_with_existing_response_returns_decision_and_cleans_up(
     assert not call_path.with_name(call_path.stem + ".response.json").exists()
 
 
-def test_interactive_without_response_returns_prompt_no_call_written(
+def test_interactive_without_response_returns_race_and_writes_call(
     tmp_path: Path,
 ) -> None:
-    """Interactive + no webui answer ⇒ fall through to CLI prompt, no new call."""
+    """Interactive + no webui answer ⇒ race the CLI prompt vs. the webui, and
+    a retry_decision call file IS written so the web console shows a chip."""
     from se3.commands import run
+    from se3.daemon import protocol
 
     flow = _stub_flow()
     step = _stub_step(step_id="step-3")
@@ -95,12 +97,15 @@ def test_interactive_without_response_returns_prompt_no_call_written(
         tmp_path, flow, step, "boom", interactive=True
     )
 
-    assert action == "prompt"
-    assert info is None
-    # No retry_decision call file appears on this path.
-    assert not (tmp_path / "se3" / "calls").exists() or list(
-        (tmp_path / "se3" / "calls").iterdir()
-    ) == []
+    assert action == "race"
+    call_path = Path(info)
+    # The dual-channel pause writes a retry_decision call (the webui chip).
+    assert call_path.exists()
+    data = interaction_calls.read_call(call_path)
+    assert data is not None
+    assert data["kind"] == protocol.CALL_KIND_RETRY_DECISION
+    # No answer was consumed, so no sibling response exists.
+    assert not call_path.with_name(call_path.stem + ".response").exists()
 
 
 def test_non_interactive_with_existing_response_unchanged(tmp_path: Path) -> None:

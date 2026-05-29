@@ -149,8 +149,11 @@ def _stub_failed_step(step_id="step-1", step_type="implement", retry_count=0):
     )
 
 
-def test_failure_with_tty_defers_to_interactive_prompt(tmp_path: Path):
-    """With an interactive terminal the handler hands back to the prompt."""
+def test_failure_with_tty_races_and_writes_retry_decision_call(tmp_path: Path):
+    """With an interactive terminal the handler returns a ``race`` action and
+    STILL writes a retry_decision call file, so a webui bystander sees the
+    failure as a Retry/Skip/Abort chip while the CLI prompt is raced against
+    the webui response."""
     from se3.commands import run
 
     flow = SimpleNamespace(flow_id="flow-1")
@@ -159,10 +162,13 @@ def test_failure_with_tty_defers_to_interactive_prompt(tmp_path: Path):
     action, info = run._resolve_step_failure_action(
         tmp_path, flow, step, "kaboom", interactive=True
     )
-    assert action == "prompt"
-    assert info is None
-    # No retry_decision call file is written on the interactive path.
-    assert not (tmp_path / "se3" / "calls").exists()
+    assert action == "race"
+    call_path = Path(info)
+    # The dual-channel pause writes the retry_decision call even on a TTY.
+    assert call_path.exists()
+    data = interaction_calls.read_call(call_path)
+    assert data is not None
+    assert data["kind"] == protocol.CALL_KIND_RETRY_DECISION
 
 
 def test_failure_without_tty_writes_retry_decision_call(tmp_path: Path):
