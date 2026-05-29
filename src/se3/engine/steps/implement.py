@@ -7,6 +7,7 @@ Supports fix iterations for the test-verify-fix loop.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -65,6 +66,41 @@ from ..stash_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _prune_recovered_dependencies(
+    groups: list[dict], completed_groups: set[str]
+) -> list[dict]:
+    """Drop already-completed groups and prune dangling ``depends_on`` edges.
+
+    During DAG disaster recovery, groups whose impl branches survived a crash
+    (``completed_groups``) are removed from the to-run set. Those groups have
+    been pre-merged into the baseline branch, so any ``depends_on`` edge in a
+    retained group that still points at them is semantically already satisfied
+    and would otherwise dangle — tripping ``DAGScheduler._build_dag`` with a
+    "depends on unknown group" error. This helper returns deep-copied group
+    dicts (so the original ``groups`` list is never mutated) with completed
+    groups dropped and their inbound edges pruned from the survivors.
+    """
+    retained: list[dict] = []
+    for g in groups:
+        gid = g.get("group_id", g.get("name", "unknown"))
+        if gid in completed_groups:
+            continue
+        g_copy = copy.deepcopy(g)
+        deps = g_copy.get("depends_on")
+        if deps:
+            pruned = [d for d in deps if d not in completed_groups]
+            if len(pruned) != len(deps):
+                logger.info(
+                    "DAG disaster recovery: pruned dangling depends_on edges "
+                    "from group %s (%s already completed/pre-merged)",
+                    gid,
+                    sorted(set(deps) - set(pruned)),
+                )
+            g_copy["depends_on"] = pruned
+        retained.append(g_copy)
+    return retained
 
 
 IMPLEMENT_PROMPT = """You are an expert software engineer. Implement the following tasks by writing code.
@@ -592,10 +628,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         pass
 
             if completed_groups_dag:
-                dag_groups = [
-                    g for g in groups
-                    if g.get("group_id", g.get("name", "unknown")) not in completed_groups_dag
-                ]
+                dag_groups = _prune_recovered_dependencies(groups, completed_groups_dag)
                 if not dag_groups:
                     logger.info("DAG parallel: all groups already completed on resume")
                     # Merge surviving branches before returning

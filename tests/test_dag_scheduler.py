@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -127,10 +128,21 @@ class TestDAGBuild:
         with pytest.raises(ValueError, match="[Cc]ycle"):
             DAGScheduler(groups)
 
-    def test_unknown_dependency(self):
+    def test_unknown_dependency_is_skipped_with_warning(self, caplog):
+        """A dangling depends_on edge is skipped (logged), not fatal.
+
+        This is the DAG disaster-recovery defense: a completed/pre-merged
+        group may have been dropped from the to-run set while a retained group
+        still references it. Such edges are treated as already satisfied.
+        """
         groups = [{"group_id": "A", "depends_on": ["Z"]}]
-        with pytest.raises(ValueError, match="unknown group"):
-            DAGScheduler(groups)
+        with caplog.at_level(logging.WARNING):
+            s = DAGScheduler(groups)
+        # No exception raised; the dangling edge contributes no in-degree.
+        assert s._in_degree["A"] == 0
+        assert s._reverse_deps["A"] == []
+        assert s._topo_order == ["A"]
+        assert any("unknown group" in r.message for r in caplog.records)
 
     def test_duplicate_group_id(self):
         groups = [

@@ -306,9 +306,20 @@ class DAGScheduler:
             deps = group.get("depends_on", []) or []
             for dep in deps:
                 if dep not in all_ids:
-                    raise ValueError(
-                        f"Group '{gid}' depends on unknown group '{dep}'"
+                    # Defensive: a dangling edge can survive DAG disaster
+                    # recovery when a completed/pre-merged group was dropped
+                    # from the to-run set but a retained group still references
+                    # it. Such edges are semantically already satisfied, so
+                    # skip them (logging a warning) rather than aborting the
+                    # whole schedule. The recovery path in implement.py prunes
+                    # these proactively; this is the second line of defense.
+                    logger.warning(
+                        "Group '%s' depends on unknown group '%s'; "
+                        "skipping dangling edge (treated as already satisfied)",
+                        gid,
+                        dep,
                     )
+                    continue
                 # dep → gid (gid depends on dep)
                 self._adjacency[dep].append(gid)
                 self._reverse_deps[gid].append(dep)
