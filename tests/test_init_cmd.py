@@ -232,6 +232,64 @@ class TestRunInit:
         assert local.read_text() == "version:\n  enabled: false\n"
 
 
+    def test_creates_versions_md(self, tmp_path):
+        """se3 init creates VERSIONS.md from the template in a clean directory."""
+        result = run_init(tmp_path, "TestProject")
+
+        versions_md = tmp_path / "VERSIONS.md"
+        assert versions_md.exists()
+        content = versions_md.read_text()
+        # First line is the canonical changelog title.
+        assert content.splitlines()[0] == "# Version History"
+        # Initial 0.1.0 entry is present.
+        assert "0.1.0" in content
+        # Placeholders were substituted.
+        assert "TestProject" in content
+        assert "{project_name}" not in content
+        assert "{date}" not in content
+        # Result flags reflect creation.
+        assert result["versions_md_created"] is True
+        assert result["versions_md_already_existed"] is False
+
+    def test_no_overwrite_existing_versions_md(self, tmp_path):
+        """se3 init does not overwrite an existing VERSIONS.md."""
+        versions_md = tmp_path / "VERSIONS.md"
+        versions_md.write_text("# Custom changelog - do not overwrite")
+
+        result = run_init(tmp_path, "TestProject")
+
+        # Content untouched.
+        assert versions_md.read_text() == "# Custom changelog - do not overwrite"
+        assert result["versions_md_created"] is False
+        assert result["versions_md_already_existed"] is True
+
+    def test_versions_md_force_overwrites(self, tmp_path):
+        """se3 init --force regenerates VERSIONS.md from the template."""
+        versions_md = tmp_path / "VERSIONS.md"
+        versions_md.write_text("# Stale changelog")
+
+        result = run_init(tmp_path, "TestProject", force=True)
+
+        assert result["versions_md_created"] is True
+        content = versions_md.read_text()
+        assert content.splitlines()[0] == "# Version History"
+        assert "0.1.0" in content
+        assert "# Stale changelog" not in content
+
+    def test_base_spec_mentions_version_rules(self, tmp_path):
+        """The generated base spec documents the se3/version-rules.md mechanism.
+
+        Guards against regressing to a base spec that locks in static bump
+        rules and never tells new projects the custom version-rules file
+        exists.
+        """
+        run_init(tmp_path, "TestProject")
+
+        base_spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        content = base_spec.read_text()
+        assert "se3/version-rules.md" in content
+
+
 class TestGitHelpers:
     """Tests for git helper functions."""
 
