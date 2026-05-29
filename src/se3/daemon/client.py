@@ -33,7 +33,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
 from . import protocol
 
@@ -728,11 +728,23 @@ class DaemonClient:
         # Rebuild the cursor map from this read so it tracks exactly the flows
         # still producing records: every active flow (always returned, even with
         # an empty delta, so its cursor keeps advancing) plus any terminal flow
-        # flushed one last time. A fully-drained terminal flow drops out, which
-        # bounds the map's growth over a long-lived daemon. Atomic engine.json
-        # writes mean an active flow is never transiently missing, so pruning
-        # cannot accidentally trigger a duplicate full re-read.
-        self._history_cursors = {read.flow_id: read.cursor for read in reads}
+        # flushed one last time. Atomic engine.json writes mean an active flow is
+        # never transiently missing, so pruning cannot accidentally trigger a
+        # duplicate full re-read.
+        new_cursors = {read.flow_id: read.cursor for read in reads}
+        # Retain the cursor of a terminal flow that produced no records this
+        # round but is still the live engine.json flow (e.g. a FAILED flow
+        # awaiting `se3 run --resume`). Without this it would drop out the round
+        # after its final flush; a later resume would then find no cursor, force
+        # a full re-read, and the web console would stay frozen on the failure
+        # snapshot instead of receiving incremental appends. Bounded by the live
+        # engine.json flows (one per root), so a fully-drained *and* archived
+        # terminal flow still drops and the map stays bounded over a long run.
+        resumable = self._resumable_flow_ids(provider)
+        for flow_id, cursor in self._history_cursors.items():
+            if flow_id not in new_cursors and flow_id in resumable:
+                new_cursors[flow_id] = cursor
+        self._history_cursors = new_cursors
         for read in reads:
             if not read.records:
                 continue
@@ -750,6 +762,28 @@ class DaemonClient:
             except Exception:
                 logger.debug("HISTORY_DATA send failed", exc_info=True)
                 return
+
+    def _resumable_flow_ids(self, provider: Any) -> Set[str]:
+        """Return flow_ids still resumable from disk (live ``engine.json`` flows).
+
+        Delegates to the provider's ``live_flow_ids`` when available so the
+        cursor rebuild in :meth:`_push_history` can retain a final-flushed
+        terminal flow's cursor (a FAILED flow awaiting ``se3 run --resume``).
+        A provider without the method (older reader, test stub) yields an empty
+        set, which preserves the prior prune-on-drain behavior. Failures are
+        logged and swallowed — a degraded lookup must never break the push.
+        """
+        live = getattr(provider, "live_flow_ids", None)
+        if not callable(live):
+            return set()
+        try:
+            return set(live())
+        except Exception:
+            logger.debug(
+                "live_flow_ids failed; not retaining terminal-flow cursors",
+                exc_info=True,
+            )
+            return set()
 
 
 def _default_respond_handler(call_id: str, project_root: str, response: Any) -> None:

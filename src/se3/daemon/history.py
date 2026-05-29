@@ -593,6 +593,30 @@ class DaemonHistoryReader:
             signature[flow_id] = tuple(parts)
         return signature
 
+    def live_flow_ids(self) -> Set[str]:
+        """Return the flow_ids that are the current ``engine.json`` flow per root.
+
+        Unlike :meth:`active_flow_signature` (which excludes terminal flows),
+        this includes a flow whose status is terminal (FAILED / COMPLETED) as
+        long as its ``engine.json`` has not yet been replaced by a new run or
+        archived — i.e. a flow that can still flip back to active via
+        ``se3 run --resume``. The daemon client uses this to retain a
+        final-flushed terminal flow's history cursor so a resume continues
+        incrementally instead of forcing a full re-read.
+
+        The result is bounded by the number of project roots (one
+        ``engine.json`` flow each), so retaining their cursors keeps the
+        client's cursor map bounded over a long-lived daemon. Like
+        :meth:`active_flow_signature`, it only reads each root's ``engine.json``
+        (no archive / history enumeration), so it is cheap to call per push.
+        """
+        ids: Set[str] = set()
+        for root in self._iter_roots():
+            data = _read_json(root / "se3" / "state" / "engine.json")
+            if isinstance(data, dict) and data.get("flow_id"):
+                ids.add(str(data["flow_id"]))
+        return ids
+
 
 # -- module-level file helpers --------------------------------------------
 
