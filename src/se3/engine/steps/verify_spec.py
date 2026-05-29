@@ -3,6 +3,15 @@
 Checks implementation against specifications for consistency.
 Uses LLM to verify that requirements are met.
 Detects test failures and triggers fix loop when appropriate.
+
+Scope of this check (see ``engine.spec_role`` for the canonical definition):
+this is a **within-flow drift guard**, not a claim that the spec overrides the
+code. For the duration of the current flow the already-recorded spec acts as
+the implementation contract *for that flow*, so the implementation does not
+silently drift away from requirements while it is being built. se3 stays
+code-first overall — code is primary and ``se3 sync`` refreshes the spec from
+the code; verify_spec only prevents mid-flow drift, it does not make the spec
+authoritative over the code in general.
 """
 
 from __future__ import annotations

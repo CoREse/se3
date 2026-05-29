@@ -4,6 +4,16 @@ Runs guardrails on any spec files (se3/specs/**/spec.md) that changed
 during the merge. Detects deleted requirements, weakened language,
 and weakened quantifiers.
 
+These guardrails are a **bounded, within-flow drift guard** (see
+``engine.spec_role`` for the canonical definition): for the duration of a flow
+or merge the already-recorded SHALL/MUST requirements act as the implementation
+contract *for that flow*, so they cannot be silently weakened or deleted
+mid-flow. This is the ``spec → code`` half of se3's asymmetric, code-first
+governance — it protects existing requirements from in-flight drift, it does
+not make the spec authoritative over the code. Genuine intent changes go
+through issues or an explicit spec update / ``se3 sync`` (code → spec), not by
+quietly editing requirements during a merge.
+
 Also exposes ``check_spec_diff()`` as a reusable pure function so the
 CLI ``se3 guardrails`` command can share the same logic.
 """
