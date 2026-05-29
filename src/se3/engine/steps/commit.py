@@ -150,6 +150,18 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         logger.info(f"Committing changes with message: {commit_message[:60]}...")
 
+        # Auto-update README badge + VERSIONS.md changelog entry.
+        #
+        # This is a deterministic, mechanical write: the LLM already decided
+        # the changelog *content* upstream in the version_analyze step (the
+        # forwarded ``versions_changes``); here we only apply the badge swap
+        # and prepend the VERSIONS entry via the already-tested
+        # DocumentationUpdater. Documentation failures must NEVER block the
+        # commit, so the entire block is best-effort and only runs once a
+        # real version bump has been applied and staged.
+        if version_bumped and new_version:
+            _update_docs(project_root, new_version, step, commit_message)
+
         # Add all changes
         result = subprocess.run(
             ["git", "add", "-A"],
@@ -320,6 +332,56 @@ def _stage_file(project_root: Path, file_path: Path) -> None:
 
     if result.returncode != 0:
         raise RuntimeError(f"Failed to stage {rel_path}: {result.stderr}")
+
+
+def _update_docs(
+    project_root: Path,
+    new_version: str,
+    step: Step,
+    commit_message: str,
+) -> None:
+    """Mechanically update README.md badge and VERSIONS.md changelog.
+
+    Runs the already-tested :class:`DocumentationUpdater` to apply a
+    deterministic badge swap and prepend a VERSIONS.md entry, then stages
+    both files so they ride along with the version bump in the same commit.
+
+    The changelog body comes from the ``versions_changes`` list produced by
+    the version_analyze step (forwarded via ``step.inputs``); when that is
+    absent or empty it falls back to the first line of the commit message.
+
+    This is strictly best-effort: any failure (missing README, I/O error,
+    staging failure) is swallowed with a ``logger.warning`` so documentation
+    problems never abort the commit. The subsequent ``git add -A`` will pick
+    up any docs the explicit staging missed.
+
+    Args:
+        project_root: Project root directory.
+        new_version: The version just written to the version file.
+        step: The commit step (its ``inputs`` carry forwarded
+            ``versions_changes``).
+        commit_message: The generated commit message (used for the changelog
+            fallback when ``versions_changes`` is unavailable).
+    """
+    try:
+        # Import lazily to keep the module import graph light and avoid any
+        # import-time coupling on the docs subsystem / config loader.
+        from ..docs_updater import DocumentationUpdater
+        from ...config import load_docs_config
+
+        first_line = commit_message.strip().splitlines()[0] if commit_message.strip() else new_version
+        changes = step.inputs.get("versions_changes") or [first_line]
+
+        updater = DocumentationUpdater(
+            project_root,
+            config=load_docs_config(project_root).to_updater_config(),
+        )
+        updater.update_both(new_version, changes=changes)
+
+        _stage_file(project_root, project_root / "README.md")
+        _stage_file(project_root, project_root / "VERSIONS.md")
+    except Exception as e:
+        logger.warning(f"Documentation auto-update failed (commit continues): {e}")
 
 
 def _rollback_version(
