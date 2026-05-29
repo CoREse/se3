@@ -1,286 +1,235 @@
 # SE3 — Software Engineering 3.0 Framework
 
-![Version](https://img.shields.io/badge/version-3.38.1-blue)
+![Version](https://img.shields.io/badge/version-7.8.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 
-**A spec-driven flow engine that turns AI coding assistants into disciplined software engineers.**
+**English** | [中文](README.zh.md)
 
-[中文版 README](README.zh.md)
+> **A project-level, cross-session flow framework where the program — not the human — supervises the AI agent. You prompt once, walk away, and come back to a finished deliverable.**
+
+SE3 is not a single-session prompting tool, a skill, a subagent, or a dynamic workflow. Those are *in-session* aids that augment one human-in-the-loop turn. SE3 sits one layer above: it is a CLI engine + persistent state machine + spec-driven contracts that drive an AI coding agent across many sessions, on many machines, until the work is actually done.
 
 ---
 
-## Motivation
+## Design Philosophy
 
-AI coding assistants are powerful but chaotic. Give one a complex task and it will:
+### 1. A different paradigm: program-as-supervisor, human out-of-the-loop
 
-- **Lose context** across sessions — no memory of what was done, what's left, or why decisions were made
-- **Skip engineering discipline** — jump straight to code without analysis, design, or spec review
-- **Drift from specifications** — silently weaken or ignore existing requirements
-- **Produce unverified work** — commit without testing, or mark things "done" without checks
-- **Lack workflow structure** — no concept of feature vs. bugfix vs. review, no adaptive process
+Skills, subagents, and dynamic workflows make a *single AI turn* smarter or more parallel. They are valuable, but they assume a human is present, reading output and steering after every step.
 
-SE3 solves this by wrapping AI agents in a **program-driven state machine**: an 11-step flow engine that enforces analysis → design → implementation → testing → verification → commit, adapting the process to the type and scope of each task. The AI still does the thinking; SE3 ensures it thinks in the right order.
+SE3 makes a different bet. The unit of work is not a turn; it is a **project task**. Between `se3 run "…"` and the final commit there may be dozens of LLM calls across plan / implement / test / verify / commit steps, multiple agent rotations, fix loops, spec-guardrail rollbacks, and even multi-machine collaboration via the daemon and central server. The supervisor of all this is the SE3 engine — Python code running a deterministic state machine — not a person watching a terminal.
 
-## Highlights
+| Tool class | Scope | Who supervises | Where state lives |
+|------------|-------|----------------|-------------------|
+| Skills / subagents / dynamic workflows | One session, one turn (or a fan-out within one turn) | Human in the loop, reading output | Conversation context |
+| **SE3** | A project task spanning many sessions / machines | The program (engine + daemon) | Persistent files (`se3/state/`, `se3/history/`, `se3/issues/`) |
 
-- **Unified `se3 run` entry point** — one command for all workflows: features, bugfixes, reviews, small changes, directives
-- **11-step flow engine** — a state machine that orchestrates analyze → propose → design → plan → implement → test → verify → commit, with automatic step selection per workflow type
-- **5 workflow types** — feature, bugfix, review, small, directive — each with a tailored step sequence (skip design for bugfixes, skip implementation for reviews)
-- **Discovery mode** — multi-turn requirement exploration when you have a vague idea but need to clarify before coding
-- **Loop mode with git worktree isolation** — continuous autonomous execution on an isolated branch, with `--merge` to bring changes back safely
-- **Spec-driven guardrails** — existing requirements cannot be silently weakened or deleted; the engine enforces spec integrity
-- **Smart version bumping** — LLM-analyzed semantic versioning that determines patch/minor/major from actual code changes
-- **Confirmation/review steps** — insert human or LLM review gates after propose/design steps
-- **Multi-language support** — configure output language (e.g., zh-CN) independently from spec language (e.g., en-US)
+### 2. The real pain: attention is all you need
+
+LLMs are not the bottleneck. *Human attention* is. The cost of any agentic system is measured in how often it forces a person to read, judge, and decide. SE3's north star is **save human attention**.
+
+The ideal SE3 session looks like this:
+
+1. **Prompt** — you type `se3 run "…"` (or open a discovery session).
+2. **Discover** — the engine asks a few targeted clarifying questions until requirements converge.
+3. **Fire-and-forget** — you walk away. The engine plans, implements, tests, self-checks, verifies against the spec, updates the spec, bumps the version, and commits.
+4. **Pick up the deliverable** — you come back to a clean commit on a branch, with the spec, version, and history already aligned.
+
+Steps 1 and 2 are the only places where human attention is genuinely required. Everything else is the program's job.
+
+### 3. The four moats that make this paradigm work
+
+A program-as-supervisor paradigm only holds up if the framework provides four things that in-session tools cannot:
+
+- **Cross-session state machine** — `se3/state/engine.json` persists the exact step, attempt, context, and fix-loop history of every flow. `se3 daemon` keeps a resident process supervising local `se3 run` flows; `se3-server` aggregates many daemons into one web view; `se3 run --loop` chains tasks autonomously on isolated git worktrees. The flow survives terminal exits, machine restarts, and hand-offs between machines. *Why this paradigm needs it:* without durable state, "walking away" loses the work.
+- **Spec ↔ code two-way governance** — `se3/specs/*/spec.md` is a documented snapshot of the code, maintained by `se3 sync` (code → spec). Existing spec requirements are protected during implementation by `se3 guardrails` (spec → code), which blocks silent weakening or deletion of SHALL/MUST clauses. *Why this paradigm needs it:* a long-running unattended agent will otherwise drift; the spec is the implementation contract for the duration of a flow.
+- **Failure recovery built in** — `se3 salvage` rescues a crashed session by committing dangling changes, filing follow-up issues, and archiving the state. `se3/state/known_test_failures.json` distinguishes a new regression from a pre-existing red test. Issue discovery promotes any unresolved concern into a tracked `se3/issues/` record. *Why this paradigm needs it:* when no human is watching, the framework must catch its own failures rather than leak them.
+- **Portable substrate** — the engine is pure Python over the file system. The LLM call layer is a thin `AgentRunner` adapter; today's concrete runner is the Claude Code CLI, but the abstraction (`AgentRunner` / `RunResult` / `InfraErrorType`) is provider-neutral. *Why this paradigm needs it:* a paradigm bet should not be a single-vendor bet.
+
+### se3 vs Claude Code Dynamic Workflows (complementary, not competing)
+
+Dynamic Workflows solve *in-session* parallelism: deterministic fan-out, judge panels, pipelines, all inside one orchestrating conversation. They make a single turn comprehensive and confident.
+
+SE3 solves *cross-session* project governance: persistent state, spec contracts, failure recovery, and a portable substrate that outlives any single conversation.
+
+The two compose. A future SE3 step can delegate its in-step parallel work to a Dynamic Workflow without changing SE3's outer state machine. We deliberately do not pin to specific DW API names here, because DW is still in research preview and its surface will evolve.
+
+---
+
+## Installation
+
+```bash
+# Core CLI (Python 3.8+)
+pip install se3
+
+# With the central server / web console
+pip install 'se3[server]'
+
+# With the headless-browser acceptance test (needs `playwright install chromium` afterwards)
+pip install 'se3[browser]'
+```
+
+Current version: **7.8.0**. Two console scripts are installed:
+
+| Script | Purpose |
+|--------|---------|
+| `se3` | Core CLI (always available) |
+| `se3-server` | Central web server (only with the `server` extra) |
+
+The core CLI never imports the web stack, so installing without `[server]` keeps the dependency surface minimal.
+
+---
 
 ## Quick Start
 
-### 1. Install
-
 ```bash
-# From the SE3 repository root
-pip install -e .
-```
-
-### 2. Initialize a project
-
-```bash
+# 1. Initialize a project (creates se3.yaml, se3/specs/base/spec.md, .gitignore, git repo)
 cd your-project
 se3 init
-```
 
-This creates:
-```
-se3/
-├── specs/
-│   └── base/
-│       └── spec.md    # Base project specification (edit this)
-se3.yaml               # Framework configuration
-```
+# 2. Optional: explore vague requirements through multi-turn discovery first
+se3 run --discover "I want a CLI tool that does X"
 
-### 3. Run a task
+# 3. Run a task end-to-end (analyze → plan → implement → test → self-check →
+#    verify_spec → update_spec → version_analyze → commit)
+se3 run "Add JWT authentication"
 
-```bash
-se3 run "Add user authentication with JWT tokens"
-```
-
-The engine will: analyze the task → read relevant specs → propose a solution → design the architecture → plan implementation tasks → write code → run tests → verify spec compliance → update specs → bump version → commit → generate a summary.
-
-## Usage
-
-### New Task
-
-```bash
-# Run with automatic workflow type detection
-se3 run "Fix the login timeout bug"
-
-# Specify the workflow type explicitly
-se3 run --type bugfix "Fix the login timeout bug"
-se3 run --type feature "Add OAuth2 support"
-se3 run --type small "Fix typo in error message"
-```
-
-### Resume an Interrupted Flow
-
-```bash
-# Resume the most recent interrupted flow
+# 4. Resume an interrupted flow exactly where it stopped
 se3 run --resume
-
-# Resume a specific flow by ID
-se3 run --resume --flow-id <flow-id>
 ```
 
-### Discovery Mode
+### Three operating modes
 
-When you have a vague idea and need to explore requirements:
+- **`--loop`** — Run tasks back-to-back on an isolated git worktree branch
+  (`loop/<slug>-<n>`). Each iteration gets its own clean working tree; the
+  branch is auto-merged or auto-discarded when the loop ends, or preserved
+  for deferred merge if you Ctrl-C.
+- **`se3 daemon start`** — Launch a resident background process that
+  supervises every local `se3 run`, aggregates state under
+  `se3/state|logs|calls|issues`, and (optionally) dials out to a central
+  server. Lets you check on a flow from anywhere.
+- **`se3-server`** — A FastAPI + WebSocket central server (with a bundled
+  static web console at `/`) that merges many daemons into one multi-machine
+  view. Useful for fleets, remote launch, and watching long-running flows
+  from a browser. Defaults to `127.0.0.1:8080`.
 
-```bash
-se3 run --discover "I need something for user role management"
-```
+---
 
-Discovery mode conducts a multi-turn conversation to clarify requirements, then proceeds with the full workflow using the refined description.
+## Command Reference
 
-### Loop Mode (Continuous Autonomous Execution)
+All commands found below are present in `src/se3/cli.py` or its registered
+sub-typers as of version 7.8.0.
 
-Loop mode runs multiple tasks autonomously, each on an isolated git worktree branch:
+### Top-level commands
 
-```bash
-# Start loop mode (default: up to 10 iterations)
-se3 run --loop
+| Command | Purpose |
+|---------|---------|
+| `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit). Supports `--resume`, `--flow-id`, `--loop`, `--discover`, `--from-issue`, `--change`, `--type`, `--output-format`. |
+| `se3 init` | Initialize a new project: writes `se3.yaml`, base spec, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
+| `se3 guardrails <spec-file>` | Run SE3 spec guardrails on a spec file (deleted-requirement / weakened-language detection). Used by CI and by `se3 merge`. |
+| `se3 sync` | One-directional code → spec sync. Iterates rounds until convergence. Flags include `--once`, `--max-rounds`, `--stable-rounds`, `--interactive`, `--show-diff`, `--validate-only`, `--resume`, `--force`, `--confirm-cleanup`. |
+| `se3 sync-respond <call-file>` | Apply a human decision file produced by `se3 sync --interactive` for high-impact requirement deletions. |
+| `se3 merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution. Flags: `--strategy fast\|safe\|strict`, `--delete-merged` / `--no-delete-merged`. Runtime data under `se3/` is synchronized per the tiered policy. |
+| `se3 merge-respond <call-file>` | Apply a human decision file produced by `se3 merge` when conflicts or guardrail violations escalated to a human MCP call. |
+| `se3 salvage` | Best-effort recovery of an abnormally terminated session: tolerant state load, commit dangling diff, file follow-up issues, archive the session. |
 
-# Limit iterations
-se3 run --loop --max-iterations 5
+### `se3 history` — flow history
 
-# Disable branch isolation (work directly on current branch)
-se3 run --loop --no-worktree
-```
+| Subcommand | Purpose |
+|------------|---------|
+| `se3 history` / `se3 history list` | List flows across active state, archived state, and history-only directories. Flags: `--active-only`, `--archived-only`, `--json`. |
+| `se3 history show <flow_id>` | Show structured step-by-step details. Flags: `--detailed` (LLM call breakdown), `--verbose` (full tool-call stream), `--json`. |
+| `se3 history restore <flow_id>` | Resume a specific flow by ID (delegates to `se3 run --resume --flow-id`). `--dry-run` prints the command without executing. |
+| `se3 history archived` | List only archived flows. `--json` for machine-readable output. |
 
-Managing loop branches:
+### `se3 issue` — project issues
 
-```bash
-# List all unmerged loop branches
-se3 run --list-loops
+| Subcommand | Purpose |
+|------------|---------|
+| `se3 issue` / `se3 issue list` | List open issues (default). `--all` includes closed; `--type <t>` filters by type. |
+| `se3 issue show <id>` | Render an issue's full details. |
+| `se3 issue create` | Interactively create a new issue (title, description, type, priority, tags). |
+| `se3 issue reset <id>` | Reset an in-progress issue back to `open`. |
 
-# Merge a loop branch back (shows diff summary first)
-se3 run --merge se3-loop/20260324-120000
-```
+### `se3 daemon` — resident control plane
 
-### Other Commands
+| Subcommand | Purpose |
+|------------|---------|
+| `se3 daemon start` | Start the daemon. `--foreground` keeps it attached; `--server-url <ws://…>` registers with a central server. |
+| `se3 daemon stop` | Stop the running daemon. |
+| `se3 daemon status` | Report run state, machine id, server URL, real connection state, and tracked flows. `--json` for machine-readable output. |
 
-```bash
-# Check spec files against guardrails
-se3 guardrails se3/specs/auth/spec.md
+---
 
-# View session history
-se3 history
-```
+## Directory Layout
 
-### Daemon & Central Server
-
-SE3 has an optional always-on control plane. The **daemon** (`se3 daemon`)
-runs resident on a machine, supervising its `se3 run` flows and aggregating
-their state; it can dial out to a **central server** (`se3-server`) that merges
-many machines into one multi-flow view and serves a web frontend for watching
-progress and publishing tasks remotely.
-
-```bash
-# Install the optional server extra (FastAPI/uvicorn/websockets)
-pip install 'se3[server]'
-
-# Start the resident daemon (detached background process)
-se3 daemon start
-
-# Start the central server (defaults to 127.0.0.1:8080)
-se3-server
-```
-
-See [docs/daemon-and-server.md](docs/daemon-and-server.md) for installation,
-deployment, architecture, and the web frontend.
-
-## Workflow Types
-
-SE3 adapts its process to the type of work. Each workflow type selects a different subset of the 11-step engine:
-
-| Type | Steps | When to Use |
-|------|-------|-------------|
-| **feature** | analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → version_analyze → commit → summarize | New functionality or significant enhancements |
-| **bugfix** | analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → version_analyze → commit → summarize | Bug fixes (skips design for faster iteration) |
-| **directive** | analyze → read_spec → plan_tasks → implement → test → verify_spec → version_analyze → commit → summarize | Following specific instructions (skips propose + design) |
-| **small** | analyze → implement → test → version_analyze → commit → summarize | Typos, minor fixes, simple changes |
-| **review** | analyze → read_spec → verify_spec → summarize | Code review, audit, or analysis (no implementation) |
-
-Discovery mode (`--discover`) prepends a **discovery** step to any workflow type for multi-turn requirement exploration.
-
-## Architecture Overview
-
-### The 11-Step Flow Engine
-
-SE3's core is a program-driven state machine. Each step has a clear responsibility:
-
-| # | Step | What It Does | Automated? |
-|---|------|-------------|------------|
-| 1 | **analyze** | Classify task type and scope | LLM |
-| 2 | **read_spec** | Load relevant specification files | Automated |
-| 3 | **propose** | Generate a change proposal identifying affected files | LLM |
-| 4 | **design** | Architect the solution with design document | LLM |
-| 5 | **plan_tasks** | Break into concrete tasks | LLM |
-| 6 | **implement** | Write code, declare tests added | LLM |
-| 7 | **test** | Run test suite, trigger fix loop on failure | Automated |
-| 8 | **verify_spec** | Check implementation against spec requirements | LLM |
-| 9 | **update_spec** | Update specs with guardrail enforcement | LLM |
-| 10 | **version_analyze** | Determine SemVer bump from actual changes | LLM |
-| 11 | **commit** | Stage, version bump, and commit | Automated |
-
-A final **summarize** step generates a handoff summary for the next session.
-
-### State Persistence
-
-All flow state is persisted to `se3/state/engine.json`, enabling:
-- **Resume** — pick up exactly where you left off after interruption
-- **History** — full audit trail of every step's inputs and outputs
-- **Fix loops** — when tests fail, the engine returns to implement automatically
-
-### LLM Subprocess Pattern
-
-Steps that require "thinking" (analyze, propose, design, etc.) spawn an LLM subprocess with carefully constructed context. The subprocess receives only the information relevant to that step — not the entire conversation history. This keeps each step focused and prevents context pollution.
-
-## Project Structure
+Everything under `se3/` is gitignored by default *except* the whitelisted
+sub-paths shown below (specs, issues, scripts, and `version-rules.md` are
+tracked; runtime state and logs are not).
 
 ```
-project/
-├── se3.yaml                    # Framework configuration
-├── pyproject.toml              # Python project config
-├── se3/                        # SE3 runtime directory (gitignored except specs/)
-│   ├── specs/                  # Source of truth for requirements (committed)
-│   │   ├── base/
-│   │   │   └── spec.md         # Base project conventions (required)
-│   │   └── [capability]/
-│   │       └── spec.md         # Feature/domain specifications
-│   ├── state/                  # Flow engine state persistence
-│   ├── history/                # LLM chat history (NDJSON)
-│   ├── cache/                  # Cache files
-│   ├── logs/                   # Execution logs
-│   ├── calls/                  # Human approval call queue
-│   └── collab/                 # Multi-agent collaboration state
-├── src/                        # Source code
-├── tests/                      # Test files
-└── scripts/                    # Helper scripts
+your-project/
+├── se3.yaml                       # Project config (tracked)
+├── se3.local.yaml                 # Local override   (gitignored)
+├── pyproject.toml                 # Single source of truth for project version
+├── VERSIONS.md                    # Changelog (maintained by documentation-updater)
+├── .gitignore                     # Written / extended by `se3 init`
+└── se3/                           # SE3 runtime root
+    ├── specs/                     # ✅ tracked — documented snapshot of code
+    │   ├── base/spec.md           # Base project spec, auto-loaded in every flow
+    │   └── <capability>/spec.md
+    ├── issues/                    # ✅ tracked — open/ and closed/ YAML records
+    ├── scripts/                   # ✅ tracked — e.g. version.py (single version source)
+    ├── version-rules.md           # ✅ tracked — optional natural-language version policy
+    ├── state/                     # ❌ runtime — engine.json, sync_state.json, …
+    │   └── archive/               #   archived engine snapshots
+    ├── history/                   # ❌ runtime — per-flow per-step jsonl conversations
+    ├── logs/                      # ❌ runtime — execution logs (incl. logs/llm/ traces)
+    ├── calls/                     # ❌ runtime — pending human MCP call files
+    ├── collab/                    # ❌ runtime — multi-agent collaboration state
+    ├── cache/                     # ❌ runtime — derived caches (e.g. spec-index)
+    ├── tmp/                       # ❌ runtime — transient prompt/response snapshots
+    └── worktrees/                 # ❌ runtime — loop-mode / DAG isolation worktrees
 ```
 
-## Configuration
+---
 
-SE3 is configured via `se3.yaml` in the project root. Key sections:
+## Specs Catalog
 
-```yaml
-# Confirmation/review gates
-confirmation:
-  enabled: true
-  steps: ["propose", "design"]    # Insert review after these steps
-  reviewer: "human"               # "human" or "llm"
-  llm_reviewer:
-    model: null
-    max_iterations: 3
+SE3 ships 22 self-describing specs under `se3/specs/`. They are both the
+project's living documentation and the implementation contract enforced by
+`se3 guardrails`. Use this as your index into the codebase.
 
-# Automatic version bumping
-# version_analyze (LLM) decides the new version directly; default rules are
-# SemVer 2.0.0. To customize, create se3/version-rules.md (natural-language
-# Markdown) — its contents are injected into the version_analyze prompt.
-version:
-  enabled: true
-  auto_bump: true
+| Spec | One-line purpose |
+|------|------------------|
+| `base` | Project identity, directory layout, coding & workflow conventions; auto-loaded in every flow. |
+| `se3-commands` | CLI surface contract for all top-level `se3 *` commands and their options. |
+| `se3-config` | `se3.yaml` / `se3.local.yaml` schema and load/override semantics. |
+| `se3-scaffold` | Standard project structure and what `se3 init` creates. |
+| `se3-workflows` | The five workflow types (feature / bugfix / review / small / directive) + discovery, and which steps each runs. |
+| `se3-versioning` | SemVer 2.0.0 rules, single-source version file, automatic bump contract. |
+| `session-protocol` | Session startup, resume, loop mode lifecycle, branch isolation, and merge-back rules. |
+| `flow-engine` | The core state machine — step pool, transitions, event stream, sinks, prompt markers, fix loops. |
+| `agent-runner-infrastructure` | `AgentRunner` ABC and the `ClaudeCodeRunner` adapter: subprocess, hang detection, oversized-prompt rerouting. |
+| `llm-caller` | Agent rotation, retry-context injection, JSON extraction modes, NDJSON streaming. |
+| `dag-scheduler` | Parallel DAG executor for the implement step (relay worktrees, transitive reduction). |
+| `worktree-management` | Loop / merge worktree lifecycle, branch naming, cleanup of orphaned worktrees. |
+| `requirement-intake` | How new requirements enter SE3 through `se3 run` (intake contract). |
+| `spec-format` | Spec-format v1 grammar: marker, headings, `### Requirement:` items, scenarios. |
+| `spec-guardrails` | Rules that block silent weakening / deletion of existing requirements. |
+| `issue-management` | `se3 issue` CLI and `IssueManager` storage API (YAML on disk, state machine). |
+| `issue-discovery` | Automatic discovery of issues from flow execution and unresolved concerns. |
+| `documentation-updater` | `README.md` badge updates and `VERSIONS.md` changelog generation. |
+| `salvage-command` | Five-step best-effort recovery pipeline for crashed sessions. |
+| `user-interjection-handling` | Ctrl-C interjection lifecycle and call-file routing across CLI / daemon / web. |
+| `running-flow-console` | Web console behavior for the live, full-screen running-flow view. |
+| `test-project` | The end-to-end test project used to exercise `se3 run` workflows. |
 
-# Language settings
-language:
-  language: zh-CN                 # Human-facing outputs
-  spec_language: en-US            # Spec writing language
+---
 
-# Claude command resolution (priority-based fallback)
-claude_commands:
-  - cmd: "claude"
-    priority: 10
-```
+## Version & License
 
-## Problems Solved
-
-| Problem | How SE3 Solves It |
-|---------|-------------------|
-| **Context loss between sessions** | State persistence in `se3/state/` + summarize step generates handoff notes; `--resume` picks up exactly where you left off |
-| **No engineering discipline** | The flow engine enforces analysis → design → implementation → testing in order; you can't skip to code on a feature task |
-| **Spec drift** | Guardrails prevent silently weakening or deleting existing requirements; `update_spec` step explicitly manages spec changes |
-| **Unverified work** | `test` step runs automatically; `verify_spec` checks implementation against requirements; failures trigger fix loops |
-| **One-size-fits-all process** | 5 workflow types adapt the process: full ceremony for features, fast path for bugfixes, read-only for reviews |
-| **Manual workflow orchestration** | `se3 run` handles everything: no manual step tracking, no remembering "what's next" |
-| **Unsafe autonomous execution** | Loop mode uses git worktree isolation; changes stay on a separate branch until explicitly merged |
-| **Version management overhead** | Smart version analysis determines the right SemVer bump automatically from actual code changes |
-| **Vague requirements** | Discovery mode conducts multi-turn exploration before committing to implementation |
-
-## Version History
-
-See [VERSIONS.md](VERSIONS.md) for the complete version history.
-
-**Current Version: 3.38.1**
-
-## License
-
-Apache-2.0
+- Version is owned by `pyproject.toml` (`7.8.0`) and bumped by the engine's `version_analyze` + `commit` steps. Do not hand-edit it.
+- License: Apache-2.0.
+- See [VERSIONS.md](VERSIONS.md) for the full changelog.

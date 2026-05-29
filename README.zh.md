@@ -1,285 +1,221 @@
 # SE3 — Software Engineering 3.0 框架
 
-![Version](https://img.shields.io/badge/version-3.38.1-blue)
+![Version](https://img.shields.io/badge/version-7.8.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 
-**一个规范驱动的流程引擎，将 AI 编程助手变成有纪律的软件工程师。**
+[English](README.md) | **中文**
 
-[English README](README.md)
+> **一个项目级、跨 session 的流程框架——由程序而非人作监工驱动 AI agent。你只 prompt 一次，走开，回来时交付物已经躺在 commit 里。**
+
+SE3 不是单次会话的 prompting 工具，不是 skill、subagent，也不是 dynamic workflow。后者是*单 session*内的增强手段，作用是放大一次"人在回路"的对话。SE3 在它们上一层：一个 CLI 引擎 + 持久化状态机 + spec 驱动的契约系统，驱动 AI coding agent 跨多个 session、跨多台机器，直到项目级任务真正做完。
 
 ---
 
-## 动机
+## 设计哲学
 
-AI 编程助手很强大，但缺乏纪律。给它一个复杂任务，它会：
+### 1. 全新范式：程序作监工，人 out-of-the-loop
 
-- **跨会话丢失上下文** — 不记得做了什么、还剩什么、为什么做出某些决策
-- **跳过工程规范** — 直接写代码，不做分析、设计或规范审查
-- **偏离规范** — 悄悄弱化或忽略现有需求
-- **产出未经验证的工作** — 不跑测试就提交，或者未检查就标记"完成"
-- **缺乏流程结构** — 没有 feature/bugfix/review 的概念，不会根据范围调整流程
+skill、subagent、dynamic workflow 让*一次 AI 对话*更聪明、或在内部更好地并行。它们是好工具，但前提是有人盯着读输出、每步介入引导。
 
-SE3 通过将 AI 代理包装在一个**程序驱动的状态机**中来解决这些问题：一个 11 步流程引擎，强制执行 分析 → 设计 → 实现 → 测试 → 验证 → 提交 的顺序，并根据任务类型和范围自动调整流程。AI 仍然负责思考；SE3 确保它按正确的顺序思考。
+SE3 押的是另一边。工作的最小单位不是一次对话，而是一项**项目级任务**。在 `se3 run "…"` 与最终 commit 之间，可能跨过 plan / implement / test / verify / commit 等数十次 LLM 调用、多次 agent 轮换、fix loop、spec guardrails 回滚，甚至通过 daemon + 中心服务器在多台机器之间协作。所有这些的*监工*是 SE3 引擎——一段跑在 Python 里的确定性状态机——而不是一个盯着终端的人。
 
-## 亮点
+| 工具类别 | 作用范围 | 谁作监工 | 状态在哪里 |
+|---------|---------|---------|-----------|
+| skill / subagent / dynamic workflow | 单 session 内一次对话（或一次对话内的 fan-out） | 人在回路、读输出 | 对话上下文 |
+| **SE3** | 一项跨多 session、多机器的项目任务 | 程序（引擎 + daemon） | 持久化文件（`se3/state/` / `se3/history/` / `se3/issues/`） |
 
-- **统一的 `se3 run` 入口** — 一个命令处理所有工作流：feature、bugfix、review、small change、directive
-- **11 步流程引擎** — 状态机编排 analyze → propose → design → plan → implement → test → verify → commit，按工作流类型自动选择步骤
-- **5 种工作流类型** — feature、bugfix、review、small、directive — 各有定制的步骤序列（bugfix 跳过设计，review 跳过实现）
-- **Discovery 模式** — 当想法模糊需要先澄清需求时，进行多轮需求探索
-- **Loop 模式 + git worktree 隔离** — 在隔离分支上连续自主执行，用 `--merge` 安全地合并回来
-- **规范驱动的护栏** — 现有需求不能被悄悄弱化或删除；引擎强制保护规范完整性
-- **智能版本管理** — LLM 分析实际代码变更，自动确定 patch/minor/major 的语义版本号
-- **确认/审阅步骤** — 在 propose/design 步骤之后插入人工或 LLM 审阅关卡
-- **多语言支持** — 输出语言（如 zh-CN）和规范书写语言（如 en-US）可独立配置
+### 2. 真正的痛点：attention is all you need
 
-## 快速开始
+LLM 不是瓶颈，*人的注意力*才是。任何 agentic 系统的成本，最终都以"逼一个人去读、去判、去决策"的次数为单位。SE3 的北极星是**节省人的 attention**。
 
-### 1. 安装
+理想的 SE3 session 长这样：
 
-```bash
-# 在 SE3 仓库根目录
-pip install -e .
-```
+1. **Prompt** — 你打一句 `se3 run "…"`（或开一次 discovery）。
+2. **Discover** — 引擎用少量精准的澄清问题逼近真实需求。
+3. **发射后不管** — 你走开。引擎自动 plan / implement / test / self-check / verify_spec / update_spec / version bump / commit。
+4. **拿走交付物** — 回来时，分支上是干净的 commit，spec、版本、history 已经对齐。
 
-### 2. 初始化项目
+只有第 1、2 步真正需要 attention，其它都是程序应该自己干完的活。
 
-```bash
-cd your-project
-se3 init
-```
+### 3. 撑起这种范式的四件套护城河
 
-这会创建：
-```
-se3/
-├── specs/
-│   └── base/
-│       └── spec.md    # 基础项目规范（编辑此文件）
-se3.yaml               # 框架配置
-```
+只有在框架本身具备以下四件套时，"程序作监工"的范式才立得住——这正是 session 内工具做不到的事：
 
-### 3. 运行任务
+- **跨 session 状态机** — `se3/state/engine.json` 持久化每个 flow 的精确 step、attempt、上下文与 fix-loop 历史；`se3 daemon` 提供一个常驻进程监管本机所有 `se3 run` flow；`se3-server` 把多台 daemon 聚合成一个网页视图；`se3 run --loop` 在隔离的 git worktree 上自动串起多次任务。flow 跨终端退出、机器重启、跨机器接管依然存活。*这一范式为何离不开它：* 没有持久化状态，"走开再回来"就等于丢工作。
+- **spec ↔ code 双向治理** — `se3/specs/*/spec.md` 是项目代码的文档化快照，由 `se3 sync` 维护（code → spec）；同一份 spec 在 implement 期间被 `se3 guardrails` 守住（spec → code），任何对既有 SHALL/MUST 的悄悄弱化或删除都会被拦下。*这一范式为何离不开它：* 一个长时间无人盯着的 agent 必然会漂移；spec 是这一次 flow 的实现契约。
+- **失败回收内建** — `se3 salvage` 在 session 异常崩溃后做尽力抢救：commit 未提交改动、为遗留问题补 issue、归档 session；`se3/state/known_test_failures.json` 区分"新引入的回归"与"历史既存的红测试"；issue discovery 把任何未解决的隐患落成 `se3/issues/` 记录。*这一范式为何离不开它：* 没人盯着的时候，框架必须自己接住自己的失败，而不是把脏状态留给下一次。
+- **底座可移植性** — 引擎本身是纯 Python + 文件系统；LLM 调用层是一层薄薄的 `AgentRunner` 适配；当前的具体 runner 是 Claude Code CLI，但抽象（`AgentRunner` / `RunResult` / `InfraErrorType`）是 provider-neutral 的。*这一范式为何离不开它：* 押在一种范式上，不应同时押在单一供应商上。
+
+### se3 vs Claude Code Dynamic Workflows（互补，而非竞争）
+
+Dynamic Workflows 解决的是*单 session 内*的并行编排：确定性 fan-out、judge panel、pipeline，都在一次对话里完成。它把"一次对话"做得更全、更可信。
+
+SE3 解决的是*跨 session*的项目治理：持久化状态、spec 契约、失败回收，以及一个能跨越任何单次对话的可移植底座。
+
+两者可以叠加。未来某个 SE3 step 可以把它在 step 内部的并行工作委托给一次 Dynamic Workflow 调用，外层的状态机不变。我们故意不在 README 里钉死 DW 的具体 API 名字——DW 仍在 research preview，API 还会演进。
+
+---
+
+## 安装
 
 ```bash
-se3 run "添加基于 JWT 的用户认证"
-```
+# 核心 CLI（Python 3.8+）
+pip install se3
 
-引擎将会：分析任务 → 读取相关规范 → 提出方案 → 设计架构 → 规划实现任务 → 编写代码 → 运行测试 → 验证规范符合性 → 更新规范 → 版本号递增 → 提交 → 生成摘要。
-
-## 使用方式
-
-### 新任务
-
-```bash
-# 自动检测工作流类型
-se3 run "修复登录超时 bug"
-
-# 显式指定工作流类型
-se3 run --type bugfix "修复登录超时 bug"
-se3 run --type feature "添加 OAuth2 支持"
-se3 run --type small "修复错误消息中的拼写错误"
-```
-
-### 恢复中断的流程
-
-```bash
-# 恢复最近中断的流程
-se3 run --resume
-
-# 恢复指定的流程
-se3 run --resume --flow-id <flow-id>
-```
-
-### Discovery 模式
-
-当你有一个模糊的想法，需要先探索需求时：
-
-```bash
-se3 run --discover "我需要一套用户角色管理的功能"
-```
-
-Discovery 模式会进行多轮对话来澄清需求，然后使用精化后的描述继续完整的工作流。
-
-### Loop 模式（连续自主执行）
-
-Loop 模式连续运行多个任务，每个任务在隔离的 git worktree 分支上执行：
-
-```bash
-# 启动 loop 模式（默认最多 10 次迭代）
-se3 run --loop
-
-# 限制迭代次数
-se3 run --loop --max-iterations 5
-
-# 禁用分支隔离（直接在当前分支上工作）
-se3 run --loop --no-worktree
-```
-
-管理 loop 分支：
-
-```bash
-# 列出所有未合并的 loop 分支
-se3 run --list-loops
-
-# 合并 loop 分支（先显示 diff 摘要）
-se3 run --merge se3-loop/20260324-120000
-```
-
-### 其他命令
-
-```bash
-# 检查规范文件是否符合护栏规则
-se3 guardrails se3/specs/auth/spec.md
-
-# 查看会话历史
-se3 history
-```
-
-### Daemon 与中心服务器
-
-SE3 带有一个可选的、常驻的控制面。**daemon**(`se3 daemon`)常驻在一台机器上,
-监管该机的 `se3 run` 流程并聚合它们的状态;它可以拨入一个**中心服务器**
-(`se3-server`),后者把多台机器合并为单一的多流程视图,并提供一个网页前端,
-用于观察进度和远程发布任务。
-
-```bash
-# 安装可选的 server extra(FastAPI/uvicorn/websockets)
+# 含中心服务器 / 网页控制台
 pip install 'se3[server]'
 
-# 启动常驻 daemon(脱离终端的后台进程)
-se3 daemon start
-
-# 启动中心服务器(默认 127.0.0.1:8080)
-se3-server
+# 含 headless-browser e2e 测试依赖（之后需 `playwright install chromium`）
+pip install 'se3[browser]'
 ```
 
-安装、部署、架构与网页前端的完整说明见
-[docs/daemon-and-server.zh.md](docs/daemon-and-server.zh.md)。
+当前版本：**7.8.0**。安装后会注册两个 console script：
 
-## 工作流类型
+| 脚本 | 用途 |
+|------|------|
+| `se3` | 核心 CLI（永远可用） |
+| `se3-server` | 中心网页服务器（仅在装了 `server` extra 时可用） |
 
-SE3 根据工作类型调整流程。每种工作流类型从 11 步引擎中选择不同的步骤子集：
+核心 CLI 永远不会 import web 依赖栈，所以不装 `[server]` 也能保持依赖面最小。
 
-| 类型 | 步骤序列 | 适用场景 |
-|------|---------|---------|
-| **feature** | analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → version_analyze → commit → summarize | 新功能或重大增强 |
-| **bugfix** | analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → version_analyze → commit → summarize | Bug 修复（跳过设计，加快迭代） |
-| **directive** | analyze → read_spec → plan_tasks → implement → test → verify_spec → version_analyze → commit → summarize | 按明确指令执行（跳过 propose + design） |
-| **small** | analyze → implement → test → version_analyze → commit → summarize | 拼写错误、小修复、简单变更 |
-| **review** | analyze → read_spec → verify_spec → summarize | 代码审查、审计或分析（不含实现） |
+---
 
-Discovery 模式（`--discover`）在任何工作流类型前添加 **discovery** 步骤，用于多轮需求探索。
+## 快速上手
 
-## 架构概览
+```bash
+# 1. 初始化项目（写 se3.yaml、se3/specs/base/spec.md、.gitignore，并按需 git init）
+cd your-project
+se3 init
 
-### 11 步流程引擎
+# 2. 可选：先通过多轮 discovery 厘清模糊需求
+se3 run --discover "我想要一个能做 X 的 CLI 工具"
 
-SE3 的核心是一个程序驱动的状态机。每个步骤有明确的职责：
+# 3. 端到端跑一次任务（analyze → plan → implement → test → self-check →
+#    verify_spec → update_spec → version_analyze → commit）
+se3 run "Add JWT authentication"
 
-| # | 步骤 | 职责 | 自动化？ |
-|---|------|------|---------|
-| 1 | **analyze** | 分类任务类型和范围 | LLM |
-| 2 | **read_spec** | 加载相关规范文件 | 自动 |
-| 3 | **propose** | 生成变更方案，识别受影响文件 | LLM |
-| 4 | **design** | 设计架构方案，生成设计文档 | LLM |
-| 5 | **plan_tasks** | 拆分为具体任务 | LLM |
-| 6 | **implement** | 编写代码，声明新增测试 | LLM |
-| 7 | **test** | 运行测试套件，失败时触发修复循环 | 自动 |
-| 8 | **verify_spec** | 检查实现是否符合规范要求 | LLM |
-| 9 | **update_spec** | 在护栏约束下更新规范 | LLM |
-| 10 | **version_analyze** | 根据实际变更确定语义版本号递增类型 | LLM |
-| 11 | **commit** | 暂存、版本递增、提交 | 自动 |
-
-最后还有一个 **summarize** 步骤，生成交接摘要供下次会话使用。
-
-### 状态持久化
-
-所有流程状态持久化到 `se3/state/engine.json`，支持：
-- **恢复** — 中断后从断点精确恢复
-- **历史** — 每个步骤的输入和输出的完整审计记录
-- **修复循环** — 测试失败时，引擎自动返回 implement 步骤
-
-### LLM 子进程模式
-
-需要"思考"的步骤（analyze、propose、design 等）会启动一个 LLM 子进程，并精心构建上下文。子进程只接收与当前步骤相关的信息——而非整个对话历史。这保证了每个步骤的专注性，防止上下文污染。
-
-## 项目结构
-
-```
-project/
-├── se3.yaml                    # 框架配置
-├── pyproject.toml              # Python 项目配置
-├── se3/                        # SE3 运行时目录（除 specs/ 外 gitignored）
-│   ├── specs/                  # 需求的权威来源（已提交到 git）
-│   │   ├── base/
-│   │   │   └── spec.md         # 基础项目约定（必需）
-│   │   └── [capability]/
-│   │       └── spec.md         # 功能/领域规范
-│   ├── state/                  # 流程引擎状态持久化
-│   ├── history/                # LLM 对话历史（NDJSON）
-│   ├── cache/                  # 缓存文件
-│   ├── logs/                   # 执行日志
-│   ├── calls/                  # 人工审批调用队列
-│   └── collab/                 # 多智能体协作状态
-├── src/                        # 源代码
-├── tests/                      # 测试文件
-└── scripts/                    # 辅助脚本
+# 4. 从中断的 flow 处精确续跑
+se3 run --resume
 ```
 
-## 配置
+### 三种运行形态
 
-SE3 通过项目根目录的 `se3.yaml` 进行配置。主要配置项：
+- **`--loop`** — 在隔离的 git worktree 分支（`loop/<slug>-<n>`）上连续跑多轮任务。每一轮都有一个干净的工作树；loop 结束时分支自动合并或丢弃，被 Ctrl-C 打断则保留分支供之后手工合并。
+- **`se3 daemon start`** — 启动常驻后台进程，监管本机所有 `se3 run`，聚合 `se3/state|logs|calls|issues` 状态，并可选地拨入一个中心服务器。让你从任何地方查看 flow 进度。
+- **`se3-server`** — FastAPI + WebSocket 中心服务器（自带静态网页控制台挂在 `/`），把多台 daemon 汇聚到同一张多机视图上。适合 fleet、远程发布任务、用浏览器盯长跑 flow。默认监听 `127.0.0.1:8080`。
 
-```yaml
-# 确认/审阅关卡
-confirmation:
-  enabled: true
-  steps: ["propose", "design"]    # 在这些步骤后插入审阅
-  reviewer: "human"               # "human" 或 "llm"
-  llm_reviewer:
-    model: null
-    max_iterations: 3
+---
 
-# 自动版本管理
-# version_analyze 步骤（LLM）直接决定新版本号，默认采用 SemVer 2.0.0。
-# 如需自定义规则，在项目中创建 se3/version-rules.md（自然语言 Markdown），
-# 其内容会注入 version_analyze 的 prompt。
-version:
-  enabled: true
-  auto_bump: true
+## 命令清单
 
-# 语言设置
-language:
-  language: zh-CN                 # 面向人的输出语言
-  spec_language: en-US            # 规范书写语言
+下表中的所有命令在 7.8.0 版本下均存在于 `src/se3/cli.py` 或其注册的 sub-typer 中。
 
-# Claude 命令解析（基于优先级的回退机制）
-claude_commands:
-  - cmd: "claude"
-    priority: 10
+### 顶层命令
+
+| 命令 | 用途 |
+|------|------|
+| `se3 run [TASK]` | 统一入口。驱动 flow engine 状态机（analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit）。支持 `--resume` / `--flow-id` / `--loop` / `--discover` / `--from-issue` / `--change` / `--type` / `--output-format`。 |
+| `se3 init` | 初始化新项目：写 `se3.yaml`、base spec、`.gitignore`，按需 `git init`。参数：`--project-root` / `--name` / `--force`。 |
+| `se3 guardrails <spec-file>` | 对 spec 文件跑 SE3 spec guardrails（检测被删除的 requirement、被弱化的语言）。供 CI 与 `se3 merge` 共用。 |
+| `se3 sync` | 单向 code → spec 同步，按轮迭代直至收敛。参数包括 `--once` / `--max-rounds` / `--stable-rounds` / `--interactive` / `--show-diff` / `--validate-only` / `--resume` / `--force` / `--confirm-cleanup`。 |
+| `se3 sync-respond <call-file>` | 处理 `se3 sync --interactive` 在高影响 requirement 删除时写出的人工决策响应文件。 |
+| `se3 merge <branch> [<branch> ...]` | 按序把多个分支合并到当前 HEAD，冲突由 LLM 驱动解决。参数：`--strategy fast\|safe\|strict` / `--delete-merged` / `--no-delete-merged`。`se3/` 下的运行时数据按分层策略同步。 |
+| `se3 merge-respond <call-file>` | 处理 `se3 merge` 在冲突或 guardrail 违规升级为人工 MCP call 时写出的响应文件。 |
+| `se3 salvage` | 对异常终止的 session 做尽力抢救：宽容地加载 state、commit 残留 diff、为未完成工作补 issue、归档 session。 |
+
+### `se3 history` — flow 历史
+
+| 子命令 | 用途 |
+|--------|------|
+| `se3 history` / `se3 history list` | 列出活跃 / 归档 / history-only 三处的 flow。参数：`--active-only` / `--archived-only` / `--json`。 |
+| `se3 history show <flow_id>` | 展示某个 flow 的逐 step 结构化详情。参数：`--detailed`（LLM 调用细节）/ `--verbose`（完整 tool-call 流）/ `--json`。 |
+| `se3 history restore <flow_id>` | 按 ID 续跑某个 flow（委托给 `se3 run --resume --flow-id`）。`--dry-run` 仅打印命令不执行。 |
+| `se3 history archived` | 仅列出归档 flow。`--json` 输出机读 JSON。 |
+
+### `se3 issue` — 项目 issue
+
+| 子命令 | 用途 |
+|--------|------|
+| `se3 issue` / `se3 issue list` | 默认列出 open issue。`--all` 含已关闭；`--type <t>` 按类型过滤。 |
+| `se3 issue show <id>` | 展示某条 issue 的全部细节。 |
+| `se3 issue create` | 交互式创建新 issue（title / description / type / priority / tags）。 |
+| `se3 issue reset <id>` | 把 in-progress 的 issue 重置回 `open`。 |
+
+### `se3 daemon` — 常驻控制面
+
+| 子命令 | 用途 |
+|--------|------|
+| `se3 daemon start` | 启动 daemon。`--foreground` 不脱离终端；`--server-url <ws://…>` 向中心服务器注册。 |
+| `se3 daemon stop` | 停止运行中的 daemon。 |
+| `se3 daemon status` | 报告运行状态、machine id、server URL、真实连接状态与已跟踪 flow。`--json` 输出机读 JSON。 |
+
+---
+
+## 目录布局
+
+`se3/` 下所有内容默认 gitignored，*除了*下表中显式 whitelist 的子路径（specs、issues、scripts、`version-rules.md` 入库；运行时 state 与 log 不入库）。
+
+```
+your-project/
+├── se3.yaml                       # 项目配置（入库）
+├── se3.local.yaml                 # 本地覆盖配置（gitignored）
+├── pyproject.toml                 # 项目版本号的单一事实源
+├── VERSIONS.md                    # 更新日志（由 documentation-updater 维护）
+├── .gitignore                     # 由 `se3 init` 创建 / 追加
+└── se3/                           # SE3 运行时根目录
+    ├── specs/                     # ✅ 入库 — 代码的文档化快照
+    │   ├── base/spec.md           # base spec，每个 flow 自动加载
+    │   └── <capability>/spec.md
+    ├── issues/                    # ✅ 入库 — open/ 与 closed/ YAML 记录
+    ├── scripts/                   # ✅ 入库 — 例如 version.py（单一版本源）
+    ├── version-rules.md           # ✅ 入库 — 可选的自然语言版本规则
+    ├── state/                     # ❌ runtime — engine.json / sync_state.json / …
+    │   └── archive/               #   归档的 engine 快照
+    ├── history/                   # ❌ runtime — per-flow per-step 的 jsonl 对话
+    ├── logs/                      # ❌ runtime — 执行日志（含 logs/llm/ 调用 trace）
+    ├── calls/                     # ❌ runtime — 待处理的人工 MCP call 文件
+    ├── collab/                    # ❌ runtime — 多智能体协作状态
+    ├── cache/                     # ❌ runtime — 衍生缓存（例如 spec-index）
+    ├── tmp/                       # ❌ runtime — 临时 prompt / response 快照
+    └── worktrees/                 # ❌ runtime — loop / DAG 隔离用的 worktree
 ```
 
-## 解决的问题
+---
 
-| 问题 | SE3 的解决方案 |
-|------|---------------|
-| **跨会话上下文丢失** | 状态持久化到 `se3/state/` + summarize 步骤生成交接摘要；`--resume` 从断点精确恢复 |
-| **缺乏工程纪律** | 流程引擎强制按顺序执行 分析 → 设计 → 实现 → 测试；feature 任务不能跳过到编码 |
-| **规范偏离** | 护栏机制防止悄悄弱化或删除现有需求；`update_spec` 步骤显式管理规范变更 |
-| **未经验证的工作** | `test` 步骤自动运行；`verify_spec` 检查实现是否符合需求；失败触发修复循环 |
-| **一刀切的流程** | 5 种工作流类型自适应调整：feature 完整流程、bugfix 快速路径、review 只读模式 |
-| **手动流程编排** | `se3 run` 处理一切：无需手动跟踪步骤，无需记住"下一步做什么" |
-| **不安全的自主执行** | Loop 模式使用 git worktree 隔离；变更留在独立分支上，直到显式合并 |
-| **版本管理开销** | 智能版本分析根据实际代码变更自动确定正确的语义版本号递增 |
-| **模糊的需求** | Discovery 模式在开始实现之前进行多轮需求探索 |
+## Specs 索引
 
-## 版本历史
+SE3 在 `se3/specs/` 下自带 22 份 spec，它们既是项目的活文档，也是被 `se3 guardrails` 强制执行的实现契约。可以作为深入代码的索引。
 
-完整版本历史请查看 [VERSIONS.md](VERSIONS.md)。
+| Spec | 一句话用途 |
+|------|-----------|
+| `base` | 项目身份、目录布局、代码与流程约定；每个 flow 自动加载。 |
+| `se3-commands` | 所有顶层 `se3 *` 命令与参数的 CLI 契约。 |
+| `se3-config` | `se3.yaml` / `se3.local.yaml` 的 schema 与加载 / 覆盖语义。 |
+| `se3-scaffold` | 标准项目结构与 `se3 init` 生成物。 |
+| `se3-workflows` | 五种 workflow 类型（feature / bugfix / review / small / directive）加上 discovery，及各自的 step 序列。 |
+| `se3-versioning` | SemVer 2.0.0 规则、单一版本源、自动 bump 契约。 |
+| `session-protocol` | session 启动、resume、loop 模式生命周期、分支隔离、回合并规则。 |
+| `flow-engine` | 核心状态机——step 池、转移、事件流、sink、prompt markers、fix loop。 |
+| `agent-runner-infrastructure` | `AgentRunner` ABC 与 `ClaudeCodeRunner` 适配器：子进程、hang 检测、超大 prompt 重路由。 |
+| `llm-caller` | agent 轮换、retry context 注入、JSON 抽取模式、NDJSON 流式输出。 |
+| `dag-scheduler` | implement step 的并行 DAG 执行器（relay worktree、传递闭包削减）。 |
+| `worktree-management` | loop / merge worktree 生命周期、分支命名、孤儿 worktree 清理。 |
+| `requirement-intake` | 新需求通过 `se3 run` 进入 SE3 的 intake 契约。 |
+| `spec-format` | spec-format v1 文法：marker、标题、`### Requirement:` 与 scenario。 |
+| `spec-guardrails` | 拦截既有 requirement 被悄悄弱化 / 删除的规则。 |
+| `issue-management` | `se3 issue` CLI 与 `IssueManager` 存储 API（YAML on disk + 状态机）。 |
+| `issue-discovery` | 从 flow 执行与未解决隐患中自动发现 issue。 |
+| `documentation-updater` | `README.md` 徽章更新与 `VERSIONS.md` 更新日志生成。 |
+| `salvage-command` | 五步式尽力抢救 pipeline。 |
+| `user-interjection-handling` | Ctrl-C 插话生命周期与 call 文件在 CLI / daemon / web 间的路由。 |
+| `running-flow-console` | 运行中 flow 全屏视图的网页控制台行为。 |
+| `test-project` | 用来跑通 `se3 run` 工作流的端到端测试项目。 |
 
-**当前版本：3.38.1**
+---
 
-## 许可证
+## 版本与许可证
 
-MIT
+- 版本号由 `pyproject.toml`（`7.8.0`）独家持有，引擎在 `version_analyze` + `commit` step 自动 bump，请勿手动修改。
+- License：Apache-2.0。
+- 完整更新日志见 [VERSIONS.md](VERSIONS.md)。
