@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+
+## 7.9.1 - 2026-05-29
+
+- Pause on step failure through both channels: always write the retry_decision call file and emit FLOW_PAUSED so the web console shows the failure and Retry/Skip/Abort, with the CLI prompt and web response racing whoever-first-wins under a TTY
+- Prune dangling depends_on edges when disaster recovery drops an already-pre-merged group, and skip rather than crash on unknown dependencies during DAG build
+- Validate the leaf-merge target branch ref before merging to avoid the opaque 'not something we can merge' error
+- Retain the history cursor for terminal flows on final flush so --resume reconnects incremental push instead of freezing the web console on the failure snapshot
+- Batch/throttle os.fsync in the merge llm_trace writer to reduce dirty-page write-back stalls under parallel streaming writes
+- Preserve existing non-interactive (daemon/CI/pipe) pause-and-decision behavior unchanged
 ## Current Version
 
 **5.2.0** — fix: Isolate claude subprocess from target project `.claude/settings.json` via `--setting-sources` (default `user`). New `claude_subprocess.setting_sources` config as escape hatch.

@@ -1866,6 +1866,7 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 
 **Leaf-Only Merge with LLM Conflict Resolution:**
 - Only leaf nodes (groups with no downstream dependents) merge back to the original branch.
+- Before attempting `git merge <branch>`, the leaf-merge path SHALL validate that the target leaf branch ref resolves to a commit via `git rev-parse --verify --quiet <branch>^{commit}`. Under IO stall or a concurrent branch deletion the ref can be missing, and `git merge <missing>` reports the opaque `merge: <branch> - not something we can merge` error. When the probe fails, the leaf merge is skipped and reported as failed (logging the diagnosable `rev-parse` failure); because the merge was never started, there is no in-progress merge state to abort.
 - Merge conflicts are resolved by LLM with full context including: task descriptions, per-group summaries and files_changed, conflicting file content with conflict markers, and spec content.
 - The LLM resolver retries up to a bounded number of attempts on failure.
 - When the LLM resolver is exhausted, the leaf-merge path SHALL fall back to a deterministic `_take_theirs_fallback`: for every still-conflicting file, run `git checkout --theirs -- <file>` (i.e., accept the leaf branch's version verbatim) and `git add <file>`, then complete the merge commit with `git commit --no-edit`. Rationale: the leaf branch encapsulates the DAG implement output — the commits that MUST be preserved; `ours` (the pre-merge target) is typically upstream content the user already accepted overriding by running implement.
@@ -1878,6 +1879,13 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **WHEN** merging back to the original branch
 - **THEN** a standard git merge is attempted
 - **AND** if no conflicts, the merge completes normally
+
+#### Scenario: Leaf merge aborts when the target branch ref is missing
+- **GIVEN** a leaf group whose target branch ref does not resolve to a commit (e.g. deleted under a concurrent operation or lost during an IO stall)
+- **WHEN** the leaf-merge handler runs
+- **THEN** the pre-merge `git rev-parse --verify --quiet <branch>^{commit}` probe fails and the merge is skipped
+- **AND** the leaf merge is reported as failed with a diagnosable error rather than an opaque `not something we can merge` git message
+- **AND** no in-progress merge state is left to abort (the merge was never started)
 
 #### Scenario: Leaf merge with LLM conflict resolution
 - **GIVEN** a leaf group's merge produces conflicts
@@ -1906,6 +1914,17 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **WHEN** conflicts arise in that command's resolution loop
 - **THEN** the DAG leaf-merge take-theirs fallback is NOT invoked
 - **AND** `se3 merge` follows its own strategy contract (LLM-as-editor or human MCP escalation per `fast` / `safe` / `strict`), never silently accepting either side
+
+**DAG Disaster-Recovery Dependency Pruning:**
+- When DAG resume / disaster recovery detects a surviving, recoverable group (its impl branch already carries commits that were effectively pre-merged into the baseline branch) and drops it from the to-run `dag_groups`, it SHALL also prune every `depends_on` edge in the surviving groups that points at a dropped group (`_prune_recovered_dependencies`). Semantically those dropped groups are already in the baseline, so the edge is satisfied and must not survive as a dangling reference.
+- This active pruning is the first line of defense; the scheduler's defensive dangling-edge skip (see the `dag-scheduler` spec's *DAG Construction and Validation* requirement) is the second, so a stale edge that escapes pruning still does not abort scheduling with a `Group X depends on unknown group Y` error.
+
+#### Scenario: Recovery prunes dangling depends_on edges of dropped groups
+- **GIVEN** a DAG resume drops an already-completed, pre-merged group from the to-run set
+- **AND** another surviving group still lists that dropped group in its `depends_on`
+- **WHEN** `_prune_recovered_dependencies` runs over the surviving groups
+- **THEN** the edge pointing at the dropped group is removed from the survivor's `depends_on`
+- **AND** the resulting group list builds a valid DAG without a dangling-dependency error
 
 **DAG Branch Cleanup:**
 - After all leaf merges complete, the DAG parallel strategy cleans up implementation branches.

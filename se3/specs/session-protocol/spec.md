@@ -214,7 +214,7 @@ There is no two-stage "first Ctrl+C interrupts / second Ctrl+C exits" state mach
 
 ### Requirement: Step Failure Interactive Recovery
 
-When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL obtain a Retry/Skip/Abort recovery decision, subject to a hard retry ceiling, rather than immediately failing the flow. On an interactive terminal the decision is collected via a prompt; off a terminal it is externalized as a `retry_decision` call file and resolved out-of-band.
+When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL obtain a Retry/Skip/Abort recovery decision, subject to a hard retry ceiling, rather than immediately failing the flow. The decision path is a **dual-channel pause**: on every failure with retries remaining — regardless of whether the process owns a terminal — a `retry_decision` call file is written and a `FLOW_PAUSED` event is emitted so a web-console bystander sees the failure as a Retry/Skip/Abort chip and can answer it. On an interactive terminal the CLI Retry/Skip/Abort prompt is then **raced** against the web response poller (whoever answers first wins); off a terminal the flow pauses and the decision is resolved out-of-band on the next `se3 run --resume`. This makes the CLI and the web console *equivalent* on the failure-decision path — it closes both "the webui can't see the failure" and "the webui can't retry".
 
 **Recovery Flow** (`_run_flow` orchestrator loop in `src/se3/commands/run.py`):
 
@@ -223,11 +223,12 @@ When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL obtain a 
 3. If `retry_count >= 3`:
    - The operator is informed that max retries have been reached.
    - The flow is **auto-failed** (no prompt): `flow.status` is set to `FlowStatus.FAILED`, state is persisted, and the process exits with code 1.
-4. If `retry_count < 3`, the recovery decision is sourced according to whether the process owns a terminal (`sys.stdin.isatty()`). The TTY and non-TTY decision channels MUST behave as a **mutually exclusive pair**: once either side answers, the other side must be left with no stale call file and no stale web-console chip. Concretely:
-   - **On a TTY (interactive):** the orchestrator first probes for an out-of-band webui answer at the deterministic `retry_decision_{step_id}.json` call file (typical when a daemon-spawned flow paused on a prior failure and the operator later resumes from a TTY). If a sibling `.response` / `.response.json` file is present, its `decision` value is adopted and the call file plus both sibling response variants are removed — no CLI prompt is shown. If no answer is waiting, the orchestrator shows a choice prompt: **"Retry this step"** / **"Skip to next step"** / **"Abort flow"** WITHOUT writing a new call file (the interactive path stays free of any webui chip while the operator types). After the CLI prompt returns a choice, the orchestrator best-effort unlinks the same `retry_decision_{step_id}.json` call file and both sibling response variants — identically for all three choices — so that any webui chip raised in the typing window (e.g. a daemon under the same project root re-surfaced an older retry_decision artifact, or a concurrent webui answer raced the CLI) disappears as soon as the CLI side commits to a decision.
-   - **Off a TTY (daemon-spawned `se3 run --output-format json`, CI, a pipe):** there is no operator to host a blocking prompt, so the decision is externalized as a `retry_decision`-kind call file under `se3/calls/` (written via `interaction_calls.write_retry_decision_call`, embedding the failed step's id/type, the error message, and the current retry count). If no sibling response file exists yet, the flow is set to `FlowStatus.PAUSED`, a `FLOW_PAUSED` event is emitted, state is persisted, and the process returns — the decision is made out-of-band (e.g. through the web console) and applied on the next `se3 run --resume`. If a sibling response file is already present (a resumed run), its `decision` value (`retry` / `skip` / `abort`, defaulting to `abort` when missing or unrecognized) is consumed and the call file plus both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call.
+4. If `retry_count < 3`, the failure is surfaced as a **dual-channel pause**, resolved by `_resolve_step_failure_action` in `src/se3/commands/run.py`. **Unconditionally — in both the interactive and non-interactive cases — the orchestrator (re)writes the deterministic `retry_decision_{step_id}.json` call file** under `se3/calls/` (via `interaction_calls.write_retry_decision_call`, embedding the failed step's id/type, the error message, and the current retry count) and **emits a `FLOW_PAUSED` event**, so a web-console bystander sees the failure as a Retry/Skip/Abort chip and can answer it. Because the `call_id` is derived from the step id, a later failure of the same step reuses the same file rather than piling up duplicates. The TTY and non-TTY decision channels MUST behave as a **mutually exclusive pair**: once either side answers, the other side must be left with no stale call file and no stale web-console chip. Concretely:
+   - **Answer already on disk (either channel):** after writing the call file the orchestrator immediately probes for a sibling `.response` / `.response.json` answer (the resume-after-pause case, or the webui having answered before control reached this point). If one is present, its `decision` value is consumed directly, the call file plus both sibling response variants are removed, and no CLI prompt or race is run.
+   - **On a TTY (interactive), no answer yet:** the orchestrator runs a **dual-channel race** via `_await_terminal_or_web_choice` — the CLI choice prompt (**"Retry this step"** / **"Skip to next step"** / **"Abort flow"**) is raced against a background poller watching the `retry_decision_{step_id}.json` call file for a sibling response. Whichever side answers first wins: if the webui answers first the poller cancels the CLI prompt and the web `decision` is consumed; if the operator answers at the terminal first the poller is stopped. Either way the call file and both sibling response variants are torn down via `_cleanup_retry_decision_artifacts`, so the losing side is left with no stale chip and the answer is never consumed twice. A Ctrl+C / EOF with no web answer is treated as Abort (the historical default).
+   - **Off a TTY (daemon-spawned `se3 run --output-format json`, CI, a pipe), no answer yet:** there is no operator to host a blocking prompt, so the flow is set to `FlowStatus.PAUSED`, state is persisted, and the process returns — the decision is made out-of-band (e.g. through the web console) and applied on the next `se3 run --resume`, which re-enters this path and consumes the now-present sibling response (`retry` / `skip` / `abort`, defaulting to `abort` when missing or unrecognized).
 
-The shared filename and cleanup behavior is owned by two helpers in `src/se3/commands/run.py`: `_retry_decision_call_path(project_root, step_id)` returns the deterministic `retry_decision_{step_id}.json` path that both ends of the channel address, and `_cleanup_retry_decision_artifacts(call_path)` is the best-effort unlink of that call file plus its `.response` / `.response.json` siblings. Both the interactive sibling-response probe, the non-interactive resumed-decision consumer, and the post-CLI-prompt mutual-exclusion cleanup route through these helpers so the two channels never disagree on which file to clear.
+The shared filename and cleanup behavior is owned by helpers in `src/se3/commands/run.py`: `_retry_decision_call_path(project_root, step_id)` returns the deterministic `retry_decision_{step_id}.json` path that both ends of the channel address, `_cleanup_retry_decision_artifacts(call_path)` is the best-effort unlink of that call file plus its `.response` / `.response.json` siblings, and the race itself lives in `_await_terminal_or_web_choice` (the selection-mode sibling of the discovery `_await_terminal_or_web` dual-wait), which degrades to a plain `prompt_user_choice` when there is no call file or no TTY to race against. Both the sibling-response probe, the resumed-decision consumer, and the race's win/lose teardown route through these helpers so the two channels never disagree on which file to clear.
 
 **Choice Outcomes:**
 
@@ -253,7 +254,8 @@ The `retry_count` on the step model is distinct from the `inputs["retry_count"]`
 - **GIVEN** a step transitions to `FAILED` and `current_step.retry_count < 3`
 - **WHEN** the orchestrator processes the failed result
 - **THEN** the error message is displayed
-- **AND** the operator is prompted with "Retry this step" / "Skip to next step" / "Abort flow"
+- **AND** a `retry_decision_{step_id}.json` call file is written under `se3/calls/` and a `FLOW_PAUSED` event is emitted so the web console surfaces a Retry/Skip/Abort chip
+- **AND** on a TTY the operator is prompted with "Retry this step" / "Skip to next step" / "Abort flow", raced against the web response poller
 
 #### Scenario: Retry resets step and increments counters
 - **GIVEN** the operator selects "Retry this step" at the failure prompt
@@ -307,18 +309,25 @@ The `retry_count` on the step model is distinct from the `inputs["retry_count"]`
 - **AND** the call file and both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call
 - **AND** no Retry/Skip/Abort prompt is shown to the operator
 
-#### Scenario: Interactive prompt does not create a new retry_decision call
-- **GIVEN** a step fails on a TTY with `retry_count < 3` and no `retry_decision_{step_id}.json` call file exists
+#### Scenario: Interactive failure writes a retry_decision call and races both channels
+- **GIVEN** a step fails on a TTY with `retry_count < 3` and no answer is waiting on disk
 - **WHEN** the orchestrator reaches the decision point
-- **THEN** the operator is shown the Retry/Skip/Abort prompt directly
-- **AND** no new `retry_decision`-kind call file is written under `se3/calls/` for that failure (the interactive path stays free of any webui chip while the operator types)
+- **THEN** a `retry_decision_{step_id}.json` call file IS written under `se3/calls/` and a `FLOW_PAUSED` event is emitted, so the web console raises its own Retry/Skip/Abort chip
+- **AND** the orchestrator runs `_await_terminal_or_web_choice`, racing the CLI Retry/Skip/Abort prompt against a poller watching that call file for a sibling response
+- **AND** the CLI and the web console are equivalent answer channels for that decision (whoever answers first wins)
 
-#### Scenario: CLI decision cleans up any concurrent webui artifacts
-- **GIVEN** a step fails on a TTY, the operator is shown the Retry/Skip/Abort prompt, and during the typing window a webui-side `retry_decision_{step_id}.json` call file (and possibly a sibling response) exists for the same step
-- **WHEN** the operator submits any of the three choices (Retry / Skip / Abort)
-- **THEN** the call file and both `.response` / `.response.json` siblings for that step are best-effort unlinked after the prompt returns
-- **AND** the cleanup happens identically for all three choices (it is keyed on the decision having been taken on the CLI side, not on which decision was picked)
-- **AND** any webui chip for that step disappears from the docked reply bar so the operator is not asked to answer the same decision again on the other channel
+#### Scenario: Web console wins the interactive race
+- **GIVEN** a step fails on a TTY with `retry_count < 3`, the call file is written, and the CLI Retry/Skip/Abort prompt is open
+- **WHEN** the webui operator answers the chip (writing a sibling `.response` / `.response.json`) before the terminal operator answers
+- **THEN** the background poller cancels the CLI prompt and the web `decision` is consumed and applied with the usual Retry/Skip/Abort outcomes
+- **AND** the call file and both sibling response variants are removed via `_cleanup_retry_decision_artifacts`, so the answer is never consumed twice
+
+#### Scenario: Terminal wins the interactive race and tears down the chip
+- **GIVEN** a step fails on a TTY with `retry_count < 3`, the call file is written, and both channels are awaited
+- **WHEN** the operator submits a choice (Retry / Skip / Abort) at the terminal before any web answer arrives
+- **THEN** the background poller is stopped and the operator's choice is applied
+- **AND** the `retry_decision_{step_id}.json` call file and both `.response` / `.response.json` siblings are best-effort unlinked — identically for all three choices (keyed on the decision having been taken on the CLI side, not on which choice was picked)
+- **AND** the webui chip for that step disappears from the docked reply bar so the operator is not asked to answer the same decision again on the other channel
 
 ### Requirement: CONFIRM Steps and REVISION_NEEDED Transitions
 

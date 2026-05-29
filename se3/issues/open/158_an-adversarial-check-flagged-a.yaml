@@ -1,0 +1,31 @@
+id: '158'
+title: An adversarial check flagged a possible spec/code divergence on the max-retries
+  auto-fail path (retry_count >= 3 auto-fails without prompting). The authoritative
+  specs loaded for this flow (session-protocol 'Max retries reached auto-fails without
+  prompt', requirement-intake, se3-workflows) all explicitly document the auto-fail
+  behavior, and run.py:2207-2216 matches them. The conflicting 'ask user after exceeding
+  retries' text the agent cited is in a separate spec section not touched by this
+  task and predates it. Surfaced for transparency only — not introduced by this task.
+description: 'An adversarial check flagged a possible spec/code divergence on the
+  max-retries auto-fail path (retry_count >= 3 auto-fails without prompting). The
+  authoritative specs loaded for this flow (session-protocol ''Max retries reached
+  auto-fails without prompt'', requirement-intake, se3-workflows) all explicitly document
+  the auto-fail behavior, and run.py:2207-2216 matches them. The conflicting ''ask
+  user after exceeding retries'' text the agent cited is in a separate spec section
+  not touched by this task and predates it. Surfaced for transparency only — not introduced
+  by this task.
+
+
+  Suggestion: No action required for this flow. If a stale Chinese-language flow-engine
+  requirement still says the user is prompted after the retry ceiling, reconcile it
+  in a separate sync/spec pass.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-29T15:29:17.646424'
+updated_at: '2026-05-29T15:29:17.646424'

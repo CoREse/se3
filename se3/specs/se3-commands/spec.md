@@ -1243,7 +1243,7 @@ Every LLM call issued during `se3 merge` (conflict resolution, guardrail repair,
 - Optional error detail.
 - Free-form metadata dict (model name, temperature, etc.).
 
-Trace files SHALL be append-only and fsync'd after each record. Concurrent writes within a single process SHALL be serialized via a threading lock; cross-process concurrency is prevented by the merge lock requirement above.
+Trace files SHALL be append-only. Each record is flushed (write + `flush`) so it is immediately visible via the OS page cache, but durable `os.fsync` SHALL be batched/throttled rather than issued after every record — by default fsync is forced only every N records or T seconds (to avoid the IO amplification that per-record fsync causes when several parallel merge groups stream traces while a daemon stats the files each tick). A durable fsync SHALL be forced at every `stop()` / file rotation / process exit so the tail record is never lost. Concurrent writes within a single process SHALL be serialized via a threading lock; cross-process concurrency is prevented by the merge lock requirement above.
 
 The orchestrator SHALL share a single `LLMCaller` instance across `ConflictResolver` and `GuardrailRepairer` so that prompt-cache reuse and per-call quota are shared across steps.
 

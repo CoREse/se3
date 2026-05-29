@@ -3,8 +3,12 @@
 Records every LLM call issued during ``se3 merge`` as a single JSON
 Lines (jsonl) record.  Each record includes the prompt, response,
 duration, agent identifier, and outcome.  The trace file is
-append-only, fsync'd after each record, and safe for concurrent
-access within a single process (protected by a threading lock).
+append-only and safe for concurrent access within a single process
+(protected by a threading lock).  Each record is flushed for
+page-cache visibility, but durable ``os.fsync`` is batched/throttled
+(by default every N records or T seconds) to avoid IO amplification,
+and forced at every ``stop()`` / file rotation / exit so the tail
+record is never lost.
 
 Files are named ``merge_<timestamp>_<seq>.jsonl`` under
 ``se3/logs/llm/`` so that a long-running merge sequence does not

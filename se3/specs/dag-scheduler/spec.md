@@ -88,9 +88,10 @@ A helper `_relay_plan_is_linear(plan)` shall return `True` only when the plan de
 - **WHEN** two groups share the same `group_id`
 - **THEN** construction raises `ValueError` reporting the duplicate
 
-#### Scenario: Unknown dependency
+#### Scenario: Unknown (dangling) dependency is skipped with a warning
 - **WHEN** a group's `depends_on` references a group_id not present in the input
-- **THEN** construction raises `ValueError` naming the dependent and the unknown id
+- **THEN** construction does NOT raise; `_build_dag` defensively SKIPS the dangling edge, logging a warning, and treats the dependency as already satisfied
+- **AND** this tolerance exists for DAG disaster recovery: when a completed / pre-merged group is dropped from the to-run set, a retained group may still reference it, and that stale edge must not abort scheduling
 
 #### Scenario: Cycle detected
 - **WHEN** the dependency relationships form a cycle

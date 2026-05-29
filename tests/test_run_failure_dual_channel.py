@@ -356,3 +356,161 @@ def test_failure_decision_to_choice_normalizes_unknown_to_abort() -> None:
     assert run._failure_decision_to_choice("abort") == 2
     assert run._failure_decision_to_choice("garbage") == 2
     assert run._failure_decision_to_choice(None) == 2
+
+
+# ---------------------------------------------------------------------------
+# Interactive race coroutine — _await_terminal_or_web_choice_interactive
+#
+# The plain-branch tests above force ``sys.stdin.isatty()`` off and never reach
+# the genuinely concurrent code (the background poller, the
+# ``app.exit(web_sentinel)`` cross-thread cancellation, the cancel-cleanup).
+# These tests drive the interactive coroutine directly with a fake
+# ``PromptSession`` so the live PromptSession-vs-poller race, its teardown, and
+# the "loser leaves no residual call/response / no double-consume" guarantees
+# are actually exercised — without depending on a real TTY.
+# ---------------------------------------------------------------------------
+
+
+class _FakePromptApp:
+    """Stand-in for ``PromptSession.app`` supporting the cancel handshake."""
+
+    def __init__(self) -> None:
+        self.is_running = False
+        self._fut = None  # asyncio.Future, set while prompt_async blocks
+
+    def exit(self, result=None) -> None:
+        self.is_running = False
+        if self._fut is not None and not self._fut.done():
+            self._fut.set_result(result)
+
+
+class _FakePromptSession:
+    """Fake ``PromptSession`` whose ``prompt_async`` we control by mode.
+
+    * ``terminal`` — returns ``value`` immediately (operator typed a choice).
+    * ``cancel``   — raises ``KeyboardInterrupt`` (Ctrl+C / EOF at the prompt).
+    * ``block``    — blocks on a future until ``app.exit(...)`` resolves it
+      (so the background poller can cancel it when a web answer lands).
+    """
+
+    def __init__(self, *, mode: str, value=None, **_kw) -> None:
+        self.app = _FakePromptApp()
+        self._mode = mode
+        self._value = value
+
+    async def prompt_async(self):
+        import asyncio
+
+        if self._mode == "terminal":
+            return self._value
+        if self._mode == "cancel":
+            raise KeyboardInterrupt
+        # block-mode: wait until the poller cancels us via app.exit().
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self.app._fut = fut
+        self.app.is_running = True
+        try:
+            return await fut
+        finally:
+            self.app.is_running = False
+
+
+def _patch_prompt_session(monkeypatch: pytest.MonkeyPatch, *, mode: str, value=None) -> None:
+    """Make the interactive coroutine build our fake PromptSession + no-op
+    ``patch_stdout`` so no real terminal is touched."""
+    import contextlib
+
+    import prompt_toolkit
+    import prompt_toolkit.patch_stdout
+
+    monkeypatch.setattr(
+        prompt_toolkit,
+        "PromptSession",
+        lambda **k: _FakePromptSession(mode=mode, value=value),
+    )
+    monkeypatch.setattr(
+        prompt_toolkit.patch_stdout,
+        "patch_stdout",
+        lambda *a, **k: contextlib.nullcontext(),
+    )
+
+
+def test_interactive_race_web_first_cancels_prompt_and_cleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A web answer the poller finds while the live prompt is blocking wins:
+    the prompt is cancelled via ``app.exit(web_sentinel)`` and the loser leaves
+    no residual call/response (no double-consume possible)."""
+    call_path = _seed_call(tmp_path)
+    interaction_calls.write_response(call_path, {"decision": "skip"})
+
+    # The prompt blocks forever; only the poller (finding the web answer) can
+    # end it — exercising the real cross-thread cancellation path.
+    _patch_prompt_session(monkeypatch, mode="block")
+
+    source, choice = run._await_terminal_or_web_choice_interactive(
+        call_path,
+        message="What would you like to do?",
+        options=_OPTIONS,
+        poll_interval=0.02,
+    )
+
+    assert source == run._FAILURE_SRC_WEB
+    assert choice == 1  # skip
+    # Winner consumed + loser torn down: nothing lingers on disk.
+    assert not call_path.exists()
+    assert not call_path.with_name(call_path.stem + ".response").exists()
+    assert not call_path.with_name(call_path.stem + ".response.json").exists()
+
+
+def test_interactive_race_terminal_first_tears_down_poller_and_cleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the terminal answers first (no web response), the prompt returns
+    the operator's choice, the poller is torn down, and any concurrent webui
+    call/response artifact is cleaned so the chip vanishes."""
+    call_path = _seed_call(tmp_path)
+    assert call_path.exists()
+
+    # Operator types "2" → Skip (index 1). No web response is ever written.
+    _patch_prompt_session(monkeypatch, mode="terminal", value="2")
+
+    source, choice = run._await_terminal_or_web_choice_interactive(
+        call_path,
+        message="What would you like to do?",
+        options=_OPTIONS,
+        poll_interval=0.02,
+    )
+
+    assert source == run._FAILURE_SRC_TERMINAL
+    assert choice == 1  # skip
+    # The CLI committed → webui chip torn down.
+    assert not call_path.exists()
+    assert not call_path.with_name(call_path.stem + ".response").exists()
+
+
+def test_interactive_race_ctrl_c_aborts_and_cleans_webui_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl+C / EOF at the failure prompt (no web answer) returns CANCEL — and
+    the deterministic retry_decision call file is torn down too, so the
+    FAILED-exempt chip does not keep surfacing on the now-aborted flow."""
+    call_path = _seed_call(tmp_path)
+    assert call_path.exists()
+
+    _patch_prompt_session(monkeypatch, mode="cancel")
+
+    source, choice = run._await_terminal_or_web_choice_interactive(
+        call_path,
+        message="What would you like to do?",
+        options=_OPTIONS,
+        poll_interval=0.02,
+    )
+
+    assert source == run._FAILURE_SRC_CANCEL
+    assert choice is None  # call site maps this to abort
+    # The losing webui channel is dismantled even on the abort-via-Ctrl+C path.
+    assert not call_path.exists()
+    assert not call_path.with_name(call_path.stem + ".response").exists()
+    assert not call_path.with_name(call_path.stem + ".response.json").exists()

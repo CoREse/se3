@@ -680,6 +680,10 @@ def _await_terminal_or_web_choice_interactive(
     try:
         source, choice = asyncio.run(_race())
     except KeyboardInterrupt:
+        # Ctrl+C at the failure prompt is a CLI-side commitment to abort — tear
+        # down the concurrent webui call/response so the (FAILED-exempt)
+        # retry_decision chip does not keep surfacing on the now-aborted flow.
+        _cleanup_retry_decision_artifacts(call_file)
         return (_FAILURE_SRC_CANCEL, None)
     except Exception:  # pragma: no cover - defensive: fall back to plain choice
         logger.exception(
@@ -693,10 +697,12 @@ def _await_terminal_or_web_choice_interactive(
         _cleanup_retry_decision_artifacts(call_file)
         return (_FAILURE_SRC_TERMINAL, choice)
 
-    # The CLI committed to a choice — best-effort tear down any concurrent
-    # webui call/response so the chip disappears (mirrors the post-prompt
-    # cleanup the non-dual-channel path used to do).
-    if source == _FAILURE_SRC_TERMINAL:
+    # The CLI committed to a decision — including aborting via Ctrl+C / EOF
+    # (_FAILURE_SRC_CANCEL) — so best-effort tear down any concurrent webui
+    # call/response, identically for all outcomes, so the chip disappears
+    # (mirrors the post-prompt cleanup the non-dual-channel path used to do).
+    # _FAILURE_SRC_WEB already cleaned up inside _race().
+    if source != _FAILURE_SRC_WEB:
         _cleanup_retry_decision_artifacts(call_file)
     return (source, choice)
 
