@@ -1992,6 +1992,33 @@ function normalizeRecord(rec) {
     };
   }
 
+  // Per-group DAG status records (written by chat_history.record_group_status
+  // from the implement step's DAGScheduler lifecycle hooks). They ride the
+  // conversation channel as a lightweight, time-ordered status marker — NOT a
+  // chat turn and NOT a partial stream fragment — so the web console can show
+  // "G3 正在 worktree 实施中" / "G1 已完成" while the parallel implement step is
+  // still running, before the full per-group histories are salvaged back at
+  // step end. Recognized here before the generic role path so the dedicated
+  // marker renderer (renderGroupStatusRecord) can pick it up.
+  const recType = String(pick("type") || "").toLowerCase();
+  if (recType === "group_status") {
+    return {
+      role: "group-status",
+      kind: "group_status",
+      groupId: pick("group_id") != null ? String(pick("group_id")) : "",
+      status: pick("status") != null ? String(pick("status")) : "",
+      content: "",
+      timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
+      // The implement step always tags these `implement`; honor an explicit
+      // envelope/inner step_type when present, else default to implement so
+      // the marker groups under the IMPLEMENT step header.
+      stepType: pickStepType() || "implement",
+      stepId: pick("step_id") || "",
+      raw: { raw_json: [msg], raw_ndjson: pick("raw_ndjson") },
+      attempt: null,
+    };
+  }
+
   // Stream-progress records (written by record_stream_progress, daemon-read
   // and pushed BEFORE the turn's final result) are in-progress process output.
   // They carry `type:'stream_progress'` and/or `partial:true` and are always
@@ -2230,6 +2257,40 @@ const STEP_HEADER_TITLES = {
   commit: "COMMIT",
   summarize: "SUMMARY",
 };
+
+// Per-group DAG status → human-readable Chinese text. Keyed by lower-case
+// status as written by chat_history.record_group_status; mirrors the lifecycle
+// the DAGScheduler emits (queued → running → completed | failed | skipped).
+const GROUP_STATUS_TEXT = {
+  queued: "排队中",
+  running: "正在 worktree 实施中",
+  completed: "已完成",
+  failed: "失败",
+  skipped: "已跳过",
+};
+
+// Per-group DAG status → leading status icon, giving running / completed /
+// failed an at-a-glance visual distinction in the marker (the rest of the
+// distinction comes from the `.status-<status>` CSS class).
+const GROUP_STATUS_ICON = {
+  queued: "◷",
+  running: "◐",
+  completed: "✓",
+  failed: "✗",
+  skipped: "⊘",
+};
+
+// Pure: render a per-group DAG status marker label, e.g.
+// groupStatusLabel("G3", "running") → "G3 正在 worktree 实施中". An unknown
+// status falls back to its raw token so nothing is silently dropped, and a
+// missing group id degrades to "?" rather than producing a dangling label.
+// Exposed for unit testing.
+function groupStatusLabel(groupId, status) {
+  const gid = String(groupId == null ? "" : groupId).trim() || "?";
+  const key = String(status == null ? "" : status).toLowerCase();
+  const text = GROUP_STATUS_TEXT[key] || String(status == null ? "" : status);
+  return text ? `${gid} ${text}` : gid;
+}
 
 // Resolve the conversation step-header label for a step type. Known step types
 // map to their paradigm heading; unknown ones fall back to the original step
@@ -4602,6 +4663,13 @@ function renderConversationRecord(norm) {
     return renderStepEventRecord(norm);
   }
 
+  // Per-group DAG status — a lightweight, self-contained marker (not a chat
+  // turn, no fold/raw affordances) inserted into the implement step's time
+  // line so the user watches G1–G5 progress while the parallel step runs.
+  if (norm.kind === "group_status") {
+    return renderGroupStatusRecord(norm);
+  }
+
   const known = ["user", "assistant", "system"].includes(norm.role);
   const role = known ? norm.role : "other";
   const content = typeof norm.content === "string" ? norm.content : "";
@@ -4682,6 +4750,32 @@ function renderConversationRecord(norm) {
   // paradigm).
   row.appendChild(renderRecordHead(norm));
   row.appendChild(buildBubble());
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Per-group DAG status markers (group_status)
+// ---------------------------------------------------------------------------
+
+// Build the conversation-row form of a per-group DAG status record. Each
+// record is its own marker placed in strict (timestamp, index) order by
+// addConversationRecords, so a group's successive states (queued → running →
+// completed) appear as the parallel implement step advances. The marker is
+// intentionally affordance-free: no fold, no raw toggle, no chip — it never
+// disturbs the fold / raw state of the surrounding chat bubbles, and a
+// step-header rebuild around it leaves it untouched.
+function renderGroupStatusRecord(norm) {
+  const status = String(norm.status || "").toLowerCase();
+  const row = el(
+    "div",
+    "history-record conv-record role-group-status group-status-marker status-" +
+      (status || "unknown"),
+  );
+  const icon = GROUP_STATUS_ICON[status] || "•";
+  row.appendChild(el("span", "group-status-icon", icon));
+  row.appendChild(
+    el("span", "group-status-text", groupStatusLabel(norm.groupId, norm.status)),
+  );
   return row;
 }
 
@@ -6030,6 +6124,9 @@ if (typeof module !== "undefined" && module.exports) {
     STEP_REPORT_TITLES,
     STEP_HEADER_TITLES,
     stepHeaderLabel,
+    groupStatusLabel,
+    GROUP_STATUS_TEXT,
+    renderGroupStatusRecord,
     hasRawPayload,
     STEP_REPORT_RENDERERS,
     renderProposalFields,
