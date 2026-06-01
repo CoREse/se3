@@ -110,7 +110,7 @@ class TestSpecLoaderItemsMode:
     def test_items_mode_loads_base_always(self):
         result = load_for_step(
             step_type="plan",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "状态机驱动流程"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"}],
             project_root=PROJECT_ROOT,
             mode="items",
         )
@@ -120,20 +120,20 @@ class TestSpecLoaderItemsMode:
     def test_items_mode_excludes_unselected_requirements(self):
         result = load_for_step(
             step_type="plan",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "状态机驱动流程"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"}],
             project_root=PROJECT_ROOT,
             mode="items",
         )
         # The selected requirement should be present
-        assert "Requirement: 状态机驱动流程" in result.text
+        assert "Requirement: State-Machine-Driven Flow" in result.text
         # Other flow-engine requirements should NOT be present
-        assert "Requirement: 16 步流程池" not in result.text
-        assert "Requirement: 统一入口" not in result.text
+        assert "Requirement: 16-Step Flow Pool" not in result.text
+        assert "Requirement: Unified entry point" not in result.text
 
     def test_items_mode_includes_spec_header(self):
         result = load_for_step(
             step_type="plan",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "状态机驱动流程"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"}],
             project_root=PROJECT_ROOT,
             mode="items",
         )
@@ -150,7 +150,7 @@ class TestSpecLoaderItemsMode:
         # Items mode: select just one requirement from flow-engine
         result = load_for_step(
             step_type="plan",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "状态机驱动流程"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"}],
             project_root=PROJECT_ROOT,
             mode="items",
         )
@@ -164,11 +164,11 @@ class TestSpecLoaderItemsMode:
     def test_items_mode_loaded_items_tracks_selection(self):
         result = load_for_step(
             step_type="plan",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "状态机驱动流程"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"}],
             project_root=PROJECT_ROOT,
             mode="items",
         )
-        assert "flow-engine::状态机驱动流程" in result.loaded_items
+        assert "flow-engine::State-Machine-Driven Flow" in result.loaded_items
 
 
 class TestSpecLoaderFullSpecMode:
@@ -177,19 +177,19 @@ class TestSpecLoaderFullSpecMode:
     def test_full_spec_mode_loads_all_requirements(self):
         result = load_for_step(
             step_type="update_spec",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "状态机驱动流程"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"}],
             project_root=PROJECT_ROOT,
             mode="full_spec",
         )
         # Full spec mode should include ALL requirements from flow-engine
-        assert "Requirement: 统一入口" in result.text
-        assert "Requirement: 状态机驱动流程" in result.text
-        assert "Requirement: 16 步流程池" in result.text
+        assert "Requirement: Unified entry point" in result.text
+        assert "Requirement: State-Machine-Driven Flow" in result.text
+        assert "Requirement: 16-Step Flow Pool" in result.text
 
     def test_full_spec_mode_includes_base(self):
         result = load_for_step(
             step_type="update_spec",
-            selected_items=[{"spec": "flow-engine", "requirement_name": "统一入口 se3 run"}],
+            selected_items=[{"spec": "flow-engine", "requirement_name": "Unified entry point `se3 run`"}],
             project_root=PROJECT_ROOT,
             mode="full_spec",
         )
@@ -215,7 +215,7 @@ class TestStateMachineSelectedItemsPassthrough:
             "relevant_specs": ["base", "flow-engine"],
             "spec_content": "base + flow-engine header + items",
             "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "状态机驱动流程"},
+                {"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"},
             ],
             "selected_specs": ["flow-engine"],
         })
@@ -235,7 +235,7 @@ class TestStateMachineSelectedItemsPassthrough:
         flow = self._flow_with_analyze_selected_items()
         inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
         assert "selected_items" in inputs
-        assert inputs["selected_items"][0]["requirement_name"] == "状态机驱动流程"
+        assert inputs["selected_items"][0]["requirement_name"] == "State-Machine-Driven Flow"
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_update_spec_gets_full_spec_mode(self, _cfg, sm):
@@ -245,7 +245,7 @@ class TestStateMachineSelectedItemsPassthrough:
         # full_spec mode should re-render spec_content from the actual spec files
         assert "spec_content" in inputs
         # The full spec text should be longer than the analyze item-filtered version
-        assert "Requirement: 16 步流程池" in inputs["spec_content"]
+        assert "Requirement: 16-Step Flow Pool" in inputs["spec_content"]
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_plan_gets_items_mode(self, _cfg, sm):
@@ -319,7 +319,7 @@ class TestAnalyzeHandlerItemLevel:
             "complexity": "medium",
             "reasoning": "This is a feature task affecting the engine",
             "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "状态机驱动流程"},
+                {"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"},
             ],
             "selected_specs": ["flow-engine"],
         })
@@ -335,7 +335,7 @@ class TestAnalyzeHandlerItemLevel:
         assert isinstance(selected_items, list)
         assert len(selected_items) > 0
         assert selected_items[0]["spec"] == "flow-engine"
-        assert selected_items[0]["requirement_name"] == "状态机驱动流程"
+        assert selected_items[0]["requirement_name"] == "State-Machine-Driven Flow"
         # Output-side cleanup: selected_specs must not leak into outputs even
         # when the LLM returns it alongside selected_items.
         assert "selected_specs" not in step.outputs
@@ -356,7 +356,7 @@ class TestAnalyzeHandlerItemLevel:
             "complexity": "medium",
             "reasoning": "Feature task",
             "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "状态机驱动流程"},
+                {"spec": "flow-engine", "requirement_name": "State-Machine-Driven Flow"},
             ],
             "selected_specs": ["flow-engine"],
         })

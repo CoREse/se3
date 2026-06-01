@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+
+## 7.10.1 - 2026-06-01
+
+- Rebuild VERSIONS.md into a single reverse-ordered changelog using the unified `## <version> - <date>` heading and bullet format
+- Merge and deduplicate the three overlapping Version History tables and the Current Version prose into one continuous list
+- Backfill a complete version history from 5.1.0 to 7.10.0 with tag-derived dates and git-log-traceable entries
+- Preserve the Pre-1.0 Development History as a separate, format-cleaned section
+- Translate all remaining Chinese spec prose to en-US (spec_language) while preserving Requirement/Scenario structure and technical symbols verbatim
+- Align test_item_loading_e2e.py to the translated flow-engine requirement names
 ## 7.10.0 - 2026-05-30
 
 - Establish a single authoritative code-first / spec-assistant role definition and inject it into discovery, analyze, and plan prompts so specs are treated as a read-only reference to current code rather than a driver

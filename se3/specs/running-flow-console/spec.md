@@ -127,8 +127,8 @@ stacked parts, all sitting below the conversation:
 1. **Pending intervention chip bar** — a row of status-style buttons, one
    per pending intervention (e.g. a generic pending reply, a retry
    decision, a CLI subprocess confirmation). Each chip shows the
-   intervention kind via a **user-facing neutral label** (e.g. "待回复" /
-   "需要决策" / "需要确认") and MUST NOT expose the internal transport
+   intervention kind via a **user-facing neutral label** (e.g. "Pending reply" /
+   "Needs decision" / "Needs confirmation") and MUST NOT expose the internal transport
    vocabulary — strings such as `MCP`, `call_id`, or `call <id>` MUST NOT
    appear as visible chip text. The underlying call identifier MAY be
    preserved on a hidden `data-call-id` attribute and inside the chip's
@@ -257,7 +257,7 @@ this gate — the gate is the source of truth for "submission settled".
 - **WHEN** the docked reply chip bar and the reply context panel header
   are rendered
 - **THEN** the chip label is a user-facing neutral phrase tied to the
-  intervention's kind (e.g. "待回复" / "插话" / "需要决策" / "需要确认")
+  intervention's kind (e.g. "Pending reply" / "Interject" / "Needs decision" / "Needs confirmation")
 - **AND** neither the chip label, the chip's visible secondary text, nor
   the reply context panel header contain the literal substrings `MCP`,
   `call_id`, or the pattern `call <id>` as visible text
@@ -301,7 +301,7 @@ one-click confirm action whose **value is the literal `"1"`** — the exact
 token the gate's `== "1"` check expects. The reply context panel MUST render
 both affordances side by side: a GUI confirm button (clicking it sends `"1"`
 through the same call/response reply channel every other chip uses) **and**
-the `输入 1 确认` textual hint as a fallback, so a user who ignores the button
+the `Enter 1 to confirm` textual hint as a fallback, so a user who ignores the button
 can still type `1`. Because the confirm value is fixed by the gate, the
 frontend MUST guarantee the confirm button even when the backend call file
 omitted the `options` array — it synthesizes a single confirm option whose
@@ -350,7 +350,7 @@ untouched.
 - **WHEN** the user selects the chip
 - **THEN** the reply context panel renders a GUI confirm button whose click
   sends the literal `"1"` through the shared call/response reply channel
-- **AND** the panel also shows the `输入 1 确认` textual hint so the user can
+- **AND** the panel also shows the `Enter 1 to confirm` textual hint so the user can
   type `1` manually instead
 - **AND** when the backend call file omitted the `options` array, the frontend
   still synthesizes the confirm button with value `"1"`
@@ -584,7 +584,7 @@ pending call once the flow has moved past the step that call belongs to. An
 interactive `call` / `cli_confirm` / `discovery_confirm` answered at the CLI
 terminal is typically consumed directly by the run loop without writing a
 `.response` / `.response.json` sibling file, so the existing
-already-answered-by-sibling-file check can never clear it and the stale "待回复"
+already-answered-by-sibling-file check can never clear it and the stale "Pending reply"
 chip would otherwise persist for the entire run. To close this, the aggregator
 (`DaemonAggregator._enumerate_calls` / `_snapshot_for_root`) MUST treat a call
 as no longer pending when its owning `context.step_id` is no longer the flow's
@@ -615,7 +615,7 @@ reuses the *same* `step_id` across successive clarification turns and the
 confirmation gate, so each new pause writes a fresh call file keyed to the same
 `(flow_id, step_id)`. Only the most recent such call is a live interaction; the
 earlier ones are superseded leftovers that, without dedup, would pile up as
-stale "待回复" chips. The aggregator therefore keeps only the newest unanswered
+stale "Pending reply" chips. The aggregator therefore keeps only the newest unanswered
 call per `(flow_id, step_id)` and discards the rest. Calls that cannot be keyed
 (missing `flow_id` or `step_id`) are exempt from dedup and are never collapsed
 against one another.
@@ -626,7 +626,7 @@ against one another.
   keyed to `(flow_id = "F1", step_id = "S")`
 - **WHEN** the aggregator enumerates `F1`'s `pending_calls`
 - **THEN** only the newest call for `(F1, S)` is reported as pending
-- **AND** the earlier, superseded call is dropped so no stale "待回复" chip
+- **AND** the earlier, superseded call is dropped so no stale "Pending reply" chip
   accumulates
 - **AND** any call that cannot be keyed (missing `flow_id` or `step_id`) is left
   untouched by the dedup pass
@@ -671,7 +671,7 @@ against one another.
   status), even though no `.response` / `.response.json` sibling file was
   written
 - **THEN** the aggregator stops reporting the call in `F1`'s `pending_calls`
-  and the stale "待回复" chip disappears from `F1`'s docked reply bar during the
+  and the stale "Pending reply" chip disappears from `F1`'s docked reply bar during the
   run, not only after the flow archives
 - **AND** a call whose step is still the current, unanswered step remains
   pending and continues to surface as a chip
@@ -724,7 +724,7 @@ default-expanded `user` bubble; the **prefix** and **suffix** MUST be merged
 into a single default-collapsed clickable chip (e.g. labeled "system prompt ·
 {step}") so collapse never hides the user's real input. When the chip is
 expanded, the prefix and suffix MAY be presented as two clearly labeled
-sub-sections inside the chip (e.g. "模板前缀" / "框架后缀") so a developer can
+sub-sections inside the chip (e.g. "template prefix" / "framework suffix") so a developer can
 distinguish what came before vs. after the user's literal input.
 
 **Normative constraint on user-content scope:** the user-content section MUST
@@ -750,10 +750,10 @@ lacks the marker protocol entirely (legacy history written before any marker
 was introduced) MUST fall back to the original behavior of rendering the
 entire record as a single collapsed chip.
 
-The original NDJSON for any collapsed record (查看原始) MUST stay reachable, but
+The original NDJSON for any collapsed record (View raw) MUST stay reachable, but
 it is **nested inside the record's own expand area** — the collapsed chip's
 expand detail for a whole-chip / empty-user-content record, or the Layer-2
-"展开全部" area for a marker-split `user` message (see *Three-Tier Progressive
+"Expand all" area for a marker-split `user` message (see *Three-Tier Progressive
 Disclosure*) — NOT surfaced as a row-level always-visible control beside the
 record.
 
@@ -857,24 +857,24 @@ model so the default view is the clean, human-meaningful payload and the
 surrounding process is reachable but never in the way. This is the deliberate
 inversion of the prior behavior, where an assistant's thinking narrative + tool
 markers were the default surface, the real result was buried in a raw JSON blob,
-and an isolated "待回复" chip sat inline in the stream.
+and an isolated "Pending reply" chip sat inline in the stream.
 
 The two roles use **different disclosure depths**, by design — a deliberate
 **mixed model**, not one unified tier count:
 
 - The **`user` side keeps three layers**: Layer 1 the literal input, Layer 2 the
-  full prompt behind "展开全部", and Layer 3 the raw NDJSON behind "查看原始" nested
+  full prompt behind "Expand all", and Layer 3 the raw NDJSON behind "View raw" nested
   at the end of the Layer-2 area.
 - The **`assistant` side uses two layers**: Layer 1 the narrative + the rendered
-  structured result (both visible by default), and a single fold layer "查看原始"
-  holding the turn's original record. There is NO assistant-side "展开全部"
+  structured result (both visible by default), and a single fold layer "View raw"
+  holding the turn's original record. There is NO assistant-side "Expand all"
   wrapper and no third assistant layer — the narrative is a JSON-stripped part of
   the visible first layer, so only the original record is folded.
 
 The target is: **the default view shows the rendered result (plus, on the
 assistant side, the JSON-stripped narrative tiled above it); the original record
-is one click away behind "查看原始"; and, on the user side only, the full prompt
-is behind "展开全部".**
+is one click away behind "View raw"; and, on the user side only, the full prompt
+is behind "Expand all".**
 
 The conversation is grouped into per-phase sections
 (DISCOVERY / ANALYZE / PLAN / …) and, within each section, turns are presented
@@ -886,12 +886,12 @@ requirement).
 1. **Layer 1 (default)** — only the user's literal input (the user-content
    section produced by the `prompt_markers.py` split; see *Role-Based Message
    Collapse*). No framework boilerplate leaks into this default view.
-2. **Layer 2 ("展开全部")** — the complete prompt the LLM actually saw,
-   presented as the labeled 模板前缀 / 框架后缀 subsections (the template prefix
+2. **Layer 2 ("Expand all")** — the complete prompt the LLM actually saw,
+   presented as the labeled template prefix / framework suffix subsections (the template prefix
    and the framework suffix). Folded by default.
-3. **Layer 3 ("查看原始")** — the original NDJSON record for the message,
-   reachable via the shared raw toggle (查看原始) **nested at the end of the
-   Layer-2 "展开全部" expand area** (built by `makeUserPromptToggle`), NOT as a
+3. **Layer 3 ("View raw")** — the original NDJSON record for the message,
+   reachable via the shared raw toggle (View raw) **nested at the end of the
+   Layer-2 "Expand all" expand area** (built by `makeUserPromptToggle`), NOT as a
    row-level always-visible button.
 
 **Assistant turn** — two layers. The two-layer model below applies **only when
@@ -909,11 +909,11 @@ MUST use that same discriminator so the two requirements never diverge.
    `STEP_ASSISTANT_RENDERERS` entry for the step type (e.g. discovery's
    `content` / `refined_description` / `questions`). No raw ```` ```json ````
    blob and no isolated pending chip appear in the default view.
-2. **Layer 2 ("查看原始", the single fold)** — the turn's original record: the raw
+2. **Layer 2 ("View raw", the single fold)** — the turn's original record: the raw
    NDJSON / tool-call JSON / unrendered result-JSON literal, with the Layer-1
    narrative removed. It is folded by default but its toggle button is always
    visible, sitting directly below the rendered result; it is built by
-   `makeAssistantRawToggle`. There is no "展开全部" wrapper and no third layer:
+   `makeAssistantRawToggle`. There is no "Expand all" wrapper and no third layer:
    because the narrative already lives in the visible Layer 1, only the original
    record is folded. The assistant raw entry prefers the raw_ndjson / raw_json
    payload and, when neither is present, falls back to the unrendered `content`
@@ -925,14 +925,14 @@ including a turn whose only JSON content is intermediate tool calls), the
 thinking process MUST stay shown inline as the default view via
 `renderToolMarkers` and MUST NOT be folded or contracted into any empty toggle.
 It never collapses to empty: because the process is already the visible default,
-this case has no separate "查看原始" fold and the content is shown in full
+this case has no separate "View raw" fold and the content is shown in full
 directly.
 
 When a turn has no Layer-1 payload to surface — e.g. a legacy `user` record
 whose user-content section is empty, or an assistant turn whose body cannot be
 parsed into structured fields — the renderer MUST degrade gracefully and never
 drops content: a legacy empty `user` turn collapses to a single chip (with its
-查看原始 raw toggle nested inside the chip's expand detail), while an assistant
+View raw raw toggle nested inside the chip's expand detail), while an assistant
 turn with no parseable result keeps its thinking process shown inline via the
 same `renderToolMarkers` + markdown path described in *Structured-JSON
 Assistant Rendering* — shown in full, not folded. Expanding any disclosure
@@ -947,9 +947,9 @@ no-scroll-on-collapse behavior used elsewhere in the view.
   above the rendered structured fields for that step type
 - **AND** the raw NDJSON / tool-call JSON / unrendered result JSON literal are
   NOT in the default view — the turn's original record is reachable only by
-  opening the single "查看原始" fold (its button is always visible, its body
+  opening the single "View raw" fold (its button is always visible, its body
   folded by default)
-- **AND** there is no assistant-side "展开全部" wrapper and no third disclosure
+- **AND** there is no assistant-side "Expand all" wrapper and no third disclosure
   layer
 
 #### Scenario: User turn defaults to the literal input only
@@ -958,15 +958,15 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **WHEN** the turn is rendered
 - **THEN** the default (Layer 1) view shows only the user's literal input,
   with no template prefix or framework suffix text
-- **AND** the full prompt the LLM saw is reachable as the 模板前缀 / 框架后缀
-  subsections behind the "展开全部" (Layer 2) toggle
-- **AND** the original NDJSON is reachable via the "查看原始" (Layer 3) toggle
-  nested at the end of that expanded "展开全部" area, never via a row-level
+- **AND** the full prompt the LLM saw is reachable as the template prefix / framework suffix
+  subsections behind the "Expand all" (Layer 2) toggle
+- **AND** the original NDJSON is reachable via the "View raw" (Layer 3) toggle
+  nested at the end of that expanded "Expand all" area, never via a row-level
   always-visible button
 
 #### Scenario: No isolated pending chip embedded in the assistant default view
 - **WHEN** an assistant turn is rendered in its default Layer-1 form
-- **THEN** no inline "待回复" / pending-intervention chip is rendered inside the
+- **THEN** no inline "Pending reply" / pending-intervention chip is rendered inside the
   turn's clean result view
 - **AND** pending interventions appear only on the docked reply bar, per the
   *Unified Intervention Items* requirement
@@ -996,21 +996,21 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **GIVEN** a marker-split `user` turn rendered with its default Layer-1
   literal-input bubble
 - **WHEN** the conversation row is first rendered, before any toggle is opened
-- **THEN** no row-level always-visible "查看原始" button is present beside the
+- **THEN** no row-level always-visible "View raw" button is present beside the
   bubble
-- **AND** the "查看原始" (Layer 3) toggle becomes reachable only after the
-  "展开全部" (Layer 2) toggle is expanded, nested at the end of that expand area
+- **AND** the "View raw" (Layer 3) toggle becomes reachable only after the
+  "Expand all" (Layer 2) toggle is expanded, nested at the end of that expand area
 
-#### Scenario: Assistant single 查看原始 fold is the only assistant disclosure
+#### Scenario: Assistant single View raw fold is the only assistant disclosure
 - **GIVEN** a result-JSON assistant turn rendered with its default Layer-1
   narrative + structured result
 - **WHEN** the conversation row is rendered
-- **THEN** the only assistant-side fold is the single "查看原始" entry below the
+- **THEN** the only assistant-side fold is the single "View raw" entry below the
   rendered result — its toggle button is always visible and its body is folded
   by default
-- **AND** there is no assistant "展开全部" wrapper, and the "查看原始" fold is NOT
-  nested inside any "展开全部" area
-- **AND** when neither raw_ndjson nor raw_json is present, the "查看原始" fold
+- **AND** there is no assistant "Expand all" wrapper, and the "View raw" fold is NOT
+  nested inside any "Expand all" area
+- **AND** when neither raw_ndjson nor raw_json is present, the "View raw" fold
   falls back to the unrendered `content` literal so the original record stays
   reachable
 
@@ -1080,13 +1080,13 @@ report; it is the worked example below:
    - `questions` — rendered as an ordered list.
 3. Always preserve the **view raw** affordance: the original assistant body
    (including the JSON literal and NDJSON envelope) MUST remain reachable via
-   the assistant's single "查看原始" fold (built by `makeAssistantRawToggle`; see
+   the assistant's single "View raw" fold (built by `makeAssistantRawToggle`; see
    *Three-Tier Progressive Disclosure*) sitting directly below the rendered
    result rather than shown as a row-level always-visible button, so a developer
    can still inspect the unrendered string when debugging. This assistant fold
    is its own dedicated entry — it falls back to the unrendered `content`
    literal when no raw_ndjson / raw_json payload is present — and is NOT nested
-   inside any "展开全部" wrapper (there is no assistant-side "展开全部").
+   inside any "Expand all" wrapper (there is no assistant-side "Expand all").
 
 The registry MUST remain open for future step types without re-architecting
 the dispatch path. Every step type listed above MUST have a registered
@@ -1108,7 +1108,7 @@ long string values (truncated to ~200 characters with a `(N chars)` suffix
 matching the CLI threshold of ~300 chars), and expands nested dicts at least
 one level by indentation. The narrative section is still rendered through the
 shared `renderNarrativeNodes` helper above the field rows, and the assistant's
-single "查看原始" fold (per *Three-Tier Progressive Disclosure*) still carries
+single "View raw" fold (per *Three-Tier Progressive Disclosure*) still carries
 the unmodified original record. This generic fallback applies **only** to the
 step.outputs dict the dispatch path hands to the assistant renderer — it MUST
 NOT alter the rendering of ```` ```json ```` code fences embedded inside
@@ -1141,7 +1141,7 @@ dropped.
 **Result-vs-tool-call identification.** A structured renderer MUST surface a
 Layer-1 result (and thereby let *Three-Tier Progressive Disclosure* render the
 narrative + structured result as the visible default, with only the turn's
-original record folded behind the single "查看原始" entry) **only when the turn
+original record folded behind the single "View raw" entry) **only when the turn
 actually produced a final result JSON** — not merely because some region of the
 body parsed as JSON.
 The discriminator is **field-based**: the frontend maintains a per-step
@@ -1163,7 +1163,7 @@ predicate as the turn's result (a result conventionally follows the tool calls
 that produced it). The Layer-1 narrative is then the body with **all** JSON
 regions removed (not just the chosen one), so intermediate tool-call JSON never
 leaks into the clean default view while the full original body — every JSON
-region included — stays reachable through the assistant's single "查看原始" fold.
+region included — stays reachable through the assistant's single "View raw" fold.
 When **no** region satisfies the result predicate — including a turn carrying
 two or more tool-call JSON segments — the renderer MUST return no result so the
 caller keeps the thinking process inline per *Three-Tier Progressive
@@ -1220,7 +1220,7 @@ as markdown without raising and without producing an empty result card.
   turn's result and rendered as the Layer-1 structured fields
 - **AND** the Layer-1 narrative has every JSON region (the tool calls and the
   result literal) removed, while the unmodified body remains reachable behind
-  the assistant's single "查看原始" fold
+  the assistant's single "View raw" fold
 
 #### Scenario: Bare JSON with embedded markdown fence still renders structured fields
 - **GIVEN** an assistant turn whose body is a bare JSON object (no outer
@@ -1348,7 +1348,7 @@ as markdown without raising and without producing an empty result card.
 - **AND** the assistant bubble does NOT contain a single bare ```` ```json ````
   fence dumping the entire dict as raw JSON
 - **AND** the narrative section above the field rows still renders through the
-  shared `renderNarrativeNodes` helper and the assistant's single "查看原始"
+  shared `renderNarrativeNodes` helper and the assistant's single "View raw"
   fold still carries the unmodified original record
 
 #### Scenario: Embedded ```json code fence in assistant prose still renders as markdown

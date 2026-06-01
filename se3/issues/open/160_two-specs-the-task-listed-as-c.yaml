@@ -1,0 +1,36 @@
+id: '160'
+title: 'Two specs the task listed as containing Chinese were never modified: agent-runner-infrastructure/spec.md
+  (16 CJK chars) and spec-format/spec.md (5 CJK chars). However, the remaining Chinese
+  is EXCLUSIVELY verbatim technical content, not untranslated prose: in spec-format
+  it is the validator''s literal rejected-prefix string values `我`/`已经`/`让我` (matched
+  by code via startswith); in agent-runner-infrastructure it is the `_CONFIRM_PATTERNS`
+  regex content `按 N …(确定|确认|继续|是)` / `输入 N …` and paired example prompts like `按
+  1 确定` (shown alongside `Press 1 to confirm`). All surrounding prose in both files
+  is already English.'
+description: 'Two specs the task listed as containing Chinese were never modified:
+  agent-runner-infrastructure/spec.md (16 CJK chars) and spec-format/spec.md (5 CJK
+  chars). However, the remaining Chinese is EXCLUSIVELY verbatim technical content,
+  not untranslated prose: in spec-format it is the validator''s literal rejected-prefix
+  string values `我`/`已经`/`让我` (matched by code via startswith); in agent-runner-infrastructure
+  it is the `_CONFIRM_PATTERNS` regex content `按 N …(确定|确认|继续|是)` / `输入 N …` and paired
+  example prompts like `按 1 确定` (shown alongside `Press 1 to confirm`). All surrounding
+  prose in both files is already English.
+
+
+  Suggestion: Leave these as-is. Per the task''s own rule (''保留所有技术符号 verbatim … 配置键/值''),
+  these are code-matched literals/regex patterns and example inputs the detector handles;
+  translating them would MISDOCUMENT the code''s actual behavior (the validator genuinely
+  matches the Chinese strings, and the runner genuinely detects Chinese confirmation
+  prompts). Do NOT translate them in a fix iteration. The requirement ''spec body
+  completely en-US'' is effectively satisfied since only verbatim technical Chinese
+  remains.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-01T13:08:04.464518'
+updated_at: '2026-06-01T13:08:04.464518'
