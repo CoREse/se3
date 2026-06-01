@@ -24,6 +24,7 @@ from ..dag_scheduler import (
     _relay_plan_is_linear,
     classify_chains,
 )
+from ..chat_history import record_group_status
 from ..prompt_markers import inject_boundary
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
@@ -1908,7 +1909,31 @@ def _run_dag_parallel(
         len(relay_plan.convergence_points),
     )
 
-    scheduler = DAGScheduler(reduced_groups, max_workers=4, relay_plan=relay_plan)
+    # Per-group status sink: during DAG parallel execution each group runs in
+    # an isolated worktree whose conversation jsonl is only salvaged back to
+    # the main repo once the whole step finishes, leaving the web console blank
+    # for the entire parallel phase. The scheduler emits coarse per-group status
+    # transitions (queued → running → completed/failed/skipped); we persist each
+    # one as a self-contained NDJSON line into the main repo's step jsonl so the
+    # daemon's history signature shifts and pushes a live status marker. This
+    # only relays *status*, never the per-group conversation content (which
+    # still appears at step end after the worktree history is salvaged).
+    def _on_group_status(group_id: str, status: str) -> None:
+        record_group_status(
+            project_root,
+            flow.flow_id,
+            step.step_id,
+            "implement",
+            group_id,
+            status,
+        )
+
+    scheduler = DAGScheduler(
+        reduced_groups,
+        max_workers=4,
+        relay_plan=relay_plan,
+        on_group_status=_on_group_status,
+    )
     execute_fn = _make_execute_fn(
         project_root=project_root,
         original_branch=original_branch,
