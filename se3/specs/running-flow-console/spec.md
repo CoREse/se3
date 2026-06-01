@@ -1853,6 +1853,23 @@ The report card MUST:
 - Render structured output (markdown, tables, field lists) rather than
   re-dumping the raw JSON blob.
 
+Field parity also covers any **per-item ordinal numbering** a report card
+renders. When a report renderer enumerates a list whose items are labeled with
+a 1-based ordinal (e.g. the `implement` report's Summary section labeling each
+implemented group `G1`, `G2`, … `Gn`), that numbering MUST match the CLI's
+output for the same field — the CLI's `step_renderers.py` numbers these with
+`enumerate(parts, 1)`. To make this hold, the shared list-rendering helper
+(`reportList(items, formatItem)`) MUST invoke its `formatItem` callback with
+the item's 0-based index as the second argument (`formatItem(item, index)`),
+so a callback of signature `(item, index)` can compute `G${index + 1}` and
+produce `G1…Gn`. The numbering MUST NOT render as `GNaN` (the symptom of a
+callback receiving an `undefined` index and computing `undefined + 1`). When
+the underlying collection is empty (e.g. `implemented_groups` is empty), the
+numbering degrades to the plain ordinal (`1…n`) without group prefix, still
+matching the CLI. Threading the index as the second positional argument is
+side-effect-free for every other `reportList` caller, since callers that take
+only the item ignore the extra argument.
+
 To make this work end-to-end, the engine sink layer MUST also persist
 `step_completed` events into the per-step jsonl files consumed by the daemon
 history reader (e.g. via an unconditionally-subscribed `HistorySink` in
@@ -1896,6 +1913,36 @@ not re-render them.
 - **THEN** the corresponding web report renderer MUST surface the same field
   set (mapped to markdown / tables / field lists), so the web and CLI users
   see the same structured report content
+
+#### Scenario: Implement Summary groups are numbered G1…Gn matching the CLI
+- **GIVEN** an `implement` `step_completed` event whose `outputs` carries a
+  non-empty `implemented_groups` list rendered by the report card's Summary
+  section through `reportList` with a `(item, index)` callback computing
+  `G${index + 1}`
+- **WHEN** the report card is rendered in `#flow-view`
+- **THEN** the Summary entries are labeled `G1`, `G2`, … `Gn` in order,
+  matching the CLI's `enumerate(parts, 1)` output in `step_renderers.py`
+- **AND** none of the entries renders as `GNaN`, because `reportList` passes
+  each item's 0-based index as the second callback argument
+
+#### Scenario: Empty implemented_groups degrades to plain ordinal numbering
+- **GIVEN** an `implement` report whose `implemented_groups` collection is
+  empty so the Summary callback's `G` prefix branch is not taken
+- **WHEN** the report card is rendered
+- **THEN** the Summary entries fall back to the plain 1-based ordinal
+  (`1`, `2`, … `n`) with no group prefix, still matching the CLI
+- **AND** the numbering is computed from the real index passed by `reportList`,
+  never producing `NaN`
+
+#### Scenario: reportList threads the item index without disturbing single-arg callers
+- **GIVEN** the shared `reportList(items, formatItem)` helper used by multiple
+  report renderers, some passing a single-argument `(item)` callback and one
+  passing a two-argument `(item, index)` callback
+- **WHEN** `reportList` iterates the items
+- **THEN** it invokes `formatItem(item, index)` with a 0-based incrementing
+  index for every item
+- **AND** callers whose callback takes only the item are unaffected, because
+  the extra positional argument is ignored
 
 #### Scenario: Report card does NOT replace the raw event record
 - **GIVEN** a `step_completed` event for a step

@@ -5085,14 +5085,16 @@ function reportSection(title, body) {
 
 function reportList(items, formatItem) {
   const ul = el("ul", "step-report__list");
+  let index = 0;
   for (const item of items) {
     const li = el("li");
-    const out = formatItem ? formatItem(item) : null;
+    const out = formatItem ? formatItem(item, index) : null;
     if (out instanceof Node) li.appendChild(out);
     else if (typeof out === "string") li.textContent = out;
     else if (typeof item === "string") li.textContent = item;
     else li.textContent = safeStringify(item);
     ul.appendChild(li);
+    index += 1;
   }
   return ul;
 }
@@ -6187,6 +6189,7 @@ if (typeof module !== "undefined" && module.exports) {
     makeRawToggle,
     makeUserRawToggle,
     STEP_REPORT_RENDERERS,
+    reportList,
     renderProposalFields,
     renderDesignFields,
     renderPlanReport,

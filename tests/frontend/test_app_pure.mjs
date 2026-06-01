@@ -3993,4 +3993,58 @@ check("G4 applyInterjectionEvent for another flow does not touch open flow", () 
   resetG4State();
 });
 
+// -- reportList passes the running index as the second callback arg ---------
+// Regression: reportList used to call formatItem(item) without an index, so a
+// (item, index) callback such as the implement Summary's `G${i + 1}` saw
+// index === undefined and rendered "GNaN". Verify the index is now threaded
+// through and increments from 0.
+check("reportList threads an incrementing index into the callback", () => {
+  const seen = [];
+  app.reportList(["a", "b", "c"], (item, index) => {
+    seen.push([item, index]);
+    return document.createTextNode(String(item));
+  });
+  assert.deepEqual(seen, [["a", 0], ["b", 1], ["c", 2]]);
+});
+
+check("reportList still works for single-arg callbacks (index ignored)", () => {
+  const ul = app.reportList(["x", "y"], (item) => document.createTextNode("+" + item));
+  // Two list items, formatted by the first arg only — second arg is harmless.
+  assert.ok(ul.textContent.includes("+x"));
+  assert.ok(ul.textContent.includes("+y"));
+});
+
+// -- implement Summary numbering: G1…Gn (parity with CLI step_renderers) -----
+function implStep(summary, implementedGroups) {
+  return {
+    step_type: "implement",
+    outputs: {
+      completion_status: "complete",
+      summary,
+      implemented_groups: implementedGroups,
+      files_changed: [],
+      tests_added: [],
+    },
+  };
+}
+
+check("implement Summary numbers multi-part summary as G1…Gn (groups non-empty)", () => {
+  const step = implStep("first part; second part; third part", ["G1", "G2", "G3"]);
+  const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
+  const ids = findAll(frag, "step-report__group-id").map((n) => n.textContent);
+  assert.deepEqual(ids, ["G1.", "G2.", "G3."]);
+  // No GNaN / NaN regression anywhere in the rendered output.
+  assert.equal(frag.textContent.includes("GNaN"), false);
+  assert.equal(frag.textContent.includes("NaN"), false);
+});
+
+check("implement Summary degrades to plain numbers 1…n when groups empty", () => {
+  const step = implStep("alpha; beta; gamma", []);
+  const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
+  const ids = findAll(frag, "step-report__group-id").map((n) => n.textContent);
+  assert.deepEqual(ids, ["1.", "2.", "3."]);
+  assert.equal(frag.textContent.includes("GNaN"), false);
+  assert.equal(frag.textContent.includes("NaN"), false);
+});
+
 console.log(`\n${passed} checks passed.`);

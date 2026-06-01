@@ -3,6 +3,14 @@
 
 
 
+
+## 7.11.2 - 2026-06-01
+
+- Fix the Web console implement step Summary rendering each group as 'GNaN' instead of G1…Gn
+- Make reportList pass the 0-based iteration index to its formatItem callback, restoring CLI field parity with step_renderers.py
+- Degrade Summary numbering to plain 1…n ordinals when implemented_groups is empty
+- Sweep app.js for other NaN/undefined render points and confirm reportList's Summary callback was the only affected site
+- Add frontend pure-function regression tests covering correct index threading and both Summary numbering branches
 ## 7.11.1 - 2026-06-01
 
 - Fix missing 'View raw' (Layer 3) on user turns in the running-flow console: user records now stably expose their original .jsonl envelope record even when no second-layer raw payload (raw_ndjson/raw_json) is present
