@@ -2772,6 +2772,12 @@ check("live partial with bracket-format generic 'Tool error' renders as .tool-ma
 const chipMod = await import("./tool_chip_state.test.mjs");
 chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 
+// Register the G4 per-group DAG status marker tests (separate module — same
+// `check` reporter, same `app` module, same shared DOM stub already installed
+// above).
+const groupStatusMod = await import("./group_status.test.mjs");
+groupStatusMod.registerGroupStatusTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

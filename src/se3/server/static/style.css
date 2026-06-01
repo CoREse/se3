@@ -1413,6 +1413,57 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   border-color: rgba(224, 86, 75, 0.5);
 }
 
+/* -- per-group DAG status marker (group_status) --------------------- */
+/*
+ * A lightweight inline status pill tiled into the implement step's time
+ * line while the parallel DAG groups run in isolated worktrees. running /
+ * completed / failed get distinct colors so the user can tell at a glance
+ * which group is in flight versus done versus failed. No fold / raw / chip
+ * affordances — it never disturbs the surrounding chat bubbles.
+ */
+.conv-record.group-status-marker {
+  align-self: flex-start;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--grey);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg-dim);
+}
+.group-status-marker .group-status-icon { font-size: 12px; line-height: 1; }
+.group-status-marker .group-status-text { white-space: pre-wrap; }
+
+.group-status-marker.status-queued {
+  border-left-color: var(--grey);
+  color: var(--fg-dim);
+}
+.group-status-marker.status-running {
+  border-left-color: var(--accent);
+  background: rgba(76, 141, 255, 0.10);
+  color: var(--fg);
+}
+.group-status-marker.status-completed {
+  border-left-color: var(--green);
+  background: rgba(76, 175, 106, 0.10);
+  color: var(--fg);
+}
+.group-status-marker.status-failed {
+  border-left-color: var(--red);
+  background: rgba(224, 86, 75, 0.12);
+  color: var(--fg);
+}
+.group-status-marker.status-skipped {
+  border-left-color: var(--yellow);
+  color: var(--fg-dim);
+}
+
 /* -- step report card ----------------------------------------------- */
 /*
  * Default-expanded report card mirroring the CLI's per-step Rich Panel.
