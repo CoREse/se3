@@ -1,0 +1,35 @@
+id: '162'
+title: The running-flow-console spec's *Three-Tier Progressive Disclosure* requirement
+  body still states the no-result assistant case 'has no separate "View raw" fold
+  and the content is shown in full directly.' This task deliberately adds an always-present
+  查看原始 fold below the inline thinking (line 4708), establishing a new unified principle.
+  The prose-level statement in the spec is now stale relative to the code. The scenario-level
+  assertions ('thinking shown inline in full, not folded or contracted into any empty
+  toggle') remain literally satisfied — the inline process is untouched and the raw
+  toggle is an additive sibling, not a folding of the thinking.
+description: 'The running-flow-console spec''s *Three-Tier Progressive Disclosure*
+  requirement body still states the no-result assistant case ''has no separate "View
+  raw" fold and the content is shown in full directly.'' This task deliberately adds
+  an always-present 查看原始 fold below the inline thinking (line 4708), establishing
+  a new unified principle. The prose-level statement in the spec is now stale relative
+  to the code. The scenario-level assertions (''thinking shown inline in full, not
+  folded or contracted into any empty toggle'') remain literally satisfied — the inline
+  process is untouched and the raw toggle is an additive sibling, not a folding of
+  the thinking.
+
+
+  Suggestion: Reconcile via `se3 sync`: update the running-flow-console spec so the
+  no-result assistant case documents the always-present 查看原始 fold (folded by default,
+  with the inline thinking still shown in full). This is code-first drift, not a regression
+  — the task explicitly directs the change and ''Planned Spec Changes'' is empty by
+  design.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-01T17:34:37.042016'
+updated_at: '2026-06-01T17:34:37.042016'

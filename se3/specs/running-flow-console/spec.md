@@ -935,9 +935,15 @@ result JSON (its body is thinking process only — narrative plus tool calls,
 including a turn whose only JSON content is intermediate tool calls), the
 thinking process MUST stay shown inline as the default view via
 `renderToolMarkers` and MUST NOT be folded or contracted into any empty toggle.
-It never collapses to empty: because the process is already the visible default,
-this case has no separate "View raw" fold and the content is shown in full
-directly.
+The thinking never collapses to empty: it is the visible default and is shown
+in full directly, never hidden behind a toggle. To uphold the universal
+view-raw guarantee (see *Universal View-Raw for Conversation Messages*), an
+always-visible, default-folded "View raw" toggle built by
+`makeAssistantRawToggle` MUST sit **below** the inline thinking; it prefers the
+turn's `raw_ndjson` / `raw_json` payload and falls back to the unrendered
+`content` literal when neither is present, so the original record stays
+reachable even on a no-result turn. Only the original record folds — the
+thinking itself stays expanded above the toggle.
 
 When a turn has no Layer-1 payload to surface — e.g. a legacy `user` record
 whose user-content section is empty, or an assistant turn whose body cannot be
@@ -1004,6 +1010,11 @@ no-scroll-on-collapse behavior used elsewhere in the view.
   `renderToolMarkers`, in full
 - **AND** it is NOT folded or contracted into any empty toggle, and it never
   collapses to empty
+- **AND** a default-folded, always-visible "View raw" toggle
+  (`makeAssistantRawToggle`) sits below the inline thinking, revealing the
+  `raw_ndjson` / `raw_json` payload when present and otherwise falling back to
+  the unrendered `content` literal, so the original record stays reachable
+  without folding the thinking itself
 
 #### Scenario: User Layer 3 raw toggle is nested inside the Layer 2 expansion
 - **GIVEN** a marker-split `user` turn rendered with its default Layer-1
@@ -1032,6 +1043,111 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **AND** when neither raw_ndjson nor raw_json is present, the "View raw" fold
   falls back to the unrendered `content` literal so the original record stays
   reachable
+
+### Requirement: Universal View-Raw for Conversation Messages
+
+Every conversation-channel record — across **all four message roles** `user`,
+`assistant`, `system`, and `other` (any in-stream record whose normalized role
+is none of `user` / `assistant` / `system`, e.g. a `tool` / `developer` / `log`
+record) — MUST expose an always-present, reachable "View raw" affordance so the
+operator can inspect the original record behind any rendered message. This is a
+**uniform invariant**: the "View raw" button is **always shown** for every
+conversation message, default-folded; when the record carries a `raw_json` /
+`raw_ndjson` payload the toggle reveals that payload, and when no raw payload
+exists the toggle falls back to the record's own original text / `.jsonl`
+envelope. The button MUST NOT appear-and-disappear depending on whether a raw
+payload happens to be present — a conversation message without a raw payload
+still shows the button and falls back to its envelope / content original.
+
+The uniform guarantee is realized by routing every conversation role through an
+**always-non-null** raw-toggle constructor (never the nullable shared
+`makeRawToggle`):
+
+- **`user`** — the Layer-3 `makeUserRawToggle`, nested at the end of the Layer-2
+  "Expand all" area, falling back to the `.jsonl` envelope (`norm.raw.envelope`)
+  when no second-layer raw payload exists (see *Three-Tier Progressive
+  Disclosure* and *Role-Based Message Collapse*). This Layer-3 path is the one
+  documented exception to the row-level rule: the user toggle is nested inside
+  Layer 2, not placed beside the bubble.
+- **`assistant`, result-JSON turn** — the single "View raw" fold built by
+  `makeAssistantRawToggle` directly below the rendered structured result,
+  falling back to the unrendered `content` literal.
+- **`assistant`, no-result inline turn** — `makeAssistantRawToggle` appended
+  **below** the inline thinking process (the thinking stays shown in full); see
+  the *Assistant turn with no result JSON* rule in *Three-Tier Progressive
+  Disclosure*.
+- **`system`** — the collapsed system-prompt chip's `makeAssistantRawToggle`
+  (content fallback) inside the chip's expand detail. This replaces the
+  previously nullable `makeRawToggle` call so the button is present whether or
+  not the system record carries a raw payload (it previously vanished for
+  payload-less system records).
+- **`other`** — `makeAssistantRawToggle` appended to the non-collapsible record
+  row (the path `other`-role records always take, since their underlying role is
+  not in the collapsible-role set), guarded so it is not duplicated on the
+  assistant-with-content path that already carries its own toggle.
+
+**Non-conversation synthetic UI MUST stay affordance-free.** The records that
+are *synthesized* progress / report UI rather than conversation turns MUST NOT
+gain any view-raw affordance from this rule: the `group_status` DAG progress
+markers (`renderGroupStatusRecord`; see *Live Per-Group DAG Status Markers*) and
+the `step_completed` / `step_failed` step report cards (`renderStepEventRecord`;
+see *Per-Step Report Cards*) MUST keep their current rendering with no added
+"View raw" toggle and no added fold chip. These records are dispatched **before**
+any role/raw logic runs, so the universal view-raw rule never reaches them.
+
+The shared `makeRawToggle` helper's existing "no raw payload → null" contract is
+preserved **unchanged** — it is simply no longer called on the conversation
+message paths. Any non-conversation path that still depends on the nullable
+`makeRawToggle` keeps its no-affordance behavior; conversation message paths MUST
+use the always-non-null `makeUserRawToggle` / `makeAssistantRawToggle`
+constructors instead of weakening that contract.
+
+#### Scenario: System chip always exposes View raw
+- **GIVEN** a `system` role record rendered as a collapsed system-prompt chip
+- **WHEN** the chip's expand detail is rendered
+- **THEN** an always-present "View raw" toggle (`makeAssistantRawToggle`) is
+  shown regardless of whether the record carries a `raw_json` / `raw_ndjson`
+  payload
+- **AND** with a raw payload present the toggle reveals that payload, and with
+  no raw payload it falls back to the record's `content` original
+- **AND** the toggle does NOT vanish for payload-less system records (the prior
+  nullable `makeRawToggle` behavior is no longer used on this path)
+
+#### Scenario: Other-role message always exposes View raw
+- **GIVEN** an in-stream conversation record whose normalized role is `other`
+  (e.g. `tool` / `developer` / `log`), rendered via the non-collapsible record
+  row
+- **WHEN** the row is rendered
+- **THEN** an always-present, default-folded "View raw" toggle
+  (`makeAssistantRawToggle`) is appended below the bubble
+- **AND** it reveals the `raw_json` / `raw_ndjson` payload when present and
+  otherwise falls back to the record's original text
+- **AND** the toggle is not duplicated on an `assistant`-with-content row, which
+  already carries its own toggle from `renderAssistantBubble`
+
+#### Scenario: group_status marker carries no View raw affordance
+- **GIVEN** an `implement` step `group_status` DAG progress marker rendered by
+  `renderGroupStatusRecord`
+- **WHEN** the marker is rendered in `#flow-view`
+- **THEN** it carries no "View raw" toggle and no fold chip
+- **AND** the universal view-raw rule does not apply to it because it is
+  dispatched before any role/raw logic runs
+
+#### Scenario: Step report card carries no added View raw affordance
+- **GIVEN** a `step_completed` / `step_failed` event rendered by
+  `renderStepEventRecord` (the step report card plus its existing raw-event
+  chip)
+- **WHEN** the record is rendered
+- **THEN** no additional "View raw" toggle is attached by the universal
+  view-raw rule — the step report card keeps its existing rendering unchanged
+
+#### Scenario: Conversation view-raw never weakens the shared makeRawToggle contract
+- **WHEN** the conversation renderer attaches a "View raw" affordance to a
+  `user` / `assistant` / `system` / `other` message
+- **THEN** it uses an always-non-null constructor (`makeUserRawToggle` or
+  `makeAssistantRawToggle`), never the nullable shared `makeRawToggle`
+- **AND** `makeRawToggle` keeps its "no raw payload → null" contract so any
+  remaining non-conversation caller stays affordance-free
 
 ### Requirement: Structured-JSON Assistant Rendering
 

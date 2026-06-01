@@ -4698,7 +4698,14 @@ function renderAssistantBubble(content, norm) {
 
   // No result JSON this turn (or the body could not be structured): keep the
   // full thinking process shown inline, never folded or contracted to empty.
+  // Per the unified "every conversation message can view raw" principle, also
+  // append the always-present "查看原始" entry below the inline process — folded
+  // by default, button always visible. The inline thinking stays fully shown;
+  // makeAssistantRawToggle shows the raw_json/raw_ndjson payload when present
+  // and otherwise falls back to the unrendered content literal, so the original
+  // record is always reachable without contracting the inline process to empty.
   frag.appendChild(renderAssistantProcessInline(content, norm));
+  frag.appendChild(makeAssistantRawToggle(content, norm));
   return frag;
 }
 
@@ -4784,8 +4791,18 @@ function renderConversationRecord(norm) {
       if (expanded && !built) {
         detail.appendChild(renderRecordHead(norm));
         detail.appendChild(buildBubble());
-        const rawToggle = makeRawToggle(norm);
-        if (rawToggle) detail.appendChild(rawToggle);
+        // Unified "every conversation message can view raw": dispatch by role to
+        // an always-non-null raw toggle instead of the nullable makeRawToggle, so
+        // a system / user chip ALWAYS exposes "查看原始" (no longer disappears when
+        // no raw payload is present). user keeps its envelope fallback semantics
+        // (makeUserRawToggle, per 3870fd8e); system falls back to the content
+        // literal (makeAssistantRawToggle). makeRawToggle's null contract is left
+        // intact for non-conversation paths — it is simply no longer called here.
+        if (norm.role === "user") {
+          detail.appendChild(makeUserRawToggle(norm));
+        } else {
+          detail.appendChild(makeAssistantRawToggle(content, norm));
+        }
         built = true;
       }
       wrap.classList.toggle("collapsed", !expanded);
@@ -4799,13 +4816,24 @@ function renderConversationRecord(norm) {
     return row;
   }
 
-  // assistant / other: expanded by default. The "查看原始" raw toggle is NOT
-  // appended at the row level — for an assistant result turn it is the single
-  // fold built by `renderAssistantBubble` → `makeAssistantRawToggle` (below the
-  // rendered result), so the default Layer-1 view stays clean (per the message
-  // paradigm).
+  // assistant / other: expanded by default. For an assistant turn WITH content
+  // the "查看原始" raw toggle is NOT appended at the row level — it is the fold
+  // built inside `renderAssistantBubble` → `makeAssistantRawToggle` (below the
+  // rendered result or the inline process), so the default Layer-1 view stays
+  // clean. But an assistant turn with empty/whitespace content takes the
+  // "(no readable content)" branch in buildBubble and never invokes
+  // renderAssistantBubble, so it would otherwise get NO toggle at all even when
+  // its raw_json / raw_ndjson carries a payload (e.g. a pure tool-call turn whose
+  // text was stored empty). For `other` (non-collapsible non-assistant) roles
+  // there is likewise no internal fold. So per the unified "every conversation
+  // message can view raw" principle append an always-present "查看原始" here for
+  // every non-assistant role AND for an empty-content assistant turn, while still
+  // avoiding a duplicate toggle on the assistant-with-content path.
   row.appendChild(renderRecordHead(norm));
   row.appendChild(buildBubble());
+  if (role !== "assistant" || !content) {
+    row.appendChild(makeAssistantRawToggle(content, norm));
+  }
   return row;
 }
 

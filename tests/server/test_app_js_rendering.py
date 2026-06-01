@@ -166,20 +166,28 @@ def test_no_visible_call_id_template_strings_in_chip_or_reply_header():
 
 
 def test_raw_toggle_is_never_appended_at_row_level():
-    """The "查看原始" toggle must not be a row-level always-visible control.
+    """The shared ``makeRawToggle`` result must never be appended at the row
+    level via a bare ``rawToggle`` variable.
 
     For the USER side the raw toggle is appended into an expand area — the
     ``makeUserPromptToggle`` "展开全部" body, or a collapsed chip's expand detail.
     For the ASSISTANT side it is the single fold built below the rendered result
-    by ``makeAssistantRawToggle``. Either way the historical row-level form
-    (``row.appendChild(rawToggle)``) must be gone, so the default view never
-    shows a row-level raw toggle.
+    by ``makeAssistantRawToggle``. The historical bare row-level form
+    (``row.appendChild(rawToggle)``) — which leaked the user/assistant raw toggle
+    onto the default row — must be gone.
+
+    NOTE: the unified "every conversation message can view raw" principle DOES
+    add a guarded row-level ``makeAssistantRawToggle`` for the non-collapsible
+    `other` role (see ``test_non_collapsible_path_appends_view_raw_for_other_role``);
+    that is a deliberate always-present affordance for `other`, distinct from the
+    old bare-variable leak this guard forbids.
     """
     src = _read_app_js()
     assert "row.appendChild(rawToggle)" not in src, (
-        "查看原始 must not be appended at the row level — nest it inside the "
-        "展开全部 expand area / chip detail (user) or build it below the result "
-        "via makeAssistantRawToggle (assistant) instead"
+        "查看原始 must not be appended at the row level via a bare rawToggle "
+        "variable — nest it inside the 展开全部 expand area / chip detail (user), "
+        "build it below the result via makeAssistantRawToggle (assistant), or "
+        "append it guarded by role !== \"assistant\" (other)"
     )
 
 
@@ -299,6 +307,135 @@ def test_step_header_titles_map_exists_and_is_used():
     assert "stepHeaderLabel" in body, (
         "rebuildStepHeaders must resolve step names via stepHeaderLabel"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2c. Static guardrail: unified "every conversation message can view raw"
+# ---------------------------------------------------------------------------
+#
+# The bugfix establishes one principle: all four conversation roles
+# (user / assistant / system / other) ALWAYS expose 查看原始, via an
+# always-non-null constructor, while the non-conversation synthetic UI
+# (group_status markers) stays affordance-free and ``makeRawToggle`` keeps its
+# null contract (it is simply no longer called by the chip branch).
+
+
+def test_assistant_no_result_branch_appends_view_raw():
+    """The assistant no-result / unstructurable inline branch MUST append the
+    always-present single 查看原始 entry (``makeAssistantRawToggle``) right after
+    the inline thinking process (``renderAssistantProcessInline``).
+
+    The inline thinking stays fully shown; the raw toggle is folded by default
+    below it. This is the unified principle's coverage of the assistant·inline
+    branch that previously had no raw affordance at all.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderAssistantBubble")
+    inline_idx = body.find("renderAssistantProcessInline(content, norm)")
+    assert inline_idx != -1, (
+        "the no-result branch must render the inline thinking process"
+    )
+    tail = body[inline_idx:]
+    assert "makeAssistantRawToggle(content, norm)" in tail, (
+        "the no-result inline branch must append makeAssistantRawToggle below "
+        "the inline thinking process"
+    )
+
+
+def test_chip_branch_dispatches_raw_toggle_by_role():
+    """The collapsed-chip branch of ``renderConversationRecord`` MUST dispatch by
+    role to an always-non-null raw toggle — ``makeUserRawToggle`` for user
+    (envelope fallback, 延续 3870fd8e) and ``makeAssistantRawToggle`` for system
+    (content fallback) — instead of the old nullable ``makeRawToggle`` +
+    ``if (rawToggle)`` guard, so a system / user chip ALWAYS exposes 查看原始.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderConversationRecord")
+    assert "makeUserRawToggle(norm)" in body, (
+        "chip branch must call makeUserRawToggle for the user role"
+    )
+    assert "makeAssistantRawToggle(content, norm)" in body, (
+        "chip branch must call makeAssistantRawToggle for the system role"
+    )
+    # The old nullable form must be gone from this function.
+    assert "makeRawToggle(norm)" not in body, (
+        "chip branch must no longer use the nullable makeRawToggle"
+    )
+    assert "if (rawToggle)" not in body, (
+        "chip branch must no longer guard the toggle append on a nullable result"
+    )
+
+
+def test_non_collapsible_path_appends_view_raw_for_other_role():
+    """The non-collapsible (assistant / other) row path of
+    ``renderConversationRecord`` MUST append ``makeAssistantRawToggle`` for the
+    ``other`` role and for an EMPTY-content assistant turn (which never goes
+    through ``renderAssistantBubble``'s in-bubble fold), guarded by
+    ``role !== "assistant" || !content`` so an assistant turn WITH content keeps
+    its single in-bubble fold and never gets a duplicate row-level toggle.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderConversationRecord")
+    assert 'role !== "assistant" || !content' in body, (
+        "the non-collapsible path must guard the row-level append with "
+        'role !== "assistant" || !content so the other role AND an empty-content '
+        "assistant turn both get the toggle, without duplicating it on the "
+        "assistant-with-content path"
+    )
+    guard_idx = body.index('role !== "assistant" || !content')
+    tail = body[guard_idx:]
+    assert "makeAssistantRawToggle(content, norm)" in tail, (
+        "the guarded row path must append makeAssistantRawToggle"
+    )
+
+
+def test_make_raw_toggle_retains_return_null_for_non_conversation_paths():
+    """``makeRawToggle`` MUST keep its ``return null`` contract even though the
+    chip branch no longer calls it — the null behavior is preserved unchanged for
+    any non-conversation path that may still rely on it."""
+    body = _extract_js_function_body(_read_app_js(), "makeRawToggle")
+    assert "return null" in body, (
+        "makeRawToggle must keep its 'no raw payload → null' contract"
+    )
+
+
+def test_group_status_record_stays_affordance_free():
+    """The non-conversation synthetic UI must stay affordance-free:
+    ``renderGroupStatusRecord`` MUST NOT build any raw toggle (no
+    ``makeRawToggle`` / ``makeAssistantRawToggle`` / ``makeUserRawToggle`` and no
+    ``raw-toggle`` class) — it is a lightweight status marker, not a chat turn.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderGroupStatusRecord")
+    for forbidden in (
+        "makeRawToggle",
+        "makeAssistantRawToggle",
+        "makeUserRawToggle",
+        "raw-toggle",
+    ):
+        assert forbidden not in body, (
+            f"renderGroupStatusRecord must carry NO {forbidden!r} affordance — "
+            "it is a non-conversation status marker"
+        )
+
+
+def test_step_event_record_stays_affordance_free():
+    """The step_completed / step_failed report-card path
+    (``renderStepEventRecord``) is the other non-conversation synthetic UI and
+    MUST keep no conversation 查看原始 affordance after the unified change: it
+    MUST NOT build any view-raw toggle (no ``makeRawToggle`` /
+    ``makeAssistantRawToggle`` / ``makeUserRawToggle``, no ``raw-toggle`` class,
+    no 查看原始 button text). Its own raw event chip uses the ``raw-json`` source
+    view, which is a different affordance and intentionally left in place.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderStepEventRecord")
+    for forbidden in (
+        "makeRawToggle",
+        "makeAssistantRawToggle",
+        "makeUserRawToggle",
+        "raw-toggle",
+        "查看原始",
+    ):
+        assert forbidden not in body, (
+            f"renderStepEventRecord must carry NO {forbidden!r} conversation "
+            "view-raw affordance — it is a non-conversation report-card surface"
+        )
 
 
 # ---------------------------------------------------------------------------

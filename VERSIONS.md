@@ -4,6 +4,15 @@
 
 
 
+
+## 7.11.3 - 2026-06-01
+
+- Fix incomplete 'View raw' coverage in the running-flow console so every conversation role (user/assistant/system/other) consistently exposes the original payload
+- Add an always-available 'View raw' fold below the assistant inline thinking on no-result turns, falling back to the message content when no raw_json/raw_ndjson exists
+- Make collapsed system and other-role chips always show 'View raw' instead of intermittently hiding it, dispatching by role to keep the user envelope fallback intact
+- Keep DAG group-status markers and step report cards affordance-free, preserving the shared makeRawToggle 'no raw payload returns null' contract for non-conversation UI
+- Add targeted frontend and server-render tests covering both the raw-payload and content-fallback cases and asserting synthetic non-conversation UI stays button-free
+- Update the running-flow-console spec with a Universal View-Raw for Conversation Messages requirement codifying the unified principle
 ## 7.11.2 - 2026-06-01
 
 - Fix the Web console implement step Summary rendering each group as 'GNaN' instead of G1…Gn

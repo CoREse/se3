@@ -1004,9 +1004,12 @@ check("renderConversation: incremental append matches a one-shot full render", (
   assert.deepEqual(describeBubbles(incr), describeBubbles(full));
   // The bubble bodies also line up A1..A4 in order (read the .conv-bubble body,
   // not the whole row which also carries the role/time head).
+  // Read the inline-process body (not the whole bubble) so the always-present
+  // "查看原始" toggle chrome on a no-result assistant turn does not bleed into the
+  // ordering comparison.
   const texts = (c) => c.children
     .filter((x) => x.__convIdx !== undefined)
-    .map((x) => { const b = findOne(x, "conv-bubble"); return b ? b.textContent : ""; });
+    .map((x) => { const b = findOne(x, "assistant-process-inline"); return b ? b.textContent : ""; });
   assert.deepEqual(texts(incr), ["A1", "A2", "A3", "A4"]);
   assert.deepEqual(texts(incr), texts(full));
 });
@@ -1031,7 +1034,7 @@ check("renderConversation: a late earlier-ts record inserts into its slot, not t
     "bubbles must be ordered by ascending timestamp");
   const texts = container.children
     .filter((c) => c.__convIdx !== undefined)
-    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : ""; });
+    .map((c) => { const b = findOne(c, "assistant-process-inline"); return b ? b.textContent : ""; });
   // "second" (ts=2) lands between "first" (ts=1) and "third" (ts=3), not at tail.
   assert.deepEqual(texts, ["first", "second", "third"]);
 });
@@ -1759,8 +1762,13 @@ check("assistant turn falls back to text when the body has no JSON", () => {
   const row = app.renderConversationRecord(asstNorm(content, "analyze"));
   // No structured wrapper: the generic path took over.
   assert.equal(findOne(row, "assistant-result"), null);
-  // No-result turn: no single 查看原始 fold is added (thinking shown inline).
-  assert.equal(findOne(row, "raw-toggle"), null);
+  // No-result turn: thinking is shown inline, AND (per the unified "every
+  // conversation message can view raw" principle) a default-folded 查看原始
+  // toggle is always appended below it.
+  assert.ok(findOne(row, "raw-toggle"),
+    "查看原始 toggle is always present, even for a no-result turn");
+  assert.ok(findOne(row, "assistant-process-inline"),
+    "the inline thinking process stays shown (not folded)");
   // The assistant text is still visible — nothing is lost.
   const bubble = findOne(row, "conv-bubble");
   assert.ok(bubble && bubble.textContent.includes("prose summary"));
@@ -1854,12 +1862,16 @@ check("assistant no-result turn shows thinking inline, not folded, no toggles", 
     "a no-result assistant turn must not collapse its thinking into a fold");
   assert.ok(inline.textContent.includes("Reasoning step."),
     "the full thinking process is visible by default");
-  // No fold controls in the no-result inline view: no assistant "展开全部" wrapper
-  // (it no longer exists), and no single 查看原始 fold either (thinking is inline).
+  // No assistant "展开全部" wrapper exists; but per the unified principle a
+  // default-folded 查看原始 toggle IS always appended below the inline thinking,
+  // which itself stays shown in full (never collapsed into the fold).
   assert.equal(findOne(row, "process-toggle"), null,
     "no 展开全部 toggle exists on the assistant side at all");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "查看原始 must not show for a no-result turn — thinking is shown inline");
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "查看原始 toggle is always present, even for a no-result turn");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true,
+    "the raw body is folded by default; the inline thinking stays visible");
 });
 
 // -- Q1 fallback: unregistered step types (confirm / project_summary / …) --
@@ -1908,8 +1920,8 @@ check("Q1 generic fallback: registered analyze step is NOT routed through fallba
   const row = app.renderConversationRecord(asstNorm(content, "analyze"));
   assert.equal(findOne(row, "assistant-result"), null,
     "fallback must not fire for registered analyze step");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "no 查看原始 for a registered-step tool-call-only turn");
+  assert.ok(findOne(row, "raw-toggle"),
+    "查看原始 toggle is always present below the inline (tool-call-only) thinking");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline, "thinking inline preserved for registered step");
 });
@@ -2130,14 +2142,14 @@ check("G2 renderPlanReport: only proposal present, design omitted -> only propos
 // 2a/2c: a turn whose only JSON is a single tool call is NOT an analyze result
 // (no task_type/complexity/… key) — even though renderAnalyzeReport would draw
 // a status bar from any dict. It must stay inline, not fold.
-check("2c: single tool-call JSON (no result field) stays inline, no fold, no toggle", () => {
+check("2c: single tool-call JSON (no result field) stays inline (always-present 查看原始)", () => {
   const content = "Let me list files.\n```json\n" +
     JSON.stringify({ command: "ls -la", description: "list files" }) + "\n```";
   const row = app.renderConversationRecord(asstNorm(content, "analyze"));
   assert.equal(findOne(row, "assistant-result"), null,
     "a tool-call-only turn must not render a structured result");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "no 查看原始 fold for a tool-call-only turn — thinking is shown inline");
+  assert.ok(findOne(row, "raw-toggle"),
+    "查看原始 toggle is always present below the inline thinking, even tool-call-only");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline, "thinking is shown inline");
   assert.ok(inline.textContent.includes("Let me list files."),
@@ -2147,7 +2159,7 @@ check("2c: single tool-call JSON (no result field) stays inline, no fold, no tog
 });
 
 // 2c: two or more tool-call JSON segments in one turn are all thinking process.
-check("2c: 2+ tool-call JSON segments stay inline, never get a 查看原始 fold", () => {
+check("2c: 2+ tool-call JSON segments stay inline (always-present 查看原始 toggle)", () => {
   const content =
     "Checking.\n```json\n" + JSON.stringify({ command: "ls" }) + "\n```\n" +
     "Now editing.\n```json\n" +
@@ -2156,8 +2168,8 @@ check("2c: 2+ tool-call JSON segments stay inline, never get a 查看原始 fold
   const row = app.renderConversationRecord(asstNorm(content, "implement"));
   assert.equal(findOne(row, "assistant-result"), null,
     "neither tool-call JSON is an implement result");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "2+ tool-call JSONs with no result stay inline — no 查看原始 fold");
+  assert.ok(findOne(row, "raw-toggle"),
+    "2+ tool-call JSONs with no result stay inline, with a default-folded 查看原始");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline, "thinking shown inline");
   assert.ok(inline.textContent.includes("Checking."));
@@ -2265,8 +2277,8 @@ check("2c: discovery turn with only a tool-call JSON stays inline", () => {
   const row = app.renderConversationRecord(asstNorm(content, "discovery"));
   assert.equal(findOne(row, "assistant-result"), null,
     "a discovery tool-call turn (no content/refined/questions) is not a result");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "no 查看原始 fold for a tool-call-only discovery turn — thinking is inline");
+  assert.ok(findOne(row, "raw-toggle"),
+    "查看原始 toggle is always present below the inline thinking for discovery too");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline && inline.textContent.includes("Reading the spec."));
 });
@@ -2301,10 +2313,218 @@ check("2c: discovery result keys present but all empty → inline, no empty fold
   const row = app.renderConversationRecord(asstNorm(content, "discovery"));
   assert.equal(findOne(row, "assistant-result"), null,
     "empty result fields do not constitute a final result");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "must not add a 查看原始 fold — thinking stays inline");
+  assert.ok(findOne(row, "raw-toggle"),
+    "查看原始 toggle is always present even for an empty-result discovery turn");
   assert.ok(findOne(row, "assistant-process-inline"),
     "thinking stays inline, content preserved");
+});
+
+// ---------------------------------------------------------------------------
+// Unified "every conversation message can view raw" — the three remaining
+// conversation branches (assistant inline, system chip, other row).
+// ---------------------------------------------------------------------------
+//
+// Regression fix: the "查看原始" affordance was missing on (1) the assistant
+// no-result / unstructurable inline turn, and (2) system / other role messages
+// whose chip used the nullable makeRawToggle (which vanished when no raw payload
+// existed). The unified principle is now: ALL four conversation roles
+// (user / assistant / system / other) ALWAYS expose "查看原始" — preferring the
+// raw_json / raw_ndjson payload and falling back to the record's own original
+// text (assistant / system / other) or .jsonl envelope (user). The
+// non-conversation synthetic UI (group_status markers) keeps NO such affordance.
+
+// Build a normalized record for an arbitrary role (system / tool / log / …) in
+// the real daemon envelope shape, optionally carrying a raw NDJSON payload.
+const roleNorm = (role, content, stepType, rawNdjson) => app.normalizeRecord({
+  step_id: stepType,
+  step_type: stepType,
+  message: {
+    role,
+    content,
+    timestamp: 1,
+    raw_ndjson: rawNdjson != null ? rawNdjson : null,
+  },
+});
+
+// -- (a) assistant inline (no-result) branch: 查看原始 always present ----------
+check("assistant inline turn: 查看原始 shows the raw NDJSON payload when present", () => {
+  const ndjson = '{"raw_marker":"INLINE_NDJSON_TOKEN"}';
+  // Pure prose for a registered step → no result JSON → the no-result inline
+  // branch of renderAssistantBubble.
+  const row = app.renderConversationRecord(
+    asstNorm("Just reasoning, no JSON here.", "analyze", ndjson));
+  // The inline thinking stays fully shown (not folded into the toggle).
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline, "inline thinking process present");
+  assert.ok(inline.textContent.includes("Just reasoning"),
+    "inline thinking shown in full by default");
+  assert.equal(findOne(row, "foldable"), null,
+    "the inline thinking is not collapsed into a fold");
+  // A default-folded 查看原始 toggle is appended below it.
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "查看原始 toggle present on the inline branch");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw body folded by default");
+  rawToggle.dispatch("click");
+  assert.equal(rawPre.classList.contains("hidden"), false, "expands on click");
+  assert.ok(rawPre.textContent.includes("INLINE_NDJSON_TOKEN"),
+    "shows the original raw NDJSON payload");
+});
+
+check("assistant inline turn: 查看原始 falls back to the content 原文 when no raw payload", () => {
+  const row = app.renderConversationRecord(
+    asstNorm("PROSE_FALLBACK_TOKEN with no JSON and no raw.", "analyze")); // no ndjson
+  assert.ok(findOne(row, "assistant-process-inline"), "inline thinking present");
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "查看原始 toggle present even without a raw payload");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(row, "raw-json");
+  assert.ok(rawPre.textContent.includes("PROSE_FALLBACK_TOKEN"),
+    "falls back to the unrendered content 原文");
+  assert.ok(rawToggle.textContent.includes("content"),
+    "the fallback labels the raw kind as 'content'");
+});
+
+// -- (b) system role chip: 查看原始 always present after expand ----------------
+check("system chip: 查看原始 always present on expand, shows the raw payload", () => {
+  const ndjson = '{"raw_marker":"SYS_NDJSON_TOKEN"}';
+  const row = app.renderConversationRecord(
+    roleNorm("system", "system boilerplate body", "analyze", ndjson));
+  // Collapsed chip by default — the raw toggle is built lazily on first expand.
+  assert.equal(findOne(row, "raw-toggle"), null, "raw toggle not built until expand");
+  const chip = findOne(row, "msg-chip");
+  assert.ok(chip, "system collapsible chip present");
+  chip.dispatch("click");
+  const detail = findOne(row, "msg-chip-detail");
+  const rawToggle = findOne(detail, "raw-toggle");
+  assert.ok(rawToggle, "查看原始 present inside the expanded system chip");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(detail, "raw-json");
+  assert.ok(rawPre.textContent.includes("SYS_NDJSON_TOKEN"),
+    "system chip 查看原始 shows the raw payload");
+});
+
+check("system chip: 查看原始 present even with no raw payload (falls back to content)", () => {
+  // Previously makeRawToggle returned null here, so the system chip had no
+  // 查看原始 at all — the regression this fixes.
+  const row = app.renderConversationRecord(
+    roleNorm("system", "SYS_FALLBACK_TOKEN body", "analyze")); // no ndjson
+  const chip = findOne(row, "msg-chip");
+  chip.dispatch("click");
+  const detail = findOne(row, "msg-chip-detail");
+  const rawToggle = findOne(detail, "raw-toggle");
+  assert.ok(rawToggle, "查看原始 present even without a raw payload (no longer null)");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(detail, "raw-json");
+  assert.ok(rawPre.textContent.includes("SYS_FALLBACK_TOKEN"),
+    "system chip 查看原始 falls back to the content 原文");
+});
+
+// -- (c) other role (non-collapsible row): row-level 查看原始 always present ----
+check("other-role row: row-level 查看原始 always present, shows the raw payload", () => {
+  const ndjson = '{"raw_marker":"OTHER_NDJSON_TOKEN"}';
+  const norm = roleNorm("tool", "tool output body", "implement", ndjson);
+  assert.equal(norm.role, "tool", "an unknown role is preserved (display → other)");
+  const row = app.renderConversationRecord(norm);
+  assert.ok(row.classList.contains("role-other"),
+    "renders on the non-collapsible other row");
+  // Not a collapsible chip — the row is directly expanded, so the toggle shows
+  // immediately at the row level (no ▸ chip).
+  assert.equal(findOne(row, "msg-chip"), null, "other role is not a collapsible chip");
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "row-level 查看原始 present for an other-role record");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(row, "raw-json");
+  assert.ok(rawPre.textContent.includes("OTHER_NDJSON_TOKEN"),
+    "other-role 查看原始 shows the raw payload");
+});
+
+check("other-role row: 查看原始 falls back to the content 原文 with no raw payload", () => {
+  const norm = roleNorm("log", "OTHER_FALLBACK_TOKEN body", "implement"); // no ndjson
+  const row = app.renderConversationRecord(norm);
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "row-level 查看原始 present without a raw payload");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(row, "raw-json");
+  assert.ok(rawPre.textContent.includes("OTHER_FALLBACK_TOKEN"),
+    "other-role 查看原始 falls back to the content 原文");
+});
+
+// -- assistant non-collapsible row gets NO duplicate row-level toggle ---------
+check("assistant row: single 查看原始 inside the bubble, no row-level duplicate", () => {
+  // A result-JSON assistant turn: makeAssistantRawToggle is appended INSIDE the
+  // bubble (renderAssistantBubble). The new row-level append is guarded by
+  // role !== "assistant", so there must be exactly ONE raw toggle, inside the
+  // conv-bubble — never a second one at the row level.
+  const content = "```json\n" + JSON.stringify({
+    task_type: "bugfix", complexity: "small", scope: "src/x", reasoning: "tiny",
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  assert.equal(findAll(row, "raw-toggle").length, 1,
+    "exactly one 查看原始 toggle for an assistant turn (no row-level duplicate)");
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && findOne(bubble, "raw-toggle"),
+    "the single toggle lives inside the assistant bubble, not at the row level");
+});
+
+// -- empty-content assistant turn still exposes 查看原始 ------------------------
+// A pure tool-call assistant turn may be stored with empty text content while
+// its raw_json / raw_ndjson carries the real payload. buildBubble then takes the
+// "(no readable content)" branch and never invokes renderAssistantBubble, so the
+// in-bubble fold is absent — the row-level append must still surface 查看原始 so
+// the raw payload stays reachable (unified principle for ALL four roles).
+check("empty-content assistant turn still exposes a row-level 查看原始 for its raw payload", () => {
+  const ndjson = '{"raw_marker":"EMPTY_ASST_NDJSON_TOKEN"}';
+  const row = app.renderConversationRecord(asstNorm("", "implement", ndjson));
+  assert.ok(row.classList.contains("role-assistant"),
+    "renders on the assistant row");
+  assert.ok(findOne(row, "conv-empty"),
+    "empty content takes the (no readable content) branch");
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "row-level 查看原始 present for an empty-content assistant turn");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(row, "raw-json");
+  assert.ok(rawPre.textContent.includes("EMPTY_ASST_NDJSON_TOKEN"),
+    "the empty-content assistant 查看原始 shows the raw payload");
+  // Exactly one toggle — the empty branch builds no in-bubble fold, so no dup.
+  assert.equal(findAll(row, "raw-toggle").length, 1,
+    "exactly one 查看原始 toggle (no duplicate) for the empty-content assistant turn");
+});
+
+// -- step_completed / step_failed report card stays affordance-free -----------
+// Like group_status, the step-event report-card path (renderStepEventRecord) is
+// non-conversation synthetic UI: its own raw event uses a `raw-json` source view,
+// but it must carry NO conversation 查看原始 toggle after the unified change.
+check("step_completed report card has no 查看原始 toggle (non-conversation synthetic UI)", () => {
+  const norm = app.normalizeRecord({
+    step_id: "03_analyze_deadbeef",
+    step_type: "analyze",
+    message: { type: "step_completed",
+      data: { step: { step_type: "analyze", status: "completed", outputs: {} } },
+      timestamp: 1 },
+  });
+  assert.equal(norm.kind, "step_completed");
+  // renderConversationRecord dispatches step_completed/step_failed to
+  // renderStepEventRecord — drive the real exported entry point.
+  const row = app.renderConversationRecord(norm);
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "a step_completed report card must carry NO 查看原始 affordance");
+});
+
+// -- (d) group_status marker stays affordance-free (no 查看原始) ----------------
+check("group_status marker has no 查看原始 toggle (non-conversation synthetic UI)", () => {
+  const norm = app.normalizeRecord({
+    step_id: "07_implement_abcd1234",
+    step_type: "implement",
+    message: { type: "group_status", role: "system", group_id: "G3",
+      status: "running", timestamp: 1 },
+  });
+  const row = app.renderGroupStatusRecord(norm);
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "a group_status marker must carry NO 查看原始 affordance");
+  assert.equal(findOne(row, "msg-chip"), null, "and no fold chip");
+  assert.ok(row.classList.contains("group-status-marker"),
+    "still renders as the lightweight status marker");
 });
 
 // -- end-to-end dispatch on the real (post-G1) envelope shape ---------------
