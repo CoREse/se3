@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Per-group status lifecycle constants
+# ---------------------------------------------------------------------------
+# Stable status strings emitted through the optional ``on_group_status``
+# callback at each point in a group's scheduling lifecycle. They are consumed
+# by implement.py (via chat_history) to surface live per-group progress to the
+# web console while groups run in isolated worktrees.
+GROUP_STATUS_QUEUED = "queued"
+GROUP_STATUS_RUNNING = "running"
+GROUP_STATUS_COMPLETED = "completed"
+GROUP_STATUS_FAILED = "failed"
+GROUP_STATUS_SKIPPED = "skipped"
+
+
+# ---------------------------------------------------------------------------
 # Relay execution planning data structures
 # ---------------------------------------------------------------------------
 
@@ -255,6 +269,14 @@ class DAGScheduler:
                 and optionally 'depends_on' (list of group_id strings).
         max_workers: Maximum number of concurrent group executions.
         relay_plan: Optional relay execution plan from ``classify_chains()``.
+        on_group_status: Optional callback ``(group_id, status)`` invoked at
+                each point in a group's scheduling lifecycle (queued, running,
+                completed, failed, skipped). The scheduler keeps no dependency
+                on how the status is persisted — implement.py injects a closure
+                that writes it to the main repo's history. When ``None`` the
+                scheduler behaves exactly as before. The callback is invoked
+                inside a try/except so a faulty callback never disrupts
+                scheduling.
     """
 
     def __init__(
@@ -262,10 +284,12 @@ class DAGScheduler:
         groups: list[dict],
         max_workers: int = 4,
         relay_plan: Optional[RelayPlan] = None,
+        on_group_status: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self._groups = groups
         self._max_workers = max_workers
         self._relay_plan = relay_plan
+        self._on_group_status = on_group_status
 
         # Maps group_id → group dict
         self._group_map: dict[str, dict] = {}
@@ -281,6 +305,26 @@ class DAGScheduler:
         self._run_results: dict[str, GroupResult] = {}
 
         self._build_dag()
+
+    def _emit_status(self, group_id: str, status: str) -> None:
+        """Safely emit a per-group status through the optional callback.
+
+        No-op when no callback was supplied. Any exception raised by the
+        callback is swallowed and logged, never propagated, so that a faulty
+        status sink cannot disrupt scheduling.
+        """
+        callback = self._on_group_status
+        if callback is None:
+            return
+        try:
+            callback(group_id, status)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "on_group_status callback raised for group '%s' status '%s'; "
+                "ignoring",
+                group_id,
+                status,
+            )
 
     def _build_dag(self) -> None:
         """Build the DAG data structures and validate no cycles exist."""
@@ -425,6 +469,11 @@ class DAGScheduler:
         failed: set[str] = set()
         skipped: dict[str, GroupResult] = {}
 
+        # Announce every group as queued up front (topological order for a
+        # stable sequence), before any is submitted for execution.
+        for gid in self._topo_order:
+            self._emit_status(gid, GROUP_STATUS_QUEUED)
+
         def _get_deps_results(group_id: str) -> dict[str, GroupResult]:
             """Extract dependency results for a group (caller holds lock)."""
             deps = self._reverse_deps.get(group_id, [])
@@ -441,6 +490,7 @@ class DAGScheduler:
                     pending.discard(downstream)
                 result = GroupResult.skipped(downstream)
                 skipped[downstream] = result
+                self._emit_status(downstream, GROUP_STATUS_SKIPPED)
                 logger.info(
                     "Group '%s' skipped due to upstream failure of '%s'",
                     downstream, group_id,
@@ -459,6 +509,7 @@ class DAGScheduler:
             for gid in ready:
                 pending.discard(gid)
                 running.add(gid)
+                self._emit_status(gid, GROUP_STATUS_RUNNING)
                 deps_results = _get_deps_results(gid)
                 relay_context = self._build_relay_context(gid, completed)
                 group_dict = self._group_map[gid]
@@ -490,6 +541,7 @@ class DAGScheduler:
                     result = GroupResult.failed(group_id, error_msg)
                     failed.add(group_id)
                     completed[group_id] = result
+                    self._emit_status(group_id, GROUP_STATUS_FAILED)
                     _propagate_failure_locked(group_id)
                 else:
                     result = future.result()
@@ -500,12 +552,14 @@ class DAGScheduler:
                         )
                         failed.add(group_id)
                         completed[group_id] = result
+                        self._emit_status(group_id, GROUP_STATUS_FAILED)
                         _propagate_failure_locked(group_id)
                     else:
                         logger.info(
                             "Group '%s' completed successfully", group_id,
                         )
                         completed[group_id] = result
+                        self._emit_status(group_id, GROUP_STATUS_COMPLETED)
 
                 # Check for newly-unblocked groups
                 _submit_ready(executor)
