@@ -196,7 +196,7 @@ A dedicated `version_analyze` step SHALL run after `update_spec` and before `com
 - **Pre-session version (pre_session_version)**: The project version recorded at the entry of the `implement` step, BEFORE any worktree-merged commits could have touched the version file. The LLM SHALL treat this value — not the on-disk `current_version` — as the baseline when computing `suggested_version`.
 - **Session-introduced commits (session_commits)**: A list (possibly empty) of commits that the `implement` step merged into the main branch in this session, each entry containing `{sha, subject, files}`. The prompt instructs the LLM to treat any version-file modifications inside these commits AS IF THEY HAD NOT HAPPENED, ensuring the bump is computed once relative to `pre_session_version`.
 
-Spec changes are prioritized as they directly reflect API contract modifications. `pre_session_version` and `session_commits` are emitted by the `implement` step (see flow-engine "步骤间输入传递" requirement) and are unconditionally forwarded — when no commits were introduced (e.g. `implement.use_worktree=false` or a single LLM-call execution), `session_commits` is an empty list and `pre_session_version` still records the entry-time version for audit.
+Spec changes are prioritized as they directly reflect API contract modifications. `pre_session_version` and `session_commits` are emitted by the `implement` step (see flow-engine "Inter-Step Input Passing" requirement) and are unconditionally forwarded — when no commits were introduced (e.g. `implement.use_worktree=false` or a single LLM-call execution), `session_commits` is an empty list and `pre_session_version` still records the entry-time version for audit.
 
 **LLM Analysis Output:**
 ```json
