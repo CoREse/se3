@@ -340,6 +340,68 @@ def record_stream_progress(
         logger.warning("Failed to record stream progress for %s: %s", step_id, exc)
 
 
+def record_group_status(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    group_id: str,
+    status: str,
+    timestamp: Optional[str] = None,
+) -> None:
+    """Append a single per-group DAG status line to the step jsonl.
+
+    During DAG parallel implement, each group runs inside an isolated
+    worktree whose conversation jsonl is only salvaged back to the main repo
+    once the step finishes — so the web console stays blank for the whole
+    parallel phase. To surface live progress, the main-process DAG scheduler
+    emits coarse per-group status transitions (``queued`` → ``running`` →
+    ``completed`` / ``failed`` / ``skipped``); each one is written here as a
+    self-contained NDJSON line into the **main repo's**
+    ``se3/history/{flow_id}/{step_id}.jsonl``.
+
+    Because the daemon's ``DaemonHistoryReader.active_flow_signature`` already
+    fingerprints the history directory's ``*.jsonl`` by ``(name, mtime,
+    size)``, appending this line shifts the signature and drives an
+    incremental ``history_data`` push — so the frontend receives each
+    ``group_status`` record before the implement step ends and can render a
+    lightweight status marker (e.g. "G3 running in worktree" / "G1 done").
+
+    The line is NOT a :class:`ChatMessage`; it carries ``type='group_status'``
+    plus ``group_id`` / ``status`` / ``step_type`` and a ``system`` role.
+    :func:`get_step_history` skips ``group_status`` lines so CLI history
+    rendering and retry-context construction (``format_history_for_retry``)
+    never ingest them.
+
+    Follows :func:`record_step_event`'s write semantics — ``mkdir`` + a single
+    whole-line ``write`` (so a half-written line cannot corrupt earlier lines)
+    wrapped in an ``OSError`` guard so a write failure never breaks the
+    in-flight scheduler callback.
+    """
+    record = {
+        "type": "group_status",
+        "role": "system",
+        "step_type": step_type,
+        "group_id": group_id,
+        "status": status,
+        "timestamp": timestamp or datetime.now().isoformat(),
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning(
+            "Failed to record group status for %s/%s (%s=%s): %s",
+            flow_id,
+            step_id,
+            group_id,
+            status,
+            exc,
+        )
+
+
 def get_step_history(
     project_root: Path, flow_id: str, step_id: str
 ) -> Optional[ChatSession]:
@@ -371,6 +433,13 @@ def get_step_history(
             # (format_history_for_retry, which reads through get_step_history)
             # MUST NOT ingest them.
             if isinstance(data, dict) and data.get("type") == "stream_progress":
+                continue
+            # Group-status records (written by record_group_status) carry a
+            # ``role`` ("system") and would otherwise deserialize as a
+            # ChatMessage. They are lightweight DAG per-group progress markers
+            # for the web console only; CLI history and retry-context
+            # construction (format_history_for_retry) MUST NOT ingest them.
+            if isinstance(data, dict) and data.get("type") == "group_status":
                 continue
             msg = ChatMessage.from_dict(data)
             messages.append(msg)
