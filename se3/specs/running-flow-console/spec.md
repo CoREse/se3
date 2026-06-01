@@ -1884,6 +1884,81 @@ not re-render them.
 - **AND** a card appears only after a later re-run drives the step to a
   terminal status
 
+### Requirement: Live Per-Group DAG Status Markers
+
+During a DAG-parallel `implement` step, each task group runs in an isolated
+worktree whose conversation is not salvaged into the main repository until the
+step ends, so the running-flow console would otherwise show nothing for that
+step until its final salvage (see the `flow-engine` *Implement Step DAG
+Execution Strategy* requirement). To give the operator live progress, the
+orchestrator now writes lightweight per-group **status** records — and only
+status, never the per-group conversation content — into the main-repo step
+jsonl as each group transitions, and the console MUST render them.
+
+`normalizeRecord` MUST recognize a conversation record whose `type` is
+`group_status` and normalize it into a record carrying at least its `group_id`,
+`status` (one of `queued` / `running` / `completed` / `failed` / `skipped`),
+and `timestamp`. Within the `implement` step's section, each such record MUST
+be rendered as a lightweight, **affordance-free** per-group status marker
+(e.g. a `.group-status-marker` element) mapping status to a short human phrase
+— for example `running` → "G3 正在 worktree 实施中", `completed` → "G1 已完成",
+`queued` → "G{n} 排队中", `failed` → "G{n} 失败", `skipped` → "G{n} 已跳过".
+The marker is a plain status line: it carries no fold chip, no "View raw"
+toggle, and no reply affordance.
+
+These markers MUST obey the existing *Conversation Strict Chronological Order*
+contract: they are placed by their `(timestamp, original-index)` key like every
+other in-stream record and MUST NOT shuffle other records out of timestamp
+order, and inserting / updating a marker MUST NOT disturb the fold state, raw
+toggles, or chip selections of already-rendered records. As successive status
+records for the same group arrive, the console reflects the group's latest
+state (appended in order, or updated in place) so the operator watches progress
+advance **before** the step finishes.
+
+This is a status-only surface and MUST NOT be confused with content relay: the
+full G1–G5 conversation still appears in one pass at step end once the worktree
+histories are salvaged, exactly as before. The markers neither replace nor
+pre-empt that final content.
+
+#### Scenario: group_status record renders as a per-group status marker
+- **GIVEN** an `implement` step's jsonl contains records of `type: "group_status"`
+  carrying `group_id` and a `status` of `running` then `completed`
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** `normalizeRecord` recognizes each record and renders it as a
+  lightweight per-group status marker inside the implement step's section
+- **AND** the marker text reflects the status (e.g. a "running in worktree"
+  phrasing for `running`, a "completed" phrasing for `completed`)
+- **AND** the marker carries no fold chip, no "View raw" toggle, and no reply
+  affordance
+
+#### Scenario: Status markers advance before the step ends
+- **GIVEN** a DAG-parallel implement step still in progress whose groups are
+  emitting `group_status` records incrementally
+- **WHEN** the daemon pushes the appended `group_status` records via the
+  incremental `history_data` channel
+- **THEN** the console updates the affected groups' markers as the records
+  arrive, so progress is visible before the step completes rather than the
+  view staying blank until step end
+
+#### Scenario: Status markers respect strict chronological order and preserve UI state
+- **GIVEN** a conversation already showing records and earlier `group_status`
+  markers
+- **WHEN** a new `group_status` record arrives via incremental append
+- **THEN** it is inserted into its correct `(timestamp, original-index)` slot,
+  not unconditionally appended at the tail
+- **AND** the fold state, raw toggles, and chip selections of already-rendered
+  records are preserved across the rebuild
+
+#### Scenario: Status markers do not replace the salvaged group content
+- **GIVEN** a DAG-parallel implement step that emitted `group_status` markers
+  during execution
+- **WHEN** the step ends and the per-group worktree histories are salvaged into
+  the main repository
+- **THEN** the full G1–G5 conversation content is rendered in one pass at step
+  end as before
+- **AND** the lightweight status markers neither replace nor suppress that
+  final salvaged content
+
 ### Requirement: New Task — Arbitrary Project Root
 
 The web console's "New Task" form MUST allow the user to start a flow against

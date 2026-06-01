@@ -1,6 +1,14 @@
 # SE3 Framework Version History
 
 
+
+## 7.11.0 - 2026-06-01
+
+- Show real-time per-group status (queued/running/completed/failed/skipped) in the running-flow web console during DAG parallel implement, instead of leaving the view blank until step end
+- Add an optional on_group_status callback to the DAG scheduler, fired at each group lifecycle transition with exceptions swallowed and omission preserving prior behavior
+- Persist per-group status as group_status NDJSON lines in the main-repo step history so the daemon's active_flow_signature changes and pushes incremental updates before the step completes
+- Render affordance-free per-group status markers in the implement section of the web UI in strict chronological order, without replacing the full G1–G5 conversation salvaged at step end
+- Exclude group_status records from get_step_history and retry context so CLI output and retry behavior are unchanged
 ## 7.10.1 - 2026-06-01
 
 - Rebuild VERSIONS.md into a single reverse-ordered changelog using the unified `## <version> - <date>` heading and bullet format

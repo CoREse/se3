@@ -1825,6 +1825,26 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **WHEN** the implement step renders the task plan panel
 - **THEN** the sequential strategy line omits the `reason:` suffix, preserving the original display
 
+**Live Per-Group Status During DAG Parallel Execution:**
+- When the DAG parallel strategy is selected, each group runs inside an isolated worktree whose conversation jsonl is written under that worktree's `se3/history/<flow_id>/`, and is only salvaged back into the main repository at step end (`_salvage_history_from_worktree`). Because the daemon's `active_flow_signature` only fingerprints jsonl files under the **main** repository's `se3/history/`, the web console would otherwise stay blank for the entire parallel implement step and only render the full G1–G5 content in one burst once the step finished.
+- To give the console live progress, the implement step's `_run_dag_parallel` SHALL pass an `on_group_status(group_id, status)` closure into the `DAGScheduler` (see the `dag-scheduler` *Event-Driven Parallel Execution* requirement). For each per-group lifecycle transition the closure SHALL persist a single-line `group_status` NDJSON record — via `chat_history.record_group_status(project_root, flow_id, step_id, "implement", group_id, status)` — appended directly to the **main** repository's `se3/history/<flow_id>/<step_id>.jsonl`. The status values are `queued` / `running` / `completed` / `failed` / `skipped`.
+- Appending these records into the main-repo step jsonl shifts that file's `(name, mtime, size)` fingerprint, so `active_flow_signature` changes and the daemon performs an incremental `history_data` push **before** the step ends — exactly the same transport used by `record_stream_progress` / `record_step_event`. No change to `active_flow_signature`, `read_active_flows`, the daemon↔server protocol, or `ServerState` is required.
+- This is a **status-only** signal by design. It does NOT relay the per-group conversation content: the full G1–G5 conversation still appears in one pass at step end, after the worktree histories are salvaged back. The worktree isolation and salvage logic are unchanged, and no run-time history-file relay (with its dedup / concurrent-flush hazards) is introduced.
+- `group_status` records are written for web rendering only. `get_step_history` and the retry-context builder SHALL skip them (alongside `stream_progress` / `step_completed`) so they never pollute the LLM retry prompt or `se3 history show` output.
+- This live-status path is scoped to the DAG parallel grouping route. The sequential grouping path is out of scope (its group jsonl already writes directly to the main repository).
+
+#### Scenario: DAG parallel implement emits live per-group status records
+- **GIVEN** an implement step routed to the DAG parallel strategy with groups G1–G5 running in isolated worktrees
+- **WHEN** the scheduler dispatches, completes, fails, or skips each group
+- **THEN** a `group_status` NDJSON line (`type: "group_status"`, with `group_id` and a `status` of `queued` / `running` / `completed` / `failed` / `skipped`) is appended to the main repository's `se3/history/<flow_id>/<step_id>.jsonl` as the transition occurs
+- **AND** the appended line shifts the file's fingerprint so the daemon pushes the record incrementally before the step ends, instead of the console staying blank until step end
+- **AND** the full per-group conversation content is still presented only after the worktree histories are salvaged at step end
+
+#### Scenario: Group-status records are excluded from history and retry context
+- **WHEN** `get_step_history` reads a step jsonl that contains `group_status` records, or the retry-context prompt is assembled for that step
+- **THEN** the `group_status` lines are skipped, the same way `stream_progress` and `step_completed` records are
+- **AND** they never appear in the LLM retry prompt or in `se3 history show`
+
 **Transitive Reduction:**
 - Before DAG parallel execution, the implement step performs transitive reduction on group `depends_on` edges by calling the `transitive_reduce(groups)` function defined in `se3/engine/transitive_reduction.py`.
 - An edge u→v is redundant if there is a longer path from u to v through intermediate nodes (standard graph theory algorithm using BFS).

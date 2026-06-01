@@ -106,6 +106,8 @@ A helper `_relay_plan_is_linear(plan)` shall return `True` only when the plan de
 
 `DAGScheduler.run(execute_fn)` shall execute groups concurrently in a `ThreadPoolExecutor` (bounded by `max_workers`), starting a group as soon as all its predecessors have completed successfully and producing results in topological order.
 
+The scheduler MAY also accept an optional `on_group_status(group_id, status)` callback (defaulting to `None`, so behavior is byte-for-byte identical to the prior contract when omitted). When supplied, the scheduler invokes it at each per-group lifecycle transition with a plain string `status` — `queued` for every pending group when `run()` starts, `running` once the group is dispatched into the executor (`running.add(gid)`), `completed` on a successful completion callback, `failed` on a raised exception or a `GroupResult.status == "failed"` outcome, and `skipped` for each downstream group marked skipped by failure propagation. The callback is purely observational: the scheduler holds no reference to `chat_history` or any main-repo path, so how the status is persisted is decided by the caller (see the `flow-engine` *Implement Step DAG Execution Strategy* requirement). Every callback invocation is wrapped in `try/except` so a callback that raises NEVER disturbs scheduling, completion accounting, or result ordering.
+
 #### Scenario: Empty group map
 - **WHEN** the scheduler was constructed with no groups
 - **THEN** `run()` returns an empty list without creating an executor
@@ -132,6 +134,31 @@ A helper `_relay_plan_is_linear(plan)` shall return `True` only when the plan de
 - **WHEN** any group is still pending or running
 - **THEN** the main thread waits on a `threading.Condition` with a 1-second timeout
 - **AND** is notified via `condition.notify_all()` from each completion callback
+
+#### Scenario: Per-group status callback fires at every lifecycle point
+- **GIVEN** the scheduler was constructed (or `run()` was called) with an
+  `on_group_status(group_id, status)` callback
+- **WHEN** `run()` executes a graph in which some groups complete, one fails,
+  and its downstream groups are skipped
+- **THEN** the callback is invoked with `queued` for every pending group at
+  startup, `running` when a group is dispatched into the executor, `completed`
+  on each successful completion, `failed` for the group that raised or returned
+  a `failed` status, and `skipped` for each downstream group marked skipped by
+  failure propagation
+
+#### Scenario: Status callback exceptions are swallowed
+- **WHEN** the supplied `on_group_status` callback raises an exception on any
+  invocation
+- **THEN** the scheduler catches it and continues — scheduling, completion
+  accounting, failure propagation, and result ordering are unaffected
+- **AND** no status-callback failure ever surfaces as a `GroupResult.failed`
+  or aborts `run()`
+
+#### Scenario: Omitted callback preserves prior behavior
+- **WHEN** the scheduler is constructed without an `on_group_status` callback
+  (the default `None`)
+- **THEN** `run()` behaves exactly as before — no status notifications are
+  emitted and no extra work is performed
 
 ### Requirement: Failure Handling and Propagation
 
