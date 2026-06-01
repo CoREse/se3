@@ -2494,6 +2494,127 @@ check("user three layers: literal bubble default, 展开全部 prefix/suffix, �
     "the raw layer shows the original NDJSON payload");
 });
 
+// -- Regression A: user Layer 3 stably reaches the original .jsonl envelope --
+// A user record carries raw_json=[] and no raw_ndjson, so the shared
+// makeRawToggle (无 raw → null) would leave Layer 3 empty. The user side must
+// instead fall back to the record's original .jsonl envelope so "查看原始" is
+// always reachable — without weakening makeRawToggle's null contract.
+
+// Build a user marker record carrying NO second-layer raw payload (raw_json=[],
+// raw_ndjson absent), in the real daemon envelope shape {step_id, step_type,
+// message}. normalizeRecord must expose that envelope at norm.raw.envelope.
+const userMarkerNormNoRaw = (content, stepType) => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  const body = "BOILER_PREFIX\n" + TPE + "\n" + UCB + "\n" + content + "\n" +
+    UCE + "\nFRAMEWORK_SUFFIX";
+  return app.normalizeRecord({
+    step_id: stepType,
+    step_type: stepType,
+    message: { role: "user", content: body, timestamp: 1, raw_json: [] },
+  });
+};
+
+check("normalizeRecord exposes the original .jsonl envelope at norm.raw.envelope", () => {
+  const norm = userMarkerNormNoRaw("ENVELOPE_USER_TOKEN", "discovery");
+  assert.ok(norm.raw && norm.raw.envelope, "norm.raw.envelope present");
+  assert.equal(norm.raw.envelope.step_type, "discovery");
+  assert.equal(norm.raw.envelope.step_id, "discovery");
+  assert.ok(norm.raw.envelope.message, "envelope carries the message");
+  // Existing raw_json / raw_ndjson fields are untouched (raw_json stays []).
+  assert.deepEqual(norm.raw.raw_json, []);
+});
+
+check("user Layer 3 reaches the .jsonl envelope when no raw payload (regression A)", () => {
+  const norm = userMarkerNormNoRaw("ENVELOPE_USER_TOKEN", "discovery");
+  const row = app.renderConversationRecord(norm);
+
+  // Layer 1 bubble surfaces only the literal input.
+  const bubble = findOne(row, "user-content-bubble");
+  assert.ok(bubble && bubble.textContent.includes("ENVELOPE_USER_TOKEN"));
+
+  // Layer 2 toggle is offered even with no raw payload (no hasRawPayload gate).
+  const wrap = findOne(row, "user-prompt-toggle-wrap");
+  assert.ok(wrap, "Layer 2 展开全部 toggle present without a raw payload");
+  // Layer 3 not visible until Layer 2 is expanded.
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "Layer 3 must not show in the default view");
+
+  const toggle = findOne(wrap, "process-toggle");
+  toggle.dispatch("click");
+  const full = findOne(wrap, "process-full");
+  // Layer 3 ("查看原始") is now reachable, nested inside the Layer-2 area.
+  const rawToggle = findOne(full, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle reachable via the user-side fallback");
+  const rawPre = findOne(full, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw hidden by default");
+  rawToggle.dispatch("click");
+  assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
+  // It shows the original .jsonl envelope record (step_type + the user body).
+  assert.ok(rawPre.textContent.includes("step_type"),
+    "Layer 3 shows the original .jsonl envelope record");
+  assert.ok(rawPre.textContent.includes("ENVELOPE_USER_TOKEN"),
+    "the envelope carries the original message body");
+  // The fallback button labels the kind as the envelope source.
+  assert.ok(rawToggle.textContent.includes("envelope"),
+    "the fallback labels the raw kind as 'envelope'");
+});
+
+check("makeRawToggle keeps its null contract while makeUserRawToggle never returns null", () => {
+  const norm = userMarkerNormNoRaw("CONTRACT_TOKEN", "analyze");
+  // Shared helper's "无 raw 载荷 → null" contract is preserved for this input.
+  assert.equal(app.makeRawToggle(norm), null,
+    "makeRawToggle must still return null when there is no raw payload");
+  // The dedicated user helper always returns a usable toggle.
+  const userToggle = app.makeUserRawToggle(norm);
+  assert.ok(userToggle, "makeUserRawToggle must never return null");
+  const btn = findOne(userToggle, "raw-toggle");
+  const pre = findOne(userToggle, "raw-json");
+  btn.dispatch("click");
+  assert.ok(pre.textContent.includes("CONTRACT_TOKEN"),
+    "makeUserRawToggle falls back to the envelope record body");
+});
+
+check("makeUserRawToggle prefers the second-layer raw payload when present", () => {
+  // When a raw_ndjson payload IS present, the user toggle prefers it over the
+  // envelope fallback (kind labeled raw_ndjson, not envelope).
+  const norm = userMarkerNorm(
+    "prefix", "PREFER_TOKEN", "suffix", "discovery",
+    '{"raw_marker":"PREFER_NDJSON_TOKEN"}');
+  const userToggle = app.makeUserRawToggle(norm);
+  const btn = findOne(userToggle, "raw-toggle");
+  const pre = findOne(userToggle, "raw-json");
+  btn.dispatch("click");
+  assert.ok(pre.textContent.includes("PREFER_NDJSON_TOKEN"),
+    "prefers the raw_ndjson payload");
+  assert.ok(btn.textContent.includes("raw_ndjson"),
+    "labels the kind as raw_ndjson, not envelope");
+});
+
+check("empty user-content chip reaches Layer 3 via the envelope (regression A)", () => {
+  // Legacy two-segment record with NO raw payload → degrades to a collapsed
+  // chip; its expand detail must still reach the original envelope record.
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const body = "PREFIX_BODY\n" + TPE + "\n" + UCB + "\nSUFFIX_TAIL_TOKEN";
+  const norm = app.normalizeRecord({
+    step_id: "analyze",
+    step_type: "analyze",
+    message: { role: "user", content: body, timestamp: 1, raw_json: [] },
+  });
+  const row = app.renderConversationRecord(norm);
+  const chip = findOne(row, "msg-chip");
+  chip.dispatch("click");
+  const detail = findOne(row, "msg-chip-detail");
+  const rawToggle = findOne(detail, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle present inside the chip detail");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(detail, "raw-json");
+  assert.ok(rawPre.textContent.includes("step_type"),
+    "the chip's Layer 3 shows the original .jsonl envelope record");
+});
+
 check("user two-segment marker degrades to a single collapsed chip (no bubble)", () => {
   const norm = userMarkerNorm(
     "You are an expert engineer.",

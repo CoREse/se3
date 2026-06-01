@@ -1,0 +1,44 @@
+id: '161'
+title: The generic collapsible-chip path in renderConversationRecord (app.js:4787),
+  shared by `system` records and marker-less legacy `user` records (whole-chip fallback),
+  still uses the gated makeRawToggle with an `if (rawToggle)` guard. For such a whole-chip
+  record carrying raw_json=[] and no raw_ndjson, makeRawToggle returns null, so no
+  'View raw' is reachable in the chip's expand detail. The running-flow-console *Role-Based
+  Message Collapse* requirement states View raw 'MUST stay reachable ... [in] the
+  collapsed chip's expand detail for a whole-chip / empty-user-content record'. This
+  is a pre-existing gap (not introduced by this task) and lies outside the task's
+  declared boundary, which targets the marker-split user three-layer Layer 3 (makeUserPromptToggle)
+  and the empty-user-content chip; the task constraints explicitly forbid altering
+  unrelated record types. Now that norm.raw.envelope is populated on this same generic
+  branch, the path could be uniformly closed by switching it to makeUserRawToggle
+  in a future change.
+description: 'The generic collapsible-chip path in renderConversationRecord (app.js:4787),
+  shared by `system` records and marker-less legacy `user` records (whole-chip fallback),
+  still uses the gated makeRawToggle with an `if (rawToggle)` guard. For such a whole-chip
+  record carrying raw_json=[] and no raw_ndjson, makeRawToggle returns null, so no
+  ''View raw'' is reachable in the chip''s expand detail. The running-flow-console
+  *Role-Based Message Collapse* requirement states View raw ''MUST stay reachable
+  ... [in] the collapsed chip''s expand detail for a whole-chip / empty-user-content
+  record''. This is a pre-existing gap (not introduced by this task) and lies outside
+  the task''s declared boundary, which targets the marker-split user three-layer Layer
+  3 (makeUserPromptToggle) and the empty-user-content chip; the task constraints explicitly
+  forbid altering unrelated record types. Now that norm.raw.envelope is populated
+  on this same generic branch, the path could be uniformly closed by switching it
+  to makeUserRawToggle in a future change.
+
+
+  Suggestion: Optional follow-up (not required for this task): in the isCollapsibleRole
+  branch at app.js:4787, replace the gated `const rawToggle = makeRawToggle(norm);
+  if (rawToggle) detail.appendChild(rawToggle);` with the envelope-backed makeUserRawToggle
+  so whole-chip system / marker-less user records also expose View raw when no second-layer
+  raw payload exists. Keep makeRawToggle''s null contract intact.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-01T15:35:50.978720'
+updated_at: '2026-06-01T15:35:50.978720'

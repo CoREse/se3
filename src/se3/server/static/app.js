@@ -2071,7 +2071,15 @@ function normalizeRecord(rec) {
     timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
     stepType: pickStepType(),
     stepId: pick("step_id") || "",
-    raw: { raw_json: rawJson, raw_ndjson: rawNdjson },
+    // `envelope` carries the record's original .jsonl envelope ({step_id,
+    // step_type, message} — the JSON envelope of the standardized persistence
+    // layer). It is the stable data source for the user side's Layer-3 "查看原始"
+    // (see `makeUserRawToggle`): a user record carries raw_json=[] and no
+    // raw_ndjson, so without the envelope its Layer 3 would have nothing to
+    // show. Only this generic branch sets it; the step-event / group_status /
+    // partial branches construct their own `raw` and are intentionally left
+    // unchanged.
+    raw: { raw_json: rawJson, raw_ndjson: rawNdjson, envelope: rec },
     attempt: pick("attempt"),
     partial: isPartial,
     toolUseId: toolUseId,
@@ -4392,6 +4400,52 @@ function makeAssistantRawToggle(content, norm) {
   return wrap;
 }
 
+// --- user single-layer raw disclosure (Layer 3) ---------------------------
+
+// "查看原始" — the user turn's Layer 3 raw disclosure. The running-flow-console
+// spec requires a user turn's Layer 3 to STABLY present the message's original
+// NDJSON record (the .jsonl envelope), regardless of whether a second-layer raw
+// payload exists. The shared `makeRawToggle` returns null when no raw_json /
+// raw_ndjson payload is present — a contract relied on elsewhere and which we
+// must NOT weaken — so the user side gets this dedicated path instead: it
+// prefers the raw payload (resolveRawPayload) when present, and otherwise falls
+// back to the record's original .jsonl envelope (`norm.raw.envelope`, the
+// {step_id, step_type, message} JSON envelope). It ALWAYS returns a toggle,
+// never null, so Layer 3 is always reachable. The interaction / naming (查看原始 /
+// 隐藏原始, scroll-into-view only on expand) matches the other raw toggles.
+function makeUserRawToggle(norm) {
+  const { payload, kind } = resolveRawPayload(norm);
+  const hasRaw = payload != null;
+  const envelope = (norm && norm.raw && norm.raw.envelope != null)
+    ? norm.raw.envelope
+    : null;
+  const wrap = el("div", "raw-toggle-wrap user-raw-toggle-wrap");
+  const btn = el("button", "raw-toggle", "查看原始");
+  btn.type = "button";
+  const pre = el("pre", "raw-json hidden");
+  let rendered = false;
+  let shown = false;
+  btn.addEventListener("click", () => {
+    shown = !shown;
+    if (shown && !rendered) {
+      // Prefer the second-layer raw payload; fall back to the original .jsonl
+      // envelope record so Layer 3 is never empty for a user turn.
+      pre.textContent = hasRaw ? formatRaw(payload) : formatRaw(envelope);
+      rendered = true;
+    }
+    pre.classList.toggle("hidden", !shown);
+    btn.classList.toggle("active", shown);
+    btn.textContent = shown
+      ? `隐藏原始 (${hasRaw ? kind : "envelope"})`
+      : "查看原始";
+    if (shown) {
+      requestAnimationFrame(() => pre.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  wrap.append(btn, pre);
+  return wrap;
+}
+
 // --- user-prompt three-layer progressive disclosure -----------------------
 
 // Append the "模板前缀" (template prefix) and "框架后缀" (framework suffix)
@@ -4440,9 +4494,11 @@ function makeUserPromptToggle(split, norm) {
     if (expanded && !built) {
       appendPromptSubsections(full, split);
       // Layer 3 nests inside the expanded Layer-2 area, after the prefix /
-      // suffix subsections — never visible in the default Layer-1 bubble.
-      const rawToggle = makeRawToggle(norm);
-      if (rawToggle) full.appendChild(rawToggle);
+      // suffix subsections — never visible in the default Layer-1 bubble. Uses
+      // the user-side toggle, which always presents the original record (the
+      // .jsonl envelope when no second-layer raw payload exists), so Layer 3 is
+      // stably reachable per the running-flow-console spec.
+      full.appendChild(makeUserRawToggle(norm));
       built = true;
     }
     full.classList.toggle("hidden", !expanded);
@@ -4866,8 +4922,6 @@ function renderUserMarkerRecord(norm, split) {
 
   const ctx = norm.stepType || norm.stepId || "step";
   const hasContent = typeof split.content === "string" && split.content.length > 0;
-  const hasPrefix = typeof split.prefix === "string" && split.prefix.length > 0;
-  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
 
   if (hasContent) {
     // Layer 1 — default-expanded bubble carrying ONLY the user's real input.
@@ -4879,11 +4933,12 @@ function renderUserMarkerRecord(norm, split) {
     // Layer 2 — "展开全部" toggle revealing the 模板前缀 / 框架后缀 subsections, with
     // Layer 3 ("查看原始") nested at the end of its expand area. Collapsed by
     // default so neither the framework boilerplate nor the raw toggle shows in
-    // the default view. Offered whenever there is boilerplate OR a raw payload
-    // to reach — the raw toggle is no longer a row-level always-visible control.
-    if (hasPrefix || hasSuffix || hasRawPayload(norm)) {
-      row.appendChild(makeUserPromptToggle(split, norm));
-    }
+    // the default view. ALWAYS offered so Layer 3 is stably reachable per the
+    // running-flow-console spec: even with no boilerplate and no second-layer
+    // raw payload, makeUserRawToggle falls back to the original .jsonl envelope
+    // record, so the user turn's Layer 3 is always present (no longer gated on
+    // the presence of boilerplate or a raw payload).
+    row.appendChild(makeUserPromptToggle(split, norm));
   } else {
     // Empty user-content (legacy two-segment / prefix+suffix sandwich):
     // degrade to a single default-collapsed system-prompt chip combining the
@@ -4901,8 +4956,9 @@ function renderUserMarkerRecord(norm, split) {
       if (chipExpanded && !chipBuilt) {
         appendPromptSubsections(chipDetail, split);
         // Layer 3 — nested inside the chip's expand detail, never row-level.
-        const rawToggle = makeRawToggle(norm);
-        if (rawToggle) chipDetail.appendChild(rawToggle);
+        // Uses the user-side toggle so the original .jsonl envelope record is
+        // always reachable even when no second-layer raw payload exists.
+        chipDetail.appendChild(makeUserRawToggle(norm));
         chipBuilt = true;
       }
       chipWrap.classList.toggle("collapsed", !chipExpanded);
@@ -6128,6 +6184,8 @@ if (typeof module !== "undefined" && module.exports) {
     GROUP_STATUS_TEXT,
     renderGroupStatusRecord,
     hasRawPayload,
+    makeRawToggle,
+    makeUserRawToggle,
     STEP_REPORT_RENDERERS,
     renderProposalFields,
     renderDesignFields,

@@ -890,9 +890,20 @@ requirement).
    presented as the labeled template prefix / framework suffix subsections (the template prefix
    and the framework suffix). Folded by default.
 3. **Layer 3 ("View raw")** — the original NDJSON record for the message,
-   reachable via the shared raw toggle (View raw) **nested at the end of the
-   Layer-2 "Expand all" expand area** (built by `makeUserPromptToggle`), NOT as a
-   row-level always-visible button.
+   reachable via a **dedicated user-side raw toggle** (`makeUserRawToggle`)
+   **nested at the end of the Layer-2 "Expand all" expand area** (hosted by
+   `makeUserPromptToggle`), NOT as a row-level always-visible button. This Layer
+   3 MUST be **stably present for every `user` record** regardless of whether the
+   second-layer raw payload (`raw_ndjson` / `raw_json`) exists: `makeUserRawToggle`
+   prefers the raw payload when present and otherwise falls back to the original
+   `.jsonl` envelope record — the normalized persistence-layer JSON envelope
+   (`{step_id, step_type, message}`) exposed on the normalized record as
+   `norm.raw.envelope` — so the toggle never returns null and the spec's
+   three-layer guarantee always holds. Because the user side uses this separate
+   path, the shared `makeRawToggle` helper's existing "no raw payload → null"
+   contract is preserved unchanged (the user side does NOT modify or depend on
+   that contract). Consequently `makeUserPromptToggle` MUST always be provided for
+   a marker-split `user` turn so Layer 3 is always reachable.
 
 **Assistant turn** — two layers. The two-layer model below applies **only when
 this turn produced a final result JSON**; a turn with no result JSON is handled
@@ -932,7 +943,9 @@ When a turn has no Layer-1 payload to surface — e.g. a legacy `user` record
 whose user-content section is empty, or an assistant turn whose body cannot be
 parsed into structured fields — the renderer MUST degrade gracefully and never
 drops content: a legacy empty `user` turn collapses to a single chip (with its
-View raw raw toggle nested inside the chip's expand detail), while an assistant
+View raw raw toggle — the same dedicated `makeUserRawToggle`, which still
+resolves to the `.jsonl` envelope record when no raw payload is present —
+nested inside the chip's expand detail), while an assistant
 turn with no parseable result keeps its thinking process shown inline via the
 same `renderToolMarkers` + markdown path described in *Structured-JSON
 Assistant Rendering* — shown in full, not folded. Expanding any disclosure
@@ -1000,6 +1013,12 @@ no-scroll-on-collapse behavior used elsewhere in the view.
   bubble
 - **AND** the "View raw" (Layer 3) toggle becomes reachable only after the
   "Expand all" (Layer 2) toggle is expanded, nested at the end of that expand area
+- **AND** the Layer 3 toggle is present even when the record carries no
+  second-layer raw payload (`raw_json` empty and no `raw_ndjson`) — the dedicated
+  `makeUserRawToggle` falls back to the original `.jsonl` envelope record
+  (`norm.raw.envelope`) so the original record is always reachable
+- **AND** this user-side path leaves the shared `makeRawToggle` helper's
+  "return null when no raw payload is present" contract unchanged
 
 #### Scenario: Assistant single View raw fold is the only assistant disclosure
 - **GIVEN** a result-JSON assistant turn rendered with its default Layer-1
@@ -1606,6 +1625,16 @@ visible without an extra click. Fold-state changes follow the same
 `scrollIntoView({block: "nearest"})`-on-expand, no-scroll-on-collapse
 behavior used elsewhere in the view.
 
+When a chip's detail panel is folded, the **entire detail wrapper**
+(`.tool-marker-details`) MUST be collapsed out of layout (`display: none`),
+not merely its inner body (`.tool-marker-details-body`). Hiding only the inner
+body leaves the full-width wrapper (`flex-basis: 100%`) occupying a blank row in
+the flex-wrap chip container and contributes its own `margin-top`, producing a
+visible empty band below the folded chip. Collapsing the whole wrapper removes
+that empty row and stray margin so a folded chip stays a clean, single-row
+affordance; the always-visible toggle button is a sibling of the wrapper (not a
+child) and therefore remains visible and operable while the wrapper is hidden.
+
 **Toggle-button placement in the chip head.** When a chip carries a detail
 payload, its expand/collapse toggle button MUST sit **inline with the chip
 head** as the rightmost sibling of the name / header / glyph nodes
@@ -1695,6 +1724,18 @@ adjacent zombie chips, never a thrown exception. New records with the
 - **AND** when the user expands the detail panel, the detail body wraps onto
   its own row beneath the head (e.g. via `flex-basis: 100%`) without
   reintroducing the top-border divider
+
+#### Scenario: Folded chip leaves no empty band below it
+- **GIVEN** a tool chip in the in-flight or success state whose detail panel is
+  folded by default
+- **WHEN** the chip is rendered in the flex-wrap chip container
+- **THEN** the entire detail wrapper (`.tool-marker-details`) is collapsed out of
+  layout (`display: none`), not merely its inner body
+  (`.tool-marker-details-body`)
+- **AND** no blank full-width row and no stray `margin-top` band appears below
+  the folded chip — the chip stays a clean single-row affordance
+- **AND** the always-visible toggle button (a sibling of the wrapper) remains
+  visible and operable, so expanding the chip still reveals the detail body
 
 #### Scenario: Chip with no detail payload renders no toggle button
 - **GIVEN** a tool chip whose terminal event produced no detail payload

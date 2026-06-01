@@ -184,19 +184,66 @@ def test_raw_toggle_is_never_appended_at_row_level():
 
 
 def test_raw_toggle_is_nested_inside_expand_area_factories():
-    """``makeUserPromptToggle`` MUST nest the shared raw toggle inside its
-    lazily-built "展开全部" expand area (user Layer 3 inside Layer 2).
+    """``makeUserPromptToggle`` MUST nest the user-side Layer-3 raw toggle inside
+    its lazily-built "展开全部" expand area (user Layer 3 inside Layer 2).
 
-    The assistant side no longer has a ``makeProcessToggle`` — it was replaced
-    by the single ``makeAssistantRawToggle`` fold — so only the user factory is
-    asserted here. The shared ``makeRawToggle`` (无 raw → null semantics) stays
-    intact for the user path and the collapsed chip.
+    The user side uses the dedicated ``makeUserRawToggle`` (永不返回 null — falls
+    back to the .jsonl envelope when no second-layer raw payload exists) so a
+    user turn's Layer 3 is always reachable, even when raw_json=[] and
+    raw_ndjson is absent (the regression-A fix). The assistant side has no
+    ``makeProcessToggle`` — it uses the single ``makeAssistantRawToggle`` fold —
+    so only the user factory is asserted here.
     """
     src = _read_app_js()
     body = _extract_js_function_body(src, "makeUserPromptToggle")
-    assert "makeRawToggle" in body, (
-        "makeUserPromptToggle must nest makeRawToggle inside its 展开全部 expand "
-        "area"
+    assert "makeUserRawToggle" in body, (
+        "makeUserPromptToggle must nest makeUserRawToggle inside its 展开全部 "
+        "expand area so Layer 3 is always reachable"
+    )
+
+
+def test_user_layer3_raw_toggle_not_gated_on_raw_payload():
+    """Regression A: the user turn's Layer 3 ("查看原始") must be stably reachable
+    regardless of whether a second-layer raw payload exists.
+
+    Concretely the hasContent branch of ``renderUserMarkerRecord`` must
+    unconditionally provide the "展开全部" toggle (which nests Layer 3) — it must
+    NOT gate it on ``hasRawPayload(norm)`` / ``hasPrefix`` / ``hasSuffix`` the
+    way the buggy version did, because a user record carries raw_json=[] and no
+    raw_ndjson, so a hasRawPayload gate would have suppressed Layer 3 entirely.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderUserMarkerRecord")
+    assert "makeUserPromptToggle(split, norm)" in body, (
+        "renderUserMarkerRecord must build the Layer-2/3 user-prompt toggle"
+    )
+    # The toggle must be provided unconditionally — no hasRawPayload gate.
+    assert "hasRawPayload" not in body, (
+        "the user Layer-2/3 toggle must not be gated on hasRawPayload — the "
+        "user side reaches its original .jsonl envelope via makeUserRawToggle, "
+        "which never returns null"
+    )
+
+
+def test_make_raw_toggle_null_contract_is_preserved():
+    """The shared ``makeRawToggle`` MUST keep its "无 raw 载荷 → null" contract.
+
+    Regression A is fixed via a *separate* user-side helper
+    (``makeUserRawToggle``); the shared helper's null contract — relied on by
+    other call sites — must NOT be weakened. So ``makeRawToggle`` must still
+    early-return ``null`` when ``resolveRawPayload`` yields no payload.
+    """
+    src = _read_app_js()
+    body = _extract_js_function_body(src, "makeRawToggle")
+    assert "return null" in body, (
+        "makeRawToggle must preserve its 'no raw payload → null' contract"
+    )
+    # And the dedicated user helper must exist (永不返回 null path).
+    user_body = _extract_js_function_body(src, "makeUserRawToggle")
+    assert "envelope" in user_body, (
+        "makeUserRawToggle must fall back to the .jsonl envelope record"
+    )
+    assert "return null" not in user_body, (
+        "makeUserRawToggle must never return null — Layer 3 is always reachable"
     )
 
 
@@ -315,6 +362,45 @@ def test_conversation_code_block_wraps_long_lines(selector: str):
     assert "overflow-x: auto" not in body, (
         f"{selector} must NOT use 'overflow-x: auto'; long single lines should "
         f"wrap rather than open an inner horizontal scrollbar"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3b. Static guardrail: tool-call chip folded state collapses the whole wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_tool_marker_details_folded_collapses_whole_wrapper():
+    """Regression B: the folded tool-call chip detail must collapse the ENTIRE
+    ``.tool-marker-details`` wrapper, not merely the inner
+    ``.tool-marker-details-body``.
+
+    The wrapper carries ``flex-basis:100%`` + ``margin-top:4px``; in a
+    flex-wrap chip, hiding only the body left the wrapper claiming a full empty
+    row below the collapsed chip (the stray blank band). The folded rule must
+    therefore set ``display:none`` on ``.tool-marker-details.folded`` itself,
+    and must NOT be the old body-only form.
+    """
+    css = _read_style_css()
+    # The whole wrapper is collapsed in the folded state.
+    assert re.search(
+        r"\.tool-marker-details\.folded\s*\{\s*display:\s*none;?\s*\}",
+        css,
+    ), (
+        ".tool-marker-details.folded must set display:none on the whole wrapper "
+        "to remove the empty flex row below a collapsed chip"
+    )
+    # The old body-only collapse form must be gone (it left the wrapper's
+    # flex-basis row + margin claiming empty space).
+    assert ".tool-marker-details.folded .tool-marker-details-body" not in css, (
+        "the folded state must not hide only the inner body — collapse the "
+        "whole .tool-marker-details wrapper instead"
+    )
+    # The expanded-state base rule keeps its flex-basis / margin-top.
+    base = _extract_rule_body(css, ".tool-marker-details")
+    assert "flex-basis: 100%" in base and "margin-top: 4px" in base, (
+        "the expanded .tool-marker-details rule must keep flex-basis:100% + "
+        "margin-top:4px so the detail body wraps onto its own row when expanded"
     )
 
 

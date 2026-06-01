@@ -2,6 +2,14 @@
 
 
 
+
+## 7.11.1 - 2026-06-01
+
+- Fix missing 'View raw' (Layer 3) on user turns in the running-flow console: user records now stably expose their original .jsonl envelope record even when no second-layer raw payload (raw_ndjson/raw_json) is present
+- Make the user-prompt expand toggle always available so the Layer 3 raw view is consistently reachable, including for empty user-content chips
+- Fix excess blank space below collapsed tool-call chips by collapsing the entire details wrapper instead of only its inner body, removing the stray full-width empty row and margin
+- Preserve the shared makeRawToggle 'no raw payload returns null' contract and leave assistant no-result turns and group_status markers unchanged (by design)
+- Add targeted frontend and server-render tests covering user-turn Layer 3 reachability and the folded chip layout fix
 ## 7.11.0 - 2026-06-01
 
 - Show real-time per-group status (queued/running/completed/failed/skipped) in the running-flow web console during DAG parallel implement, instead of leaving the view blank until step end

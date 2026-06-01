@@ -1091,7 +1091,14 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   flex-basis: 100%;
   margin-top: 4px;
 }
-.tool-marker-details.folded .tool-marker-details-body { display: none; }
+/* Folded state collapses the ENTIRE details wrapper, not just the inner body.
+ * In a flex-wrap chip the wrapper keeps `flex-basis:100%`, so hiding only the
+ * body left the wrapper claiming a full empty row (its `margin-top:4px` plus
+ * the chip's bottom padding showing as a blank band below the collapsed chip).
+ * Collapsing the wrapper removes that empty row and stray margin; the expanded
+ * state keeps the original flex-basis / margin-top and the body wrapping onto
+ * its own row. */
+.tool-marker-details.folded { display: none; }
 .tool-marker-toggle {
   margin-left: auto;
   flex-shrink: 0;
