@@ -30,7 +30,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Response, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -38,6 +38,9 @@ from pydantic import BaseModel
 from se3 import __version__
 from se3.daemon import protocol
 
+from . import bootstrap
+from .auth.session import SessionStore
+from .persistence import Store
 from .state import ServerState
 from .ws import (
     ConnectionManager,
@@ -97,8 +100,24 @@ class InterjectRequest(BaseModel):
     text: str
 
 
-def create_app() -> FastAPI:
-    """Build and return the SE3 central-server FastAPI application."""
+class BreakglassRequest(BaseModel):
+    """Body of ``POST /api/auth/breakglass`` — the one-time admin escape hatch."""
+
+    token: str
+
+
+def create_app(
+    *,
+    store: Optional[Store] = None,
+    sessions: Optional[SessionStore] = None,
+) -> FastAPI:
+    """Build and return the SE3 central-server FastAPI application.
+
+    ``store`` / ``sessions`` are injectable for tests and forward wiring; when
+    omitted the session store is created in-memory and the persistence
+    :class:`Store` is resolved lazily from the server config on first
+    break-glass use (so constructing the app touches no disk).
+    """
     app = FastAPI(title="SE3 Central Server", version=protocol.PROTOCOL_VERSION)
     state = ServerState()
     manager = ConnectionManager()
@@ -106,6 +125,11 @@ def create_app() -> FastAPI:
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
     interjection_tracker = InterjectionEventTracker()
+    # The session store is pure in-memory (no disk), so building it eagerly is
+    # safe; the persistence Store is resolved lazily to avoid touching the
+    # configured DB file just by constructing the app (e.g. in unit tests).
+    if sessions is None:
+        sessions = SessionStore()
     # Expose for tests / introspection.
     app.state.server_state = state
     app.state.connection_manager = manager
@@ -113,6 +137,16 @@ def create_app() -> FastAPI:
     app.state.history_registry = history_registry
     app.state.index_refresh_registry = index_refresh_registry
     app.state.interjection_tracker = interjection_tracker
+    app.state.sessions = sessions
+    app.state.store = store
+
+    def _resolve_store() -> Store:
+        """Return the persistence Store, building it from config on first use."""
+        if app.state.store is None:
+            from se3.config import load_server_config
+
+            app.state.store = Store(load_server_config().resolved_db_path())
+        return app.state.store
 
     # -- daemon WebSocket endpoint -----------------------------------------
 
@@ -143,6 +177,39 @@ def create_app() -> FastAPI:
     @app.get("/api/version")
     async def version() -> dict:
         return {"version": __version__}
+
+    @app.post("/api/auth/breakglass")
+    async def breakglass_login(req: BreakglassRequest, response: Response) -> dict:
+        """Enter as the single break-glass admin with a one-time token.
+
+        This is the fail-closed escape hatch: it is provider-independent (it
+        never consults the auth provider chain), so it still works when the
+        configured provider is unreachable or none is configured. A valid token
+        is consumed (one-time) and an admin session cookie is set.
+        """
+        token = (req.token or "").strip()
+        if not token:
+            raise HTTPException(status_code=422, detail="'token' must not be empty")
+        store = _resolve_store()
+        result = await asyncio.to_thread(
+            bootstrap.consume_breakglass_login, store, sessions, token
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=401, detail="invalid or already-used break-glass token"
+            )
+        session_id, identity = result
+        cookie = sessions.cookie_config
+        response.set_cookie(
+            cookie.name,
+            session_id,
+            max_age=cookie.max_age,
+            httponly=cookie.http_only,
+            samesite=cookie.same_site,
+            secure=cookie.secure,
+            path=cookie.path,
+        )
+        return {"status": "ok", "admin": identity.is_admin}
 
     @app.get("/api/machines")
     async def list_machines() -> dict:

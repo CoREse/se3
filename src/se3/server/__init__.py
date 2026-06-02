@@ -44,6 +44,15 @@ def main(argv: Optional[list] = None) -> None:
         print(f"se3-server version {__version__}")
         raise SystemExit(0)
 
+    # Break-glass token issuance is the fail-closed escape hatch: it must work
+    # even on a core-only install (no FastAPI / uvicorn) and even when the auth
+    # provider is broken. Intercept it *before* the [server]-extra check so the
+    # CLI only touches the stdlib-sqlite persistence layer.
+    if args and args[0] == "bootstrap-token":
+        from .bootstrap import run_bootstrap_token_cli
+
+        raise SystemExit(run_bootstrap_token_cli(args[1:]))
+
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
