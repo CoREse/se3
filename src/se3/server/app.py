@@ -30,7 +30,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -38,6 +38,14 @@ from pydantic import BaseModel
 from se3 import __version__
 from se3.daemon import protocol
 
+from . import crypto
+from .auth.base import OwnerIdentity, ProviderChain
+from .auth.local import LocalAuthProvider
+from .auth.ratelimit import LoginRateLimited, LoginRateLimiter
+from .auth.registry import build_provider_chain, make_require_owner
+from .auth.session import SessionStore, read_cookie
+from .identity import IdentityService
+from .persistence import Store
 from .state import ServerState
 from .ws import (
     ConnectionManager,
@@ -70,6 +78,14 @@ HISTORY_PULL_TIMEOUT = 30.0
 #: a daemon is slow or unreachable.
 HISTORY_INDEX_REFRESH_TIMEOUT = 2.0
 
+#: The identity-binding discriminator + external id of the single break-glass
+#: admin subject. Break-glass is deliberately a *single* admin subject (not a
+#: per-user impersonation channel), so every consumed break-glass token resolves
+#: to this same stable internal owner; distinguishing real owners is the local
+#: auth provider's job. See the multi-tenant design's break-glass section.
+BREAKGLASS_PROVIDER = "breakglass"
+BREAKGLASS_EXTERNAL_ID = "admin"
+
 
 # -- request models --------------------------------------------------------
 
@@ -97,8 +113,68 @@ class InterjectRequest(BaseModel):
     text: str
 
 
-def create_app() -> FastAPI:
-    """Build and return the SE3 central-server FastAPI application."""
+class LoginRequest(BaseModel):
+    """Body of ``POST /api/auth/login`` — local username + password login."""
+
+    username: str
+    password: str
+
+
+class BreakglassRequest(BaseModel):
+    """Body of ``POST /api/auth/breakglass`` — one-time admin escape hatch."""
+
+    token: str
+
+
+def _scope_for(identity: OwnerIdentity) -> Optional[str]:
+    """Map an authenticated identity to the owner-scoping value for queries.
+
+    A regular owner is scoped to its own ``owner_id`` — it can see and control
+    only its own daemons. An admin (the break-glass subject, or any owner with
+    the admin flag) is given the unscoped/operator view (``None``), so an
+    operator console can observe every machine. This is the single place the
+    "what may this identity see" policy is decided.
+    """
+    return None if identity.is_admin else identity.owner_id
+
+
+def _ensure_breakglass_admin(store: Store) -> str:
+    """Resolve (or lazily create) the single stable break-glass admin owner.
+
+    Break-glass is one admin subject by construction, so every token consumption
+    resolves to the same internal ``owner_id`` (bound via the reserved
+    ``(breakglass, admin)`` identity). The owner is created on first use with the
+    admin flag set.
+    """
+    owner_id = store.resolve_owner_by_identity(BREAKGLASS_PROVIDER, BREAKGLASS_EXTERNAL_ID)
+    if owner_id is None:
+        owner_id = store.create_owner("break-glass admin", is_admin=True)
+        store.link_identity(owner_id, BREAKGLASS_PROVIDER, BREAKGLASS_EXTERNAL_ID)
+    return owner_id
+
+
+def create_app(
+    *,
+    store: Optional[Store] = None,
+    db_path: Optional[str] = None,
+    auth_config: Optional[dict] = None,
+    session_store: Optional[SessionStore] = None,
+    rate_limiter: Optional[LoginRateLimiter] = None,
+) -> FastAPI:
+    """Build and return the SE3 central-server FastAPI application.
+
+    The app is multi-tenant from the ground up (no more identity-unaware "bare"
+    mode): a pluggable auth provider chain resolves every ``/api/*`` and
+    ``/ws/ui`` request to an :class:`OwnerIdentity`, and all machine / flow /
+    history views are filtered by that owner. Assembly is **fail-closed** — if
+    no usable auth provider is configured, :class:`AuthNotConfigured` is raised
+    here and the server refuses to start rather than serving anonymously.
+
+    *store* / *db_path* select the persistence backend (defaults to an in-memory
+    sqlite store). *auth_config* is the ``server.auth`` sub-mapping driving
+    provider selection (``None`` ⇒ the built-in local provider). *session_store*
+    / *rate_limiter* are injectable for tests.
+    """
     app = FastAPI(title="SE3 Central Server", version=protocol.PROTOCOL_VERSION)
     state = ServerState()
     manager = ConnectionManager()
@@ -106,6 +182,28 @@ def create_app() -> FastAPI:
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
     interjection_tracker = InterjectionEventTracker()
+
+    # -- auth / identity wiring (fail-closed) ------------------------------
+    if store is None:
+        store = Store(db_path or ":memory:")
+    # NB: explicit ``is None`` checks — ``SessionStore`` defines ``__len__`` so
+    # a fresh (empty) one is falsy; ``session_store or SessionStore()`` would
+    # silently discard a caller-injected empty store.
+    sessions = session_store if session_store is not None else SessionStore()
+    rate = rate_limiter if rate_limiter is not None else LoginRateLimiter()
+    identity = IdentityService(store)
+    # Raises AuthNotConfigured when nothing can authenticate — the server then
+    # refuses to start instead of falling back to the old open control plane.
+    auth_chain: ProviderChain = build_provider_chain(
+        auth_config, store=store, sessions=sessions, rate_limiter=rate
+    )
+    require_owner = make_require_owner(auth_chain)
+    # The local provider (when present) owns the username+password login
+    # ceremony; resolution of an established session is provider-agnostic.
+    local_provider: Optional[LocalAuthProvider] = next(
+        (p for p in auth_chain.providers if isinstance(p, LocalAuthProvider)), None
+    )
+
     # Expose for tests / introspection.
     app.state.server_state = state
     app.state.connection_manager = manager
@@ -113,11 +211,31 @@ def create_app() -> FastAPI:
     app.state.history_registry = history_registry
     app.state.index_refresh_registry = index_refresh_registry
     app.state.interjection_tracker = interjection_tracker
+    app.state.store = store
+    app.state.identity = identity
+    app.state.sessions = sessions
+    app.state.rate_limiter = rate
+    app.state.auth_chain = auth_chain
+
+    def _set_session_cookie(response: Response, session_id: str) -> None:
+        cfg = sessions.cookie_config
+        response.set_cookie(
+            key=cfg.name,
+            value=session_id,
+            max_age=cfg.max_age,
+            httponly=cfg.http_only,
+            samesite=cfg.same_site,
+            secure=cfg.secure,
+            path=cfg.path,
+        )
 
     # -- daemon WebSocket endpoint -----------------------------------------
 
     @app.websocket("/ws")
     async def daemon_ws(websocket: WebSocket) -> None:
+        # The daemon channel authenticates via the HELLO key (key -> owner_id),
+        # NOT via the human session cookie. Passing the identity service makes
+        # a missing / invalid key fail-closed (WELCOME accepted=false + close).
         await handle_daemon_connection(
             websocket,
             manager,
@@ -126,13 +244,100 @@ def create_app() -> FastAPI:
             history_registry,
             index_refresh_registry,
             interjection_tracker,
+            identity=identity,
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
 
     @app.websocket("/ws/ui")
     async def ui_ws(websocket: WebSocket) -> None:
-        await handle_ui_connection(websocket, ui_hub, state)
+        # Resolve the connecting human before accepting any data. An
+        # unauthenticated socket is fail-closed (accepted then immediately
+        # closed). An authenticated owner is scoped to its own machines; an
+        # admin gets the unscoped operator view.
+        who = auth_chain.resolve_owner(websocket)
+        if who is None:
+            await handle_ui_connection(
+                websocket, ui_hub, state, owner=None, require_owner=True
+            )
+            return
+        await handle_ui_connection(
+            websocket, ui_hub, state, owner=_scope_for(who), require_owner=False
+        )
+
+    # -- auth API ----------------------------------------------------------
+    # login / logout / me / breakglass. These are the only unauthenticated
+    # entry points (besides health/version); every other /api/* route below
+    # requires a resolved owner via Depends(require_owner).
+
+    @app.post("/api/auth/login")
+    async def login(req: LoginRequest, response: Response) -> dict:
+        if local_provider is None:
+            raise HTTPException(
+                status_code=503, detail="local password login is not enabled"
+            )
+        try:
+            # argon2 verification is CPU-bound — run it off the event loop.
+            result = await asyncio.to_thread(
+                local_provider.login, req.username, req.password
+            )
+        except LoginRateLimited as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="too many failed login attempts; try again later",
+                headers={"Retry-After": str(int(exc.retry_after) + 1)},
+            )
+        if result is None:
+            # Uniform message for unknown-user vs bad-password (no enumeration).
+            raise HTTPException(status_code=401, detail="invalid credentials")
+        session_id, who = result
+        _set_session_cookie(response, session_id)
+        return {
+            "owner_id": who.owner_id,
+            "display_name": who.display_name,
+            "is_admin": who.is_admin,
+            "provider": who.provider,
+        }
+
+    @app.post("/api/auth/logout")
+    async def logout(request: Request, response: Response) -> dict:
+        # Idempotent: destroy the referenced session (if any) and clear the
+        # cookie. Never requires an already-valid session.
+        session_id = read_cookie(request, sessions.cookie_config.name)
+        sessions.destroy(session_id)
+        response.delete_cookie(
+            sessions.cookie_config.name, path=sessions.cookie_config.path
+        )
+        return {"status": "logged_out"}
+
+    @app.get("/api/auth/me")
+    async def me(identity_: OwnerIdentity = Depends(require_owner)) -> dict:
+        return {
+            "owner_id": identity_.owner_id,
+            "display_name": identity_.display_name,
+            "is_admin": identity_.is_admin,
+            "provider": identity_.provider,
+        }
+
+    @app.post("/api/auth/breakglass")
+    async def breakglass(req: BreakglassRequest, response: Response) -> dict:
+        # The break-glass token is a credential: hash it for the constant-time
+        # one-shot consume, and never log the plaintext.
+        token = req.token.strip()
+        if not token:
+            raise HTTPException(status_code=422, detail="'token' must not be empty")
+        consumed = await asyncio.to_thread(
+            store.consume_breakglass, crypto.token_hash(token)
+        )
+        if not consumed:
+            raise HTTPException(
+                status_code=401, detail="invalid or expired break-glass token"
+            )
+        owner_id = _ensure_breakglass_admin(store)
+        session_id, _session = sessions.create(owner_id)
+        _set_session_cookie(response, session_id)
+        logger.info("break-glass token consumed; admin session minted")
+        return {"owner_id": owner_id, "is_admin": True, "provider": BREAKGLASS_PROVIDER}
 
     # -- REST API ----------------------------------------------------------
 
@@ -145,27 +350,39 @@ def create_app() -> FastAPI:
         return {"version": __version__}
 
     @app.get("/api/machines")
-    async def list_machines() -> dict:
-        machines = await state.get_machines()
+    async def list_machines(
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        machines = await state.get_machines(owner=_scope_for(identity_))
         return {"machines": machines, "count": len(machines)}
 
     @app.get("/api/machines/{machine_id}/flows")
-    async def machine_flows(machine_id: str) -> dict:
-        flows = await state.get_machine_flows(machine_id)
+    async def machine_flows(
+        machine_id: str, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> dict:
+        flows = await state.get_machine_flows(
+            machine_id, owner=_scope_for(identity_)
+        )
+        # 404 covers both "unknown" and "owned by another owner" — no
+        # cross-owner existence leak.
         if flows is None:
             raise HTTPException(status_code=404, detail=f"machine '{machine_id}' not found")
         return {"machine_id": machine_id, "flows": flows, "count": len(flows)}
 
     @app.get("/api/flows/{flow_id}")
-    async def flow_detail(flow_id: str) -> dict:
-        result = await state.get_flow(flow_id)
+    async def flow_detail(
+        flow_id: str, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> dict:
+        result = await state.get_flow(flow_id, owner=_scope_for(identity_))
         if result is None:
             raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
         machine_id, flow = result
         return {"machine_id": machine_id, "flow": flow}
 
     @app.post("/api/flows")
-    async def publish_flow(req: NewFlowRequest) -> JSONResponse:
+    async def publish_flow(
+        req: NewFlowRequest, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> JSONResponse:
         task = req.task.strip()
         if not task:
             raise HTTPException(status_code=422, detail="'task' must not be empty")
@@ -184,6 +401,15 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=422,
                 detail=f"'project_root' must be an absolute path, got {project_root!r}",
+            )
+        # Ownership gate: an owner may only dispatch to its OWN daemon. A
+        # machine that is unknown OR belongs to another owner reads as absent
+        # (404) — this is what closes the former remote-arbitrary-command-exec
+        # / cross-owner-dispatch hole.
+        owned = await state.get_machine(machine_id, owner=_scope_for(identity_))
+        if owned is None:
+            raise HTTPException(
+                status_code=404, detail=f"machine '{machine_id}' not found"
             )
         if not manager.is_connected(machine_id):
             raise HTTPException(
@@ -208,8 +434,13 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/flows/{flow_id}/respond")
-    async def respond_flow(flow_id: str, req: RespondRequest) -> dict:
-        result = await state.get_flow(flow_id)
+    async def respond_flow(
+        flow_id: str,
+        req: RespondRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        # Ownership gate: a flow on another owner's machine reads as absent.
+        result = await state.get_flow(flow_id, owner=_scope_for(identity_))
         if result is None:
             raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
         machine_id, flow = result
@@ -241,7 +472,11 @@ def create_app() -> FastAPI:
         return {"status": "dispatched", "machine_id": machine_id, "call_id": call_id}
 
     @app.post("/api/flows/{flow_id}/interject")
-    async def interject_flow(flow_id: str, req: InterjectRequest) -> dict:
+    async def interject_flow(
+        flow_id: str,
+        req: InterjectRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
         """Deliver a mid-flow user interjection to a running flow.
 
         Unlike ``/respond`` (which answers an *existing* pending call), this
@@ -252,7 +487,8 @@ def create_app() -> FastAPI:
         text = req.text.strip()
         if not text:
             raise HTTPException(status_code=422, detail="'text' must not be empty")
-        result = await state.get_flow(flow_id)
+        # Ownership gate: a flow on another owner's machine reads as absent.
+        result = await state.get_flow(flow_id, owner=_scope_for(identity_))
         if result is None:
             raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
         machine_id, flow = result
@@ -279,7 +515,9 @@ def create_app() -> FastAPI:
     # on a cache miss. Nothing here is persisted to disk.
 
     @app.get("/api/history")
-    async def list_history() -> dict:
+    async def list_history(
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
         # Entering the history view must always reflect the latest sessions, not
         # whatever index a daemon last happened to push. Actively ask every
         # connected daemon to rebuild and re-push its index, then briefly wait
@@ -298,11 +536,23 @@ def create_app() -> FastAPI:
                 # so a late re-push never leaves a dangling future behind.
                 for machine_id, fut in waiters.items():
                     index_refresh_registry.discard(machine_id, fut)
-        sessions = await state.get_history_index()
-        return {"sessions": sessions, "count": len(sessions)}
+        index = await state.get_history_index(owner=_scope_for(identity_))
+        return {"sessions": index, "count": len(index)}
 
     @app.get("/api/history/{flow_id}")
-    async def history_detail(flow_id: str) -> dict:
+    async def history_detail(
+        flow_id: str, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> dict:
+        # Ownership gate first: a flow whose owning machine belongs to another
+        # owner (or is unknown) reads as absent — even if its records happen to
+        # be cached server-side — so one owner can never pull another's history.
+        scope = _scope_for(identity_)
+        owner_machine = await state.find_machine_for_history_flow(flow_id, owner=scope)
+        if owner_machine is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no history for flow '{flow_id}'",
+            )
         cached = await state.get_history(flow_id)
         if cached is not None:
             return {"flow_id": flow_id, "cached": True, **cached}

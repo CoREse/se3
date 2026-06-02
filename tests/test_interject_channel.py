@@ -255,9 +255,11 @@ def test_dispatch_interject_ignores_empty_text(tmp_path):
 def server_client():
     from fastapi.testclient import TestClient
 
-    from se3.server.app import create_app
+    from _authsrv import authed_app, login
 
-    with TestClient(create_app()) as client:
+    app, _key = authed_app()
+    with TestClient(app) as client:
+        login(client)
         yield client
 
 
@@ -267,7 +269,11 @@ def _snapshot(machine_id, flows):
 
 def test_interject_endpoint_dispatches(server_client):
     with server_client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "h", "6.4.0").to_json())
+        ws.send_text(
+            protocol.make_hello(
+                "m1", "h", "6.4.0", key=server_client.app.state.test_daemon_key
+            ).to_json()
+        )
         protocol.decode(ws.receive_text())  # WELCOME
         ws.send_text(
             protocol.make_status_update(
@@ -300,7 +306,11 @@ def test_interject_endpoint_unknown_flow_404(server_client):
 
 def test_interject_endpoint_rejects_empty_text(server_client):
     with server_client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "h", "6.4.0").to_json())
+        ws.send_text(
+            protocol.make_hello(
+                "m1", "h", "6.4.0", key=server_client.app.state.test_daemon_key
+            ).to_json()
+        )
         protocol.decode(ws.receive_text())
         ws.send_text(
             protocol.make_status_update(
@@ -317,7 +327,11 @@ def test_interject_endpoint_rejects_empty_text(server_client):
 def test_interject_pending_call_fields_reach_snapshot(server_client):
     """A pending call's kind/prompt/options survive the machines snapshot."""
     with server_client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "h", "6.4.0").to_json())
+        ws.send_text(
+            protocol.make_hello(
+                "m1", "h", "6.4.0", key=server_client.app.state.test_daemon_key
+            ).to_json()
+        )
         protocol.decode(ws.receive_text())
         ws.send_text(
             protocol.make_status_update(

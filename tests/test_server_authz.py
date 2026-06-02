@@ -451,3 +451,201 @@ def test_handle_ui_connection_owner_snapshot_is_scoped():
         assert hub.client_count == 0
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# G7 tasks 2 & 3 — REST owner authorization filtering over a live TestClient
+#
+# Two *non-admin* owners A and B each have their own daemon (bound via a daemon
+# key in HELLO). The REST surface must isolate them: A can see and control only
+# A's daemon, B only B's, and an unauthenticated caller sees nothing (401).
+# --------------------------------------------------------------------------
+
+from _authsrv import login  # noqa: E402  (kept beside the tests that use it)
+
+
+@pytest.fixture()
+def authz_app():
+    """A server app seeded with two non-admin owners (A, B), each with a key."""
+    import se3.server.crypto as crypto
+    from se3.server.app import create_app
+    from se3.server.auth.session import CookieConfig, SessionStore
+
+    app = create_app(
+        session_store=SessionStore(cookie_config=CookieConfig(secure=False))
+    )
+    store = app.state.store
+    owners = {}
+    for name in ("A", "B"):
+        oid = store.create_owner(name, is_admin=False)
+        store.link_identity(oid, "local", name)
+        store.set_password(oid, crypto.hash_password("pw"))
+        key_plain, key_hash = crypto.generate_token("dk")
+        store.issue_daemon_key(oid, key_hash)
+        owners[name] = {"owner_id": oid, "key": key_plain}
+    app.state.owners = owners
+    return app
+
+
+def _owner_hello(app, owner_name, machine_id):
+    key = app.state.owners[owner_name]["key"]
+    return protocol.make_hello(machine_id, "h", "6.4.0", key=key).to_json()
+
+
+def _await_visible(client, machine_id, tries=100):
+    for _ in range(tries):
+        machines = client.get("/api/machines").json().get("machines", [])
+        if any(m["machine_id"] == machine_id for m in machines):
+            return
+    raise AssertionError(f"machine {machine_id} never became visible")
+
+
+def test_rest_reads_are_owner_isolated(authz_app):
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
+            da.send_text(_owner_hello(app, "A", "mA"))
+            protocol.decode(da.receive_text())  # WELCOME
+            db.send_text(_owner_hello(app, "B", "mB"))
+            protocol.decode(db.receive_text())  # WELCOME
+            da.send_text(
+                protocol.make_status_update(
+                    {"machine_id": "mA", "flows": [{"flow_id": "fA", "status": "running"}]}
+                ).to_json()
+            )
+            db.send_text(
+                protocol.make_status_update(
+                    {"machine_id": "mB", "flows": [{"flow_id": "fB", "status": "running"}]}
+                ).to_json()
+            )
+            _await_visible(ca, "mA")
+            _await_visible(cb, "mB")
+
+            # /api/machines is scoped to each owner.
+            a_machines = {m["machine_id"] for m in ca.get("/api/machines").json()["machines"]}
+            b_machines = {m["machine_id"] for m in cb.get("/api/machines").json()["machines"]}
+            assert a_machines == {"mA"}
+            assert b_machines == {"mB"}
+
+            # Cross-owner reads are 404 (no existence leak), own reads are 200.
+            assert ca.get("/api/flows/fA").status_code == 200
+            assert ca.get("/api/flows/fB").status_code == 404
+            assert cb.get("/api/flows/fA").status_code == 404
+            assert ca.get("/api/machines/mB/flows").status_code == 404
+            assert ca.get("/api/machines/mA/flows").status_code == 200
+            # Cross-owner history detail is 404 (resolved via the live flow set).
+            assert ca.get("/api/history/fB").status_code == 404
+
+
+def test_rest_unauthenticated_reads_are_401(authz_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(authz_app) as anon:
+        assert anon.get("/api/machines").status_code == 401
+        assert anon.get("/api/machines/mA/flows").status_code == 401
+        assert anon.get("/api/flows/fA").status_code == 401
+        assert anon.get("/api/history").status_code == 401
+        assert anon.get("/api/history/fA").status_code == 401
+
+
+def test_rest_writes_are_owner_isolated(authz_app):
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
+            da.send_text(_owner_hello(app, "A", "mA"))
+            protocol.decode(da.receive_text())
+            db.send_text(_owner_hello(app, "B", "mB"))
+            protocol.decode(db.receive_text())
+            da.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mA",
+                        "flows": [
+                            {
+                                "flow_id": "fA",
+                                "project_root": "/pa",
+                                "status": "running",
+                                "pending_calls": [{"call_id": "cA"}],
+                            }
+                        ],
+                    }
+                ).to_json()
+            )
+            db.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mB",
+                        "flows": [
+                            {"flow_id": "fB", "project_root": "/pb", "status": "running"}
+                        ],
+                    }
+                ).to_json()
+            )
+            _await_visible(ca, "mA")
+            _await_visible(cb, "mB")
+
+            # A may dispatch to its OWN daemon.
+            ok = ca.post(
+                "/api/flows",
+                json={"machine_id": "mA", "task": "do", "project_root": "/pa"},
+            )
+            assert ok.status_code == 202
+            spawn = protocol.decode(da.receive_text())
+            assert spawn.type == protocol.MSG_SPAWN_FLOW
+
+            # A may NOT dispatch to B's daemon — cross-owner reads as absent (404).
+            cross = ca.post(
+                "/api/flows",
+                json={"machine_id": "mB", "task": "pwn", "project_root": "/pb"},
+            )
+            assert cross.status_code == 404
+
+            # The absolute-path constraint is preserved (422 before ownership).
+            rel = ca.post(
+                "/api/flows",
+                json={"machine_id": "mA", "task": "do", "project_root": "relative"},
+            )
+            assert rel.status_code == 422
+
+            # respond / interject are owner-gated: B's flow reads as absent to A.
+            assert (
+                ca.post("/api/flows/fB/respond", json={"response": "x"}).status_code
+                == 404
+            )
+            assert (
+                ca.post("/api/flows/fB/interject", json={"text": "x"}).status_code
+                == 404
+            )
+            # A may respond to its own flow's pending call.
+            own = ca.post("/api/flows/fA/respond", json={"response": "yes"})
+            assert own.status_code == 200
+            respond = protocol.decode(da.receive_text())
+            assert respond.type == protocol.MSG_RESPOND_CALL
+            assert respond.payload["call_id"] == "cA"
+
+
+def test_rest_unauthenticated_writes_are_401(authz_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(authz_app) as anon:
+        assert (
+            anon.post(
+                "/api/flows",
+                json={"machine_id": "mA", "task": "x", "project_root": "/p"},
+            ).status_code
+            == 401
+        )
+        assert (
+            anon.post("/api/flows/fA/respond", json={"response": "x"}).status_code == 401
+        )
+        assert (
+            anon.post("/api/flows/fA/interject", json={"text": "x"}).status_code == 401
+        )

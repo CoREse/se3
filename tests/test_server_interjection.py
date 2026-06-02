@@ -34,10 +34,11 @@ from se3.engine import interaction_calls
 def client_and_app():
     from fastapi.testclient import TestClient
 
-    from se3.server.app import create_app
+    from _authsrv import authed_app, login
 
-    app = create_app()
+    app, _key = authed_app()
     with TestClient(app) as client:
+        login(client)
         yield client, app
 
 
@@ -50,9 +51,11 @@ def _snapshot(machine_id="m1", flows=None):
     }
 
 
-def _register(client, ws, flows):
+def _register(client, app, ws, flows):
     """Send HELLO + STATUS_UPDATE on *ws* and wait for *flows* to land."""
-    ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+    from _authsrv import authed_hello
+
+    ws.send_text(authed_hello(app, "m1", "host-1", "6.4.0"))
     protocol.decode(ws.receive_text())  # WELCOME
     ws.send_text(protocol.make_status_update(_snapshot("m1", flows)).to_json())
     for _ in range(50):
@@ -61,10 +64,10 @@ def _register(client, ws, flows):
 
 
 def test_interject_endpoint_dispatches(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         _register(
-            client, ws,
+            client, app, ws,
             [{"flow_id": "f1", "status": "running", "project_root": "/p"}],
         )
         resp = client.post("/api/flows/f1/interject", json={"text": "add logging"})
@@ -86,19 +89,19 @@ def test_interject_unknown_flow_returns_404(client_and_app):
 
 
 def test_interject_empty_text_returns_422(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        _register(client, ws, [{"flow_id": "f1", "status": "running"}])
+        _register(client, app, ws, [{"flow_id": "f1", "status": "running"}])
         resp = client.post("/api/flows/f1/interject", json={"text": "   "})
         assert resp.status_code == 422
 
 
 def test_interject_offline_machine_returns_503(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     # Register the flow, then drop the daemon connection. The flow stays in
     # ServerState but its owning machine is no longer connected.
     with client.websocket_connect("/ws") as ws:
-        _register(client, ws, [{"flow_id": "f1", "status": "running"}])
+        _register(client, app, ws, [{"flow_id": "f1", "status": "running"}])
     # The flow is still visible…
     assert client.get("/api/flows/f1").status_code == 200
     # …but interject cannot be delivered to an offline machine.
@@ -108,10 +111,10 @@ def test_interject_offline_machine_returns_503(client_and_app):
 
 def test_respond_locates_non_call_kind_pending_call(client_and_app):
     """`/respond` must resolve a pending call of any kind, e.g. retry_decision."""
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         _register(
-            client, ws,
+            client, app, ws,
             [
                 {
                     "flow_id": "f1",

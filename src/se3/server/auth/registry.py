@@ -153,7 +153,7 @@ def make_require_owner(chain: ProviderChain):
     """
     from fastapi import HTTPException, Request  # deferred: server extra only
 
-    def require_owner(request: Request) -> OwnerIdentity:
+    def require_owner(request) -> OwnerIdentity:
         identity = chain.resolve_owner(request)
         if identity is None:
             raise HTTPException(
@@ -163,4 +163,11 @@ def make_require_owner(chain: ProviderChain):
             )
         return identity
 
+    # This module uses ``from __future__ import annotations``, so any inline
+    # annotation would be stored as the *string* ``"Request"`` — and FastAPI's
+    # ``get_type_hints`` cannot resolve it because the deferred ``Request``
+    # import is a local, not a module global. Assigning the real classes to
+    # ``__annotations__`` makes FastAPI recognise the parameter as the request
+    # object to inject (rather than mis-reading it as a query field).
+    require_owner.__annotations__ = {"request": Request, "return": OwnerIdentity}
     return require_owner
