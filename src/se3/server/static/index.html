@@ -12,12 +12,51 @@
     <div class="topbar-right">
       <span id="se3-version" class="se3-version"></span>
       <span id="conn-status" class="conn conn-connecting">connecting&hellip;</span>
-      <button id="history-btn" type="button" class="ghost-btn">History</button>
-      <button id="new-task-btn" type="button">+ New Task</button>
+      <!-- Auth-only controls: hidden until an owner is resolved. -->
+      <button id="history-btn" type="button" class="ghost-btn auth-only hidden">History</button>
+      <button id="keys-btn" type="button" class="ghost-btn auth-only hidden">Daemon&nbsp;Keys</button>
+      <button id="new-task-btn" type="button" class="auth-only hidden">+ New Task</button>
+      <span id="owner-label" class="owner-label auth-only hidden"></span>
+      <button id="logout-btn" type="button" class="ghost-btn auth-only hidden">Logout</button>
     </div>
   </header>
 
-  <main class="layout">
+  <!-- Login gate — shown until an owner identity is resolved. Covers the whole
+       app surface so an unauthenticated visitor sees only the login ceremony. -->
+  <div id="login-view" class="login-view">
+    <div class="login-card">
+      <h2>Sign in</h2>
+      <p class="login-sub">Authenticate to view and control your daemons.</p>
+
+      <form id="login-form" class="login-form">
+        <label for="login-username">Username</label>
+        <input type="text" id="login-username" autocomplete="username"
+               autocapitalize="off" spellcheck="false" required />
+
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password"
+               autocomplete="current-password" required />
+
+        <p id="login-error" class="form-error hidden"></p>
+        <button type="submit" id="login-submit">Sign in</button>
+      </form>
+
+      <div class="login-breakglass">
+        <button type="button" id="breakglass-toggle" class="link-btn">
+          Use a break-glass admin token
+        </button>
+        <form id="breakglass-form" class="login-form hidden">
+          <label for="breakglass-token">Break-glass token</label>
+          <input type="password" id="breakglass-token"
+                 autocomplete="one-time-code" spellcheck="false" />
+          <p id="breakglass-error" class="form-error hidden"></p>
+          <button type="submit" id="breakglass-submit">Enter as admin</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <main id="main-layout" class="layout hidden">
     <aside class="machines-pane">
       <h2>Machines</h2>
       <ul id="machine-list" class="machine-list">
@@ -147,6 +186,43 @@
           <button type="submit" id="nt-submit">Publish</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Daemon-key management modal -->
+  <div id="keys-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Daemon Keys</h3>
+        <button id="keys-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="form-hint">
+          A daemon authenticates to this server with a key bound to your owner
+          account. The plaintext is shown <strong>only once</strong> at creation
+          — copy it into the daemon's <code>--daemon-key</code> config.
+        </p>
+
+        <form id="keys-create-form" class="keys-create">
+          <input type="text" id="keys-label" placeholder="Label (optional)"
+                 autocomplete="off" spellcheck="false" />
+          <button type="submit" id="keys-create-submit">Create key</button>
+        </form>
+
+        <!-- One-time plaintext reveal of a freshly minted key. -->
+        <div id="keys-reveal" class="keys-reveal hidden">
+          <p class="keys-reveal-note">
+            Copy this key now — it will not be shown again.
+          </p>
+          <code id="keys-reveal-value" class="keys-reveal-value"></code>
+        </div>
+
+        <p id="keys-error" class="form-error hidden"></p>
+
+        <div id="keys-list" class="keys-list">
+          <p class="empty">Loading keys&hellip;</p>
+        </div>
+      </div>
     </div>
   </div>
 

@@ -204,46 +204,82 @@ def test_flow_snapshot_from_payload_defaults():
 
 @pytest.fixture()
 def client_and_app():
+    """An authenticated TestClient + app.
+
+    G7 makes the server multi-tenant and fail-closed: every ``/api/*`` route and
+    the ``/ws/ui`` socket require a resolved owner, and the daemon ``/ws`` channel
+    requires a valid HELLO key. The fixture therefore seeds an *admin* owner
+    (admins get the unscoped operator view, preserving the legacy "see every
+    machine" behaviour these tests assert), logs in to obtain a session cookie
+    (auto-persisted by the TestClient cookie jar), and issues a daemon key. The
+    issued key is stashed on ``app.state.test_daemon_key`` so the daemon-channel
+    tests can present it in their HELLO.
+    """
     from fastapi.testclient import TestClient
 
+    import se3.server.crypto as crypto
     from se3.server.app import create_app
+    from se3.server.auth.session import CookieConfig, SessionStore
 
-    app = create_app()
+    # The TestClient speaks plain HTTP, so a Secure cookie would never be sent
+    # back; use a non-secure session cookie for the test transport only.
+    app = create_app(
+        session_store=SessionStore(cookie_config=CookieConfig(secure=False))
+    )
+    store = app.state.store
+    owner_id = store.create_owner("admin", is_admin=True)
+    store.link_identity(owner_id, "local", "admin")
+    store.set_password(owner_id, crypto.hash_password("pw"))
+    key_plain, key_hash = crypto.generate_token("dk")
+    store.issue_daemon_key(owner_id, key_hash)
+    app.state.test_daemon_key = key_plain
+    app.state.test_owner_id = owner_id
     with TestClient(app) as client:
+        resp = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "pw"}
+        )
+        assert resp.status_code == 200, resp.text
         yield client, app
 
 
+def _hello(app, machine_id="m1", hostname="host-1", version="6.4.0"):
+    """Build an authenticated daemon HELLO carrying the fixture's daemon key."""
+    return protocol.make_hello(
+        machine_id, hostname, version, key=app.state.test_daemon_key
+    ).to_json()
+
+
 def test_health_endpoint(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     resp = client.get("/api/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
 
 
 def test_index_serves_frontend(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     resp = client.get("/")
     assert resp.status_code == 200
     assert "SE3" in resp.text
 
 
 def test_machines_empty(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     resp = client.get("/api/machines")
     assert resp.status_code == 200
     assert resp.json() == {"machines": [], "count": 0}
 
 
 def test_unknown_machine_flows_404(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     assert client.get("/api/machines/nope/flows").status_code == 404
     assert client.get("/api/flows/nope").status_code == 404
 
 
 def test_daemon_handshake_and_status_update(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         welcome = protocol.decode(ws.receive_text())
         assert welcome.type == protocol.MSG_WELCOME
         assert welcome.payload["accepted"] is True
@@ -265,7 +301,7 @@ def test_daemon_handshake_and_status_update(client_and_app):
 
 
 def test_bad_hello_is_rejected(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         # First frame is a STATUS_UPDATE, not a HELLO.
         ws.send_text(protocol.make_status_update(_snapshot()).to_json())
@@ -275,9 +311,9 @@ def test_bad_hello_is_rejected(client_and_app):
 
 
 def test_publish_flow_dispatches_spawn(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())  # WELCOME
 
         resp = client.post(
@@ -297,9 +333,9 @@ def test_publish_flow_dispatches_spawn(client_and_app):
 
 
 def test_publish_flow_threads_discover_flag(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())  # WELCOME
 
         resp = client.post(
@@ -318,7 +354,7 @@ def test_publish_flow_threads_discover_flag(client_and_app):
 
 
 def test_publish_flow_unknown_machine_404(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     resp = client.post(
         "/api/flows",
         json={"machine_id": "ghost", "task": "X", "project_root": "/p"},
@@ -327,9 +363,9 @@ def test_publish_flow_unknown_machine_404(client_and_app):
 
 
 def test_publish_flow_rejects_empty_task(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())
         resp = client.post(
             "/api/flows",
@@ -344,9 +380,9 @@ def test_publish_flow_accepts_unknown_absolute_project_root(client_and_app):
     The owning daemon auto-runs `se3 init` on first use, so users can target
     a freshly typed directory directly from the web New Task form.
     """
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())  # WELCOME
 
         # Note: '/never/registered/path' is not in any STATUS_UPDATE.
@@ -364,9 +400,9 @@ def test_publish_flow_accepts_unknown_absolute_project_root(client_and_app):
 
 
 def test_publish_flow_rejects_non_absolute_project_root(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())
         resp = client.post(
             "/api/flows",
@@ -380,9 +416,9 @@ def test_publish_flow_rejects_non_absolute_project_root(client_and_app):
 
 
 def test_publish_flow_rejects_empty_project_root(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())
         resp = client.post(
             "/api/flows",
@@ -392,9 +428,9 @@ def test_publish_flow_rejects_empty_project_root(client_and_app):
 
 
 def test_respond_flow_dispatches_respond_call(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
-        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())  # WELCOME
         ws.send_text(
             protocol.make_status_update(
@@ -424,7 +460,7 @@ def test_respond_flow_dispatches_respond_call(client_and_app):
 
 
 def test_respond_flow_unknown_flow_404(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     resp = client.post("/api/flows/ghost/respond", json={"response": "x"})
     assert resp.status_code == 404
 
@@ -435,7 +471,7 @@ def test_respond_flow_unknown_flow_404(client_and_app):
 
 
 def test_static_assets_served(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     # index.html (via html=True directory serving)
     assert "SE3" in client.get("/").text
     css = client.get("/style.css")
@@ -445,7 +481,7 @@ def test_static_assets_served(client_and_app):
 
 
 def test_ui_ws_receives_initial_snapshot(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws/ui") as ui:
         import json
 
@@ -457,13 +493,13 @@ def test_ui_ws_receives_initial_snapshot(client_and_app):
 def test_ui_ws_broadcasts_daemon_status_update(client_and_app):
     import json
 
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws/ui") as ui:
         snapshot = json.loads(ui.receive_text())
         assert snapshot["type"] == "snapshot"
 
         with client.websocket_connect("/ws") as daemon:
-            daemon.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+            daemon.send_text(_hello(app))
             protocol.decode(daemon.receive_text())  # WELCOME
             # Daemon connect triggers a broadcast to the UI client.
             on_connect = json.loads(ui.receive_text())

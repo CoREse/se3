@@ -63,6 +63,30 @@ def test_owner_decoupled_from_provider_identity_with_many_bindings(store):
     )
 
 
+def test_create_local_user_atomic_owner_binding_password(store):
+    pw_hash = crypto.hash_password("s3cret")
+    oid = store.create_local_user(
+        "local", "bob", pw_hash, display_name="Bob", is_admin=True
+    )
+    # All three facts landed in one transaction.
+    assert store.resolve_owner_by_identity("local", "bob") == oid
+    owner = store.get_owner(oid)
+    assert owner.display_name == "Bob" and owner.is_admin is True
+    assert store.get_password_hash(oid) == pw_hash
+
+
+def test_create_local_user_duplicate_raises_and_leaves_no_orphan(store):
+    pw_hash = crypto.hash_password("pw")
+    first = store.create_local_user("local", "dup", pw_hash)
+    before = {o.owner_id for o in store.list_owners()}
+    with pytest.raises(IdentityAlreadyBound):
+        store.create_local_user("local", "dup", pw_hash)
+    # The rolled-back attempt created no owner row.
+    after = {o.owner_id for o in store.list_owners()}
+    assert after == before
+    assert store.resolve_owner_by_identity("local", "dup") == first
+
+
 def test_resolve_unknown_identity_returns_none(store):
     assert store.resolve_owner_by_identity("local", "nobody") is None
 

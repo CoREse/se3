@@ -18,6 +18,19 @@
 // ---------------------------------------------------------------------------
 
 const state = {
+  // ---- Auth / owner identity ----
+  // The resolved owner for this browser session, as returned by
+  // /api/auth/me|login|breakglass: {owner_id, display_name, is_admin, provider}.
+  // null until authenticated; cleared on logout / a 401 from any /api/* call.
+  identity: null,
+  // Coarse auth state machine value ("unknown" | "login" | "authed"), driven by
+  // the pure `nextAuthState` transition. Gates whether the app surface or the
+  // login gate is shown.
+  authState: "unknown",
+  // Daemon keys owned by the current owner (metadata only — the plaintext is
+  // shown once at creation and never stored here).
+  daemonKeys: [],
+
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
   selectedFlowId: null,   // flow open in the full-screen flow view
@@ -110,6 +123,98 @@ let flowViewHistoryPushed = false;
 // ---------------------------------------------------------------------------
 
 const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Auth / owner identity — pure helpers (DOM-free, isomorphically testable)
+// ---------------------------------------------------------------------------
+
+// Coarse login state machine. `unknown` is the boot value (before /api/auth/me
+// resolves); `login` shows the sign-in gate; `authed` shows the app surface.
+const AUTH_STATES = Object.freeze({
+  UNKNOWN: "unknown",
+  LOGIN: "login",
+  AUTHED: "authed",
+});
+
+// Pure transition for the auth state machine. Events:
+//   "me_ok" | "login_ok" | "breakglass_ok" → AUTHED
+//   "me_401" | "unauthorized" | "logout"   → LOGIN
+// Any other event leaves the state unchanged (idempotent). The transition is
+// deliberately total and side-effect free so it can be unit-tested without a
+// DOM or network.
+function nextAuthState(current, event) {
+  switch (event) {
+    case "me_ok":
+    case "login_ok":
+    case "breakglass_ok":
+      return AUTH_STATES.AUTHED;
+    case "me_401":
+    case "unauthorized":
+    case "logout":
+      return AUTH_STATES.LOGIN;
+    default:
+      return current === AUTH_STATES.AUTHED ||
+        current === AUTH_STATES.LOGIN ||
+        current === AUTH_STATES.UNKNOWN
+        ? current
+        : AUTH_STATES.UNKNOWN;
+  }
+}
+
+// Human-readable label for the resolved owner shown in the top bar. Prefers the
+// display name, falls back to the internal owner_id, and appends an "(admin)"
+// suffix for the operator/break-glass subject. Returns "" for no identity.
+function ownerLabel(identity) {
+  if (!identity || typeof identity !== "object") return "";
+  const name =
+    (typeof identity.display_name === "string" && identity.display_name.trim()) ||
+    (typeof identity.owner_id === "string" && identity.owner_id) ||
+    "unknown";
+  return identity.is_admin ? `${name} (admin)` : name;
+}
+
+// A request is "unauthorized" exactly when the server answered 401. Used to
+// drive the global session-expiry interception (kick back to the login gate).
+function isUnauthorizedStatus(status) {
+  return status === 401;
+}
+
+// Owner-scoping policy for the machine list. The backend already filters
+// /api/machines by owner, but the frontend re-applies the same narrowing
+// defensively so a stale or mixed snapshot can never surface another owner's
+// daemon. An admin (operator view) sees every machine; a regular owner sees
+// only machines whose `owner_id` matches its own. A machine with no resolved
+// owner_id (unbound) is hidden from a regular owner — it is not "theirs".
+function canOwnerControlMachine(machine, identity) {
+  if (!identity || typeof identity !== "object") return false;
+  if (identity.is_admin) return true;
+  if (!machine || typeof machine !== "object") return false;
+  return Boolean(machine.owner_id) && machine.owner_id === identity.owner_id;
+}
+
+// Narrow a machine list to those the current owner may see/control. With no
+// identity the list is empty (fail-closed); an admin gets the list verbatim.
+function visibleMachinesForOwner(machines, identity) {
+  const list = Array.isArray(machines) ? machines : [];
+  if (!identity) return [];
+  if (identity.is_admin) return list.slice();
+  return list.filter((m) => canOwnerControlMachine(m, identity));
+}
+
+// View model for one daemon-key row. Normalizes the label/status presentation
+// so the renderer (and its tests) share one source of truth.
+function daemonKeyRowModel(key) {
+  key = key && typeof key === "object" ? key : {};
+  const revoked = Boolean(key.revoked || key.revoked_at);
+  return {
+    keyId: key.key_id || "",
+    label: (typeof key.label === "string" && key.label.trim()) || "(unlabeled)",
+    revoked,
+    statusLabel: revoked ? "Revoked" : "Active",
+    statusClass: revoked ? "revoked" : "active",
+    createdAt: key.created_at || null,
+  };
+}
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -209,6 +314,45 @@ function setStale(stale) {
   for (const id of ["history-stale", "flow-view-stale"]) {
     const node = $(id);
     if (node) node.classList.toggle("hidden", !stale);
+  }
+}
+
+// fetch() wrapper that intercepts session-expiry. Any /api/* call that comes
+// back 401 means the cookie session is gone (logout elsewhere / expiry); we
+// kick the SPA back to the login gate so the user can re-authenticate instead
+// of staring at a silently-empty dashboard. Same-origin cookies ride along
+// automatically, so no Authorization header is needed.
+async function authedFetch(input, init) {
+  const resp = await fetch(input, init);
+  if (isUnauthorizedStatus(resp.status)) {
+    handleUnauthorized();
+  }
+  return resp;
+}
+
+// Drop back to the login gate after a 401 / explicit logout. Idempotent: a
+// burst of concurrent 401s collapses to a single transition + WS teardown.
+function handleUnauthorized() {
+  if (state.authState === AUTH_STATES.LOGIN) return;
+  state.authState = nextAuthState(state.authState, "unauthorized");
+  state.identity = null;
+  teardownWs();
+  applyAuthState();
+}
+
+// Close the live /ws/ui socket (used on logout / session loss so a stale,
+// now-unauthorized socket is not left dangling reconnecting).
+function teardownWs() {
+  reconnectAttempts = 0;
+  if (ws) {
+    try {
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.close();
+    } catch (_) {
+      /* noop */
+    }
+    ws = null;
   }
 }
 
@@ -452,7 +596,11 @@ function maybeSettleViaPendingCallsDiff(freshFlow) {
 }
 
 function applyMachines(machines) {
-  state.machines = machines;
+  // Defense in depth: the server already scopes /ws/ui pushes to this owner,
+  // but re-apply the owner narrowing on the client so a mixed/stale snapshot
+  // can never render another owner's daemon (or expose New Task / respond /
+  // interject entry points on a machine that is not this owner's).
+  state.machines = visibleMachinesForOwner(machines, state.identity);
 
   // Keep selection valid; default to the first machine.
   if (!state.machines.some((m) => m.machine_id === state.selectedMachineId)) {
@@ -693,7 +841,7 @@ async function loadFlowConversation(flowId) {
   container.__convState = null;
   container.appendChild(el("p", "empty", "Loading conversation…"));
   try {
-    const resp = await fetch(`/api/history/${encodeURIComponent(flowId)}`);
+    const resp = await authedFetch(`/api/history/${encodeURIComponent(flowId)}`);
     // The user may have opened another flow while this was in flight.
     if (state.selectedFlowId !== flowId) return;
     if (!resp.ok) {
@@ -746,7 +894,7 @@ async function refreshFlowDetail() {
   const flowId = state.selectedFlowId;
   if (!flowId) return;
   try {
-    const resp = await fetch(`/api/flows/${encodeURIComponent(flowId)}`);
+    const resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}`);
     if (state.selectedFlowId !== flowId) return;
     if (!resp.ok) {
       noteDetailFetchFailure(`Could not load flow details (${resp.status}).`);
@@ -1419,13 +1567,13 @@ async function sendReply(flowId, target, text) {
   try {
     let resp;
     if (target.kind === "interjection") {
-      resp = await fetch(`/api/flows/${encodeURIComponent(flowId)}/interject`, {
+      resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}/interject`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: text }),
       });
     } else {
-      resp = await fetch(`/api/flows/${encodeURIComponent(flowId)}/respond`, {
+      resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}/respond`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ response: text, call_id: target.callId }),
@@ -1522,7 +1670,7 @@ async function fetchHistoryIndex() {
   state.historyIndexLoading = true;
   renderHistoryList();
   try {
-    const resp = await fetch("/api/history");
+    const resp = await authedFetch("/api/history");
     if (!resp.ok) return;
     const data = await resp.json();
     if (Array.isArray(data.sessions)) {
@@ -1816,7 +1964,7 @@ async function openHistorySession(flowId) {
   detail.appendChild(el("p", "empty", "Loading records…"));
 
   try {
-    const resp = await fetch(`/api/history/${encodeURIComponent(flowId)}`);
+    const resp = await authedFetch(`/api/history/${encodeURIComponent(flowId)}`);
     // The user may have clicked another session while this was in flight.
     if (state.selectedHistoryId !== flowId) return;
     if (!resp.ok) {
@@ -6139,7 +6287,7 @@ async function submitNewTask(event) {
   const submit = $("nt-submit");
   submit.disabled = true;
   try {
-    const resp = await fetch("/api/flows", {
+    const resp = await authedFetch("/api/flows", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -6173,6 +6321,257 @@ function showFormError(node, message) {
 }
 
 // ---------------------------------------------------------------------------
+// Auth flow — login gate, session bootstrap, logout
+// ---------------------------------------------------------------------------
+
+// Reflect the current auth state into the DOM: show the login gate or the app
+// surface, toggle the auth-only top-bar controls, and render the owner label.
+// Driven entirely by `state.authState` / `state.identity` so it stays a pure
+// projection of the state machine.
+function applyAuthState() {
+  const authed = state.authState === AUTH_STATES.AUTHED;
+  const loginView = $("login-view");
+  const mainLayout = $("main-layout");
+  if (loginView) loginView.classList.toggle("hidden", authed);
+  if (mainLayout) mainLayout.classList.toggle("hidden", !authed);
+  for (const node of document.querySelectorAll(".auth-only")) {
+    node.classList.toggle("hidden", !authed);
+  }
+  const label = $("owner-label");
+  if (label) label.textContent = authed ? ownerLabel(state.identity) : "";
+}
+
+// Resolve the existing session (if any) on page load. A 200 means an owner is
+// already signed in (cookie still valid) → straight to the app; a 401 means no
+// session → show the login gate. Network failures degrade to the login gate.
+async function bootstrapAuth() {
+  let resp;
+  try {
+    resp = await fetch("/api/auth/me");
+  } catch (_) {
+    state.authState = nextAuthState(state.authState, "me_401");
+    applyAuthState();
+    return;
+  }
+  if (resp.ok) {
+    const identity = await resp.json().catch(() => null);
+    onAuthenticated(identity, "me_ok");
+  } else {
+    state.identity = null;
+    state.authState = nextAuthState(state.authState, "me_401");
+    applyAuthState();
+  }
+}
+
+// Shared post-authentication entry point (used by bootstrap / login /
+// break-glass): record the owner, advance the state machine, paint the app,
+// and open the realtime socket.
+function onAuthenticated(identity, event) {
+  state.identity = identity || null;
+  state.authState = nextAuthState(state.authState, event);
+  applyAuthState();
+  connect();
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  const errBox = $("login-error");
+  errBox.classList.add("hidden");
+  const username = $("login-username").value.trim();
+  const password = $("login-password").value;
+  if (!username) return showFormError(errBox, "Enter your username.");
+  if (!password) return showFormError(errBox, "Enter your password.");
+
+  const submit = $("login-submit");
+  submit.disabled = true;
+  try {
+    const resp = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (resp.ok) {
+      const identity = await resp.json().catch(() => null);
+      $("login-password").value = "";
+      onAuthenticated(identity, "login_ok");
+    } else if (resp.status === 429) {
+      showFormError(errBox, "Too many attempts — wait a moment and retry.");
+    } else if (resp.status === 503) {
+      showFormError(errBox, "Password login is not enabled on this server.");
+    } else {
+      showFormError(errBox, "Invalid username or password.");
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not reach the server.");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function handleBreakglass(event) {
+  event.preventDefault();
+  const errBox = $("breakglass-error");
+  errBox.classList.add("hidden");
+  const token = $("breakglass-token").value.trim();
+  if (!token) return showFormError(errBox, "Paste the break-glass token.");
+
+  const submit = $("breakglass-submit");
+  submit.disabled = true;
+  try {
+    const resp = await fetch("/api/auth/breakglass", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    if (resp.ok) {
+      const identity = await resp.json().catch(() => null);
+      $("breakglass-token").value = "";
+      onAuthenticated(identity, "breakglass_ok");
+    } else {
+      showFormError(errBox, "Invalid or expired break-glass token.");
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not reach the server.");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function toggleBreakglass() {
+  const form = $("breakglass-form");
+  if (form) form.classList.toggle("hidden");
+}
+
+async function handleLogout() {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch (_) {
+    /* logout is best-effort — clear client state regardless */
+  }
+  state.identity = null;
+  state.machines = [];
+  state.selectedMachineId = null;
+  state.authState = nextAuthState(state.authState, "logout");
+  teardownWs();
+  // Wipe any rendered owner data so a different owner signing in next sees a
+  // clean surface rather than the previous owner's machines.
+  applyMachines([]);
+  applyAuthState();
+}
+
+// ---------------------------------------------------------------------------
+// Daemon-key management panel
+// ---------------------------------------------------------------------------
+
+function openKeys() {
+  $("keys-error").classList.add("hidden");
+  $("keys-reveal").classList.add("hidden");
+  $("keys-label").value = "";
+  $("keys-modal").classList.remove("hidden");
+  loadDaemonKeys();
+}
+
+function closeKeys() {
+  $("keys-modal").classList.add("hidden");
+}
+
+async function loadDaemonKeys() {
+  const listBox = $("keys-list");
+  listBox.innerHTML = "";
+  listBox.appendChild(el("p", "empty", "Loading keys…"));
+  try {
+    const resp = await authedFetch("/api/daemon-keys");
+    if (!resp.ok) {
+      state.daemonKeys = [];
+      renderDaemonKeys();
+      return;
+    }
+    const data = await resp.json().catch(() => ({ keys: [] }));
+    state.daemonKeys = Array.isArray(data.keys) ? data.keys : [];
+  } catch (_) {
+    state.daemonKeys = [];
+  }
+  renderDaemonKeys();
+}
+
+function renderDaemonKeys() {
+  const listBox = $("keys-list");
+  listBox.innerHTML = "";
+  if (!state.daemonKeys.length) {
+    listBox.appendChild(el("p", "empty", "No daemon keys yet."));
+    return;
+  }
+  for (const key of state.daemonKeys) {
+    const model = daemonKeyRowModel(key);
+    const row = el("div", "keys-row" + (model.revoked ? " revoked" : ""));
+    row.append(
+      el("span", "keys-row-label", model.label),
+      el("span", "keys-row-status keys-status-" + model.statusClass, model.statusLabel),
+    );
+    if (!model.revoked && model.keyId) {
+      const btn = el("button", "ghost-btn keys-revoke-btn", "Revoke");
+      btn.type = "button";
+      btn.addEventListener("click", () => revokeDaemonKey(model.keyId));
+      row.appendChild(btn);
+    }
+    listBox.appendChild(row);
+  }
+}
+
+async function createDaemonKey(event) {
+  event.preventDefault();
+  const errBox = $("keys-error");
+  errBox.classList.add("hidden");
+  const submit = $("keys-create-submit");
+  submit.disabled = true;
+  try {
+    const resp = await authedFetch("/api/daemon-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: $("keys-label").value.trim() }),
+    });
+    if (resp.status === 201) {
+      const data = await resp.json().catch(() => ({}));
+      // The plaintext is shown exactly once — surface it prominently, then
+      // refresh the (metadata-only) list.
+      $("keys-reveal-value").textContent = data.key || "";
+      $("keys-reveal").classList.remove("hidden");
+      $("keys-label").value = "";
+      showToast("success", "Daemon key created — copy it now.");
+      loadDaemonKeys();
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not create the key.");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function revokeDaemonKey(keyId) {
+  if (!keyId) return;
+  const errBox = $("keys-error");
+  errBox.classList.add("hidden");
+  try {
+    const resp = await authedFetch(
+      `/api/daemon-keys/${encodeURIComponent(keyId)}`,
+      { method: "DELETE" },
+    );
+    if (resp.ok) {
+      showToast("success", "Daemon key revoked.");
+      loadDaemonKeys();
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not revoke the key.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -6187,6 +6586,20 @@ function init() {
 
   $("history-btn").addEventListener("click", openHistory);
   $("history-close").addEventListener("click", closeHistory);
+
+  // Auth gate: login / break-glass / logout.
+  $("login-form").addEventListener("submit", handleLogin);
+  $("breakglass-form").addEventListener("submit", handleBreakglass);
+  $("breakglass-toggle").addEventListener("click", toggleBreakglass);
+  $("logout-btn").addEventListener("click", handleLogout);
+
+  // Daemon-key management panel.
+  $("keys-btn").addEventListener("click", openKeys);
+  $("keys-close").addEventListener("click", closeKeys);
+  $("keys-create-form").addEventListener("submit", createDaemonKey);
+  $("keys-modal").addEventListener("click", (e) => {
+    if (e.target.id === "keys-modal") closeKeys();
+  });
 
   $("flow-reply-form").addEventListener("submit", submitReply);
   $("flow-interject-btn").addEventListener("click", onInterjectButtonClick);
@@ -6223,7 +6636,10 @@ function init() {
     })
     .catch(() => {});
 
-  connect();
+  // Resolve any existing session, then either open the realtime socket
+  // (authenticated) or show the login gate. `connect()` is now reached only
+  // through the auth flow, never unconditionally on boot.
+  bootstrapAuth();
 }
 
 if (typeof document !== "undefined") {
@@ -6325,6 +6741,15 @@ if (typeof module !== "undefined" && module.exports) {
     bindLocalInterjectionToCallId,
     consumeLocalInterjectionByCallId,
     applyInterjectionEvent,
+    // Auth / owner identity pure helpers (G9) — exposed for the DOM-free
+    // tests in tests/test_server_authz_frontend.mjs.
+    AUTH_STATES,
+    nextAuthState,
+    ownerLabel,
+    isUnauthorizedStatus,
+    canOwnerControlMachine,
+    visibleMachinesForOwner,
+    daemonKeyRowModel,
     state,
   };
 }

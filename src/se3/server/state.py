@@ -85,11 +85,21 @@ class FlowSnapshot:
 
 @dataclass
 class MachineRecord:
-    """Server-side record of one connected (or recently-seen) SE3 machine."""
+    """Server-side record of one connected (or recently-seen) SE3 machine.
+
+    ``owner_id`` is the internal owner this machine's daemon authenticated as
+    during its ``HELLO`` (resolved from the daemon key by the identity layer
+    and written by :meth:`ServerState.register_machine`). It is the trust-domain
+    key every owner-scoped query filters on: a machine with no resolved owner
+    (``None``) belongs to no trust domain and is therefore invisible to any
+    owner-scoped view. The field is live state — it is set on each daemon
+    reconnect and never persisted, matching the rest of this in-memory store.
+    """
 
     machine_id: str
     hostname: str = ""
     se3_version: str = ""
+    owner_id: Optional[str] = None
     connected_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     online: bool = True
@@ -101,6 +111,7 @@ class MachineRecord:
             "machine_id": self.machine_id,
             "hostname": self.hostname,
             "se3_version": self.se3_version,
+            "owner_id": self.owner_id,
             "connected_at": self.connected_at,
             "last_seen": self.last_seen,
             "online": self.online,
@@ -110,6 +121,19 @@ class MachineRecord:
         if include_flows:
             data["flows"] = [f.to_dict() for f in self.flows.values()]
         return data
+
+
+def _owned(record: "MachineRecord", owner: Optional[str]) -> bool:
+    """Whether *record* is visible to an *owner*-scoped query.
+
+    ``owner is None`` is the unscoped / admin view: every machine is visible
+    (this preserves the pre-multi-tenant behaviour and lets a not-yet-wired
+    deployment keep working). When *owner* is a concrete id, only machines the
+    daemon authenticated into that same trust domain are visible — an
+    unbound machine (``owner_id is None``) is fail-closed out of every
+    owner-scoped view.
+    """
+    return owner is None or record.owner_id == owner
 
 
 class ServerState:
@@ -129,12 +153,21 @@ class ServerState:
     # -- machine lifecycle -------------------------------------------------
 
     async def register_machine(
-        self, machine_id: str, hostname: str = "", se3_version: str = ""
+        self,
+        machine_id: str,
+        hostname: str = "",
+        se3_version: str = "",
+        *,
+        owner_id: Optional[str] = None,
     ) -> MachineRecord:
         """Register (or refresh) a machine on HELLO and mark it online.
 
         A reconnecting machine keeps its previously aggregated flows until the
-        next STATUS_UPDATE replaces them.
+        next STATUS_UPDATE replaces them. *owner_id* is the trust domain the
+        daemon authenticated into (resolved from its HELLO key by the identity
+        layer); it is recorded on the machine so every owner-scoped query can
+        filter on it. ``None`` leaves the machine unbound — only the
+        unscoped/admin view will see it.
         """
         async with self._lock:
             record = self._machines.get(machine_id)
@@ -144,6 +177,7 @@ class ServerState:
                     machine_id=machine_id,
                     hostname=hostname,
                     se3_version=se3_version,
+                    owner_id=owner_id,
                     connected_at=now,
                     last_seen=now,
                     online=True,
@@ -152,6 +186,7 @@ class ServerState:
             else:
                 record.hostname = hostname or record.hostname
                 record.se3_version = se3_version or record.se3_version
+                record.owner_id = owner_id
                 record.connected_at = now
                 record.last_seen = now
                 record.online = True
@@ -208,55 +243,99 @@ class ServerState:
 
     # -- queries -----------------------------------------------------------
 
-    async def get_machines(self) -> List[Dict[str, Any]]:
-        """Return summary dicts for every known machine (no nested flows)."""
-        async with self._lock:
-            return [m.to_dict(include_flows=False) for m in self._machines.values()]
+    async def get_machine_owner(self, machine_id: str) -> Optional[str]:
+        """Return the owner bound to *machine_id*, or ``None`` if unknown/unbound.
 
-    async def get_machine(self, machine_id: str) -> Optional[Dict[str, Any]]:
-        """Return the full record for *machine_id*, or ``None`` if unknown."""
+        Used by the owner-scoped ``/ws/ui`` push paths to decide which UI
+        clients may see a machine's flow/history/interjection events.
+        """
         async with self._lock:
             record = self._machines.get(machine_id)
-            return record.to_dict() if record is not None else None
+            return record.owner_id if record is not None else None
 
-    async def get_machines_full(self) -> List[Dict[str, Any]]:
+    async def get_machines(
+        self, *, owner: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Return summary dicts for every known machine (no nested flows).
+
+        When *owner* is given, only machines bound to that owner are returned.
+        """
+        async with self._lock:
+            return [
+                m.to_dict(include_flows=False)
+                for m in self._machines.values()
+                if _owned(m, owner)
+            ]
+
+    async def get_machine(
+        self, machine_id: str, *, owner: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the full record for *machine_id*, or ``None`` if unknown.
+
+        With *owner* set, a machine owned by a different owner is reported as
+        ``None`` (indistinguishable from absent — no cross-owner existence
+        leak).
+        """
+        async with self._lock:
+            record = self._machines.get(machine_id)
+            if record is None or not _owned(record, owner):
+                return None
+            return record.to_dict()
+
+    async def get_machines_full(
+        self, *, owner: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Return full dicts (machines *with* their nested flows).
 
         Used to build the realtime payload broadcast to web-frontend clients,
         which need the flow list in a single frame rather than one REST call
-        per machine.
+        per machine. With *owner* set, only that owner's machines are included.
         """
         async with self._lock:
-            return [m.to_dict(include_flows=True) for m in self._machines.values()]
+            return [
+                m.to_dict(include_flows=True)
+                for m in self._machines.values()
+                if _owned(m, owner)
+            ]
 
     async def get_machine_flows(
-        self, machine_id: str
+        self, machine_id: str, *, owner: Optional[str] = None
     ) -> Optional[List[Dict[str, Any]]]:
-        """Return the flow list for *machine_id*, or ``None`` if unknown."""
+        """Return the flow list for *machine_id*, or ``None`` if unknown.
+
+        With *owner* set, a machine owned by a different owner reads as
+        ``None`` (no cross-owner visibility).
+        """
         async with self._lock:
             record = self._machines.get(machine_id)
-            if record is None:
+            if record is None or not _owned(record, owner):
                 return None
             return [f.to_dict() for f in record.flows.values()]
 
     async def get_flow(
-        self, flow_id: str
+        self, flow_id: str, *, owner: Optional[str] = None
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
         """Find a flow by id across all machines.
 
         Returns ``(machine_id, flow_dict)`` or ``None`` when no machine owns a
-        flow with that id.
+        flow with that id. With *owner* set, flows on machines belonging to a
+        different owner are skipped — owner A can neither see nor (via the
+        callers that gate on this) control owner B's flows.
         """
         async with self._lock:
             for machine_id, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
                 flow = record.flows.get(flow_id)
                 if flow is not None:
                     return machine_id, flow.to_dict()
         return None
 
-    async def find_machine_for_flow(self, flow_id: str) -> Optional[str]:
+    async def find_machine_for_flow(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[str]:
         """Return the machine id owning *flow_id*, or ``None``."""
-        result = await self.get_flow(flow_id)
+        result = await self.get_flow(flow_id, owner=owner)
         return result[0] if result is not None else None
 
     # -- history relay (in-memory only, never persisted) -------------------
@@ -275,16 +354,25 @@ class ServerState:
             cleaned = [dict(s) for s in (sessions or []) if isinstance(s, dict)]
             self._history_index[machine_id] = cleaned
 
-    async def get_history_index(self) -> List[Dict[str, Any]]:
+    async def get_history_index(
+        self, *, owner: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Return the history index aggregated across every machine.
 
         Each entry is annotated with the ``machine_id`` that reported it and
         the list is sorted by ``updated_at`` descending (entries lacking the
-        field sort last).
+        field sort last). With *owner* set, only sessions reported by machines
+        bound to that owner are included — history is owner-scoped just like the
+        live machine/flow views.
         """
         async with self._lock:
             entries: List[Dict[str, Any]] = []
             for machine_id, sessions in self._history_index.items():
+                record = self._machines.get(machine_id)
+                if owner is not None and (
+                    record is None or not _owned(record, owner)
+                ):
+                    continue
                 for session in sessions:
                     entry = dict(session)
                     entry.setdefault("machine_id", machine_id)
@@ -344,22 +432,39 @@ class ServerState:
                 "updated_at": cached.get("updated_at"),
             }
 
-    async def find_machine_for_history_flow(self, flow_id: str) -> Optional[str]:
+    async def find_machine_for_history_flow(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[str]:
         """Resolve which machine owns *flow_id* for an on-demand history pull.
 
         Checks the reported history index first, then any cached history
         bundle's owner, then the live flow set — so a flow can be pulled
-        whether it is historical or still active.
+        whether it is historical or still active. With *owner* set, a candidate
+        machine is only accepted when it is bound to that owner, so one owner
+        cannot pull another owner's history.
         """
         async with self._lock:
+
+            def _accept(machine_id: str) -> bool:
+                if owner is None:
+                    return True
+                record = self._machines.get(machine_id)
+                return record is not None and _owned(record, owner)
+
             for machine_id, sessions in self._history_index.items():
+                if not _accept(machine_id):
+                    continue
                 for session in sessions:
                     if str(session.get("flow_id") or "") == flow_id:
                         return machine_id
             cached = self._history_data.get(flow_id)
             if cached is not None and cached.get("machine_id"):
-                return str(cached["machine_id"])
+                cached_mid = str(cached["machine_id"])
+                if _accept(cached_mid):
+                    return cached_mid
             for machine_id, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
                 if flow_id in record.flows:
                     return machine_id
         return None

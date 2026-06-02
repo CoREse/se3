@@ -362,10 +362,11 @@ def test_status_update_broadcasts_interjection_event_to_ui_clients():
     ``interjection_event`` payload on the live ``/ws/ui`` channel."""
     from fastapi.testclient import TestClient
 
-    from se3.server.app import create_app
+    from _authsrv import authed_app, authed_hello, login
 
-    app = create_app()
+    app, _key = authed_app()
     with TestClient(app) as client:
+        login(client)
         with client.websocket_connect("/ws/ui") as ui_ws:
             # The initial snapshot frame the server sends on UI connect.
             initial = json.loads(ui_ws.receive_text())
@@ -373,7 +374,7 @@ def test_status_update_broadcasts_interjection_event_to_ui_clients():
 
             with client.websocket_connect("/ws") as daemon_ws:
                 daemon_ws.send_text(
-                    protocol.make_hello("m-e2e", "h", "6.4.0").to_json()
+                    authed_hello(app, "m-e2e", "h", "6.4.0")
                 )
                 protocol.decode(daemon_ws.receive_text())  # WELCOME
                 # STATUS_UPDATE: a new interjection-kind pending_call appears.

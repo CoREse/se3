@@ -1,5 +1,6 @@
 """SE 3.0 CLI - Main entry point for se3 commands."""
 
+import os
 import re
 import subprocess
 import sys
@@ -591,6 +592,17 @@ def daemon_start_cmd(
             "default server port 8080 (matching the se3-server default)."
         ),
     ),
+    daemon_key: Optional[str] = typer.Option(
+        None,
+        "--daemon-key",
+        help=(
+            "Secret daemon credential sent to the central server so it can "
+            "bind this machine to its owner. When omitted, the SE3_DAEMON_KEY "
+            "environment variable is used. The key is held only in memory and "
+            "is never written to logs or the daemon status file. Prefer the "
+            "environment variable so the secret does not land in shell history."
+        ),
+    ),
     foreground: bool = typer.Option(
         False, "--foreground", help="Run the daemon in the foreground (do not detach)"
     ),
@@ -608,7 +620,10 @@ def daemon_start_cmd(
     if server_url:
         _precheck_websockets(server_url)
 
-    config = DaemonConfig(server_url=server_url)
+    # The explicit flag wins; otherwise fall back to the environment so a
+    # secret need not appear on the command line / in shell history.
+    resolved_key = daemon_key or os.environ.get("SE3_DAEMON_KEY") or None
+    config = DaemonConfig(server_url=server_url, daemon_key=resolved_key)
     try:
         result = start_daemon(config, foreground=foreground)
     except DaemonAlreadyRunning as exc:

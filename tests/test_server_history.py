@@ -14,6 +14,7 @@ import threading
 
 import pytest
 
+from _authsrv import authed_hello
 from se3.daemon import protocol
 from se3.server.state import ServerState
 
@@ -160,7 +161,8 @@ def client_and_app(monkeypatch):
     from fastapi.testclient import TestClient
 
     import se3.server.app as app_module
-    from se3.server.app import create_app
+
+    from _authsrv import authed_app, login
 
     # ``GET /api/history`` now broadcasts a forced index re-push to every
     # connected daemon and waits for the replies. Tests using a stand-in
@@ -168,8 +170,9 @@ def client_and_app(monkeypatch):
     # on every call, so shorten the wait here.
     monkeypatch.setattr(app_module, "HISTORY_INDEX_REFRESH_TIMEOUT", 0.3)
 
-    app = create_app()
+    app, _key = authed_app()
     with TestClient(app) as client:
+        login(client)
         yield client, app
 
 
@@ -188,9 +191,9 @@ def _receive_until(daemon, msg_type):
 
 
 def test_history_index_message_routed_to_state(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
-        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         protocol.decode(daemon.receive_text())  # WELCOME
         daemon.send_text(
             protocol.make_history_index(
@@ -206,11 +209,11 @@ def test_history_index_message_routed_to_state(client_and_app):
 
 
 def test_history_index_broadcast_to_ui(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws/ui") as ui:
         assert json.loads(ui.receive_text())["type"] == "snapshot"
         with client.websocket_connect("/ws") as daemon:
-            daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+            daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
             protocol.decode(daemon.receive_text())  # WELCOME
             assert json.loads(ui.receive_text())["type"] == "status_update"
             daemon.send_text(
@@ -222,11 +225,11 @@ def test_history_index_broadcast_to_ui(client_and_app):
 
 
 def test_history_data_message_cached_and_broadcast(client_and_app):
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws/ui") as ui:
         assert json.loads(ui.receive_text())["type"] == "snapshot"
         with client.websocket_connect("/ws") as daemon:
-            daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+            daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
             protocol.decode(daemon.receive_text())  # WELCOME
             assert json.loads(ui.receive_text())["type"] == "status_update"
             # Active flow incremental append arrives unsolicited.
@@ -250,9 +253,9 @@ def test_history_data_message_cached_and_broadcast(client_and_app):
 
 def test_history_detail_on_demand_pull(client_and_app):
     """A cache miss triggers a MSG_HISTORY_REQUEST and resolves on the reply."""
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
-        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         protocol.decode(daemon.receive_text())  # WELCOME
         # Report the index so the server knows m1 owns f1.
         daemon.send_text(protocol.make_history_index([{"flow_id": "f1"}]).to_json())
@@ -299,9 +302,9 @@ def test_history_detail_pull_timeout(client_and_app, monkeypatch):
     import se3.server.app as app_module
 
     monkeypatch.setattr(app_module, "HISTORY_PULL_TIMEOUT", 0.5)
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
-        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         protocol.decode(daemon.receive_text())  # WELCOME
         daemon.send_text(protocol.make_history_index([{"flow_id": "f1"}]).to_json())
         for _ in range(50):
@@ -440,9 +443,9 @@ def test_broadcast_index_refresh_discards_waiter_on_send_failure():
 
 def test_history_list_broadcasts_index_refresh_request(client_and_app):
     """Entering the history view asks every connected daemon to re-push."""
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
-        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         protocol.decode(daemon.receive_text())  # WELCOME
 
         result: dict = {}
@@ -463,9 +466,9 @@ def test_history_list_broadcasts_index_refresh_request(client_and_app):
 def test_history_list_returns_latest_after_forced_repush(client_and_app):
     """A stale cached index (5/14) is replaced by the daemon's forced
     re-push (5/21) before GET /api/history aggregates and returns."""
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
-        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         protocol.decode(daemon.receive_text())  # WELCOME
         # Stale index the server caches up front (only an old 5/14 entry).
         daemon.send_text(
@@ -505,9 +508,9 @@ def test_history_list_returns_latest_after_forced_repush(client_and_app):
 def test_history_list_degrades_to_cache_on_timeout(client_and_app):
     """A connected daemon that never answers the refresh request still yields
     a prompt 200 with the currently cached index (no 5xx, no hang)."""
-    client, _ = client_and_app
+    client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
-        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         protocol.decode(daemon.receive_text())  # WELCOME
         daemon.send_text(
             protocol.make_history_index(

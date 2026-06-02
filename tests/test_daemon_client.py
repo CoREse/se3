@@ -403,14 +403,26 @@ def _free_port() -> int:
     return port
 
 
-def _start_server(port: int):
-    """Start a fresh uvicorn-hosted FastAPI server on *port* in a thread."""
+def _start_server(port: int, seed_key: str | None = None):
+    """Start a fresh uvicorn-hosted FastAPI server on *port* in a thread.
+
+    When *seed_key* is given, that daemon key is also accepted by the new
+    server (in addition to the freshly issued one). This lets a reconnecting
+    client keep using its original key against a fresh server on the same port.
+    """
     import uvicorn
 
-    from se3.server.app import create_app
+    import se3.server.crypto as crypto
+    from _authsrv import authed_app
 
+    app, daemon_key = authed_app()
+    if seed_key is not None:
+        app.state.store.issue_daemon_key(
+            app.state.test_owner_id, crypto.token_hash(seed_key)
+        )
+        daemon_key = seed_key
     config = uvicorn.Config(
-        create_app(), host="127.0.0.1", port=port, log_level="warning"
+        app, host="127.0.0.1", port=port, log_level="warning"
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -419,7 +431,7 @@ def _start_server(port: int):
     while not server.started and time.time() < deadline:
         time.sleep(0.05)
     assert server.started, "uvicorn server did not start"
-    return server, thread
+    return server, thread, daemon_key
 
 
 def _stop_server(server, thread) -> None:
@@ -440,7 +452,7 @@ def test_client_connects_reports_and_receives():
     import httpx
 
     port = _free_port()
-    server, thread = _start_server(port)
+    server, thread, daemon_key = _start_server(port)
     snapshot = {
         "machine_id": "m-e2e",
         "hostname": "e2e-host",
@@ -455,6 +467,7 @@ def test_client_connects_reports_and_receives():
         snapshot_provider=lambda: snapshot,
         spawn_handler=lambda t, p, ty, d: spawned.append((t, p, ty, d)),
         status_interval=0.2,
+        daemon_key=daemon_key,
     )
     base = f"http://127.0.0.1:{port}"
 
@@ -465,6 +478,11 @@ def test_client_connects_reports_and_receives():
         assert client.connected, f"client never connected: {client.last_error}"
 
         async with httpx.AsyncClient(base_url=base) as http:
+            # Authenticate the REST client (cookie persists across requests).
+            login_resp = await http.post(
+                "/api/auth/login", json={"username": "admin", "password": "pw"}
+            )
+            assert login_resp.status_code == 200, login_resp.text
             # The server should learn our machine + flow from the pushed snapshot.
             for _ in range(300):
                 resp = await http.get("/api/flows/f-e2e")
@@ -612,7 +630,7 @@ def test_client_reconnects_after_server_drop():
     """The client must re-establish the connection (with backoff) after the
     server goes away and comes back."""
     port = _free_port()
-    server, thread = _start_server(port)
+    server, thread, daemon_key = _start_server(port)
     client = DaemonClient(
         f"ws://127.0.0.1:{port}",
         machine_id="m-recon",
@@ -620,6 +638,7 @@ def test_client_reconnects_after_server_drop():
         se3_version="6.4.0",
         snapshot_provider=lambda: {"machine_id": "m-recon", "flows": []},
         status_interval=0.2,
+        daemon_key=daemon_key,
     )
 
     async def scenario():
@@ -635,9 +654,10 @@ def test_client_reconnects_after_server_drop():
         await _wait_connected(client, want=False)
         assert not client.connected
 
-        # Bring a fresh server back up on the same port.
-        server2, thread2 = await asyncio.get_event_loop().run_in_executor(
-            None, _start_server, port
+        # Bring a fresh server back up on the same port; reuse the original
+        # daemon key so the reconnecting client still authenticates.
+        server2, thread2, _key2 = await asyncio.get_event_loop().run_in_executor(
+            None, _start_server, port, daemon_key
         )
         try:
             await _wait_connected(client, tries=400)

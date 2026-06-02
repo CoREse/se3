@@ -19,11 +19,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from se3.daemon import protocol
 
 from .state import ServerState
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .identity import IdentityService
 
 #: WS event type pushed to ``/ws/ui`` clients when an interjection chip's
 #: lifecycle phase changes. Older frontends that do not recognise this type
@@ -376,27 +379,34 @@ def _make_interjection_event(
 
 
 class UiHub:
-    """Fan-out hub for web-frontend WebSocket clients.
+    """Owner-scoped fan-out hub for web-frontend WebSocket clients.
 
     The frontend (``static/app.js``) dials ``/ws/ui`` and expects a realtime
-    push of the whole machine list whenever a daemon's state changes. This hub
-    tracks those browser sockets and broadcasts to all of them at once. Unlike
-    :class:`ConnectionManager` it is keyed by nothing — frontend clients are
-    anonymous and interchangeable.
+    push of the machine list whenever a daemon's state changes. This hub tracks
+    those browser sockets and broadcasts to them — but, unlike a flat fan-out,
+    each client is registered with the **owner** it authenticated as, and every
+    push is filtered to that owner's trust domain so no client ever sees
+    another owner's machines / flows / history.
+
+    The owner mapping is ``websocket -> owner_id`` where ``owner_id`` may be
+    ``None`` for the unscoped/admin view (an operator console, or a deployment
+    that has not yet wired authentication): a ``None`` client receives the
+    unfiltered stream, exactly as before multi-tenancy existed.
     """
 
     def __init__(self) -> None:
-        self._clients: set = set()
+        # websocket -> owner_id (None == unscoped/admin view)
+        self._clients: Dict[Any, Optional[str]] = {}
         self._lock = asyncio.Lock()
 
-    async def register(self, websocket: Any) -> None:
+    async def register(self, websocket: Any, owner: Optional[str] = None) -> None:
         async with self._lock:
-            self._clients.add(websocket)
+            self._clients[websocket] = owner
         logger.info("UI client connected (%d total)", len(self._clients))
 
     async def unregister(self, websocket: Any) -> None:
         async with self._lock:
-            self._clients.discard(websocket)
+            self._clients.pop(websocket, None)
         logger.info("UI client disconnected (%d total)", len(self._clients))
 
     @property
@@ -404,71 +414,166 @@ class UiHub:
         """Number of currently-connected frontend clients."""
         return len(self._clients)
 
+    def distinct_owners(self) -> set:
+        """The set of distinct owners currently connected (may include ``None``).
+
+        The owner-scoped push helpers use this to compute one filtered payload
+        per owner rather than per client, since clients of the same owner all
+        receive identical frames.
+        """
+        return set(self._clients.values())
+
     async def broadcast(self, payload: Dict[str, Any]) -> None:
-        """Send *payload* (a JSON-serializable dict) to every UI client."""
+        """Send *payload* to every UI client, unfiltered.
+
+        Retained for owner-agnostic frames (none currently); owner-sensitive
+        pushes use :meth:`broadcast_scoped` / :meth:`broadcast_owned` instead.
+        """
+        await self._send_map({owner: payload for owner in self.distinct_owners()})
+
+    async def broadcast_scoped(
+        self, payload_by_owner: Dict[Optional[str], Optional[Dict[str, Any]]]
+    ) -> None:
+        """Send each owner the payload precomputed for it.
+
+        *payload_by_owner* maps an owner id (or ``None`` for the admin view) to
+        the frame that owner should receive. A ``None`` value (or a missing
+        key) means "send nothing to that owner".
+        """
+        await self._send_map(payload_by_owner)
+
+    async def broadcast_owned(
+        self, payload: Dict[str, Any], owner: Optional[str]
+    ) -> None:
+        """Send *payload* only to clients allowed to see *owner*'s data.
+
+        A client sees the frame when it is the unscoped/admin view
+        (``client_owner is None``) or when its owner equals *owner* (the trust
+        domain the data belongs to). Data with no owner (``owner is None``,
+        e.g. an unbound machine) is therefore visible only to the admin view —
+        fail-closed for every scoped client.
+        """
         async with self._lock:
-            clients = list(self._clients)
-        if not clients:
+            clients = list(self._clients.items())
+        await self._fan_out(
+            [
+                (ws, payload)
+                for ws, client_owner in clients
+                if client_owner is None or client_owner == owner
+            ]
+        )
+
+    async def _send_map(
+        self, payload_by_owner: Dict[Optional[str], Optional[Dict[str, Any]]]
+    ) -> None:
+        async with self._lock:
+            clients = list(self._clients.items())
+        targets = []
+        for ws, owner in clients:
+            payload = payload_by_owner.get(owner)
+            if payload is None:
+                continue
+            targets.append((ws, payload))
+        await self._fan_out(targets)
+
+    async def _fan_out(self, targets: list) -> None:
+        if not targets:
             return
         import json
 
-        text = json.dumps(payload, ensure_ascii=False, default=str)
         dead = []
-        for client in clients:
+        for client, payload in targets:
             try:
-                await client.send_text(text)
+                await client.send_text(
+                    json.dumps(payload, ensure_ascii=False, default=str)
+                )
             except Exception:  # pragma: no cover - best effort
                 dead.append(client)
         if dead:
             async with self._lock:
                 for client in dead:
-                    self._clients.discard(client)
+                    self._clients.pop(client, None)
 
 
 async def _push_state(hub: Optional["UiHub"], state: ServerState, kind: str) -> None:
-    """Broadcast the current machine list to all UI clients (best effort)."""
+    """Broadcast the machine list to UI clients, scoped per owner (best effort).
+
+    Each distinct connected owner gets a list filtered to its own machines;
+    the unscoped/admin view (``owner is None``) gets the full list.
+    """
     if hub is None or hub.client_count == 0:
         return
-    machines = await state.get_machines_full()
-    await hub.broadcast({"type": kind, "machines": machines})
+    payload_by_owner: Dict[Optional[str], Optional[Dict[str, Any]]] = {}
+    for owner in hub.distinct_owners():
+        machines = await state.get_machines_full(owner=owner)
+        payload_by_owner[owner] = {"type": kind, "machines": machines}
+    await hub.broadcast_scoped(payload_by_owner)
 
 
 async def _push_history_index(hub: Optional["UiHub"], state: ServerState) -> None:
-    """Broadcast the aggregated history index to all UI clients (best effort)."""
+    """Broadcast the history index to UI clients, scoped per owner (best effort)."""
     if hub is None or hub.client_count == 0:
         return
-    sessions = await state.get_history_index()
-    await hub.broadcast({"type": "history_index", "sessions": sessions})
+    payload_by_owner: Dict[Optional[str], Optional[Dict[str, Any]]] = {}
+    for owner in hub.distinct_owners():
+        sessions = await state.get_history_index(owner=owner)
+        payload_by_owner[owner] = {"type": "history_index", "sessions": sessions}
+    await hub.broadcast_scoped(payload_by_owner)
 
 
 async def _push_history_data(
     hub: Optional["UiHub"],
+    state: ServerState,
+    machine_id: str,
     flow_id: str,
     mode: str,
     records: list,
 ) -> None:
-    """Broadcast a history-data delta for *flow_id* to all UI clients."""
+    """Broadcast a history-data delta for *flow_id* to its owner's UI clients.
+
+    History records originate from a specific daemon (*machine_id*), so the
+    delta is visible only to that machine's owner (plus the admin view) — never
+    to another owner's console.
+    """
     if hub is None or hub.client_count == 0:
         return
-    await hub.broadcast(
-        {"type": "history_data", "flow_id": flow_id, "mode": mode, "records": records}
+    owner = await state.get_machine_owner(machine_id)
+    await hub.broadcast_owned(
+        {"type": "history_data", "flow_id": flow_id, "mode": mode, "records": records},
+        owner,
     )
 
 
 async def handle_ui_connection(
-    websocket: Any, hub: "UiHub", state: ServerState
+    websocket: Any,
+    hub: "UiHub",
+    state: ServerState,
+    *,
+    owner: Optional[str] = None,
+    require_owner: bool = False,
 ) -> None:
-    """Serve one web-frontend WebSocket connection.
+    """Serve one web-frontend WebSocket connection, scoped to *owner*.
 
-    Accepts the socket, sends an initial full ``snapshot``, registers the
-    client with the hub, then idles reading frames purely so a client
-    disconnect is detected promptly. Frontend clients are not expected to send
-    anything meaningful; any frame they do send is ignored.
+    Accepts the socket, sends an initial ``snapshot`` filtered to *owner*'s
+    machines, registers the client with the hub under that owner, then idles
+    reading frames purely so a client disconnect is detected promptly. Frontend
+    clients are not expected to send anything meaningful; any frame they do
+    send is ignored.
+
+    *owner* is the trust domain the connecting human authenticated as (resolved
+    by the auth layer before this coroutine runs). ``None`` is the
+    unscoped/admin view. When *require_owner* is true a ``None`` owner is
+    rejected fail-closed — the socket is accepted and immediately closed so an
+    unauthenticated UI connection never receives any machine data.
     """
+    if require_owner and owner is None:
+        await websocket.accept()
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
-    await hub.register(websocket)
+    await hub.register(websocket, owner)
     try:
-        machines = await state.get_machines_full()
+        machines = await state.get_machines_full(owner=owner)
         await websocket.send_text(
             __import__("json").dumps(
                 {"type": "snapshot", "machines": machines},
@@ -493,6 +598,7 @@ async def handle_daemon_connection(
     registry: Optional["HistoryRequestRegistry"] = None,
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
+    identity: Optional["IdentityService"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -503,6 +609,16 @@ async def handle_daemon_connection(
     frames resolve any on-demand pull parked in *registry*; inbound
     ``MSG_HISTORY_INDEX`` frames resolve any index-refresh parked in
     *index_registry*.
+
+    When an *identity* service is supplied the HELLO is authenticated:
+    the daemon's ``key`` is resolved to an internal ``owner_id`` and the machine
+    is bound to that trust domain (its :class:`MachineRecord.owner_id`). A
+    missing or invalid key is rejected fail-closed — the server answers
+    ``WELCOME(accepted=false)`` and closes without entering the receive loop, so
+    an unauthenticated daemon contributes nothing to any owner's view. When
+    *identity* is ``None`` the channel is unauthenticated (the pre-multi-tenant
+    behaviour / a deployment that has not yet wired auth): the machine is
+    registered with no owner.
     """
     await websocket.accept()
     machine_id: Optional[str] = None
@@ -539,7 +655,33 @@ async def handle_daemon_connection(
 
         hostname = str(hello.payload.get("hostname") or "")
         se3_version = str(hello.payload.get("se3_version") or "")
-        await state.register_machine(machine_id, hostname, se3_version)
+
+        # Authenticate the daemon's key → owner_id when an identity service is
+        # wired. The key is a secret credential and is NEVER logged (only the
+        # accept/reject outcome and the resolved owner are).
+        owner_id: Optional[str] = None
+        if identity is not None:
+            key = str(hello.payload.get("key") or "")
+            owner_id = identity.resolve_owner_for_key(key)
+            if owner_id is None:
+                logger.warning(
+                    "Rejecting daemon %s: unauthorized or missing daemon key",
+                    machine_id,
+                )
+                await websocket.send_text(
+                    protocol.make_welcome(
+                        SERVER_VERSION,
+                        accepted=False,
+                        reason="unauthorized daemon key",
+                    ).to_json()
+                )
+                await websocket.close()
+                return
+            identity.bind_machine(machine_id, owner_id)
+
+        await state.register_machine(
+            machine_id, hostname, se3_version, owner_id=owner_id
+        )
         await manager.connect(machine_id, websocket)
         await websocket.send_text(protocol.make_welcome(SERVER_VERSION).to_json())
         await _push_state(hub, state, "status_update")
@@ -656,8 +798,13 @@ async def _handle_message(
             # backward-compatible.
             if interjection_tracker is not None and hub is not None:
                 events = interjection_tracker.diff_machine(machine_id, snapshot)
-                for event in events:
-                    await hub.broadcast(event)
+                if events:
+                    # Interjection chips belong to this machine's owner, so the
+                    # lifecycle events are scoped to that owner (plus the admin
+                    # view) rather than fanned out to every console.
+                    owner = await state.get_machine_owner(machine_id)
+                    for event in events:
+                        await hub.broadcast_owned(event, owner)
     elif message.type == protocol.MSG_PONG:
         await state.touch(machine_id)
     elif message.type == protocol.MSG_CALL_NOTIFICATION:
@@ -695,6 +842,6 @@ async def _handle_message(
             )
             if registry is not None:
                 registry.resolve(flow_id, await state.get_history(flow_id))
-            await _push_history_data(hub, flow_id, mode, records)
+            await _push_history_data(hub, state, machine_id, flow_id, mode, records)
     else:  # pragma: no cover - decode() restricts to known daemon->server types
         logger.debug("Ignoring unexpected daemon message type %s", message.type)
