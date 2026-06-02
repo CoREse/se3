@@ -34,6 +34,12 @@ revision will never *send* them; if it ever *receives* one it does not
 recognise, the frame is rejected as an unknown type — callers decoding
 untrusted frames should therefore tolerate :class:`ProtocolError` rather
 than crash, so new and old peers can interoperate.
+
+The multi-tenant control plane added an optional ``key`` field to the HELLO
+payload (the daemon credential the server resolves to an owner). It is purely
+additive: a daemon with no key omits the field, and an older single-tenant
+server that does not understand it simply ignores it — so the version was not
+bumped for it. The key is a secret and MUST never be logged.
 """
 
 from __future__ import annotations
@@ -233,17 +239,32 @@ def decode(raw: str) -> Message:
 # daemon both build messages exclusively through these.
 
 
-def make_hello(machine_id: str, hostname: str, se3_version: str) -> Message:
-    """daemon → server: announce a daemon and identify its machine."""
-    return Message(
-        type=MSG_HELLO,
-        payload={
-            "machine_id": machine_id,
-            "hostname": hostname,
-            "se3_version": se3_version,
-            "protocol_version": PROTOCOL_VERSION,
-        },
-    )
+def make_hello(
+    machine_id: str, hostname: str, se3_version: str, key: str = ""
+) -> Message:
+    """daemon → server: announce a daemon and identify its machine.
+
+    *key* is the daemon credential the multi-tenant server resolves to an owner
+    (``key → owner_id``) so it can bind the reporting machine to a trust domain.
+    It is **optional on the wire**: when *key* is empty the ``key`` field is
+    omitted entirely, so a daemon running purely locally (or against a legacy
+    single-tenant server) produces the exact same payload as before — the field
+    is additive and an older server simply ignores it. A server that requires a
+    key treats a HELLO without one as unauthenticated and answers
+    ``WELCOME(accepted=false)``.
+
+    The key is a secret credential: it lives only in memory and on the wire here
+    and MUST NOT be logged. Callers logging a HELLO must never echo this field.
+    """
+    payload: Dict[str, Any] = {
+        "machine_id": machine_id,
+        "hostname": hostname,
+        "se3_version": se3_version,
+        "protocol_version": PROTOCOL_VERSION,
+    }
+    if key:
+        payload["key"] = key
+    return Message(type=MSG_HELLO, payload=payload)
 
 
 def make_welcome(server_version: str, accepted: bool = True, reason: str = "") -> Message:

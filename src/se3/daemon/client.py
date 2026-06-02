@@ -121,6 +121,7 @@ class DaemonClient:
         hostname: str,
         se3_version: str,
         snapshot_provider: SnapshotProvider,
+        daemon_key: str = "",
         spawn_handler: Optional[SpawnHandler] = None,
         ensure_handler: Optional[EnsureHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
@@ -138,6 +139,11 @@ class DaemonClient:
             se3_version: SE3 version advertised in HELLO.
             snapshot_provider: Zero-arg callable returning the current machine
                 snapshot dict (typically ``aggregator.get_snapshot().to_dict()``).
+            daemon_key: Optional daemon credential carried in HELLO. The
+                multi-tenant server resolves it to an owner and binds this
+                machine to that trust domain; an empty key means "no
+                credential" (local / legacy single-tenant operation). The key
+                is held only in memory and on the wire — it is never logged.
             spawn_handler: Callable invoked for an incoming SPAWN_FLOW.
             ensure_handler: Optional pre-spawn hook called with the resolved
                 ``project_root`` *before* the spawn handler. Used by the
@@ -171,6 +177,9 @@ class DaemonClient:
         self.machine_id = machine_id
         self.hostname = hostname
         self.se3_version = se3_version
+        # Secret daemon credential carried in HELLO. Kept private and never
+        # logged; only ``make_hello`` ever reads it.
+        self._daemon_key = daemon_key or ""
         self._snapshot_provider = snapshot_provider
         self._spawn_handler = spawn_handler
         self._ensure_handler = ensure_handler
@@ -186,6 +195,15 @@ class DaemonClient:
         self._seq = 0
         self._connected = False
         self._last_error: Optional[str] = None
+        # Set when the server answers HELLO with ``WELCOME(accepted=false)``.
+        # The run loop checks it after each session and stops reconnecting
+        # rather than hammering the server with a key it has already rejected
+        # (fail-closed: an unauthenticated daemon degrades to local-only).
+        self._auth_rejected = False
+        # Bound to the running loop inside :meth:`_session`; set by the WELCOME
+        # handler so the session unwinds immediately on a rejection instead of
+        # waiting for the server to close the socket.
+        self._auth_rejected_event: Optional[asyncio.Event] = None
         # History push state, reset on every (re)connection so a freshly
         # connected server always receives a fresh index and full snapshots.
         self._last_index: Optional[list] = None
@@ -256,6 +274,18 @@ class DaemonClient:
                 self._connected = False
             if stop_event.is_set():
                 break
+            if self._auth_rejected:
+                # The server rejected our HELLO credential. Retrying would just
+                # replay the same rejected key in a tight loop, so we stop the
+                # reconnect storm and stay local-only. The reason is preserved
+                # in ``last_error`` for ``se3 daemon status`` to surface.
+                logger.error(
+                    "Central server rejected this daemon's credential (%s); "
+                    "not reconnecting. The daemon continues in local-only mode. "
+                    "Re-issue / fix the daemon key and restart the daemon to retry.",
+                    self._last_error or "no reason given",
+                )
+                return
             # Wait out the backoff, but wake immediately on shutdown.
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
@@ -284,9 +314,23 @@ class DaemonClient:
             # Bind the fast-push event to *this* session's running loop; the
             # previous session's event (if any) is dropped along with it.
             self._fast_push_event = asyncio.Event()
-            # Announce ourselves, then push a full snapshot immediately so a
-            # freshly (re)connected server has state before the first tick.
-            await self._send(ws, protocol.make_hello(self.machine_id, self.hostname, self.se3_version))
+            # Bind the auth-rejection event to this session's loop. A new
+            # session optimistically assumes acceptance until a WELCOME says
+            # otherwise.
+            self._auth_rejected_event = asyncio.Event()
+            # Announce ourselves (carrying the daemon credential, when set),
+            # then push a full snapshot immediately so a freshly (re)connected
+            # server has state before the first tick. The key is passed to
+            # make_hello only — it is never written to a log line.
+            await self._send(
+                ws,
+                protocol.make_hello(
+                    self.machine_id,
+                    self.hostname,
+                    self.se3_version,
+                    self._daemon_key,
+                ),
+            )
             await self._push_status(ws)
             await self._push_history(ws, force_index=True)
             # Prime the signature so the fast push loop only fires on the *next*
@@ -298,8 +342,11 @@ class DaemonClient:
             recv_task = asyncio.create_task(self._receive_loop(ws, stop_event))
             push_task = asyncio.create_task(self._push_loop(ws, stop_event))
             stop_task = asyncio.create_task(stop_event.wait())
+            # A WELCOME(accepted=false) sets this event so the session unwinds
+            # at once rather than idling until the server closes the socket.
+            abort_task = asyncio.create_task(self._auth_rejected_event.wait())
             done, pending = await asyncio.wait(
-                {recv_task, push_task, stop_task},
+                {recv_task, push_task, stop_task, abort_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
@@ -480,8 +527,7 @@ class DaemonClient:
         if message.type == protocol.MSG_PING:
             await self._send(ws, protocol.make_pong(seq=message.seq))
         elif message.type == protocol.MSG_WELCOME:
-            accepted = message.payload.get("accepted", True)
-            logger.info("Server WELCOME received (accepted=%s)", accepted)
+            self._handle_welcome(message.payload)
         elif message.type == protocol.MSG_SPAWN_FLOW:
             self._handle_spawn(message.payload)
         elif message.type == protocol.MSG_RESPOND_CALL:
@@ -494,6 +540,29 @@ class DaemonClient:
             await self._handle_history_index_request(ws)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
+
+    def _handle_welcome(self, payload: Dict[str, Any]) -> None:
+        """Process the server's WELCOME, honouring an ``accepted=false`` reject.
+
+        On acceptance this is just an informational log line. On rejection — the
+        server could not resolve this daemon's credential to an owner — we
+        record the reason in :attr:`last_error`, flag :attr:`_auth_rejected` so
+        the run loop stops reconnecting, and signal the session to unwind now.
+        The ``reason`` is server-supplied prose (e.g. ``"unknown daemon key"``)
+        and never contains the key itself, so it is safe to log; we never echo
+        the credential we sent.
+        """
+        accepted = bool(payload.get("accepted", True))
+        if accepted:
+            logger.info("Server WELCOME received (accepted=True)")
+            return
+        reason = str(payload.get("reason") or "").strip() or "server rejected HELLO"
+        self._auth_rejected = True
+        self._last_error = reason
+        logger.warning("Server WELCOME received (accepted=False): %s", reason)
+        event = self._auth_rejected_event
+        if event is not None:
+            event.set()
 
     def _handle_spawn(self, payload: Dict[str, Any]) -> None:
         """Route a SPAWN_FLOW instruction to the daemon's spawner.

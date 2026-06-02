@@ -103,6 +103,11 @@ class DaemonConfig:
     Attributes:
         server_url: Central-server URL the daemon dials out to. Stored now;
             the outbound WebSocket client is wired in a later group.
+        daemon_key: Secret daemon credential carried in HELLO so the
+            multi-tenant server can resolve this daemon to an owner. ``None``
+            / empty means "no credential" (local / legacy single-tenant
+            operation). Held only in memory and passed to the outbound client;
+            it is never written to the status file or any log.
         pid_dir: Directory for the pidfile, status file and log.
         poll_interval: Seconds between aggregation polls.
         machine_id: Stable id for this machine; auto-derived when ``None``.
@@ -116,6 +121,7 @@ class DaemonConfig:
     """
 
     server_url: Optional[str] = None
+    daemon_key: Optional[str] = None
     pid_dir: Path = field(default_factory=_default_pid_dir)
     poll_interval: float = 2.0
     machine_id: Optional[str] = None
@@ -262,6 +268,7 @@ class Daemon:
             machine_id=self.aggregator.machine_id,
             hostname=self.aggregator.hostname,
             se3_version=_se3_version(),
+            daemon_key=self.config.daemon_key or "",
             snapshot_provider=lambda: self.aggregator.get_snapshot().to_dict(),
             spawn_handler=self._handle_spawn_request,
             ensure_handler=self._handle_ensure_request,
@@ -672,6 +679,11 @@ def _start_detached_subprocess(config: DaemonConfig) -> Dict[str, object]:  # pr
     if config.server_url:
         args += ["--server-url", config.server_url]
     child_env = os.environ.copy()
+    # Pass the daemon credential through the environment, never on argv — a key
+    # on the command line would be visible in the process list. The foreground
+    # child reads SE3_DAEMON_KEY back when it rebuilds its DaemonConfig.
+    if config.daemon_key:
+        child_env["SE3_DAEMON_KEY"] = config.daemon_key
     try:
         import se3 as _se3
 
