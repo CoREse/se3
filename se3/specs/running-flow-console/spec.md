@@ -2277,10 +2277,22 @@ sourced from the selected machine's record:
    text input that accepts an absolute path; the entered path is sent as
    `project_root` to `POST /api/flows`.
 
+The New Task form is additionally **owner-scoped** on the now multi-tenant
+control plane (see the `base` spec's *Server Identity, Authentication and
+Persistence* requirement): the machine picker and its linked `project_root`
+dropdown are populated only from machines belonging to the currently
+authenticated owner — a machine bound to a different owner never appears as a
+target and the form cannot dispatch a flow to it. `POST /api/flows` is guarded
+by `Depends(require_owner)` and verifies that the selected machine belongs to
+the current owner before dispatching; a cross-owner target reads as not-found
+(404) rather than being spawned.
+
 The server endpoint `POST /api/flows` MUST validate only that the supplied
 `project_root` is an absolute path; it MUST NOT reject paths that are absent
 from the machine's known-roots list. Membership in `project_roots` is a hint
-for the dropdown, not a precondition for spawning.
+for the dropdown, not a precondition for spawning. (This is orthogonal to the
+owner check above: the path-shape validation gates the `project_root` value,
+while owner ownership gates the target machine.)
 
 When the user-supplied target directory is not yet an SE3 project (no
 `se3/specs/base/spec.md` marker), the daemon MUST initialize it on the user's
@@ -2328,3 +2340,19 @@ Task form itself need not require the user to pre-initialize the directory.
 - **THEN** the daemon first initializes the directory as an SE3 project (per
   the spawner/client bullets in the `base` spec), registers the new root, and
   then continues with the normal spawn path
+
+#### Scenario: New Task only targets the authenticated owner's machines
+- **GIVEN** the central server hosts machine `M1` owned by the current owner
+  `O1` and machine `M2` owned by a different owner `O2`
+- **WHEN** the user opens the New Task form
+- **THEN** the machine picker and its linked Project dropdown surface only
+  `M1` (and `M1`'s `project_roots`); `M2` does not appear as a selectable
+  target
+
+#### Scenario: New Task submission to a cross-owner machine is rejected
+- **GIVEN** the current owner `O1` crafts a `POST /api/flows` request whose
+  target machine is `M2`, owned by another owner `O2`
+- **WHEN** the server validates the request
+- **THEN** the request is rejected as not-found (404) and no flow is spawned on
+  `M2`, because the owner check gates the target machine regardless of the
+  `project_root` path being absolute

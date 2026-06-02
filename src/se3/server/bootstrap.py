@@ -1,57 +1,134 @@
-I'll analyze the conflict by examining how `bootstrap.py` is actually used across the codebase to determine the correct resolution.I'll examine the key consumers to determine which API surface the rest of the code expects.`__init__.py` and `app.py` are also conflicted. Let me look at the test files (which define the expected contract) and the conflicted consumers.The test file references BOTH API styles (it's also conflicted). Since `bootstrap.py` must be consistent with its real runtime consumers, let me examine the conflicted `app.py` and `__init__.py` to see which API the system actually calls.`__init__.py` is already resolved to the HEAD API (`run_bootstrap_token_cli`). Let me verify the current conflict state across these files and check app.py's usage.app.py is resolved and imports `DEFAULT_DB_PATH` (G5 symbol) while `__init__.py` uses `run_bootstrap_token_cli` (HEAD symbol). So the resolution must be a **merge** of both APIs. Let me read app.py's bootstrap-related code precisely.Let me read app.py's argparse section and the breakglass endpoint to understand exactly what's needed.app.py only needs `DEFAULT_DB_PATH` from bootstrap; `__init__.py` needs `run_bootstrap_token_cli`. Now let me examine the conflicted test file to see which API half should win, so bootstrap.py matches.The resolution is clear: keep HEAD's comprehensive `bootstrap.py` (which `__init__.py`'s `run_bootstrap_token_cli` and the breakglass design require) and add the `DEFAULT_DB_PATH` constant that the resolved `app.py` imports. Let me verify `load_server_config().resolved_db_path()` exists so HEAD's CLI isn't broken.Both exist, so HEAD's CLI is valid. The resolution: keep HEAD's comprehensive module (required by `__init__.py`'s `run_bootstrap_token_cli` and the breakglass design) and add the `DEFAULT_DB_PATH` constant that the resolved `app.py` imports. Here is the fully resolved file:
+"""Break-glass bootstrap — minting the one-time admin escape-hatch token.
 
-"""Break-glass bootstrap: the one-time admin escape hatch.
+The break-glass token is the single, IdP-independent escape hatch into the
+multi-tenant control plane (see the design's break-glass section). It is *not*
+a daily login and never distinguishes trust domains — it is one admin subject
+used only for two orthogonal problems:
 
-Break-glass is the *single, provider-independent* way into the control plane.
-It exists to solve exactly two orthogonal problems and nothing else:
+1. **bootstrap** — the first admin uses it to get in and create accounts /
+   configure an auth provider;
+2. **fail-closed fallback** — an emergency entrance when the configured auth
+   provider is unreachable.
 
-1. **Bootstrap** — the very first admin has no account yet, so they need a way
-   in to create accounts / configure an auth provider.
-2. **Fail-closed fallback** — when the configured auth provider is unreachable
-   or misconfigured (and the request boundary therefore refuses everyone), an
-   operator still needs an emergency entrance.
+Distinguishing real owners is the local auth provider's job; break-glass never
+models multiple trust domains.
 
-It is deliberately a *single admin subject*, not a multi-owner mechanism:
-distinguishing trust domains is the job of the built-in
-:class:`~se3.server.auth.local.LocalAuthProvider` (or an enabled OIDC). A
-break-glass token MUST NOT be used as "one token per user".
+This module is deliberately dependency-light: it pulls in only the persistence
+layer (stdlib ``sqlite3``) and the crypto helpers, never FastAPI / uvicorn.
+That keeps ``se3-server bootstrap-token`` off the heavy web import chain so it
+works even on a core-only install, and is why ``se3.server.__init__.main``
+intercepts the subcommand *before* importing the ``[server]`` extra.
 
-Security properties (mirrored from the multi-tenant server design):
+Security invariants:
 
-- The token plaintext is generated with :func:`se3.server.crypto.generate_token`
-  (256 bits of entropy) and printed to the server console **exactly once** by
-  the issuing CLI; only its SHA-256 hash is persisted in ``breakglass_tokens``.
-- Re-issuable: minting a fresh token purges any prior outstanding tokens, so an
-  operator can always rotate the escape hatch ("re-sign overwrites old").
-- One-time / temporary: a token is consumed atomically (valid at most once) and
-  may additionally carry an absolute expiry; a consumed or expired token fails.
-- Validation is constant-time: the presented plaintext is hashed and matched
-  against the stored hash through the persistence layer's keyed lookup (the
-  stored value is a SHA-256 hash, so no plaintext comparison ever occurs), and
-  the crypto layer's comparisons go through :func:`hmac.compare_digest`.
-- The token is **never** written to any log — neither on issue nor on consume.
-  Only non-secret facts (a token *id*, an outcome) may be logged.
+* The token plaintext is generated, only its SHA-256 *hash* is persisted (via
+  :meth:`Store.put_breakglass`), and the plaintext is printed to the server
+  console exactly once — never stored, never logged.
+* Issuance is re-runnable (a fresh token each time); previously minted tokens
+  stay valid until consumed or purged.
+"""
 
-Importing this module is safe on a core-only install: it pulls in only the
-stdlib-``sqlite3`` persistence layer and the crypto helpers (whose argon2/bcrypt
-backends are deferred). The FastAPI / session machinery is imported lazily and
-only on the server-side consume path, so ``se3-server bootstrap-token`` can mint
-a token without the ``se3[server]`` extra installed — which is precisely what
-makes break-glass usable as a fail-closed escape hatch.
-"""I need to read the file first before writing.I resolved the conflict. Here's my reasoning:
+from __future__ import annotations
 
-**The two sides had incompatible APIs**, so I couldn't blindly pick one:
-- **HEAD**: comprehensive module — `issue_breakglass_token` (returns plaintext `str`), plus `consume_breakglass_token`, `ensure_breakglass_admin`, `consume_breakglass_login`, `format_announcement`, `run_bootstrap_token_cli`, and the `BREAKGLASS_*` constants.
-- **impl/…/G5**: lean module — `issue_breakglass_token` (returns `(plaintext, token_id)` tuple), `print_breakglass_token`, `main`, and a `DEFAULT_DB_PATH` constant.
+import argparse
+from pathlib import Path
+from typing import Optional, TextIO, Tuple
 
-**I checked the already-resolved runtime consumers** to decide which surface the rest of the merge committed to:
-- `src/se3/server/__init__.py` (resolved) calls `from .bootstrap import run_bootstrap_token_cli` — a **HEAD-only** symbol.
-- `src/se3/server/app.py` (resolved) does `from .bootstrap import DEFAULT_DB_PATH` and uses it as the `se3-server --db-path` default — a **G5-only** symbol.
+#: Default on-disk location of the server's sqlite store. The running server
+#: (``se3-server``) defaults to the same path, so a token minted here is
+#: consumable by that server's ``POST /api/auth/breakglass``.
+DEFAULT_DB_PATH = "~/.se3/server.db"
 
-So the resolution is a **hybrid**: keep HEAD's full module (its `run_bootstrap_token_cli` is what `__init__.py` invokes, and `issue_breakglass_token→str` is what that CLI internally relies on) **and add the `DEFAULT_DB_PATH` constant** that `app.py` imports. I also wired `DEFAULT_DB_PATH` into the CLI's `--db-path` help text for consistency.
 
-I verified `load_server_config().resolved_db_path()` exists in `config.py` (lines 3064/3069), so HEAD's CLI path isn't broken. I dropped G5's `print_breakglass_token`/`main`/tuple-return because they're unreachable under the resolved `__init__.py` and conflict with the `str` return that `run_bootstrap_token_cli` depends on.
+def issue_breakglass_token(
+    store, *, ttl_seconds: Optional[float] = None
+) -> Tuple[str, str]:
+    """Mint a break-glass token against *store*; return ``(plaintext, token_id)``.
 
-**Two notes for the broader merge** (outside this file, which I left untouched per the task scope):
-- `tests/test_breakglass_bootstrap.py` is still conflicted and contains both test halves. To match this `bootstrap.py`, its **HEAD half** (lines 32–299, using `issue_breakglass_token→str`, `format_announcement`, `consume_breakglass_login`, `run_bootstrap_token_cli`) should be kept; the G5 half (which calls `print_breakglass_token` and unpacks a tuple) won't work against this module.
-- `tests/test_extract_failures.py`, `tests/engine/test_extract_failures.py`, and several `.pyc` files still carry conflict markers — those need separate resolution (the `.pyc` files are just stale caches).
+    Only the token *hash* is persisted; the returned plaintext is the secret to
+    print **once** and is never stored or logged by this function.
+    """
+    from . import crypto
+
+    plaintext, token_hash = crypto.generate_token("bg")
+    expires_at: Optional[float] = None
+    if ttl_seconds is not None:
+        import time
+
+        expires_at = time.time() + float(ttl_seconds)
+    token_id = store.put_breakglass(token_hash, expires_at=expires_at)
+    return plaintext, token_id
+
+
+def print_breakglass_token(
+    db_path: str = DEFAULT_DB_PATH,
+    *,
+    ttl_seconds: Optional[float] = None,
+    stream: Optional[TextIO] = None,
+) -> str:
+    """Open the store at *db_path*, mint a token, print it once, return the plaintext.
+
+    The plaintext is written to *stream* (default ``sys.stdout``) — the single
+    console reveal the design mandates — and returned for programmatic callers
+    (tests). It is never returned through any persisted record.
+    """
+    import sys
+
+    from .persistence import Store
+
+    out = stream if stream is not None else sys.stdout
+    store = Store(Path(db_path).expanduser())
+    plaintext, token_id = issue_breakglass_token(store, ttl_seconds=ttl_seconds)
+    _print_banner(out, plaintext, token_id, ttl_seconds)
+    return plaintext
+
+
+def _print_banner(
+    out: TextIO, plaintext: str, token_id: str, ttl_seconds: Optional[float]
+) -> None:
+    rule = "=" * 64
+    lines = [
+        "",
+        rule,
+        "  se3-server break-glass admin token (shown ONCE — copy it now)",
+        rule,
+        f"  token:  {plaintext}",
+        f"  id:     {token_id}",
+    ]
+    if ttl_seconds is not None:
+        lines.append(f"  expires in: {int(ttl_seconds)}s")
+    lines += [
+        "",
+        "  Present it at POST /api/auth/breakglass (or the web login's",
+        "  break-glass field) to mint a one-time admin session. It is",
+        "  single-use; re-run this command to mint another.",
+        rule,
+        "",
+    ]
+    out.write("\n".join(lines) + "\n")
+
+
+def main(argv: Optional[list] = None) -> int:
+    """``se3-server bootstrap-token`` subcommand entry point.
+
+    Dependency-light by design: it never imports FastAPI / uvicorn, so it works
+    on a core-only install as well as on the server host.
+    """
+    parser = argparse.ArgumentParser(
+        prog="se3-server bootstrap-token",
+        description="Mint a one-time break-glass admin token (printed once).",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=DEFAULT_DB_PATH,
+        help=f"Path to the server sqlite store (default: {DEFAULT_DB_PATH})",
+    )
+    parser.add_argument(
+        "--ttl",
+        type=float,
+        default=None,
+        help="Optional time-to-live in seconds (default: no expiry)",
+    )
+    args = parser.parse_args(argv)
+    print_breakglass_token(args.db_path, ttl_seconds=args.ttl)
+    return 0

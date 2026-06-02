@@ -1676,11 +1676,15 @@ file access. Recommended alternatives:
 ### Requirement: Daemon and Server Configuration
 
 The SE3 daemon (`se3 daemon`) and the central server (`se3-server`) each
-expose a small set of runtime configuration parameters. Unlike the
-`se3.yaml`-driven options above, these parameters are currently sourced
-from CLI flags and built-in dataclass / argparse defaults rather than
-from `se3.yaml`; they are documented here so the configuration surface
-of the daemon/server feature has a single registered home.
+expose a set of runtime configuration parameters. The daemon parameters
+are sourced from CLI flags / environment variables and built-in
+dataclass defaults. The central server's identity / auth / persistence
+parameters are read from the `server:` section of `se3.yaml` (loaded via
+`load_server_config` into the `ServerConfig` dataclass with the same
+global→project top-level-key override as the rest of the config), with
+`se3-server` CLI flags overriding a subset; they are documented here so
+the configuration surface of the daemon/server feature has a single
+registered home.
 
 **Daemon parameters** (`DaemonConfig` in `src/se3/daemon/daemon.py`):
 
@@ -1697,6 +1701,60 @@ of the daemon/server feature has a single registered home.
   from silently falling back to the WebSocket-standard port 80 while
   the server listens on the default port, which left the central
   server with no machine registration.
+- `daemon.daemon_key` — The secret daemon credential the daemon presents
+  in its HELLO so the multi-tenant server can resolve it to an owner
+  (`key → owner_id`) and bind the reporting machine to that trust domain
+  (see the `base` spec's *Server Identity, Authentication and
+  Persistence* requirement). It is NOT read from `se3.yaml`; it is
+  supplied via `se3 daemon start --daemon-key <key>` or the
+  `SE3_DAEMON_KEY` environment variable (the flag takes precedence),
+  defaults to `null`/empty (keyless = local / legacy single-tenant
+  operation, no owner binding), is propagated to spawned `se3 run`
+  subprocesses via the `SE3_DAEMON_KEY` child-environment variable, and
+  is a secret that is never written to the daemon status file or any
+  log.
+
+**Server identity / auth / persistence parameters** (`ServerConfig` /
+`AuthConfig` in `src/se3/config.py`, under the `server:` section):
+
+- `server.db_path` — Filesystem path of the embedded sqlite store backing
+  owners / identity-bindings / local credentials / daemon-key hashes /
+  break-glass token hashes (default: `~/.se3/server.db`). The
+  `se3-server --db-path <path>` flag overrides it for a single launch
+  (an explicit `--db-path` wins over the configured value).
+- `server.auth.providers` — Ordered list of auth provider type names the
+  registry assembles into the provider chain (default: `["local"]`).
+  Recognized names are `local`, `oidc`, and `proxy_header`; unknown or
+  non-string entries are warned-and-dropped, and an empty / fully-invalid
+  list falls back to the default `["local"]`. If the assembled chain ends
+  up with no usable provider, the server fails closed (see the `base`
+  spec) rather than serving anonymously.
+- `server.auth.session.*` — UI session cookie security attributes for the
+  local provider:
+  `cookie_name` (default: `se3_session`),
+  `cookie_secure` (default: `true`),
+  `cookie_httponly` (default: `true`),
+  `cookie_samesite` (default: `lax`; an invalid value warns and falls
+  back to `lax`), and
+  `max_age_seconds` (default: `86400`, the 24-hour session lifetime).
+- `server.auth.local.*` — Brute-force defense for the local provider:
+  `max_failed_attempts` consecutive failures lock an account for
+  `lockout_seconds`, and independently at most `ratelimit_max_attempts`
+  login attempts are accepted per `ratelimit_window_seconds` window
+  (defaults: `5` / `300` / `60` / `10`; each coerced to a positive
+  integer).
+- `server.auth.oidc.*` — Disabled-by-default OIDC social-login seam
+  (`enabled` default `false`; `issuer` / `client_id` / `client_secret` /
+  `redirect_url` optional strings; `scopes` default
+  `["openid", "email", "profile"]`). v1 ships only the config seam; the
+  provider is not implemented, and the fields are inert while `enabled`
+  is false.
+- `server.auth.proxy_header.*` — Disabled-by-default reverse-proxy
+  trusted-identity-header seam (`enabled` default `false`; `trust_proxy`
+  default `false`; `header` default `X-Forwarded-Email`). When enabled,
+  the reverse proxy MUST strip any client-supplied copy of `header` and
+  the server MUST NOT be reachable bypassing the proxy, otherwise the
+  injected identity is forgeable (an authz hole). v1 ships only the seam.
 
 **Server parameters** (`se3-server` entry point in
 `src/se3/server/app.py`):
@@ -1755,3 +1813,34 @@ a magic number.
 - **AND** the printed version string equals `se3.__version__`, which is
   the single canonical version source (sourced from `pyproject.toml`)
   and is the same value reported by the core `se3 version` command
+
+#### Scenario: Default server config has no se3.yaml server section
+- **WHEN** `se3.yaml` has no `server:` section
+- **THEN** `ServerConfig` yields `db_path = ~/.se3/server.db` and
+  `auth.providers = ["local"]` (the built-in local provider), with the
+  session cookie defaulting to `Secure` + `HttpOnly` + `SameSite=lax`
+  and the local lockout / rate-limit defaults (`5` / `300` / `60` / `10`)
+
+#### Scenario: Explicit --db-path overrides server.db_path
+- **GIVEN** `server.db_path: /var/lib/se3/server.db` in `se3.yaml`
+- **WHEN** the user runs `se3-server --db-path /tmp/test.db`
+- **THEN** the server opens the sqlite store at `/tmp/test.db`
+- **AND** the configured `server.db_path` is unused for that launch
+
+#### Scenario: Disabling the only provider triggers fail-closed
+- **GIVEN** `server.auth.providers` resolves to no usable provider (e.g.
+  the built-in `local` provider is explicitly disabled and no other
+  provider is enabled)
+- **WHEN** the server application is assembled from this config
+- **THEN** assembly fails closed (`AuthNotConfigured`) and the server
+  refuses to serve rather than reverting to the identity-unaware bare mode
+
+#### Scenario: Daemon key is sourced from flag or environment, never se3.yaml
+- **WHEN** the daemon is started with `se3 daemon start --daemon-key K`
+  (or with `SE3_DAEMON_KEY=K` in the environment)
+- **THEN** `DaemonConfig.daemon_key` is `K` and the daemon presents it in
+  HELLO so the server can resolve `key → owner_id`
+- **AND** the flag takes precedence over the environment variable when
+  both are present
+- **AND** the key is not read from `se3.yaml` and never appears in the
+  daemon status file or log

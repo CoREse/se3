@@ -1,0 +1,35 @@
+id: '164'
+title: 'OIDC provider config key mismatch: `OidcProvider._REQUIRED_KEYS` requires
+  `''redirect_uri''` (`src/se3/server/auth/oidc.py:60`), but the config dataclass
+  (`src/se3/config.py:2918` as `redirect_url`) and `app.py` wiring (`src/se3/server/app.py:774`
+  as `''redirect_url''`) use `''redirect_url''`. A fully-configured OIDC provider
+  would compute `fully_configured=False` and stay permanently disabled. This is confined
+  to the explicitly non-mandatory-v1 OIDC seam, whose `begin_login`/`complete_login`
+  raise `NotImplementedError` regardless — it cannot authenticate anyone and does
+  not affect the mandatory local-auth path, the break-glass path, the fail-closed
+  default, or any owner-authz boundary.'
+description: 'OIDC provider config key mismatch: `OidcProvider._REQUIRED_KEYS` requires
+  `''redirect_uri''` (`src/se3/server/auth/oidc.py:60`), but the config dataclass
+  (`src/se3/config.py:2918` as `redirect_url`) and `app.py` wiring (`src/se3/server/app.py:774`
+  as `''redirect_url''`) use `''redirect_url''`. A fully-configured OIDC provider
+  would compute `fully_configured=False` and stay permanently disabled. This is confined
+  to the explicitly non-mandatory-v1 OIDC seam, whose `begin_login`/`complete_login`
+  raise `NotImplementedError` regardless — it cannot authenticate anyone and does
+  not affect the mandatory local-auth path, the break-glass path, the fail-closed
+  default, or any owner-authz boundary.
+
+
+  Suggestion: Align the key name: rename `OidcProvider._REQUIRED_KEYS` (and the docstring
+  at `oidc.py:51`) from `''redirect_uri''` to `''redirect_url''` to match `config.py:2918`
+  and `app.py:774`, so the enablement gate works when the OIDC ceremony is implemented.
+  No change required for v1 correctness.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-02T16:22:06.163184'
+updated_at: '2026-06-02T16:22:06.163184'

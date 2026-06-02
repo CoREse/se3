@@ -195,14 +195,20 @@ class TestOidcAndProxySeams:
 
     def test_proxy_header_custom(self):
         ph = ProxyHeaderConfig.from_dict(
-            {"enabled": True, "header": "X-Auth-Email"}
+            {"enabled": True, "trust_proxy": True, "header": "X-Auth-Email"}
         )
         assert ph.enabled is True
+        assert ph.trust_proxy is True
         assert ph.header == "X-Auth-Email"
+
+    def test_proxy_header_trust_proxy_defaults_false(self):
+        ph = ProxyHeaderConfig.from_dict({"enabled": True})
+        assert ph.trust_proxy is False
 
     def test_proxy_header_blank_falls_back(self):
         ph = ProxyHeaderConfig.from_dict({"header": ""})
         assert ph.header == "X-Forwarded-Email"
+        assert ph.trust_proxy is False
 
 
 class TestDbPath:

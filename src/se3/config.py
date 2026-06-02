@@ -2974,6 +2974,7 @@ class ProxyHeaderConfig:
     """
 
     enabled: bool = False
+    trust_proxy: bool = False
     header: str = "X-Forwarded-Email"
 
     @classmethod
@@ -2982,6 +2983,7 @@ class ProxyHeaderConfig:
             return cls()
         return cls(
             enabled=_coerce_bool(data.get("enabled", False), default=False),
+            trust_proxy=_coerce_bool(data.get("trust_proxy", False), default=False),
             header=_str_or_default(
                 data.get("header", cls.header), cls.header,
                 "server.auth.proxy_header.header",

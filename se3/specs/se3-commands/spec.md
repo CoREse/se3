@@ -1495,6 +1495,7 @@ The system SHALL provide `se3 daemon` as a subcommand group that manages the res
 se3 daemon start                          # Start the daemon (detached background process)
 se3 daemon start --foreground             # Run the daemon in the current terminal
 se3 daemon start --server-url ws://host   # Start with a central-server URL to dial out to
+se3 daemon start --daemon-key <key>       # Start with a daemon key for owner binding on a multi-tenant server
 se3 daemon stop                           # Stop the running daemon
 se3 daemon status                         # Show daemon running state and tracked flows
 se3 daemon status --json                  # Emit status as JSON
@@ -1504,7 +1505,7 @@ se3 daemon status --json                  # Emit status as JSON
 
 | Subcommand | Options | Behavior |
 |------------|---------|----------|
-| `start` | `--server-url`, `--foreground` | Starts the daemon. By default it is launched as a detached background process; `--foreground` runs it in the current terminal. `--server-url` records the central-server URL the daemon dials out to; when the URL omits a port it is completed to the shared default server port (see the *Daemon and Server Configuration* requirement in the `se3-config` spec). When `--server-url` is supplied, the command surfaces central-server connection problems in the CLI foreground: if the `websockets` dependency is missing it prints a visible warning before launch, and after launch it briefly polls the daemon status file and warns when the daemon did not connect (e.g. `websockets not installed`, handshake/connection failure). These warnings are advisory — `se3 daemon start` does not fail solely because the central-server connection degraded. When a daemon is already running, the command reports it and exits non-zero. |
+| `start` | `--server-url`, `--daemon-key`, `--foreground` | Starts the daemon. By default it is launched as a detached background process; `--foreground` runs it in the current terminal. `--server-url` records the central-server URL the daemon dials out to; when the URL omits a port it is completed to the shared default server port (see the *Daemon and Server Configuration* requirement in the `se3-config` spec). `--daemon-key <key>` records the secret credential the daemon presents in its HELLO so a multi-tenant central server can resolve it to an owner and bind this machine to that owner's trust domain; when omitted, the daemon falls back to the `SE3_DAEMON_KEY` environment variable, and when neither is set the daemon runs keyless (local / legacy single-tenant, no owner binding). The key is secret and is never written to the daemon status file or log. When `--server-url` is supplied, the command surfaces central-server connection problems in the CLI foreground: if the `websockets` dependency is missing it prints a visible warning before launch, and after launch it briefly polls the daemon status file and warns when the daemon did not connect (e.g. `websockets not installed`, handshake/connection failure). These warnings are advisory — `se3 daemon start` does not fail solely because the central-server connection degraded. When a daemon is already running, the command reports it and exits non-zero. |
 | `stop` | — | Stops the running daemon. Reports `not running` when none is up (exit 0), and reports a stop timeout with a non-zero exit when the process does not exit within the grace period. |
 | `status` | `--json, -j` | Reports whether the daemon is running, its pid, machine id, configured server URL, the real central-server connection state, and the list of tracked flows. The connection line reflects the live `DaemonClient` state read from the daemon status file — `local-only` when no server URL is configured, `connected` when the outbound connection is established, or `not connected` with the underlying reason — rather than echoing the configured URL. `--json` emits the status as JSON instead of the rendered panel. |
 
@@ -1541,6 +1542,43 @@ se3 daemon status --json                  # Emit status as JSON
 - **THEN** the command prints a visible warning in the CLI foreground that the central-server connection is unavailable, with the reason
 - **AND** the warning is shown in addition to the daemon log entry, not only written to the log
 - **AND** the daemon still starts in local-only mode and the command does not fail solely because of the degraded connection
+
+#### Scenario: Start records a daemon key for owner binding
+- **WHEN** the user runs `se3 daemon start --daemon-key K` (or starts the daemon with `SE3_DAEMON_KEY=K` set)
+- **THEN** `DaemonConfig.daemon_key` is `K` and the daemon presents it in its HELLO so a multi-tenant server can resolve `key → owner_id` and bind this machine to that owner
+- **AND** the key is not echoed into the daemon status file, the `se3 daemon status` output, or the log
+- **AND** with neither flag nor environment variable set, the daemon runs keyless (no owner binding) and stays compatible with a single-tenant server
+
+**`se3-server bootstrap-token` subcommand:**
+
+The separate `se3-server` console script (the central-server entry point,
+not a `se3` subcommand) provides a `bootstrap-token` subcommand that mints
+the one-time admin **break-glass** token used to bootstrap the first admin
+and as a fail-closed fallback entrance when the configured auth provider is
+unreachable (see the `base` spec's *Server Identity, Authentication and
+Persistence* requirement).
+
+```bash
+se3-server bootstrap-token                       # Mint a token against ~/.se3/server.db
+se3-server bootstrap-token --db-path <path>      # Mint against a specific sqlite store
+se3-server bootstrap-token --ttl <seconds>       # Optional expiry for the minted token
+```
+
+The subcommand generates a fresh token, persists only its hash to the
+sqlite store, and prints the plaintext to the server console exactly once —
+the token is never stored in plaintext and never logged. It is re-runnable
+(each run mints a new token; previously minted tokens stay valid until
+consumed or purged). Because it needs only the persistence + crypto layers
+(stdlib `sqlite3`), it is intercepted in `se3.server.__init__:main` before
+the `[server]` optional extra (FastAPI / uvicorn) is imported, so it works
+on a core-only install.
+
+#### Scenario: bootstrap-token mints a one-time admin token to the console
+- **WHEN** the operator runs `se3-server bootstrap-token`
+- **THEN** a one-time admin break-glass token is minted, only its hash is written to the sqlite store, and the plaintext is printed to the console exactly once
+- **AND** the plaintext token is never written to any log
+- **AND** running the command again mints a fresh token without invalidating the single-admin-subject model
+- **AND** the subcommand succeeds on a core-only install because it is intercepted before any FastAPI / uvicorn import
 
 ## Error Codes
 

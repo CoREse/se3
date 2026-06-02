@@ -141,6 +141,67 @@ def test_register_machine_records_owner_id():
     asyncio.run(scenario())
 
 
+def test_owner_takeover_on_machine_id_collision_discards_prior_state():
+    """A forged HELLO reusing a victim's machine_id must not inherit its state.
+
+    machine_id is derived from hostname + NIC MAC and supplied verbatim by the
+    daemon, so any valid-key holder can connect under another owner's
+    machine_id. When the resolved owner changes, register_machine must scrub the
+    prior owner's flows and cached history before rebinding, so the new owner
+    can never read the previous owner's trust-domain data.
+    """
+
+    async def scenario():
+        state = ServerState()
+        # Owner B's daemon connects and aggregates flows + history under m1.
+        await state.register_machine("host-mac", "host", "6.4.0", owner_id="B")
+        await state.update_status(
+            "host-mac",
+            {"flows": [{"flow_id": "fB", "status": "running",
+                        "task_description": "secret B task"}]},
+        )
+        await state.update_history_index(
+            "host-mac", [{"flow_id": "fB", "updated_at": "1"}]
+        )
+        await state.append_history(
+            "fB", "full", [{"step_id": "s", "message": {}}], machine_id="host-mac"
+        )
+
+        # Owner A connects with the SAME machine_id and A's own valid key.
+        await state.register_machine("host-mac", "host", "6.4.0", owner_id="A")
+
+        # A must see no flows and no history from B's domain.
+        assert await state.get_machine_flows("host-mac", owner="A") == []
+        assert await state.get_history_index(owner="A") == []
+        # The cached bundle for B's flow is gone too (no cross-owner pull).
+        assert await state.get_history("fB") is None
+        assert await state.find_machine_for_history_flow("fB", owner="A") is None
+
+    asyncio.run(scenario())
+
+
+def test_owner_reconnect_same_owner_retains_flows():
+    """The scrub only fires on an owner *change* — a same-owner reconnect keeps
+    its aggregated flows/history until the next STATUS_UPDATE."""
+
+    async def scenario():
+        state = ServerState()
+        await state.register_machine("m1", "host", "6.4.0", owner_id="A")
+        await state.update_status(
+            "m1", {"flows": [{"flow_id": "fA", "status": "running"}]}
+        )
+        await state.update_history_index("m1", [{"flow_id": "fA", "updated_at": "1"}])
+        # Same owner reconnects — flows and history survive.
+        await state.register_machine("m1", "host", "6.4.0", owner_id="A")
+        flows = await state.get_machine_flows("m1", owner="A")
+        assert [f["flow_id"] for f in flows] == ["fA"]
+        assert [e["flow_id"] for e in await state.get_history_index(owner="A")] == [
+            "fA"
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_owner_scoped_machine_queries_isolate_owners():
     async def scenario():
         state = ServerState()

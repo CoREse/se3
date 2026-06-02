@@ -6,6 +6,17 @@
 
 
 
+
+## 8.0.0 - 2026-06-02
+
+- Require authenticated, owner-scoped access for all webui/REST and daemon channels; remove the prior unauthenticated control-plane mode
+- Default to fail-closed: refuse to serve when no usable auth provider is configured instead of running open
+- Add a pluggable authentication layer with a built-in local multi-user provider (accounts, argon2-hashed passwords, server-side sessions) plus disabled-by-default OIDC and reverse-proxy-header seams
+- Introduce an internal owner_id identity model with (provider, external_id) identity-bindings so daemons and machines are scoped to a trust domain
+- Add the first persistence layer using embedded sqlite for owners, identity-bindings, local credentials, daemon-key hashes, and break-glass token hashes; machine/flow state stays in-memory
+- Evolve the daemon HELLO protocol to carry a daemon key, binding each machine to its owner and rejecting unkeyed daemons with WELCOME(accepted=false)
+- Add the `se3-server bootstrap-token` CLI to mint a one-time, hash-stored break-glass admin token for bootstrap and fail-closed recovery, plus owner-managed daemon-key issuance/revocation in the UI
+- Add login/session UI, owner-scoped machine/flow/history views, and admin user provisioning (no public self-registration in v1)
 ## 7.11.4 - 2026-06-02
 
 - Fix running-flow console docked reply box overflowing when an intervention prompt is long (e.g. discovery_confirm carrying a full refined task description), which previously pushed the textarea, options, and Send button off-screen

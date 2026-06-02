@@ -521,3 +521,82 @@ def test_full_chain_fail_closed_without_identity():
             m["machine_id"] != "mGhost"
             for m in admin.get("/api/machines").json()["machines"]
         )
+
+
+# -- config wiring (se3-server reads server.auth.* / server.db_path) ---------
+
+
+def test_create_app_kwargs_from_server_config_translates_auth():
+    """``_create_app_kwargs_from_server_config`` maps the structured
+    ``ServerConfig`` onto the surfaces ``create_app`` consumes, so an operator's
+    ``server.auth.*`` / ``server.db_path`` values actually drive the server
+    instead of being silently dropped (regression for the medium self-check)."""
+    from se3.config import (
+        AuthConfig,
+        LocalAuthConfig,
+        ProxyHeaderConfig,
+        ServerConfig,
+        SessionConfig,
+    )
+    from se3.server.app import _create_app_kwargs_from_server_config
+
+    cfg = ServerConfig(
+        db_path="/tmp/custom-server.db",
+        auth=AuthConfig(
+            providers=["local", "proxy_header"],
+            session=SessionConfig(
+                cookie_name="my_sess",
+                cookie_secure=False,
+                cookie_samesite="strict",
+                max_age_seconds=3600,
+            ),
+            local=LocalAuthConfig(
+                max_failed_attempts=3,
+                lockout_seconds=120,
+                ratelimit_window_seconds=45,
+            ),
+            proxy_header=ProxyHeaderConfig(
+                enabled=True, trust_proxy=True, header="X-Auth-Email"
+            ),
+        ),
+    )
+
+    kwargs = _create_app_kwargs_from_server_config(cfg)
+
+    assert kwargs["db_path"] == "/tmp/custom-server.db"
+    # providers expanded into full entries carrying each provider's options,
+    # including trust_proxy so the proxy-header provider is actually enableable
+    # purely through se3.yaml.
+    entries = kwargs["auth_config"]["providers"]
+    assert entries[0] == "local"
+    assert entries[1] == {
+        "type": "proxy_header",
+        "enabled": True,
+        "trust_proxy": True,
+        "header": "X-Auth-Email",
+    }
+    # session cookie attributes flow into the SessionStore.
+    cookie = kwargs["session_store"].cookie_config
+    assert cookie.name == "my_sess"
+    assert cookie.secure is False
+    assert cookie.same_site == "strict"
+    assert cookie.max_age == 3600
+    # local lockout thresholds flow into the LoginRateLimiter.
+    rl_cfg = kwargs["rate_limiter"]._config
+    assert rl_cfg.max_failures == 3
+    assert rl_cfg.lockout_seconds == 120.0
+    assert rl_cfg.window_seconds == 45.0
+
+
+def test_create_app_kwargs_default_config_builds_local_chain():
+    """The default ServerConfig still yields a usable local-only chain when fed
+    through the translation + create_app (no fail-closed regression)."""
+    from se3.config import ServerConfig
+    from se3.server.app import _create_app_kwargs_from_server_config, create_app
+
+    cfg = ServerConfig()  # defaults: providers=['local']
+    kwargs = _create_app_kwargs_from_server_config(cfg)
+    # Use an in-memory store rather than the configured ~/.se3 default.
+    kwargs["db_path"] = None
+    app = create_app(**kwargs)
+    assert app.state.auth_chain is not None

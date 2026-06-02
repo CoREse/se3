@@ -162,12 +162,20 @@ class ServerState:
     ) -> MachineRecord:
         """Register (or refresh) a machine on HELLO and mark it online.
 
-        A reconnecting machine keeps its previously aggregated flows until the
-        next STATUS_UPDATE replaces them. *owner_id* is the trust domain the
-        daemon authenticated into (resolved from its HELLO key by the identity
-        layer); it is recorded on the machine so every owner-scoped query can
-        filter on it. ``None`` leaves the machine unbound — only the
-        unscoped/admin view will see it.
+        A reconnecting machine keeps its previously aggregated flows **only when
+        the resolved owner is unchanged**, until the next STATUS_UPDATE replaces
+        them. *owner_id* is the trust domain the daemon authenticated into
+        (resolved from its HELLO key by the identity layer); it is recorded on
+        the machine so every owner-scoped query can filter on it. ``None`` leaves
+        the machine unbound — only the unscoped/admin view will see it.
+
+        ``machine_id`` is **not** a secret: the daemon derives it from the
+        hostname + NIC MAC and supplies it verbatim in HELLO, so any holder of a
+        valid daemon key can connect under a victim's ``machine_id``. To stop a
+        machine_id collision/takeover from leaking one owner's trust-domain state
+        to another, whenever the resolved owner of an existing record *changes*
+        we discard the previous owner's aggregated flows and the machine's cached
+        history (index + bundles) before rebinding the record to the new owner.
         """
         async with self._lock:
             record = self._machines.get(machine_id)
@@ -186,11 +194,32 @@ class ServerState:
             else:
                 record.hostname = hostname or record.hostname
                 record.se3_version = se3_version or record.se3_version
+                if record.owner_id != owner_id:
+                    # Owner takeover on a forgeable machine_id: scrub the prior
+                    # owner's flows and history so the new owner can never read
+                    # them. Flow/history retention across reconnects is only safe
+                    # when the owner is unchanged.
+                    self._discard_machine_state(machine_id)
+                    record.flows = {}
                 record.owner_id = owner_id
                 record.connected_at = now
                 record.last_seen = now
                 record.online = True
             return record
+
+    def _discard_machine_state(self, machine_id: str) -> None:
+        """Drop the cached history index/bundles owned by *machine_id*.
+
+        Caller must hold ``self._lock``. Used on an owner change so a
+        machine_id collision/takeover cannot expose the prior owner's history.
+        ``record.flows`` is cleared by the caller (it owns the record).
+        """
+        self._history_index.pop(machine_id, None)
+        self._history_data = {
+            flow_id: bundle
+            for flow_id, bundle in self._history_data.items()
+            if str(bundle.get("machine_id") or "") != machine_id
+        }
 
     async def mark_offline(self, machine_id: str) -> None:
         """Mark a machine offline (its daemon disconnected)."""
