@@ -40,12 +40,12 @@ from se3.daemon import protocol
 
 from . import crypto
 from .auth.base import OwnerIdentity, ProviderChain
-from .auth.local import LocalAuthProvider
+from .auth.local import PROVIDER_LOCAL, LocalAuthProvider
 from .auth.ratelimit import LoginRateLimited, LoginRateLimiter
 from .auth.registry import build_provider_chain, make_require_owner
 from .auth.session import SessionStore, read_cookie
 from .identity import IdentityService
-from .persistence import Store
+from .persistence import IdentityAlreadyBound, Store
 from .state import ServerState
 from .ws import (
     ConnectionManager,
@@ -124,6 +124,21 @@ class BreakglassRequest(BaseModel):
     """Body of ``POST /api/auth/breakglass`` — one-time admin escape hatch."""
 
     token: str
+
+
+class CreateDaemonKeyRequest(BaseModel):
+    """Body of ``POST /api/daemon-keys`` — mint a new daemon key for the owner."""
+
+    label: str = ""
+
+
+class CreateUserRequest(BaseModel):
+    """Body of ``POST /api/users`` — admin creates / invites a local user."""
+
+    username: str
+    password: str
+    display_name: str = ""
+    is_admin: bool = False
 
 
 def _scope_for(identity: OwnerIdentity) -> Optional[str]:
@@ -507,6 +522,125 @@ def create_app(
                 detail=f"failed to deliver INTERJECT_FLOW to '{machine_id}'",
             )
         return {"status": "dispatched", "machine_id": machine_id, "flow_id": flow_id}
+
+    # -- daemon-key self-management ----------------------------------------
+    # An owner mints / lists / revokes its OWN daemon keys (the credential a
+    # daemon presents in its HELLO). The plaintext key is shown exactly once,
+    # at creation; the list view returns metadata only. Every route is scoped
+    # to ``identity_.owner_id`` — a key is a *personal* credential, so even an
+    # admin manages only its own keys here (no cross-owner key administration).
+
+    @app.post("/api/daemon-keys")
+    async def create_daemon_key(
+        req: CreateDaemonKeyRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        label = req.label.strip() or None
+        # High-entropy token: only its hash is persisted, the plaintext is
+        # returned to the caller once and never stored / logged.
+        plaintext, key_hash = crypto.generate_token("dk")
+        key_id = await asyncio.to_thread(
+            store.issue_daemon_key, identity_.owner_id, key_hash, label
+        )
+        return JSONResponse(
+            status_code=201,
+            content={
+                "key_id": key_id,
+                "key": plaintext,
+                "label": label,
+                "owner_id": identity_.owner_id,
+            },
+        )
+
+    @app.get("/api/daemon-keys")
+    async def list_daemon_keys(
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        keys = await asyncio.to_thread(store.list_daemon_keys, identity_.owner_id)
+        # Metadata only — never the plaintext (gone after creation) nor the hash.
+        return {
+            "keys": [
+                {
+                    "key_id": k.key_id,
+                    "label": k.label,
+                    "created_at": k.created_at,
+                    "revoked_at": k.revoked_at,
+                    "revoked": k.revoked,
+                }
+                for k in keys
+            ],
+            "count": len(keys),
+        }
+
+    @app.delete("/api/daemon-keys/{key_id}")
+    async def revoke_daemon_key(
+        key_id: str, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> dict:
+        # Ownership gate: list the caller's own keys and require membership.
+        # A key_id belonging to another owner (or unknown) reads as absent
+        # (404) — no cross-owner existence leak, and no cross-owner revoke.
+        owned = await asyncio.to_thread(store.list_daemon_keys, identity_.owner_id)
+        if not any(k.key_id == key_id for k in owned):
+            raise HTTPException(
+                status_code=404, detail=f"daemon key '{key_id}' not found"
+            )
+        await asyncio.to_thread(store.revoke_daemon_key, key_id)
+        return {"status": "revoked", "key_id": key_id}
+
+    # -- admin user provisioning -------------------------------------------
+    # An admin creates / invites a local user: a new owner + ("local",
+    # username) binding + password hash, in one atomic insert. v1 deliberately
+    # exposes NO public self-registration endpoint (its email-verification /
+    # anti-abuse / password-recovery debt is out of scope — see the design's
+    # non-goals); the only way to add a user is an admin calling here.
+
+    @app.post("/api/users")
+    async def create_user(
+        req: CreateUserRequest, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> JSONResponse:
+        # Only an admin (a local admin owner, or the break-glass admin subject)
+        # may provision users.
+        if not identity_.is_admin:
+            raise HTTPException(
+                status_code=403, detail="admin privileges required to create users"
+            )
+        username = req.username.strip()
+        if not username:
+            raise HTTPException(status_code=422, detail="'username' must not be empty")
+        if not req.password:
+            raise HTTPException(status_code=422, detail="'password' must not be empty")
+        display_name = req.display_name.strip() or username
+        # argon2 hashing is CPU-bound — keep it off the event loop.
+        password_hash = await asyncio.to_thread(crypto.hash_password, req.password)
+        try:
+            new_owner_id = await asyncio.to_thread(
+                store.create_local_user,
+                PROVIDER_LOCAL,
+                username,
+                password_hash,
+                display_name=display_name,
+                is_admin=req.is_admin,
+            )
+        except IdentityAlreadyBound:
+            raise HTTPException(
+                status_code=409, detail=f"username {username!r} already exists"
+            )
+        logger.info(
+            "admin %s created user %r (owner %s, admin=%s)",
+            identity_.owner_id,
+            username,
+            new_owner_id,
+            req.is_admin,
+        )
+        return JSONResponse(
+            status_code=201,
+            content={
+                "owner_id": new_owner_id,
+                "username": username,
+                "display_name": display_name,
+                "is_admin": req.is_admin,
+            },
+        )
 
     # -- history API -------------------------------------------------------
     # The server is a pure in-memory relay: ``/api/history`` serves the

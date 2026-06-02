@@ -286,6 +286,63 @@ class Store:
             conn.commit()
             return cur.rowcount > 0
 
+    def create_local_user(
+        self,
+        provider: str,
+        external_id: str,
+        password_hash: str,
+        *,
+        display_name: Optional[str] = None,
+        is_admin: bool = False,
+        owner_id: Optional[str] = None,
+    ) -> str:
+        """Atomically create an owner + identity binding + local password hash.
+
+        This is the admin user-provisioning primitive (``POST /api/users``):
+        the owner record, the ``(provider, external_id)`` binding, and the
+        password-hash credential are inserted in a **single transaction**, so a
+        duplicate username never leaves an orphan owner behind. ``password_hash``
+        is the already-slow-hashed value (the caller hashes via
+        :func:`se3.server.crypto.hash_password`); this layer never sees plaintext.
+
+        Raises :class:`IdentityAlreadyBound` when ``(provider, external_id)``
+        already maps to an owner — the whole insert is rolled back.
+        """
+        oid = owner_id or self._new_id()
+        now = self._now()
+        with self._lock:
+            conn = self._conn()
+            existing = conn.execute(
+                "SELECT owner_id FROM identity_bindings "
+                "WHERE provider = ? AND external_id = ?",
+                (provider, external_id),
+            ).fetchone()
+            if existing is not None:
+                raise IdentityAlreadyBound(
+                    f"identity ({provider!r}, {external_id!r}) is already bound"
+                )
+            try:
+                conn.execute(
+                    "INSERT INTO owners (owner_id, display_name, is_admin, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (oid, display_name, 1 if is_admin else 0, now),
+                )
+                conn.execute(
+                    "INSERT INTO identity_bindings "
+                    "(provider, external_id, owner_id, created_at) VALUES (?, ?, ?, ?)",
+                    (provider, external_id, oid, now),
+                )
+                conn.execute(
+                    "INSERT INTO local_credentials (owner_id, password_hash, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (oid, password_hash, now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return oid
+
     # ----- identity bindings ---------------------------------------------- #
 
     def link_identity(self, owner_id: str, provider: str, external_id: str) -> None:

@@ -225,6 +225,122 @@ def test_default_session_cookie_is_secure():
 # -- credential hygiene: nothing secret reaches the logs --------------------
 
 
+# -- admin user provisioning (G8 task 2) ------------------------------------
+
+
+def _seed_local_user(app, username, password, *, is_admin=False) -> str:
+    """Directly seed a local user (owner + binding + password) in the store."""
+    import se3.server.crypto as crypto
+
+    store = app.state.store
+    oid = store.create_owner(username, is_admin=is_admin)
+    store.link_identity(oid, "local", username)
+    store.set_password(oid, crypto.hash_password(password))
+    return oid
+
+
+def test_admin_creates_user_who_can_then_login(client_and_app):
+    client, app = client_and_app
+    login(client)  # the seeded admin
+    resp = client.post(
+        "/api/users",
+        json={"username": "bob", "password": "bob-pw", "display_name": "Bob"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["username"] == "bob"
+    assert body["display_name"] == "Bob"
+    assert body["is_admin"] is False
+    new_owner_id = body["owner_id"]
+
+    # The owner + binding + password hash all landed: the new user can log in.
+    from se3.server import crypto
+
+    store = app.state.store
+    assert store.resolve_owner_by_identity("local", "bob") == new_owner_id
+    assert crypto.verify_password("bob-pw", store.get_password_hash(new_owner_id))
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as fresh:
+        ok = fresh.post("/api/auth/login", json={"username": "bob", "password": "bob-pw"})
+        assert ok.status_code == 200
+        assert ok.json()["owner_id"] == new_owner_id
+
+
+def test_admin_can_create_another_admin(client_and_app):
+    client, app = client_and_app
+    login(client)
+    resp = client.post(
+        "/api/users",
+        json={"username": "carol", "password": "pw2", "is_admin": True},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["is_admin"] is True
+    assert app.state.store.get_owner(resp.json()["owner_id"]).is_admin is True
+
+
+def test_non_admin_cannot_create_user(client_and_app):
+    client, app = client_and_app
+    _seed_local_user(app, "eve", "eve-pw", is_admin=False)
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as eve:
+        eve.post("/api/auth/login", json={"username": "eve", "password": "eve-pw"})
+        forbidden = eve.post(
+            "/api/users", json={"username": "mallory", "password": "x"}
+        )
+        assert forbidden.status_code == 403
+        # No owner was created for the rejected request.
+        assert app.state.store.resolve_owner_by_identity("local", "mallory") is None
+
+
+def test_create_user_requires_authentication(client_and_app):
+    client, _ = client_and_app
+    # No public self-registration: an unauthenticated POST is 401, never 201.
+    assert (
+        client.post("/api/users", json={"username": "x", "password": "y"}).status_code
+        == 401
+    )
+
+
+def test_create_duplicate_user_is_409(client_and_app):
+    client, app = client_and_app
+    login(client)
+    first = client.post("/api/users", json={"username": "dup", "password": "pw"})
+    assert first.status_code == 201
+    again = client.post("/api/users", json={"username": "dup", "password": "other"})
+    assert again.status_code == 409
+    # The duplicate attempt left no orphan: exactly one owner bound to "dup".
+    owner_id = app.state.store.resolve_owner_by_identity("local", "dup")
+    assert owner_id == first.json()["owner_id"]
+
+
+def test_create_user_validates_empty_fields(client_and_app):
+    client, _ = client_and_app
+    login(client)
+    assert (
+        client.post("/api/users", json={"username": "  ", "password": "pw"}).status_code
+        == 422
+    )
+    assert (
+        client.post("/api/users", json={"username": "ok", "password": ""}).status_code
+        == 422
+    )
+
+
+def test_no_public_registration_endpoint(client_and_app):
+    """v1 exposes no self-service registration route (design non-goal)."""
+    client, _ = client_and_app
+    for path in ("/api/auth/register", "/api/register", "/api/signup"):
+        # No POST registration handler exists: the path is either unrouted
+        # (404) or only served by the static mount for GET (405). Crucially it
+        # is never a successful account creation.
+        assert client.post(
+            path, json={"username": "x", "password": "y"}
+        ).status_code in (404, 405)
+
+
 def test_credentials_never_logged(client_and_app, caplog):
     client, app = client_and_app
     secret_pw = "S3cr3t-PASSWORD-do-not-log"

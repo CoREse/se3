@@ -649,3 +649,106 @@ def test_rest_unauthenticated_writes_are_401(authz_app):
         assert (
             anon.post("/api/flows/fA/interject", json={"text": "x"}).status_code == 401
         )
+
+
+# --------------------------------------------------------------------------
+# G8 task 1 — owner-self-managed daemon keys (create / list / revoke)
+# --------------------------------------------------------------------------
+
+
+def test_daemon_key_create_returns_plaintext_once_then_list_hides_it(authz_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(authz_app) as ca:
+        login(ca, "A", "pw")
+        created = ca.post("/api/daemon-keys", json={"label": "laptop"})
+        assert created.status_code == 201
+        body = created.json()
+        plaintext = body["key"]
+        key_id = body["key_id"]
+        assert plaintext and body["label"] == "laptop"
+
+        listing = ca.get("/api/daemon-keys")
+        assert listing.status_code == 200
+        keys = listing.json()["keys"]
+        entry = next(k for k in keys if k["key_id"] == key_id)
+        # Metadata only — the plaintext (and the stored hash) are never echoed.
+        assert "key" not in entry
+        assert "key_hash" not in entry
+        assert entry["label"] == "laptop"
+        assert entry["revoked"] is False
+        # The one-time plaintext appears in no field of any list entry.
+        assert all(plaintext not in str(v) for k in keys for v in k.values())
+
+
+def test_daemon_keys_are_owner_isolated(authz_app):
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        a_key_id = ca.post("/api/daemon-keys", json={"label": "a-key"}).json()["key_id"]
+        b_key_id = cb.post("/api/daemon-keys", json={"label": "b-key"}).json()["key_id"]
+
+        # B never sees A's key in its own listing.
+        b_ids = {k["key_id"] for k in cb.get("/api/daemon-keys").json()["keys"]}
+        assert a_key_id not in b_ids
+        assert b_key_id in b_ids
+
+        # B cannot revoke A's key — it reads as absent (404, no existence leak).
+        assert ca.delete(f"/api/daemon-keys/{a_key_id}").status_code == 200
+        # (Re-login a fresh A client to confirm revoke landed.)
+        revoked = next(
+            k for k in ca.get("/api/daemon-keys").json()["keys"] if k["key_id"] == a_key_id
+        )
+        assert revoked["revoked"] is True
+        assert cb.delete(f"/api/daemon-keys/{a_key_id}").status_code == 404
+
+
+def test_daemon_key_endpoints_require_auth(authz_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(authz_app) as anon:
+        assert anon.post("/api/daemon-keys", json={"label": "x"}).status_code == 401
+        assert anon.get("/api/daemon-keys").status_code == 401
+        assert anon.delete("/api/daemon-keys/whatever").status_code == 401
+
+
+def test_revoked_daemon_key_blocks_daemon_hello(authz_app):
+    """A key minted via the API authenticates a daemon HELLO until it is revoked."""
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    owner_a = app.state.owners["A"]["owner_id"]
+    with TestClient(app) as ca:
+        login(ca, "A", "pw")
+        created = ca.post("/api/daemon-keys", json={"label": "node"}).json()
+        key, key_id = created["key"], created["key_id"]
+
+    identity = app.state.identity
+    # Before revocation the key resolves to owner A (a daemon could connect).
+    assert identity.resolve_owner_for_key(key) == owner_a
+
+    with TestClient(app) as ca:
+        login(ca, "A", "pw")
+        assert ca.delete(f"/api/daemon-keys/{key_id}").status_code == 200
+
+    # After revocation the key resolves to nothing, so the daemon HELLO is
+    # rejected fail-closed (WELCOME accepted=false + close), exactly as a
+    # bogus key is.
+    assert identity.resolve_owner_for_key(key) is None
+
+    async def hello_is_rejected():
+        state = app.state.server_state
+        manager = ConnectionManager()
+        ws = _FakeDaemonWS(
+            [protocol.make_hello("mRevoked", "h", "6.4.0", key=key).to_json()]
+        )
+        await handle_daemon_connection(ws, manager, state, identity=identity)
+        welcomes = ws.welcomes()
+        assert welcomes and welcomes[0].payload["accepted"] is False
+        assert ws.closed is True
+        assert await state.get_machine("mRevoked") is None
+
+    asyncio.run(hello_is_rejected())
