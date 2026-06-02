@@ -1,0 +1,35 @@
+id: '163'
+title: For a discovery_confirm intervention, the running-flow-console spec's 'Discovery
+  confirmation chip offers a confirm button and a textual fallback' scenario expects
+  the 'Enter 1 to confirm' textual hint to be visible alongside the GUI confirm button.
+  With this fix the prompt body (which typically carries that '输入 1 确认' text) is now
+  collapsed by default, so the textual hint is hidden until the user expands the prompt.
+  The always-visible GUI confirm button is synthesized with label '确认并继续 (输入 1)',
+  which still conveys the literal '1' value, so the primary affordance is preserved
+  — but the textual-fallback hint is no longer shown by default.
+description: 'For a discovery_confirm intervention, the running-flow-console spec''s
+  ''Discovery confirmation chip offers a confirm button and a textual fallback'' scenario
+  expects the ''Enter 1 to confirm'' textual hint to be visible alongside the GUI
+  confirm button. With this fix the prompt body (which typically carries that ''输入
+  1 确认'' text) is now collapsed by default, so the textual hint is hidden until the
+  user expands the prompt. The always-visible GUI confirm button is synthesized with
+  label ''确认并继续 (输入 1)'', which still conveys the literal ''1'' value, so the primary
+  affordance is preserved — but the textual-fallback hint is no longer shown by default.
+
+
+  Suggestion: No change required for this task. This is a direct, expected consequence
+  of the explicitly-declared prompt-collapse deviation; the confirm button label (''输入
+  1'') preserves the value. When se3 sync back-writes the spec, the discovery_confirm
+  textual-hint expectation should be reconciled with the new collapse-by-default behavior
+  (e.g. note that the ''输入 1'' affordance now lives in the always-visible confirm
+  button label).'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-02T10:38:33.814788'
+updated_at: '2026-06-02T10:38:33.814788'

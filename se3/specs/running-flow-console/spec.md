@@ -135,10 +135,13 @@ stacked parts, all sitting below the conversation:
    `title` hover tooltip for developer debugging only.
 2. **Reply context panel** — when a chip is selected, the panel above the
    textarea renders, for **every** intervention kind, only the intervention's
-   kind header, its full prompt (Markdown rendered), and any `options` action
-   buttons. It MUST NOT render a separate `context` block — the panel never
-   duplicates context text that the prompt already carries. When no chip is
-   selected the panel is empty or shows a brief "no pending interaction" hint.
+   kind header, the intervention's prompt (Markdown rendered, mounted behind a
+   **default-collapsed expand/collapse trigger** whose expanded body is
+   height-bounded and scrollable — see the *Collapsible Reply-Context Prompt
+   Body* requirement), and any `options` action buttons. It MUST NOT render a
+   separate `context` block — the panel never duplicates context text that the
+   prompt already carries. When no chip is selected the panel is empty or shows
+   a brief "no pending interaction" hint.
 3. **Reply input row** — a single horizontal row carrying three elements,
    left-to-right: an inline **Interject icon button**, the **reply
    textarea**, and the **send button**. The Interject button is a compact
@@ -234,9 +237,10 @@ this gate — the gate is the source of truth for "submission settled".
 #### Scenario: Reply box activated by selecting a chip
 - **WHEN** the running flow has at least one pending intervention and the
   user selects its chip in the docked chip bar
-- **THEN** the reply context panel above the textarea expands the
-  intervention's full kind header, Markdown-rendered prompt, and any
-  `options` action buttons (no separate context block)
+- **THEN** the reply context panel above the textarea shows the
+  intervention's kind header, its Markdown-rendered prompt behind a
+  default-collapsed expand/collapse trigger (see *Collapsible Reply-Context
+  Prompt Body*), and any `options` action buttons (no separate context block)
 - **AND** the reply textarea and submit control become enabled
 - **AND** the reply area clearly states which intervention it is targeting
 
@@ -276,10 +280,12 @@ literal pattern `call <id>` MUST NOT appear in the chip's visible text. The
 underlying call identifier, when retained for debugging, lives only on hidden
 DOM attributes (e.g. `data-call-id`) and `title` hover tooltips, not in any
 text node a screen reader or sighted user can read. Selecting a chip expands
-that intervention's full `prompt` (Markdown rendered) and any `options` action
-buttons inside the reply context panel above the shared reply textarea; the
-panel MUST NOT render a separate `context` block for any kind. The same reply
-textarea is the single input surface for every intervention kind.
+that intervention's `prompt` (Markdown rendered, behind a default-collapsed
+expand/collapse trigger — see the *Collapsible Reply-Context Prompt Body*
+requirement) and any `options` action buttons inside the reply context panel
+above the shared reply textarea; the panel MUST NOT render a separate `context`
+block for any kind. The same reply textarea is the single input surface for
+every intervention kind.
 
 The recognized intervention kinds are at least: (1) a pending MCP call
 (`call`); (2) a post-Ctrl-C mid-flow interjection (`interjection`); (3) a
@@ -370,8 +376,10 @@ untouched.
 #### Scenario: Selecting a chip expands its prompt and options above the textarea
 - **WHEN** the user selects an intervention chip
 - **THEN** the reply context panel above the textarea shows the
-  intervention's full kind header, Markdown-rendered `prompt`, and any
-  `options` action buttons — and renders no separate `context` block
+  intervention's kind header, its Markdown-rendered `prompt` behind a
+  default-collapsed expand/collapse trigger (see *Collapsible Reply-Context
+  Prompt Body*), and any `options` action buttons — and renders no separate
+  `context` block
 - **AND** the reply textarea + send button are enabled
 - **AND** the same textarea is reused as the reply input regardless of
   intervention kind
@@ -395,6 +403,87 @@ untouched.
   substrings `MCP`, `call_id`, or the pattern `call <hex-id>`
 - **AND** any preserved call identifier appears only on the chip's
   `data-call-id` attribute or `title` tooltip, never in visible text
+
+### Requirement: Collapsible Reply-Context Prompt Body
+
+The docked reply context panel (`updateReplyBox` in `app.js`) MUST NOT render a
+selected intervention's `prompt` as an unbounded, always-expanded block. A long
+`prompt` — most notably a `discovery_confirm` whose `prompt` embeds an entire
+refined task description — would otherwise grow the `.flow-reply-prompt` body
+without limit and push the height-bounded reply controls (kind header, any
+synthesized confirm / `options` buttons, the reply textarea, and the Send
+button) out of the viewport, leaving them unreachable. To prevent this, the
+prompt body MUST be mounted as a **default-collapsed, expand-on-demand block**
+with a **height-bounded, internally scrollable** expanded state. This scope is
+strictly limited to `#flow-view`'s reply-context panel (the sole consumer of the
+collapsible-prompt helper); the history view and all other surfaces are
+untouched.
+
+The structure is built by a pure helper (`buildCollapsiblePrompt`, exported for
+DOM-stub tests) and has these properties:
+
+1. **Default collapsed** — when a chip is first selected, the `.flow-reply-prompt`
+   Markdown body is rendered but hidden by default (e.g. a `.hidden` class
+   mapping to `display: none`), so the panel's initial height carries only the
+   kind header, the expand/collapse trigger, the `options` / confirm buttons, the
+   textarea, and Send. This loses no information: the prompt body is redundant
+   with the conversation chat-stream for every kind (a `call` prompt is the agent
+   turn text; `cli_confirm` enters the stream via `StreamJSONTracker`;
+   `retry_decision` surfaces as a `step_failed` card; the `discovery_confirm`
+   refined description already appears as an assistant message; `interjection`
+   carries no prompt).
+2. **Expand/collapse trigger** — an always-visible toggle control (e.g.
+   "▸ expand message details" / "▾ collapse") sits above the body; clicking it
+   toggles the body's visibility. Expanding calls
+   `Element.scrollIntoView({block: "nearest"})` (via `requestAnimationFrame`) on
+   the freshly shown body so the revealed content scrolls into view; collapsing
+   does NOT scroll, consistent with the view's other foldable affordances.
+3. **Height-bounded expanded body** — when expanded, the `.flow-reply-prompt`
+   body MUST be capped at a viewport-relative maximum height (currently
+   `max-height: 30vh`) with `overflow-y: auto`, so a prompt of any length
+   occupies at most that fixed fraction of the viewport and is scrolled
+   internally. The body MUST also keep horizontal overflow out (`overflow-x:
+   hidden`) and wrap long lines (`overflow-wrap: anywhere` / `word-break`), per
+   the *Long-Content Wrapping* requirement. The kind header, expand trigger,
+   `options` / confirm buttons, textarea, and Send button all sit OUTSIDE this
+   height-capped region and therefore remain visible and clickable regardless of
+   prompt length.
+
+The expand state is **panel-local** and resets to collapsed on every panel
+re-render — no global toggle state is introduced. The synthesized
+`discovery_confirm` confirm button (see *Unified Intervention Items*) and all
+other `options` buttons remain outside the collapsible body so they are reachable
+without expanding the prompt.
+
+#### Scenario: Long prompt is collapsed by default and never pushes controls off-screen
+- **GIVEN** a selected intervention chip (e.g. `discovery_confirm`) whose
+  `prompt` is very long (an embedded refined task description)
+- **WHEN** the reply context panel is rendered
+- **THEN** the `.flow-reply-prompt` Markdown body is hidden by default behind an
+  expand/collapse trigger
+- **AND** the panel's kind header, any confirm / `options` buttons, the reply
+  textarea, and the Send button are all visible and clickable without expanding
+  the prompt
+
+#### Scenario: Expanding the prompt bounds its height and scrolls internally
+- **GIVEN** a selected chip whose prompt body is collapsed
+- **WHEN** the user clicks the expand trigger
+- **THEN** the `.flow-reply-prompt` body becomes visible, capped at the
+  configured maximum height (`max-height: 30vh`) with `overflow-y: auto`, so an
+  arbitrarily long prompt scrolls inside that fixed region rather than growing
+  the panel
+- **AND** the body is scrolled into view via
+  `scrollIntoView({block: "nearest"})` on expand
+- **AND** the header, trigger, `options` buttons, textarea, and Send button
+  remain outside the height-capped region and stay visible
+
+#### Scenario: Collapsing the prompt does not scroll and resets on re-render
+- **GIVEN** an expanded prompt body
+- **WHEN** the user clicks the trigger to collapse it
+- **THEN** the body is hidden again and the view does NOT scroll
+- **AND** when the panel is re-rendered (e.g. a new snapshot), the prompt body
+  returns to its default-collapsed state without any global toggle state being
+  retained
 
 ### Requirement: Interjection Lifecycle Events
 

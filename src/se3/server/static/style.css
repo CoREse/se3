@@ -458,10 +458,44 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   white-space: nowrap;
 }
 
+/* Default-collapsed prompt body in the docked reply panel. The trigger toggles
+ * the body's `.hidden` (display:none) state; when expanded the body is capped at
+ * 30vh and scrolls internally so a very long prompt (e.g. a discovery_confirm
+ * embedding the whole refined task description) can never push the textarea /
+ * options / Send button out of view. */
+.flow-reply-prompt-wrap { display: flex; flex-direction: column; gap: 5px; }
+.flow-reply-prompt-toggle {
+  align-self: flex-start;
+  padding: 2px 9px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+.flow-reply-prompt-toggle:hover { border-color: var(--fg-dim); color: var(--fg); }
+.flow-reply-prompt-wrap.expanded .flow-reply-prompt-toggle {
+  color: var(--yellow);
+  border-color: var(--yellow);
+}
+
 .flow-reply-prompt {
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--fg);
+  /* Expanded state: bound the height and scroll internally so the prompt body
+   * cannot grow the docked bar without limit. Long single-line content wraps
+   * (Long-Content Wrapping convention) rather than producing a horizontal
+   * scrollbar. */
+  max-height: 30vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .flow-reply-prompt .md-p { margin: 4px 0; }
 .flow-reply-prompt .md-p:first-child { margin-top: 0; }

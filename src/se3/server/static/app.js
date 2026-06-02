@@ -1163,6 +1163,39 @@ function safeStringify(value) {
   catch (_) { return String(value); }
 }
 
+// Build the docked reply panel's prompt body as a default-collapsed,
+// expand-on-demand container. Returns a wrapper holding a "展开/收起消息详情"
+// trigger button plus a `.flow-reply-prompt` body (Markdown rendered, never
+// truncated) that starts hidden. Clicking the trigger toggles the body and,
+// on expand only, scrolls it into view (requestAnimationFrame-wrapped, matching
+// the foldable behavior elsewhere in this view); collapsing does not scroll.
+// The body stays mounted while hidden so the existing reply-box tests (and the
+// CSS height cap that only applies in the expanded state) keep working. Kept as
+// a small pure function so the DOM-stub tests can assemble it directly. Scope:
+// only the #flow-view docked reply box (updateReplyBox) consumes this.
+function buildCollapsiblePrompt(promptText) {
+  const wrap = el("div", "flow-reply-prompt-wrap");
+  const collapsedLabel = "▸ 展开消息详情";
+  const expandedLabel = "▾ 收起消息详情";
+  const btn = el("button", "flow-reply-prompt-toggle", collapsedLabel);
+  btn.type = "button";
+  const body = el("div", "flow-reply-prompt hidden");
+  body.appendChild(renderMarkdown(promptText));
+  let expanded = false;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    expanded = !expanded;
+    body.classList.toggle("hidden", !expanded);
+    wrap.classList.toggle("expanded", expanded);
+    btn.textContent = expanded ? expandedLabel : collapsedLabel;
+    if (expanded) {
+      requestAnimationFrame(() => body.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  wrap.append(btn, body);
+  return wrap;
+}
+
 // Sync the docked reply box to the current intervention selection. When at
 // least one chip exists, the textarea + submit are enabled and the reply-
 // context panel above them materializes the selected chip's full content:
@@ -1230,11 +1263,18 @@ function updateReplyBox(flow) {
   }
   ctx.appendChild(head);
 
-  // Full prompt — rendered as Markdown, never truncated.
+  // Prompt body — default collapsed behind an expand/collapse trigger. The
+  // prompt is redundant with the conversation chat-stream above (the refined
+  // task description, the agent turn text, the step_failed card, etc. are
+  // already tiled there for every kind), so the docked reply panel keeps only
+  // the bounded-height functional controls (header / options / textarea /
+  // Send) on screen by default and surfaces the full prompt on demand. When
+  // expanded the body is height-capped + scrollable (see `.flow-reply-prompt`
+  // in style.css), so even a very long prompt — e.g. a `discovery_confirm`
+  // whose prompt embeds an entire refined task description — can never push the
+  // textarea / options / Send out of view.
   if (target.prompt) {
-    const prompt = el("div", "flow-reply-prompt");
-    prompt.appendChild(renderMarkdown(target.prompt));
-    ctx.appendChild(prompt);
+    ctx.appendChild(buildCollapsiblePrompt(target.prompt));
   } else {
     ctx.appendChild(el("p", "flow-reply-hint", meta.hint));
   }
@@ -6265,6 +6305,7 @@ if (typeof module !== "undefined" && module.exports) {
     progressTurnKey,
     renderConversationRecord,
     renderInterventions,
+    buildCollapsiblePrompt,
     reconcileReplyTarget,
     tsValue,
     stepKey,

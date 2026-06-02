@@ -5,6 +5,14 @@
 
 
 
+
+## 7.11.4 - 2026-06-02
+
+- Fix running-flow console docked reply box overflowing when an intervention prompt is long (e.g. discovery_confirm carrying a full refined task description), which previously pushed the textarea, options, and Send button off-screen
+- Collapse the reply-context prompt body (消息详情) by default behind an expand/collapse trigger, since the prompt is already shown in the conversation stream above
+- Cap the expanded prompt body at 30vh with an internal scrollbar so the header, options, textarea, and Send button stay visible and clickable no matter how long the prompt is
+- Scroll the prompt body into view on expand and leave scroll position untouched on collapse, matching the view's foldable behavior
+- Limit the change to the #flow-view docked reply box, leaving the history view and other interfaces unaffected
 ## 7.11.3 - 2026-06-01
 
 - Fix incomplete 'View raw' coverage in the running-flow console so every conversation role (user/assistant/system/other) consistently exposes the original payload
