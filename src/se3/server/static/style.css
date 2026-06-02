@@ -1818,3 +1818,102 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   text-align: center;
   flex-shrink: 0;
 }
+
+/* -- login gate (G9) ------------------------------------------------- */
+
+.login-view {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+.login-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  width: min(380px, 92vw);
+  padding: 26px 26px 22px;
+}
+.login-card h2 { margin: 0 0 4px; font-size: 18px; }
+.login-sub { margin: 0 0 18px; color: var(--fg-dim); font-size: 12.5px; }
+.login-form { display: flex; flex-direction: column; }
+.login-form label {
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin: 10px 0 4px;
+}
+.login-form button { margin-top: 16px; }
+.login-breakglass {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.link-btn {
+  background: transparent;
+  color: var(--accent);
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.link-btn:hover { filter: none; text-decoration: underline; }
+
+/* -- top-bar owner label --------------------------------------------- */
+
+.owner-label {
+  font-size: 12.5px;
+  color: var(--fg);
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+/* -- daemon-key panel (G9) ------------------------------------------- */
+
+.keys-create {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 6px;
+}
+.keys-create input { flex: 1; }
+
+.keys-reveal {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--green);
+  border-radius: 6px;
+  background: rgba(76,175,106,.08);
+}
+.keys-reveal-note { margin: 0 0 6px; font-size: 12px; color: var(--green); }
+.keys-reveal-value {
+  display: block;
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  word-break: break-all;
+  color: var(--fg);
+}
+
+.keys-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.keys-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+.keys-row.revoked { opacity: .55; }
+.keys-row-label { flex: 1; font-size: 13px; }
+.keys-row-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.keys-status-active { color: var(--green); border: 1px solid var(--green); }
+.keys-status-revoked { color: var(--grey); border: 1px solid var(--grey); }
+.keys-revoke-btn { font-size: 12px; padding: 4px 10px; }
