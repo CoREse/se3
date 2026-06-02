@@ -15,6 +15,7 @@ import pytest
 
 from _authsrv import authed_app, login
 
+from se3.daemon import protocol
 from se3.server.auth.ratelimit import LoginRateLimiter, RateLimitConfig
 
 
@@ -365,3 +366,158 @@ def test_credentials_never_logged(client_and_app, caplog):
     assert bg_token not in blob
     if session_cookie:
         assert session_cookie not in blob
+
+
+# --------------------------------------------------------------------------
+# G10 task 1 — the full multi-tenant chain, end to end
+#
+# bootstrap-token  ->  break-glass admin login  ->  admin creates owner
+#   ->  owner mints a daemon key in the UI  ->  daemon HELLOs with that key and
+#   binds its machine to the owner  ->  the owner dispatches a flow to its OWN
+#   daemon  ->  a second owner can neither see nor dispatch to the first's
+#   daemon. Exercised over a live FastAPI TestClient with a real daemon /ws
+#   socket, against the real persistence + identity wiring.
+# --------------------------------------------------------------------------
+
+
+def _shared_app():
+    """A multi-tenant app over a shared real Store (in-memory sqlite)."""
+    from se3.server.app import create_app
+    from se3.server.auth.session import CookieConfig, SessionStore
+    from se3.server.persistence import Store
+
+    store = Store(":memory:")
+    app = create_app(
+        store=store,
+        session_store=SessionStore(cookie_config=CookieConfig(secure=False)),
+    )
+    return app, store
+
+
+def _await_visible(client, machine_id, tries=200):
+    for _ in range(tries):
+        machines = client.get("/api/machines").json().get("machines", [])
+        if any(m["machine_id"] == machine_id for m in machines):
+            return
+    raise AssertionError(f"machine {machine_id} never became visible")
+
+
+def test_full_chain_bootstrap_owner_key_daemon_dispatch():
+    from fastapi.testclient import TestClient
+
+    from se3.server import bootstrap
+
+    app, store = _shared_app()
+
+    # 1. bootstrap: mint a break-glass token exactly as `se3-server
+    #    bootstrap-token` does (hash at rest; plaintext returned once).
+    bg_plain, _tid = bootstrap.issue_breakglass_token(store)
+
+    # 2. break-glass login -> a stable single admin subject.
+    with TestClient(app) as admin:
+        bg = admin.post("/api/auth/breakglass", json={"token": bg_plain})
+        assert bg.status_code == 200 and bg.json()["is_admin"] is True
+
+        # 3. the admin provisions two distinct owners (no public self-signup).
+        alice = admin.post(
+            "/api/users", json={"username": "alice", "password": "alice-pw"}
+        )
+        bob = admin.post(
+            "/api/users", json={"username": "bob", "password": "bob-pw"}
+        )
+        assert alice.status_code == 201 and bob.status_code == 201
+        alice_id = alice.json()["owner_id"]
+        bob_id = bob.json()["owner_id"]
+        assert alice_id != bob_id and not alice.json()["is_admin"]
+
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "alice", "alice-pw")
+        login(cb, "bob", "bob-pw")
+
+        # 4. alice mints a daemon key in the UI (plaintext returned once).
+        created = ca.post("/api/daemon-keys", json={"label": "alice-node"})
+        assert created.status_code == 201
+        dkey = created.json()["key"]
+        assert dkey  # the one-time plaintext
+
+        # 5. the daemon dials /ws and authenticates via the HELLO key, binding
+        #    its machine to alice's owner_id.
+        with ca.websocket_connect("/ws") as daemon:
+            daemon.send_text(
+                protocol.make_hello("mAlice", "h", "6.4.0", key=dkey).to_json()
+            )
+            welcome = protocol.decode(daemon.receive_text())
+            assert welcome.type == protocol.MSG_WELCOME
+            assert welcome.payload["accepted"] is True
+            # The secret key is never echoed back in the WELCOME.
+            assert dkey not in welcome.to_json()
+
+            daemon.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mAlice",
+                        "flows": [
+                            {"flow_id": "fA", "project_root": "/pa", "status": "running"}
+                        ],
+                    }
+                ).to_json()
+            )
+            _await_visible(ca, "mAlice")
+
+            # alice sees ONLY her machine; bob sees nothing of hers.
+            assert {m["machine_id"] for m in ca.get("/api/machines").json()["machines"]} == {
+                "mAlice"
+            }
+            assert cb.get("/api/machines").json()["machines"] == []
+            assert cb.get("/api/machines/mAlice/flows").status_code == 404
+            assert cb.get("/api/flows/fA").status_code == 404
+
+            # 6. alice dispatches a flow to her OWN daemon -> SPAWN_FLOW lands.
+            ok = ca.post(
+                "/api/flows",
+                json={"machine_id": "mAlice", "task": "do", "project_root": "/pa"},
+            )
+            assert ok.status_code == 202
+            spawn = protocol.decode(daemon.receive_text())
+            assert spawn.type == protocol.MSG_SPAWN_FLOW
+
+            # 7. bob CANNOT dispatch to alice's daemon — it reads as absent (404),
+            #    so the remote-command-execution hole the bare server had is shut.
+            cross = cb.post(
+                "/api/flows",
+                json={"machine_id": "mAlice", "task": "pwn", "project_root": "/pa"},
+            )
+            assert cross.status_code == 404
+
+
+def test_full_chain_fail_closed_without_identity():
+    """No valid identity anywhere on the chain ⇒ fail-closed, never bare."""
+    from fastapi.testclient import TestClient
+
+    app, _store = _shared_app()
+    with TestClient(app) as anon:
+        # REST: unauthenticated reads/writes are refused (401), never anonymous.
+        assert anon.get("/api/machines").status_code == 401
+        assert (
+            anon.post(
+                "/api/flows",
+                json={"machine_id": "m", "task": "x", "project_root": "/p"},
+            ).status_code
+            == 401
+        )
+        # daemon /ws: a HELLO with no key is rejected (WELCOME accepted=false).
+        with anon.websocket_connect("/ws") as ws:
+            ws.send_text(protocol.make_hello("mGhost", "h", "6.4.0").to_json())
+            welcome = protocol.decode(ws.receive_text())
+            assert welcome.type == protocol.MSG_WELCOME
+            assert welcome.payload["accepted"] is False
+        # The rejected daemon registered nothing the operator could later see.
+        from se3.server import bootstrap
+
+        bg_plain, _ = bootstrap.issue_breakglass_token(_store)
+        admin = anon  # reuse the client; log in via break-glass
+        admin.post("/api/auth/breakglass", json={"token": bg_plain})
+        assert all(
+            m["machine_id"] != "mGhost"
+            for m in admin.get("/api/machines").json()["machines"]
+        )

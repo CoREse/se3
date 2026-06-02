@@ -356,3 +356,56 @@ def test_cli_daemon_start_no_key_is_none(cli_capture, monkeypatch):
     result = _invoke_daemon_start([])
     assert result.exit_code == 0
     assert cli_capture["config"].daemon_key is None
+
+
+# --------------------------------------------------------------------------
+# G10 task 2 — backward compatibility over a LIVE server
+#
+# A pre-multi-tenant daemon that HELLOs with no key must be turned away
+# fail-closed by the now-authenticated server (WELCOME accepted=false + close),
+# and must leave no machine registered. The mirror direction — an *old* server
+# that does not understand the key field simply ignoring it — is covered by
+# ``test_hello_with_key_decodes_roundtrip`` above (unknown payload fields are
+# preserved on decode and never read by a single-tenant server).
+# --------------------------------------------------------------------------
+
+
+def test_old_daemon_without_key_rejected_by_live_server():
+    from fastapi.testclient import TestClient
+
+    from _authsrv import authed_app, login
+
+    app, _key = authed_app()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            # An old daemon's HELLO carries no ``key`` field at all.
+            ws.send_text(protocol.make_hello("mOld", "h", "6.4.0").to_json())
+            welcome = protocol.decode(ws.receive_text())
+            assert welcome.type == protocol.MSG_WELCOME
+            assert welcome.payload["accepted"] is False
+            assert welcome.payload.get("reason")  # a human-readable reason
+
+        # The rejected daemon registered nothing: the admin operator view is empty.
+        login(client)  # seeded admin -> unscoped "see everything" view
+        machines = client.get("/api/machines").json()["machines"]
+        assert all(m["machine_id"] != "mOld" for m in machines)
+
+
+def test_live_server_tolerates_unknown_key_bearing_hello_field():
+    """A key-bearing HELLO never crashes the server's decode/dispatch path.
+
+    The additive ``key`` field must not break wire compatibility: a valid daemon
+    whose HELLO carries the key connects cleanly, proving the field is parsed,
+    not choked on.
+    """
+    from fastapi.testclient import TestClient
+
+    from _authsrv import authed_app, authed_hello
+
+    app, _key = authed_app()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(authed_hello(app, "mNew"))
+            welcome = protocol.decode(ws.receive_text())
+            assert welcome.type == protocol.MSG_WELCOME
+            assert welcome.payload["accepted"] is True

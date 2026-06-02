@@ -157,6 +157,16 @@ class _IsolatedConsole:
         self._daemon_log = self.tmp / "daemon.out"
         self._sfh = None
         self._dfh = None
+        # Multi-tenant auth (G10): the server is fail-closed, so the daemon
+        # must HELLO with an issued key and every REST/WS caller must carry an
+        # owner session. We seed one admin owner that both (a) owns the daemon
+        # via a daemon key and (b) logs the HTTP/browser clients in. The store
+        # is an explicit sqlite file shared by the seeding (this process) and
+        # the server subprocess.
+        self.db_path = self.tmp / "server.db"
+        self.daemon_key: Optional[str] = None
+        self.session_cookie: Optional[str] = None
+        self._cookiejar = None
 
     # -- environment -------------------------------------------------------
 
@@ -189,6 +199,44 @@ class _IsolatedConsole:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _seed_admin_and_key(self) -> None:
+        """Seed one admin owner (password + daemon key) into the server store.
+
+        Runs in the pytest process and writes the explicit sqlite file the
+        server subprocess later opens. The admin owns the daemon (via the key)
+        and authenticates the HTTP/browser clients.
+        """
+        import se3.server.crypto as crypto
+        from se3.server.persistence import Store
+
+        store = Store(str(self.db_path))
+        owner_id = store.create_owner("admin", is_admin=True)
+        store.link_identity(owner_id, "local", "admin")
+        store.set_password(owner_id, crypto.hash_password("pw"))
+        key_plain, key_hash = crypto.generate_token("dk")
+        store.issue_daemon_key(owner_id, key_hash)
+        self.daemon_key = key_plain
+
+    def _install_cookie_opener(self) -> None:
+        """Make ``urllib`` carry the owner session cookie on every call."""
+        import http.cookiejar
+
+        self._cookiejar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self._cookiejar)
+        )
+        urllib.request.install_opener(opener)
+
+    def _login(self) -> None:
+        """Establish the admin session (cookie) used by the REST/browser paths."""
+        _http_post(
+            self.base + "/api/auth/login", {"username": "admin", "password": "pw"}
+        )
+        for cookie in self._cookiejar:
+            if cookie.name == "se3_session":
+                self.session_cookie = cookie.value
+        assert self.session_cookie, "login did not establish a session cookie"
+
     def start(self) -> None:
         self.assert_isolation_guards()
         env = self._env()
@@ -205,15 +253,25 @@ class _IsolatedConsole:
         assert init.returncode == 0, f"se3 init failed: {init.stdout}\n{init.stderr}"
         assert (self.project / "se3" / "specs" / "base" / "spec.md").exists()
 
-        # 2. Start se3-server (worktree) bound to our free loopback port.
+        # 1b. Seed the admin owner + daemon key before the server opens the DB.
+        self._seed_admin_and_key()
+        self._install_cookie_opener()
+
+        # 2. Start se3-server (worktree) on our store file. A non-secure session
+        #    cookie is used because the test transport is plain-HTTP loopback (a
+        #    real deployment terminates TLS at the reverse proxy); everything
+        #    else is the production app.
         self._sfh = open(self._server_log, "wb")
+        server_launcher = (
+            "import uvicorn;"
+            "from se3.server.app import create_app;"
+            "from se3.server.auth.session import SessionStore, CookieConfig;"
+            f"app=create_app(db_path={str(self.db_path)!r}, "
+            "session_store=SessionStore(cookie_config=CookieConfig(secure=False)));"
+            f"uvicorn.run(app, host='127.0.0.1', port={self.port}, log_level='warning')"
+        )
         self.server = subprocess.Popen(
-            [
-                _PY,
-                "-c",
-                "from se3.server import main; main(['--host','127.0.0.1',"
-                f"'--port','{self.port}','--log-level','warning'])",
-            ],
+            [_PY, "-c", server_launcher],
             env=env,
             cwd=str(self.tmp),
             stdout=self._sfh,
@@ -222,9 +280,13 @@ class _IsolatedConsole:
         ready = _poll(lambda: _http_get(self.base + "/api/health"), attempts=60, delay=0.25)
         assert ready and ready.get("status") == "ok", "se3-server never became healthy"
 
+        # 2b. Log the REST/browser clients in as the seeded admin.
+        self._login()
+
         # 3. Start the daemon (worktree) dialing our server, scoped strictly to
-        #    the temp project. External ``se3 run`` process scanning is disabled
-        #    so the daemon can never aggregate the user's real flows.
+        #    the temp project, authenticating with the issued daemon key.
+        #    External ``se3 run`` process scanning is disabled so the daemon can
+        #    never aggregate the user's real flows.
         launcher = (
             "from se3.daemon.daemon import Daemon, DaemonConfig;"
             "d=Daemon(DaemonConfig("
@@ -232,6 +294,7 @@ class _IsolatedConsole:
             f"pid_dir=r'{self.daemon_dir}',"
             f"project_roots=[r'{self.project}'],"
             f"machine_id='{self.machine_id}',"
+            f"daemon_key={self.daemon_key!r},"
             "poll_interval=0.5));"
             # Hard isolation: never discover externally-running se3 run procs.
             "d.supervisor.discover_flows=lambda *a, **k: [];"
@@ -593,6 +656,18 @@ def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> Non
             )
         try:
             page = browser.new_page()
+            # The console is login-gated (multi-tenant): seed the owner session
+            # cookie so the page boots past the login gate without driving the
+            # form. The cookie is non-secure (plain-HTTP test transport).
+            page.context.add_cookies(
+                [
+                    {
+                        "name": "se3_session",
+                        "value": console.session_cookie,
+                        "url": console.base,
+                    }
+                ]
+            )
             page.goto(console.base, wait_until="domcontentloaded")
             # The console boots and renders its version label from /api/version,
             # which also proves the production app.js loaded in-page.

@@ -44,6 +44,15 @@ def main(argv: Optional[list] = None) -> None:
         print(f"se3-server version {__version__}")
         raise SystemExit(0)
 
+    # ``bootstrap-token`` only needs the persistence + crypto layers (stdlib
+    # sqlite3), never FastAPI / uvicorn. Intercept it here — like ``--version``
+    # — so the break-glass escape hatch can be minted even on a core-only
+    # install and stays off the heavy web import chain.
+    if args and args[0] == "bootstrap-token":
+        from .bootstrap import main as _bootstrap_main
+
+        raise SystemExit(_bootstrap_main(args[1:]))
+
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401

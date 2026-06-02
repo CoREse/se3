@@ -39,6 +39,7 @@ from se3 import __version__
 from se3.daemon import protocol
 
 from . import crypto
+from .bootstrap import DEFAULT_DB_PATH
 from .auth.base import OwnerIdentity, ProviderChain
 from .auth.local import PROVIDER_LOCAL, LocalAuthProvider
 from .auth.ratelimit import LoginRateLimited, LoginRateLimiter
@@ -727,12 +728,21 @@ def run(
     host: str = "127.0.0.1",
     port: int = protocol.DEFAULT_SERVER_PORT,
     *,
+    db_path: Optional[str] = None,
     log_level: str = "info",
 ) -> None:
-    """Start the SE3 central server with uvicorn (blocking)."""
+    """Start the SE3 central server with uvicorn (blocking).
+
+    *db_path* selects the sqlite store backing owners / identities / daemon
+    keys / break-glass tokens. The CLI passes the persistent default so a token
+    minted via ``se3-server bootstrap-token`` is consumable by the live server;
+    ``None`` falls back to an in-memory store (used by tests).
+    """
     import uvicorn
 
-    uvicorn.run(create_app(), host=host, port=port, log_level=log_level)
+    uvicorn.run(
+        create_app(db_path=db_path), host=host, port=port, log_level=log_level
+    )
 
 
 def main(argv: Optional[list] = None) -> None:
@@ -763,8 +773,13 @@ def main(argv: Optional[list] = None) -> None:
         help=f"Bind port (default: {protocol.DEFAULT_SERVER_PORT})",
     )
     parser.add_argument(
+        "--db-path",
+        default=DEFAULT_DB_PATH,
+        help=f"Path to the sqlite store (default: {DEFAULT_DB_PATH})",
+    )
+    parser.add_argument(
         "--log-level", default="info", help="uvicorn log level (default: info)"
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
-    run(args.host, args.port, log_level=args.log_level)
+    run(args.host, args.port, db_path=args.db_path, log_level=args.log_level)
