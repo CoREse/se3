@@ -28,6 +28,13 @@ server = [
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "websockets>=12.0",
+    # Slow password hashing (argon2id) for the multi-tenant local auth
+    # provider. Kept in the [server] extra so a core-only install never
+    # imports it: `se3.cli` / `se3.daemon` must not depend on argon2. The
+    # crypto layer prefers argon2-cffi and only falls back to bcrypt when
+    # argon2 is unavailable. The embedded persistence layer uses stdlib
+    # `sqlite3`, so no extra dependency is needed for storage.
+    "argon2-cffi>=21.3.0",
 ]
 # Headless-browser dependency for the UI render acceptance test
 # (`tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser`).

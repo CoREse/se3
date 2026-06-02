@@ -2694,3 +2694,388 @@ def load_claude_subprocess_config(
             ``{user, project, local}``).
     """
     return ClaudeSubprocessConfig.load(project_root)
+
+
+# ---------------------------------------------------------------------------
+# Server / auth configuration (multi-tenant control plane)
+# ---------------------------------------------------------------------------
+#
+# These settings configure the central server's authentication and identity
+# layer. Unlike the daemon/server *runtime* params documented in the
+# se3-config spec (host / port / poll_interval, sourced from CLI flags), the
+# ``server:`` section here lives in se3.yaml (and the global config) and drives
+# the pluggable auth providers, UI session cookie security, the embedded sqlite
+# path, and the local-auth rate-limit / lockout parameters. Every item has an
+# explicit default so a server with no ``server:`` section still comes up with
+# ``providers=['local']`` and fail-safe cookie attributes.
+#
+# The ``server`` key is a normal top-level config key, so it follows the
+# documented merge rule "project-level config overrides global config at the
+# top-level key level (no deep merge)": when the project YAML defines
+# ``server:`` it wholly replaces the global one; otherwise the global
+# ``server:`` (if any) is used.
+
+DEFAULT_SERVER_DB_PATH = "~/.se3/server.db"
+
+# Auth providers the registry knows how to assemble. ``local`` is the built-in
+# self-managed username+password provider (v1 mandatory); ``oidc`` and
+# ``proxy_header`` are disabled-by-default seams (see the future auth/oidc.py
+# and auth/proxy_header.py modules) that later groups flesh out.
+_KNOWN_AUTH_PROVIDERS = ("local", "oidc", "proxy_header")
+_DEFAULT_AUTH_PROVIDERS = ("local",)
+
+# Valid SameSite cookie attribute values (compared lower-cased).
+_VALID_COOKIE_SAMESITE = ("lax", "strict", "none")
+
+# Default OIDC scopes when the (disabled) seam is configured.
+_DEFAULT_OIDC_SCOPES = ("openid", "email", "profile")
+
+
+def _coerce_positive_int(value: Any, default: int, label: str) -> int:
+    """Coerce ``value`` to a positive int, warning + falling back on failure.
+
+    Booleans are rejected (``True`` / ``False`` are not meaningful counts) and
+    non-positive results fall back to ``default`` so a typo cannot silently
+    disable a lockout / rate-limit window.
+    """
+    if isinstance(value, bool):
+        logger.warning(
+            "%s=%r is not a valid integer; using default %d", label, value, default,
+        )
+        return default
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not a valid integer; using default %d", label, value, default,
+        )
+        return default
+    if coerced <= 0:
+        logger.warning(
+            "%s=%d must be positive; using default %d", label, coerced, default,
+        )
+        return default
+    return coerced
+
+
+def _str_or_default(value: Any, default: str, label: str) -> str:
+    """Return ``value`` when it is a non-empty string, else warn + default."""
+    if isinstance(value, str) and value.strip():
+        return value
+    logger.warning(
+        "%s=%r is not a non-empty string; using default %r", label, value, default,
+    )
+    return default
+
+
+def _parse_auth_providers(raw: Any) -> list[str]:
+    """Validate ``server.auth.providers`` into a deduplicated known-name list.
+
+    Unknown / blank / non-string entries are dropped with a warning. An
+    absent, non-list, or fully-invalid value falls back to ``['local']`` so the
+    server never comes up with an empty provider chain (which would otherwise
+    mean "no way to authenticate"). Fail-closed enforcement (refusing to serve
+    when no usable provider is configured) is the auth registry's job in a
+    later group; here we only guarantee a sane, typed default.
+    """
+    if raw is None:
+        return list(_DEFAULT_AUTH_PROVIDERS)
+    if not isinstance(raw, list):
+        logger.warning(
+            "server.auth.providers is not a list (got %s); using default %s",
+            type(raw).__name__, list(_DEFAULT_AUTH_PROVIDERS),
+        )
+        return list(_DEFAULT_AUTH_PROVIDERS)
+    result: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            logger.warning(
+                "server.auth.providers entry %r is not a non-empty string; "
+                "skipping", entry,
+            )
+            continue
+        name = entry.strip().lower()
+        if name not in _KNOWN_AUTH_PROVIDERS:
+            logger.warning(
+                "server.auth.providers entry %r is unknown (known: %s); "
+                "skipping", entry, list(_KNOWN_AUTH_PROVIDERS),
+            )
+            continue
+        if name not in result:
+            result.append(name)
+    if not result:
+        logger.warning(
+            "server.auth.providers resolved to no valid providers; using "
+            "default %s", list(_DEFAULT_AUTH_PROVIDERS),
+        )
+        return list(_DEFAULT_AUTH_PROVIDERS)
+    return result
+
+
+@dataclass
+class SessionConfig:
+    """UI session cookie security attributes for the local auth provider.
+
+    Defaults are fail-safe for a public deployment behind a TLS-terminating
+    reverse proxy: ``Secure`` + ``HttpOnly`` cookies with ``SameSite=lax``.
+    """
+
+    cookie_name: str = "se3_session"
+    cookie_secure: bool = True
+    cookie_httponly: bool = True
+    cookie_samesite: str = "lax"
+    max_age_seconds: int = 86400  # 24h session lifetime
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "SessionConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+        samesite_raw = data.get("cookie_samesite", cls.cookie_samesite)
+        samesite = samesite_raw.lower() if isinstance(samesite_raw, str) else ""
+        if samesite not in _VALID_COOKIE_SAMESITE:
+            logger.warning(
+                "server.auth.session.cookie_samesite=%r is invalid (expected "
+                "one of %s); using default %r",
+                samesite_raw, list(_VALID_COOKIE_SAMESITE), cls.cookie_samesite,
+            )
+            samesite = cls.cookie_samesite
+        return cls(
+            cookie_name=_str_or_default(
+                data.get("cookie_name", cls.cookie_name), cls.cookie_name,
+                "server.auth.session.cookie_name",
+            ),
+            cookie_secure=_coerce_bool(
+                data.get("cookie_secure", cls.cookie_secure),
+                default=cls.cookie_secure,
+            ),
+            cookie_httponly=_coerce_bool(
+                data.get("cookie_httponly", cls.cookie_httponly),
+                default=cls.cookie_httponly,
+            ),
+            cookie_samesite=samesite,
+            max_age_seconds=_coerce_positive_int(
+                data.get("max_age_seconds", cls.max_age_seconds),
+                cls.max_age_seconds, "server.auth.session.max_age_seconds",
+            ),
+        )
+
+
+@dataclass
+class LocalAuthConfig:
+    """Login lockout / rate-limit parameters for the local auth provider.
+
+    ``max_failed_attempts`` consecutive failures lock an account for
+    ``lockout_seconds``; independently, at most ``ratelimit_max_attempts``
+    login attempts are accepted per ``ratelimit_window_seconds`` window. Both
+    guards exist to blunt brute-force attacks (security baseline).
+    """
+
+    max_failed_attempts: int = 5
+    lockout_seconds: int = 300  # 5 minutes
+    ratelimit_window_seconds: int = 60
+    ratelimit_max_attempts: int = 10
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "LocalAuthConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+        return cls(
+            max_failed_attempts=_coerce_positive_int(
+                data.get("max_failed_attempts", cls.max_failed_attempts),
+                cls.max_failed_attempts,
+                "server.auth.local.max_failed_attempts",
+            ),
+            lockout_seconds=_coerce_positive_int(
+                data.get("lockout_seconds", cls.lockout_seconds),
+                cls.lockout_seconds, "server.auth.local.lockout_seconds",
+            ),
+            ratelimit_window_seconds=_coerce_positive_int(
+                data.get("ratelimit_window_seconds", cls.ratelimit_window_seconds),
+                cls.ratelimit_window_seconds,
+                "server.auth.local.ratelimit_window_seconds",
+            ),
+            ratelimit_max_attempts=_coerce_positive_int(
+                data.get("ratelimit_max_attempts", cls.ratelimit_max_attempts),
+                cls.ratelimit_max_attempts,
+                "server.auth.local.ratelimit_max_attempts",
+            ),
+        )
+
+
+@dataclass
+class OidcConfig:
+    """OIDC social-login provider seam — disabled by default (v1 optional).
+
+    This is only a config seam so the schema does not block a future OIDC
+    provider; the provider itself is not implemented in v1. When ``enabled``
+    is false the remaining fields are inert.
+    """
+
+    enabled: bool = False
+    issuer: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    redirect_url: Optional[str] = None
+    scopes: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_OIDC_SCOPES),
+    )
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "OidcConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+
+        def _opt_str(key: str) -> Optional[str]:
+            val = data.get(key)
+            if val is None:
+                return None
+            if isinstance(val, str) and val.strip():
+                return val
+            logger.warning(
+                "server.auth.oidc.%s=%r is not a non-empty string; ignoring",
+                key, val,
+            )
+            return None
+
+        scopes_raw = data.get("scopes")
+        if scopes_raw is None:
+            scopes = list(_DEFAULT_OIDC_SCOPES)
+        elif isinstance(scopes_raw, list) and all(
+            isinstance(s, str) and s.strip() for s in scopes_raw
+        ) and scopes_raw:
+            scopes = list(scopes_raw)
+        else:
+            logger.warning(
+                "server.auth.oidc.scopes=%r is not a non-empty list of "
+                "strings; using default %s",
+                scopes_raw, list(_DEFAULT_OIDC_SCOPES),
+            )
+            scopes = list(_DEFAULT_OIDC_SCOPES)
+
+        return cls(
+            enabled=_coerce_bool(data.get("enabled", False), default=False),
+            issuer=_opt_str("issuer"),
+            client_id=_opt_str("client_id"),
+            client_secret=_opt_str("client_secret"),
+            redirect_url=_opt_str("redirect_url"),
+            scopes=scopes,
+        )
+
+
+@dataclass
+class ProxyHeaderConfig:
+    """Reverse-proxy trusted-identity-header provider seam — disabled by default.
+
+    Hard security precondition when enabled (enforced by a later group, not
+    here): the reverse proxy MUST strip any client-supplied copy of ``header``
+    and the server MUST NOT be reachable while bypassing the proxy; otherwise
+    the injected identity is forgeable and this is an authz hole. v1 ships the
+    seam only.
+    """
+
+    enabled: bool = False
+    header: str = "X-Forwarded-Email"
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ProxyHeaderConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+        return cls(
+            enabled=_coerce_bool(data.get("enabled", False), default=False),
+            header=_str_or_default(
+                data.get("header", cls.header), cls.header,
+                "server.auth.proxy_header.header",
+            ),
+        )
+
+
+@dataclass
+class AuthConfig:
+    """Pluggable authentication configuration (A-layer).
+
+    ``providers`` is the ordered chain of auth providers the registry should
+    assemble; ``session`` / ``local`` configure the built-in local provider;
+    ``oidc`` / ``proxy_header`` are disabled-by-default seams.
+    """
+
+    providers: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_AUTH_PROVIDERS),
+    )
+    session: SessionConfig = field(default_factory=SessionConfig)
+    local: LocalAuthConfig = field(default_factory=LocalAuthConfig)
+    oidc: OidcConfig = field(default_factory=OidcConfig)
+    proxy_header: ProxyHeaderConfig = field(default_factory=ProxyHeaderConfig)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "AuthConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+        return cls(
+            providers=_parse_auth_providers(data.get("providers")),
+            session=SessionConfig.from_dict(data.get("session", {})),
+            local=LocalAuthConfig.from_dict(data.get("local", {})),
+            oidc=OidcConfig.from_dict(data.get("oidc", {})),
+            proxy_header=ProxyHeaderConfig.from_dict(data.get("proxy_header", {})),
+        )
+
+
+@dataclass
+class ServerConfig:
+    """Central-server auth / identity configuration (``server:`` YAML section).
+
+    Loaded with global→project top-level-key override (no deep merge), matching
+    the documented config precedence. All fields default so an absent
+    ``server:`` section yields ``db_path='~/.se3/server.db'`` and
+    ``auth.providers=['local']``.
+    """
+
+    db_path: str = DEFAULT_SERVER_DB_PATH
+    auth: AuthConfig = field(default_factory=AuthConfig)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ServerConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+        db_path = _str_or_default(
+            data.get("db_path", DEFAULT_SERVER_DB_PATH),
+            DEFAULT_SERVER_DB_PATH, "server.db_path",
+        )
+        return cls(
+            db_path=db_path,
+            auth=AuthConfig.from_dict(data.get("auth", {})),
+        )
+
+    @classmethod
+    def load(cls, project_root: Optional[Path]) -> "ServerConfig":
+        """Load the ``server:`` config from global + project YAML.
+
+        ``server`` is a normal top-level key: the project ``server:`` section,
+        when present, wholly replaces the global one (no deep merge). Missing /
+        non-mapping sections fall back to built-in defaults.
+        """
+        global_data, project_data, _src = _load_agent_configs(project_root)
+        server_data = project_data.get("server")
+        if server_data is None:
+            server_data = global_data.get("server")
+        if not isinstance(server_data, dict):
+            server_data = {}
+        return cls.from_dict(server_data)
+
+    def resolved_db_path(self) -> Path:
+        """Return ``db_path`` with ``~`` expanded to an absolute Path."""
+        return Path(self.db_path).expanduser()
+
+
+def load_server_config(project_root: Optional[Path] = None) -> ServerConfig:
+    """Load central-server auth / identity configuration.
+
+    Args:
+        project_root: Project root directory. If None, uses the current
+            working directory (and still reads the global ``~/.se3/config.yaml``).
+
+    Returns:
+        ServerConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return ServerConfig.load(project_root)
