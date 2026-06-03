@@ -23,12 +23,12 @@ The system SHALL support two classes of issue discovery:
 - **AND** the flow is set to FAILED status and execution stops (the flow does NOT continue to the next step)
 - **NOTE** when `max_fix_iterations == 0` (the user-configured `0`/`null` sentinel for "unlimited"), this A-class trigger never fires because the state machine skips the exhaustion check entirely. Negative values are rejected at config load, so they cannot reach this code path.
 
-#### Scenario: A-class trigger on pre-existing test failures
-- **WHEN** the test step detects failures that exist in `se3/state/known_test_failures.json` (not introduced by the current change)
+#### Scenario: A-class trigger on inherited (baseline) test failures
+- **WHEN** the test step detects failures that are **inherited** — present in the frozen pre-implement `baseline_failures` set (captured before this flow's `implement` touched anything), not introduced by the current change (see flow-engine *Pre-implement Test Baseline*). The baseline replaces the retired `se3/state/known_test_failures.json` known-list as the provenance source.
 - **THEN** `IssueDiscovery.create_from_pre_existing_failures()` creates a `medium` priority issue
-- **AND** the issue lists each pre-existing failing test with its test_id and reason
+- **AND** the issue lists each inherited failing test with its test_id and reason
 - **AND** the issue is tagged with `auto-discovered` and `source:test-pre-existing`
-- **AND** duplicate issues are suppressed within the same flow execution
+- **AND** the issue is filed **at most once per flow execution** (deduped via `context["inherited_failures_filed"]`) — it is never re-filed on each fix iteration, preventing the historical duplicate-issue explosion
 
 #### Scenario: B-class injection into whitelisted step
 - **WHEN** a configured whitelisted step builds its LLM prompt (note: the default whitelist is empty, and `summarize` is no longer a participant)
@@ -53,7 +53,7 @@ issue_discovery:
 
 **Note — `summarize` no longer participates in B-class discovery:** The default whitelist previously contained `["summarize"]`. `summarize` has since been reworked into a pure, user-facing session report (see the flow-engine *Summarize Session Report and Completion Gate* requirement); both its injection call AND its `discovered_issues` extraction (`_extract_discovered_issues`) were removed. Re-adding `summarize` to `issue_discovery.steps` is therefore explicitly **unsupported**: even when configured, `summarize` neither appends the injection fragment nor writes `discovered_issues`, so nothing is collected. The whitelist mechanism itself is retained (default empty) so that other steps which can capture `discovered_issues` from their own output may still be opted in explicitly.
 
-**Note:** `verify_spec` is likewise not in the default whitelist. The `verify_spec` step uses a deterministic scope mechanism to file out-of-scope issues directly via `IssueManager.create()`, replacing the probabilistic B-class discovery approach.
+**Note:** `verify_spec` is likewise not in the default whitelist. The `verify_spec` step uses a deterministic scope mechanism, but out-of-scope issues are now **logged (留痕) via `_log_out_of_scope_issues`, not filed** via `IssueManager.create()` — see the flow-engine *verify_spec Unified Priority and Scope Mechanism* requirement. This avoids the issue-tracker explosion a looping scoped flow would otherwise cause by re-filing the same out-of-scope observations every iteration.
 
 **Forbidden steps (hardcoded):** `{"implement", "test"}` — these steps NEVER receive injection regardless of configuration.
 
@@ -72,7 +72,7 @@ The `get_issue_discovery_injection(step_type, project_root)` function encapsulat
 #### Scenario: Custom whitelist for a capable step
 - **WHEN** `issue_discovery.steps: ["plan"]` is configured
 - **THEN** `plan` receives injection
-- **AND** `verify_spec` does NOT receive injection (it files issues deterministically instead)
+- **AND** `verify_spec` does NOT receive injection (it classifies scope deterministically and logs out-of-scope issues instead of filing them)
 
 #### Scenario: Forbidden step override
 - **WHEN** config includes `implement` in `issue_discovery.steps`
@@ -232,7 +232,7 @@ State Machine (after step completion)
             ├── Use priority_hint directly as issue priority
             └── IssueManager.create()
 
-verify_spec Deterministic Filing (separate from B-class):
+verify_spec Deterministic Scope Classification (separate from B-class):
 
 verify_spec handler
     │
@@ -240,5 +240,5 @@ verify_spec handler
     │
     ├── in_scope issues → trigger REVISION_NEEDED
     │
-    └── out_of_scope issues → IssueManager.create() directly
+    └── out_of_scope issues → _log_out_of_scope_issues() (留痕, logged not filed)
 ```

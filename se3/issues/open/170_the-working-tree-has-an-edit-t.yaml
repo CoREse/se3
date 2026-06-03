@@ -1,0 +1,31 @@
+id: '170'
+title: 'The working tree has an edit to tests/engine/test_spec_format.py (assert len(parsed.requirements)
+  == 18 → 19) that is NOT listed in this flow''s Changes Made, while the input test_results
+  still show that test failing. The base spec genuinely has 19 requirements, so the
+  edit is correct and the test now passes — but the provenance is untracked and it
+  diverges from the proposal''s framing of this test as the permanently-surfaced inherited
+  failure (acceptance criterion #6 treats it as one of the 2 known pre-existing failures).
+  Non-blocking observation only.'
+description: 'The working tree has an edit to tests/engine/test_spec_format.py (assert
+  len(parsed.requirements) == 18 → 19) that is NOT listed in this flow''s Changes
+  Made, while the input test_results still show that test failing. The base spec genuinely
+  has 19 requirements, so the edit is correct and the test now passes — but the provenance
+  is untracked and it diverges from the proposal''s framing of this test as the permanently-surfaced
+  inherited failure (acceptance criterion #6 treats it as one of the 2 known pre-existing
+  failures). Non-blocking observation only.
+
+
+  Suggestion: Confirm whether the test_spec_format.py edit belongs to this flow; if
+  so, record it in changes_made. If the proposal intends this test to remain a demonstration
+  of a surfaced-but-unfixed inherited failure, revert the edit. No action required
+  for the baseline feature itself to be correct.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-03T13:15:48.931722'
+updated_at: '2026-06-03T13:15:48.931722'

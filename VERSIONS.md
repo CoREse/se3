@@ -7,6 +7,16 @@
 
 
 
+
+## 8.1.0 - 2026-06-03
+
+- Capture a deterministic test baseline before implement runs, freezing the set of pre-existing failures so introduced regressions can never be laundered into 'known' status
+- Pre-warm the baseline as a background subprocess during analyze/plan/confirm, adding ~0 wall-clock; implement blocks only if the run is not yet ready
+- Cache the baseline by git HEAD sha plus working-tree dirty hash and persist baseline_failures in flow state so --resume and parallel flows reuse it
+- Stop scoped flows (e.g. doc-sync) from infinite-looping on inherited test failures: the test gate and verify_spec now block only on failures this session introduced
+- Retire the auto-populated known_test_failures.json laundering vector; the inherited-vs-introduced exemption is now the measured baseline only
+- Log inherited test failures and out_of_scope observations once (留痕) instead of re-filing duplicate issues every fix iteration
+- Reconcile workflow.max_fix_iterations between se3.yaml and se3.local.yaml and log the resolved value and winning source at load time
 ## 8.0.0 - 2026-06-02
 
 - Require authenticated, owner-scoped access for all webui/REST and daemon channels; remove the prior unauthenticated control-plane mode

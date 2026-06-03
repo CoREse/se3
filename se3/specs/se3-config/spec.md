@@ -882,6 +882,10 @@ The system SHALL support workflow-level configuration for the fix loop mechanism
 - `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a single fix-loop round before advancing to the next step (default: 1). MUST be an integer `>= 1`. When set to N>1, each fix-loop round repeats the self_check step up to N times: any single instance reporting issues short-circuits to fix-loop immediately (remaining instances are not created). Only after N consecutive clean instances does the flow advance. Values `< 1` (including 0 and negatives) trigger startup fail-fast in `WorkflowConfig` loading.
 - `workflow.self_check_convergence_enabled`: Toggle for the cross-fix-loop self_check convergence shortcut (default: `false`). When `false`, the state machine never compares the current round's issues against the previous round's issues, and `_issues_converged` is not invoked. When `true`, only the first self_check instance of a new fix-loop round (pass_index=1) receives `prev_self_check_issues` and participates in the comparison; instances #2..#N within the same round never participate. **NOTE:** the default flipped from on to off in this revision; this flip is intentionally not announced via changelog or startup log because the project requires every issue to be resolved, making convergence-based early exit a no-op on the happy path.
 
+**Local-override shadowing and effective-source logging:**
+
+Because `se3.local.yaml` replaces `se3.yaml` as a whole (whole-file pick-one, no key-level merge — see *Configuration File Format*), a `workflow.max_fix_iterations` set in `se3.yaml` is silently shadowed whenever `se3.local.yaml` exists. To make that override visible, `WorkflowConfig.load` SHALL log the resolved value together with the file it came from (`_log_effective_source`): `workflow config: max_fix_iterations=<N> (effective source: <se3.local.yaml|se3.yaml>)`. The log line is deduped per resolved config path so the per-step `load` calls do not flood the log. The two shipped files SHOULD carry the **same** reconciled value so the shadow is a no-op (the cap is only a backstop — with the pre-implement baseline mechanism eliminating the inherited-failure fix loop, exhaustion should rarely be reached).
+
 **Engine.json output schema:**
 
 When the fix loop branches in `verify_spec` or `self_check`, the step writes `max_fix_iterations` (int) into `step.outputs` for downstream renderers. `0` is the documented sentinel for "unlimited" and SHOULD be displayed as `N (unlimited)` rather than `N of 0`. Negatives never appear here (rejected at config load). The field is written only on the fix-loop trigger branch (when the step returns `REVISION_NEEDED`); downstream renderers MUST treat the key as optional on success-path steps.
@@ -893,6 +897,12 @@ workflow:
   self_check_passes_required: 3         # Require 3 consecutive clean self_check passes per round
   self_check_convergence_enabled: false # Disable cross-round convergence shortcut (default)
 ```
+
+#### Scenario: Effective max_fix_iterations source is logged
+- **GIVEN** both `se3.yaml` and `se3.local.yaml` set `workflow.max_fix_iterations` (reconciled to the same value)
+- **WHEN** `WorkflowConfig.load` resolves the workflow config
+- **THEN** a one-shot (per resolved config path) INFO line is logged naming the resolved value and the effective source file (`se3.local.yaml` when present, since it shadows `se3.yaml` whole-file)
+- **AND** the resolved `max_fix_iterations` is the value from the shadowing file, making the override visible rather than silent
 
 #### Scenario: Default workflow configuration
 - **WHEN** no `workflow` section exists in se3.yaml

@@ -239,3 +239,71 @@ class TestBaselineCapture:
         cmd = capture._resolve_command()
         assert "pytest" in cmd
         assert "-v" in cmd
+
+
+# ---------------------------------------------------------------------------
+# Timeout / kill enforcement (bounded pre-implement run)
+# ---------------------------------------------------------------------------
+
+class TestBaselineTimeoutKill:
+    def test_wait_or_kill_returns_none_and_kills_on_timeout(self, tmp_path):
+        # A subprocess that would run far longer than the bound.
+        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        proc = capture._process  # capture the handle before kill clears state
+        result = capture.wait_or_kill(timeout=0.2)
+        assert result is None
+        assert capture.timed_out is True
+        assert capture.is_ready() is True
+        # The subprocess must actually be dead, not orphaned still running.
+        assert proc is not None and proc.poll() is not None
+
+    def test_wait_or_kill_resolves_normally_within_bound(self, tmp_path):
+        body = "tests/foo.py::test_a PASSED\ntests/foo.py::test_b FAILED"
+        cmd = [sys.executable, "-c",
+               f"import sys; print({body!r}); sys.exit(1)"]
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        result = capture.wait_or_kill(timeout=30)
+        assert result == {"tests/foo.py::test_b"}
+        assert capture.timed_out is False
+
+    def test_wait_or_kill_none_timeout_is_unbounded(self, tmp_path):
+        cmd = _py_print_command("tests/foo.py::test_b FAILED")
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        result = capture.wait_or_kill(timeout=None)
+        assert result == {"tests/foo.py::test_b"}
+        assert capture.timed_out is False
+
+    def test_kill_is_idempotent(self, tmp_path):
+        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        capture.kill()
+        # Second kill must not raise and must keep the resolved sentinel.
+        capture.kill()
+        assert capture.wait() is None
+        assert capture.is_ready() is True
+
+    def test_kill_before_resolution_yields_none_sentinel(self, tmp_path):
+        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        capture.kill()
+        assert capture.wait_or_kill(timeout=5) is None
+
+    def test_wait_or_kill_after_done_returns_cached(self, tmp_path):
+        cmd = _py_print_command("tests/foo.py::test_b FAILED")
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        first = capture.wait()
+        # Already resolved: a later bounded wait returns the cached result.
+        assert capture.wait_or_kill(timeout=0.001) == first
+
+
+class TestResolveBaselineTimeout:
+    def test_defaults_when_not_a_project(self, tmp_path):
+        # No se3.yaml → TestConfig defaults → test.timeout default (1800).
+        assert test_baseline.resolve_baseline_timeout(tmp_path) == 1800.0
+
+    def test_reads_configured_timeout(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            "test:\n  timeout: 600\n", encoding="utf-8",
+        )
+        assert test_baseline.resolve_baseline_timeout(tmp_path) == 600.0

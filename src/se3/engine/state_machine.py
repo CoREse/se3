@@ -1589,17 +1589,26 @@ class StateMachine:
         a prior pass, or a fix-loop re-entry into IMPLEMENT) it returns at once
         without re-measuring.
 
+        Every wait is **time-bounded** (see :func:`resolve_baseline_timeout`):
+        a hung test (deadlock, infinite loop, stuck IO) is killed at the bound
+        and treated as a failed measurement, so the baseline run can never
+        reintroduce the unbounded-runtime failure mode this change exists to
+        eliminate — just relocated to flow start.
+
         Resolution order:
 
-        1. **Background handle** from :meth:`_start_baseline_capture`: await it.
+        1. **Background handle** from :meth:`_start_baseline_capture`: await it
+           up to the time bound, killing the subprocess on expiry.
         2. **Synchronous fallback**: if there is no handle, or the background
-           run returned the ``None`` failure sentinel (could not produce
-           parseable results), run one authoritative measurement here.
-        3. **Empty-baseline last resort**: if even the synchronous run fails,
-           fall back to an empty baseline with a loud warning. This errs toward
-           treating current failures as *introduced* (never launders a real
-           regression into the baseline), at the cost of possibly re-flagging a
-           genuinely pre-existing failure — the safe direction.
+           run returned the ``None`` failure sentinel for an *infra* reason
+           (could not produce parseable results), run one authoritative,
+           time-bounded measurement here. A background *timeout* skips this step
+           (re-running a hung suite synchronously would just hang again).
+        3. **Empty-baseline last resort**: if even the synchronous run fails or
+           times out, fall back to an empty baseline with a loud warning. This
+           errs toward treating current failures as *introduced* (never launders
+           a real regression into the baseline), at the cost of possibly
+           re-flagging a genuinely pre-existing failure — the safe direction.
 
         The resolved set is persisted onto the flow and written to the cache so
         parallel/resumed flows on the same commit reuse it.
@@ -1611,28 +1620,35 @@ class StateMachine:
         from .test_baseline import (
             BaselineCapture,
             compute_baseline_key,
+            resolve_baseline_timeout,
             save_cache,
         )
 
+        timeout = resolve_baseline_timeout(self.project_root)
         failures: Optional[set] = None
+        background_timed_out = False
 
         capture = self._baseline_capture
         if capture is not None:
             try:
-                failures = capture.wait()  # blocks until the background suite ends
+                # Bounded wait: a hung suite is killed at the bound rather than
+                # blocking the flow forever before implement.
+                failures = capture.wait_or_kill(timeout)
+                background_timed_out = capture.timed_out
             except Exception as e:  # noqa: BLE001
                 logger.warning("Baseline background capture wait failed: %s", e)
                 failures = None
 
         # Synchronous fallback: no background handle, or the background run
-        # signalled failure via the None sentinel.
-        if failures is None:
+        # signalled an infra failure via the None sentinel. Skip it after a
+        # timeout — a hung suite would only hang again, doubling the wall-clock.
+        if failures is None and not background_timed_out:
             logger.info(
                 "Baseline not ready from background capture; running synchronous "
                 "fallback measurement before implement"
             )
             try:
-                failures = BaselineCapture(self.project_root).launch().wait()
+                failures = BaselineCapture(self.project_root).launch().wait_or_kill(timeout)
             except Exception as e:  # noqa: BLE001
                 logger.warning("Synchronous baseline fallback failed: %s", e)
                 failures = None
@@ -1665,6 +1681,35 @@ class StateMachine:
 
         # Drop the handle; subsequent re-entries hit the idempotent guard above.
         self._baseline_capture = None
+
+    def cleanup_baseline_capture(self) -> None:
+        """Terminate any still-running pre-implement baseline subprocess.
+
+        The background baseline suite launched in :meth:`_start_baseline_capture`
+        (from :meth:`init_flow`) is normally awaited and reaped by
+        :meth:`_ensure_baseline_ready`, which the state machine invokes only just
+        before the IMPLEMENT step. But a flow can terminate *before* IMPLEMENT is
+        ever dispatched — analyze/plan/confirm failing, or the operator choosing
+        Abort/Exit at a confirm pause — in which case ``_ensure_baseline_ready``
+        never runs and the full-suite pytest would be left orphaned (and, for a
+        genuinely hung test, never exit at all). The orchestrator calls this from
+        its outermost ``finally`` so a pre-implement suite run can never outlive
+        the flow.
+
+        Idempotent and never raises: when no capture was launched (cache hit /
+        resumed flow), or it was already reaped by ``_ensure_baseline_ready``,
+        the handle is ``None`` and this is a no-op; a still-running subprocess is
+        killed and reaped via :meth:`BaselineCapture.kill`.
+        """
+        capture = self._baseline_capture
+        if capture is None:
+            return
+        try:
+            capture.kill()
+        except Exception as e:  # noqa: BLE001 — teardown must not crash shutdown
+            logger.debug("Baseline capture cleanup failed: %s", e)
+        finally:
+            self._baseline_capture = None
 
     def get_progress(self, flow: FlowInstance) -> Dict[str, Any]:
         """Get detailed progress information.

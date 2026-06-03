@@ -1606,26 +1606,31 @@ The `verify_spec` step SHALL use the unified issue priority system (`critical/hi
 
 **Scope Dimension:**
 - `in_scope`: Issue directly introduced by current task's implementation, or current task claims to address it but has not. Blocks current flow and must be fixed.
-- `out_of_scope`: Pre-existing problem discovered during verification, or relates to functionality outside current task boundaries. Filed as an issue via `IssueManager.create()`, does not block current flow.
+- `out_of_scope`: Pre-existing problem discovered during verification, or relates to functionality outside current task boundaries. **Logged (留痕) via `_log_out_of_scope_issues`, NOT filed as an issue** (to avoid issue explosion across fix iterations); does not block current flow.
 
 **verified Field (Rule-Based Computation):**
 - The `verified` field is NOT determined by LLM output — it is computed by code: `verified = (in_scope_count == 0) and tests_passed`
 - If the LLM outputs a `verified` field, it is ignored/overridden by the rule-based computation
 - This eliminates inconsistency between displayed verification status and actual flow behavior
 
-**Honest `tests_passed` — critical acceptance test consumption:**
+**Baseline-aligned `tests_passed` — single source of truth with the test step:**
 
-The `tests_passed` input to the formula MUST honestly reflect whether the critical acceptance tests actually ran. The verify_spec step SHALL explicitly consume the `test_results["critical_skipped"]` and `test_results["critical_missing"]` signals produced by the test step (see *Test Step Configuration and Multi-Phase Execution*): if **either** list is non-empty, `tests_passed` is forced to `False`, so the authoritative `verified` cannot be polluted by a false-green. This is a defensive double-safety net that sits alongside the existing returncode/`overall_passed` check — even if an upstream branch failed to force `overall_passed=False`, a skipped or missing critical acceptance test still drives `verified` to `False`. When this gate trips, verify_spec returns REVISION_NEEDED and its `fix_instructions` note that a critical acceptance test was skipped or is missing and must be made to truly run.
+`tests_passed` SHALL consume the **same baseline-based verdict the test step computes** rather than re-deriving a pass/fail from any-red-test. The step reads `test_results["tests_blocking"]` (the authoritative flag `test.py` sets — `True` iff there is an introduced failure, an unparseable failure, or a critical-gate trip) and computes `tests_passed = not tests_blocking`. **Inherited** failures (those in `baseline_failures`) are deliberately excluded from `tests_passed`, so they do **not** drive `REVISION_NEEDED` and do not block a correctly-scoped flow from committing its work. Robust fallbacks (in `_evaluate_test_gate` / `_compute_introduced_failures`) cover older `test_results` shapes: if `tests_blocking` is absent, the step falls back to `introduced_failures`, then recomputes the introduced split from the structured `new_tests`/`regression` lists against the injected `baseline_failures`. Inherited failures are surfaced once (留痕) but do not affect the verdict.
+
+**Honest `tests_passed` — critical acceptance test consumption (defensive gate retained):**
+
+Independently of the baseline verdict, the `tests_passed` input MUST honestly reflect whether **this session's** critical acceptance tests actually ran. The verify_spec step SHALL continue to consume the `test_results["critical_skipped"]` and `test_results["critical_missing"]` signals produced by the test step (see *Test Step Configuration and Multi-Phase Execution*): if **either** list is non-empty, `tests_passed` is forced to `False`, so the authoritative `verified` cannot be polluted by a false-green. This is a defensive double-safety net — even if an upstream branch failed to force the blocking flag, a skipped or missing critical acceptance test still drives `verified` to `False`. When this gate trips, verify_spec returns REVISION_NEEDED and its `fix_instructions` note that a critical acceptance test was skipped or is missing and must be made to truly run.
 
 **REVISION_NEEDED Logic:**
-- Triggered when `in_scope_count > 0` (spec compliance issues) OR `tests_passed == False` (test failures)
+- Triggered when `in_scope_count > 0` (spec compliance issues) OR `tests_passed == False` (introduced test failures or a critical-gate trip — never inherited/baseline failures)
 - verify_spec handler always returns REVISION_NEEDED when issues are found (does not check exhaustion internally)
 - Exhaustion detection is centralized in `state_machine.transition_to_next()`: when `fix_iteration >= max_fix_iterations` (default 100), the flow is set to FAILED status, an A-class issue is generated, and execution stops
 - **Sentinel:** when `max_fix_iterations == 0` (i.e. user configured `0` or `null`, both normalized to `0`), the exhaustion check is skipped entirely — the flow continues to dispatch fix loops indefinitely, prompts/log lines render the iteration as `N (unlimited)` rather than `N of M`, and no A-class fix-loop-exhaustion issue is filed. Negative integers are rejected fail-fast at config load (must be `>= 0`); only an explicit `0`/`null` opts into unlimited mode. The default `100` keeps the bound finite to avoid surprising token consumption; users opt into unlimited mode explicitly.
 
-**Out-of-Scope Issue Filing:**
-- Out-of-scope issues are deterministically filed via `IssueManager.create()` with the issue's priority, tagged with `auto-discovered`, `source:verify-spec`, and `out-of-scope`
-- This replaces the probabilistic B-class discovery mechanism for verify_spec
+**Out-of-Scope Issue Logging (not filing):**
+- Out-of-scope issues are **logged (留痕) via `_log_out_of_scope_issues`**, recording each issue's description and supplied evidence to the flow log / telemetry. They are **not** filed via `IssueManager.create()`.
+- Rationale: a scoped flow that loops re-discovers the same out-of-scope observations every iteration; filing them produced an issue explosion (the historical 189 duplicate issues). Logging keeps the substance visible without ballooning the tracker.
+- This replaces the earlier deterministic-filing behavior (`_file_out_of_scope_issues`) for verify_spec; provenance from the git diff is NOT used to auto-classify scope (provenance ≠ relevance).
 
 **Planned Change Awareness:**
 
@@ -1646,10 +1651,16 @@ The "Planned Spec Changes" section is formatted into the prompt using `_format_s
 
 #### Scenario: Out-of-scope issue does not block flow
 - **GIVEN** verify_spec finds an issue classified as `out_of_scope` with priority `medium`
-- **WHEN** no in-scope issues exist and tests pass
+- **WHEN** no in-scope issues exist and there are no introduced test failures
 - **THEN** verify_spec returns COMPLETED
 - **AND** `verified` is computed as `True`
-- **AND** the out-of-scope issue is filed via `IssueManager.create()`
+- **AND** the out-of-scope issue is **logged via `_log_out_of_scope_issues`, not filed** via `IssueManager.create()`
+
+#### Scenario: Inherited test failures do not block a scoped flow
+- **GIVEN** the only failing tests are inherited (present in the frozen `baseline_failures`) and there are no in-scope spec issues
+- **WHEN** verify_spec computes the verdict
+- **THEN** `tests_passed` is `True` (inherited failures are excluded), `verified` is `True`, and verify_spec returns COMPLETED
+- **AND** the inherited failures are surfaced once (留痕) but do not drive `REVISION_NEEDED`, so the correctly-scoped flow can commit its work
 
 #### Scenario: Intentional deviation classified as low/out_of_scope
 - **GIVEN** the plan step declared a spec_change: `[add_requirement] flow-engine :: Requirement: New Feature X`
@@ -2563,6 +2574,59 @@ Retained for backward compatibility with persisted flows containing pre-unificat
 - **THEN** `_render_design` extracts the design dict (under key `design`, `design_doc`, or `design_document`) and delegates to `render_design()`
 - **AND** remaining outputs are rendered via `_render_remaining`
 
+### Requirement: Pre-implement Test Baseline
+
+The flow engine SHALL capture a deterministic **baseline of failing tests measured before the `implement` step modifies anything**, so that the `test` and `verify_spec` steps can distinguish **inherited** failures (already red at flow start) from **introduced** failures (regressions caused by this flow). Only introduced failures may drive the fix loop; inherited failures are surfaced (留痕) but never looped. The baseline is the **only** legitimate exemption dimension, and because it is frozen before `implement`'s first write, an introduced regression can never be laundered into it.
+
+This mechanism replaces the retired `se3/state/known_test_failures.json` auto-accumulated known-list (see *Test Step Configuration and Multi-Phase Execution*), which forgave a genuinely new failure after a single occurrence with no human sign-off and no expiry. Provenance is now answered by an empirically measured baseline, never by an LLM's judgement and never by an auto-accumulated store.
+
+**Module (`src/se3/engine/test_baseline.py`):** capture, key computation, and caching live in a standalone module — separate from `steps/test.py` — because capture happens on the state-machine side at flow start while consumption happens inside the `test`/`verify_spec` steps; keeping it standalone avoids a reverse import from the state machine into the test step. It reuses `steps/test.py`'s `_detect_test_command` / `_parse_test_ids` so the baseline command and parsing stay identical to the real test step.
+
+**Background pre-warm (overlap with pre-implement steps):**
+- At flow start (`init_flow` → `_start_baseline_capture`), the full test suite is launched as a **background subprocess** concurrently with the LLM/network-bound `analyze → plan → confirm` steps, which leave CPU idle. The suite runtime is hidden under that pre-implement work, so a typical flow adds ~0 wall-clock.
+- The capture sets `SE3_TEST_RUNNING=1` in the child environment so a test that itself invokes the se3 test handler is short-circuited rather than recursing into another full suite run.
+- `BaselineCapture.launch()` is idempotent and never raises; a launch failure is recorded and surfaced later as the `None` sentinel from `wait`/`wait_or_kill`.
+
+**Freeze point before `implement` (`_ensure_baseline_ready`):**
+- `state_machine.run_step` calls `_ensure_baseline_ready(flow)` before dispatching the `IMPLEMENT` handler (idempotent across fix-loop re-entries into implement). The snapshot point is the repo state at flow start; `analyze`/`plan`/`confirm` do not write source, so launching at flow creation is correct.
+- Resolution order: (1) await the background handle, time-bounded by `resolve_baseline_timeout` (derived from `test.timeout`, default 1800s) so a hung suite is killed rather than blocking the flow forever; (2) on capture failure (`None` sentinel) re-measure **synchronously** once as the authoritative measurement; (3) if even the synchronous run fails or times out, fall back to an **empty** baseline with a loud warning — the safe failure mode, since every failure is then treated as introduced (never the reverse). A timed-out capture skips the synchronous retry because a hung suite would just hang again.
+- The `None` sentinel (capture could not run / produced no parseable output while exiting non-zero) is distinct from an empty set (suite ran, zero failures); only the former triggers the synchronous fallback, so an unmeasured baseline is never mistaken for "no failures".
+
+**Persistence and caching:**
+- The measured set is stored on `State.baseline_failures` (see *State Tracking Fields and Helper API*) and persisted in `engine.json`, so `--resume` reuses it without re-measuring. `None` means "not yet captured"; `[]` means "captured, zero failures".
+- The baseline is cached at `se3/state/test_baseline_cache.json` (atomic tempfile + `os.replace` write, corruption-tolerant, gitignored under the `/se3/*` rule) keyed by `compute_baseline_key` = git HEAD sha + a working-tree dirty hash (`git diff HEAD` plus the names and content hashes of untracked non-ignored files). Either a HEAD change or any tracked/untracked content change yields a different key, so a stale baseline can never be reused across a content change. The cache is bounded to `MAX_CACHE_ENTRIES` most-recently-saved keys (insertion-order LRU). In a serial commit-per-flow pipeline the cache usually misses (each flow lands on a fresh commit); the background overlap is the real cost-hider and the cache is a bonus for parallel/resumed flows on the same commit.
+
+**Injection into step inputs:** `state_machine._build_step_inputs` injects `baseline_failures` (a list) into the `TEST` and `VERIFY_SPEC` step inputs so both steps consume the same frozen set.
+
+**Cleanup:** `cleanup_baseline_capture()` terminates any still-running baseline subprocess when a flow ends before reaching `implement` (e.g. Abort/Exit at a confirm pause), so a background suite is not orphaned.
+
+#### Scenario: Baseline captured before implement
+- **WHEN** a flow starts and reaches the `implement` step for the first time
+- **THEN** `state.baseline_failures` is a non-`None` list of the test IDs that were failing at flow start, measured before `implement`'s first write
+- **AND** the measurement either resolves the background capture launched at flow start or, on capture failure, re-measures synchronously
+
+#### Scenario: Introduced failure cannot launder into the baseline
+- **GIVEN** the repo had a frozen baseline measured before `implement`
+- **WHEN** `implement` introduces a test regression whose test ID is NOT in `state.baseline_failures`
+- **THEN** that failure is classified as introduced and drives the fix loop; it is never added to the baseline
+
+#### Scenario: Baseline reused on resume
+- **GIVEN** a flow that already captured `state.baseline_failures` in an earlier session
+- **WHEN** the flow is resumed with `--resume`
+- **THEN** `_ensure_baseline_ready` returns immediately without re-measuring (the persisted baseline is reused)
+
+#### Scenario: Cache keyed by HEAD sha and working-tree dirty hash
+- **GIVEN** a baseline was measured and cached for the current `compute_baseline_key`
+- **WHEN** another flow starts on the same commit with an unchanged working tree
+- **THEN** the cached failing-id set is reused (cache hit) and no new suite run is launched for the baseline
+- **AND** any change to tracked or untracked content changes the key, forcing a fresh measurement
+
+#### Scenario: Unmeasurable baseline falls back to empty with warning
+- **GIVEN** the background capture failed and a synchronous re-measurement also fails or times out
+- **WHEN** `_ensure_baseline_ready` resolves
+- **THEN** `state.baseline_failures` is set to an empty list and a loud warning is logged
+- **AND** every subsequent failure is treated as introduced (the safe direction — a real regression is never silently forgiven)
+
 ### Requirement: Test Step Configuration and Multi-Phase Execution
 
 The test step SHALL support multi-phase testing via the `test:` configuration section of `se3.yaml`, and output structured results.
@@ -2591,6 +2655,9 @@ test:
   "regression": {"passed": [...], "failed": [...], "count": 0},
   "phases": [{"name": "default", "passed": true, ...}],
   "overall_passed": true,
+  "introduced_failures": [],
+  "inherited_failures": [],
+  "tests_blocking": false,
   "critical_skipped": [],
   "critical_missing": [],
   "passed": true
@@ -2600,7 +2667,17 @@ test:
 **Classification logic:**
 - `new_tests`: file paths matching the implement step's `tests_added`
 - `regression`: all other tests
-- `overall_passed`: all `required: true` phases pass **and** the critical acceptance test gate is not triggered (see below). `overall_passed` is **no longer equivalent to** the pytest process's `returncode == 0`: pytest returns 0 for skipped cases, so a truthy return code is insufficient to prove that critical acceptance actually ran. The raw `returncode == 0` is still retained separately in the backward-compat `passed` field, for consumers that need to distinguish the two.
+- `overall_passed`: all `required: true` phases pass **and** the critical acceptance test gate is not triggered (see below). `overall_passed` is **no longer equivalent to** the pytest process's `returncode == 0`: pytest returns 0 for skipped cases, so a truthy return code is insufficient to prove that critical acceptance actually ran. The raw `returncode == 0` is still retained separately in the backward-compat `passed` field, for consumers that need to distinguish the two. `overall_passed` is retained **for reporting only** — it is NOT the fix-loop trigger (any red test, inherited or introduced, makes it false); the loop trigger is `should_fix` (see below).
+
+**Baseline-based provenance split (inherited vs introduced):**
+
+The exemption decision is the frozen pre-implement baseline (see *Pre-implement Test Baseline*), injected into the step inputs as `baseline_failures`. It replaces the retired `se3/state/known_test_failures.json` known-list entirely.
+
+- A failing test is **inherited** iff its test-id ∈ `baseline_failures`; otherwise it is **introduced**. `inherited_failures` and `introduced_failures` are written to `step.outputs["test_results"]`. The legacy `pre_existing_failures` output key is retained for backward compatibility with downstream renderers and now carries the baseline-inherited list.
+- New-test failures are always introduced (a test the implement step added cannot have been failing before it existed).
+- `should_fix` (the fix-loop trigger) `= any(new_tests failed) OR any(introduced regression, i.e. a regression failure NOT in baseline_failures) OR unparseable failures OR critical_failed`. **All** introduced failures must be fixed; there is no severity floor and no known-list exemption. `should_fix` is also published as `test_results["tests_blocking"]` so `verify_spec` consumes the exact same baseline-based verdict rather than recomputing it (single source of truth).
+- The `known_test_failures.json` load/save and auto-population are removed. The store is no longer read or written by the test step; any remaining references in other modules (`issue_discovery.py`, `merge/runtime_sync.py`) are migrated to the baseline or removed.
+- The new-vs-regression split (`_classify_results`) is unchanged.
 
 **Critical Acceptance Test skip/missing detection:**
 
@@ -2638,25 +2715,29 @@ False-positive prevention and verbose prerequisite for missing detection:
 - **THEN** phases with `in_fix_loop: false` are skipped
 
 #### Scenario: Test failure triggers the fix loop
-- **WHEN** the test step finishes executing and there are new test failures, net-new regressions, or unparseable failures
+- **WHEN** the test step finishes executing and there are new test failures, introduced regressions (failures NOT present in the pre-implement `baseline_failures`), or unparseable failures
 - **THEN** the test step returns `REVISION_NEEDED` status
 - **AND** the flow goes directly into the fix loop and returns to the implement step
 - **AND** the verify_spec step is skipped (because the problem was already found by tests)
 - **AND** the fix instructions include diagnostic information intelligently extracted by `_extract_failures_section()` (FAILURES/ERRORS sections), rather than a simple tail truncation of stdout
 
-#### Scenario: Pre-existing failures do not trigger the fix loop
+#### Scenario: Inherited (baseline) failures do not trigger the fix loop
 - **WHEN** the test step finishes executing and `overall_passed` is false
-- **AND** all failing tests are pre-existing failures (present in `se3/state/known_test_failures.json`)
-- **THEN** the test step returns `COMPLETED` status (does not trigger the fix loop)
-- **AND** `step.outputs["pre_existing_failures"]` records these known failures
-- **AND** a medium-priority issue reporting these pre-existing failures is created via A-class issue discovery
-- **AND** the log records "Tests failed but all failures are pre-existing — not triggering fix loop"
+- **AND** every failing test is **inherited** — its test-id is present in the frozen pre-implement `baseline_failures`
+- **THEN** `should_fix`/`tests_blocking` is `False` and the test step returns `COMPLETED` status (does not trigger the fix loop)
+- **AND** `step.outputs["test_results"]["inherited_failures"]` (and the legacy `pre_existing_failures` key) record these inherited failures
+- **AND** a medium-priority issue reporting these inherited failures is created via A-class issue discovery **at most once per flow** (deduped via `context["inherited_failures_filed"]`), never re-filed each iteration
+- **AND** the inherited failures are logged once (留痕) noting they are present in the pre-implement baseline and were NOT introduced by this flow
 
-#### Scenario: Known test failures persistence
-- **WHEN** the test step finishes executing
-- **THEN** all regression failures are written to `se3/state/known_test_failures.json` (atomic write)
-- **AND** existing entries update the `last_seen` timestamp
-- **AND** new entries record `reason` (extracted from pytest output), `first_seen`, and `last_seen`
+#### Scenario: Introduced (non-baseline) failure triggers the fix loop
+- **WHEN** the test step finishes executing and at least one failing test is **introduced** — its test-id is NOT in `baseline_failures` (or it is a new-test failure)
+- **THEN** `should_fix`/`tests_blocking` is `True` and the test step returns `REVISION_NEEDED`, entering the fix loop
+- **AND** an introduced failure can never be exempted, because the baseline was frozen before `implement`'s first write
+
+#### Scenario: known_test_failures.json is no longer auto-populated
+- **WHEN** the test step finishes executing with regression failures
+- **THEN** the test step does NOT read or write `se3/state/known_test_failures.json` — the load/save helpers and the auto-population step are removed
+- **AND** the provenance/exemption decision is the measured `baseline_failures` set, not an auto-accumulated known-list (closing the laundering vector where a genuinely new failure became "known" after a single occurrence)
 
 #### Scenario: Intelligent failure diagnostic extraction
 - **WHEN** the test step needs to build fix instructions
@@ -3034,6 +3115,7 @@ The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state
 | `review_iterations` | `Dict[str, int]` | `{}` | Per-step review iteration counter, keyed by the **reviewed** step's `step_id`. Used by the CONFIRM step's LLM reviewer to bound iterations against `confirmation.steps.<step>.max_iterations`. |
 | `fix_iterations` | `int` | `0` | Global fix-loop counter shared by `test`, `self_check`, and `verify_spec`. Bounded by `workflow.max_fix_iterations` (see *verify_spec Unified Priority and Scope Mechanism*). |
 | `fix_history` | `List[Dict[str, Any]]` | `[]` | Append-only log of fix-loop iterations, capped at `FIX_HISTORY_MAX_ENTRIES` (see *Fix History Structure*). Each entry follows the schema documented under that Requirement. |
+| `baseline_failures` | `Optional[List[str]]` | `None` | Frozen set of test IDs that were failing at flow start, measured before `implement`'s first write (see *Pre-implement Test Baseline*). Three-state sentinel: `None` = not yet captured (no failure may be treated as inherited); `[]` = captured, zero failures at flow start; `[...]` = these specific test IDs were already failing. Persisted so `--resume` reuses the same snapshot rather than re-measuring against a different one. |
 
 **Step ID auto-generation:** `add_step(step)` SHALL auto-generate `step.step_id` when not already set, using the format `NN_steptype_uuid8` where `NN` is the 1-based sequence number derived from `len(step_history) + 1` and `uuid8` is the first eight hex characters of a fresh UUID (e.g. `01_analyze_844c2cf8`). The format is human-readable and sortable so on-disk history files (`se3/history/{flow_id}/{step_id}.jsonl`) order chronologically.
 
@@ -3051,8 +3133,8 @@ The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state
 
 **Persistence:**
 
-- `to_dict()` SHALL serialize every field above. `selected_steps` is persisted as a list of `StepType.value` strings; `steps` is persisted as a `{step_id: step.to_dict()}` map.
-- `from_dict()` SHALL accept missing keys and substitute defaults (`get_current_step_id` → `None`, `step_history`/`steps`/`context`/`review_iterations` → empty containers, `fix_iterations` → `0`, `current_step_index` → `0`).
+- `to_dict()` SHALL serialize every field above, including `baseline_failures` (preserving the `None` vs `[]` distinction). `selected_steps` is persisted as a list of `StepType.value` strings; `steps` is persisted as a `{step_id: step.to_dict()}` map.
+- `from_dict()` SHALL accept missing keys and substitute defaults (`get_current_step_id` → `None`, `step_history`/`steps`/`context`/`review_iterations` → empty containers, `fix_iterations` → `0`, `current_step_index` → `0`, `baseline_failures` → `None`).
 - `from_dict()` SHALL apply the same tail-keep `FIX_HISTORY_MAX_ENTRIES` cap on load that `increment_fix_iteration()` applies on append, so engine.json files written by older builds (or builds with a larger cap) are clamped at deserialization time rather than only on the next increment.
 
 #### Scenario: Step IDs follow NN_steptype_uuid8 format

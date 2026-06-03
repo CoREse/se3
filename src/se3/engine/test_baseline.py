@@ -51,6 +51,16 @@ logger = logging.getLogger(__name__)
 BASELINE_CACHE_SCHEMA_VERSION = 1
 _CACHE_REL_PATH = Path("se3") / "state" / "test_baseline_cache.json"
 
+# Wall-clock bound (seconds) for a pre-implement baseline run when the project's
+# ``test.timeout`` cannot be read. Mirrors the test step's own fallback timeout
+# default so a hung baseline subprocess is killed rather than blocking the flow
+# forever right before ``implement``.
+DEFAULT_BASELINE_TIMEOUT = 1800.0
+
+# Grace period (seconds) to wait for a killed baseline subprocess to actually
+# exit before giving up on reaping it.
+_KILL_GRACE_SECONDS = 5.0
+
 # Bound the on-disk cache so a long-lived serial commit-per-flow pipeline (where
 # almost every flow lands on a fresh commit → a fresh key) cannot grow the file
 # without limit. Most-recently-saved keys are retained (insertion-order LRU).
@@ -260,6 +270,32 @@ def save_cache(project_root: Path, key: str, failures: Set[str]) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Timeout resolution
+# ---------------------------------------------------------------------------
+
+def resolve_baseline_timeout(project_root: Path) -> float:
+    """Return the wall-clock bound (seconds) for a pre-implement baseline run.
+
+    Reuses ``test.timeout`` from ``se3.yaml`` (the suite fallback timeout,
+    default 1800s) so the baseline run is bounded by the same ceiling the real
+    test step applies to a full suite run. On expiry the baseline subprocess is
+    killed (see :meth:`BaselineCapture.wait_or_kill`) instead of letting a hung
+    test block the flow forever before ``implement``.
+
+    Any failure to read the config degrades to :data:`DEFAULT_BASELINE_TIMEOUT`.
+    """
+    try:
+        from ..config import TestConfig
+
+        timeout = float(TestConfig.load(project_root).timeout)
+        if timeout > 0:
+            return timeout
+    except Exception as exc:  # noqa: BLE001 — never let config errors block the flow
+        logger.debug("Could not resolve baseline timeout from config: %s", exc)
+    return DEFAULT_BASELINE_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
 # Background capture
 # ---------------------------------------------------------------------------
 
@@ -293,6 +329,7 @@ class BaselineCapture:
         self._launch_error: Optional[BaseException] = None
         self._done = False
         self._result: Optional[Set[str]] = None
+        self._timed_out = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -375,6 +412,72 @@ class BaselineCapture:
         self._result = self._parse_result()
         self._done = True
         return self._result
+
+    @property
+    def timed_out(self) -> bool:
+        """True when the capture was killed because it exceeded its time bound.
+
+        Distinguishes a hung-suite timeout (where re-running synchronously would
+        just hang again) from an ordinary infra failure (a transient collection
+        error that a synchronous retry might recover). The caller uses this to
+        skip the synchronous fallback after a timeout and go straight to an empty
+        baseline.
+        """
+        return self._timed_out
+
+    def wait_or_kill(self, timeout: Optional[float] = None) -> Optional[Set[str]]:
+        """Wait up to *timeout* seconds, killing the subprocess on expiry.
+
+        Unlike :meth:`wait` (which raises :class:`subprocess.TimeoutExpired` and
+        leaves the capture resumable), this *bounds* the pre-implement baseline
+        run: when the subprocess does not finish within *timeout*, it is killed
+        and the capture resolves to the ``None`` sentinel (and :attr:`timed_out`
+        becomes True). This guarantees a hung test (deadlock, infinite loop,
+        stuck IO) cannot block the flow forever before ``implement`` — the caller
+        falls through to its synchronous / empty-baseline fallback instead.
+
+        With ``timeout=None`` it behaves exactly like :meth:`wait` (unbounded).
+        """
+        if self._done:
+            return self._result
+        if timeout is None:
+            return self.wait()
+        try:
+            return self.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Baseline capture exceeded %.0fs; killing the subprocess and "
+                "signalling synchronous fallback",
+                timeout,
+            )
+            self._timed_out = True
+            self.kill()
+            return None
+
+    def kill(self) -> None:
+        """Terminate the background subprocess and resolve to the ``None`` sentinel.
+
+        Best-effort: kill a still-running subprocess, reap it within a short
+        grace period, drop the temp output file, and mark the capture as a failed
+        measurement so :meth:`wait` / :meth:`wait_or_kill` return ``None``.
+        Idempotent and never raises — safe to call whether or not the subprocess
+        is still alive.
+        """
+        if self._done:
+            return
+        proc = self._process
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                try:
+                    proc.wait(timeout=_KILL_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    logger.debug("Baseline subprocess did not exit after kill")
+            except Exception as exc:  # noqa: BLE001 — teardown must not crash the flow
+                logger.debug("Baseline capture kill failed: %s", exc)
+        self._cleanup_stdout_file()
+        self._done = True
+        self._result = None
 
     # -- internals ---------------------------------------------------------
 

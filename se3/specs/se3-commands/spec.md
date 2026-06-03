@@ -1050,8 +1050,9 @@ After each successful `git merge` of a branch, `se3 merge` SHALL synchronize git
 - Idempotency: When the source and destination files have identical content (byte-for-byte), the destination is treated as already-synced and the file is skipped silently rather than being reported as a collision. This allows safe re-runs of `se3 merge` against the same branch.
 
 **Tier B — Discard branch-side (preserve current state):**
-- Paths: `se3/state/engine.json`, `se3/state/known_test_failures.json`, `se3/calls/active/`.
+- Paths: `se3/state/engine.json`, `se3/calls/active/`.
 - Semantics: The current project's tier B content is preserved as-is; the merged branch's tier B content is recorded as discarded but NOT copied. Rationale: these files describe live flow-engine runtime state and overwriting them would corrupt the current run.
+- **Note:** `se3/state/known_test_failures.json` was previously a tier B file; it has been **retired** — the deterministic pre-implement test baseline (see flow-engine *Pre-implement Test Baseline*) replaces the known-list exemption, so the file is no longer written or synced and no longer appears in any sync tier. The baseline cache `se3/state/test_baseline_cache.json` is gitignored and not branch-merged, so it likewise does not participate in runtime sync.
 
 **Tier C — Skip entirely (neither read nor written):**
 - Paths: `se3/cache/`, `se3/tmp/`, `se3/worktrees/`.

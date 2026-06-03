@@ -36,11 +36,18 @@ def _make_flow() -> FlowInstance:
     return flow
 
 
-def _fake_capture(result):
-    """A stand-in BaselineCapture whose wait() returns *result*."""
+def _fake_capture(result, timed_out=False):
+    """A stand-in BaselineCapture whose bounded wait returns *result*.
+
+    ``_ensure_baseline_ready`` resolves the baseline via the time-bounded
+    ``wait_or_kill`` and consults ``timed_out`` to decide whether to attempt the
+    synchronous fallback, so both are configured here.
+    """
     cap = MagicMock()
     cap.launch.return_value = cap
     cap.wait.return_value = result
+    cap.wait_or_kill.return_value = result
+    cap.timed_out = timed_out
     return cap
 
 
@@ -178,6 +185,26 @@ class TestEnsureBaselineReady:
         # Last resort: empty baseline (never None — so introduced detection runs).
         assert flow.state.baseline_failures == []
 
+    def test_background_timeout_skips_sync_and_uses_empty_baseline(self, tmp_path):
+        """A hung background suite (timed_out) must NOT re-run synchronously.
+
+        Re-running a hung suite would just hang again, doubling the wall-clock;
+        the flow goes straight to an empty baseline instead.
+        """
+        sm = StateMachine(tmp_path)
+        flow = _make_flow()
+        # Background returned None *because it timed out and was killed*.
+        sm._baseline_capture = _fake_capture(None, timed_out=True)
+        sm._baseline_key = "k"
+
+        with patch("se3.engine.test_baseline.BaselineCapture") as MockCapture, \
+             patch("se3.engine.test_baseline.save_cache"):
+            sm._ensure_baseline_ready(flow)
+
+        # No synchronous fallback was constructed after a timeout.
+        MockCapture.assert_not_called()
+        assert flow.state.baseline_failures == []
+
     def test_resolved_baseline_written_to_cache(self, tmp_path):
         sm = StateMachine(tmp_path)
         flow = _make_flow()
@@ -192,6 +219,59 @@ class TestEnsureBaselineReady:
         # (project_root, key, failures_set)
         assert args[1] == "mykey"
         assert args[2] == {"x::1"}
+
+
+# ---------------------------------------------------------------------------
+# cleanup_baseline_capture (orphan-on-early-exit teardown)
+# ---------------------------------------------------------------------------
+
+class TestCleanupBaselineCapture:
+    def test_kills_still_running_capture(self, tmp_path):
+        # Flow ended before IMPLEMENT (e.g. abort at confirm): the background
+        # capture is still held → it must be killed and the handle cleared.
+        sm = StateMachine(tmp_path)
+        cap = _fake_capture(None)
+        sm._baseline_capture = cap
+
+        sm.cleanup_baseline_capture()
+
+        cap.kill.assert_called_once()
+        assert sm._baseline_capture is None
+
+    def test_noop_when_no_capture(self, tmp_path):
+        # Cache hit / resumed flow: no handle was ever stored → no-op.
+        sm = StateMachine(tmp_path)
+        sm._baseline_capture = None
+
+        sm.cleanup_baseline_capture()  # must not raise
+
+        assert sm._baseline_capture is None
+
+    def test_noop_after_ensure_already_reaped(self, tmp_path):
+        # _ensure_baseline_ready already consumed and cleared the handle before
+        # IMPLEMENT; the outermost finally then finds nothing to clean up.
+        sm = StateMachine(tmp_path)
+        flow = _make_flow()
+        sm._baseline_capture = _fake_capture({"a::1"})
+        sm._baseline_key = "k"
+        with patch("se3.engine.test_baseline.save_cache"):
+            sm._ensure_baseline_ready(flow)
+        assert sm._baseline_capture is None
+
+        sm.cleanup_baseline_capture()  # no handle → no-op
+
+        assert sm._baseline_capture is None
+
+    def test_kill_failure_is_swallowed(self, tmp_path):
+        # Teardown must never crash flow shutdown even if kill raises.
+        sm = StateMachine(tmp_path)
+        cap = _fake_capture(None)
+        cap.kill.side_effect = RuntimeError("boom")
+        sm._baseline_capture = cap
+
+        sm.cleanup_baseline_capture()  # must not raise
+
+        assert sm._baseline_capture is None
 
 
 # ---------------------------------------------------------------------------

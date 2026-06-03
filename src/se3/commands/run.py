@@ -1835,6 +1835,13 @@ def run_flow(
     finally:
         # Restore original signal handler
         signal.signal(signal.SIGINT, old_sigint_handler)
+        # Ensure the pre-implement baseline subprocess never outlives the flow.
+        # If the flow ended before IMPLEMENT was dispatched (analyze/plan/confirm
+        # failure, or an Abort/Exit at a confirm pause), _ensure_baseline_ready
+        # never ran, so the background full-suite pytest would otherwise be left
+        # orphaned (a hung test would never exit). This covers every exit path
+        # of _run_flow_impl: normal return, exception, and sys.exit/SystemExit.
+        state_machine.cleanup_baseline_capture()
 
 
 def _run_flow_impl(

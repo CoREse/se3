@@ -1,0 +1,31 @@
+id: '166'
+title: 'Regression test tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count
+  fails: it hard-codes `assert len(parsed.requirements) == 18` but the base spec now
+  contains 19 requirements (the ''Server Identity, Authentication and Persistence''
+  requirement). This is a pre-existing/inherited failure — the base spec and the test
+  file were NOT modified by this flow, and the proposal itself names this exact test
+  as the inherited failure. It is the very failure class this baseline feature is
+  built to surface-but-not-loop. It does not block this correctly-scoped flow.'
+description: 'Regression test tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count
+  fails: it hard-codes `assert len(parsed.requirements) == 18` but the base spec now
+  contains 19 requirements (the ''Server Identity, Authentication and Persistence''
+  requirement). This is a pre-existing/inherited failure — the base spec and the test
+  file were NOT modified by this flow, and the proposal itself names this exact test
+  as the inherited failure. It is the very failure class this baseline feature is
+  built to surface-but-not-loop. It does not block this correctly-scoped flow.
+
+
+  Suggestion: Track separately: a follow-up flow permitted to edit tests should update
+  the assertion to the current count (19) or replace the brittle hard-coded count
+  with a name-based set check. Out of scope for this implementation (which forbids
+  chasing inherited failures).'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-03T12:40:50.810330'
+updated_at: '2026-06-03T12:40:50.810330'

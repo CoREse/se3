@@ -1,0 +1,41 @@
+id: '171'
+title: '3 pre-existing test failures in src/se3/engine/test_steps.py (TestStepSequences::test_review_sequence_has_verify_spec,
+  test_small_sequence_unchanged, TestCommitStep::test_commit_success) assert SUMMARIZE
+  is part of the review/small/commit default step sequences, but get_default_step_sequence
+  has omitted SUMMARIZE from those sequences since 2026-02-24. Proven inherited: the
+  sequence definition and the test assertions are byte-identical at the pre-flow baseline
+  commit e30daac and at current HEAD; this flow (e30daac..ff3e297) did not touch get_default_step_sequence
+  or these assertions. These are exactly the kind of inherited failure the new baseline
+  mechanism is designed to surface-not-loop on, so they do NOT block this correctly-scoped
+  flow. NOTE: the proposal narrative undercounts pre-existing failures as ''2'' (test_spec_format
+  count + a flaky daemon test); the repo recovered from an aborted doc-sync flow actually
+  carries more. This is a discrepancy in the proposal''s count, not a defect in the
+  implementation, which handles all inherited failures generically regardless of count.'
+description: '3 pre-existing test failures in src/se3/engine/test_steps.py (TestStepSequences::test_review_sequence_has_verify_spec,
+  test_small_sequence_unchanged, TestCommitStep::test_commit_success) assert SUMMARIZE
+  is part of the review/small/commit default step sequences, but get_default_step_sequence
+  has omitted SUMMARIZE from those sequences since 2026-02-24. Proven inherited: the
+  sequence definition and the test assertions are byte-identical at the pre-flow baseline
+  commit e30daac and at current HEAD; this flow (e30daac..ff3e297) did not touch get_default_step_sequence
+  or these assertions. These are exactly the kind of inherited failure the new baseline
+  mechanism is designed to surface-not-loop on, so they do NOT block this correctly-scoped
+  flow. NOTE: the proposal narrative undercounts pre-existing failures as ''2'' (test_spec_format
+  count + a flaky daemon test); the repo recovered from an aborted doc-sync flow actually
+  carries more. This is a discrepancy in the proposal''s count, not a defect in the
+  implementation, which handles all inherited failures generically regardless of count.
+
+
+  Suggestion: Track separately (a single follow-up issue). Either update the three
+  assertions to match the current SUMMARIZE-less sequences, or restore SUMMARIZE to
+  the sequences if its removal was unintended. Do not chase this in the current flow''s
+  fix loop.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-03T13:30:26.635881'
+updated_at: '2026-06-03T13:30:26.635881'

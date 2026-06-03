@@ -1,0 +1,138 @@
+id: '169'
+title: Pre-existing test failures (1 test)
+description: "**1 pre-existing test failure(s)** detected during flow execution.\n\
+  These failures were NOT introduced by the current change.\n\n**Failing tests:**\n\
+  - `tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count`:\
+  \ test failed (details in pytest output)\n\n**Task:** # Proposal: Deterministic\
+  \ test baseline to kill the pre-existing-failure fix loop\n\n## Problem\n\nA scoped\
+  \ flow (e.g. the `doc-sync` preset, which is forbidden to touch anything\nbut `README*.md`)\
+  \ entered an **infinite `test → self_check → verify_spec → fix`\nloop** and ran\
+  \ for ~17 hours / 176+ steps without converging\n(flow `20260602-163452_704c1e1e`).\n\
+  \nRoot cause: the repository already had **pre-existing test failures inherited\n\
+  from an earlier commit** (e.g. `tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count`\n\
+  — a hard-coded `assert len(parsed.requirements) == 18` that broke when commit\n\
+  `31de8b2` added a 19th base-spec requirement without updating the test; plus a\n\
+  flaky daemon test). The scoped flow is structurally unable to fix these (its\ntask\
+  \ forbids editing tests/specs), yet the engine kept demanding a fix:\n\n- `src/se3/engine/steps/test.py`\
+  \ **correctly** classifies them as pre-existing\n  (`should_fix=False`, returns\
+  \ `COMPLETED`, logs \"not triggering fix loop\").\n- But `src/se3/engine/steps/verify_spec.py:244,319`\
+  \ independently re-checks the\n  test results using **`overall_passed`** (any red\
+  \ test ⇒ fail) and returns\n  `REVISION_NEEDED`, re-triggering the fix loop that\
+  \ `test.py` had declined.\n- The fix loop bounces back into `implement`, which (correctly)\
+  \ refuses to edit\n  out-of-scope files → tests stay red → `verify_spec` demands\
+  \ a fix again → loop.\n- The loop cap (`workflow.max_fix_iterations`) is a backstop\
+  \ only; the effective\n  value is **100** (set in `se3.local.yaml`, which shadows\
+  \ the `30` in\n  `se3.yaml`), and the flow was at iteration 58 when it was killed.\n\
+  - Each iteration re-filed the same auto-discovered issues → **189 duplicate\n  issues**\
+  \ (ids 165–353) were created. (Already cleaned up out-of-band.)\n\nThe current pre-existing\
+  \ exemption is also a **laundering vector**: `test.py`\nauto-appends *every* regression\
+  \ failure to `se3/state/known_test_failures.json`\n(`test.py:380-397`), so a genuinely\
+  \ new failure becomes \"known\" after a single\noccurrence and is forgiven forever,\
+  \ with no human sign-off and no expiry.\n\n## Design principles (agreed)\n\n1. **Fix\
+  \ all.** Every test failure / `self_check` / `verify_spec` issue that is\n   in-scope\
+  \ and attributable to *this* session must be fixed. No severity floor,\n   no \"\
+  known-list\" exemption.\n2. **The only legitimate exemption is provenance, and it\
+  \ must be deterministic\n   and non-game-able.** \"Was this failing *before* this\
+  \ flow's `implement`\n   touched anything?\" is answered by an **empirically measured\
+  \ baseline**, never\n   by an LLM's judgement and never by an auto-accumulated store.\n\
+  3. **Provenance ≠ relevance.** A git diff can tell you a failure is *not this\n\
+  \   session's*, but it cannot decide whether an LLM-reported issue is\n   *out of\
+  \ scope*. Do **not** use the diff to auto-classify issue scope.\n4. **Nothing real\
+  \ disappears silently.** Dropped `out_of_scope` observations are\n   logged (留痕),\
+  \ but **not** filed as issues (avoid issue explosion).\n\n## Work items\n\n### 1.\
+  \ Pre-implement test baseline — \"Approach A\" with background pre-warm\n\nAdd a\
+  \ deterministic baseline of failing tests captured **before** `implement`\nmodifies\
+  \ anything.\n\n- At **flow start** (flow creation), launch the full test suite as\
+  \ a\n  **background subprocess**, concurrently with the `analyze → plan → confirm`\n\
+  \  steps (these are LLM/network-bound and leave CPU idle; the suite takes ~183s\n\
+  \  / 5304 tests, which is hidden under that pre-implement work → ~0 added\n  wall-clock).\n\
+  - The result is `baseline_failures`: the set of failing test IDs at flow start.\n\
+  \  Persist it in flow state so `--resume` reuses it.\n- **Cache** the baseline keyed\
+  \ by the git HEAD sha (and a working-tree dirty\n  hash) so parallel/resumed flows\
+  \ on the same commit reuse it. (Note: in a\n  serial commit-per-flow pipeline the\
+  \ cache usually misses; the background\n  overlap is the real cost-hider, the cache\
+  \ is a bonus.)\n- By the time `implement` starts the baseline must be ready; if\
+  \ the background\n  run has not finished, `implement` blocks until it has.\n- Snapshot\
+  \ point = repo state at flow start, before `implement`'s first write.\n  `analyze`/`plan`/`confirm`\
+  \ do not write source, so launching at flow creation\n  is correct.\n- Suggested\
+  \ wiring: launch in the flow-creation path / first step; store on\n  `FlowState`\
+  \ (alongside `fix_iterations`); inject into the `test` and\n  `verify_spec` step\
+  \ inputs via `state_machine._build_step_inputs`.\n\n### 2. `test.py` — replace known-list\
+  \ exemption with the baseline\n\n- Remove the `known_test_failures.json` dependency\
+  \ for the exemption decision\n  (`_load_known_failures`/`_save_known_failures` at\
+  \ `test.py:117,137`; the\n  `known_ids` / `net_new_regression` / `pre_existing_ids`\
+  \ logic at\n  `test.py:309-319`).\n- A failing test is **inherited** iff its test-id\
+  \ ∈ `baseline_failures`.\n- `should_fix` (the fix-loop trigger, `test.py:337-342`)\
+  \ =\n  `any(new_test failed) OR any(failure NOT in baseline_failures) OR\n   unparseable\
+  \ OR critical_failed`. **All** introduced failures must be fixed.\n- **Stop the\
+  \ auto-population** at `test.py:380-397` entirely — this is the\n  laundering vector.\
+  \ Retire `se3/state/known_test_failures.json` (the baseline\n  replaces it). If\
+  \ any other module reads it\n  (`issue_discovery.py`, `merge/runtime_sync.py`),\
+  \ migrate or remove those reads.\n- Keep `overall_passed` for reporting, but the\
+  \ loop trigger is `should_fix`.\n- Keep `_classify_results` (`test.py:690`) new-vs-regression\
+  \ split as-is.\n\n### 3. `verify_spec.py` — align the test gate with `test.py`\n\
+  \n- `verify_spec.py:244` currently sets `tests_passed = overall_passed`. Change\
+  \ the\n  fix-loop test gate to consume the **same baseline-based verdict** as `test.py`\n\
+  \  (i.e. block on introduced failures only). Inherited (baseline) failures must\n\
+  \  **not** drive `REVISION_NEEDED` (`verify_spec.py:319-342`).\n- `verified` (`verify_spec.py:270`,\
+  \ the authoritative flag for `commit`/\n  `summarize`) = `in_scope_count == 0 AND\
+  \ no introduced test failures AND\n  critical gate ok`. Inherited failures are surfaced\
+  \ (logged) but do not block a\n  correctly-scoped flow from committing its work.\n\
+  - **Keep** the critical-acceptance-gate defensive logic (`verify_spec.py:257-265`,\n\
+  \  skip/missing != pass) for *this session's* tests.\n\n### 4. Inherited failures\
+  \ → surfaced, not looped, not issue-spammed\n\n- When the only failures are inherited,\
+  \ the flow does **not** loop; it completes\n  its scoped work and commits.\n- Log\
+  \ the inherited failures once (留痕). Optionally route them to a single\n  dedicated\
+  \ follow-up (one issue or one fix-flow handoff) — **never** re-file the\n  same\
+  \ issue every iteration. Issue filing must dedup within a flow.\n\n### 5. `out_of_scope`\
+  \ observations → log, don't drop silently, don't file\n\n- `self_check.py:246-248`\
+  \ drops `out_of_scope` issues *before* any evidence\n  check, silently (counter\
+  \ only). Change to **log** the dropped item (its\n  description + whatever evidence\
+  \ the LLM supplied) to the flow log / telemetry.\n- `verify_spec` currently **files**\
+  \ out-of-scope issues\n  (`_file_out_of_scope_issues`) — change to **log** instead\
+  \ of file, to avoid\n  issue explosion.\n- Do **not** add an evidence gate to `out_of_scope`\
+  \ (best-effort discovery\n  stands; multiple self_check passes raise recall). Do\
+  \ **not** weaken the\n  in-scope evidence requirements (`self_check.py:250-269`).\n\
+  \n### 6. (Minor) config hygiene\n\n- `workflow.max_fix_iterations` is `30` in `se3.yaml`\
+  \ but `100` in\n  `se3.local.yaml`, which shadows it. The cap is only a backstop;\
+  \ with this fix\n  it should rarely be reached. Reconcile the two files (decide\
+  \ the intended cap)\n  and/or log which source won at load time.\n\n## Non-goals\
+  \ / explicit \"do NOT\"\n\n- Do **not** exempt inherited failures via LLM judgement\
+  \ or an auto-accumulated\n  known-list.\n- Do **not** use git-diff to decide whether\
+  \ an LLM issue is `out_of_scope`\n  (provenance ≠ relevance).\n- Do **not** add\
+  \ an evidence gate to `out_of_scope`; do **not** silently discard\n  it either —\
+  \ log it.\n- Do **not** weaken in-scope evidence requirements.\n- Do **not** let\
+  \ a scoped flow edit out-of-scope files to chase inherited\n  failures.\n\n## Acceptance\
+  \ criteria\n\n1. A scoped flow (e.g. `doc-sync`) starting on a repo with pre-existing\
+  \ test\n   failures **completes without infinite-looping**, commits its scoped work,\
+  \ and\n   the inherited failures are logged (not looped, not re-filed each iteration).\n\
+  2. A flow that **introduces** a real test regression **does** trigger the fix\n\
+  \   loop and must fix it — an introduced failure can never be laundered into the\n\
+  \   baseline (the baseline is frozen before `implement` runs).\n3. `se3/state/known_test_failures.json`\
+  \ is no longer auto-populated; the\n   exemption decision is the measured baseline.\n\
+  4. `out_of_scope` items are logged, not filed as issues; the issue tracker does\n\
+  \   not balloon across fix iterations.\n5. The baseline run overlaps the pre-implement\
+  \ steps (background) so a typical\n   flow adds ~0 wall-clock; `implement` blocks\
+  \ only if the baseline is not yet\n   ready.\n6. The existing suite (5304 tests,\
+  \ minus the 2 known pre-existing failures)\n   still passes, plus new tests covering:\
+  \ baseline capture/caching, introduced-\n   vs-inherited classification in `test.py`\
+  \ and `verify_spec.py`, no-auto-\n   populate, and `out_of_scope` logging.\n\n##\
+  \ Reference: key locations\n\n- `src/se3/engine/steps/test.py` — `_load/_save_known_failures`\
+  \ (117/137),\n  exemption (309-319), `should_fix` (337-342), auto-populate (380-397),\n\
+  \  return status (540-542), `_classify_results` (690).\n- `src/se3/engine/steps/verify_spec.py`\
+  \ — `tests_passed=overall_passed` (244),\n  critical gate (257-265), `verified`\
+  \ (270), test-failure REVISION path (319-342).\n- `src/se3/engine/steps/self_check.py`\
+  \ — `_validate_and_filter_issues` (207),\n  `out_of_scope` silent drop (246-248),\
+  \ in-scope evidence pipeline (250-269).\n- `src/se3/engine/state_machine.py` — fix-loop\
+  \ trigger (524-554),\n  `_build_step_inputs` (997+), `_get_max_fix_iterations`.\n\
+  - Config: `se3.yaml` / `se3.local.yaml` `workflow.max_fix_iterations`.\n\nThese\
+  \ tests should be investigated and fixed to prevent the broken-window effect."
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:test-pre-existing
+created_at: '2026-06-03T13:05:35.146451'
+updated_at: '2026-06-03T13:05:35.146451'
