@@ -20,7 +20,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..issue_manager import IssueManager
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..prompt_markers import inject_boundary
@@ -135,11 +134,19 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     The ``verified`` field is computed by rule, not by LLM:
         verified = (in_scope_count == 0) and tests_passed
 
+    where ``tests_passed`` consumes the SAME baseline-based verdict as the
+    test step (steps/test.py): only *introduced* test failures (not in the
+    frozen pre-implement baseline) block the flow. Inherited (baseline)
+    failures are surfaced/logged but never drive REVISION_NEEDED — looping on
+    failures a scoped flow structurally cannot fix is the infinite-loop bug
+    the baseline mechanism eliminates.
+
     REVISION_NEEDED is triggered when:
         in_scope_count > 0 or tests_passed == False
 
-    Out-of-scope issues are filed via IssueManager.create() and do not
-    block the flow.
+    Out-of-scope issues are logged (留痕) via ``_log_out_of_scope_issues``,
+    NOT filed as tracked issues, to avoid the issue tracker ballooning across
+    fix iterations.
 
     Args:
         step: The current step being executed
@@ -155,6 +162,10 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     changes_made = step.inputs.get("changes_made", {})
     test_results = step.inputs.get("test_results", {})
     spec_changes = step.inputs.get("spec_changes", [])
+    # Frozen pre-implement baseline (injected by state_machine). Used only as a
+    # fallback to recompute the introduced/inherited split when an older
+    # test_results dict predates the baseline split fields.
+    baseline_failures = step.inputs.get("baseline_failures", []) or []
 
     # Get fix iteration count from inputs
     fix_iteration = step.inputs.get("fix_iteration", 0)
@@ -237,23 +248,29 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         in_scope_count = len(in_scope_issues)
         out_of_scope_count = len(out_of_scope_issues)
 
-        # Check test results - support both old flat format and new structured format
+        # Check test results — consume the SAME baseline-based verdict that
+        # the test step (steps/test.py) computed, so the two steps can never
+        # disagree on whether the test failures block the flow.
+        #
+        # The fix-loop test gate blocks on *introduced* failures only (failures
+        # NOT in the frozen pre-implement baseline). Inherited (baseline)
+        # failures are surfaced/logged below but never drive REVISION_NEEDED —
+        # looping on failures a scoped flow structurally cannot fix is exactly
+        # the infinite-loop bug the baseline mechanism eliminates.
         critical_skipped: list[str] = []
         critical_missing: list[str] = []
+        inherited_failures: list[str] = []
         if test_results and isinstance(test_results, dict):
-            tests_passed = test_results.get("overall_passed", test_results.get("passed", False))
-            returncode = test_results.get("returncode", 0)
-            if returncode != 0 and tests_passed:
-                logger.warning(f"Test return code is {returncode}, marking as failed")
-                tests_passed = False
+            tests_passed = _evaluate_test_gate(test_results, baseline_failures)
+            inherited_failures = list(test_results.get("inherited_failures") or [])
 
-            # Defensive backstop for the critical acceptance gate. The test
-            # step (steps/test.py) flags critical acceptance tests that were
-            # skipped or never collected via these fields. As the authoritative
-            # ``verified`` computation point, verify_spec consumes them
-            # explicitly so a skipped/missing critical test can never count as
-            # passing — even if some upstream branch left ``overall_passed``
-            # truthy. Skip != pass for these tests.
+            # Defensive backstop for the critical acceptance gate, scoped to
+            # THIS session's tests. The test step flags critical acceptance
+            # tests that were skipped or never collected via these fields. As
+            # the authoritative ``verified`` computation point, verify_spec
+            # consumes them explicitly so a skipped/missing critical test can
+            # never count as passing — even if some upstream branch left the
+            # gate truthy. Skip != pass for these tests.
             critical_skipped = list(test_results.get("critical_skipped") or [])
             critical_missing = list(test_results.get("critical_missing") or [])
             if (critical_skipped or critical_missing) and tests_passed:
@@ -266,7 +283,22 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         else:
             tests_passed = True
 
-        # Rule-based verified: ignore LLM's verified field
+        # Surface inherited (baseline) failures once (留痕). They do not block
+        # the flow, but a correctly-scoped flow that commits its work should
+        # still leave a trace of the pre-existing red tests it could not fix.
+        if inherited_failures:
+            logger.info(
+                "%d inherited (pre-implement baseline) test failure(s) present "
+                "but NOT blocking verify_spec (surfaced, not looped): %s",
+                len(inherited_failures),
+                ", ".join(str(t) for t in inherited_failures),
+            )
+
+        # Rule-based verified: ignore the LLM's verified field. verified is
+        # True only when there are no in-scope spec issues AND no introduced
+        # test failures AND the critical acceptance gate is satisfied.
+        # Inherited failures are deliberately excluded from ``tests_passed`` so
+        # a correctly-scoped flow can commit its work.
         verified = (in_scope_count == 0) and tests_passed
 
         # Bridge the authoritative verdict into the verification_result dict so
@@ -289,8 +321,9 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if discovered_issues:
             step.outputs["discovered_issues"] = discovered_issues
 
-        # File out-of-scope issues via IssueManager
-        _file_out_of_scope_issues(out_of_scope_issues, flow, project_root)
+        # Log out-of-scope issues (留痕) instead of filing them as tracked
+        # issues, to avoid the issue tracker ballooning across fix iterations.
+        _log_out_of_scope_issues(out_of_scope_issues, flow, project_root)
 
         test_analysis = verification.get("test_analysis", {})
         fix_instructions = verification.get("fix_instructions", "")
@@ -428,41 +461,116 @@ def _build_critical_fix_instructions(
     return note
 
 
-def _file_out_of_scope_issues(
+def _compute_introduced_failures(
+    test_results: dict[str, Any],
+    baseline_failures: list[str],
+) -> list[str]:
+    """Recompute the introduced-failure list from a test_results dict.
+
+    Used only as a fallback when ``test_results`` predates the baseline split
+    (no ``tests_blocking`` / ``introduced_failures`` field). Mirrors test.py's
+    classification: a failing test is *introduced* iff its id is NOT in the
+    frozen pre-implement baseline.
+    """
+    baseline = set(baseline_failures or [])
+    new_tests = test_results.get("new_tests") or {}
+    regression = test_results.get("regression") or {}
+    all_failed = list(new_tests.get("failed") or []) + list(
+        regression.get("failed") or []
+    )
+    return [tid for tid in all_failed if tid not in baseline]
+
+
+def _evaluate_test_gate(
+    test_results: dict[str, Any],
+    baseline_failures: list[str],
+) -> bool:
+    """Compute ``tests_passed`` from a test_results dict (baseline-aware).
+
+    Consumes the SAME baseline-based verdict as the test step so the two steps
+    never disagree on whether test failures block the flow:
+
+    - **Primary** — ``test_results["tests_blocking"]``: the authoritative flag
+      test.py sets (True iff there are introduced failures, an unparseable
+      failure, or a critical-gate trip). ``tests_passed = not tests_blocking``.
+    - **Secondary** — ``introduced_failures`` present without the blocking
+      flag: block iff that list is non-empty.
+    - **Fallback** — ``test_results`` predates the baseline split: recompute
+      the introduced-failure set from the structured new_tests/regression
+      lists against the injected ``baseline_failures``; block on any introduced
+      failure or an unparseable failure (pytest failed yet no individual test
+      could be classified). Oldest flat-format results with no structure fall
+      back to ``overall_passed``/``passed`` (with a non-zero returncode
+      overriding a stale truthy ``passed``).
+
+    Inherited (baseline) failures never make this return ``False``.
+    """
+    # Primary: authoritative verdict from test.py.
+    if "tests_blocking" in test_results:
+        return not bool(test_results["tests_blocking"])
+
+    # Secondary: introduced_failures present without the blocking flag.
+    if "introduced_failures" in test_results:
+        return not bool(test_results.get("introduced_failures"))
+
+    # Fallback: structured results present — recompute the introduced split.
+    if "new_tests" in test_results or "regression" in test_results:
+        introduced = _compute_introduced_failures(test_results, baseline_failures)
+        if introduced:
+            return False
+        overall_passed = test_results.get(
+            "overall_passed", test_results.get("passed", False)
+        )
+        new_failed = (test_results.get("new_tests") or {}).get("failed", [])
+        reg_failed = (test_results.get("regression") or {}).get("failed", [])
+        # Unparseable failure: pytest failed yet no individual test could be
+        # classified — block (mirrors test.py's unparseable_failure trigger).
+        if not overall_passed and not new_failed and not reg_failed:
+            return False
+        return True
+
+    # Oldest flat format: no structure to split — honor the raw verdict.
+    passed = bool(
+        test_results.get("overall_passed", test_results.get("passed", False))
+    )
+    returncode = test_results.get("returncode", 0)
+    if returncode not in (0, "?", None) and passed:
+        logger.warning(
+            "Test return code is %s but passed is truthy; marking as failed",
+            returncode,
+        )
+        return False
+    return passed
+
+
+def _log_out_of_scope_issues(
     out_of_scope_issues: list[dict[str, Any]],
     flow: FlowInstance,
     project_root: Path,
 ) -> None:
-    """File out-of-scope issues as tracked issues via IssueManager.
+    """Log out-of-scope observations (留痕) instead of filing them as issues.
 
-    Each out-of-scope issue is persisted as a YAML issue file so it can
-    be addressed in a future flow without blocking the current one.
+    Out-of-scope items are surfaced to the flow log / telemetry but
+    deliberately NOT filed via ``IssueManager.create()``: filing one issue per
+    out-of-scope observation per fix iteration is exactly the issue-explosion
+    (189 duplicate issues) this change eliminates. Provenance ≠ relevance — an
+    LLM-reported out-of-scope item is best-effort discovery, so it is recorded
+    for a human to triage rather than auto-filed and never silently dropped.
     """
     if not out_of_scope_issues:
         return
 
-    try:
-        mgr = IssueManager(project_root)
-        for issue_data in out_of_scope_issues:
-            title = issue_data.get("message", "Untitled out-of-scope issue")
-            suggestion = issue_data.get("suggestion", "")
-            description = title
-            if suggestion:
-                description = f"{title}\n\nSuggestion: {suggestion}"
-            priority = issue_data.get("priority", "medium")
-            tags = ["auto-discovered", "source:verify-spec", "out-of-scope"]
-
-            mgr.create(
-                title=title,
-                description=description,
-                priority=priority,
-                scope="out_of_scope",
-                tags=tags,
-                type="bug",
-            )
-            logger.info(f"Filed out-of-scope issue: {title}")
-    except Exception as e:
-        logger.warning(f"Failed to file out-of-scope issues: {e}")
+    for issue_data in out_of_scope_issues:
+        message = issue_data.get("message", "Untitled out-of-scope issue")
+        suggestion = issue_data.get("suggestion", "")
+        priority = issue_data.get("priority", "medium")
+        logger.info(
+            "verify_spec out-of-scope observation (logged, not filed) "
+            "[priority=%s]: %s%s",
+            priority,
+            message,
+            f" | suggestion: {suggestion}" if suggestion else "",
+        )
 
 
 def _get_max_fix_iterations(flow: FlowInstance) -> int:

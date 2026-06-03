@@ -16,7 +16,9 @@ from se3.engine.steps.verify_spec import (
     _format_fix_context,
     _format_spec_changes,
     _get_max_fix_iterations,
-    _file_out_of_scope_issues,
+    _log_out_of_scope_issues,
+    _evaluate_test_gate,
+    _compute_introduced_failures,
     VERIFY_PROMPT,
 )
 
@@ -209,7 +211,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 with patch(
                     "se3.engine.steps.verify_spec._get_max_fix_iterations",
                     return_value=42,
@@ -269,7 +271,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.COMPLETED
@@ -296,7 +298,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
@@ -321,7 +323,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
@@ -350,7 +352,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
@@ -374,7 +376,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 verify_spec_handler(step, flow)
 
             # Should include iteration 2 in prompt
@@ -401,7 +403,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 verify_spec_handler(step, flow)
 
             fix_context = step.outputs.get("fix_context")
@@ -411,8 +413,8 @@ class TestVerifySpecHandler:
             assert fix_context["fix_instructions"] == "Instructions here"
             assert fix_context["iteration"] == 2  # Incremented
 
-    def test_out_of_scope_issues_filed(self, flow, step):
-        """Test that out-of-scope issues are filed via IssueManager."""
+    def test_out_of_scope_issues_logged_not_filed(self, flow, step):
+        """Out-of-scope issues are routed to logging, NOT filed as issues."""
         mock_response = json.dumps({
             "issues": [
                 {"priority": "medium", "scope": "out_of_scope", "message": "Pre-existing bug in auth", "suggestion": "Refactor auth module"},
@@ -428,16 +430,53 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues") as mock_file:
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues") as mock_log:
                 result = verify_spec_handler(step, flow)
 
                 assert result == StepStatus.COMPLETED
                 assert step.outputs["verified"] is True
-                # Verify _file_out_of_scope_issues was called with the out-of-scope issues
-                mock_file.assert_called_once()
-                filed_issues = mock_file.call_args[0][0]
-                assert len(filed_issues) == 1
-                assert filed_issues[0]["scope"] == "out_of_scope"
+                # _log_out_of_scope_issues is invoked with the out-of-scope set
+                mock_log.assert_called_once()
+                logged_issues = mock_log.call_args[0][0]
+                assert len(logged_issues) == 1
+                assert logged_issues[0]["scope"] == "out_of_scope"
+
+    def test_out_of_scope_issues_do_not_create_issue_files(self, flow, step):
+        """End-to-end: out-of-scope issues must not produce any issue files.
+
+        The whole point of routing out_of_scope to logging is to stop the
+        issue tracker ballooning across fix iterations. Run the real
+        _log_out_of_scope_issues (not patched) and assert no YAML issue file
+        is written.
+        """
+        import os
+
+        project_root = flow.change_path.parent
+        (project_root / "se3" / "issues" / "open").mkdir(parents=True, exist_ok=True)
+        (project_root / "se3" / "issues" / "closed").mkdir(parents=True, exist_ok=True)
+
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "high", "scope": "out_of_scope", "message": "Pre-existing tech debt"},
+                {"priority": "low", "scope": "out_of_scope", "message": "Old style issue"},
+            ],
+            "summary": "Only out-of-scope issues",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            result = verify_spec_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        from se3.engine.issue_manager import IssueManager
+        mgr = IssueManager(project_root)
+        assert mgr.list_issues() == []
 
     def test_mixed_scope_issues(self, flow, step):
         """Test handling of mixed in_scope and out_of_scope issues."""
@@ -460,7 +499,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
@@ -487,7 +526,7 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
@@ -515,19 +554,161 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            with patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
                 result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
             assert step.outputs.get("fix_needed") is True
             assert step.outputs["in_scope_count"] == 1
 
+    def test_inherited_only_failures_complete_and_verified(self, flow, step):
+        """Only inherited (baseline) test failures → COMPLETED, verified=True.
 
-class TestFileOutOfScopeIssues:
-    """Test cases for _file_out_of_scope_issues."""
+        A scoped flow on a repo with pre-existing red tests must not loop: the
+        test step marks the failures inherited (tests_blocking=False) and
+        verify_spec must consume that verdict so verified is True and the flow
+        can commit its scoped work.
+        """
+        step.inputs["fix_iteration"] = 0
+        step.inputs["test_results"] = {
+            "new_tests": {"failed": [], "passed": [], "count": 0},
+            "regression": {"failed": ["tests/t.py::t_old"], "passed": [], "count": 1},
+            "overall_passed": False,
+            "introduced_failures": [],
+            "inherited_failures": ["tests/t.py::t_old"],
+            "tests_blocking": False,
+            "critical_skipped": [],
+            "critical_missing": [],
+        }
 
-    def test_files_issues_via_issue_manager(self, tmp_path):
-        """Test that out-of-scope issues are filed as YAML issue files."""
+        mock_response = json.dumps({
+            "issues": [],
+            "summary": "scoped work done",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            result = verify_spec_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["verified"] is True
+        assert step.outputs.get("fix_needed") is not True
+
+    def test_introduced_failure_triggers_revision_needed(self, flow, step):
+        """An introduced test failure (not in baseline) → REVISION_NEEDED."""
+        step.inputs["fix_iteration"] = 0
+        step.inputs["test_results"] = {
+            "new_tests": {"failed": [], "passed": [], "count": 0},
+            "regression": {"failed": ["tests/t.py::t_new"], "passed": [], "count": 1},
+            "overall_passed": False,
+            "introduced_failures": ["tests/t.py::t_new"],
+            "inherited_failures": [],
+            "tests_blocking": True,
+            "critical_skipped": [],
+            "critical_missing": [],
+        }
+
+        mock_response = json.dumps({
+            "issues": [],
+            "summary": "regression introduced",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": False, "failure_summary": "boom", "root_cause": "x"},
+            "fix_instructions": "fix the regression",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            result = verify_spec_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["verified"] is False
+        assert step.outputs["fix_needed"] is True
+
+    def test_fallback_recompute_when_no_blocking_field(self, flow, step):
+        """When test_results lacks tests_blocking/introduced_failures, the
+        handler recomputes the split from inputs['baseline_failures']."""
+        step.inputs["fix_iteration"] = 0
+        step.inputs["baseline_failures"] = ["tests/t.py::t_old"]
+        step.inputs["test_results"] = {
+            "new_tests": {"failed": [], "passed": [], "count": 0},
+            "regression": {"failed": ["tests/t.py::t_old"], "passed": [], "count": 1},
+            "overall_passed": False,
+        }
+
+        mock_response = json.dumps({
+            "issues": [],
+            "summary": "ok",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            result = verify_spec_handler(step, flow)
+
+        # Failure is in the baseline → inherited → not blocking → verified.
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["verified"] is True
+
+    def test_critical_skipped_forces_not_passed_even_if_not_blocking(self, flow, step):
+        """A skipped/missing critical acceptance test forces tests_passed=False.
+
+        Defensive backstop (skip != pass for this session's tests): even if the
+        baseline gate said not-blocking, a critical skip/missing drives
+        REVISION_NEEDED.
+        """
+        step.inputs["fix_iteration"] = 0
+        step.inputs["test_results"] = {
+            "new_tests": {"failed": [], "passed": [], "count": 0},
+            "regression": {"failed": [], "passed": [], "count": 0},
+            "overall_passed": True,
+            "introduced_failures": [],
+            "inherited_failures": [],
+            "tests_blocking": False,
+            "critical_skipped": ["tests/t.py::test_critical"],
+            "critical_missing": [],
+        }
+
+        mock_response = json.dumps({
+            "issues": [],
+            "summary": "ok per llm",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            result = verify_spec_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["verified"] is False
+        assert step.outputs["fix_context"]["reason"] == "critical_acceptance_not_verified"
+
+
+class TestLogOutOfScopeIssues:
+    """Test cases for _log_out_of_scope_issues."""
+
+    def test_logs_issues_without_filing(self, tmp_path, caplog):
+        """Out-of-scope issues are logged (留痕) and NOT filed as YAML files."""
+        import logging
+
         (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
         (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
 
@@ -543,33 +724,101 @@ class TestFileOutOfScopeIssues:
             {"priority": "low", "scope": "out_of_scope", "message": "Style issue"},
         ]
 
-        _file_out_of_scope_issues(issues, flow, tmp_path)
+        with caplog.at_level(logging.INFO, logger="se3.engine.steps.verify_spec"):
+            _log_out_of_scope_issues(issues, flow, tmp_path)
 
-        # Verify files were created
+        # Each item left a trace in the log (description + suggestion + priority)
+        logged = caplog.text
+        assert "Pre-existing bug" in logged
+        assert "Fix it" in logged
+        assert "Style issue" in logged
+        assert "priority=medium" in logged
+        assert "priority=low" in logged
+
+        # No issue files were created
         from se3.engine.issue_manager import IssueManager
         mgr = IssueManager(tmp_path)
-        created = mgr.list_issues()
-        assert len(created) == 2
-        assert created[0].scope == "out_of_scope"
-        assert created[1].scope == "out_of_scope"
-        assert "auto-discovered" in created[0].tags
-        assert "source:verify-spec" in created[0].tags
-        assert "out-of-scope" in created[0].tags
+        assert mgr.list_issues() == []
 
     def test_empty_list_is_noop(self, tmp_path):
-        """Test that empty out-of-scope list does nothing."""
+        """Empty out-of-scope list does nothing (no error, no log)."""
         flow = Mock()
-        _file_out_of_scope_issues([], flow, tmp_path)
-        # No error, no files created
+        _log_out_of_scope_issues([], flow, tmp_path)
 
-    def test_handles_exception_gracefully(self, tmp_path):
-        """Test that filing errors are caught and logged, not raised."""
+    def test_missing_fields_do_not_raise(self, tmp_path, caplog):
+        """An item missing message/suggestion/priority logs defaults, no raise."""
+        import logging
+
         flow = Mock()
-        # tmp_path doesn't have issue dirs, IssueManager.create will fail
-        # but _file_out_of_scope_issues should handle it gracefully
-        issues = [{"priority": "high", "scope": "out_of_scope", "message": "Test"}]
-        # Should not raise
-        _file_out_of_scope_issues(issues, flow, tmp_path / "nonexistent")
+        issues = [{"scope": "out_of_scope"}]
+        with caplog.at_level(logging.INFO, logger="se3.engine.steps.verify_spec"):
+            _log_out_of_scope_issues(issues, flow, tmp_path / "nonexistent")
+        assert "Untitled out-of-scope issue" in caplog.text
+
+
+class TestEvaluateTestGate:
+    """Test cases for the baseline-aware _evaluate_test_gate helper."""
+
+    def test_tests_blocking_true_blocks(self):
+        assert _evaluate_test_gate({"tests_blocking": True}, []) is False
+
+    def test_tests_blocking_false_passes(self):
+        assert _evaluate_test_gate({"tests_blocking": False}, []) is True
+
+    def test_introduced_failures_present_blocks(self):
+        results = {"introduced_failures": ["tests/test_a.py::test_x"]}
+        assert _evaluate_test_gate(results, []) is False
+
+    def test_introduced_failures_empty_passes(self):
+        # inherited_failures populated but no introduced ones → passes
+        results = {"introduced_failures": [], "inherited_failures": ["tests/t.py::t"]}
+        assert _evaluate_test_gate(results, []) is True
+
+    def test_fallback_recompute_inherited_only_passes(self):
+        # Old-format results (no blocking/introduced fields): the single failure
+        # is in the baseline → inherited → does NOT block.
+        results = {
+            "new_tests": {"failed": [], "passed": []},
+            "regression": {"failed": ["tests/t.py::t_old"], "passed": []},
+            "overall_passed": False,
+        }
+        baseline = ["tests/t.py::t_old"]
+        assert _evaluate_test_gate(results, baseline) is True
+
+    def test_fallback_recompute_introduced_blocks(self):
+        results = {
+            "new_tests": {"failed": [], "passed": []},
+            "regression": {"failed": ["tests/t.py::t_new"], "passed": []},
+            "overall_passed": False,
+        }
+        baseline = ["tests/t.py::t_old"]
+        assert _evaluate_test_gate(results, baseline) is False
+
+    def test_fallback_unparseable_failure_blocks(self):
+        results = {
+            "new_tests": {"failed": [], "passed": []},
+            "regression": {"failed": [], "passed": []},
+            "overall_passed": False,
+        }
+        assert _evaluate_test_gate(results, []) is False
+
+    def test_flat_format_passed_true(self):
+        assert _evaluate_test_gate({"passed": True, "returncode": 0}, []) is True
+
+    def test_flat_format_passed_false(self):
+        assert _evaluate_test_gate({"passed": False, "returncode": 1}, []) is False
+
+    def test_flat_format_returncode_overrides_stale_passed(self):
+        assert _evaluate_test_gate({"passed": True, "returncode": 1}, []) is False
+
+    def test_compute_introduced_failures_splits_on_baseline(self):
+        results = {
+            "new_tests": {"failed": ["tests/n.py::new"]},
+            "regression": {"failed": ["tests/r.py::old", "tests/r.py::fresh"]},
+        }
+        baseline = ["tests/r.py::old"]
+        introduced = _compute_introduced_failures(results, baseline)
+        assert set(introduced) == {"tests/n.py::new", "tests/r.py::fresh"}
 
 
 class TestFormatSpecContent:

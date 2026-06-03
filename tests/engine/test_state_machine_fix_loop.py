@@ -1266,7 +1266,7 @@ class TestUnlimitedSentinelEndToEnd:
             ' "root_cause": ""}, "fix_instructions": "fix it"}'
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class, \
-             patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+             patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
@@ -1353,7 +1353,7 @@ class TestUnlimitedSentinelEndToEnd:
             ' "root_cause": ""}, "fix_instructions": ""}'
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class, \
-             patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+             patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
@@ -1617,7 +1617,7 @@ class TestUnlimitedOutputDiskShape:
         })
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_cls, \
-             patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+             patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
