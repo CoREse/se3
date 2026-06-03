@@ -8,6 +8,14 @@
 
 
 
+
+## 8.2.0 - 2026-06-03
+
+- Capture per-call LLM token usage (input/output, cache read, cache creation) and total cost from the Claude CLI result stream
+- Aggregate token usage and cost at both step and whole-session granularity, merging retries, rotations, and two-phase extraction calls per step
+- Display a per-step token/cost summary block and a session total block in the CLI with aligned, unobtrusive formatting
+- Show a low-key per-step usage footnote and a running session usage badge in the running-flow web console
+- Persist session token usage in engine state with backward-compatible loading of older engine.json files
 ## 8.1.0 - 2026-06-03
 
 - Capture a deterministic test baseline before implement runs, freezing the set of pre-existing failures so introduced regressions can never be laundered into 'known' status

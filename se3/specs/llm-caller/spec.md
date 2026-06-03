@@ -410,6 +410,29 @@ The caller exposes two post-call extractors used by different consumers.
 - **WHEN** `_contains_valid_json(output)` is called
 - **THEN** it delegates to `parse_json_response` (the same parser used elsewhere) and returns `True` iff the parser returned a non-`None` value
 
+### Requirement: Result Usage and Cost Capture
+
+Beyond the synthesized final `result` text (see *Result Text Extraction Modes*), the `StreamJSONTracker` SHALL also capture the token-usage and cost telemetry carried on the stream's `type == "result"` line, which the prior implementation read for its `result` field and then discarded. This lets the flow engine aggregate per-step and per-session token usage and cost (see the `flow-engine` *State Tracking Fields and Helper API* and *Step Output Renderer Registry* requirements) without changing the agent-runner subprocess contract.
+
+The captured fields are the four usage token counts — `usage.input_tokens`, `usage.output_tokens`, `usage.cache_creation_input_tokens`, `usage.cache_read_input_tokens` — and the top-level `total_cost_usd`. The tracker tolerates both the nested `message.usage` shape and a flat top-level `usage` object, defaults any missing field to `0`, and swallows any parsing exception so usage capture is strictly best-effort and never disturbs the main call path.
+
+Because a single step may issue several subprocess calls (retry, agent rotation, and the JSON two-phase extractor each spawn their own subprocess), `_call_with_retry` SHALL fold the tracker's captured usage into the current step-scoped accumulator after **every** subprocess returns — on both the success and the failure paths — so the per-step total is the sum across all of that step's calls. The accumulator is the contextvar-scoped one owned by `token_usage.add_call_usage` (see the `flow-engine` requirements); the caller does not retain or expose per-call usage detail.
+
+#### Scenario: Usage and cost captured from the result line
+- **WHEN** the stream emits a `type == "result"` line carrying `usage.input_tokens` / `usage.output_tokens` / `usage.cache_creation_input_tokens` / `usage.cache_read_input_tokens` and a top-level `total_cost_usd`
+- **THEN** the tracker records all four token counts and the cost, exposed via its read-only `usage` property
+- **AND** both the nested `message.usage` form and the flat top-level `usage` form are accepted
+
+#### Scenario: Missing usage fields default to zero
+- **WHEN** the `type == "result"` line omits one or more usage fields (or omits `total_cost_usd`)
+- **THEN** each absent field is recorded as `0` rather than raising
+- **AND** a malformed or unparseable usage payload is swallowed silently, leaving the call result unaffected
+
+#### Scenario: Per-step usage merges across retries, rotations, and two-phase extraction
+- **WHEN** a step issues multiple subprocess calls (internal retry, agent rotation, or the two-phase JSON extractor)
+- **THEN** `_call_with_retry` folds each call's `stream_tracker.usage` into the current step-scoped accumulator via `token_usage.add_call_usage`, on both success and failure paths
+- **AND** the step's reported usage is the accumulated sum across all those calls, with no single-call breakdown retained
+
 ### Requirement: Subprocess Invocation and History Recording
 
 Each call invokes the current agent's `Runner.run_with_monitor` with stream-json output, no wall-time limit, and a 1800-second (30-minute) inactivity timeout. Prompts and responses are recorded to chat history (whether the call succeeded, failed, or was interrupted) if `flow_id` and `step_id` are set.

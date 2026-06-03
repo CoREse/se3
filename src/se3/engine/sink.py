@@ -107,10 +107,19 @@ class CliSink(Sink):
     def _render_step(self, event: Event) -> None:
         """Route a step event to the existing step-output renderer.
 
-        Interactive steps (CONFIRM/DISCOVERY) and PLAN are skipped: their CLI
-        output is presented by the orchestrator's interactive/special paths, so
-        rendering them here too would double the CLI output. Their events still
-        reach HistorySink (web report cards) and JsonSink (daemon NDJSON).
+        Interactive steps (CONFIRM/DISCOVERY) and PLAN have their full report
+        skipped: that output is presented by the orchestrator's interactive/
+        special paths, so rendering it here too would double the CLI output.
+        Their events still reach HistorySink (web report cards) and JsonSink
+        (daemon NDJSON).
+
+        However, the orchestrator's interactive/special paths never render the
+        per-step token-usage block, so for these skipped step types CliSink
+        still renders just the usage block directly. This keeps per-step usage
+        symmetric on the CLI: token-heavy steps like ``plan`` and ``discovery``
+        show their consumption exactly as ``analyze`` / ``test`` / etc. do
+        (and the WebUI report cards already surface it). The block self-guards
+        on empty ``token_usage``, so steps that made no LLM call print nothing.
         """
         step = event.data.get("step")
         if step is None:
@@ -120,6 +129,9 @@ class CliSink(Sink):
             st = getattr(step, "step_type", None)
             step_type = getattr(st, "value", st)
         if step_type in self._CLI_SKIP_STEP_TYPES:
+            from .step_renderers import render_step_usage
+
+            render_step_usage(step)
             return
         from .step_renderers import render_step_output
 

@@ -1,0 +1,33 @@
+id: '176'
+title: 'tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count
+  fails: it asserts the flow-engine spec has 43 requirements but the spec currently
+  parses to 44. This is a pre-existing spec/test inconsistency unrelated to the token-usage
+  task: the 44th requirement (''Pre-implement Test Baseline'') was added by commit
+  a8ae785, which is an ancestor of this task''s first commit (0679844), so the test
+  was already red before this work began. The token-usage implementation made no changes
+  to se3/specs/flow-engine/spec.md. The failure has been auto-flagged as pre-existing
+  in issues 172-175.'
+description: 'tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count
+  fails: it asserts the flow-engine spec has 43 requirements but the spec currently
+  parses to 44. This is a pre-existing spec/test inconsistency unrelated to the token-usage
+  task: the 44th requirement (''Pre-implement Test Baseline'') was added by commit
+  a8ae785, which is an ancestor of this task''s first commit (0679844), so the test
+  was already red before this work began. The token-usage implementation made no changes
+  to se3/specs/flow-engine/spec.md. The failure has been auto-flagged as pre-existing
+  in issues 172-175.
+
+
+  Suggestion: Out of scope for this flow. Track separately: update the assertion in
+  test_flow_engine_spec_requirement_count from 43 to 44 to match the spec that already
+  includes the Pre-implement Test Baseline requirement (the actual fix for issues
+  172-175). Do NOT modify the flow-engine spec to satisfy the stale count.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-03T15:12:32.710644'
+updated_at: '2026-06-03T15:12:32.710644'

@@ -32,12 +32,15 @@ export function registerTokenUsageTests(ctx) {
   });
 
   // A step_completed conversation record carrying token_usage in outputs.
-  const stepEvent = (stepId, usage, stepType = "analyze") => ({
+  // `ts` (optional) sets the record timestamp so two executions of the same
+  // step_id (a fix-loop re-run) carry distinct per-record identities.
+  const stepEvent = (stepId, usage, stepType = "analyze", ts = undefined) => ({
     step_id: stepId,
     step_type: stepType,
     message: {
       type: "step_completed",
       step_id: stepId,
+      timestamp: ts,
       data: {
         step: {
           step_type: stepType,
@@ -111,14 +114,30 @@ export function registerTokenUsageTests(ctx) {
     assert.ok(Math.abs(totals.total_cost_usd - 0.0223) < 1e-9);
   });
 
-  check("G4 accumulateSessionUsage de-dups by step_id (no double count)", () => {
-    // Same step delivered twice (re-fetch / reconnect) must count once.
+  check("G4 accumulateSessionUsage de-dups identical re-delivered records", () => {
+    // The SAME execution's record delivered twice (re-fetch / reconnect) shares
+    // a recordKey and must count once.
     const totals = app.accumulateSessionUsage([
       stepEvent("01_analyze_a", USAGE()),
       stepEvent("01_analyze_a", USAGE()),
     ]);
     assert.equal(totals.input_tokens, 1000);
     assert.equal(totals.output_tokens, 200);
+  });
+
+  check("G4 accumulateSessionUsage counts fix-loop re-runs of one step_id", () => {
+    // A fix loop re-runs test/self_check/verify_spec on the SAME step_id, each
+    // emitting a distinct step_completed record (different timestamp + usage).
+    // The engine folds every run into the session total, so the badge must too:
+    // distinct per-record identity (recordKey) => counted separately, NOT
+    // collapsed to the first occurrence the way a step_id-only dedup would.
+    const totals = app.accumulateSessionUsage([
+      stepEvent("05_verify_spec_x", USAGE(), "verify_spec", "2026-06-03T10:00:00Z"),
+      stepEvent("05_verify_spec_x", USAGE({ input_tokens: 400, output_tokens: 30 }),
+        "verify_spec", "2026-06-03T10:05:00Z"),
+    ]);
+    assert.equal(totals.input_tokens, 1400);
+    assert.equal(totals.output_tokens, 230);
   });
 
   check("G4 accumulateSessionUsage is order-independent", () => {

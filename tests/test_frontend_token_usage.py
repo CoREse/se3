@@ -70,7 +70,8 @@ def test_frontend_token_usage_node_suite_passes():
     # render footnote + badge), not silently been skipped.
     for needle in (
         "G4 formatTokenUsage renders labelled, comma-grouped fields",
-        "G4 accumulateSessionUsage de-dups by step_id (no double count)",
+        "G4 accumulateSessionUsage de-dups identical re-delivered records",
+        "G4 accumulateSessionUsage counts fix-loop re-runs of one step_id",
         "G4 report card shows a usage footnote when the step has usage",
         "G4 updateFlowUsageBadge shows + populates the badge once usage exists",
     ):

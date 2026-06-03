@@ -1,0 +1,29 @@
+id: '177'
+title: 'The previously-flagged pre-existing test failure (tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count,
+  issues 172-176) has been RESOLVED. The implement step applied exactly the one-line
+  fix the previous verification recommended: the assertion was changed from `== 43`
+  to `== 44` to match the legitimate ''Pre-implement Test Baseline'' requirement (added
+  by ancestor commit a8ae785). No se3/specs/**/spec.md file was modified (spec read-only
+  constraint honored). The test now passes. This is noted only for completeness —
+  it is not an outstanding issue.'
+description: 'The previously-flagged pre-existing test failure (tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count,
+  issues 172-176) has been RESOLVED. The implement step applied exactly the one-line
+  fix the previous verification recommended: the assertion was changed from `== 43`
+  to `== 44` to match the legitimate ''Pre-implement Test Baseline'' requirement (added
+  by ancestor commit a8ae785). No se3/specs/**/spec.md file was modified (spec read-only
+  constraint honored). The test now passes. This is noted only for completeness —
+  it is not an outstanding issue.
+
+
+  Suggestion: No action needed; the stale assertion was corrected and the test is
+  green. Issues 172-176 can be marked closed.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-06-03T15:21:10.173735'
+updated_at: '2026-06-03T15:21:10.173735'

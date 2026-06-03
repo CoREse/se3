@@ -2489,6 +2489,10 @@ When no custom renderer is registered for a step type, the default renderer iter
 
 Custom renderers MAY call `_render_remaining(step, title, skip_keys)` to display any output keys not already covered by their specialized rendering. The remaining keys are rendered under a "{title} — Additional Details" header using the same generic formatting as the default renderer.
 
+**Per-step token-usage block:**
+
+When `step.outputs` carries a non-empty `token_usage` total (written by `run_step`; see *Step-Scoped Token Usage Aggregation*), `render_step_output` SHALL append a compact, aligned token/cost usage summary block at the end of that step's report — labeling the input/output tokens, the `cache_read` / `cache_creation` breakdown, and the `total_cost_usd` cost with clear units rather than bare numbers — rendered through the shared `display.py` block primitive so it follows the established Block Rendering Visual Style. When `step.outputs` has no `token_usage` or it is empty, no usage block is rendered.
+
 **Registered renderers beyond the base set:**
 
 In addition to `analyze`, `self_check`, `verify_spec`, `update_spec`, `commit`, and `implement` (covered under the **Step Output Rendering** Requirement), the registry SHALL include custom renderers for the following step types:
@@ -2573,6 +2577,15 @@ Retained for backward compatibility with persisted flows containing pre-unificat
 - **WHEN** a persisted flow with a `DESIGN` step is loaded and rendered
 - **THEN** `_render_design` extracts the design dict (under key `design`, `design_doc`, or `design_document`) and delegates to `render_design()`
 - **AND** remaining outputs are rendered via `_render_remaining`
+
+#### Scenario: Step with token usage appends a usage summary block
+- **GIVEN** a step whose `outputs` carries a non-empty `token_usage` total
+- **WHEN** `render_step_output(step)` renders that step
+- **THEN** an aligned token/cost usage summary block is appended after the step's report, labeling input/output tokens, the `cache_read` / `cache_creation` breakdown, and the `total_cost_usd` cost with clear units, rendered through the shared `display.py` block primitive (Block Rendering Visual Style)
+
+#### Scenario: Step without token usage renders no usage block
+- **WHEN** `render_step_output(step)` renders a step whose `outputs` has no `token_usage` key or an empty one
+- **THEN** no usage summary block is appended
 
 ### Requirement: Pre-implement Test Baseline
 
@@ -3116,6 +3129,7 @@ The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state
 | `fix_iterations` | `int` | `0` | Global fix-loop counter shared by `test`, `self_check`, and `verify_spec`. Bounded by `workflow.max_fix_iterations` (see *verify_spec Unified Priority and Scope Mechanism*). |
 | `fix_history` | `List[Dict[str, Any]]` | `[]` | Append-only log of fix-loop iterations, capped at `FIX_HISTORY_MAX_ENTRIES` (see *Fix History Structure*). Each entry follows the schema documented under that Requirement. |
 | `baseline_failures` | `Optional[List[str]]` | `None` | Frozen set of test IDs that were failing at flow start, measured before `implement`'s first write (see *Pre-implement Test Baseline*). Three-state sentinel: `None` = not yet captured (no failure may be treated as inherited); `[]` = captured, zero failures at flow start; `[...]` = these specific test IDs were already failing. Persisted so `--resume` reuses the same snapshot rather than re-measuring against a different one. |
+| `session_token_usage` | `UsageTotals` | empty `UsageTotals` | Session-level (whole-flow) running total of LLM token usage and cost, accumulated across every step. Carries `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, and `total_cost_usd` (the `UsageTotals` structure defined in `se3/engine/token_usage.py`). Each step's per-step total (written to `step.outputs["token_usage"]`) is added into this running total when the step finishes (see *Step-Scoped Token Usage Aggregation*). Persisted so `--resume` continues the same session total and the flow-completion CLI summary can read the authoritative figure. |
 
 **Step ID auto-generation:** `add_step(step)` SHALL auto-generate `step.step_id` when not already set, using the format `NN_steptype_uuid8` where `NN` is the 1-based sequence number derived from `len(step_history) + 1` and `uuid8` is the first eight hex characters of a fresh UUID (e.g. `01_analyze_844c2cf8`). The format is human-readable and sortable so on-disk history files (`se3/history/{flow_id}/{step_id}.jsonl`) order chronologically.
 
@@ -3133,8 +3147,8 @@ The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state
 
 **Persistence:**
 
-- `to_dict()` SHALL serialize every field above, including `baseline_failures` (preserving the `None` vs `[]` distinction). `selected_steps` is persisted as a list of `StepType.value` strings; `steps` is persisted as a `{step_id: step.to_dict()}` map.
-- `from_dict()` SHALL accept missing keys and substitute defaults (`get_current_step_id` → `None`, `step_history`/`steps`/`context`/`review_iterations` → empty containers, `fix_iterations` → `0`, `current_step_index` → `0`, `baseline_failures` → `None`).
+- `to_dict()` SHALL serialize every field above, including `baseline_failures` (preserving the `None` vs `[]` distinction) and `session_token_usage` (via `UsageTotals.to_dict()`). `selected_steps` is persisted as a list of `StepType.value` strings; `steps` is persisted as a `{step_id: step.to_dict()}` map.
+- `from_dict()` SHALL accept missing keys and substitute defaults (`get_current_step_id` → `None`, `step_history`/`steps`/`context`/`review_iterations` → empty containers, `fix_iterations` → `0`, `current_step_index` → `0`, `baseline_failures` → `None`, `session_token_usage` → an empty `UsageTotals`). `UsageTotals.from_dict()` SHALL tolerate a `None`/missing payload and absent individual fields so engine.json files written by older builds (which have no token-usage field) load without error.
 - `from_dict()` SHALL apply the same tail-keep `FIX_HISTORY_MAX_ENTRIES` cap on load that `increment_fix_iteration()` applies on append, so engine.json files written by older builds (or builds with a larger cap) are clamped at deserialization time rather than only on the next increment.
 
 #### Scenario: Step IDs follow NN_steptype_uuid8 format
@@ -3170,8 +3184,44 @@ The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state
 #### Scenario: State round-trips through persistence
 - **GIVEN** a `State` populated with non-default values for every field above (including non-empty `review_iterations`, `fix_iterations`, `fix_history`, `context`, and `selected_steps`)
 - **WHEN** the state is serialized via `to_dict()` and reconstructed via `from_dict()`
-- **THEN** every field equals its original value (with `selected_steps` rehydrated from `.value` strings back to `StepType` enum members and `steps` rehydrated to `Step` instances)
+- **THEN** every field equals its original value (with `selected_steps` rehydrated from `.value` strings back to `StepType` enum members, `steps` rehydrated to `Step` instances, and `session_token_usage` rehydrated to an equal `UsageTotals`)
 - **AND** an oversized `fix_history` in the persisted dict is clamped on load via the same tail-keep policy used by `increment_fix_iteration`
+
+#### Scenario: Older engine.json without session_token_usage loads with an empty total
+- **GIVEN** an engine.json written by a build that predates the token-usage feature, so its serialized state dict has no `session_token_usage` key
+- **WHEN** `State.from_dict()` loads it
+- **THEN** `session_token_usage` defaults to an empty `UsageTotals` (all token counts and `total_cost_usd` zero) rather than raising
+- **AND** a partial `session_token_usage` payload that omits individual fields likewise tolerates the gaps, defaulting each missing field to zero
+
+### Requirement: Step-Scoped Token Usage Aggregation
+
+The flow engine SHALL aggregate LLM token usage and cost at two granularities — **per step** and **per session (whole flow)** — reusing the `UsageTotals` data structure, the contextvar-scoped accumulator, and the formatting helpers defined in `se3/engine/token_usage.py` as the single source of truth for field names and merge semantics. This consumes the telemetry the `llm-caller` subsystem captures from each subprocess call (see the `llm-caller` *Result Usage and Cost Capture* requirement) and feeds both the CLI per-step / session usage blocks and the web console's per-step footnote / session badge.
+
+**Step scope (`state_machine.run_step`):**
+
+- Before dispatching a step's handler, `run_step` SHALL open a step-scoped token-usage accumulator via the `token_usage` context manager; the `llm-caller` `_call_with_retry` folds each subprocess call's usage into whatever accumulator is currently in scope.
+- When the handler returns — including the `finally` path on handler exception — `run_step` SHALL write the accumulated step total into `step.outputs["token_usage"]` as a plain JSON-primitive dict (via `UsageTotals.to_dict()`), and only when the total is non-empty, and SHALL add that step total into `flow.state.session_token_usage`.
+- `UsageTotals` defines `add()` (component-wise merge of the four token counts plus `total_cost_usd`), `to_dict()` / `from_dict()`, and `is_empty()`, so per-step and per-session totals share one merge and serialization contract.
+
+**DAG-parallel implement re-binding:** When the `implement` step runs groups in parallel worker threads (see *Implement Step DAG Execution Strategy*), each worker SHALL re-bind the step accumulator into its own thread so concurrent groups' usage still folds into the same step total under a lock, rather than being lost because the contextvar default is per-thread.
+
+#### Scenario: Step total written to step.outputs and folded into the session total
+- **GIVEN** a step whose handler makes one or more LLM calls
+- **WHEN** `run_step` finishes the handler (normally or via exception)
+- **THEN** the step's accumulated token usage is written to `step.outputs["token_usage"]` as a JSON-primitive dict, but only when the total is non-empty
+- **AND** the same step total is added into `flow.state.session_token_usage` so the session running total reflects every finished step
+
+#### Scenario: A step with no LLM usage writes no token_usage key
+- **GIVEN** a step whose handler issues no LLM call (or whose calls reported zero usage)
+- **WHEN** `run_step` finishes the handler
+- **THEN** `step.outputs` carries no `token_usage` key (the empty total is not persisted)
+- **AND** `flow.state.session_token_usage` is left unchanged
+
+#### Scenario: Parallel implement groups fold usage into the same step total
+- **GIVEN** an `implement` step running multiple task groups concurrently in worker threads
+- **WHEN** each group's LLM calls report usage
+- **THEN** every group's usage is folded into the one step-scoped accumulator (re-bound into each worker thread, merged under a lock)
+- **AND** the step's `token_usage` total is the sum across all groups, not just the group that ran on the originating thread
 
 ### Requirement: Transition Data Model
 

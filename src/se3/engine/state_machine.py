@@ -26,7 +26,7 @@ from .models import (
 )
 from .chat_history import _history_dir
 from .llm_caller import clear_phase1_cache
-from .token_usage import accumulate_step_usage
+from .token_usage import accumulate_step_usage, UsageTotals
 from .issue_discovery import IssueDiscovery
 from .issue_manager import IssueManager
 from .persistence import PersistenceManager
@@ -470,15 +470,53 @@ class StateMachine:
 
         finally:
             step.completed_at = datetime.now()
-            # Aggregate this step's token usage before persisting. Write the
-            # per-step merged total into step.outputs (JSON-primitive dict, only
-            # when non-empty so a step with no LLM call adds no noise field) and
-            # fold it into the flow's session-level running total. Best-effort:
+            # Aggregate this step's token usage before persisting. Best-effort:
             # a fault here must never break the step / flow.
+            #
+            # Two consumers read this:
+            #  * the CLI session total — flow.state.session_token_usage — which
+            #    folds EVERY run_step's usage (this is the authoritative total);
+            #  * the web session badge — which re-derives the session total by
+            #    summing token_usage off the *emitted* terminal step_completed
+            #    records (one per COMPLETED/PARTIAL/FAILED run; see run.py).
+            #
+            # A run that consumes tokens but returns a non-terminal status
+            # (PAUSED for a DISCOVERY clarification round, REVISION_NEEDED for a
+            # CONFIRM LLM review) emits NO terminal record, and the next run of
+            # the same Step object would overwrite step.outputs['token_usage'].
+            # That run's tokens would then be folded into the engine session
+            # total but never appear in any emitted record, so the web badge
+            # would undercount them. To keep the two ends in agreement we carry
+            # a non-emitting run's usage forward in `carried_token_usage` and
+            # roll it into the next emitted record's token_usage, so the single
+            # terminal record for a multi-round step reflects the sum of all its
+            # rounds — exactly what the engine folds into the session total.
             try:
                 if step_usage is not None and not step_usage.is_empty():
-                    step.outputs["token_usage"] = step_usage.to_dict()
                     flow.state.session_token_usage.add(step_usage)
+                # Combine this run's usage with usage carried from prior
+                # non-emitting (PAUSED / REVISION_NEEDED) runs of this step.
+                combined = UsageTotals.from_dict(
+                    step.outputs.get("carried_token_usage")
+                )
+                if step_usage is not None:
+                    combined.add(step_usage)
+                if step.status in (
+                    StepStatus.COMPLETED,
+                    StepStatus.PARTIAL,
+                    StepStatus.FAILED,
+                ):
+                    # A terminal step_completed/step_failed record WILL be
+                    # emitted for this run (see run.py gating). Surface the full
+                    # (carried + this run) total on it and clear the carry.
+                    if not combined.is_empty():
+                        step.outputs["token_usage"] = combined.to_dict()
+                    step.outputs.pop("carried_token_usage", None)
+                else:
+                    # No terminal record will be emitted for this run; carry the
+                    # running total forward to the next run of this step.
+                    if not combined.is_empty():
+                        step.outputs["carried_token_usage"] = combined.to_dict()
             except Exception:
                 logger.debug("Failed to record step token usage", exc_info=True)
             self.persistence.save_flow(flow)

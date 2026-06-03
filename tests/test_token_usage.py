@@ -7,6 +7,9 @@ serialization, formatting) and the step-scoped accumulator
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from se3.engine.token_usage import (
@@ -16,6 +19,7 @@ from se3.engine.token_usage import (
     current_step_usage,
     format_cost,
     format_usage_line,
+    use_step_usage,
 )
 
 
@@ -244,3 +248,83 @@ class TestStepScopedAccumulator:
             with accumulate_step_usage():
                 raise ValueError("boom")
         assert current_step_usage() is None
+
+
+class TestUseStepUsageCrossThread:
+    """Covers ``use_step_usage`` re-binding a parent accumulator across a thread
+    boundary — the fix for the DAG-parallel implement path silently dropping
+    every task group's token/cost usage (worker threads start with a fresh
+    contextvars context that cannot see the main-thread step scope)."""
+
+    def test_use_step_usage_none_is_noop(self):
+        assert current_step_usage() is None
+        with use_step_usage(None):
+            assert current_step_usage() is None
+            # add_call_usage stays a no-op with no scope bound.
+            add_call_usage(UsageTotals(input_tokens=5))
+        assert current_step_usage() is None
+
+    def test_use_step_usage_binds_existing_accumulator(self):
+        acc = UsageTotals(input_tokens=1)
+        with use_step_usage(acc):
+            assert current_step_usage() is acc
+            add_call_usage(UsageTotals(input_tokens=10, total_cost_usd=0.02))
+        assert current_step_usage() is None
+        assert acc.input_tokens == 11
+        assert acc.total_cost_usd == pytest.approx(0.02)
+
+    def test_worker_thread_without_rebind_does_not_see_scope(self):
+        """Reproduces the bug: a bare worker thread sees no step scope, so its
+        add_call_usage is a no-op (the group's usage would be discarded)."""
+
+        def worker():
+            # Fresh thread context: no scope visible despite the parent's scope.
+            assert current_step_usage() is None
+            add_call_usage(UsageTotals(input_tokens=999))
+
+        with accumulate_step_usage() as step:
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                ex.submit(worker).result()
+        # The worker's usage was dropped — the scope did not cross the boundary.
+        assert step.input_tokens == 0
+
+    def test_worker_thread_with_rebind_folds_into_parent(self):
+        """The fix: the scheduling thread captures the accumulator and each
+        worker re-binds it via use_step_usage, so group usage folds in."""
+
+        with accumulate_step_usage() as step:
+            captured = current_step_usage()
+
+            def worker(n):
+                with use_step_usage(captured):
+                    add_call_usage(UsageTotals(input_tokens=n, total_cost_usd=0.01))
+
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futures = [ex.submit(worker, n) for n in (10, 20, 30)]
+                for f in futures:
+                    f.result()
+        assert step.input_tokens == 60
+        assert step.total_cost_usd == pytest.approx(0.03)
+
+    def test_concurrent_folds_are_not_lost(self):
+        """Many threads folding into one shared accumulator must not lose
+        updates — add_call_usage serializes the read-modify-write fold."""
+
+        n_threads = 16
+        per_thread = 50
+        with accumulate_step_usage() as step:
+            captured = current_step_usage()
+            barrier = threading.Barrier(n_threads)
+
+            def worker():
+                with use_step_usage(captured):
+                    barrier.wait()  # maximize contention
+                    for _ in range(per_thread):
+                        add_call_usage(UsageTotals(input_tokens=1, output_tokens=2))
+
+            with ThreadPoolExecutor(max_workers=n_threads) as ex:
+                futures = [ex.submit(worker) for _ in range(n_threads)]
+                for f in futures:
+                    f.result()
+        assert step.input_tokens == n_threads * per_thread
+        assert step.output_tokens == n_threads * per_thread * 2

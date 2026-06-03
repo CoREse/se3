@@ -853,6 +853,73 @@ class TestRunStepTokenAggregation:
             # Scope must not leak past run_step.
             assert current_step_usage() is None
 
+    def test_paused_run_usage_carried_into_next_emitted_record(self):
+        """A token-consuming run that returns a non-terminal status (PAUSED /
+        REVISION_NEEDED) emits no terminal step_completed record, so its usage is
+        carried forward and rolled into the next emitted record's token_usage.
+
+        This keeps the web session badge (which re-derives the total by summing
+        the emitted records' token_usage) in agreement with the CLI authoritative
+        total (flow.state.session_token_usage, which folds EVERY run). Without the
+        carry, the paused round's tokens would be folded into the session total
+        but never surface in any emitted record, so the web badge would
+        undercount a multi-round discovery flow.
+        """
+        from .token_usage import add_call_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            calls = {"n": 0}
+
+            def handler(step, flow):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # Round 1: consumes tokens, pauses awaiting user input.
+                    add_call_usage(self._make_usage(input_tokens=100, output_tokens=10, total_cost_usd=0.01))
+                    return StepStatus.PAUSED
+                if calls["n"] == 2:
+                    # Round 2: another clarification round, still paused.
+                    add_call_usage(self._make_usage(input_tokens=50, output_tokens=5, total_cost_usd=0.02))
+                    return StepStatus.PAUSED
+                # Final round: completes, emitting the only terminal record.
+                add_call_usage(self._make_usage(input_tokens=30, output_tokens=3, total_cost_usd=0.03))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.DISCOVERY, handler)
+            flow = sm.create_flow("multi-round discovery", task_type="discovery")
+            step = flow.state.get_current_step()
+
+            # Round 1 — PAUSED: no token_usage surfaced, carried instead.
+            sm.run_step(flow, step)
+            assert step.status == StepStatus.PAUSED
+            assert "token_usage" not in step.outputs
+            assert step.outputs["carried_token_usage"]["input_tokens"] == 100
+
+            # Round 2 — PAUSED: carry accumulates (round1 + round2).
+            step.status = StepStatus.PENDING
+            sm.run_step(flow, step)
+            assert step.status == StepStatus.PAUSED
+            assert "token_usage" not in step.outputs
+            assert step.outputs["carried_token_usage"]["input_tokens"] == 150
+
+            # Final round — COMPLETED: the single emitted record's token_usage is
+            # the sum of all three rounds, and the carry is cleared.
+            step.status = StepStatus.PENDING
+            sm.run_step(flow, step)
+            assert step.status == StepStatus.COMPLETED
+            assert "carried_token_usage" not in step.outputs
+            tu = step.outputs["token_usage"]
+            assert tu["input_tokens"] == 180  # 100 + 50 + 30
+            assert tu["output_tokens"] == 18  # 10 + 5 + 3
+            assert tu["total_cost_usd"] == pytest.approx(0.06)  # 0.01 + 0.02 + 0.03
+
+            # CLI authoritative session total folds every run independently and
+            # must equal the single emitted record's rolled-up total.
+            su = flow.state.session_token_usage
+            assert su.input_tokens == 180
+            assert su.total_cost_usd == pytest.approx(0.06)
+
     def test_aggregated_usage_survives_persistence(self):
         """Both layers (step.outputs + session) round-trip through engine.json."""
         from .token_usage import add_call_usage

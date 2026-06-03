@@ -469,6 +469,50 @@ def test_cli_sink_skips_interactive_terminal_events(captured_console, step_type_
     assert captured_console.export_text() == ""
 
 
+@pytest.mark.parametrize("step_type_value", ["plan", "discovery"])
+def test_cli_sink_renders_usage_for_skipped_step_types(captured_console, step_type_value):
+    """Even though CliSink skips the full report for plan/discovery, it MUST
+    still render the per-step token-usage block when those (token-heavy) steps
+    consumed LLM tokens — keeping CLI per-step usage symmetric with analyze/
+    test/etc. (which the WebUI report cards already surface)."""
+    step = _completed_step(step_type_value, f"00_{step_type_value}")
+    step.outputs = {
+        "summary": "done",
+        "token_usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 10,
+            "total_cost_usd": 0.01,
+        },
+    }
+    CliSink().consume(new_event(
+        EventType.STEP_COMPLETED,
+        step_id=step.step_id,
+        step_type=step_type_value,
+        step=step,
+    ))
+    out = captured_console.export_text()
+    # The usage block renders, but the full step report does NOT (the
+    # orchestrator owns that). The usage block carries the "Step Token Usage"
+    # title.
+    assert "Step Token Usage" in out
+
+
+@pytest.mark.parametrize("step_type_value", ["confirm", "discovery", "plan"])
+def test_cli_sink_skips_step_without_usage(captured_console, step_type_value):
+    """A skipped interactive step with NO token_usage still renders nothing on
+    the CLI — the usage block self-guards on empty/absent usage."""
+    step = _completed_step(step_type_value, f"00_{step_type_value}")
+    CliSink().consume(new_event(
+        EventType.STEP_COMPLETED,
+        step_id=step.step_id,
+        step_type=step_type_value,
+        step=step,
+    ))
+    assert captured_console.export_text() == ""
+
+
 def test_cli_skips_but_history_persists_same_interactive_event(tmp_path, captured_console):
     """The same DISCOVERY terminal event is skipped by CliSink (no CLI output)
     yet persisted by HistorySink (web report card) — the two sinks diverge

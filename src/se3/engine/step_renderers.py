@@ -85,20 +85,26 @@ def render_step_output(step: Step) -> None:
     else:
         _default_render(step, title)
 
-    # Append the step's token-usage summary block after its own report. Only
-    # the steps CliSink actually renders reach here (it skips confirm/discovery/
-    # plan), so this naturally scopes the block to rendered steps. Steps with no
-    # LLM consumption (no token_usage in outputs) are byte-identical to before.
-    _render_step_usage(step)
+    # Append the step's token-usage summary block after its own report. Steps
+    # with no LLM consumption (no token_usage in outputs) are byte-identical to
+    # before. Note that CliSink skips render_step_output for confirm/discovery/
+    # plan (their report is owned by the orchestrator's interactive paths), but
+    # it calls render_step_usage directly for those step types so token-heavy
+    # steps like plan/discovery still show their per-step usage on the CLI.
+    render_step_usage(step)
 
 
-def _render_step_usage(step: Step) -> None:
+def render_step_usage(step: Step) -> None:
     """Render the per-step token-usage block when the step consumed tokens.
 
     G2's ``state_machine.run_step`` writes a non-empty ``token_usage`` dict into
     ``step.outputs`` whenever the step made at least one LLM call. Absent or
     empty usage renders nothing (``render_usage_block`` also guards is_empty),
     keeping non-LLM steps byte-identical.
+
+    Exposed publicly so ``CliSink`` can render the usage block for the
+    interactive/special step types (confirm/discovery/plan) whose full report
+    rendering it skips — keeping CLI per-step usage symmetric across all steps.
     """
     usage = (step.outputs or {}).get("token_usage")
     if not usage:

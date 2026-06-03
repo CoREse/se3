@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Mapping, Optional
@@ -153,6 +154,14 @@ _current_step_usage: contextvars.ContextVar[Optional[UsageTotals]] = (
     contextvars.ContextVar("se3_current_step_usage", default=None)
 )
 
+# Serializes concurrent folds into a step accumulator that is shared across
+# threads. The DAG-parallel implement path runs each task group on its own
+# ThreadPoolExecutor worker, all bound (via use_step_usage) to the SAME step
+# accumulator object; without this lock their concurrent UsageTotals.add()
+# read-modify-write on the shared int/float fields could lose updates. The lock
+# is held only for the brief field-wise fold, so contention is negligible.
+_accumulate_lock = threading.Lock()
+
 
 @contextmanager
 def accumulate_step_usage() -> Iterator[UsageTotals]:
@@ -180,6 +189,33 @@ def current_step_usage() -> Optional[UsageTotals]:
     return _current_step_usage.get()
 
 
+@contextmanager
+def use_step_usage(accumulator: Optional[UsageTotals]) -> Iterator[None]:
+    """Bind an existing step accumulator into the current context.
+
+    Unlike :func:`accumulate_step_usage` (which opens a *fresh* accumulator),
+    this re-establishes a *given* accumulator object as the in-scope step total.
+    It is used to carry a parent step's scope across a thread boundary: a
+    ``ThreadPoolExecutor`` worker starts with a fresh contextvars context that
+    does not see the scope opened on the main thread, so the DAG-parallel
+    implement path captures the parent accumulator on the scheduling thread and
+    re-binds it inside each worker via this helper. Every :func:`add_call_usage`
+    made inside the ``with`` body then folds into that shared accumulator
+    (serialized by ``_accumulate_lock``).
+
+    Passing ``None`` is a no-op so callers need no guard when no step scope is
+    active (e.g. an ad-hoc DAG run outside ``run_step``).
+    """
+    if accumulator is None:
+        yield
+        return
+    token = _current_step_usage.set(accumulator)
+    try:
+        yield
+    finally:
+        _current_step_usage.reset(token)
+
+
 def add_call_usage(usage: Any) -> None:
     """Best-effort fold one LLM call's usage into the in-scope step accumulator.
 
@@ -200,7 +236,11 @@ def add_call_usage(usage: Any) -> None:
             increment = UsageTotals.from_dict(usage)
         else:
             return
-        target.add(increment)
+        # The accumulator may be shared across DAG worker threads (see
+        # use_step_usage); serialize the read-modify-write fold so concurrent
+        # group calls never lose an update.
+        with _accumulate_lock:
+            target.add(increment)
     except Exception:  # pragma: no cover - defensive; never break the call path
         logger.debug("Failed to accumulate call usage", exc_info=True)
 

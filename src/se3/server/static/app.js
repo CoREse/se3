@@ -5292,9 +5292,28 @@ function formatTokenUsage(usage) {
 }
 
 // Sum the per-step `token_usage` carried on the conversation records into one
-// session total. De-duplicates by step_id so a step whose `step_completed`
-// event is delivered more than once (snapshot re-fetch, reconnect, incremental
-// re-render) is counted exactly once; order-independent. Returns a usage dict
+// session total. De-duplicates by full record identity (`recordKey`) — NOT by
+// step_id — so the badge equals the engine's authoritative session total, which
+// folds EVERY run_step's usage into `flow.state.session_token_usage`.
+//
+// The match relies on the engine surfacing every token-consuming run in exactly
+// one emitted terminal record. A run that returns a non-terminal status (a
+// DISCOVERY clarification round returning PAUSED, a CONFIRM LLM review returning
+// REVISION_NEEDED) emits no terminal `step_completed`/`step_failed` record, so
+// state_machine.run_step carries that run's usage forward (`carried_token_usage`)
+// and rolls it into the next emitted record's `token_usage`. The single terminal
+// record for a multi-round step therefore reflects the SUM of all its rounds —
+// the same amount the engine folded into the session total — so this client-side
+// re-derivation no longer undercounts paused/revision rounds.
+//
+// A step_id is reused across fix-loop re-runs (test / self_check / verify_spec
+// re-execute on the same Step object), each emitting a distinct terminal record
+// with its own per-run token_usage; those carry distinct timestamps/content and
+// so distinct `recordKey`s and are counted separately, just as the engine counts
+// each run (and the carry is empty across terminal-to-terminal runs, so there is
+// no overlap to double-count). A genuinely re-delivered identical record
+// (snapshot re-fetch, reconnect, incremental re-render) shares its `recordKey`
+// and is still counted exactly once; order-independent. Returns a usage dict
 // with the same key set as a single step's token_usage (all zeros when nothing
 // was found), so the caller can format / empty-check it uniformly.
 function accumulateSessionUsage(records) {
@@ -5309,21 +5328,21 @@ function accumulateSessionUsage(records) {
   const seen = new Set();
   for (const rec of records) {
     let norm;
+    let key;
     try {
       norm = normalizeRecord(rec);
+      key = recordKey(rec);
     } catch (_) {
       continue;  // A malformed record must never break the badge total.
     }
     if (!norm || norm.role !== "step-event" || !norm.stepReport) continue;
     const usage = norm.stepReport.outputs && norm.stepReport.outputs.token_usage;
     if (isTokenUsageEmpty(usage)) continue;
-    // De-dup by step_id: the same step's completed event can arrive again on a
-    // re-fetch / reconnect; a step_id is unique per step so this counts once.
-    const key = norm.stepId || norm.stepReport.step_id || "";
-    if (key) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-    }
+    // De-dup by per-record identity so each distinct step execution counts once
+    // (including fix-loop re-runs sharing a step_id) while a re-delivered
+    // identical record is not double-counted.
+    if (seen.has(key)) continue;
+    seen.add(key);
     totals.input_tokens += usageNum(usage.input_tokens);
     totals.output_tokens += usageNum(usage.output_tokens);
     totals.cache_creation_input_tokens +=

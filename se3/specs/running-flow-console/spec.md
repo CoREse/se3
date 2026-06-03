@@ -2083,6 +2083,25 @@ report card has access to the same `outputs` dict that the CLI Panel sees —
 without breaking the CLI history viewer (`get_step_history` skips these
 records on the CLI side).
 
+**Per-step token-usage footnote and session badge.** When a `step_completed`
+event's `outputs` carries a non-empty `token_usage` total (written by the engine
+per *flow-engine: Step-Scoped Token Usage Aggregation*), the step's report card
+MUST render a single low-key, small-print usage footnote (e.g. a
+`.step-report__usage` row built by `buildStepUsageFootnote`) showing that step's
+input / output tokens, the cache token breakdown, and the cost — styled so it is
+unobtrusive and does not compete with the report's main content. In addition,
+`#flow-view` MUST render a discreet session-total usage badge (e.g. a
+bottom-corner `.flow-usage-badge` produced by `accumulateSessionUsage`) showing
+the whole-flow running total, computed **client-side** by summing the
+`token_usage` totals carried on the per-step records already pushed to the
+frontend. No new daemon↔server protocol field is introduced — the per-step
+usage rides the existing `step.outputs` / per-step jsonl stream. To keep the
+client-side session total equal to the engine's authoritative
+`session_token_usage`, the accumulation MUST de-duplicate records by full record
+identity (e.g. a `recordKey`) so a step re-delivered across snapshots is counted
+once. When no step has reported usage, the badge is absent or empty. The badge
+reflects the final session total once the flow completes.
+
 Crucially, the orchestrator MUST emit a terminal `step_completed` /
 `step_failed` event for **every** step type, including the interactive
 DISCOVERY and CONFIRM steps, PLAN, and `summarize` — step types whose CLI
@@ -2176,6 +2195,26 @@ not re-render them.
   for that not-yet-finished step, so no `.step-report` card is rendered for it
 - **AND** a card appears only after a later re-run drives the step to a
   terminal status
+
+#### Scenario: Report card shows a per-step token-usage footnote
+- **GIVEN** a `step_completed` event whose `outputs` carries a non-empty
+  `token_usage` total
+- **WHEN** the report card is rendered in `#flow-view`
+- **THEN** the card includes a single low-key, small-print usage footnote
+  (`.step-report__usage`) showing that step's input / output tokens, the cache
+  token breakdown, and the cost
+- **AND** a step whose `outputs` has no `token_usage` renders no footnote
+
+#### Scenario: Flow-view shows a client-accumulated session usage badge
+- **GIVEN** several steps have reported per-step `token_usage` totals on their
+  records pushed to the frontend
+- **WHEN** `#flow-view` is rendered
+- **THEN** a discreet session-total usage badge (`.flow-usage-badge`) shows the
+  whole-flow running total summed client-side from those per-step totals
+- **AND** the accumulation de-duplicates records by full record identity so a
+  step re-delivered across snapshots is counted once, keeping the badge equal to
+  the engine's authoritative `session_token_usage`
+- **AND** once the flow completes the badge reflects the final session total
 
 ### Requirement: Live Per-Group DAG Status Markers
 

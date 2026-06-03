@@ -461,6 +461,23 @@ class DAGScheduler:
         if not self._group_map:
             return []
 
+        # Capture the step-scoped token-usage accumulator on the scheduling
+        # thread (which runs inside StateMachine.run_step's accumulate_step_usage
+        # scope). ThreadPoolExecutor workers start with a fresh contextvars
+        # context that cannot see that scope, so every group's LLM usage would
+        # be silently dropped (add_call_usage would be a no-op). We re-bind this
+        # exact accumulator inside each worker via token_usage.use_step_usage so
+        # all groups fold into the same per-step total. Captured here (not inside
+        # _submit_ready) because _submit_ready also runs from worker-thread
+        # done-callbacks where the scope is no longer visible.
+        from . import token_usage
+
+        step_usage_accumulator = token_usage.current_step_usage()
+
+        def _execute_in_step_scope(group_dict, deps_results, relay_context):
+            with token_usage.use_step_usage(step_usage_accumulator):
+                return execute_fn(group_dict, deps_results, relay_context)
+
         # Shared state protected by condition lock
         condition = threading.Condition()
         pending: set[str] = set(self._group_map.keys())
@@ -514,7 +531,7 @@ class DAGScheduler:
                 relay_context = self._build_relay_context(gid, completed)
                 group_dict = self._group_map[gid]
                 future = executor.submit(
-                    execute_fn, group_dict, deps_results, relay_context,
+                    _execute_in_step_scope, group_dict, deps_results, relay_context,
                 )
                 future.add_done_callback(
                     lambda f, g=gid: _on_complete(g, f, executor)
