@@ -20,6 +20,7 @@ from .retry_context import (
     RETRY_HISTORY_MARKER,
     RETRY_HISTORY_SEPARATOR,
 )
+from .token_usage import UsageTotals, add_call_usage
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,11 @@ class StreamJSONTracker:
         # Pending coalesced text/thinking awaiting a flush.
         self._progress_text_buf: List[str] = []
         self._progress_text_len = 0
+        # Token / cost usage captured from the type:"result" message. Stays an
+        # empty tally until a result line carrying usage is seen; exposed via
+        # the read-only ``usage`` property for the caller to fold into the
+        # current step accumulator.
+        self._usage = UsageTotals()
 
     @property
     def _progress_enabled(self) -> bool:
@@ -573,9 +579,54 @@ class StreamJSONTracker:
                 self._emit_progress(f"[Tool error: {truncate_preview(str(error_msg))}]", None)
                 self._last_ended_with_newline = True
 
+            elif msg_type == 'result':
+                # The terminal result line carries the call's token usage and
+                # cost. Capture them silently — this does NOT touch stdout or the
+                # stream_progress channel, so the human-readable terminal stream
+                # and the web/jsonl bytes are unchanged.
+                self._capture_usage(data)
+
         except json.JSONDecodeError:
             # Not valid JSON, might be a partial line
             pass
+
+    def _capture_usage(self, data: Dict[str, Any]) -> None:
+        """Capture token usage + cost from a type:"result" NDJSON message.
+
+        Reads the four token counts from ``message.usage`` (nested form) or a
+        top-level ``usage`` (flat form), plus the top-level ``total_cost_usd``.
+        Missing fields count as 0 and any structural surprise is swallowed, so a
+        malformed or partial result line never disrupts the stream.
+        """
+        try:
+            usage_obj = None
+            message = data.get("message")
+            if isinstance(message, dict):
+                usage_obj = message.get("usage")
+            if not isinstance(usage_obj, dict):
+                top_usage = data.get("usage")
+                if isinstance(top_usage, dict):
+                    usage_obj = top_usage
+            captured = UsageTotals.from_dict(usage_obj if isinstance(usage_obj, dict) else None)
+            # total_cost_usd lives at the top level of the result message, not
+            # inside usage; from_dict on usage_obj leaves it at 0.0, so fill it
+            # here.
+            if "total_cost_usd" in data:
+                captured.total_cost_usd = UsageTotals.from_dict(
+                    {"total_cost_usd": data.get("total_cost_usd")}
+                ).total_cost_usd
+            self._usage = captured
+        except Exception:  # pragma: no cover - defensive; never break the stream
+            logger.debug("Failed to capture usage from result message", exc_info=True)
+
+    @property
+    def usage(self) -> UsageTotals:
+        """Token / cost usage captured from this stream's result message.
+
+        An empty :class:`UsageTotals` until a ``type:"result"`` line carrying
+        usage has been processed.
+        """
+        return self._usage
 
     def _record_touched_path(self, path: str) -> None:
         """Record a file path touched by a tool, normalized to project-relative."""
@@ -1410,6 +1461,14 @@ class LLMCaller:
                         self._last_touched_files = stream_tracker.touched_files
                     else:
                         self._last_touched_files = set()
+
+                    # Fold this subprocess's token usage into the current step
+                    # accumulator (best-effort). Done on BOTH success and
+                    # failure paths so retry / rotation attempts each count
+                    # against the step total; covered by add_call_usage's own
+                    # no-op-when-out-of-scope + swallow-all contract, so this
+                    # never disrupts the LLM call regardless of flow context.
+                    add_call_usage(stream_tracker.usage)
 
                 # Record the response (whether success, failure, or interrupted)
                 self._record_response(result.output or "", self.external_attempt)

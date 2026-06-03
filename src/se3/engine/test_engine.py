@@ -556,5 +556,123 @@ class TestStreamProgressHistory:
             assert second.cursor[fname] == 4
 
 
+class TestStreamJSONTrackerUsage:
+    """Cover usage/cost capture from the type:"result" NDJSON message."""
+
+    def _tracker(self):
+        from .llm_caller import StreamJSONTracker
+
+        # No flow_id/step_id -> no progress writes; we only inspect .usage.
+        return StreamJSONTracker()
+
+    def test_usage_starts_empty(self):
+        tracker = self._tracker()
+        assert tracker.usage.is_empty()
+
+    def test_capture_nested_message_usage_and_top_cost(self):
+        tracker = self._tracker()
+        line = json.dumps(
+            {
+                "type": "result",
+                "result": "done",
+                "total_cost_usd": 0.0123,
+                "message": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 10,
+                        "cache_read_input_tokens": 20,
+                    }
+                },
+            }
+        )
+        tracker.process_line(line)
+        u = tracker.usage
+        assert u.input_tokens == 100
+        assert u.output_tokens == 50
+        assert u.cache_creation_input_tokens == 10
+        assert u.cache_read_input_tokens == 20
+        assert u.total_cost_usd == pytest.approx(0.0123)
+
+    def test_capture_top_level_usage(self):
+        tracker = self._tracker()
+        line = json.dumps(
+            {
+                "type": "result",
+                "total_cost_usd": 0.5,
+                "usage": {"input_tokens": 7, "output_tokens": 3},
+            }
+        )
+        tracker.process_line(line)
+        u = tracker.usage
+        assert u.input_tokens == 7
+        assert u.output_tokens == 3
+        assert u.total_cost_usd == pytest.approx(0.5)
+
+    def test_result_without_usage_stays_zero(self):
+        tracker = self._tracker()
+        tracker.process_line(json.dumps({"type": "result", "result": "x"}))
+        assert tracker.usage.is_empty()
+
+    def test_result_partial_usage_fields_default_zero(self):
+        tracker = self._tracker()
+        line = json.dumps(
+            {
+                "type": "result",
+                "message": {"usage": {"input_tokens": 42}},
+            }
+        )
+        tracker.process_line(line)
+        u = tracker.usage
+        assert u.input_tokens == 42
+        assert u.output_tokens == 0
+        assert u.cache_creation_input_tokens == 0
+        assert u.cache_read_input_tokens == 0
+        assert u.total_cost_usd == 0.0
+
+    def test_malformed_usage_does_not_raise(self):
+        tracker = self._tracker()
+        # usage is not a dict -> swallowed, stays empty.
+        tracker.process_line(
+            json.dumps({"type": "result", "usage": "not-a-dict", "total_cost_usd": None})
+        )
+        assert tracker.usage.is_empty()
+
+    def test_non_result_lines_do_not_set_usage(self):
+        tracker = self._tracker()
+        tracker.process_line(
+            json.dumps(
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}
+            )
+        )
+        assert tracker.usage.is_empty()
+
+    def test_invalid_json_silently_skipped(self):
+        tracker = self._tracker()
+        tracker.process_line("not json at all {")
+        assert tracker.usage.is_empty()
+
+    def test_capture_integrates_with_step_accumulator(self):
+        """tracker.usage folds into the step scope via add_call_usage."""
+        from .token_usage import accumulate_step_usage, add_call_usage
+
+        tracker = self._tracker()
+        tracker.process_line(
+            json.dumps(
+                {
+                    "type": "result",
+                    "total_cost_usd": 0.01,
+                    "message": {"usage": {"input_tokens": 5, "output_tokens": 2}},
+                }
+            )
+        )
+        with accumulate_step_usage() as step:
+            add_call_usage(tracker.usage)
+            add_call_usage(tracker.usage)  # simulate a second call/retry
+        assert step.input_tokens == 10
+        assert step.output_tokens == 4
+        assert step.total_cost_usd == pytest.approx(0.02)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
