@@ -221,6 +221,14 @@ class StateMachine:
         # Step handlers registry
         self._handlers: Dict[StepType, Callable[[Step, FlowInstance], Any]] = {}
 
+        # Pre-implement test baseline capture: a background suite run launched at
+        # flow start (concurrent with analyze/plan/confirm) whose handle is
+        # awaited just before IMPLEMENT's first write. ``_baseline_key`` is the
+        # cache key computed at launch time so ``_ensure_baseline_ready`` can
+        # write the measured result back to the cache without recomputing.
+        self._baseline_capture: Any = None
+        self._baseline_key: Optional[str] = None
+
         # Transition rules: (from_step, condition) -> to_step
         self._transitions: Dict[tuple[StepType, Optional[str]], StepType] = {}
 
@@ -406,6 +414,12 @@ class StateMachine:
         Returns:
             Final status of the step
         """
+        # Freeze the pre-implement test baseline before IMPLEMENT's first write,
+        # so test/verify_spec can tell inherited (baseline) failures from
+        # introduced ones. Idempotent across fix-loop re-entries into implement.
+        if step.step_type == StepType.IMPLEMENT:
+            self._ensure_baseline_ready(flow)
+
         handler = self._handlers.get(step.step_type)
 
         if not handler:
@@ -1273,6 +1287,11 @@ class StateMachine:
 
         # Special handling for TEST step when in fix iteration
         if step_type == StepType.TEST:
+            # Inject the frozen pre-implement baseline so the test step can
+            # classify failures as inherited (in baseline) vs introduced.
+            # Not-yet-captured (None) injects as [] so the consumer treats
+            # every failure as introduced (the safe default).
+            inputs["baseline_failures"] = list(flow.state.baseline_failures or [])
             fix_iteration = flow.state.get_fix_iteration()
             if fix_iteration > 0:
                 inputs["is_fix_iteration"] = True
@@ -1350,6 +1369,10 @@ class StateMachine:
 
         # Special handling for VERIFY_SPEC step when in fix iteration
         if step_type == StepType.VERIFY_SPEC:
+            # Inject the same frozen baseline as the TEST step so verify_spec's
+            # test gate consumes the identical inherited-vs-introduced verdict
+            # (not-yet-captured injects as []).
+            inputs["baseline_failures"] = list(flow.state.baseline_failures or [])
             # Always populate max_fix_iterations (see SELF_CHECK comment above
             # for rationale: avoids extra YAML parse on the initial pass).
             inputs["max_fix_iterations"] = self._get_max_fix_iterations()
@@ -1491,6 +1514,157 @@ class StateMachine:
 
         self._write_flow_meta(flow)
         self._record_baseline_commit(flow)
+        self._start_baseline_capture(flow)
+
+    def _start_baseline_capture(self, flow: FlowInstance) -> None:
+        """Launch (or reuse a cached) pre-implement test baseline at flow start.
+
+        Runs at flow creation/init — concurrently with the LLM-bound
+        ``analyze → plan → confirm`` steps, which do not write source — so the
+        ~3-minute suite run is hidden under that pre-implement work and adds
+        ~0 wall-clock to a typical flow.
+
+        Three paths:
+
+        - **Already measured** (``state.baseline_failures`` is not ``None``):
+          a resumed flow that captured its baseline in an earlier session.
+          Nothing to launch.
+        - **Cache hit** on the ``HEAD sha + dirty hash`` key: reuse the measured
+          set immediately and persist it onto the flow — no background run.
+        - **Cache miss**: launch :class:`BaselineCapture` in the background and
+          stash its handle for :meth:`_ensure_baseline_ready` to await.
+
+        Never raises: a baseline-capture failure must not crash the flow. The
+        synchronous fallback in :meth:`_ensure_baseline_ready` covers the case
+        where launch silently failed.
+        """
+        # Idempotent: a resumed flow that already has a measured baseline (even
+        # the empty-set case, distinguished from the ``None`` "not measured"
+        # sentinel) must not re-launch.
+        if flow.state.baseline_failures is not None:
+            logger.debug(
+                "Baseline already measured for flow %s (%d failures); skipping capture launch",
+                flow.flow_id,
+                len(flow.state.baseline_failures),
+            )
+            return
+
+        try:
+            from .test_baseline import (
+                BaselineCapture,
+                compute_baseline_key,
+                load_cached,
+            )
+
+            key = compute_baseline_key(self.project_root)
+            self._baseline_key = key
+
+            cached = load_cached(self.project_root, key)
+            if cached is not None:
+                flow.state.baseline_failures = sorted(cached)
+                self.persistence.save_flow(flow)
+                logger.info(
+                    "Baseline cache hit (key=%s, %d failures); skipping background capture",
+                    key,
+                    len(cached),
+                )
+                return
+
+            # Cache miss → launch the suite in the background, overlapping the
+            # analyze/plan/confirm steps that follow.
+            self._baseline_capture = BaselineCapture(self.project_root).launch()
+            logger.info("Baseline capture launched in background (key=%s)", key)
+        except Exception as e:  # noqa: BLE001 — never crash the flow on capture setup
+            logger.warning("Failed to start baseline capture: %s", e)
+
+    def _ensure_baseline_ready(self, flow: FlowInstance) -> None:
+        """Block until the pre-implement baseline is measured, before IMPLEMENT.
+
+        Called right before the ``implement`` step's first write so the
+        introduced-vs-inherited classification has a frozen reference taken
+        *before* this flow modified anything (acceptance criterion: an
+        introduced failure can never be laundered into the baseline).
+
+        Idempotent: when ``state.baseline_failures`` is already set (cache hit,
+        a prior pass, or a fix-loop re-entry into IMPLEMENT) it returns at once
+        without re-measuring.
+
+        Resolution order:
+
+        1. **Background handle** from :meth:`_start_baseline_capture`: await it.
+        2. **Synchronous fallback**: if there is no handle, or the background
+           run returned the ``None`` failure sentinel (could not produce
+           parseable results), run one authoritative measurement here.
+        3. **Empty-baseline last resort**: if even the synchronous run fails,
+           fall back to an empty baseline with a loud warning. This errs toward
+           treating current failures as *introduced* (never launders a real
+           regression into the baseline), at the cost of possibly re-flagging a
+           genuinely pre-existing failure — the safe direction.
+
+        The resolved set is persisted onto the flow and written to the cache so
+        parallel/resumed flows on the same commit reuse it.
+        """
+        # Idempotent guard: already measured (None == not measured, [] == clean).
+        if flow.state.baseline_failures is not None:
+            return
+
+        from .test_baseline import (
+            BaselineCapture,
+            compute_baseline_key,
+            save_cache,
+        )
+
+        failures: Optional[set] = None
+
+        capture = self._baseline_capture
+        if capture is not None:
+            try:
+                failures = capture.wait()  # blocks until the background suite ends
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Baseline background capture wait failed: %s", e)
+                failures = None
+
+        # Synchronous fallback: no background handle, or the background run
+        # signalled failure via the None sentinel.
+        if failures is None:
+            logger.info(
+                "Baseline not ready from background capture; running synchronous "
+                "fallback measurement before implement"
+            )
+            try:
+                failures = BaselineCapture(self.project_root).launch().wait()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Synchronous baseline fallback failed: %s", e)
+                failures = None
+
+        if failures is None:
+            # Both paths failed to produce a real measurement. Use an empty
+            # baseline so introduced-failure detection still runs (the safe
+            # direction); shout about it so the degradation is visible.
+            logger.warning(
+                "Could not measure a test baseline before implement; falling back "
+                "to an EMPTY baseline. Pre-existing failures (if any) may be "
+                "re-classified as introduced this run."
+            )
+            failures = set()
+
+        flow.state.baseline_failures = sorted(failures)
+        self.persistence.save_flow(flow)
+        logger.info(
+            "Baseline ready before implement: %d failing test(s)",
+            len(flow.state.baseline_failures),
+        )
+
+        # Persist to the shared cache so concurrent/resumed flows on the same
+        # commit reuse it. Best-effort: a cache-write failure must not block.
+        try:
+            key = self._baseline_key or compute_baseline_key(self.project_root)
+            save_cache(self.project_root, key, set(failures))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to save baseline cache: %s", e)
+
+        # Drop the handle; subsequent re-entries hit the idempotent guard above.
+        self._baseline_capture = None
 
     def get_progress(self, flow: FlowInstance) -> Dict[str, Any]:
         """Get detailed progress information.
