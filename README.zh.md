@@ -105,6 +105,24 @@ se3 run --resume
 - **`se3 daemon start`** — 启动常驻后台进程，监管本机所有 `se3 run`，聚合 `se3/state|logs|calls|issues` 状态，并可选地拨入一个中心服务器。让你从任何地方查看 flow 进度。
 - **`se3-server`** — FastAPI + WebSocket 中心服务器（自带静态网页控制台挂在 `/`），把多台 daemon 汇聚到同一张多机视图上。适合 fleet、远程发布任务、用浏览器盯长跑 flow。默认监听 `127.0.0.1:8080`。
 
+#### 网页控制台鉴权（自 8.0.0 起）
+
+中心服务器是一个多租户控制面——网页控制台与 REST API 都需要登录，每台机器 / 每个
+flow 都按其所属 owner 隔离。首次启用的动线是：
+
+1. **铸发 break-glass admin token** — 跑一次 `se3-server bootstrap-token`，它会把
+   一次性 admin token 打印到控制台。
+2. **登录** — 打开网页控制台，用该 token 换取 break-glass admin 会话
+   （`POST /api/auth/breakglass`）。
+3. **建本地用户** — 以 admin 身份邀请 / 创建账号（`POST /api/users`）。v1 不开放
+   公开自助注册。
+4. **签发 daemon key** — 每个 owner 在 UI 中自助铸发一把 daemon key
+   （`POST /api/daemon-keys`），再用 `se3 daemon start --daemon-key <key>` 把工作机
+   绑到自己名下。owner 只能看到自己名下的机器与 flow。
+
+完整的端到端鉴权操作指引与配置键见
+[docs/daemon-and-server.md](docs/daemon-and-server.md#鉴权与多租户访问)。
+
 ---
 
 ## 命令清单

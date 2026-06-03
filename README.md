@@ -114,6 +114,26 @@ se3 run --resume
   view. Useful for fleets, remote launch, and watching long-running flows
   from a browser. Defaults to `127.0.0.1:8080`.
 
+#### Web console authentication (since 8.0.0)
+
+The central server is a multi-tenant control plane — the web console and REST
+API require a login, and every machine / flow is scoped to the owner that owns
+it. The first-run flow is:
+
+1. **Mint a break-glass admin token** — run `se3-server bootstrap-token` once;
+   it prints a one-time admin token to the console.
+2. **Log in** — open the web console and exchange the token for the break-glass
+   admin session (`POST /api/auth/breakglass`).
+3. **Create local users** — as admin, invite/create accounts (`POST /api/users`).
+   v1 has no public self-service registration.
+4. **Issue a daemon key** — each owner self-mints a daemon key in the UI
+   (`POST /api/daemon-keys`), then binds a worker with
+   `se3 daemon start --daemon-key <key>`. The owner only ever sees their own
+   machines and flows.
+
+See [docs/daemon-and-server.md](docs/daemon-and-server.md#authentication--multi-tenant-access)
+for the full end-to-end auth walkthrough and configuration keys.
+
 ---
 
 ## Command Reference
