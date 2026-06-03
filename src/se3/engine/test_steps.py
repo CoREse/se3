@@ -243,6 +243,25 @@ class TestAnalyzeStep:
 class TestTestStep:
     """Tests for the test step."""
 
+    @pytest.fixture(autouse=True)
+    def _warm_main_repo_root_cache(self):
+        """Pre-warm the git-probe lru_cache before ``@patch('subprocess.Popen')``.
+
+        ``TestConfig.load`` (called at the top of ``test_handler``) resolves the
+        main-repo root via ``_resolve_main_repo_root_cached``, which shells out
+        to git through ``subprocess.run`` → ``subprocess.Popen``. The tests below
+        patch ``subprocess.Popen`` to stub the test-command execution, which also
+        corrupts that git probe when its cache is cold — so the tests only pass
+        in the full suite (where an earlier test happens to warm the cache) and
+        fail in isolation. This autouse fixture runs *before* the patch is
+        applied, warming the cache for the current working directory so the
+        probe never runs under the patched Popen.
+        """
+        import se3.config as _cfg
+
+        _cfg._resolve_main_repo_root(Path.cwd())
+        yield
+
     @patch("subprocess.Popen")
     def test_test_success(self, mock_popen):
         """Test successful test execution."""
@@ -261,7 +280,17 @@ class TestTestStep:
 
     @patch("subprocess.Popen")
     def test_test_failure(self, mock_popen):
-        """Test handling of test failures."""
+        """Test handling of test failures.
+
+        pytest exited non-zero but no per-test ``file::test FAILED`` lines are
+        parseable from the output, so this is an *unparseable* failure. Under
+        the baseline-driven gate (steps/test.py) an unparseable failure is
+        treated as introduced (not inherited from any baseline) and triggers
+        the fix loop — the handler returns REVISION_NEEDED, not COMPLETED.
+        (The old known_test_failures.json exemption that let some failures pass
+        through as COMPLETED has been removed; the frozen pre-implement baseline
+        is now the sole exemption source, and an empty baseline exempts nothing.)
+        """
         mock_process = MagicMock()
         mock_process.returncode = 1
         mock_process.communicate.return_value = ("3 passed, 2 failed", "FAILED test_foo")
@@ -272,10 +301,11 @@ class TestTestStep:
 
         result = run_test_step(step, flow)
 
-        # test_handler returns COMPLETED even on test failure
-        # (to allow verify_spec to decide what to do)
-        assert result == StepStatus.COMPLETED
+        assert result == StepStatus.REVISION_NEEDED
         assert step.outputs["tests_passed"] is False
+        # An unparseable failure with an empty baseline is an introduced
+        # (blocking) failure, so the test step demands a fix.
+        assert step.outputs["test_results"]["tests_blocking"] is True
 
 
 class TestCommitStep:
