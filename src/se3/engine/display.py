@@ -15,6 +15,8 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 
+from .token_usage import UsageTotals, format_cost
+
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -22,6 +24,12 @@ _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # bottom boundary of a rendered block. Kept small and constant so it never
 # stretches with terminal width and never adds visible characters when copied.
 _BLOCK_FOOTER_WIDTH = 4
+
+
+# Role color for the token-usage summary block. Cyan reads as an auxiliary /
+# summary accent (see the spec's color→role table), keeping the block legible
+# yet unobtrusive — it summarizes, it does not steal the show.
+_USAGE_BLOCK_COLOR = "cyan"
 
 
 # Global console instance for consistent output
@@ -81,6 +89,57 @@ def render_block_footer(color: str) -> None:
     """
     console = get_console()
     console.print(_reverse_footer(color))
+    console.print("")
+
+
+def render_usage_block(
+    totals: Any, title: str = "Token Usage"
+) -> None:
+    """Render an aligned token / cost summary as a reverse-color block.
+
+    Accepts a :class:`~se3.engine.token_usage.UsageTotals`, the JSON-primitive
+    dict it serializes to (as persisted in ``step.outputs['token_usage']`` and
+    ``State.session_token_usage``), or ``None``. Empty or ``None`` usage renders
+    **nothing**, so callers need not guard themselves.
+
+    The body is a fixed two-column table — left-aligned dim labels, right-aligned
+    values — so the numbers line up regardless of magnitude. Costs render as
+    ``$0.0000`` and token counts carry thousands separators. The block follows
+    the standard reverse-color visual (title block / body / fixed-width footer,
+    no Panel, no Rule).
+
+    Args:
+        totals: A ``UsageTotals``, a usage dict, or ``None``.
+        title: Heading shown in the reverse-color title block.
+    """
+    if totals is None:
+        return
+    if not isinstance(totals, UsageTotals):
+        totals = UsageTotals.from_dict(totals)
+    if totals.is_empty():
+        return
+
+    rows = [
+        ("Input tokens", f"{totals.input_tokens:,}"),
+        ("Output tokens", f"{totals.output_tokens:,}"),
+        ("Cache read", f"{totals.cache_read_input_tokens:,}"),
+        ("Cache creation", f"{totals.cache_creation_input_tokens:,}"),
+        ("Cost", format_cost(totals.total_cost_usd)),
+    ]
+    label_w = max(len(label) for label, _ in rows)
+    value_w = max(len(value) for _, value in rows)
+
+    lines = [
+        f"  [dim]{label.ljust(label_w)}[/dim]  {value.rjust(value_w)}"
+        for label, value in rows
+    ]
+
+    console = get_console()
+    console.print(_reverse_title(title, _USAGE_BLOCK_COLOR))
+    console.print("")
+    console.print("\n".join(lines))
+    console.print("")
+    console.print(_reverse_footer(_USAGE_BLOCK_COLOR))
     console.print("")
 
 

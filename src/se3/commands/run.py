@@ -43,6 +43,7 @@ try:
         format_output,
         get_console,
         render_full,
+        render_usage_block,
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
     from ..engine.sink import CliSink, HistorySink, JsonSink
@@ -65,6 +66,7 @@ except ImportError:
         format_output,
         get_console,
         render_full,
+        render_usage_block,
     )
     from engine.event_stream import EventEmitter, EventType, new_event
     from engine.sink import CliSink, HistorySink, JsonSink
@@ -2314,6 +2316,9 @@ def _run_flow_impl(
             EventType.FLOW_COMPLETED, flow_id=flow.flow_id,
         ))
         display_success("Flow completed successfully!")
+        # Session-level token/cost summary (sum of every step's usage). Renders
+        # nothing when the flow consumed no LLM tokens.
+        render_usage_block(flow.state.session_token_usage, title="Session Token Usage")
         return 0
     elif flow.status == FlowStatus.FAILED:
         current_step = flow.state.get_current_step()
@@ -2322,6 +2327,8 @@ def _run_flow_impl(
             EventType.FLOW_FAILED, flow_id=flow.flow_id, message=error_msg,
         ))
         display_error(f"Flow failed: {error_msg}")
+        # Still surface whatever tokens/cost were consumed before the failure.
+        render_usage_block(flow.state.session_token_usage, title="Session Token Usage")
         return 1
     else:
         get_console().print(f"[dim]Flow ended with status: {flow.status.value}[/dim]")
