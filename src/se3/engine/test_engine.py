@@ -674,5 +674,210 @@ class TestStreamJSONTrackerUsage:
         assert step.total_cost_usd == pytest.approx(0.02)
 
 
+class TestSessionTokenUsageModel:
+    """State.session_token_usage round-trip and old-file compatibility."""
+
+    def test_default_session_usage_is_empty(self):
+        state = State()
+        assert state.session_token_usage.is_empty()
+
+    def test_session_usage_round_trips(self):
+        from .token_usage import UsageTotals
+
+        flow = FlowInstance(task_description="usage round-trip")
+        flow.state.session_token_usage = UsageTotals(
+            input_tokens=100,
+            output_tokens=40,
+            cache_creation_input_tokens=5,
+            cache_read_input_tokens=20,
+            total_cost_usd=0.0123,
+        )
+
+        restored = FlowInstance.from_dict(flow.to_dict())
+        u = restored.state.session_token_usage
+        assert u.input_tokens == 100
+        assert u.output_tokens == 40
+        assert u.cache_creation_input_tokens == 5
+        assert u.cache_read_input_tokens == 20
+        assert u.total_cost_usd == pytest.approx(0.0123)
+
+    def test_session_usage_serializes_as_primitive_dict(self):
+        from .token_usage import UsageTotals
+
+        state = State(session_token_usage=UsageTotals(input_tokens=3))
+        payload = state.to_dict()["session_token_usage"]
+        assert isinstance(payload, dict)
+        assert payload["input_tokens"] == 3
+        # JSON-primitive: survives a json round-trip unchanged.
+        assert json.loads(json.dumps(payload)) == payload
+
+    def test_old_engine_json_without_field_loads_empty(self):
+        # An engine.json written by an older build has no session_token_usage.
+        state = State.from_dict(
+            {
+                "current_step_id": None,
+                "step_history": [],
+                "steps": {},
+                "context": {},
+                "selected_steps": [],
+            }
+        )
+        assert state.session_token_usage.is_empty()
+
+    def test_other_state_fields_unaffected_by_round_trip(self):
+        from .token_usage import UsageTotals
+
+        state = State(
+            fix_iterations=2,
+            baseline_failures=["tests/test_x.py::test_y"],
+            session_token_usage=UsageTotals(input_tokens=1, total_cost_usd=0.5),
+        )
+        restored = State.from_dict(state.to_dict())
+        assert restored.fix_iterations == 2
+        assert restored.baseline_failures == ["tests/test_x.py::test_y"]
+        assert restored.session_token_usage.input_tokens == 1
+
+
+class TestRunStepTokenAggregation:
+    """run_step folds per-step usage into step.outputs and session totals."""
+
+    def _make_usage(self, **kwargs):
+        from .token_usage import UsageTotals
+
+        return UsageTotals(**kwargs)
+
+    def test_single_step_merges_multiple_calls(self):
+        """A step whose handler triggers two calls writes their merged total."""
+        from .token_usage import add_call_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                # Simulate two LLM subprocess calls (e.g. a retry) folding usage
+                # into the active step scope opened by run_step.
+                add_call_usage(self._make_usage(input_tokens=10, output_tokens=4, total_cost_usd=0.01))
+                add_call_usage(self._make_usage(input_tokens=5, output_tokens=1, total_cost_usd=0.02))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("merge calls")
+            step = flow.state.get_current_step()
+
+            sm.run_step(flow, step)
+
+            tu = step.outputs["token_usage"]
+            assert tu["input_tokens"] == 15
+            assert tu["output_tokens"] == 5
+            assert tu["total_cost_usd"] == pytest.approx(0.03)
+            # Session total reflects this one step.
+            su = flow.state.session_token_usage
+            assert su.input_tokens == 15
+            assert su.total_cost_usd == pytest.approx(0.03)
+
+    def test_no_call_step_writes_no_usage_field(self):
+        """A step with no LLM call must not add a token_usage noise field."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                step.outputs["result"] = "done"
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("no calls")
+            step = flow.state.get_current_step()
+
+            sm.run_step(flow, step)
+
+            assert "token_usage" not in step.outputs
+            assert flow.state.session_token_usage.is_empty()
+
+    def test_multi_step_session_accumulation(self):
+        """Session total equals the sum of each step's usage."""
+        from .token_usage import add_call_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def make_handler(amount):
+                def handler(step, flow):
+                    add_call_usage(self._make_usage(input_tokens=amount, total_cost_usd=amount / 1000))
+                    return StepStatus.COMPLETED
+                return handler
+
+            sm.register_handler(StepType.ANALYZE, make_handler(100))
+            sm.register_handler(StepType.IMPLEMENT, make_handler(250))
+
+            flow = sm.create_flow("multi step")
+            step1 = flow.state.get_current_step()
+            sm.run_step(flow, step1)
+
+            # Advance to a second step and run it.
+            step1.status = StepStatus.COMPLETED
+            step2 = sm.transition_to_next(flow)
+            # Drive to the IMPLEMENT step (skip any intervening steps quickly).
+            while step2 is not None and step2.step_type != StepType.IMPLEMENT:
+                step2.status = StepStatus.COMPLETED
+                step2 = sm.transition_to_next(flow)
+            assert step2 is not None and step2.step_type == StepType.IMPLEMENT
+            sm.run_step(flow, step2)
+
+            assert step1.outputs["token_usage"]["input_tokens"] == 100
+            assert step2.outputs["token_usage"]["input_tokens"] == 250
+            su = flow.state.session_token_usage
+            assert su.input_tokens == 350
+            assert su.total_cost_usd == pytest.approx(0.35)
+
+    def test_exception_step_still_aggregates_and_resets_scope(self):
+        """A raising handler still records the usage gathered before it raised,
+        and the step scope is reset (no contextvar leak)."""
+        from .token_usage import add_call_usage, current_step_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                add_call_usage(self._make_usage(input_tokens=8, total_cost_usd=0.005))
+                raise RuntimeError("boom")
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("raising step")
+            step = flow.state.get_current_step()
+
+            result = sm.run_step(flow, step)
+
+            assert result == StepStatus.FAILED
+            assert step.outputs["token_usage"]["input_tokens"] == 8
+            assert flow.state.session_token_usage.input_tokens == 8
+            # Scope must not leak past run_step.
+            assert current_step_usage() is None
+
+    def test_aggregated_usage_survives_persistence(self):
+        """Both layers (step.outputs + session) round-trip through engine.json."""
+        from .token_usage import add_call_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                add_call_usage(self._make_usage(input_tokens=12, output_tokens=3, total_cost_usd=0.02))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("persist usage")
+            step = flow.state.get_current_step()
+            step_id = step.step_id
+            sm.run_step(flow, step)
+
+            sm.persistence.save_flow(flow)
+            loaded = sm.persistence.load_flow()
+
+            assert loaded is not None
+            assert loaded.state.steps[step_id].outputs["token_usage"]["input_tokens"] == 12
+            assert loaded.state.session_token_usage.input_tokens == 12
+            assert loaded.state.session_token_usage.total_cost_usd == pytest.approx(0.02)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

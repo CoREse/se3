@@ -12,6 +12,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from .token_usage import UsageTotals
+
 # Sliding-window cap on State.fix_history to keep memory / engine.json size /
 # per-transition deepcopy cost bounded under unlimited mode
 # (max_fix_iterations=0). Held at the *default* value of
@@ -209,6 +211,13 @@ class State:
     #   [...] -> baseline captured, these specific test IDs were already failing
     baseline_failures: Optional[List[str]] = None
 
+    # Session-level cumulative token / cost usage across every step of this
+    # flow. Each step's merged per-step total is folded in by
+    # ``state_machine.run_step`` after the step's handler returns. Held as a
+    # ``UsageTotals`` in memory and round-tripped as a JSON-primitive dict; an
+    # older engine.json lacking the key deserializes to an empty tally.
+    session_token_usage: UsageTotals = field(default_factory=UsageTotals)
+
     def get_current_step(self) -> Optional[Step]:
         """Get the currently active step."""
         if self.current_step_id:
@@ -349,6 +358,7 @@ class State:
             "fix_iterations": self.fix_iterations,
             "fix_history": self.fix_history,
             "baseline_failures": self.baseline_failures,
+            "session_token_usage": self.session_token_usage.to_dict(),
         }
 
     @classmethod
@@ -377,6 +387,9 @@ class State:
             # no failures". data.get() naturally preserves both — [] is falsy but
             # is NOT substituted with the default, so the two states stay distinct.
             baseline_failures=data.get("baseline_failures"),
+            # A missing key (older engine.json) yields an empty tally via
+            # UsageTotals.from_dict(None); a stored dict round-trips exactly.
+            session_token_usage=UsageTotals.from_dict(data.get("session_token_usage")),
         )
         # Keep ``state.context['fix_history']`` consistent with the clamped
         # list — ``increment_fix_iteration`` mirrors fix_history into context,

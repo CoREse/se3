@@ -26,6 +26,7 @@ from .models import (
 )
 from .chat_history import _history_dir
 from .llm_caller import clear_phase1_cache
+from .token_usage import accumulate_step_usage
 from .issue_discovery import IssueDiscovery
 from .issue_manager import IssueManager
 from .persistence import PersistenceManager
@@ -437,9 +438,17 @@ class StateMachine:
 
         logger.info(f"Running step: {step.step_type.value}")
 
+        # Step-scoped token-usage accumulator. Opened before the handler runs so
+        # every LLM subprocess call made during this step (main call, retry,
+        # rotation, two-phase JSON extraction) folds into one per-step total via
+        # token_usage.add_call_usage. The yielded UsageTotals is captured here so
+        # the finally block can read it even after the context manager has reset
+        # the contextvar on exit (including the exception path).
+        step_usage = None
         try:
-            # Execute handler
-            result = handler(step, flow)
+            # Execute handler under the step usage scope.
+            with accumulate_step_usage() as step_usage:
+                result = handler(step, flow)
 
             # Handler can return status or we infer from step object
             if isinstance(result, StepStatus):
@@ -461,6 +470,17 @@ class StateMachine:
 
         finally:
             step.completed_at = datetime.now()
+            # Aggregate this step's token usage before persisting. Write the
+            # per-step merged total into step.outputs (JSON-primitive dict, only
+            # when non-empty so a step with no LLM call adds no noise field) and
+            # fold it into the flow's session-level running total. Best-effort:
+            # a fault here must never break the step / flow.
+            try:
+                if step_usage is not None and not step_usage.is_empty():
+                    step.outputs["token_usage"] = step_usage.to_dict()
+                    flow.state.session_token_usage.add(step_usage)
+            except Exception:
+                logger.debug("Failed to record step token usage", exc_info=True)
             self.persistence.save_flow(flow)
 
         logger.info(f"Step {step.step_type.value} finished with status: {step.status.value}")
