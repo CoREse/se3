@@ -875,15 +875,12 @@ class TestTierB:
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "engine.json").write_text("{}")
-        (source_se3 / "state" / "known_test_failures.json").write_text("[]")
 
         call = _make_sync_call(source, target)
         report = call("feature")
 
         assert "state/engine.json" in report.discarded
-        assert "state/known_test_failures.json" in report.discarded
         assert not (target_se3 / "state" / "engine.json").exists()
-        assert not (target_se3 / "state" / "known_test_failures.json").exists()
 
     def test_tier_b_dir_discarded(self, tmp_path: Path) -> None:
         source = tmp_path / "source"

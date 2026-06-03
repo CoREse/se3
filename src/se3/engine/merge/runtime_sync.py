@@ -321,9 +321,11 @@ TIER_A_GLOBS = [
 ]
 
 # Tier B: specific files to discard from source (relative to se3/)
+# NOTE: state/known_test_failures.json has been retired — the deterministic
+# pre-implement test baseline replaces the known-list exemption, so the file is
+# no longer written or synced and therefore no longer appears here.
 TIER_B_FILES = [
     "state/engine.json",
-    "state/known_test_failures.json",
 ]
 
 # Tier B: directories to discard from source (relative to se3/)
@@ -1382,8 +1384,8 @@ def sync_branch_runtime(
     - ``strict=False``: the source version is written to a sidecar file
       ``<dest>.from-<branch>`` and recorded in ``SyncReport.collisions``.
 
-    Tier B files (``state/engine.json``, ``state/known_test_failures.json``,
-    ``calls/active/``) are recorded as discarded but not copied.
+    Tier B files (``state/engine.json``, ``calls/active/``) are recorded as
+    discarded but not copied.
 
     Tier C directories (``cache/``, ``tmp/``, ``worktrees/``) are completely
     ignored.

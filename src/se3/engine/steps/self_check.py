@@ -245,6 +245,23 @@ def _validate_and_filter_issues(
             continue
         if issue.get("out_of_scope") is True:
             stats["out_of_scope_count"] += 1
+            # 留痕: an out_of_scope observation is dropped (not filed as an
+            # issue, to avoid issue explosion), but its substance must not
+            # disappear silently. Log the description plus whatever evidence
+            # the LLM supplied so a real signal stays recoverable from logs.
+            description = (
+                issue.get("description")
+                or issue.get("title")
+                or issue.get("actual_behavior")
+                or "(no description)"
+            )
+            logger.info(
+                "self_check dropped out_of_scope issue (logged, not filed): "
+                "%s | evidence_lines=%s | missing_in=%s",
+                description,
+                issue.get("evidence_lines") or [],
+                issue.get("missing_in") or [],
+            )
             continue
 
         source = issue.get("expectation_source") or {}

@@ -168,15 +168,19 @@ class IssueDiscovery:
         flow: FlowInstance,
         pre_existing_failures: List[Dict[str, Any]],
     ) -> Optional[Issue]:
-        """Create an issue for pre-existing test failures.
+        """Create an issue for inherited (pre-existing) test failures.
 
-        A-class trigger: called by test_handler when pre-existing failures
-        are detected (failures present in known_test_failures.json that
-        were not introduced by the current change).
+        A-class trigger: called by test_handler when inherited failures are
+        detected — failures whose test-id is present in the frozen
+        pre-implement ``baseline_failures`` set (captured before this flow's
+        implement step touched anything) and were therefore not introduced by
+        the current change. The baseline replaces the retired
+        ``known_test_failures.json`` known-list as the provenance source.
 
         Args:
             flow: Current flow instance
-            pre_existing_failures: List of {test_id, reason} dicts
+            pre_existing_failures: List of {test_id, reason} dicts of the
+                inherited (baseline) failures
 
         Returns:
             Created Issue, or None if no failures, deduplicated, or failed
