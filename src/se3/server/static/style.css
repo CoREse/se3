@@ -282,6 +282,34 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-shrink: 0;
 }
 
+/* Session token/cost total badge (G4): docked as a non-scrolling thin strip
+ * between the conversation and the reply box, with the pill pinned to the
+ * left. Deliberately low-key — small dim text, no fill — so it reads as a
+ * footnote/角标 and neither obscures the conversation scroll area nor competes
+ * with the docked reply controls. Hidden entirely until usage is non-zero. */
+.flow-usage-badge {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 16px 4px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.flow-usage-badge.hidden { display: none; }
+.flow-usage-badge__label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
+.flow-usage-badge__value {
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
 @media (max-width: 720px) {
   .flow-view-body {
     grid-template-columns: 1fr;
@@ -1689,6 +1717,29 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg-dim);
   font-style: italic;
   font-size: 11.5px;
+}
+
+/* Per-step token-usage footnote (G4): a low-key one-liner at the card's
+ * bottom — dim, small, tabular-aligned — so it informs without competing with
+ * the structured report above it. */
+.step-report__usage {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.step-report__usage-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
+.step-report__usage-value {
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
 }
 
 .step-report__files {

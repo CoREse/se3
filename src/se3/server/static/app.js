@@ -775,6 +775,9 @@ function openFlowView(flowId) {
   $("flow-view-title").textContent = "Flow";
   renderSidebarPlaceholder("Loading flow details…");
   $("flow-interventions").innerHTML = "";
+  // Reset the session-usage badge for the freshly-opened flow; it re-appears
+  // once this flow's first usage-bearing step event is rendered.
+  updateFlowUsageBadge([]);
   resetReplyBox();
 
   refreshFlowDetail();
@@ -858,6 +861,7 @@ async function loadFlowConversation(flowId) {
     state.flowConversationRecords = mergeSnapshotWithLiveAppends(
       snapshot, state.flowConversationRecords);
     renderConversation(container, state.flowConversationRecords);
+    updateFlowUsageBadge(state.flowConversationRecords);
     scrollFlowConversationToBottom();
   } catch (_) {
     if (state.selectedFlowId !== flowId) return;
@@ -1632,6 +1636,7 @@ function appendLocalReply(flowId, target, text) {
   };
   state.flowConversationRecords = state.flowConversationRecords.concat([record]);
   renderConversation($("flow-conversation"), state.flowConversationRecords, true);
+  updateFlowUsageBadge(state.flowConversationRecords);
   scrollFlowConversationToBottom();
 }
 
@@ -1730,6 +1735,7 @@ function applyHistoryData(msg) {
       : records;
     renderConversation(
       $("flow-conversation"), state.flowConversationRecords, append);
+    updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) scrollFlowConversationToBottom();
   }
 }
@@ -5220,6 +5226,152 @@ const STEP_REPORT_TITLES = {
   summarize: "Work Summary",
 };
 
+// ---------------------------------------------------------------------------
+// Token-usage display (G4)
+// ---------------------------------------------------------------------------
+//
+// The engine attaches a per-step `token_usage` dict to `step.outputs` and folds
+// the running session total into `flow.state.session_token_usage` (G2). The web
+// console surfaces both: a low-key footnote on each completed step's report
+// card, and a session-total badge in the flow-view corner accumulated by the
+// client over the step events it has received. The dict shape mirrors the
+// engine's `UsageTotals.to_dict()` (token_usage.py):
+//   { input_tokens, output_tokens, cache_creation_input_tokens,
+//     cache_read_input_tokens, total_cost_usd }
+// The two helpers below (formatTokenUsage / accumulateSessionUsage) are pure /
+// DOM-free so they can be unit-tested headlessly.
+
+const TOKEN_USAGE_TOKEN_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+];
+
+// Coerce a usage field to a finite number; missing / null / NaN → 0, mirroring
+// the backend `_coerce_int` / `_coerce_float` tolerance so a partial or
+// malformed payload never throws or renders NaN.
+function usageNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// True when every token field is zero AND the cost is (near) zero — matches
+// `UsageTotals.is_empty()`. The display layer suppresses the footnote / badge
+// for empty usage so steps that made no LLM call show nothing extra.
+function isTokenUsageEmpty(usage) {
+  if (!usage || typeof usage !== "object") return true;
+  const tokens = TOKEN_USAGE_TOKEN_FIELDS.reduce(
+    (sum, k) => sum + usageNum(usage[k]), 0);
+  return tokens === 0 && usageNum(usage.total_cost_usd) === 0;
+}
+
+function formatTokenCount(n) {
+  return usageNum(n).toLocaleString("en-US");
+}
+
+// Render a USD cost as `$0.0123` (4 dp), matching the Python `format_cost`
+// precision so sub-cent LLM costs stay legible.
+function formatCostUsd(v) {
+  return "$" + usageNum(v).toFixed(4);
+}
+
+// Render a token_usage dict as a compact, labelled small string:
+//   "in 12,345 · out 6,789 · cache r/w 1,000/200 · $0.0123"
+// Safe for missing / null / partial input (each missing field → 0). Mirrors the
+// label grammar of `token_usage.format_usage_line` so CLI and Web read alike.
+function formatTokenUsage(usage) {
+  const u = usage && typeof usage === "object" ? usage : {};
+  return (
+    "in " + formatTokenCount(u.input_tokens) +
+    " · out " + formatTokenCount(u.output_tokens) +
+    " · cache r/w " + formatTokenCount(u.cache_read_input_tokens) +
+    "/" + formatTokenCount(u.cache_creation_input_tokens) +
+    " · " + formatCostUsd(u.total_cost_usd)
+  );
+}
+
+// Sum the per-step `token_usage` carried on the conversation records into one
+// session total. De-duplicates by step_id so a step whose `step_completed`
+// event is delivered more than once (snapshot re-fetch, reconnect, incremental
+// re-render) is counted exactly once; order-independent. Returns a usage dict
+// with the same key set as a single step's token_usage (all zeros when nothing
+// was found), so the caller can format / empty-check it uniformly.
+function accumulateSessionUsage(records) {
+  const totals = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    total_cost_usd: 0,
+  };
+  if (!Array.isArray(records)) return totals;
+  const seen = new Set();
+  for (const rec of records) {
+    let norm;
+    try {
+      norm = normalizeRecord(rec);
+    } catch (_) {
+      continue;  // A malformed record must never break the badge total.
+    }
+    if (!norm || norm.role !== "step-event" || !norm.stepReport) continue;
+    const usage = norm.stepReport.outputs && norm.stepReport.outputs.token_usage;
+    if (isTokenUsageEmpty(usage)) continue;
+    // De-dup by step_id: the same step's completed event can arrive again on a
+    // re-fetch / reconnect; a step_id is unique per step so this counts once.
+    const key = norm.stepId || norm.stepReport.step_id || "";
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    totals.input_tokens += usageNum(usage.input_tokens);
+    totals.output_tokens += usageNum(usage.output_tokens);
+    totals.cache_creation_input_tokens +=
+      usageNum(usage.cache_creation_input_tokens);
+    totals.cache_read_input_tokens += usageNum(usage.cache_read_input_tokens);
+    totals.total_cost_usd += usageNum(usage.total_cost_usd);
+  }
+  return totals;
+}
+
+// Build the per-step report-card token-usage footnote, or null when the step
+// consumed no tokens (so the card structure is unchanged for usage-less steps).
+function buildStepUsageFootnote(usage) {
+  if (isTokenUsageEmpty(usage)) return null;
+  const foot = el("div", "step-report__usage");
+  foot.append(
+    el("span", "step-report__usage-label", "tokens"),
+    el("span", "step-report__usage-value", formatTokenUsage(usage)),
+  );
+  return foot;
+}
+
+// Recompute and render the flow-view session-usage badge from the conversation
+// records the client has received so far. Hidden (and emptied) when nothing has
+// been consumed yet, so it never shows a bare "0" placeholder. Best-effort —
+// a render fault here must never disturb the conversation.
+function updateFlowUsageBadge(records) {
+  const badge = $("flow-usage-badge");
+  if (!badge) return;
+  try {
+    const totals = accumulateSessionUsage(records);
+    if (isTokenUsageEmpty(totals)) {
+      badge.innerHTML = "";
+      badge.classList.add("hidden");
+      return;
+    }
+    badge.innerHTML = "";
+    badge.append(
+      el("span", "flow-usage-badge__label", "Session"),
+      el("span", "flow-usage-badge__value", formatTokenUsage(totals)),
+    );
+    badge.classList.remove("hidden");
+  } catch (_) {
+    badge.innerHTML = "";
+    badge.classList.add("hidden");
+  }
+}
+
 // Build a default-open collapsible report card. `buildBody()` is invoked
 // immediately so the body is rendered out of the gate; on a later toggle
 // it is preserved (not rebuilt) so the reader's expand-state on inner
@@ -5270,6 +5422,11 @@ function renderStepReport(step) {
       frag.appendChild(el("div", "step-report__error",
         "Error: " + String(step.error_message)));
     }
+    // Token-usage footnote (G4): a low-key one-liner at the card's bottom,
+    // shown only when this step actually consumed tokens. Steps with no
+    // `token_usage` get no extra row, so their card structure is unchanged.
+    const usageFoot = buildStepUsageFootnote((step.outputs || {}).token_usage);
+    if (usageFoot) frag.appendChild(usageFoot);
     return frag;
   });
 }
@@ -6674,6 +6831,14 @@ if (typeof module !== "undefined" && module.exports) {
     makeUserRawToggle,
     STEP_REPORT_RENDERERS,
     reportList,
+    // Token-usage display (G4) — exposed for the DOM-free tests in
+    // tests/frontend/token_usage.test.mjs.
+    formatTokenUsage,
+    accumulateSessionUsage,
+    isTokenUsageEmpty,
+    formatCostUsd,
+    buildStepUsageFootnote,
+    updateFlowUsageBadge,
     renderProposalFields,
     renderDesignFields,
     renderPlanReport,

@@ -3125,6 +3125,11 @@ groupStatusMod.registerGroupStatusTests({ app, check, findOne, findAll });
 const replyBoxCollapseMod = await import("./reply_box_prompt_collapse.test.mjs");
 replyBoxCollapseMod.registerReplyBoxPromptCollapseTests({ app, check, findOne, findAll });
 
+// Register the G4 token-usage display tests (separate module — same `check`
+// reporter, same `app` module, same shared DOM stub already installed above).
+const tokenUsageMod = await import("./token_usage.test.mjs");
+tokenUsageMod.registerTokenUsageTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

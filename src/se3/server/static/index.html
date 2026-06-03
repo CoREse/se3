@@ -118,6 +118,12 @@
         <div id="flow-conversation" class="history-detail flow-conversation">
           <p class="empty">Select a flow to view its conversation.</p>
         </div>
+        <!-- Session token/cost total (G4): a low-key badge docked at the
+             bottom-left corner of the main column, between the conversation
+             and the reply box, so it never obscures the scroll area. Hidden
+             until this flow has consumed tokens. -->
+        <div id="flow-usage-badge" class="flow-usage-badge hidden"
+             title="本次 flow 已消耗的 token 与成本合计"></div>
         <form id="flow-reply-form" class="flow-reply">
           <div id="flow-interventions" class="flow-interventions"></div>
           <div id="flow-reply-context" class="flow-reply-context">
