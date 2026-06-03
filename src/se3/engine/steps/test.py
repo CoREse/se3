@@ -16,12 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shlex
 import subprocess
-import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -112,57 +109,6 @@ def _extract_failures_section(stdout: str, max_chars: int = FAILURES_SECTION_MAX
 
     result = header_line + "".join(truncated_blocks)
     return result[:max_chars]
-
-
-def _load_known_failures(project_root: Path) -> Dict[str, Any]:
-    """Load known test failures from se3/state/known_test_failures.json.
-
-    Returns a dict of {test_id: {reason, first_seen, last_seen}}.
-    Returns empty dict if file doesn't exist or is corrupted.
-    """
-    path = project_root / "se3" / "state" / "known_test_failures.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return data
-        logger.warning("known_test_failures.json has unexpected format, ignoring")
-        return {}
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(f"Failed to load known_test_failures.json: {e}")
-        return {}
-
-
-def _save_known_failures(project_root: Path, failures: Dict[str, Any]) -> None:
-    """Save known test failures to se3/state/known_test_failures.json.
-
-    Uses atomic write (temp file + rename) to avoid corruption.
-    Automatically creates se3/state/ directory if needed.
-    """
-    state_dir = project_root / "se3" / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    target = state_dir / "known_test_failures.json"
-
-    content = json.dumps(failures, indent=2, ensure_ascii=False)
-    try:
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(state_dir), suffix=".tmp", prefix="known_failures_",
-        )
-        closed = False
-        try:
-            os.write(fd, content.encode("utf-8"))
-            os.close(fd)
-            closed = True
-            os.replace(tmp_path, str(target))
-        except Exception:
-            if not closed:
-                os.close(fd)
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
-    except Exception as e:
-        logger.warning(f"Failed to save known_test_failures.json: {e}")
 
 
 def _render_estimate(value: float | int | None) -> str:
@@ -305,17 +251,36 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
             )
     critical_failed = bool(critical_skipped) or bool(critical_missing)
 
-    # 5. Distinguish pre-existing failures from net-new regressions
-    known_failures = _load_known_failures(project_root)
-    known_ids = set(known_failures.keys())
+    # 5. Distinguish inherited (pre-implement baseline) failures from
+    #    introduced ones.
+    #
+    # ``baseline_failures`` is the frozen set of test IDs that were already
+    # failing *before* this flow's implement step ran (captured at flow start
+    # by the state machine and injected into this step's inputs). A failing
+    # test is INHERITED iff its id is in the baseline; otherwise it is
+    # INTRODUCED and must be fixed.
+    #
+    # This replaces the old auto-accumulated ``known_test_failures.json``
+    # exemption, which was a laundering vector: it appended every regression
+    # failure to the store, so a genuinely new failure became "known" after a
+    # single occurrence and was then forgiven forever. The baseline is frozen
+    # before implement runs, so an introduced regression can never launder
+    # itself into it.
+    baseline_failures = set(step.inputs.get("baseline_failures") or [])
 
-    # Net-new regressions: regression failures NOT in known failures list
-    net_new_regression = [
-        tid for tid in regression["failed"] if tid not in known_ids
+    all_failed = list(new_tests["failed"]) + list(regression["failed"])
+    introduced_failures = [
+        tid for tid in all_failed if tid not in baseline_failures
     ]
-    # Pre-existing: regression failures that ARE known
-    pre_existing_ids = [
-        tid for tid in regression["failed"] if tid in known_ids
+    inherited_failures = [
+        tid for tid in all_failed if tid in baseline_failures
+    ]
+
+    # Introduced regressions: regression failures NOT in the baseline. New-test
+    # failures are handled separately below (they are always introduced — a
+    # newly added test file does not exist at baseline capture time).
+    introduced_regression = [
+        tid for tid in regression["failed"] if tid not in baseline_failures
     ]
 
     # Detect timeout in primary test result via the structured flag set by
@@ -326,8 +291,12 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Fix loop triggers on:
     # 1. New test failures
-    # 2. Net-new regressions (not in known failures)
+    # 2. Introduced regressions (failures NOT in the pre-implement baseline)
     # 3. Unparseable failures (pytest failed but we can't classify individual tests)
+    # 4. A skipped/missing critical acceptance test
+    # Inherited (baseline) failures do NOT trigger the fix loop — a scoped flow
+    # cannot fix them and looping on them is exactly the infinite-loop bug this
+    # baseline mechanism eliminates.
     unparseable_failure = (
         not overall_passed
         and not regression["failed"]
@@ -336,7 +305,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
     should_fix = (
         bool(new_tests["failed"])
-        or bool(net_new_regression)
+        or bool(introduced_regression)
         or unparseable_failure
         or critical_failed
     )
@@ -352,6 +321,18 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # mis-set upstream). Empty lists when no critical_tests are configured.
         "critical_skipped": critical_skipped,
         "critical_missing": critical_missing,
+        # Baseline-based provenance split. ``introduced_failures`` are failures
+        # NOT in the frozen pre-implement baseline (this session's fault, must
+        # be fixed); ``inherited_failures`` were already failing at flow start.
+        # verify_spec consumes these as the single source of truth so its
+        # fix-loop test gate blocks on exactly the same condition as test.py.
+        "introduced_failures": introduced_failures,
+        "inherited_failures": inherited_failures,
+        # Authoritative test-gate verdict: True when the test step demands a
+        # fix (introduced failures / unparseable / critical gate). verify_spec
+        # reads this directly so the two steps can never disagree on whether
+        # tests block the flow. Inherited baseline failures never set this.
+        "tests_blocking": should_fix,
         # Backward compat fields
         "command": " ".join(primary_command),
         "returncode": primary_result["returncode"],
@@ -361,42 +342,26 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     }
     step.outputs["tests_passed"] = overall_passed
 
-    # 7. Handle pre-existing failures: report and persist
-    now_iso = datetime.now().isoformat()
-    pre_existing_list: List[Dict[str, str]] = []
-    if pre_existing_ids:
-        for tid in pre_existing_ids:
-            reason = known_failures.get(tid, {}).get("reason", "previously known failure")
-            pre_existing_list.append({"test_id": tid, "reason": reason})
+    # 7. Handle inherited (baseline) failures: leave a trace (留痕) every time,
+    #    but never re-trigger the fix loop on them. We deliberately do NOT
+    #    persist anything to disk — the baseline is the single, frozen source of
+    #    the exemption decision, so there is no known-list to auto-populate.
+    inherited_list: List[Dict[str, str]] = []
+    if inherited_failures:
+        for tid in inherited_failures:
+            reason = _extract_failure_reason(primary_result["stdout"], tid)
+            inherited_list.append({"test_id": tid, "reason": reason})
         logger.warning(
-            f"{len(pre_existing_ids)} pre-existing test failure(s) detected "
-            f"(not introduced by this change): {', '.join(pre_existing_ids)}"
+            f"{len(inherited_failures)} inherited test failure(s) detected "
+            f"(present in the pre-implement baseline, NOT introduced by this "
+            f"flow — surfaced, not looped): {', '.join(inherited_failures)}"
         )
 
-    # Also treat regression failures not in known list as potentially new
-    # pre-existing entries if overall_passed is False but should_fix is False
-    # (i.e., all failures are pre-existing)
-
-    # Update known failures with all current regression failures
-    updated_known = dict(known_failures)
-    for tid in regression["failed"]:
-        if tid in updated_known:
-            updated_known[tid]["last_seen"] = now_iso
-        else:
-            # New failure — extract reason from stdout if possible
-            reason = _extract_failure_reason(primary_result["stdout"], tid)
-            updated_known[tid] = {
-                "reason": reason,
-                "first_seen": now_iso,
-                "last_seen": now_iso,
-            }
-            # If this failure is not in net_new_regression, it's actually
-            # a first-time failure that we haven't seen before; add to
-            # pre_existing for next run but it IS a regression for this run
-
-    _save_known_failures(project_root, updated_known)
-
-    step.outputs["pre_existing_failures"] = pre_existing_list
+    # Retain the legacy ``pre_existing_failures`` output key for backward
+    # compatibility with downstream renderers; it now carries baseline-inherited
+    # failures rather than known-list failures.
+    step.outputs["pre_existing_failures"] = inherited_list
+    step.outputs["inherited_failures"] = inherited_list
 
     # Record test results in history
     _record_test_history(project_root, flow, step, phase_results, overall_passed)
@@ -405,18 +370,23 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.info("All tests passed")
     elif not should_fix:
         logger.info(
-            "Tests failed but all failures are pre-existing — not triggering fix loop"
+            "Tests failed but all failures are inherited from the pre-implement "
+            "baseline — not triggering fix loop"
         )
     else:
-        logger.warning("Tests failed with new/regression failures")
+        logger.warning("Tests failed with new/introduced-regression failures")
         stderr_tail = primary_result["stderr"][-FIX_STDERR_TAIL_CHARS:] if primary_result["stderr"] else ""
         step.error_message = f"Tests failed:\n{stderr_tail}"
 
-    # 8. Report pre-existing failures via A-class issue discovery
-    if pre_existing_list:
-        _report_pre_existing_issues(project_root, flow, pre_existing_list)
+    # 8. Report inherited failures via A-class issue discovery — at most ONCE
+    #    per flow. Each fix iteration re-runs the test step on the same baseline
+    #    failures; without this flow-level guard the same issue would be re-filed
+    #    every iteration (the 189-duplicate-issue explosion this change fixes).
+    if inherited_list and not flow.state.context.get("inherited_failures_filed"):
+        _report_pre_existing_issues(project_root, flow, inherited_list)
+        flow.state.context["inherited_failures_filed"] = True
 
-    # 9. Determine return status: fix loop only for new/regression failures
+    # 9. Determine return status: fix loop only for new/introduced failures
     if should_fix:
         stdout = primary_result.get("stdout", "")
         stderr = primary_result.get("stderr", "")
@@ -566,9 +536,12 @@ def _report_pre_existing_issues(
     flow: FlowInstance,
     pre_existing_failures: List[Dict[str, str]],
 ) -> None:
-    """Report pre-existing test failures via A-class issue discovery.
+    """Report inherited (pre-implement baseline) test failures via A-class
+    issue discovery.
 
-    Creates a medium priority issue with all pre-existing failures listed.
+    Creates a medium priority issue with all inherited failures listed. The
+    caller is responsible for the flow-level "file at most once" guard; this
+    helper just files whatever it is handed.
     """
     try:
         from ..issue_discovery import IssueDiscovery

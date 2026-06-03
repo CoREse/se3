@@ -1,27 +1,23 @@
-"""Tests for fix loop refactoring, known failures persistence, and pre-existing issue reporting.
+"""Tests for fix loop logic, baseline-driven inherited/introduced split, and
+inherited-failure issue reporting.
 
 Covers:
-- _load_known_failures / _save_known_failures (Task 7)
-- Refactored overall_passed logic distinguishing pre-existing vs new failures (Task 6)
-- Pre-existing failures output and persistence (Task 8)
-- IssueDiscovery.create_from_pre_existing_failures (Task 9)
 - _extract_failure_reason helper
+- IssueDiscovery.create_from_pre_existing_failures (now fed baseline-inherited
+  failures)
+- Baseline-driven test_handler fix loop trigger logic (inherited vs introduced)
+- inherited_failures output + no auto-populate of known_test_failures.json
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.steps.test import (
-    _extract_failure_reason,
-    _load_known_failures,
-    _save_known_failures,
-)
+from se3.engine.steps.test import _extract_failure_reason
 from se3.engine.issue_discovery import IssueDiscovery
 from se3.engine.issue_manager import IssueManager
 from se3.engine.models import (
@@ -67,99 +63,6 @@ def discovery(issue_manager):
 
 
 # ---------------------------------------------------------------------------
-# _load_known_failures
-# ---------------------------------------------------------------------------
-
-class TestLoadKnownFailures:
-    def test_file_not_exists_returns_empty(self, tmp_path):
-        result = _load_known_failures(tmp_path)
-        assert result == {}
-
-    def test_valid_json_returns_dict(self, project_root):
-        data = {
-            "tests/test_a.py::test_foo": {
-                "reason": "assert 1 == 2",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-02T00:00:00",
-            }
-        }
-        path = project_root / "se3" / "state" / "known_test_failures.json"
-        path.write_text(json.dumps(data), encoding="utf-8")
-
-        result = _load_known_failures(project_root)
-        assert result == data
-
-    def test_invalid_json_returns_empty(self, project_root):
-        path = project_root / "se3" / "state" / "known_test_failures.json"
-        path.write_text("{invalid json", encoding="utf-8")
-
-        result = _load_known_failures(project_root)
-        assert result == {}
-
-    def test_non_dict_json_returns_empty(self, project_root):
-        path = project_root / "se3" / "state" / "known_test_failures.json"
-        path.write_text("[1, 2, 3]", encoding="utf-8")
-
-        result = _load_known_failures(project_root)
-        assert result == {}
-
-
-# ---------------------------------------------------------------------------
-# _save_known_failures
-# ---------------------------------------------------------------------------
-
-class TestSaveKnownFailures:
-    def test_creates_file(self, project_root):
-        data = {
-            "tests/test_a.py::test_foo": {
-                "reason": "assert fail",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, data)
-
-        path = project_root / "se3" / "state" / "known_test_failures.json"
-        assert path.exists()
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        assert loaded == data
-
-    def test_creates_state_directory(self, tmp_path):
-        """Should auto-create se3/state/ if it doesn't exist."""
-        _save_known_failures(tmp_path, {"t": {"reason": "x", "first_seen": "x", "last_seen": "x"}})
-
-        path = tmp_path / "se3" / "state" / "known_test_failures.json"
-        assert path.exists()
-
-    def test_overwrites_existing(self, project_root):
-        path = project_root / "se3" / "state" / "known_test_failures.json"
-        path.write_text('{"old": {}}', encoding="utf-8")
-
-        _save_known_failures(project_root, {"new": {"reason": "x", "first_seen": "x", "last_seen": "x"}})
-
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        assert "new" in loaded
-        assert "old" not in loaded
-
-    def test_roundtrip(self, project_root):
-        data = {
-            "tests/test_cli.py::test_delete": {
-                "reason": "AssertionError: assert 1 == 0",
-                "first_seen": "2026-04-09T12:00:00",
-                "last_seen": "2026-04-09T13:00:00",
-            },
-            "tests/test_cli.py::test_search": {
-                "reason": "AssertionError: assert 'found' in ''",
-                "first_seen": "2026-04-09T12:00:00",
-                "last_seen": "2026-04-09T12:00:00",
-            },
-        }
-        _save_known_failures(project_root, data)
-        loaded = _load_known_failures(project_root)
-        assert loaded == data
-
-
-# ---------------------------------------------------------------------------
 # _extract_failure_reason
 # ---------------------------------------------------------------------------
 
@@ -191,7 +94,7 @@ class TestExtractFailureReason:
 
 
 # ---------------------------------------------------------------------------
-# IssueDiscovery.create_from_pre_existing_failures
+# IssueDiscovery.create_from_pre_existing_failures (now fed inherited failures)
 # ---------------------------------------------------------------------------
 
 class TestCreateFromPreExistingFailures:
@@ -268,12 +171,16 @@ class TestCreateFromPreExistingFailures:
 # ---------------------------------------------------------------------------
 
 class TestFixLoopLogic:
-    """Tests for the refactored test_handler fix loop trigger logic."""
+    """Tests for the baseline-driven test_handler fix loop trigger logic."""
 
-    def _make_step_and_flow(self, project_root):
+    def _make_step_and_flow(self, project_root, baseline_failures=None):
         """Create a Step and FlowInstance for test_handler."""
         step = Step(step_type=StepType.TEST, status=StepStatus.PENDING)
-        step.inputs = {"tests_added": [], "is_fix_iteration": False}
+        step.inputs = {
+            "tests_added": [],
+            "is_fix_iteration": False,
+            "baseline_failures": baseline_failures or [],
+        }
 
         flow = FlowInstance(
             flow_id="test-flow-fix",
@@ -297,25 +204,17 @@ class TestFixLoopLogic:
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_pre_existing_failure_no_fix_loop(
+    def test_inherited_failure_no_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """Pre-existing failures should NOT trigger fix loop."""
-        # Set up known failures
-        known = {
-            "tests/test_old.py::test_broken": {
-                "reason": "known issue",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, known)
-
-        # pytest output with only the known failure
+        """Inherited (baseline) failures should NOT trigger fix loop."""
+        # pytest output with only the inherited failure
         stdout = "tests/test_old.py::test_broken FAILED\ntests/test_ok.py::test_pass PASSED\n"
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        step, flow = self._make_step_and_flow(
+            project_root, baseline_failures=["tests/test_old.py::test_broken"],
+        )
         result = step_handler_call(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -347,17 +246,18 @@ class TestFixLoopLogic:
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_net_new_regression_triggers_fix_loop(
+    def test_introduced_regression_triggers_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """A regression failure NOT in known failures should trigger fix loop."""
+        """A regression failure NOT in the baseline should trigger fix loop."""
         stdout = (
             "tests/test_existing.py::test_was_passing FAILED\n"
             "tests/test_ok.py::test_pass PASSED\n"
         )
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        # Empty baseline → the regression is introduced.
+        step, flow = self._make_step_and_flow(project_root, baseline_failures=[])
         result = step_handler_call(step, flow)
 
         assert result == StepStatus.REVISION_NEEDED
@@ -367,19 +267,10 @@ class TestFixLoopLogic:
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_mixed_pre_existing_and_new_triggers_fix_loop(
+    def test_mixed_inherited_and_new_triggers_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """Mix of pre-existing and new failures: fix loop should still trigger."""
-        known = {
-            "tests/test_old.py::test_broken": {
-                "reason": "known issue",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, known)
-
+        """Mix of inherited and new failures: fix loop should still trigger."""
         stdout = (
             "tests/test_old.py::test_broken FAILED\n"
             "tests/test_new.py::test_feature FAILED\n"
@@ -387,7 +278,9 @@ class TestFixLoopLogic:
         )
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        step, flow = self._make_step_and_flow(
+            project_root, baseline_failures=["tests/test_old.py::test_broken"],
+        )
         step.inputs["tests_added"] = ["tests/test_new.py"]
         result = step_handler_call(step, flow)
 
@@ -418,33 +311,30 @@ class TestFixLoopLogic:
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
         """overall_passed should reflect pytest exit code, not fix logic."""
-        known = {
-            "tests/test_old.py::test_broken": {
-                "reason": "known issue",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, known)
-
         stdout = "tests/test_old.py::test_broken FAILED\n"
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        step, flow = self._make_step_and_flow(
+            project_root, baseline_failures=["tests/test_old.py::test_broken"],
+        )
         result = step_handler_call(step, flow)
 
         # overall_passed reflects actual exit code (False)
         assert step.outputs["test_results"]["overall_passed"] is False
-        # But fix loop is NOT triggered
+        # But fix loop is NOT triggered (the failure is inherited)
         assert result == StepStatus.COMPLETED
 
 
-class TestPreExistingFailuresOutput:
-    """Tests for pre-existing failures in step outputs."""
+class TestInheritedFailuresOutput:
+    """Tests for inherited failures in step outputs and no auto-populate."""
 
-    def _make_step_and_flow(self, project_root):
+    def _make_step_and_flow(self, project_root, baseline_failures=None):
         step = Step(step_type=StepType.TEST, status=StepStatus.PENDING)
-        step.inputs = {"tests_added": [], "is_fix_iteration": False}
+        step.inputs = {
+            "tests_added": [],
+            "is_fix_iteration": False,
+            "baseline_failures": baseline_failures or [],
+        }
 
         flow = FlowInstance(
             flow_id="test-flow-pre",
@@ -467,89 +357,59 @@ class TestPreExistingFailuresOutput:
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_pre_existing_in_outputs(
+    def test_inherited_in_outputs(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """Pre-existing failures should appear in outputs['pre_existing_failures']."""
-        known = {
-            "tests/test_old.py::test_broken": {
-                "reason": "assert 1 == 2",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, known)
-
-        stdout = "tests/test_old.py::test_broken FAILED\n"
+        """Inherited failures appear in outputs (both legacy + new keys)."""
+        stdout = (
+            "FAILED tests/test_old.py::test_broken - assert 1 == 2\n"
+            "tests/test_old.py::test_broken FAILED\n"
+        )
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        step, flow = self._make_step_and_flow(
+            project_root, baseline_failures=["tests/test_old.py::test_broken"],
+        )
         step_handler_call(step, flow)
 
-        pre_existing = step.outputs["pre_existing_failures"]
-        assert len(pre_existing) == 1
-        assert pre_existing[0]["test_id"] == "tests/test_old.py::test_broken"
-        assert pre_existing[0]["reason"] == "assert 1 == 2"
+        for key in ("pre_existing_failures", "inherited_failures"):
+            entries = step.outputs[key]
+            assert len(entries) == 1
+            assert entries[0]["test_id"] == "tests/test_old.py::test_broken"
+            assert "1 == 2" in entries[0]["reason"]
 
     @patch("se3.engine.steps.test._report_pre_existing_issues")
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_known_failures_updated_with_last_seen(
+    def test_introduced_regression_not_persisted(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """Known failures should have last_seen updated."""
-        known = {
-            "tests/test_old.py::test_broken": {
-                "reason": "assert 1 == 2",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, known)
-
-        stdout = "tests/test_old.py::test_broken FAILED\n"
-        mock_run.return_value = self._mock_run_command(False, stdout=stdout)
-
-        step, flow = self._make_step_and_flow(project_root)
-        step_handler_call(step, flow)
-
-        updated = _load_known_failures(project_root)
-        assert "tests/test_old.py::test_broken" in updated
-        # last_seen should be updated (not the old date)
-        assert updated["tests/test_old.py::test_broken"]["last_seen"] != "2026-01-01T00:00:00"
-
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_new_regression_added_to_known(
-        self, mock_detect, mock_run, mock_history, mock_report, project_root,
-    ):
-        """A net-new regression should be added to known_test_failures.json."""
+        """An introduced regression is NOT auto-populated into a known-list file."""
         stdout = (
             "FAILED tests/test_new_reg.py::test_regressed - AssertionError: oops\n"
             "tests/test_new_reg.py::test_regressed FAILED\n"
         )
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        step, flow = self._make_step_and_flow(project_root, baseline_failures=[])
         step_handler_call(step, flow)
 
-        updated = _load_known_failures(project_root)
-        assert "tests/test_new_reg.py::test_regressed" in updated
-        entry = updated["tests/test_new_reg.py::test_regressed"]
-        assert "first_seen" in entry
-        assert "last_seen" in entry
+        kf_path = project_root / "se3" / "state" / "known_test_failures.json"
+        assert not kf_path.exists()
+        # It is classified as introduced, not inherited.
+        tr = step.outputs["test_results"]
+        assert "tests/test_new_reg.py::test_regressed" in tr["introduced_failures"]
+        assert tr["inherited_failures"] == []
 
     @patch("se3.engine.steps.test._report_pre_existing_issues")
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_no_pre_existing_when_all_pass(
+    def test_no_inherited_when_all_pass(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """When all tests pass, pre_existing_failures should be empty."""
+        """When all tests pass, inherited_failures should be empty."""
         stdout = "tests/test_ok.py::test_pass PASSED\n"
         mock_run.return_value = self._mock_run_command(True, stdout=stdout)
 
@@ -557,42 +417,36 @@ class TestPreExistingFailuresOutput:
         step_handler_call(step, flow)
 
         assert step.outputs["pre_existing_failures"] == []
+        assert step.outputs["inherited_failures"] == []
 
     @patch("se3.engine.steps.test._report_pre_existing_issues")
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_report_called_for_pre_existing(
+    def test_report_called_for_inherited(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """_report_pre_existing_issues should be called when pre-existing failures exist."""
-        known = {
-            "tests/test_old.py::test_broken": {
-                "reason": "known issue",
-                "first_seen": "2026-01-01T00:00:00",
-                "last_seen": "2026-01-01T00:00:00",
-            }
-        }
-        _save_known_failures(project_root, known)
-
+        """_report_pre_existing_issues is called once when inherited failures exist."""
         stdout = "tests/test_old.py::test_broken FAILED\n"
         mock_run.return_value = self._mock_run_command(False, stdout=stdout)
 
-        step, flow = self._make_step_and_flow(project_root)
+        step, flow = self._make_step_and_flow(
+            project_root, baseline_failures=["tests/test_old.py::test_broken"],
+        )
         step_handler_call(step, flow)
 
         mock_report.assert_called_once()
         call_args = mock_report.call_args
-        assert len(call_args[0][2]) == 1  # 1 pre-existing failure
+        assert len(call_args[0][2]) == 1  # 1 inherited failure
 
     @patch("se3.engine.steps.test._report_pre_existing_issues")
     @patch("se3.engine.steps.test._record_test_history")
     @patch("se3.engine.steps.test._run_command")
     @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
-    def test_report_not_called_when_no_pre_existing(
+    def test_report_not_called_when_no_inherited(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
-        """_report_pre_existing_issues should NOT be called when no pre-existing failures."""
+        """_report_pre_existing_issues should NOT be called when no inherited failures."""
         stdout = "tests/test_ok.py::test_pass PASSED\n"
         mock_run.return_value = self._mock_run_command(True, stdout=stdout)
 
@@ -600,6 +454,37 @@ class TestPreExistingFailuresOutput:
         step_handler_call(step, flow)
 
         mock_report.assert_not_called()
+
+    @patch("se3.engine.steps.test._report_pre_existing_issues")
+    @patch("se3.engine.steps.test._record_test_history")
+    @patch("se3.engine.steps.test._run_command")
+    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    def test_inherited_issue_filed_once_across_iterations(
+        self, mock_detect, mock_run, mock_history, mock_report, project_root,
+    ):
+        """The inherited-failure issue is filed at most once per flow even across
+        repeated test-step invocations (fix iterations)."""
+        stdout = "tests/test_old.py::test_broken FAILED\n"
+        mock_run.return_value = self._mock_run_command(False, stdout=stdout)
+
+        flow = FlowInstance(
+            flow_id="test-flow-once",
+            task_description="Fix a bug",
+            status=FlowStatus.RUNNING,
+        )
+        flow.change_path = project_root / "se3.yaml"
+
+        for _ in range(3):
+            step = Step(step_type=StepType.TEST, status=StepStatus.PENDING)
+            step.inputs = {
+                "tests_added": [],
+                "is_fix_iteration": False,
+                "baseline_failures": ["tests/test_old.py::test_broken"],
+            }
+            step_handler_call(step, flow)
+
+        mock_report.assert_called_once()
+        assert flow.state.context.get("inherited_failures_filed") is True
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +498,7 @@ def step_handler_call(step, flow):
     mock_config = MagicMock()
     mock_config.command = None
     mock_config.timeout = 300
+    mock_config.critical_tests = []
     mock_config.get_phases_for_run.return_value = []
 
     with patch("se3.config.TestConfig") as MockTestConfig:

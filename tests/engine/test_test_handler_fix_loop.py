@@ -1,12 +1,12 @@
 """Tests for test_handler fix loop trigger logic.
 
-Verifies:
-1. Pre-existing failures do NOT trigger fix loop
+Verifies (baseline-driven, no known_test_failures.json):
+1. Inherited (baseline) failures do NOT trigger fix loop
 2. New test failures DO trigger fix loop
-3. Net-new regressions DO trigger fix loop
-4. Mixed scenario: pre-existing + new failures triggers fix loop
-5. pre_existing_failures written to outputs
-6. known_test_failures.json read/write
+3. Introduced regressions (not in baseline) DO trigger fix loop
+4. Mixed scenario: inherited + new failures triggers fix loop
+5. inherited_failures / introduced_failures written to outputs
+6. known_test_failures.json is no longer auto-populated
 """
 
 from __future__ import annotations
@@ -27,12 +27,21 @@ def _make_flow(tmp_path: Path) -> FlowInstance:
     return flow
 
 
-def _make_step(tests_added: list[str] | None = None, is_fix: bool = False) -> Step:
-    """Create a TEST step with given inputs."""
+def _make_step(
+    tests_added: list[str] | None = None,
+    is_fix: bool = False,
+    baseline_failures: list[str] | None = None,
+) -> Step:
+    """Create a TEST step with given inputs.
+
+    ``baseline_failures`` is the frozen pre-implement baseline the state machine
+    injects; a failure in this set is treated as inherited (not introduced).
+    """
     step = Step(step_type=StepType.TEST)
     step.inputs = {
         "tests_added": tests_added or [],
         "is_fix_iteration": is_fix,
+        "baseline_failures": baseline_failures or [],
     }
     return step
 
@@ -83,20 +92,15 @@ _PATCHES = {
 }
 
 
-class TestFixLoopPreExistingOnly:
-    """Pre-existing failures should NOT trigger fix loop."""
+class TestFixLoopInheritedOnly:
+    """Inherited (baseline) failures should NOT trigger fix loop."""
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
     def test_returns_completed(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        # Setup: test_two is a known failure
-        state_dir = tmp_path / "se3" / "state"
-        state_dir.mkdir(parents=True)
-        known = {"tests/test_a.py::test_two": {"reason": "old bug", "first_seen": "2026-01-01", "last_seen": "2026-01-01"}}
-        (state_dir / "known_test_failures.json").write_text(json.dumps(known))
-
+        # test_two is in the pre-implement baseline → inherited
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
             get_phases_for_run=MagicMock(return_value=[]),
@@ -104,7 +108,7 @@ class TestFixLoopPreExistingOnly:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        step = _make_step()
+        step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
 
         from se3.engine.steps.test import test_handler
         status = test_handler(step, flow)
@@ -112,17 +116,17 @@ class TestFixLoopPreExistingOnly:
         assert status == StepStatus.COMPLETED
         assert step.outputs.get("fix_needed") is None or step.outputs.get("fix_needed") is not True
         assert step.outputs["tests_passed"] is False  # overall_passed still reflects actual result
+        # No introduced failures; the failure is classified as inherited.
+        tr = step.outputs["test_results"]
+        assert tr["introduced_failures"] == []
+        assert tr["inherited_failures"] == ["tests/test_a.py::test_two"]
+        assert tr["tests_blocking"] is False
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
-    def test_writes_pre_existing_to_outputs(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        state_dir = tmp_path / "se3" / "state"
-        state_dir.mkdir(parents=True)
-        known = {"tests/test_a.py::test_two": {"reason": "old bug", "first_seen": "2026-01-01", "last_seen": "2026-01-01"}}
-        (state_dir / "known_test_failures.json").write_text(json.dumps(known))
-
+    def test_writes_inherited_to_outputs(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
             get_phases_for_run=MagicMock(return_value=[]),
@@ -130,25 +134,22 @@ class TestFixLoopPreExistingOnly:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        step = _make_step()
+        step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
 
         from se3.engine.steps.test import test_handler
         test_handler(step, flow)
 
-        pre = step.outputs["pre_existing_failures"]
-        assert len(pre) == 1
-        assert pre[0]["test_id"] == "tests/test_a.py::test_two"
+        # Legacy key retained for back-compat, plus the new explicit alias.
+        for key in ("pre_existing_failures", "inherited_failures"):
+            pre = step.outputs[key]
+            assert len(pre) == 1
+            assert pre[0]["test_id"] == "tests/test_a.py::test_two"
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
-    def test_reports_pre_existing_via_issue_discovery(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        state_dir = tmp_path / "se3" / "state"
-        state_dir.mkdir(parents=True)
-        known = {"tests/test_a.py::test_two": {"reason": "old bug", "first_seen": "2026-01-01", "last_seen": "2026-01-01"}}
-        (state_dir / "known_test_failures.json").write_text(json.dumps(known))
-
+    def test_reports_inherited_via_issue_discovery(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
             get_phases_for_run=MagicMock(return_value=[]),
@@ -156,10 +157,35 @@ class TestFixLoopPreExistingOnly:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        step = _make_step()
+        step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
 
         from se3.engine.steps.test import test_handler
         test_handler(step, flow)
+
+        mock_report.assert_called_once()
+        # Flow-level guard is set so a later test pass does not re-file.
+        assert flow.state.context.get("inherited_failures_filed") is True
+
+    @patch(_PATCHES["report"])
+    @patch(_PATCHES["record"])
+    @patch(_PATCHES["run_cmd"])
+    @patch(_PATCHES["config"])
+    def test_inherited_issue_filed_at_most_once_per_flow(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
+        """Across multiple test-step invocations (fix iterations) on the same
+        flow, the inherited-failure issue is filed at most once."""
+        mock_config.load.return_value = MagicMock(
+            command="python -m pytest -v", timeout=60,
+            get_phases_for_run=MagicMock(return_value=[]),
+        )
+        mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
+
+        flow = _make_flow(tmp_path)
+        from se3.engine.steps.test import test_handler
+
+        # Three separate test-step invocations on the same flow.
+        for _ in range(3):
+            step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
+            test_handler(step, flow)
 
         mock_report.assert_called_once()
 
@@ -189,15 +215,15 @@ class TestFixLoopNewTestFail:
         assert "fix_instructions" in step.outputs
 
 
-class TestFixLoopNetNewRegression:
-    """Net-new regressions (not in known failures) trigger fix loop."""
+class TestFixLoopIntroducedRegression:
+    """Introduced regressions (failures not in the baseline) trigger fix loop."""
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
     def test_returns_revision_needed(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        # No known_test_failures.json → all regression failures are net-new
+        # Empty baseline → every regression failure is introduced
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
             get_phases_for_run=MagicMock(return_value=[]),
@@ -205,28 +231,27 @@ class TestFixLoopNetNewRegression:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        step = _make_step()
+        step = _make_step(baseline_failures=[])
 
         from se3.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
+        tr = step.outputs["test_results"]
+        assert tr["introduced_failures"] == ["tests/test_a.py::test_two"]
+        assert tr["inherited_failures"] == []
+        assert tr["tests_blocking"] is True
 
 
 class TestFixLoopMixedScenario:
-    """Pre-existing + new failures: fix loop triggers (due to new failures)."""
+    """Inherited + new failures: fix loop triggers (due to new failures)."""
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
-    def test_triggers_fix_and_reports_pre_existing(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        # test_two is known, test_fresh is new
-        state_dir = tmp_path / "se3" / "state"
-        state_dir.mkdir(parents=True)
-        known = {"tests/test_a.py::test_two": {"reason": "old bug", "first_seen": "2026-01-01", "last_seen": "2026-01-01"}}
-        (state_dir / "known_test_failures.json").write_text(json.dumps(known))
-
+    def test_triggers_fix_and_reports_inherited(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
+        # test_two is inherited (baseline), test_fresh is a new test
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
             get_phases_for_run=MagicMock(return_value=[]),
@@ -234,7 +259,10 @@ class TestFixLoopMixedScenario:
         mock_run.return_value = _primary_result(False, STDOUT_MIXED)
 
         flow = _make_flow(tmp_path)
-        step = _make_step(tests_added=["tests/test_new.py"])
+        step = _make_step(
+            tests_added=["tests/test_new.py"],
+            baseline_failures=["tests/test_a.py::test_two"],
+        )
 
         from se3.engine.steps.test import test_handler
         status = test_handler(step, flow)
@@ -242,10 +270,13 @@ class TestFixLoopMixedScenario:
         # Fix loop triggers because test_fresh (new test) failed
         assert status == StepStatus.REVISION_NEEDED
 
-        # Pre-existing still reported
-        pre = step.outputs["pre_existing_failures"]
+        # Inherited still surfaced (留痕) and filed once
+        pre = step.outputs["inherited_failures"]
         assert len(pre) == 1
         assert pre[0]["test_id"] == "tests/test_a.py::test_two"
+        tr = step.outputs["test_results"]
+        assert "tests/test_new.py::test_fresh" in tr["introduced_failures"]
+        assert tr["inherited_failures"] == ["tests/test_a.py::test_two"]
         mock_report.assert_called_once()
 
 
@@ -272,18 +303,20 @@ class TestFixLoopAllPass:
         assert status == StepStatus.COMPLETED
         assert step.outputs["tests_passed"] is True
         assert step.outputs["pre_existing_failures"] == []
+        assert step.outputs["inherited_failures"] == []
         mock_report.assert_not_called()
 
 
-class TestKnownFailuresPersistence:
-    """known_test_failures.json is read and written correctly."""
+class TestNoAutoPopulate:
+    """known_test_failures.json is no longer read or written (the laundering
+    vector is removed; the baseline is the sole exemption source)."""
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
-    def test_new_regression_saved(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        """A net-new regression failure gets persisted to known failures."""
+    def test_regression_failure_does_not_create_known_file(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
+        """A regression failure must NOT auto-populate known_test_failures.json."""
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
             get_phases_for_run=MagicMock(return_value=[]),
@@ -291,32 +324,31 @@ class TestKnownFailuresPersistence:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        step = _make_step()
+        step = _make_step(baseline_failures=[])
 
         from se3.engine.steps.test import test_handler
         test_handler(step, flow)
 
         kf_path = tmp_path / "se3" / "state" / "known_test_failures.json"
-        assert kf_path.exists()
-        data = json.loads(kf_path.read_text())
-        assert "tests/test_a.py::test_two" in data
+        assert not kf_path.exists()
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])
     @patch(_PATCHES["run_cmd"])
     @patch(_PATCHES["config"])
-    def test_existing_failure_last_seen_updated(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
-        """A known failure's last_seen is updated when seen again."""
+    def test_existing_known_file_left_untouched(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
+        """A pre-existing known_test_failures.json is never written/updated."""
         state_dir = tmp_path / "se3" / "state"
         state_dir.mkdir(parents=True)
-        known = {
+        original = {
             "tests/test_a.py::test_two": {
                 "reason": "old bug",
                 "first_seen": "2026-01-01T00:00:00",
                 "last_seen": "2026-01-01T00:00:00",
             },
         }
-        (state_dir / "known_test_failures.json").write_text(json.dumps(known))
+        kf_path = state_dir / "known_test_failures.json"
+        kf_path.write_text(json.dumps(original))
 
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60,
@@ -325,16 +357,13 @@ class TestKnownFailuresPersistence:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        step = _make_step()
+        step = _make_step(baseline_failures=[])
 
         from se3.engine.steps.test import test_handler
         test_handler(step, flow)
 
-        data = json.loads((state_dir / "known_test_failures.json").read_text())
-        entry = data["tests/test_a.py::test_two"]
-        # first_seen preserved, last_seen updated
-        assert entry["first_seen"] == "2026-01-01T00:00:00"
-        assert entry["last_seen"] != "2026-01-01T00:00:00"
+        # File content is byte-for-byte unchanged (not consulted, not rewritten).
+        assert json.loads(kf_path.read_text()) == original
 
 
 def _timeout_result(timeout: int) -> dict:
