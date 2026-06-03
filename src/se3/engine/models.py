@@ -198,6 +198,17 @@ class State:
     fix_iterations: int = 0
     fix_history: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Pre-implement test baseline: the set of test IDs that were already
+    # failing *before* this flow's implement step modified anything. Used by
+    # the test / verify_spec steps to distinguish inherited (pre-existing)
+    # failures from failures this session introduced. Tri-state semantics that
+    # MUST round-trip through persistence so ``--resume`` does not re-measure
+    # against a different snapshot:
+    #   None  -> baseline not yet captured (do not treat any failure as inherited)
+    #   []    -> baseline captured, zero failures at flow start
+    #   [...] -> baseline captured, these specific test IDs were already failing
+    baseline_failures: Optional[List[str]] = None
+
     def get_current_step(self) -> Optional[Step]:
         """Get the currently active step."""
         if self.current_step_id:
@@ -337,6 +348,7 @@ class State:
             "review_iterations": self.review_iterations,
             "fix_iterations": self.fix_iterations,
             "fix_history": self.fix_history,
+            "baseline_failures": self.baseline_failures,
         }
 
     @classmethod
@@ -360,6 +372,11 @@ class State:
             review_iterations=data.get("review_iterations", {}),
             fix_iterations=data.get("fix_iterations", 0),
             fix_history=loaded_history,
+            # Tri-state: a missing key (older engine.json) deserializes to None
+            # ("not yet captured"), while an explicit [] round-trips as "captured,
+            # no failures". data.get() naturally preserves both — [] is falsy but
+            # is NOT substituted with the default, so the two states stay distinct.
+            baseline_failures=data.get("baseline_failures"),
         )
         # Keep ``state.context['fix_history']`` consistent with the clamped
         # list — ``increment_fix_iteration`` mirrors fix_history into context,

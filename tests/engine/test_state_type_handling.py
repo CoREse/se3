@@ -100,6 +100,68 @@ class TestStateInitialization:
         assert state.context.get("explicit_type") == "feature"
 
 
+class TestBaselineFailuresPersistence:
+    """Tri-state round-trip for State.baseline_failures (None / [] / [...])."""
+
+    def test_default_is_none(self):
+        """A fresh State has no baseline captured yet."""
+        assert State().baseline_failures is None
+
+    def test_none_round_trips(self):
+        """None ('not yet captured') survives serialization as None."""
+        state = State()
+        data = state.to_dict()
+        assert data["baseline_failures"] is None
+        restored = State.from_dict(data)
+        assert restored.baseline_failures is None
+
+    def test_empty_list_round_trips_distinct_from_none(self):
+        """[] ('captured, zero failures') is preserved, NOT collapsed to None."""
+        state = State()
+        state.baseline_failures = []
+        data = state.to_dict()
+        assert data["baseline_failures"] == []
+        restored = State.from_dict(data)
+        assert restored.baseline_failures == []
+        # The two captured-states must stay distinguishable.
+        assert restored.baseline_failures is not None
+
+    def test_populated_list_round_trips(self):
+        """A concrete failure set round-trips intact."""
+        failures = [
+            "tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count",
+            "tests/test_daemon.py::test_flaky",
+        ]
+        state = State()
+        state.baseline_failures = list(failures)
+        data = state.to_dict()
+        restored = State.from_dict(data)
+        assert restored.baseline_failures == failures
+
+    def test_missing_key_loads_as_none(self):
+        """An older engine.json without the key loads as None (no error)."""
+        data = {
+            "current_step_id": None,
+            "step_history": [],
+            "steps": {},
+            "context": {},
+            "selected_steps": [],
+            "current_step_index": 0,
+            "review_iterations": {},
+            # no "baseline_failures" key (pre-baseline build)
+        }
+        state = State.from_dict(data)
+        assert state.baseline_failures is None
+
+    def test_round_trip_through_json(self):
+        """End-to-end JSON dump/load preserves the tri-state."""
+        for value in (None, [], ["a::b", "c::d"]):
+            state = State()
+            state.baseline_failures = value
+            reloaded = State.from_dict(json.loads(json.dumps(state.to_dict())))
+            assert reloaded.baseline_failures == value
+
+
 class TestTypeUpdateAfterAnalyze:
     """Test type updates after analyze step completes."""
 

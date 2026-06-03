@@ -1949,6 +1949,13 @@ DEFAULT_MAX_FIX_ITERATIONS = 100
 DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
 DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
 
+# Dedup set for the "which config source won" load-time log line, keyed by the
+# resolved active config path. ``WorkflowConfig.load`` is called per step, so
+# without dedup the effective-source line would flood the log; logging once per
+# (process, config file) is enough to surface the se3.local.yaml-shadows-se3.yaml
+# ambiguity. Tests use fresh tmp_path dirs (distinct keys), so each gets its line.
+_logged_workflow_source_for: set[str] = set()
+
 
 class ConfigError(ValueError):
     """Raised when project configuration is invalid.
@@ -2100,10 +2107,36 @@ class WorkflowConfig:
             ConfigError: If ``self_check_passes_required`` is < 1 or
                 ``max_fix_iterations`` is negative.
         """
-        data, _src = load_project_yaml(project_root)
+        data, src = load_project_yaml(project_root)
         if not data:
             return cls()
-        return cls.from_dict(data)
+        cfg = cls.from_dict(data)
+        cls._log_effective_source(project_root, src, cfg)
+        return cfg
+
+    @staticmethod
+    def _log_effective_source(
+        project_root: Path, source_label: str, cfg: "WorkflowConfig",
+    ) -> None:
+        """Record which config file the resolved ``max_fix_iterations`` came from.
+
+        ``se3.local.yaml`` shadows ``se3.yaml`` as a whole, so when both set
+        ``workflow.max_fix_iterations`` the committed value can be silently
+        overridden. Surfacing the winning source (and the resolved value) at
+        load time makes that override visible. Deduped per resolved config path
+        so the per-step ``load`` calls do not flood the log.
+        """
+        try:
+            key = str(get_project_config_path(project_root).resolve())
+        except OSError:
+            key = source_label
+        if key in _logged_workflow_source_for:
+            return
+        _logged_workflow_source_for.add(key)
+        logger.info(
+            "workflow config: max_fix_iterations=%d (effective source: %s)",
+            cfg.max_fix_iterations, source_label,
+        )
 
 
 def load_workflow_config(project_root: Optional[Path] = None) -> WorkflowConfig:

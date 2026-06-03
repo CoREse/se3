@@ -84,7 +84,12 @@ test:
     - "tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser"
 
 workflow:
-  max_fix_iterations: 30
+  # Backstop only: with the deterministic pre-implement test baseline, a
+  # correctly-scoped flow no longer loops on inherited failures, so this cap is
+  # rarely reached. Kept at the documented default (100) and intentionally
+  # identical to se3.local.yaml so the local override does not silently shadow a
+  # different value (config loading is whole-file select-one, not key-merge).
+  max_fix_iterations: 100
 
 # Preset Prompts (common-task library)
 # Project-level presets override the built-in presets shipped with se3

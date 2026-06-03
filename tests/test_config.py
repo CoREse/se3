@@ -263,6 +263,60 @@ workflow:
         with pytest.raises(ConfigError, match="must be >= 1"):
             WorkflowConfig.load(tmp_path)
 
+    def test_load_logs_effective_source_se3_yaml(self, tmp_path: Path, caplog):
+        """load() logs which file the resolved max_fix_iterations came from."""
+        import logging as _logging
+
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 42\n", encoding="utf-8"
+        )
+        with caplog.at_level(_logging.INFO):
+            cfg = WorkflowConfig.load(tmp_path)
+        assert cfg.max_fix_iterations == 42
+        msgs = "\n".join(r.getMessage() for r in caplog.records)
+        assert "max_fix_iterations=42" in msgs
+        assert "se3.yaml" in msgs
+
+    def test_load_logs_local_yaml_as_winning_source(self, tmp_path: Path, caplog):
+        """When se3.local.yaml shadows se3.yaml, the log names the local file."""
+        import logging as _logging
+
+        # se3.local.yaml shadows se3.yaml as a whole (select-one, not key-merge).
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 30\n", encoding="utf-8"
+        )
+        (tmp_path / "se3.local.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 100\n", encoding="utf-8"
+        )
+        with caplog.at_level(_logging.INFO):
+            cfg = WorkflowConfig.load(tmp_path)
+        # The local file wins entirely.
+        assert cfg.max_fix_iterations == 100
+        msgs = "\n".join(r.getMessage() for r in caplog.records)
+        assert "max_fix_iterations=100" in msgs
+        assert "se3.local.yaml" in msgs
+
+    def test_load_source_log_deduped_per_path(self, tmp_path: Path, caplog):
+        """Repeated load() calls for the same config path log the source once."""
+        import logging as _logging
+
+        from se3 import config as _config
+
+        # Isolate the module-level dedup set for this path.
+        key = str((tmp_path / "se3.yaml").resolve())
+        _config._logged_workflow_source_for.discard(key)
+
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 7\n", encoding="utf-8"
+        )
+        with caplog.at_level(_logging.INFO):
+            WorkflowConfig.load(tmp_path)
+            WorkflowConfig.load(tmp_path)
+        source_lines = [
+            r for r in caplog.records if "effective source" in r.getMessage()
+        ]
+        assert len(source_lines) == 1
+
 
 # ---------------------------------------------------------------------------
 # load_workflow_config
