@@ -16,6 +16,7 @@ from .plan import plan_handler
 from .plan_tasks import plan_tasks_handler
 from .project_summary import project_summary_handler
 from .self_check import self_check_handler
+from .spec_gate import spec_gate_handler
 from .summarize import summarize_handler
 from .test import test_handler
 from .update_spec import update_spec_handler
@@ -78,6 +79,7 @@ STEP_HANDLERS = {
     StepType.SELF_CHECK: self_check_handler,
     StepType.VERIFY_SPEC: verify_spec_handler,
     StepType.UPDATE_SPEC: update_spec_handler,
+    StepType.SPEC_GATE: spec_gate_handler,
     StepType.VERSION_ANALYZE: version_analyze_handler,
     StepType.COMMIT: commit_handler,
     StepType.SUMMARIZE: summarize_handler,
@@ -95,6 +97,7 @@ __all__ = [
     "implement_handler",
     "test_handler",
     "self_check_handler",
+    "spec_gate_handler",
     "verify_spec_handler",
     "update_spec_handler",
     "version_analyze_handler",

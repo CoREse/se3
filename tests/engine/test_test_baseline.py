@@ -114,7 +114,13 @@ class TestBaselineRoundTripExemptsInheritedFailures:
         step = Step(step_type=StepType.TEST)
         step.inputs = {"tests_added": [], "baseline_failures": sorted(baseline)}
 
-        status = test_step.test_handler(step, flow)
+        # This asserts the capture→exemption round-trip on the surface-not-loop
+        # path, so disable mechanism B's baseline-fix budget (otherwise the
+        # inherited failures would be looped within budget and return
+        # REVISION_NEEDED). The looping path is covered in test_baseline_fix_loop.py.
+        with patch("se3.config.WorkflowConfig") as mock_wf:
+            mock_wf.load.return_value = MagicMock(baseline_fix_max_attempts=0)
+            status = test_step.test_handler(step, flow)
 
         # Every failure was already in the measured baseline → inherited only.
         assert status == StepStatus.COMPLETED

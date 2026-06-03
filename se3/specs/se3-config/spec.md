@@ -138,6 +138,7 @@ would silently ignore the developer's main-repo override.
 - `implement.use_worktree`: Whether the implement step may use per-group worktrees and `impl/*` branches on the DAG parallel path (default: true). Set to `false` to force fully sequential execution on the original branch regardless of DAG topology.
 - `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 100). A value of `0` (or `null`) is the sentinel for "unlimited" — the fix loop will never exit due to the iteration upper bound.
 - `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a fix-loop round before advancing to the next step (default: 1, must be >= 1 — startup fail-fast otherwise)
+- `workflow.baseline_fix_max_attempts`: Independent per-flow cap on how many fix-loop attempts may target inherited (baseline) test failures under mechanism B (default: 3, must be `>= 0`). `0` disables baseline looping entirely; negatives fail-fast; bool/float/non-integer types warn and fall back to the default. Deliberately independent of `workflow.max_fix_iterations` so baseline failures stay bounded even when the global fix loop is unlimited (see Workflow Configuration requirement and the flow-engine *Test Step Configuration and Multi-Phase Execution* mechanism B).
 - `workflow.self_check_convergence_enabled`: Enable cross-fix-loop convergence detection in self_check (default: false). When true, the first self_check instance of each fix-loop round (pass_index=1) compares its issues against the last self_check instance of the previous fix-loop round; identical issues short-circuit to COMPLETED. Same-round self_check instances never compare against each other.
 - `spec_loading.steps.<step_name>`: Per-step spec loading mode — `"items"` (default, header + selected requirements only) or `"full_spec"` (entire spec file). `update_spec` defaults to `full_spec`; all other steps default to `items`.
 - `test.command`: Primary test command override (default: null = auto-detect)
@@ -880,6 +881,7 @@ The system SHALL support workflow-level configuration for the fix loop mechanism
 **Workflow section options:**
 - `workflow.max_fix_iterations`: Maximum number of fix loop iterations before the flow is marked FAILED (default: 100). The fix loop counter is shared across TEST, SELF_CHECK, and VERIFY_SPEC steps. When exhausted, the state machine sets the flow to FAILED status, generates an A-class issue, and stops execution. **Sentinel:** a value of exactly `0` (or `null`, which is normalized to `0` at load time) means "unlimited" — every fix-loop comparison point treats `max_iter == 0` as no upper bound, so the flow is never marked FAILED purely on iteration count and prompts/log lines render the iteration as `N (unlimited)` rather than `N of M`. **Negative values are rejected fail-fast** at config load (mirrors the `< 1` rejection on `self_check_passes_required`), so a typo like `-1` cannot silently disable exhaustion. The default deliberately remains finite (100) to avoid new users accidentally burning tokens; users must set `0`/`null` explicitly to opt into unlimited mode.
 - `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a single fix-loop round before advancing to the next step (default: 1). MUST be an integer `>= 1`. When set to N>1, each fix-loop round repeats the self_check step up to N times: any single instance reporting issues short-circuits to fix-loop immediately (remaining instances are not created). Only after N consecutive clean instances does the flow advance. Values `< 1` (including 0 and negatives) trigger startup fail-fast in `WorkflowConfig` loading.
+- `workflow.baseline_fix_max_attempts`: Independent per-flow bound on how many fix-loop attempts may target inherited (baseline) test failures under mechanism B (default: `3`). MUST be an integer `>= 0`. This budget is **deliberately not shared** with `workflow.max_fix_iterations`: the global cap may be the "unlimited" sentinel (`0`), but baseline failures — which are not this flow's regression and may be fundamentally un-fixable (a missing system library, a flaky test, one needing a human decision) — must always be bounded. A value of `0` disables baseline looping entirely (inherited failures are surfaced but never looped, the historical behavior). **Negative values are rejected fail-fast** at config load (mirrors `self_check_passes_required`'s `< 1` rejection). Non-integer types — YAML booleans (`true`/`false`/`yes`/`no`/`on`/`off`) and floats — log a WARNING and fall back to the default `3`, symmetric with `self_check_passes_required` / `max_fix_iterations` handling of the same types. The per-flow attempt counter lives in the flow state (`flow.state.context["baseline_fix_attempts"]`) and is incremented by the state machine whenever a fix transition targeted baseline failures; once it reaches this cap, the active baseline failures are recorded as given-up in `se3/state/baseline_fix_attempts.json` (a cross-flow persistent memory) and surfaced without further looping (see the flow-engine *Test Step Configuration and Multi-Phase Execution* mechanism B and base *Engine Module Extensions*).
 - `workflow.self_check_convergence_enabled`: Toggle for the cross-fix-loop self_check convergence shortcut (default: `false`). When `false`, the state machine never compares the current round's issues against the previous round's issues, and `_issues_converged` is not invoked. When `true`, only the first self_check instance of a new fix-loop round (pass_index=1) receives `prev_self_check_issues` and participates in the comparison; instances #2..#N within the same round never participate. **NOTE:** the default flipped from on to off in this revision; this flip is intentionally not announced via changelog or startup log because the project requires every issue to be resolved, making convergence-based early exit a no-op on the happy path.
 
 **Local-override shadowing and effective-source logging:**
@@ -895,6 +897,7 @@ When the fix loop branches in `verify_spec` or `self_check`, the step writes `ma
 workflow:
   max_fix_iterations: 100               # Allow up to 100 fix loop iterations (default; use 0 or null for unlimited)
   self_check_passes_required: 3         # Require 3 consecutive clean self_check passes per round
+  baseline_fix_max_attempts: 3          # Per-flow cap on looping inherited baseline failures (default; 0 disables)
   self_check_convergence_enabled: false # Disable cross-round convergence shortcut (default)
 ```
 
@@ -906,7 +909,7 @@ workflow:
 
 #### Scenario: Default workflow configuration
 - **WHEN** no `workflow` section exists in se3.yaml
-- **THEN** the framework uses `max_fix_iterations=100`, `self_check_passes_required=1`, and `self_check_convergence_enabled=false`
+- **THEN** the framework uses `max_fix_iterations=100`, `self_check_passes_required=1`, `baseline_fix_max_attempts=3`, and `self_check_convergence_enabled=false`
 - **AND** self_check executes once per fix-loop round (legacy behavior, single pass)
 - **AND** convergence detection is OFF — even when current and previous round issues are identical, the flow still enters fix-loop
 
@@ -941,6 +944,29 @@ workflow:
 - **WHEN** the framework loads `WorkflowConfig` at startup
 - **THEN** a WARNING is logged identifying the offending value
 - **AND** `max_fix_iterations` falls back to the default (100) — symmetric with `self_check_passes_required` handling of the same types
+
+#### Scenario: Custom baseline_fix_max_attempts
+- **GIVEN** `workflow.baseline_fix_max_attempts: 5` in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig`
+- **THEN** the resolved `baseline_fix_max_attempts` is `5`
+- **AND** mechanism B may attempt to fix inherited baseline failures across up to 5 per-flow fix-loop attempts before recording them as given-up, independently of `max_fix_iterations`
+
+#### Scenario: baseline_fix_max_attempts=0 disables baseline looping
+- **GIVEN** `workflow.baseline_fix_max_attempts: 0` in se3.yaml
+- **WHEN** a flow encounters inherited (baseline) test failures
+- **THEN** mechanism B never loops them — inherited failures are surfaced (留痕) but never enter the fix loop (the historical surface-only behavior)
+
+#### Scenario: Negative baseline_fix_max_attempts fail-fast
+- **GIVEN** `workflow.baseline_fix_max_attempts: -1` (or any negative integer) in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a `ConfigError` is raised before any flow runs
+- **AND** the error message identifies the offending key and value (e.g., "baseline_fix_max_attempts=-1 must be >= 0 (use 0 to disable baseline looping)")
+
+#### Scenario: Boolean / float baseline_fix_max_attempts warns and falls back
+- **GIVEN** `workflow.baseline_fix_max_attempts: true` (a YAML boolean) or any float like `2.5` in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a WARNING is logged identifying the offending value
+- **AND** `baseline_fix_max_attempts` falls back to the default (3) — symmetric with `self_check_passes_required` / `max_fix_iterations` handling of the same types
 
 #### Scenario: Custom N-pass self_check
 - **GIVEN** `workflow.self_check_passes_required: 3` in se3.yaml

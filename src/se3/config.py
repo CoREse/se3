@@ -1948,6 +1948,12 @@ def load_conflict_resolver_config(project_root: Optional[Path] = None) -> Confli
 DEFAULT_MAX_FIX_ITERATIONS = 100
 DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
 DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
+# Per-flow attempt cap for looping on inherited (baseline) test failures
+# (mechanism B). Independent of ``max_fix_iterations`` (which may be the
+# unlimited sentinel 0); baseline failures must stay independently bounded.
+# ``0`` disables baseline looping entirely (inherited failures are surfaced,
+# never looped); negative values are rejected fail-fast at load.
+DEFAULT_BASELINE_FIX_MAX_ATTEMPTS = 3
 
 # Dedup set for the "which config source won" load-time log line, keyed by the
 # resolved active config path. ``WorkflowConfig.load`` is called per step, so
@@ -1974,6 +1980,7 @@ class WorkflowConfig:
     max_fix_iterations: int = DEFAULT_MAX_FIX_ITERATIONS
     self_check_passes_required: int = DEFAULT_SELF_CHECK_PASSES_REQUIRED
     self_check_convergence_enabled: bool = DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
+    baseline_fix_max_attempts: int = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkflowConfig":
@@ -1984,8 +1991,9 @@ class WorkflowConfig:
                 config dict, in which case the ``workflow`` key is extracted).
 
         Raises:
-            ConfigError: If ``self_check_passes_required`` is < 1 or
-                ``max_fix_iterations`` is negative.
+            ConfigError: If ``self_check_passes_required`` is < 1,
+                ``max_fix_iterations`` is negative, or
+                ``baseline_fix_max_attempts`` is negative.
         """
         if not data:
             return cls()
@@ -2090,10 +2098,40 @@ class WorkflowConfig:
                     f"falling back to default {DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED}"
                 )
 
+        # baseline_fix_max_attempts (mechanism B): per-flow cap on looping
+        # inherited (baseline) failures, independent of max_fix_iterations.
+        # ``0`` disables baseline looping; negatives fail-fast. bool/float/
+        # non-integer types warn and fall back to the default — mirrors
+        # ``self_check_passes_required`` handling above.
+        raw_baseline = workflow_data.get(
+            "baseline_fix_max_attempts", DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+        )
+        if isinstance(raw_baseline, bool) or isinstance(raw_baseline, float):
+            logger.warning(
+                f"workflow.baseline_fix_max_attempts={raw_baseline!r} is not a valid integer; "
+                f"falling back to default {DEFAULT_BASELINE_FIX_MAX_ATTEMPTS}"
+            )
+            baseline_attempts = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+        else:
+            try:
+                baseline_attempts = int(raw_baseline)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"workflow.baseline_fix_max_attempts={raw_baseline!r} is not a valid integer; "
+                    f"falling back to default {DEFAULT_BASELINE_FIX_MAX_ATTEMPTS}"
+                )
+                baseline_attempts = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+        if baseline_attempts < 0:
+            raise ConfigError(
+                f"workflow.baseline_fix_max_attempts={baseline_attempts!r} must be >= 0 "
+                f"(use 0 to disable baseline looping)"
+            )
+
         return cls(
             max_fix_iterations=max_fix,
             self_check_passes_required=passes,
             self_check_convergence_enabled=convergence,
+            baseline_fix_max_attempts=baseline_attempts,
         )
 
     @classmethod

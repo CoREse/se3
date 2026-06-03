@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 UPDATE_SPEC_PROMPT = """You are an expert technical writer. Update the project specifications to reflect the changes made.
-
+{redo_guidance}
 ## Task Description
 {task_description}
 
@@ -120,6 +120,18 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     spec_changes = step.inputs.get("spec_changes", [])
     design_doc = step.inputs.get("design_doc", {})
 
+    # Mechanism A — SPEC_GATE redo inputs. When the SPEC_GATE artifact check
+    # rejects this flow's spec edit (a deleted requirement or a structurally
+    # invalid spec), the state machine routes back here with the gate's
+    # diagnosis. Without surfacing it into the prompt the redo would re-issue
+    # an identical LLM call and re-read the already-broken spec from disk,
+    # never repairing the rejected artifact (the loop then just burns the
+    # shared fix-iteration budget until exhaustion). Inject the diagnosis so
+    # the redo knows WHICH requirement was dropped / WHICH rule failed.
+    is_spec_redo = bool(step.inputs.get("is_spec_redo", False))
+    redo_fix_instructions = step.inputs.get("fix_instructions", "")
+    redo_fix_context = step.inputs.get("fix_context", {})
+
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
     # Resolve specs directory for LLM tool access
@@ -132,6 +144,9 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     verification_text = _format_verification(verification_result)
     spec_changes_text = _format_spec_changes(spec_changes)
     design_doc_text = _format_design_doc(design_doc)
+    redo_guidance_text = _format_redo_guidance(
+        is_spec_redo, redo_fix_instructions, redo_fix_context
+    )
 
     # Build prompt
     prompt = UPDATE_SPEC_PROMPT.format(
@@ -141,6 +156,7 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         spec_changes=spec_changes_text,
         design_doc=design_doc_text,
         specs_dir=specs_dir,
+        redo_guidance=redo_guidance_text,
     )
 
     # Append language instruction if configured
@@ -360,6 +376,84 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Update spec step failed")
         step.error_message = f"Spec update failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _format_redo_guidance(
+    is_spec_redo: bool,
+    fix_instructions: str,
+    fix_context: dict[str, Any],
+) -> str:
+    """Format the SPEC_GATE redo guidance section for the prompt.
+
+    Returns an empty string for a normal (first-pass) update_spec run. On a
+    redo (``is_spec_redo`` True) it returns a prominent block carrying the
+    gate's ``fix_instructions`` plus the concrete spec errors / edited / new
+    spec names from ``fix_context`` so the LLM repairs the SPECIFIC rejected
+    artifact instead of re-issuing an identical update.
+
+    The block is deliberately emphatic and placed at the top of the prompt
+    (framework-prefix region) because the on-disk spec the LLM is about to
+    re-read is the already-broken starting point: a no-change redo would leave
+    the deletion / structural violation in place and the gate would reject it
+    again on every iteration.
+    """
+    if not is_spec_redo:
+        return ""
+
+    if not isinstance(fix_context, dict):
+        fix_context = {}
+
+    lines: list[str] = [
+        "",
+        "## ⚠️ SPEC REDO — PREVIOUS update_spec WAS REJECTED",
+        "",
+        "Your previous spec edit did NOT pass the SPEC_GATE artifact check and "
+        "must be redone. The spec file(s) currently on disk are the REJECTED, "
+        "already-broken result of that edit — re-reading them is your starting "
+        "point, but you MUST actively repair the problems below. Simply re-saving "
+        "the current (broken) content will be rejected again.",
+        "",
+    ]
+
+    instructions = (fix_instructions or "").strip()
+    if instructions:
+        lines.append("### Why it was rejected")
+        lines.append(instructions)
+        lines.append("")
+
+    spec_errors = fix_context.get("spec_errors") or []
+    if isinstance(spec_errors, list) and spec_errors:
+        lines.append("### Specific problems to fix")
+        for err in spec_errors:
+            lines.append(f"- {err}")
+        lines.append("")
+
+    edited_specs = fix_context.get("edited_specs") or []
+    new_specs = fix_context.get("new_specs") or []
+    if isinstance(edited_specs, list) and edited_specs:
+        lines.append(f"- Edited specs flagged: {', '.join(str(s) for s in edited_specs)}")
+    if isinstance(new_specs, list) and new_specs:
+        lines.append(f"- New specs flagged: {', '.join(str(s) for s in new_specs)}")
+    if (isinstance(edited_specs, list) and edited_specs) or (
+        isinstance(new_specs, list) and new_specs
+    ):
+        lines.append("")
+
+    lines.append(
+        "### Required actions\n"
+        "1. Open each flagged spec and RESTORE any '### Requirement:' heading "
+        "that was deleted relative to the version before this flow began — the "
+        "se3 spec guardrails forbid deleting or weakening a requirement.\n"
+        "2. Fix every structural violation named above so each spec conforms to "
+        "spec-format v1 (v1 marker first line, '# <name> Specification' title, "
+        "'## Purpose' section with content, at least one '### Requirement:', no "
+        "narrative first line).\n"
+        "3. Re-apply the intended spec update WITHOUT dropping or weakening any "
+        "pre-existing requirement. Use the Edit tool to make these repairs; do "
+        "NOT leave the spec in its current rejected state."
+    )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _format_spec_changes(spec_changes: list[dict[str, Any]]) -> str:

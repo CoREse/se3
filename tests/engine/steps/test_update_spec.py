@@ -10,6 +10,7 @@ from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStat
 from se3.engine.steps.update_spec import (
     _format_spec_changes,
     _format_design_doc,
+    _format_redo_guidance,
     update_spec_handler,
     UPDATE_SPEC_PROMPT,
 )
@@ -130,7 +131,46 @@ class TestFormatDesignDoc:
         assert _format_design_doc(doc) == "No design document available."
 
 
-class TestUpdateSpecPromptPlaceholders:
+class TestFormatRedoGuidance:
+    """Tests for the SPEC_GATE redo-guidance helper (mechanism A)."""
+
+    def test_not_a_redo_returns_empty(self):
+        assert _format_redo_guidance(False, "anything", {"spec_errors": ["x"]}) == ""
+
+    def test_redo_includes_fix_instructions(self):
+        result = _format_redo_guidance(
+            True,
+            "The spec edit deleted a requirement and must be redone.",
+            {},
+        )
+        assert "SPEC REDO" in result
+        assert "REJECTED" in result
+        assert "deleted a requirement and must be redone" in result
+
+    def test_redo_includes_spec_errors_and_names(self):
+        result = _format_redo_guidance(
+            True,
+            "rejected",
+            {
+                "spec_errors": [
+                    "spec 'flow-engine' removed requirement(s): Pre-implement Test Baseline",
+                ],
+                "edited_specs": ["flow-engine"],
+                "new_specs": ["brand-new"],
+            },
+        )
+        assert "removed requirement(s): Pre-implement Test Baseline" in result
+        assert "flow-engine" in result
+        assert "brand-new" in result
+        assert "RESTORE" in result
+
+    def test_redo_tolerates_non_dict_context(self):
+        # A malformed fix_context must not raise — still emit the header.
+        result = _format_redo_guidance(True, "rejected", None)  # type: ignore[arg-type]
+        assert "SPEC REDO" in result
+
+
+
     """Verify prompt contains the expected placeholders."""
 
     def test_spec_changes_placeholder(self):
@@ -152,6 +192,9 @@ class TestUpdateSpecPromptPlaceholders:
         assert "{verification_result}" in UPDATE_SPEC_PROMPT
         assert "{specs_dir}" in UPDATE_SPEC_PROMPT
 
+    def test_redo_guidance_placeholder(self):
+        assert "{redo_guidance}" in UPDATE_SPEC_PROMPT
+
     def test_prompt_renders_with_empty_inputs(self):
         """Prompt renders without error when spec_changes and design_doc are empty defaults."""
         rendered = UPDATE_SPEC_PROMPT.format(
@@ -161,6 +204,7 @@ class TestUpdateSpecPromptPlaceholders:
             spec_changes="No specific spec changes planned.",
             design_doc="No design document available.",
             specs_dir="/tmp/specs",
+            redo_guidance="",
         )
         assert "No specific spec changes planned." in rendered
         assert "No design document available." in rendered
@@ -174,6 +218,7 @@ class TestUpdateSpecPromptPlaceholders:
             spec_changes="- [add_requirement] spec-a: New Req",
             design_doc="### Overview\nRefactor data flow.",
             specs_dir="/project/se3/specs",
+            redo_guidance="",
         )
         assert "[add_requirement] spec-a" in rendered
         assert "### Overview" in rendered
@@ -260,6 +305,53 @@ class TestUpdateSpecHandlerIntegration:
             assert "Refactor the data flow pipeline" in prompt
             assert "**plan.py**" in prompt
             assert "**Use intent, not diff**" in prompt
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    def test_handler_injects_redo_guidance_on_spec_redo(self, _lang, _inj, flow):
+        """A SPEC_GATE redo surfaces the gate's diagnosis into the prompt so the
+        redo repairs the rejected artifact rather than re-issuing an identical call."""
+        step = self._make_step()
+        step.inputs["is_spec_redo"] = True
+        step.inputs["fix_instructions"] = (
+            "The spec edit deleted requirement 'Foo' and must be redone."
+        )
+        step.inputs["fix_context"] = {
+            "reason": "spec_gate_artifact_invalid",
+            "spec_errors": ["spec 'flow-engine' removed requirement(s): Foo"],
+            "edited_specs": ["flow-engine"],
+            "new_specs": [],
+        }
+
+        with patch("se3.engine.steps.update_spec.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"specs_updated": [], "new_capabilities": []}'
+            mock_cls.return_value = mock_caller
+
+            result = update_spec_handler(step, flow)
+
+            prompt = mock_caller.call.call_args[1]["prompt"]
+            assert "SPEC REDO" in prompt
+            assert "deleted requirement 'Foo' and must be redone" in prompt
+            assert "removed requirement(s): Foo" in prompt
+            assert "flow-engine" in prompt
+            assert result == StepStatus.COMPLETED
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    def test_handler_no_redo_guidance_on_normal_run(self, _lang, _inj, flow):
+        """A normal (first-pass) update_spec run carries no redo block."""
+        step = self._make_step()
+
+        with patch("se3.engine.steps.update_spec.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"specs_updated": [], "new_capabilities": []}'
+            mock_cls.return_value = mock_caller
+
+            update_spec_handler(step, flow)
+
+            prompt = mock_caller.call.call_args[1]["prompt"]
+            assert "SPEC REDO" not in prompt
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
     @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")

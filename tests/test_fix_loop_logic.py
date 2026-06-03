@@ -492,7 +492,13 @@ class TestInheritedFailuresOutput:
 # ---------------------------------------------------------------------------
 
 def step_handler_call(step, flow):
-    """Call test_handler with TestConfig mocked to avoid se3.yaml lookup."""
+    """Call test_handler with TestConfig mocked to avoid se3.yaml lookup.
+
+    The baseline-fix budget (mechanism B) is disabled here so these
+    classification tests stay on the surface-not-loop path for *inherited*
+    failures (introduced failures still loop). Mechanism B's in-budget looping
+    is covered in ``tests/engine/test_baseline_fix_loop.py``.
+    """
     from se3.engine.steps.test import test_handler
 
     mock_config = MagicMock()
@@ -501,6 +507,8 @@ def step_handler_call(step, flow):
     mock_config.critical_tests = []
     mock_config.get_phases_for_run.return_value = []
 
-    with patch("se3.config.TestConfig") as MockTestConfig:
+    with patch("se3.config.TestConfig") as MockTestConfig, \
+         patch("se3.config.WorkflowConfig") as MockWorkflowConfig:
         MockTestConfig.load.return_value = mock_config
+        MockWorkflowConfig.load.return_value = MagicMock(baseline_fix_max_attempts=0)
         return test_handler(step, flow)

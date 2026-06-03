@@ -369,7 +369,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 
 ### Requirement: 16-Step Flow Pool
 
-The flow engine SHALL define a fixed pool of 16 steps (the StepType enum), and all flow steps are selected from this pool. The pool consists of 5 active steps + CONFIRM + DISCOVERY + 4 deprecated steps + others. The table below lists the main steps; for the backward-compatible behavior of deprecated steps, see the *Deprecated Step Type Backward Compatibility* requirement.
+The flow engine SHALL define a fixed pool of step types (the StepType enum), and all flow steps are selected from this pool. The pool grew to 17 entries with the addition of the `spec_gate` step (mechanism A — the post-`update_spec` verification gate; see *Post-update_spec Spec Verification Gate*); it consists of 6 active steps + CONFIRM + DISCOVERY + 4 deprecated steps + others. The table below lists the main steps; for the backward-compatible behavior of deprecated steps, see the *Deprecated Step Type Backward Compatibility* requirement.
 
 | Step | Responsibility | LLM Involvement | JSON Mode | Read-Only | Input | Output |
 |------|------|---------|-----------|-----------|------|------|
@@ -381,14 +381,15 @@ The flow engine SHALL define a fixed pool of 16 steps (the StepType enum), and a
 | `self_check` | LLM code review: logic completeness, code robustness, functional omissions, test-uncovered areas (does not check spec compliance) | Yes | TWO_PHASE | **Yes** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | self_check_result, issues (structured list with description, severity, location), actionable_count |
 | `verify_spec` | Check the implementation's consistency with the spec | Yes | EXTRACT | **Yes** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context, **verified** (rule-based, computed by code: `(in_scope_count == 0) and tests_passed` — see *verify_spec Unified Priority and Scope Mechanism*) |
 | `update_spec` | Update the spec to record changes | Yes | EXTRACT | No | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
+| `spec_gate` | **Mechanism A**: post-`update_spec` gate — programmatically validate each edited/new spec, then re-run the full test suite (see *Post-update_spec Spec Verification Gate*) | No (program execution) | - | No | changes_made, baseline_failures, spec_requirement_baseline | gate_passed, gate_route, fix_needed, fix_instructions, fix_context |
 | `version_analyze` | Analyze changes to determine suggested_version (authoritative) + generate commit message | Yes | EXTRACT | **Yes** | changes_made, summary, verification_result, task_type | **suggested_version** (authoritative), bump_type, confidence, reasoning, commit_message |
 | `commit` | Commit changes | No (program execution) | - | No | changes_made, bump_type, commit_message, proposal, updated_specs | commit_hash |
 | `summarize` | Generate a summary and handoff | Yes | Text | **Yes** | all_previous_outputs | summary (Markdown text) |
 | ~~`project_summary`~~ | ~~Generate a project context summary~~ (deprecated — merged into analyze) | Yes | Text | **Yes** | project state | summary string |
 
 **Step sequences for different task types:**
-- `discovery`: discovery → analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **version_analyze** → commit
-- `feature`: analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **version_analyze** → commit
+- `discovery`: discovery → analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit
+- `feature`: analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit
 - `bugfix`: analyze → plan → implement → test → **self_check** → verify_spec → **version_analyze** → commit
 - `review`: analyze → verify_spec
 - `small`: analyze → implement → test → **version_analyze** → commit
@@ -398,7 +399,7 @@ The flow engine SHALL define a fixed pool of 16 steps (the StepType enum), and a
 
 #### Scenario: Feature Task Full Flow
 - **WHEN** the task type is `feature`
-- **THEN** execute the full 10-step flow (plan uses full depth), including the self_check step
+- **THEN** execute the full 11-step flow (plan uses full depth), including the self_check step and the `spec_gate` step inserted between `update_spec` and `version_analyze`
 
 #### Scenario: Small Task Simplified Flow
 - **WHEN** the task type is `small`
@@ -2688,9 +2689,21 @@ The exemption decision is the frozen pre-implement baseline (see *Pre-implement 
 
 - A failing test is **inherited** iff its test-id ∈ `baseline_failures`; otherwise it is **introduced**. `inherited_failures` and `introduced_failures` are written to `step.outputs["test_results"]`. The legacy `pre_existing_failures` output key is retained for backward compatibility with downstream renderers and now carries the baseline-inherited list.
 - New-test failures are always introduced (a test the implement step added cannot have been failing before it existed).
-- `should_fix` (the fix-loop trigger) `= any(new_tests failed) OR any(introduced regression, i.e. a regression failure NOT in baseline_failures) OR unparseable failures OR critical_failed`. **All** introduced failures must be fixed; there is no severity floor and no known-list exemption. `should_fix` is also published as `test_results["tests_blocking"]` so `verify_spec` consumes the exact same baseline-based verdict rather than recomputing it (single source of truth).
+- `should_fix` (the fix-loop trigger) `= any(new_tests failed) OR any(introduced regression, i.e. a regression failure NOT in baseline_failures) OR unparseable failures OR critical_failed OR an in-budget active baseline failure (mechanism B, see below)`. **All** introduced failures must be fixed; there is no severity floor and no known-list exemption. `should_fix` is also published as `test_results["tests_blocking"]` so `verify_spec` consumes the exact same baseline-based verdict rather than recomputing it (single source of truth).
+- The "introduced or critical" group (new-test failures, introduced regressions, unparseable failures, skipped/missing critical acceptance tests) keeps the **normal** fix-loop guardrails with no scope relaxation. The mechanism-B baseline-looping relaxation (see below) is the only exception and applies ONLY to the specifically-annotated baseline failures.
 - The `known_test_failures.json` load/save and auto-population are removed. The store is no longer read or written by the test step; any remaining references in other modules (`issue_discovery.py`, `merge/runtime_sync.py`) are migrated to the baseline or removed.
 - The new-vs-regression split (`_classify_results`) is unchanged.
+
+**Mechanism B — bounded looping of inherited (baseline) failures:**
+
+Historically inherited failures were surfaced (留痕) but **never** looped, so a project's pre-existing red tests stayed red forever (the "baseline zombie" gap: a failure inherited at every flow start is never anyone's regression and is therefore never fixed). Mechanism B lets the fix loop **also** attempt inherited baseline failures, under a strictly bounded, independently-budgeted, and persistently-given-up policy. The shared test core (`run_and_classify_tests`) implements it; both the `test` step and the mechanism-A SPEC_GATE re-test consume the result through the same code path.
+
+- **Active baseline set.** `active_baseline = inherited_failures − given_up`, where `given_up` is the cross-flow persistent set loaded via `baseline_fix_memory.load_given_up` (see base *Engine Module Extensions*). Only failures in `active_baseline` are eligible to loop; a given-up id is surfaced but never re-attempted.
+- **Independent per-flow budget.** Looping is gated by `workflow.baseline_fix_max_attempts` (default `3`; see se3-config *Workflow Configuration*), a budget **independent of** the possibly-unlimited global `workflow.max_fix_iterations`. The per-flow attempt count lives in `flow.state.context["baseline_fix_attempts"]` and is incremented by the state machine each time it transitions to a fix that targeted baseline failures. `baseline_should_loop` is true iff the budget is enabled (`> 0`) and `baseline_fix_attempts < baseline_fix_max_attempts` **and** `active_baseline` is non-empty. A budget of `0` disables baseline looping entirely (pure surface, the historical behavior).
+- **should_fix folds in baseline.** When `baseline_should_loop` is true, `should_fix`/`tests_blocking` is `True` even if the only failures are inherited — so a flow with nothing but in-budget baseline failures enters the fix loop (returns `REVISION_NEEDED`) instead of completing.
+- **Targeted, bounded unlock semantics.** When the loop runs because of baseline failures, `fix_instructions` is **prepended** with a dedicated baseline section (analogous to the critical-acceptance prefix) that: lists the exact active baseline failure ids; states they MUST ALSO be fixed and are to be treated with **equal priority to the main task — worked on in PARALLEL, never preempting it**; and grants a scope relaxation that applies **ONLY to those listed ids** — the agent MAY step beyond the user-prompt's stated scope / focus limits **only as far as needed** to fix the listed baseline failures. The relaxation explicitly does NOT extend to introduced failures or anything else, and it MUST NOT cross any se3 guardrail (no deleting, weakening, or modifying any spec's SHALL/MUST contracts — the spec guardrails apply in full). The section is code-first: do NOT revert a legitimate spec/code change to placate a brittle test; when a test is stale relative to a correct change, the right fix is to UPDATE the test (e.g. `44 → 45`). The annotated ids are also recorded in `fix_context["baseline_failures_targeted"]`, which is the signal the state machine uses to increment `baseline_fix_attempts`; the unlock applies to exactly that annotated set.
+- **Budget exhaustion → persistent give-up.** When baseline looping was enabled and the per-flow budget is exhausted without the active baseline failures being fixed, those ids are recorded as given-up via `baseline_fix_memory.record_given_up` (accumulating the attempt count and a reason) and surfaced **without** looping. This double cap (per-flow budget + cross-flow persistent memory) prevents every subsequent flow from re-attempting the same fundamentally un-fixable baseline failure — a missing system library, a flaky test, or one needing a human decision.
+- **Always leave a trace.** Inherited failures are logged (留痕) every round regardless of whether they are also being looped, and `test_results` carries `inherited_failures`, `introduced_failures`, and `active_baseline` (the inherited−given_up subset) for transparency.
 
 **Critical Acceptance Test skip/missing detection:**
 
@@ -2734,13 +2747,41 @@ False-positive prevention and verbose prerequisite for missing detection:
 - **AND** the verify_spec step is skipped (because the problem was already found by tests)
 - **AND** the fix instructions include diagnostic information intelligently extracted by `_extract_failures_section()` (FAILURES/ERRORS sections), rather than a simple tail truncation of stdout
 
-#### Scenario: Inherited (baseline) failures do not trigger the fix loop
+#### Scenario: Inherited (baseline) failures surfaced when not loopable
 - **WHEN** the test step finishes executing and `overall_passed` is false
 - **AND** every failing test is **inherited** — its test-id is present in the frozen pre-implement `baseline_failures`
+- **AND** none of them is loopable under mechanism B — each is either already given-up (in the cross-flow `baseline_fix_memory`) or the per-flow `baseline_fix_max_attempts` budget is exhausted or disabled (`0`)
 - **THEN** `should_fix`/`tests_blocking` is `False` and the test step returns `COMPLETED` status (does not trigger the fix loop)
 - **AND** `step.outputs["test_results"]["inherited_failures"]` (and the legacy `pre_existing_failures` key) record these inherited failures
 - **AND** a medium-priority issue reporting these inherited failures is created via A-class issue discovery **at most once per flow** (deduped via `context["inherited_failures_filed"]`), never re-filed each iteration
 - **AND** the inherited failures are logged once (留痕) noting they are present in the pre-implement baseline and were NOT introduced by this flow
+
+#### Scenario: In-budget inherited (baseline) failure enters the fix loop (mechanism B)
+- **GIVEN** `workflow.baseline_fix_max_attempts` is `> 0` (default 3)
+- **WHEN** the test step finishes executing and the only failures are **inherited** (in `baseline_failures`)
+- **AND** at least one is in `active_baseline` (inherited minus the given-up set) and the per-flow `baseline_fix_attempts` count is below the budget
+- **THEN** `should_fix`/`tests_blocking` is `True` and the test step returns `REVISION_NEEDED`, entering the fix loop
+- **AND** `fix_instructions` is prepended with a baseline section listing exactly those active baseline failure ids, stating they MUST ALSO be fixed with EQUAL priority to the main task (handled in PARALLEL, not preempting it)
+- **AND** the scope relaxation in that section applies ONLY to the listed baseline ids (it may step beyond the user-prompt's focus limits only as far as needed for them) and explicitly does NOT cross any se3 guardrail SHALL/MUST contract
+- **AND** `fix_context["baseline_failures_targeted"]` records exactly the annotated ids, and the state machine increments `flow.state.context["baseline_fix_attempts"]` on the resulting transition to the fix step
+
+#### Scenario: Baseline-fix budget exhaustion records a persistent give-up
+- **GIVEN** baseline looping was enabled and the per-flow `baseline_fix_attempts` count has reached `workflow.baseline_fix_max_attempts`
+- **WHEN** the test step finishes executing with the same active baseline failures still red
+- **THEN** those ids are recorded as given-up via `baseline_fix_memory.record_given_up` (accumulating the attempt count and a reason), so subsequent flows skip looping them
+- **AND** they are surfaced (留痕) without looping — `should_fix` is `False` for a pure-baseline run at this point
+- **AND** the independent baseline budget is NOT shared with the (possibly unlimited) global `max_fix_iterations`
+
+#### Scenario: Given-up baseline failure is never re-looped across flows
+- **GIVEN** a baseline failure id was recorded as given-up in `se3/state/baseline_fix_attempts.json` by an earlier flow
+- **WHEN** a later flow on the same project finds that test still failing at baseline
+- **THEN** it is excluded from `active_baseline` and the fix loop does NOT re-attempt it
+- **AND** it is still surfaced (留痕) so the failure remains visible
+
+#### Scenario: baseline_fix_max_attempts=0 disables baseline looping
+- **GIVEN** `workflow.baseline_fix_max_attempts: 0` in se3.yaml
+- **WHEN** the test step finishes with only inherited failures
+- **THEN** mechanism B is disabled — `should_fix` is `False` and the inherited failures are surfaced (留痕) without ever entering the fix loop (the historical surface-only behavior)
 
 #### Scenario: Introduced (non-baseline) failure triggers the fix loop
 - **WHEN** the test step finishes executing and at least one failing test is **introduced** — its test-id is NOT in `baseline_failures` (or it is a new-test failure)
@@ -2866,6 +2907,60 @@ The `State.fix_history` list SHALL be capped at `FIX_HISTORY_MAX_ENTRIES` (defin
 - **GIVEN** `test.critical_tests` is non-empty, but this run's main command is not verbose and no per-result output can be parsed (`ran_ids` and `skipped_ids` are both empty)
 - **THEN** missing detection is skipped and `critical_missing` is empty (no false positives)
 - **AND** a warning noting the verbose prerequisite is logged
+
+### Requirement: Post-update_spec Spec Verification Gate
+
+The flow engine SHALL run a `spec_gate` step (mechanism A) immediately after `update_spec` in the `feature` and `discovery` step sequences (statically inserted between `update_spec` and `version_analyze`). The gate closes the root-cause gap whereby a spec edited by `update_spec` (a non-read-only step that uses Edit to rewrite `spec.md`) was followed by **no further test step**, so a spec-content test broken by that edit (e.g. a hard-coded requirement-count assertion) was committed unre-tested and froze into a permanent inherited "zombie" failure for every later flow.
+
+`spec_gate` is a pure program step (`uses_llm=False`, `read_only=False`). It is implemented in `steps/spec_gate.py` (see base *Engine Step Implementations*) and shares the exhaustion bound of the existing fix loop.
+
+**Stable pre-`update_spec` snapshot.** Before the state machine first dispatches `UPDATE_SPEC`, it captures a stable snapshot of every on-disk spec into `flow.state.context["spec_requirement_baseline"]` via `build_spec_requirement_baseline` (the canonical builder, exported from `steps/spec_gate.py` so the state machine and the handler share one format). The snapshot records, per spec, the full `spec.md` content and its ordered `### Requirement:` name list. It is captured **once per flow** and is NOT re-taken before an `update_spec` redo: re-snapshotting after a bad edit landed on disk would let the gate measure non-decrease against an already-corrupted baseline and wave a deletion through. Because no step before `update_spec` writes specs, this snapshot is the flow's true baseline spec state.
+
+**No-op when nothing changed.** The gate diffs the current on-disk specs against the snapshot to classify them into *edited* (present in the snapshot but with changed content) and *new* (absent from the snapshot). When the flow changed no spec at all, the gate is a no-op and returns `COMPLETED`. When the snapshot is missing from context (a sequence without `update_spec`, or an interrupted/legacy flow), the gate cannot trust its edited-vs-new classification and SHALL skip rather than mis-route, returning `COMPLETED`.
+
+**Phase 1 — programmatic artifact check (no LLM, no test-output parsing).** For every edited or new spec, the content MUST pass `spec_validator.validate_spec_structure` (the spec-format v1 contract). For *edited* specs only, the requirement count and name set MUST NOT shrink relative to the snapshot (a new spec has no prior baseline, so only the structural check applies to it). A structural failure, an unparseable spec, or a removed requirement is an **invalid artifact**: the gate returns `REVISION_NEEDED` with `gate_route = "update_spec"` and `fix_instructions` naming the structural / requirement problems, so the flow routes back to `update_spec` to redo the edit (NOT a code fix loop).
+
+**Phase 2 — full re-test (only when the artifact is clean).** The gate re-runs the **entire** test suite through the shared `steps.test.run_and_classify_tests` core — the same command, phases, dynamic timeout, critical-acceptance gate, and inherited-vs-introduced baseline split as the real `test` step (single source of truth). The full suite is run deliberately (`is_fix_iteration=False`): a spec edit can break any spec-content test, including phases marked `in_fix_loop: false`. No static "spec-related subset" is selected, because there is no reliable marker for such a subset and maintaining one would be a brittle coupling (a future opt-in pytest marker is left for later if performance demands it). When the re-test demands a fix (`verdict.should_fix`), the gate returns `REVISION_NEEDED` with `gate_route = "implement"`, entering the existing fix loop (which may edit code or the stale test). The gate is **code-first**: the fix is to update the implementation or the stale test, NEVER to revert a legitimate spec change to placate a brittle test (the correct resolution for a count assertion is to update the test, e.g. `44 → 45`).
+
+**Routing and bounded exhaustion.** The state machine treats `SPEC_GATE` returning `REVISION_NEEDED` as a fix trigger alongside `TEST` / `SELF_CHECK` / `VERIFY_SPEC`, sharing the same global `max_fix_iterations` exhaustion bound, and dispatches by `gate_route`: `update_spec` → an `update_spec` redo (`_transition_to_update_spec_redo`), anything else (default) → the implement fix loop (`_transition_to_fix`). After an `update_spec` redo completes, normal progression lands the flow back on the `spec_gate` step to re-check the redone spec. The shared `max_fix_iterations` cap guarantees both the redo loop and the test fix loop terminate.
+
+#### Scenario: No spec change makes the gate a no-op
+- **GIVEN** a `feature` flow whose `update_spec` step did not change any `spec.md`
+- **WHEN** the `spec_gate` step executes
+- **THEN** it detects no edited and no new specs and returns `COMPLETED` (`gate_passed=true`, `gate_skipped=true`), running neither the artifact check nor the re-test
+
+#### Scenario: Invalid spec artifact routes back to update_spec
+- **GIVEN** `update_spec` edited a spec so that it fails `validate_spec_structure` or dropped a `### Requirement:` present in the pre-`update_spec` snapshot
+- **WHEN** the `spec_gate` step runs its phase-1 artifact check
+- **THEN** the gate returns `REVISION_NEEDED` with `gate_route = "update_spec"`
+- **AND** `fix_instructions` names the structural / requirement-deletion problems and instructs the redo to re-apply the intended update without dropping or weakening any pre-existing requirement
+- **AND** the state machine routes the flow back to `update_spec` for a redo, then back into `spec_gate` to re-check
+
+#### Scenario: Requirement non-decrease measured against the stable flow-start baseline
+- **GIVEN** the pre-`update_spec` snapshot recorded N requirements for an edited spec
+- **WHEN** the gate parses the current spec and finds fewer than N requirements, or a snapshot requirement name is absent
+- **THEN** the gate flags the spec as having lost requirement(s) and routes back to `update_spec`
+- **AND** the snapshot is the one captured once before the first `UPDATE_SPEC` dispatch (never re-taken on a redo), so a bad edit already on disk cannot become the comparison baseline
+
+#### Scenario: Clean artifact triggers a full re-test
+- **GIVEN** every edited/new spec passes the phase-1 artifact check
+- **WHEN** the gate runs phase 2
+- **THEN** it re-runs the entire test suite through the shared `run_and_classify_tests` core (full suite, not a fix-iteration subset), using the same baseline split as the `test` step
+
+#### Scenario: Spec edit that breaks a test routes to implement (code-first)
+- **GIVEN** the phase-1 artifact check passed but the full re-test surfaces an introduced (non-baseline) failure caused by the spec edit (e.g. a hard-coded `== 44` requirement-count assertion now sees 45)
+- **WHEN** the gate evaluates the re-test verdict
+- **THEN** the gate returns `REVISION_NEEDED` with `gate_route = "implement"`, entering the existing fix loop
+- **AND** the guidance is code-first: update the implementation or the stale test (e.g. `44 → 45`), and do NOT revert the legitimate spec change to satisfy the brittle test
+
+#### Scenario: Missing snapshot skips the gate safely
+- **GIVEN** `flow.state.context` has no `spec_requirement_baseline` (e.g. a sequence without `update_spec`, or a legacy/interrupted flow)
+- **WHEN** the `spec_gate` step executes
+- **THEN** it logs a warning and returns `COMPLETED` without attempting an edited-vs-new classification, rather than risk a mis-route
+
+#### Scenario: Gate fix loops share the global exhaustion bound
+- **WHEN** repeated `spec_gate` redos or implement fixes are triggered
+- **THEN** they count toward the same global `workflow.max_fix_iterations` counter as the TEST / SELF_CHECK / VERIFY_SPEC fix loop, so the gate cannot loop unbounded
 
 ### Requirement: Test Dynamic Timeout
 

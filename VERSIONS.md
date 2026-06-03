@@ -10,6 +10,15 @@
 
 
 
+
+## 8.4.0 - 2026-06-03
+
+- Add a post-update_spec verification gate (mechanism A): after a flow edits spec.md, validate the spec structure and ensure requirements are not silently dropped, then re-run the full test suite so spec-content regressions are caught before commit.
+- Route gate failures programmatically: invalid/parse-broken/requirement-losing artifacts go back to update_spec, while red tests enter the existing fix loop under code-first rules (fix the test, do not revert a legitimate spec change).
+- Fold inherited baseline test failures into the bounded fix loop (mechanism B): pre-existing failures are now actively repaired with parallel, equal-priority instructions instead of merely surfaced.
+- Add workflow.baseline_fix_max_attempts config option (default 3; 0 disables) governing an independent budget for baseline fixes, separate from max_fix_iterations.
+- Persist per-test_id give-up memory (se3/state/baseline_fix_attempts.json) so genuinely unfixable baseline failures (environment, flaky, needs-human) are not retried every flow.
+- Scope baseline-fix unlock narrowly: relaxed focus applies only to annotated baseline failures and never crosses se3 guardrail SHALL/MUST contracts; introduced failures keep the existing guardrails.
 ## 8.3.0 - 2026-06-03
 
 - Document the 8.0.0 webui/central-server authentication flow end-to-end in docs/daemon-and-server.md and its Chinese mirror (server.auth providers, fail-closed startup, sqlite identity persistence, bootstrap-token break-glass admin, local user creation, owner daemon-key issuance, and owner-isolated visibility)

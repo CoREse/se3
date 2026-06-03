@@ -56,6 +56,7 @@ class StepType(Enum):
     SELF_CHECK = "self_check"  # Code self-review: logic completeness and robustness
     VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency
     UPDATE_SPEC = "update_spec"  # Update spec to record changes
+    SPEC_GATE = "spec_gate"  # Mechanism A: post-update_spec artifact gate + full re-test
     VERSION_ANALYZE = "version_analyze"  # Analyze changes to determine version bump type
     COMMIT = "commit"  # Commit changes (program execution)
     SUMMARIZE = "summarize"  # Generate summary and handoff
@@ -615,6 +616,20 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": ["changes_made", "verification_result", "spec_changes", "design_doc"],
         "outputs": ["updated_specs"],
     },
+    StepType.SPEC_GATE: {
+        "name": "spec_gate",
+        "description": (
+            "Mechanism A: post-update_spec gate. Validates each edited/new spec "
+            "(validate_spec_structure + requirement non-decrease for edited specs) "
+            "and, on a clean artifact, re-runs the full test suite. Routes back to "
+            "update_spec on an invalid artifact or to implement on an introduced "
+            "test failure."
+        ),
+        "uses_llm": False,
+        "read_only": False,
+        "inputs": ["changes_made", "baseline_failures", "spec_requirement_baseline"],
+        "outputs": ["gate_passed", "gate_route", "fix_needed", "fix_instructions", "fix_context"],
+    },
     StepType.VERSION_ANALYZE: {
         "name": "version_analyze",
         "description": "Analyze changes to determine SemVer bump type and generate commit message",
@@ -661,6 +676,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.SELF_CHECK,
             StepType.VERIFY_SPEC,
             StepType.UPDATE_SPEC,
+            StepType.SPEC_GATE,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
         ],
@@ -701,6 +717,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.SELF_CHECK,
             StepType.VERIFY_SPEC,
             StepType.UPDATE_SPEC,
+            StepType.SPEC_GATE,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
         ],

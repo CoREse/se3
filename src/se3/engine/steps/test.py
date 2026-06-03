@@ -19,14 +19,52 @@ import logging
 import re
 import shlex
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..baseline_fix_memory import load_given_up, record_given_up
 from ..models import FlowInstance, Step, StepStatus
 from ..truncation import FAILURES_SECTION_MAX_CHARS, FIX_STDERR_TAIL_CHARS, TEST_HISTORY_STDERR_TAIL_CHARS, TEST_HISTORY_STDOUT_TAIL_CHARS
 from .implement import _sanitize_estimated_test_duration
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TestVerdict:
+    """The classified result of one test-suite run.
+
+    The shared core (:func:`run_and_classify_tests`) returns this so that both
+    the ``test`` step handler and mechanism A's SPEC_GATE step can re-run the
+    full suite through one code path (same command, phases, dynamic timeout,
+    critical-gate detection, and baseline provenance split) and consume an
+    identical verdict — a single source of truth that cannot drift between the
+    two callers.
+
+    Fields:
+        test_results: the structured ``test_results`` dict written to
+            ``step.outputs["test_results"]`` verbatim by the handler.
+        overall_passed: whether the run passed (the raw pytest gate, reflecting
+            actual exit status plus the critical-acceptance gate). Written to
+            ``step.outputs["tests_passed"]``.
+        should_fix: the authoritative fix-loop trigger (``tests_blocking``).
+            True for introduced/critical failures AND for in-budget baseline
+            failures (mechanism B).
+        fix_instructions: LLM-facing fix guidance (empty when ``should_fix`` is
+            False).
+        fix_context: structured fix context for the implement step (empty when
+            ``should_fix`` is False).
+        inherited_list: the inherited (baseline) failures surfaced for 留痕 and
+            once-per-flow issue filing (``[{"test_id", "reason"}]``).
+    """
+
+    test_results: Dict[str, Any]
+    overall_passed: bool
+    should_fix: bool
+    fix_instructions: str = ""
+    fix_context: Dict[str, Any] = field(default_factory=dict)
+    inherited_list: List[Dict[str, str]] = field(default_factory=list)
 
 
 def _extract_failures_section(stdout: str, max_chars: int = FAILURES_SECTION_MAX_CHARS) -> str:
@@ -128,9 +166,10 @@ def _render_estimate(value: float | int | None) -> str:
 def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the test step.
 
-    Runs the project's test suite, optionally with additional phases.
-    Classifies results into new_tests and regression based on implement
-    step's tests_added output.
+    Thin shell around the shared :func:`run_and_classify_tests` core: it loads
+    the test config, runs+classifies the suite, then performs the step-level
+    side effects (write outputs, record history, file the inherited-failure
+    issue at most once per flow) and maps the verdict onto a ``StepStatus``.
 
     Args:
         step: The current step being executed
@@ -144,9 +183,97 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     config = TestConfig.load(project_root)
-    tests_added = step.inputs.get("tests_added", [])
-    is_fix_iteration = step.inputs.get("is_fix_iteration", False)
 
+    verdict = run_and_classify_tests(
+        project_root=project_root,
+        flow=flow,
+        tests_added=step.inputs.get("tests_added", []),
+        baseline_failures=step.inputs.get("baseline_failures") or [],
+        is_fix_iteration=step.inputs.get("is_fix_iteration", False),
+        fix_iteration=step.inputs.get("fix_iteration", 0),
+        estimated_test_duration=step.inputs.get("estimated_test_duration"),
+        config=config,
+    )
+
+    # Write structured outputs.
+    step.outputs["test_results"] = verdict.test_results
+    step.outputs["tests_passed"] = verdict.overall_passed
+    # Retain the legacy ``pre_existing_failures`` output key for backward
+    # compatibility with downstream renderers; it now carries baseline-inherited
+    # failures rather than known-list failures.
+    step.outputs["pre_existing_failures"] = verdict.inherited_list
+    step.outputs["inherited_failures"] = verdict.inherited_list
+
+    # Record test results in history (phase_results == test_results["phases"]).
+    _record_test_history(
+        project_root, flow, step,
+        verdict.test_results.get("phases", []),
+        verdict.overall_passed,
+    )
+
+    if not verdict.overall_passed and verdict.should_fix:
+        stderr = verdict.test_results.get("stderr", "") or ""
+        stderr_tail = stderr[-FIX_STDERR_TAIL_CHARS:] if stderr else ""
+        step.error_message = f"Tests failed:\n{stderr_tail}"
+
+    # Report inherited failures via A-class issue discovery — at most ONCE per
+    # flow. Each fix iteration re-runs the test step on the same baseline
+    # failures; without this flow-level guard the same issue would be re-filed
+    # every iteration (the 189-duplicate-issue explosion this guard fixes).
+    if verdict.inherited_list and not flow.state.context.get("inherited_failures_filed"):
+        _report_pre_existing_issues(project_root, flow, verdict.inherited_list)
+        flow.state.context["inherited_failures_filed"] = True
+
+    if verdict.should_fix:
+        step.outputs["fix_needed"] = True
+        step.outputs["fix_instructions"] = verdict.fix_instructions
+        step.outputs["fix_context"] = verdict.fix_context
+        return StepStatus.REVISION_NEEDED
+
+    return StepStatus.COMPLETED
+
+
+def run_and_classify_tests(
+    project_root: Path,
+    flow: FlowInstance,
+    tests_added: List[str],
+    baseline_failures: List[str],
+    is_fix_iteration: bool,
+    fix_iteration: int,
+    estimated_test_duration: Any,
+    config: Any,
+) -> TestVerdict:
+    """Run the full test suite and classify the result into a :class:`TestVerdict`.
+
+    This is the single source of truth shared by the ``test`` step and
+    mechanism A's SPEC_GATE re-test: it runs the primary command + phases with
+    the same dynamic timeout, performs the critical-acceptance gate, splits
+    failures into inherited (baseline) vs introduced, applies mechanism B
+    (bounded looping of inherited baseline failures), and builds the
+    fix_instructions / fix_context for the fix loop.
+
+    It is intentionally decoupled from ``Step`` so callers with a different step
+    object (e.g. SPEC_GATE) can reuse it. Step-level side effects (writing
+    outputs, recording history, the once-per-flow issue filing) stay in the
+    caller; the only persistent side effect performed here is recording a
+    baseline failure as *given up* when its independent budget is exhausted.
+
+    Args:
+        project_root: Project root directory.
+        flow: The flow instance (used to read ``baseline_fix_attempts`` from the
+            flow context for mechanism B's per-flow budget).
+        tests_added: New test file paths from the implement step.
+        baseline_failures: The frozen pre-implement baseline failing test ids.
+        is_fix_iteration: Whether this run is inside a fix iteration (controls
+            phase filtering).
+        fix_iteration: The current fix-loop iteration count (for fix_context).
+        estimated_test_duration: The implement step's runtime estimate (drives
+            the dynamic timeout); may be None / invalid (falls back to config).
+        config: A ``TestConfig`` (command, timeouts, phases, critical_tests).
+
+    Returns:
+        A :class:`TestVerdict`.
+    """
     # Compute dynamic timeout for primary test command.
     # - Minimum floor prevents instantaneous timeouts if the LLM returns a
     #   nonsense estimate (e.g. 0 or 1 second).
@@ -154,7 +281,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     #   it, repeated timeouts cause the LLM to escalate estimated_test_duration
     #   each iteration, which the multiplier then scales further — a hung
     #   test could end up with an hours-long timeout.
-    raw_estimated_test_duration = step.inputs.get("estimated_test_duration")
+    raw_estimated_test_duration = estimated_test_duration
     # Reuse the implement-side sanitizer so the "valid estimate" contract is
     # defined once: any future tightening (NaN, upper sanity bound, …) stays
     # consistent between the producer (implement) and the consumer (test).
@@ -266,21 +393,21 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # single occurrence and was then forgiven forever. The baseline is frozen
     # before implement runs, so an introduced regression can never launder
     # itself into it.
-    baseline_failures = set(step.inputs.get("baseline_failures") or [])
+    baseline_failures_set = set(baseline_failures or [])
 
     all_failed = list(new_tests["failed"]) + list(regression["failed"])
     introduced_failures = [
-        tid for tid in all_failed if tid not in baseline_failures
+        tid for tid in all_failed if tid not in baseline_failures_set
     ]
     inherited_failures = [
-        tid for tid in all_failed if tid in baseline_failures
+        tid for tid in all_failed if tid in baseline_failures_set
     ]
 
     # Introduced regressions: regression failures NOT in the baseline. New-test
     # failures are handled separately below (they are always introduced — a
     # newly added test file does not exist at baseline capture time).
     introduced_regression = [
-        tid for tid in regression["failed"] if tid not in baseline_failures
+        tid for tid in regression["failed"] if tid not in baseline_failures_set
     ]
 
     # Detect timeout in primary test result via the structured flag set by
@@ -289,29 +416,79 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # happened to contain the same text.
     primary_timed_out = bool(primary_result.get("timed_out"))
 
-    # Fix loop triggers on:
-    # 1. New test failures
-    # 2. Introduced regressions (failures NOT in the pre-implement baseline)
-    # 3. Unparseable failures (pytest failed but we can't classify individual tests)
-    # 4. A skipped/missing critical acceptance test
-    # Inherited (baseline) failures do NOT trigger the fix loop — a scoped flow
-    # cannot fix them and looping on them is exactly the infinite-loop bug this
-    # baseline mechanism eliminates.
+    # The "introduced or critical" group is the always-blocking category: a new
+    # test failure, an introduced regression, an unparseable failure, or a
+    # skipped/missing critical acceptance test. These keep the normal fix-loop
+    # guardrails (no scope relaxation).
     unparseable_failure = (
         not overall_passed
         and not regression["failed"]
         and not new_tests["failed"]
         and not critical_failed
     )
-    should_fix = (
+    introduced_or_critical = (
         bool(new_tests["failed"])
         or bool(introduced_regression)
         or unparseable_failure
         or critical_failed
     )
 
-    # 6. Store structured output
-    step.outputs["test_results"] = {
+    # ------------------------------------------------------------------
+    # Mechanism B: bounded looping of inherited (baseline) failures.
+    #
+    # Historically inherited failures were surfaced but NEVER looped, so a
+    # repo's pre-existing red tests stayed red forever (the "baseline zombie"
+    # gap). Mechanism B lets the fix loop ALSO attempt inherited baseline
+    # failures, but only:
+    #   - excluding ids already *given up* on in a previous flow (cross-flow
+    #     persistent memory — avoids every flow re-attempting an unfixable
+    #     failure such as a missing system library / flaky test / human call);
+    #   - within an independently bounded per-flow budget
+    #     (``workflow.baseline_fix_max_attempts``, default 3, NOT shared with
+    #     the possibly-unlimited global ``max_fix_iterations``);
+    #   - ``0`` disables baseline looping entirely (pure surface, as before).
+    # When the budget is exhausted the active baseline failures are recorded as
+    # given-up (so future flows skip them) and surfaced without looping.
+    # ------------------------------------------------------------------
+    active_baseline: List[str] = []
+    baseline_budget = 0
+    baseline_attempts_so_far = 0
+    baseline_should_loop = False
+    baseline_budget_exhausted = False
+    # Only consult the given-up memory and the workflow budget when there are
+    # inherited failures to consider. This keeps the common (no-inherited) path
+    # free of the WorkflowConfig YAML/git resolution, which is both unnecessary
+    # work and a subprocess probe that callers stubbing subprocess would trip on.
+    if inherited_failures:
+        given_up = load_given_up(project_root)
+        active_baseline = [t for t in inherited_failures if t not in given_up]
+        if active_baseline:
+            from ...config import WorkflowConfig
+            baseline_budget = WorkflowConfig.load(project_root).baseline_fix_max_attempts
+            baseline_attempts_so_far = flow.state.context.get("baseline_fix_attempts", 0)
+            if not isinstance(baseline_attempts_so_far, int) or baseline_attempts_so_far < 0:
+                baseline_attempts_so_far = 0
+
+            budget_enabled = baseline_budget > 0
+            baseline_should_loop = (
+                budget_enabled
+                and baseline_attempts_so_far < baseline_budget
+            )
+            # Budget genuinely exhausted (we DID enable looping and burned the
+            # budget) — distinct from "disabled" (budget == 0), which never
+            # attempted anything.
+            baseline_budget_exhausted = (
+                budget_enabled
+                and baseline_attempts_so_far >= baseline_budget
+            )
+
+    # Fix loop triggers on the introduced/critical group OR an in-budget
+    # baseline failure (mechanism B). ``should_fix`` is the authoritative
+    # ``tests_blocking`` verdict consumed by verify_spec.
+    should_fix = introduced_or_critical or baseline_should_loop
+
+    # 6. Build structured test_results dict (written to step.outputs by caller)
+    test_results: Dict[str, Any] = {
         "new_tests": new_tests,
         "regression": regression,
         "phases": phase_results,
@@ -328,10 +505,13 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # fix-loop test gate blocks on exactly the same condition as test.py.
         "introduced_failures": introduced_failures,
         "inherited_failures": inherited_failures,
+        # Mechanism B: the subset of inherited failures still eligible to loop
+        # (inherited − given_up). Surfaced for transparency / downstream use.
+        "active_baseline": list(active_baseline),
         # Authoritative test-gate verdict: True when the test step demands a
-        # fix (introduced failures / unparseable / critical gate). verify_spec
-        # reads this directly so the two steps can never disagree on whether
-        # tests block the flow. Inherited baseline failures never set this.
+        # fix (introduced failures / unparseable / critical gate / in-budget
+        # baseline). verify_spec reads this directly so the two steps can never
+        # disagree on whether tests block the flow.
         "tests_blocking": should_fix,
         # Backward compat fields
         "command": " ".join(primary_command),
@@ -340,12 +520,9 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         "stderr": primary_result["stderr"],
         "passed": primary_result["passed"],
     }
-    step.outputs["tests_passed"] = overall_passed
 
     # 7. Handle inherited (baseline) failures: leave a trace (留痕) every time,
-    #    but never re-trigger the fix loop on them. We deliberately do NOT
-    #    persist anything to disk — the baseline is the single, frozen source of
-    #    the exemption decision, so there is no known-list to auto-populate.
+    #    regardless of whether they are also being looped this round.
     inherited_list: List[Dict[str, str]] = []
     if inherited_failures:
         for tid in inherited_failures:
@@ -354,39 +531,49 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.warning(
             f"{len(inherited_failures)} inherited test failure(s) detected "
             f"(present in the pre-implement baseline, NOT introduced by this "
-            f"flow — surfaced, not looped): {', '.join(inherited_failures)}"
+            f"flow): {', '.join(inherited_failures)}"
         )
 
-    # Retain the legacy ``pre_existing_failures`` output key for backward
-    # compatibility with downstream renderers; it now carries baseline-inherited
-    # failures rather than known-list failures.
-    step.outputs["pre_existing_failures"] = inherited_list
-    step.outputs["inherited_failures"] = inherited_list
-
-    # Record test results in history
-    _record_test_history(project_root, flow, step, phase_results, overall_passed)
+    # Mechanism B budget exhaustion: when we enabled baseline looping but burned
+    # the per-flow budget without fixing the active baseline failures, give up
+    # on them persistently so future flows do not re-attempt the same un-fixable
+    # failures, and surface them (do NOT loop).
+    if baseline_budget_exhausted and not baseline_should_loop:
+        record_given_up(
+            project_root,
+            active_baseline,
+            attempts=baseline_attempts_so_far,
+            reason="exhausted",
+        )
+        logger.warning(
+            "Baseline-fix budget exhausted (%d attempt(s) >= cap %d) for %d "
+            "active baseline failure(s); recorded as given-up and surfaced "
+            "(not looped): %s",
+            baseline_attempts_so_far, baseline_budget, len(active_baseline),
+            ", ".join(active_baseline),
+        )
 
     if overall_passed:
         logger.info("All tests passed")
     elif not should_fix:
         logger.info(
-            "Tests failed but all failures are inherited from the pre-implement "
-            "baseline — not triggering fix loop"
+            "Tests failed but no failure triggers the fix loop (all failures "
+            "are inherited and either given-up or out of budget) — surfacing, "
+            "not looping"
+        )
+    elif baseline_should_loop and not introduced_or_critical:
+        logger.info(
+            "Only inherited (baseline) failures remain; looping within the "
+            "baseline-fix budget (%d/%d): %s",
+            baseline_attempts_so_far, baseline_budget,
+            ", ".join(active_baseline),
         )
     else:
         logger.warning("Tests failed with new/introduced-regression failures")
-        stderr_tail = primary_result["stderr"][-FIX_STDERR_TAIL_CHARS:] if primary_result["stderr"] else ""
-        step.error_message = f"Tests failed:\n{stderr_tail}"
 
-    # 8. Report inherited failures via A-class issue discovery — at most ONCE
-    #    per flow. Each fix iteration re-runs the test step on the same baseline
-    #    failures; without this flow-level guard the same issue would be re-filed
-    #    every iteration (the 189-duplicate-issue explosion this change fixes).
-    if inherited_list and not flow.state.context.get("inherited_failures_filed"):
-        _report_pre_existing_issues(project_root, flow, inherited_list)
-        flow.state.context["inherited_failures_filed"] = True
-
-    # 9. Determine return status: fix loop only for new/introduced failures
+    # 8. Build fix instructions / fix context (only when looping).
+    fix_instructions = ""
+    fix_context: Dict[str, Any] = {}
     if should_fix:
         stdout = primary_result.get("stdout", "")
         stderr = primary_result.get("stderr", "")
@@ -437,18 +624,35 @@ Error output:
                 + fix_instructions
             )
 
-        # Store fix context in outputs for the fix loop
-        fix_context: dict[str, Any] = {
+        # Mechanism B: prepend a dedicated baseline section listing the active
+        # baseline failures the fix loop is also expected to repair this round.
+        # Prepended even when introduced/critical failures also triggered the
+        # loop (the baseline failures are handled in PARALLEL, not preempting).
+        if baseline_should_loop:
+            fix_instructions = (
+                _build_baseline_fix_section(active_baseline) + fix_instructions
+            )
+
+        # Store fix context in outputs for the fix loop. The reason prefers the
+        # introduced/critical category; a pure-baseline loop is "baseline_failure".
+        if critical_failed:
+            reason = "critical_acceptance_not_verified"
+        elif introduced_or_critical:
+            reason = "test_failure"
+        else:
+            reason = "baseline_failure"
+        fix_context = {
             "test_failed": True,
-            "test_results": step.outputs["test_results"],
-            "reason": (
-                "critical_acceptance_not_verified" if critical_failed
-                else "test_failure"
-            ),
-            "iteration": step.inputs.get("fix_iteration", 0) + 1,
+            "test_results": test_results,
+            "reason": reason,
+            "iteration": (fix_iteration or 0) + 1,
             "critical_skipped": critical_skipped,
             "critical_missing": critical_missing,
         }
+        # Mechanism B: record exactly which baseline failures the relaxation
+        # applies to. The unlock semantics apply ONLY to these annotated ids.
+        if baseline_should_loop:
+            fix_context["baseline_failures_targeted"] = list(active_baseline)
 
         # If primary test timed out, include timeout info so implement can
         # provide a higher estimated_test_duration next iteration.
@@ -503,13 +707,47 @@ Error output:
                 "phase-level `timeout` raised in se3.yaml.\n"
             )
 
-        step.outputs["fix_needed"] = True
-        step.outputs["fix_instructions"] = fix_instructions
-        step.outputs["fix_context"] = fix_context
+    return TestVerdict(
+        test_results=test_results,
+        overall_passed=overall_passed,
+        should_fix=should_fix,
+        fix_instructions=fix_instructions,
+        fix_context=fix_context,
+        inherited_list=inherited_list,
+    )
 
-        return StepStatus.REVISION_NEEDED
 
-    return StepStatus.COMPLETED
+def _build_baseline_fix_section(active_baseline: List[str]) -> str:
+    """Build the prepended fix-instruction section for mechanism B.
+
+    Lists the active baseline (inherited) failures the fix loop is also expected
+    to repair, with a tightly-scoped relaxation of the user-prompt focus limits
+    that applies ONLY to these annotated ids — never to introduced failures and
+    never past the se3 guardrails' SHALL/MUST contracts.
+    """
+    bullet_ids = "\n".join(f"  - {tid}" for tid in active_baseline)
+    return (
+        "BASELINE (PRE-EXISTING) TEST FAILURES — MUST ALSO BE FIXED\n\n"
+        "The following test(s) were already failing before this flow began — "
+        "they are baseline / inherited failures, NOT introduced by your change:\n"
+        f"{bullet_ids}\n\n"
+        "These baseline failures MUST ALSO be fixed and are to be treated with "
+        "EQUAL priority to the main task — work on them in PARALLEL; they do NOT "
+        "preempt or push aside the primary task. The following scope relaxation "
+        "applies ONLY to fixing these specifically-listed baseline failures:\n"
+        "  - ONLY these listed baseline failures are in scope for the "
+        "relaxation; introduced failures and everything else keep their normal "
+        "boundaries.\n"
+        "  - You MAY step beyond the user-prompt's stated scope / focus limits, "
+        "but ONLY as far as needed to fix these listed baseline failures.\n"
+        "  - You MUST NOT cross any se3 guardrail: do not delete, weaken, or "
+        "modify the SHALL / MUST contracts of any spec. The spec guardrails "
+        "apply in full.\n"
+        "  - Code-first: do NOT revert a legitimate spec/code change merely to "
+        "placate a brittle test. When a test is stale relative to a correct "
+        "change, the right fix is to UPDATE the test (e.g. 44 → 45), not to undo "
+        "the change.\n\n"
+    )
 
 
 def _extract_failure_reason(stdout: str, test_id: str) -> str:

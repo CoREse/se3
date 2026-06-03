@@ -93,7 +93,20 @@ _PATCHES = {
 
 
 class TestFixLoopInheritedOnly:
-    """Inherited (baseline) failures should NOT trigger fix loop."""
+    """Inherited (baseline) failures should NOT trigger fix loop when the
+    baseline-fix budget (mechanism B) is disabled.
+
+    The budget is disabled (``baseline_fix_max_attempts=0``) for this class so it
+    keeps covering the surface-not-loop path: 留痕, once-per-flow filing, output
+    keys. Mechanism B's in-budget looping path is covered separately in
+    ``tests/engine/test_baseline_fix_loop.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_baseline_budget(self):
+        with patch("se3.config.WorkflowConfig") as mock_wf:
+            mock_wf.load.return_value = MagicMock(baseline_fix_max_attempts=0)
+            yield
 
     @patch(_PATCHES["report"])
     @patch(_PATCHES["record"])

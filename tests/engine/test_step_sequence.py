@@ -36,6 +36,47 @@ class TestSummarizeNotInDefaults:
             assert steps[-1] == StepType.COMMIT
 
 
+class TestSpecGateInDefaults:
+    """Mechanism A: SPEC_GATE is inserted after UPDATE_SPEC (and before
+    VERSION_ANALYZE) in the feature and discovery sequences only — the two
+    task types whose default sequence runs UPDATE_SPEC."""
+
+    @pytest.mark.parametrize("task_type", ["feature", "discovery"])
+    def test_spec_gate_follows_update_spec(self, task_type):
+        steps = get_default_step_sequence(task_type)
+        assert StepType.SPEC_GATE in steps, (
+            f"SPEC_GATE should be in the {task_type} sequence"
+        )
+        assert StepType.UPDATE_SPEC in steps
+        # SPEC_GATE must come immediately after UPDATE_SPEC.
+        update_idx = steps.index(StepType.UPDATE_SPEC)
+        gate_idx = steps.index(StepType.SPEC_GATE)
+        assert gate_idx == update_idx + 1, (
+            "SPEC_GATE must immediately follow UPDATE_SPEC"
+        )
+
+    @pytest.mark.parametrize("task_type", ["feature", "discovery"])
+    def test_spec_gate_precedes_version_analyze(self, task_type):
+        steps = get_default_step_sequence(task_type)
+        gate_idx = steps.index(StepType.SPEC_GATE)
+        version_idx = steps.index(StepType.VERSION_ANALYZE)
+        assert gate_idx < version_idx, (
+            "SPEC_GATE must run before VERSION_ANALYZE"
+        )
+        assert version_idx == gate_idx + 1, (
+            "VERSION_ANALYZE must immediately follow SPEC_GATE"
+        )
+
+    @pytest.mark.parametrize("task_type", ["bugfix", "review", "small", "directive"])
+    def test_spec_gate_absent_when_no_update_spec(self, task_type):
+        """Sequences without UPDATE_SPEC must not carry the gate."""
+        steps = get_default_step_sequence(task_type)
+        assert StepType.UPDATE_SPEC not in steps
+        assert StepType.SPEC_GATE not in steps, (
+            f"SPEC_GATE should not appear in the {task_type} sequence"
+        )
+
+
 class TestStepConfig:
     """StepConfig loading from se3.yaml."""
 

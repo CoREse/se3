@@ -15,6 +15,7 @@ import pytest
 
 from se3.config import (
     ConfigError,
+    DEFAULT_BASELINE_FIX_MAX_ATTEMPTS,
     DEFAULT_MAX_FIX_ITERATIONS,
     DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
     DEFAULT_SELF_CHECK_PASSES_REQUIRED,
@@ -222,6 +223,57 @@ class TestWorkflowConfigFromDict:
         assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
         assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
         assert cfg.self_check_convergence_enabled == DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
+
+
+# ---------------------------------------------------------------------------
+# WorkflowConfig.baseline_fix_max_attempts (mechanism B)
+# ---------------------------------------------------------------------------
+
+class TestBaselineFixMaxAttempts:
+    def test_default_value_is_3(self):
+        assert DEFAULT_BASELINE_FIX_MAX_ATTEMPTS == 3
+        assert WorkflowConfig().baseline_fix_max_attempts == 3
+
+    def test_default_when_workflow_section_missing(self):
+        cfg = WorkflowConfig.from_dict({})
+        assert cfg.baseline_fix_max_attempts == DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+
+    def test_custom_value(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": 5}})
+        assert cfg.baseline_fix_max_attempts == 5
+
+    def test_zero_disables_baseline_loop(self):
+        """0 is a valid value meaning 'do not loop baseline failures'."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": 0}})
+        assert cfg.baseline_fix_max_attempts == 0
+
+    def test_string_coercion(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": "4"}})
+        assert cfg.baseline_fix_max_attempts == 4
+
+    def test_negative_raises(self):
+        with pytest.raises(ConfigError, match="must be >= 0"):
+            WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": -1}})
+
+    def test_negative_string_raises(self):
+        with pytest.raises(ConfigError, match="must be >= 0"):
+            WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": "-2"}})
+
+    def test_bool_warns_and_falls_back(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": True}})
+        assert cfg.baseline_fix_max_attempts == DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+        cfg = WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": False}})
+        assert cfg.baseline_fix_max_attempts == DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+
+    def test_float_warns_and_falls_back(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"baseline_fix_max_attempts": 2.0}})
+        assert cfg.baseline_fix_max_attempts == DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+
+    def test_non_numeric_string_falls_back(self):
+        cfg = WorkflowConfig.from_dict(
+            {"workflow": {"baseline_fix_max_attempts": "not_a_number"}}
+        )
+        assert cfg.baseline_fix_max_attempts == DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------

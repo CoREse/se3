@@ -49,11 +49,21 @@ def _make_flow(tmp_path: Path) -> FlowInstance:
 
 def _run_test_step(flow, tmp_path, baseline_failures):
     """Run the real test step over STDOUT_TWO_REG_FAIL and return its
-    ``test_results`` output dict (the object verify_spec will consume)."""
+    ``test_results`` output dict (the object verify_spec will consume).
+
+    The baseline-fix budget (mechanism B) is disabled here so that *inherited*
+    failures stay on the surface-not-loop path: this file exercises the
+    test.py↔verify_spec verdict seam, which is only reachable when test.py
+    returns COMPLETED (a looping baseline returns REVISION_NEEDED and never
+    reaches verify_spec). Mechanism B's looping path is covered separately in
+    ``tests/engine/test_baseline_fix_loop.py``.
+    """
     with patch("se3.engine.steps.test._report_pre_existing_issues"), \
          patch("se3.engine.steps.test._record_test_history"), \
          patch("se3.engine.steps.test._run_command") as mock_run, \
+         patch("se3.config.WorkflowConfig") as mock_wf, \
          patch("se3.config.TestConfig") as mock_config:
+        mock_wf.load.return_value = MagicMock(baseline_fix_max_attempts=0)
         mock_config.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60, critical_tests=[],
             get_phases_for_run=MagicMock(return_value=[]),
