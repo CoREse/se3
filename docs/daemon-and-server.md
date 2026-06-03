@@ -32,7 +32,14 @@ neither.
    - [Inside the daemon](#inside-the-daemon)
    - [Inside the central server](#inside-the-central-server)
    - [End-to-end: publishing a task from a remote machine](#end-to-end-publishing-a-task-from-a-remote-machine)
-4. [The Web Frontend](#the-web-frontend)
+4. [Authentication & Multi-Tenant Access](#authentication--multi-tenant-access)
+   - [Why authentication is mandatory](#why-authentication-is-mandatory)
+   - [The persistence layer (`~/.se3/server.db`)](#the-persistence-layer-se3serverdb)
+   - [Bootstrapping the first admin (`bootstrap-token`)](#bootstrapping-the-first-admin-bootstrap-token)
+   - [Logging in and creating users](#logging-in-and-creating-users)
+   - [Issuing daemon keys and binding machines](#issuing-daemon-keys-and-binding-machines)
+   - [Owner isolation](#owner-isolation)
+5. [The Web Frontend](#the-web-frontend)
 
 ---
 
@@ -86,32 +93,47 @@ The central server is started through its own `console_scripts` entry point,
 ```bash
 se3-server                                # Bind to 127.0.0.1:8080 (defaults)
 se3-server --host 0.0.0.0 --port 9000     # Listen on all interfaces, port 9000
+se3-server --db-path /var/lib/se3.db      # Override the sqlite store location
 se3-server --log-level debug              # Raise the uvicorn log level
+se3-server bootstrap-token                # Mint a one-time break-glass admin token
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
+| Option / Subcommand | Default | Description |
+|---------------------|---------|-------------|
 | `--host` | `127.0.0.1` | Bind host for the server. Use `0.0.0.0` to accept connections from other machines. |
 | `--port` | `8080` | Bind port. |
+| `--db-path <path>` | `~/.se3/server.db` | Path of the embedded sqlite store backing the identity / auth layer. Overrides the configured `server.db_path` for a single launch. |
 | `--log-level` | `info` | uvicorn log level. |
+| `bootstrap-token` | — | Mint a one-time **break-glass admin token**, print its plaintext to the console exactly once, and store only its hash. The first entrance into a fresh server — see [Authentication & Multi-Tenant Access](#authentication--multi-tenant-access). Re-runnable. |
 
 `se3-server` runs in the foreground and blocks. Run it under a process manager
 (systemd, supervisor, a container, …) for an always-on deployment.
 
+> **The server requires authentication.** Since 8.0.0 every web/REST request and
+> every daemon connection must resolve to an *owner* — there is no anonymous
+> mode. Before the server is useful you must mint a break-glass admin token and
+> log in; see [Authentication & Multi-Tenant Access](#authentication--multi-tenant-access).
+
 ### A typical session
 
 ```bash
-# On a worker machine — start a daemon that dials your central server.
-pip install 'se3[server]'
-se3 daemon start --server-url ws://control.example.com:8080
-se3 daemon status
-
 # On the machine hosting the control plane — start the server.
 pip install 'se3[server]'
 se3-server --host 0.0.0.0 --port 8080
 
-# Then open http://control.example.com:8080 in a browser to watch every
-# connected machine, its flows, and publish new tasks.
+# Mint a one-time break-glass admin token, then open the server in a browser,
+# log in with it, and mint a daemon key for your worker (see Authentication
+# & Multi-Tenant Access below).
+se3-server bootstrap-token
+
+# On a worker machine — start a daemon that dials your central server,
+# carrying the daemon key so the machine is bound to your owner.
+pip install 'se3[server]'
+se3 daemon start --server-url ws://control.example.com:8080 --daemon-key <key>
+se3 daemon status
+
+# Then open http://control.example.com:8080 in a browser, log in, and watch
+# your connected machines, their flows, and publish new tasks.
 
 # When done:
 se3 daemon stop
@@ -279,12 +301,19 @@ signal.
   opening handshake and maintaining a `machine_id → connection` pool with
   heartbeats;
 - keeps an in-memory **multi-machine / multi-flow** aggregated view —
-  `ServerState` — built from the `MachineStatus` snapshots daemons push (this
-  delivery has no database; state is rebuilt as daemons reconnect);
+  `ServerState` — built from the `MachineStatus` snapshots daemons push. This
+  *live* machine / flow / history state deliberately lives only in memory and is
+  rebuilt as daemons reconnect, so it is never written to the persistence layer;
+- persists, in an **embedded single-file sqlite store** (`~/.se3/server.db`,
+  stdlib `sqlite3` — no extra dependency), only the identity facts that a daemon
+  reconnect *cannot* rebuild: owner records, `(provider, external_id)` identity
+  bindings, local password hashes, issued daemon-key hashes, and break-glass
+  token hashes (see [Authentication & Multi-Tenant Access](#authentication--multi-tenant-access));
 - exposes a REST API for querying and acting on that view:
   `GET /api/machines`, `GET /api/machines/{id}/flows`, `GET /api/flows/{id}`,
   `POST /api/flows` (publish a new task), `POST /api/flows/{id}/respond`
-  (answer a flow's pending interjection/call), plus `GET /api/health`;
+  (answer a flow's pending interjection/call), plus `GET /api/health`. Every
+  `/api/*` data route resolves and is filtered by the calling owner;
 - serves the bundled web frontend and a frontend WebSocket on `/ws/ui`.
 
 The daemon↔server wire protocol has a single source of truth — the
@@ -315,21 +344,181 @@ which unblocks the paused flow.
 
 ---
 
+## Authentication & Multi-Tenant Access
+
+Since 8.0.0 the central server is a **multi-tenant control plane**: every
+web/REST request and every daemon connection must resolve to an *owner*, and
+all visibility and control are filtered by that owner. The earlier
+identity-unaware "bare" mode — where anyone reaching the server could list all
+machines and `POST /api/flows` to dispatch `se3 run` on any daemon — has been
+removed.
+
+This section walks the end-to-end setup motion:
+
+```
+se3-server bootstrap-token   →   log in (break-glass)   →   create local users
+        →   each owner mints a daemon key   →   se3 daemon start --daemon-key
+        →   machines & flows are isolated per owner
+```
+
+### Why authentication is mandatory
+
+The server **fails closed**. The set of authentication providers is configured
+by `server.auth.providers` in `se3.yaml`, defaulting to `["local"]` (the
+built-in username + password provider). The recognized names are `local`,
+`oidc`, and `proxy_header`; `oidc` and `proxy_header` are disabled-by-default
+seams not required in v1. If the resolved provider chain ends up with **no
+usable provider** (e.g. `local` is explicitly disabled and nothing else is
+enabled), the server raises `AuthNotConfigured` at startup and **refuses to
+serve** rather than reverting to anonymous access. Likewise, an `/api/*`
+request that resolves to no owner is rejected with **HTTP 401**.
+
+### The persistence layer (`~/.se3/server.db`)
+
+The server's only persistence is an **embedded single-file sqlite store**
+(stdlib `sqlite3`, no extra dependency), at `~/.se3/server.db` by default. Its
+path comes from `server.db_path` in `se3.yaml` and can be overridden for a
+single launch with `se3-server --db-path <path>` (an explicit `--db-path`
+wins). It stores **only the identity facts that a daemon reconnect cannot
+rebuild**:
+
+- owner records (keyed by an opaque, stable internal `owner_id`);
+- `(provider, external_id) → owner_id` identity bindings (one owner may carry
+  many bindings; one external identity maps to one owner);
+- local password hashes (argon2id preferred, bcrypt fallback — never plaintext
+  or a fast hash);
+- issued **daemon-key hashes**;
+- one-time **break-glass token hashes**.
+
+Machine / flow / history live state is *not* stored here — it stays in memory
+and is rebuilt as daemons reconnect.
+
+### Bootstrapping the first admin (`bootstrap-token`)
+
+A fresh server has no accounts, so there is a single IdP-independent entrance:
+
+```bash
+se3-server bootstrap-token
+```
+
+This mints a **one-time break-glass admin token**, prints the plaintext to the
+server console **exactly once**, and persists only its SHA-256 hash (it is
+never logged). Break-glass is a single admin subject used for two orthogonal
+jobs: first-admin bootstrap, and a fail-closed fallback entrance when the
+configured provider is unreachable. The command is **re-runnable** — each run
+mints a fresh token and prior tokens stay valid until consumed or purged. The
+subcommand is dependency-light and works even on a core-only install (without
+the `[server]` extra).
+
+You consume the token from the web login screen, or directly:
+
+```
+POST /api/auth/breakglass     # consume a one-time token → the break-glass admin owner
+```
+
+### Logging in and creating users
+
+Human / UI authentication flows through the provider chain (daemons never
+traverse it). The local provider's login ceremony exchanges a username +
+password for a server-side session cookie:
+
+```
+POST /api/auth/login          # username + password → session cookie
+POST /api/auth/logout         # end the session
+GET  /api/auth/me             # the current OwnerIdentity
+```
+
+Once logged in as an admin (the break-glass admin, or any admin owner), you
+create or invite further local users:
+
+```
+POST /api/users               # admin-only: create / invite a local user
+```
+
+**v1 does not open public self-service registration** — accounts are created by
+the first-boot bootstrap admin plus admin-provisioned users. Multiple distinct
+owners are distinguished by the local provider, never by minting one
+break-glass token per user.
+
+### Issuing daemon keys and binding machines
+
+After logging in, an owner self-services their own **daemon keys** — the
+credential a daemon presents so the server can bind the reporting machine to
+that owner:
+
+```
+POST   /api/daemon-keys           # mint a key bound to the current owner (plaintext returned ONCE)
+GET    /api/daemon-keys           # list the owner's key metadata (hashes, never plaintext)
+DELETE /api/daemon-keys/{key_id}  # revoke a key
+```
+
+The plaintext key is returned **only once** at mint time; only its hash is
+persisted. You then start a daemon with that key so its machine joins the
+owner's trust domain:
+
+```bash
+se3 daemon start --daemon-key <key> --server-url wss://control.example.com
+# or, equivalently:
+SE3_DAEMON_KEY=<key> se3 daemon start --server-url wss://control.example.com
+```
+
+The daemon carries the key in its HELLO handshake; the server resolves
+`key → owner_id`, binds the machine (`MachineRecord.owner_id`), and answers
+`WELCOME(accepted=true)`. A **missing or invalid** key is answered with
+`WELCOME(accepted=false)` (with a key-free reason) and the socket is closed
+without entering the receive loop — the daemon records the rejection and stops
+replaying the rejected key in a tight reconnect loop. The key lives only in
+memory and on the HELLO wire and is never written to the daemon status file or
+any log. A keyless daemon (no `--daemon-key`) stays compatible with local /
+legacy single-tenant operation and is simply not bound to any owner.
+
+The daemon→server reverse trust is carried by **TLS**: the daemon dials a known
+`wss://` address whose server identity is certificate-backed (the server itself
+does not terminate TLS — a reverse proxy does). The application layer builds no
+separate server-authentication mechanism on top of that.
+
+### Owner isolation
+
+Both channels are owner-scoped:
+
+- **The frontend `/ws/ui` and all `/api/*` REST routes** resolve an owner via
+  the provider chain and filter visibility and control by owner. An owner sees
+  only its own machines / flows / history, and may `POST /api/flows`,
+  `respond`, or `interject` **only** against its own daemons. A cross-owner
+  target reads as **not-found (404)** rather than being dispatched.
+- **The daemon `/ws`** resolves the HELLO key to an owner and binds the
+  machine, as described above.
+
+Adding a second auth provider later is purely additive: a new
+`(provider, external_id)` binding is linked (through a trust gate) to an
+existing `owner_id`, so the `owner_id`, the daemon→owner binding, and
+already-issued daemon keys all stay unchanged — daemons never need to be
+re-enrolled.
+
+---
+
 ## The Web Frontend
 
 `se3-server` bundles a small, pure-static web frontend (`index.html`,
 `style.css`, `app.js` — no build step). It is mounted at the server root, so
-once `se3-server` is running you simply open the server's address in a
-browser:
+once `se3-server` is running you open the server's address in a browser:
 
 ```
 http://<server-host>:<port>/        # e.g. http://127.0.0.1:8080/
 ```
 
-The page connects back to the server over the `/ws/ui` WebSocket. The server
-pushes the full machine list down that socket: an initial `snapshot` on
-connect, then a `status_update` every time any daemon's state changes — so the
-view updates in real time without polling.
+**You must log in first.** The control plane is multi-tenant (see
+[Authentication & Multi-Tenant Access](#authentication--multi-tenant-access)),
+so the frontend presents a login screen — sign in with a local username +
+password, or consume a one-time break-glass token on a fresh server — before
+any machines or flows are shown. Everything below is then scoped to **your**
+owner: you only ever see and act on your own machines, flows, and history; a
+cross-owner target reads as not-found.
+
+The page connects back to the server over the owner-scoped `/ws/ui` WebSocket.
+The server pushes that owner's machine list down the socket: an initial
+`snapshot` on connect, then a `status_update` every time any of *your* daemons'
+state changes — so the view updates in real time without polling.
 
 From the frontend you can:
 

@@ -28,7 +28,14 @@ SE3 的核心（`se3 run`、`se3 sync` ……）是一次性的 CLI：每个命�
    - [daemon 内部](#daemon-内部)
    - [中心服务器内部](#中心服务器内部)
    - [端到端:从远端机器发布任务](#端到端从远端机器发布任务)
-4. [网页前端](#网页前端)
+4. [鉴权与多租户访问](#鉴权与多租户访问)
+   - [为什么鉴权是强制的](#为什么鉴权是强制的)
+   - [持久化层(`~/.se3/server.db`)](#持久化层se3serverdb)
+   - [引导首个管理员(`bootstrap-token`)](#引导首个管理员bootstrap-token)
+   - [登录并创建用户](#登录并创建用户)
+   - [签发 daemon key 并绑定机器](#签发-daemon-key-并绑定机器)
+   - [owner 隔离](#owner-隔离)
+5. [网页前端](#网页前端)
 
 ---
 
@@ -79,31 +86,44 @@ se3 daemon status --json                  # 以 JSON 形式输出状态
 ```bash
 se3-server                                # 绑定到 127.0.0.1:8080(默认值)
 se3-server --host 0.0.0.0 --port 9000     # 监听所有网卡,端口 9000
+se3-server --db-path /var/lib/se3.db      # 覆盖 sqlite 存储位置
 se3-server --log-level debug              # 提高 uvicorn 日志级别
+se3-server bootstrap-token                # 铸发一次性的 break-glass admin token
 ```
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
+| 选项 / 子命令 | 默认值 | 说明 |
+|---------------|--------|------|
 | `--host` | `127.0.0.1` | 服务器绑定主机。用 `0.0.0.0` 可接受来自其他机器的连接。 |
 | `--port` | `8080` | 绑定端口。 |
+| `--db-path <path>` | `~/.se3/server.db` | 承载身份 / 鉴权层的嵌入式 sqlite 存储路径。对单次启动覆盖配置中的 `server.db_path`。 |
 | `--log-level` | `info` | uvicorn 日志级别。 |
+| `bootstrap-token` | —— | 铸发一次性的 **break-glass admin token**,把明文向控制台打印且仅打印一次,只存其 hash。这是进入一台全新服务器的首个入口 —— 见 [鉴权与多租户访问](#鉴权与多租户访问)。可重复铸发。 |
 
 `se3-server` 在前台运行并阻塞。若需常驻部署,请把它放在进程管理器(systemd、
 supervisor、容器 ……)下运行。
 
+> **服务器要求鉴权。** 自 8.0.0 起,每个 web/REST 请求与每条 daemon 连接都必须
+> 解析到一个 *owner* —— 不存在匿名模式。在服务器可用之前,你必须铸发一个
+> break-glass admin token 并登录;见 [鉴权与多租户访问](#鉴权与多租户访问)。
+
 ### 一次典型会话
 
 ```bash
-# 在一台工作机上 —— 启动一个拨入你的中心服务器的 daemon。
-pip install 'se3[server]'
-se3 daemon start --server-url ws://control.example.com:8080
-se3 daemon status
-
 # 在托管控制面的机器上 —— 启动服务器。
 pip install 'se3[server]'
 se3-server --host 0.0.0.0 --port 8080
 
-# 然后在浏览器中打开 http://control.example.com:8080,即可观察每台已连接
+# 铸发一个一次性的 break-glass admin token,然后在浏览器中打开服务器、用它登录,
+# 并为你的工作机签发一把 daemon key(见下文「鉴权与多租户访问」)。
+se3-server bootstrap-token
+
+# 在一台工作机上 —— 启动一个拨入你的中心服务器的 daemon,携带 daemon key
+# 以便把该机器绑定到你这个 owner。
+pip install 'se3[server]'
+se3 daemon start --server-url ws://control.example.com:8080 --daemon-key <key>
+se3 daemon status
+
+# 然后在浏览器中打开 http://control.example.com:8080、登录,即可观察你已连接的
 # 机器及其流程,并发布新任务。
 
 # 结束时:
@@ -249,11 +269,17 @@ daemon 是一个单一的、长寿命的 `asyncio` 进程,由四个部件组成:
 - 在 `/ws` 上接受 daemon 的 WebSocket 连接,校验每个 daemon 的开场握手,并维护
   一个带心跳的 `machine_id → 连接` 连接池;
 - 维护一份内存中的**多机 / 多流程**聚合视图 —— `ServerState` —— 由 daemon 推送
-  的 `MachineStatus` 快照构建(本次交付没有数据库;状态随 daemon 重连而重建);
+  的 `MachineStatus` 快照构建。这份机器 / 流程 / 历史的*实时*态刻意只保存在内存中
+  并随 daemon 重连而重建,因此从不写入持久化层;
+- 在一个**嵌入式单文件 sqlite 存储**(`~/.se3/server.db`,标准库 `sqlite3` ——
+  不引入额外依赖)中,只持久化那些 daemon 重连*无法*重建的身份事实:owner 记录、
+  `(provider, external_id)` 身份绑定、本地口令 hash、已签发的 daemon-key hash,
+  以及 break-glass token hash(见 [鉴权与多租户访问](#鉴权与多租户访问));
 - 暴露一组 REST API 用于查询该视图并对其执行操作:`GET /api/machines`、
   `GET /api/machines/{id}/flows`、`GET /api/flows/{id}`、`POST /api/flows`
   (发布新任务)、`POST /api/flows/{id}/respond`(应答某个流程待处理的
-  介入/调用),外加 `GET /api/health`;
+  介入/调用),外加 `GET /api/health`。每个 `/api/*` 数据路由都会解析并按调用方
+  owner 过滤;
 - 提供自带的网页前端,以及位于 `/ws/ui` 的前端 WebSocket。
 
 daemon↔服务器的线上协议有单一事实来源 —— `se3.daemon.protocol` 模块 —— 由两端
@@ -279,19 +305,156 @@ daemon 向该项目的 `se3/calls/` 队列写入一个响应文件,从而解除�
 
 ---
 
+## 鉴权与多租户访问
+
+自 8.0.0 起,中心服务器是一个**多租户控制面**:每个 web/REST 请求与每条 daemon
+连接都必须解析到一个 *owner*,所有可见范围与控制权都按该 owner 过滤。早先那种
+身份无关的「裸」模式 —— 任何能访问到服务器的人都能列出全部机器、并经
+`POST /api/flows` 在任意 daemon 上派发 `se3 run` —— 已被移除。
+
+本节按端到端的搭建动线讲解:
+
+```
+se3-server bootstrap-token   →   登录(break-glass)   →   建本地用户
+        →   每个 owner 签发 daemon key   →   se3 daemon start --daemon-key
+        →   机器与 flow 按 owner 隔离
+```
+
+### 为什么鉴权是强制的
+
+服务器**fail-closed**(无可用 provider 即拒绝服务)。鉴权 provider 集合由
+`se3.yaml` 的 `server.auth.providers` 配置,默认为 `["local"]`(内置的
+用户名 + 口令 provider)。可识别的名称为 `local`、`oidc`、`proxy_header`;其中
+`oidc` 与 `proxy_header` 是默认关闭、v1 不要求的接缝。若解析后的 provider 链
+最终**没有任何可用 provider**(例如 `local` 被显式禁用且无其他 provider 启用),
+服务器会在启动时抛出 `AuthNotConfigured` 并**拒绝服务**,而不是退回匿名访问。
+同理,一个解析不到 owner 的 `/api/*` 请求会以 **HTTP 401** 拒绝。
+
+### 持久化层(`~/.se3/server.db`)
+
+服务器唯一的持久化是一个**嵌入式单文件 sqlite 存储**(标准库 `sqlite3`,不引入
+额外依赖),默认位于 `~/.se3/server.db`。其路径来自 `se3.yaml` 的
+`server.db_path`,并可用 `se3-server --db-path <path>` 对单次启动覆盖(显式的
+`--db-path` 优先)。它**只存储那些 daemon 重连无法重建的身份事实**:
+
+- owner 记录(以不透明、稳定的内部 `owner_id` 为主键);
+- `(provider, external_id) → owner_id` 身份绑定(一个 owner 可携带多条绑定;
+  一个外部身份映射到唯一一个 owner);
+- 本地口令 hash(优先 argon2id,回退 bcrypt —— 绝不明文或快速 hash);
+- 已签发的 **daemon-key hash**;
+- 一次性的 **break-glass token hash**。
+
+机器 / 流程 / 历史的实时态*不*存于此 —— 它们保留在内存中并随 daemon 重连重建。
+
+### 引导首个管理员(`bootstrap-token`)
+
+全新服务器没有任何账号,因此存在一个与 IdP 无关的唯一入口:
+
+```bash
+se3-server bootstrap-token
+```
+
+它会铸发一个**一次性的 break-glass admin token**,把明文向服务器控制台打印且
+**仅打印一次**,只持久化其 SHA-256 hash(永不写入日志)。break-glass 是单一的
+管理员主体,服务于两件正交的事:首个管理员的引导,以及当所配置的 provider 不可达
+时的 fail-closed 兜底入口。该命令**可重复运行** —— 每次铸发一个新 token,先前的
+token 在被消费或清除前仍然有效。该子命令依赖极轻,即便在仅核心安装(未装
+`[server]` extra)上也可运行。
+
+你可在网页登录界面消费该 token,或直接:
+
+```
+POST /api/auth/breakglass     # 消费一次性 token → break-glass admin owner
+```
+
+### 登录并创建用户
+
+人 / UI 侧的鉴权流经 provider 链(daemon 从不走这一层)。本地 provider 的登录
+仪式用用户名 + 口令换取一个服务端 session cookie:
+
+```
+POST /api/auth/login          # 用户名 + 口令 → session cookie
+POST /api/auth/logout         # 结束 session
+GET  /api/auth/me             # 当前的 OwnerIdentity
+```
+
+以管理员身份(break-glass admin,或任一 admin owner)登录后,你可创建 / 邀请
+更多本地用户:
+
+```
+POST /api/users               # 仅限 admin:创建 / 邀请一个本地用户
+```
+
+**v1 不开放公开自助注册** —— 账号由首次引导的 bootstrap admin 加上管理员提供
+(邀请或创建)的用户构成。多个不同 owner 由本地 provider 区分,绝不靠为每个用户
+铸一个 break-glass token。
+
+### 签发 daemon key 并绑定机器
+
+登录之后,owner 自助管理自己的 **daemon key** —— 这是 daemon 出示、使服务器能把
+上报机器绑定到该 owner 的凭据:
+
+```
+POST   /api/daemon-keys           # 铸发一把绑定到当前 owner 的 key(明文仅返回一次)
+GET    /api/daemon-keys           # 列出该 owner 的 key 元数据(hash,绝不返回明文)
+DELETE /api/daemon-keys/{key_id}  # 吊销一把 key
+```
+
+明文 key 仅在铸发时**返回一次**,只持久化其 hash。随后你用该 key 启动一个 daemon,
+让它的机器加入该 owner 的信任域:
+
+```bash
+se3 daemon start --daemon-key <key> --server-url wss://control.example.com
+# 或者等价地:
+SE3_DAEMON_KEY=<key> se3 daemon start --server-url wss://control.example.com
+```
+
+daemon 在它的 HELLO 握手中携带该 key;服务器解析 `key → owner_id`,绑定机器
+(`MachineRecord.owner_id`),并回 `WELCOME(accepted=true)`。**缺失或无效**的 key
+会被以 `WELCOME(accepted=false)`(附一个不含 key 的原因)拒绝并关闭 socket,不进入
+接收循环 —— daemon 会记录该拒绝,并停止在紧密的重连循环里重放被拒的 key。该 key
+只存在于内存与 HELLO 报文中,绝不写入 daemon 状态文件或任何日志。无 key 的 daemon
+(未带 `--daemon-key`)与本地 / 旧版单租户运行保持兼容,只是不绑定到任何 owner。
+
+daemon→服务器的反向信任由 **TLS** 承载:daemon 拨入一个已知的 `wss://` 地址,
+其服务器身份由证书背书(服务器自身不终结 TLS —— 由反向代理终结)。应用层不在其上
+另建一套服务器鉴权机制。
+
+### owner 隔离
+
+两条通道都按 owner 限定范围:
+
+- **前端 `/ws/ui` 与所有 `/api/*` REST 路由**经 provider 链解析出 owner,并按
+  owner 过滤可见范围与控制权。一个 owner 只能看到自己的机器 / 流程 / 历史,且
+  **只能**对自己的 daemon 执行 `POST /api/flows`、`respond`、`interject`。跨
+  owner 的目标读作**未找到(404)**,而不是被派发。
+- **daemon `/ws`** 把 HELLO 中的 key 解析为 owner 并绑定机器,如上所述。
+
+日后增加第二个鉴权 provider 是纯叠加式的:经一道信任门(trust gate)把一条新的
+`(provider, external_id)` 绑定挂到既有 `owner_id` 上,于是 `owner_id`、daemon→owner
+绑定、以及已签发的 daemon key 全部保持不变 —— daemon 无需重新登记。
+
+---
+
 ## 网页前端
 
 `se3-server` 自带一个小巧的、纯静态的网页前端(`index.html`、`style.css`、
 `app.js` —— 无构建步骤)。它被挂载在服务器根路径上,因此只要 `se3-server` 在
-运行,你直接在浏览器中打开服务器地址即可:
+运行,你在浏览器中打开服务器地址即可:
 
 ```
 http://<server-host>:<port>/        # 例如 http://127.0.0.1:8080/
 ```
 
-页面经 `/ws/ui` WebSocket 连回服务器。服务器把完整的机器列表沿该 socket 下推:
-连上时先发一份初始 `snapshot`,此后每当任一 daemon 的状态变化就发一次
-`status_update` —— 因此视图无需轮询即可实时更新。
+**你必须先登录。** 该控制面是多租户的(见
+[鉴权与多租户访问](#鉴权与多租户访问)),因此前端会先呈现一个登录界面 —— 用本地
+用户名 + 口令登录,或在全新服务器上消费一次性的 break-glass token —— 然后才会显示
+任何机器或流程。此后的一切都被限定在**你**这个 owner 的范围内:你只会看到并操作
+自己的机器、流程与历史;跨 owner 的目标读作未找到。
+
+页面经按 owner 限定的 `/ws/ui` WebSocket 连回服务器。服务器把该 owner 的机器列表
+沿该 socket 下推:连上时先发一份初始 `snapshot`,此后每当*你的*任一 daemon 的状态
+变化就发一次 `status_update` —— 因此视图无需轮询即可实时更新。
 
 在前端中你可以:
 
