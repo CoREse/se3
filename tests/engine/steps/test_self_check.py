@@ -934,6 +934,28 @@ class TestValidateAndFilterIssues:
         assert kept == []
         assert stats["out_of_scope_count"] == 1
 
+    def test_out_of_scope_logged_before_drop(self, caplog):
+        """An out_of_scope observation is dropped (not filed) but its
+        substance is logged (留痕) — description + evidence — so a real
+        signal does not disappear silently."""
+        import logging
+
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+
+        issue = self._good_issue(out_of_scope=True)
+        issue["description"] = "pre-existing flakiness in unrelated module"
+        issue["evidence_lines"] = ["src/legacy.py:7"]
+        issue["missing_in"] = []
+        with caplog.at_level(logging.INFO, logger="se3.engine.steps.self_check"):
+            kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["out_of_scope_count"] == 1
+        # The dropped item's description and evidence must appear in the log.
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "out_of_scope" in joined
+        assert "pre-existing flakiness in unrelated module" in joined
+        assert "src/legacy.py:7" in joined
+
     def test_empty_quote_dropped(self):
         from se3.engine.steps.self_check import _validate_and_filter_issues
         bad = self._good_issue()
