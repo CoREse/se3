@@ -9,6 +9,16 @@
 
 
 
+
+## 8.3.0 - 2026-06-03
+
+- Document the 8.0.0 webui/central-server authentication flow end-to-end in docs/daemon-and-server.md and its Chinese mirror (server.auth providers, fail-closed startup, sqlite identity persistence, bootstrap-token break-glass admin, local user creation, owner daemon-key issuance, and owner-isolated visibility)
+- Correct outdated 8.0.0 descriptions in the daemon-and-server docs: the central server now persists identity in ~/.se3/server.db, and the Web frontend requires login rather than being open-and-use
+- Add a concise webui authentication overview to README.md and README.zh.md with a link into the daemon-and-server guide
+- Generalize the doc-sync preset from README-only to reconciling all published user-facing documentation, treating a docs/ tree (or equivalent) as an additive layer that is a no-op when absent
+- Preserve the README item-by-item reconciliation baseline (CLI surface, specs, structure, version-display correction without bumping) intact under the new generalized scope
+- Add a report-only documentation-gap rule to doc-sync so uncovered subsystems are surfaced for human triage and never auto-created, keeping the pass deterministic and re-runnable
+- Extend the localized-naming convention to docs pages (docs/<name>.<lang>.md) and keep all language variants in sync
 ## 8.2.0 - 2026-06-03
 
 - Capture per-call LLM token usage (input/output, cache read, cache creation) and total cost from the Claude CLI result stream

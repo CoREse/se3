@@ -1,0 +1,26 @@
+id: '178'
+title: Pre-existing test failures (1 test)
+description: '**1 pre-existing test failure(s)** detected during flow execution.
+
+  These failures were NOT introduced by the current change.
+
+
+  **Failing tests:**
+
+  - `tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count`:
+  test failed (details in pytest output)
+
+
+  **Task:** 8.0.0新增的webui鉴权要怎么弄？后来我用doc更新也没更新到这方面的内容。
+
+
+  These tests should be investigated and fixed to prevent the broken-window effect.'
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:test-pre-existing
+created_at: '2026-06-03T16:26:28.857105'
+updated_at: '2026-06-03T16:26:28.857105'

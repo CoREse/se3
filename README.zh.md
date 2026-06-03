@@ -121,7 +121,7 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
    绑到自己名下。owner 只能看到自己名下的机器与 flow。
 
 完整的端到端鉴权操作指引与配置键见
-[docs/daemon-and-server.md](docs/daemon-and-server.md#鉴权与多租户访问)。
+[docs/daemon-and-server.zh.md](docs/daemon-and-server.zh.md#鉴权与多租户访问)。
 
 ---
 

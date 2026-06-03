@@ -11,6 +11,10 @@ __pycache__/
 human-calls/
 issues.md
 prompts/
+# But the built-in preset prompts shipped as package data MUST be tracked
+# (the broad `prompts/` rule above would otherwise swallow them, so the
+# root-cause doc-sync fix could never be committed/shipped).
+!/src/se3/templates/prompts/
 e2e
 materials
 
