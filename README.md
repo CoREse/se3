@@ -70,7 +70,7 @@ pip install 'se3[server]'
 pip install 'se3[browser]'
 ```
 
-Current version: **7.8.0**. Two console scripts are installed:
+Current version: **8.0.0**. Two console scripts are installed:
 
 | Script | Purpose |
 |--------|---------|
@@ -119,20 +119,20 @@ se3 run --resume
 ## Command Reference
 
 All commands found below are present in `src/se3/cli.py` or its registered
-sub-typers as of version 7.8.0.
+sub-typers as of version 8.0.0.
 
 ### Top-level commands
 
 | Command | Purpose |
 |---------|---------|
-| `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit). Supports `--resume`, `--flow-id`, `--loop`, `--discover`, `--from-issue`, `--change`, `--type`, `--output-format`. |
+| `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit). Supports `--resume`, `--flow-id`, `--loop`, `--max-iterations`, `--no-worktree`, `--merge`, `--list-loops`, `--discover`, `--from-issue`, `--change`, `--type`, `--preset`, `--output-format`. |
 | `se3 init` | Initialize a new project: writes `se3.yaml`, base spec, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
-| `se3 guardrails <spec-file>` | Run SE3 spec guardrails on a spec file (deleted-requirement / weakened-language detection). Used by CI and by `se3 merge`. |
+| `se3 guardrails <spec-file>` | Run SE3 spec guardrails on a spec file (deleted-requirement / weakened-language detection). Used by CI and by `se3 merge`. Flag: `--original` / `-o <original-file>` to compare against a specific baseline. |
 | `se3 sync` | One-directional code → spec sync. Iterates rounds until convergence. Flags include `--once`, `--max-rounds`, `--stable-rounds`, `--interactive`, `--show-diff`, `--validate-only`, `--resume`, `--force`, `--confirm-cleanup`. |
 | `se3 sync-respond <call-file>` | Apply a human decision file produced by `se3 sync --interactive` for high-impact requirement deletions. |
 | `se3 merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution. Flags: `--strategy fast\|safe\|strict`, `--delete-merged` / `--no-delete-merged`. Runtime data under `se3/` is synchronized per the tiered policy. |
 | `se3 merge-respond <call-file>` | Apply a human decision file produced by `se3 merge` when conflicts or guardrail violations escalated to a human MCP call. |
-| `se3 salvage` | Best-effort recovery of an abnormally terminated session: tolerant state load, commit dangling diff, file follow-up issues, archive the session. |
+| `se3 salvage` | Best-effort recovery of an abnormally terminated session: tolerant state load, commit dangling diff, file follow-up issues, archive the session. Flag: `--project-root` / `-p <path>`. |
 
 ### `se3 history` — flow history
 
@@ -156,7 +156,7 @@ sub-typers as of version 7.8.0.
 
 | Subcommand | Purpose |
 |------------|---------|
-| `se3 daemon start` | Start the daemon. `--foreground` keeps it attached; `--server-url <ws://…>` registers with a central server. |
+| `se3 daemon start` | Start the daemon. `--foreground` keeps it attached; `--server-url <ws://…>` registers with a central server; `--daemon-key <key>` binds this machine to an owner on a multi-tenant server. |
 | `se3 daemon stop` | Stop the running daemon. |
 | `se3 daemon status` | Report run state, machine id, server URL, real connection state, and tracked flows. `--json` for machine-readable output. |
 
@@ -165,8 +165,8 @@ sub-typers as of version 7.8.0.
 ## Directory Layout
 
 Everything under `se3/` is gitignored by default *except* the whitelisted
-sub-paths shown below (specs, issues, scripts, and `version-rules.md` are
-tracked; runtime state and logs are not).
+sub-paths shown below (specs, issues, scripts, prompts, and `version-rules.md`
+are tracked; runtime state and logs are not).
 
 ```
 your-project/
@@ -174,14 +174,15 @@ your-project/
 ├── se3.local.yaml                 # Local override   (gitignored)
 ├── pyproject.toml                 # Single source of truth for project version
 ├── VERSIONS.md                    # Changelog (maintained by documentation-updater)
+├── scripts/                       # Helper scripts
 ├── .gitignore                     # Written / extended by `se3 init`
 └── se3/                           # SE3 runtime root
     ├── specs/                     # ✅ tracked — documented snapshot of code
     │   ├── base/spec.md           # Base project spec, auto-loaded in every flow
     │   └── <capability>/spec.md
     ├── issues/                    # ✅ tracked — open/ and closed/ YAML records
-    ├── scripts/                   # ✅ tracked — e.g. version.py (single version source)
-    ├── version-rules.md           # ✅ tracked — optional natural-language version policy
+    ├── prompts/                   # ✅ tracked — project-level preset prompt bodies (se3 run --preset)
+    ├── version-rules.md           # ✅ tracked — optional, not present by default
     ├── state/                     # ❌ runtime — engine.json, sync_state.json, …
     │   └── archive/               #   archived engine snapshots
     ├── history/                   # ❌ runtime — per-flow per-step jsonl conversations
@@ -197,7 +198,7 @@ your-project/
 
 ## Specs Catalog
 
-SE3 ships 22 self-describing specs under `se3/specs/`. They are the project's
+SE3 ships 24 self-describing specs under `se3/specs/`. They are the project's
 living documentation — a code-first snapshot of what the code currently does —
 which `se3 guardrails` protects from silent weakening within a flow. Use this
 as your index into the codebase.
@@ -217,8 +218,10 @@ as your index into the codebase.
 | `dag-scheduler` | Parallel DAG executor for the implement step (relay worktrees, transitive reduction). |
 | `worktree-management` | Loop / merge worktree lifecycle, branch naming, cleanup of orphaned worktrees. |
 | `requirement-intake` | How new requirements enter SE3 through `se3 run` (intake contract). |
+| `preset-prompts` | Built-in + project two-layer preset prompt registry reused by `se3 run --preset` for standardized recurring tasks. |
 | `spec-format` | Spec-format v1 grammar: marker, headings, `### Requirement:` items, scenarios. |
 | `spec-guardrails` | Rules that block silent weakening / deletion of existing requirements. |
+| `spec-role` | The spec's role as a documented snapshot of code (spec-assistant): code → spec is primary, with no routine manual-edit entry. |
 | `issue-management` | `se3 issue` CLI and `IssueManager` storage API (YAML on disk, state machine). |
 | `issue-discovery` | Automatic discovery of issues from flow execution and unresolved concerns. |
 | `documentation-updater` | `README.md` badge updates and `VERSIONS.md` changelog generation. |
@@ -231,6 +234,6 @@ as your index into the codebase.
 
 ## Version & License
 
-- Version is owned by `pyproject.toml` (`7.8.0`) and bumped by the engine's `version_analyze` + `commit` steps. Do not hand-edit it.
+- Version is owned by `pyproject.toml` (`8.0.0`) and bumped by the engine's `version_analyze` + `commit` steps. Do not hand-edit it.
 - License: Apache-2.0.
 - See [VERSIONS.md](VERSIONS.md) for the full changelog.

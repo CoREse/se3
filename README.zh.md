@@ -1,6 +1,6 @@
 # SE3 — Software Engineering 3.0 框架
 
-![Version](https://img.shields.io/badge/version-7.8.0-blue)
+![Version](https://img.shields.io/badge/version-8.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 
@@ -70,7 +70,7 @@ pip install 'se3[server]'
 pip install 'se3[browser]'
 ```
 
-当前版本：**7.8.0**。安装后会注册两个 console script：
+当前版本：**8.0.0**。安装后会注册两个 console script：
 
 | 脚本 | 用途 |
 |------|------|
@@ -109,20 +109,20 @@ se3 run --resume
 
 ## 命令清单
 
-下表中的所有命令在 7.8.0 版本下均存在于 `src/se3/cli.py` 或其注册的 sub-typer 中。
+下表中的所有命令在 8.0.0 版本下均存在于 `src/se3/cli.py` 或其注册的 sub-typer 中。
 
 ### 顶层命令
 
 | 命令 | 用途 |
 |------|------|
-| `se3 run [TASK]` | 统一入口。驱动 flow engine 状态机（analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit）。支持 `--resume` / `--flow-id` / `--loop` / `--discover` / `--from-issue` / `--change` / `--type` / `--output-format`。 |
+| `se3 run [TASK]` | 统一入口。驱动 flow engine 状态机（analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit）。支持 `--resume` / `--flow-id` / `--loop` / `--max-iterations` / `--no-worktree` / `--merge` / `--list-loops` / `--discover` / `--from-issue` / `--change` / `--type` / `--preset` / `--output-format`。 |
 | `se3 init` | 初始化新项目：写 `se3.yaml`、base spec、`.gitignore`，按需 `git init`。参数：`--project-root` / `--name` / `--force`。 |
-| `se3 guardrails <spec-file>` | 对 spec 文件跑 SE3 spec guardrails（检测被删除的 requirement、被弱化的语言）。供 CI 与 `se3 merge` 共用。 |
+| `se3 guardrails <spec-file>` | 对 spec 文件跑 SE3 spec guardrails（检测被删除的 requirement、被弱化的语言）。供 CI 与 `se3 merge` 共用。参数：`--original` / `-o <original-file>`，指定对比的基线文件。 |
 | `se3 sync` | 单向 code → spec 同步，按轮迭代直至收敛。参数包括 `--once` / `--max-rounds` / `--stable-rounds` / `--interactive` / `--show-diff` / `--validate-only` / `--resume` / `--force` / `--confirm-cleanup`。 |
 | `se3 sync-respond <call-file>` | 处理 `se3 sync --interactive` 在高影响 requirement 删除时写出的人工决策响应文件。 |
 | `se3 merge <branch> [<branch> ...]` | 按序把多个分支合并到当前 HEAD，冲突由 LLM 驱动解决。参数：`--strategy fast\|safe\|strict` / `--delete-merged` / `--no-delete-merged`。`se3/` 下的运行时数据按分层策略同步。 |
 | `se3 merge-respond <call-file>` | 处理 `se3 merge` 在冲突或 guardrail 违规升级为人工 MCP call 时写出的响应文件。 |
-| `se3 salvage` | 对异常终止的 session 做尽力抢救：宽容地加载 state、commit 残留 diff、为未完成工作补 issue、归档 session。 |
+| `se3 salvage` | 对异常终止的 session 做尽力抢救：宽容地加载 state、commit 残留 diff、为未完成工作补 issue、归档 session。参数：`--project-root` / `-p <path>`。 |
 
 ### `se3 history` — flow 历史
 
@@ -146,7 +146,7 @@ se3 run --resume
 
 | 子命令 | 用途 |
 |--------|------|
-| `se3 daemon start` | 启动 daemon。`--foreground` 不脱离终端；`--server-url <ws://…>` 向中心服务器注册。 |
+| `se3 daemon start` | 启动 daemon。`--foreground` 不脱离终端；`--server-url <ws://…>` 向中心服务器注册；`--daemon-key <key>` 在多租户服务器上把本机绑定到某个 owner。 |
 | `se3 daemon stop` | 停止运行中的 daemon。 |
 | `se3 daemon status` | 报告运行状态、machine id、server URL、真实连接状态与已跟踪 flow。`--json` 输出机读 JSON。 |
 
@@ -154,7 +154,7 @@ se3 run --resume
 
 ## 目录布局
 
-`se3/` 下所有内容默认 gitignored，*除了*下表中显式 whitelist 的子路径（specs、issues、scripts、`version-rules.md` 入库；运行时 state 与 log 不入库）。
+`se3/` 下所有内容默认 gitignored，*除了*下表中显式 whitelist 的子路径（specs、issues、scripts、prompts、`version-rules.md` 入库；运行时 state 与 log 不入库）。
 
 ```
 your-project/
@@ -162,14 +162,15 @@ your-project/
 ├── se3.local.yaml                 # 本地覆盖配置（gitignored）
 ├── pyproject.toml                 # 项目版本号的单一事实源
 ├── VERSIONS.md                    # 更新日志（由 documentation-updater 维护）
+├── scripts/                       # 辅助脚本
 ├── .gitignore                     # 由 `se3 init` 创建 / 追加
 └── se3/                           # SE3 运行时根目录
     ├── specs/                     # ✅ 入库 — 代码的文档化快照
     │   ├── base/spec.md           # base spec，每个 flow 自动加载
     │   └── <capability>/spec.md
     ├── issues/                    # ✅ 入库 — open/ 与 closed/ YAML 记录
-    ├── scripts/                   # ✅ 入库 — 例如 version.py（单一版本源）
-    ├── version-rules.md           # ✅ 入库 — 可选的自然语言版本规则
+    ├── prompts/                   # ✅ 入库 — 项目级 preset prompt 正文（se3 run --preset）
+    ├── version-rules.md           # ✅ 入库 — 可选，默认不存在
     ├── state/                     # ❌ runtime — engine.json / sync_state.json / …
     │   └── archive/               #   归档的 engine 快照
     ├── history/                   # ❌ runtime — per-flow per-step 的 jsonl 对话
@@ -185,7 +186,7 @@ your-project/
 
 ## Specs 索引
 
-SE3 在 `se3/specs/` 下自带 22 份 spec，它们是项目的活文档——代码当前行为的 code-first 快照——并在 flow 内被 `se3 guardrails` 守护、防止被悄悄弱化。可以作为深入代码的索引。
+SE3 在 `se3/specs/` 下自带 24 份 spec，它们是项目的活文档——代码当前行为的 code-first 快照——并在 flow 内被 `se3 guardrails` 守护、防止被悄悄弱化。可以作为深入代码的索引。
 
 | Spec | 一句话用途 |
 |------|-----------|
@@ -202,8 +203,10 @@ SE3 在 `se3/specs/` 下自带 22 份 spec，它们是项目的活文档——�
 | `dag-scheduler` | implement step 的并行 DAG 执行器（relay worktree、传递闭包削减）。 |
 | `worktree-management` | loop / merge worktree 生命周期、分支命名、孤儿 worktree 清理。 |
 | `requirement-intake` | 新需求通过 `se3 run` 进入 SE3 的 intake 契约。 |
+| `preset-prompts` | 内置 + 项目两层 preset prompt 注册表，供 `se3 run --preset` 复用标准化的常见任务。 |
 | `spec-format` | spec-format v1 文法：marker、标题、`### Requirement:` 与 scenario。 |
 | `spec-guardrails` | 拦截既有 requirement 被悄悄弱化 / 删除的规则。 |
+| `spec-role` | spec 作为代码文档化快照（spec-assistant）的角色：以 code → spec 为主，无常规手工编辑入口。 |
 | `issue-management` | `se3 issue` CLI 与 `IssueManager` 存储 API（YAML on disk + 状态机）。 |
 | `issue-discovery` | 从 flow 执行与未解决隐患中自动发现 issue。 |
 | `documentation-updater` | `README.md` 徽章更新与 `VERSIONS.md` 更新日志生成。 |
@@ -216,6 +219,6 @@ SE3 在 `se3/specs/` 下自带 22 份 spec，它们是项目的活文档——�
 
 ## 版本与许可证
 
-- 版本号由 `pyproject.toml`（`7.8.0`）独家持有，引擎在 `version_analyze` + `commit` step 自动 bump，请勿手动修改。
+- 版本号由 `pyproject.toml`（`8.0.0`）独家持有，引擎在 `version_analyze` + `commit` step 自动 bump，请勿手动修改。
 - License：Apache-2.0。
 - 完整更新日志见 [VERSIONS.md](VERSIONS.md)。
