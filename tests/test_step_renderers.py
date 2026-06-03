@@ -548,3 +548,64 @@ class TestRenderSelfCheck:
         content = mock_render_full.call_args[0][0]
         assert "FAILED" in content
         assert "PASSED" not in content
+
+
+# ---------------------------------------------------------------------------
+# Per-step token-usage block appended by render_step_output (G3)
+# ---------------------------------------------------------------------------
+
+
+class TestStepUsageBlock:
+    _USAGE = {
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 10,
+        "total_cost_usd": 0.01,
+    }
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    def test_usage_block_rendered_when_present(self, mock_usage):
+        from se3.engine.step_renderers import render_step_output
+
+        # COMMIT renderer is simple and self-contained.
+        step = _make_step(
+            StepType.COMMIT,
+            {"committed": False, "token_usage": self._USAGE},
+        )
+        render_step_output(step)
+
+        mock_usage.assert_called_once()
+        # First positional arg is the usage payload (the dict from outputs).
+        assert mock_usage.call_args[0][0] == self._USAGE
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    def test_no_usage_block_when_absent(self, mock_usage):
+        from se3.engine.step_renderers import render_step_output
+
+        step = _make_step(StepType.COMMIT, {"committed": False})
+        render_step_output(step)
+
+        mock_usage.assert_not_called()
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    def test_no_usage_block_when_empty(self, mock_usage):
+        from se3.engine.step_renderers import render_step_output
+
+        step = _make_step(StepType.COMMIT, {"committed": False, "token_usage": {}})
+        render_step_output(step)
+
+        mock_usage.assert_not_called()
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    def test_usage_block_for_default_rendered_step(self, mock_usage):
+        """A step type with no custom renderer still gets its usage block."""
+        from se3.engine.step_renderers import render_step_output
+
+        step = _make_step(
+            StepType.PROJECT_SUMMARY,
+            {"some_field": "x", "token_usage": self._USAGE},
+        )
+        render_step_output(step)
+
+        mock_usage.assert_called_once()

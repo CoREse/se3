@@ -11,7 +11,14 @@ import json
 import logging
 from typing import Any, Callable, Dict, Optional
 
-from .display import get_console, render_design, render_full, render_markdown, render_proposal
+from .display import (
+    get_console,
+    render_design,
+    render_full,
+    render_markdown,
+    render_proposal,
+    render_usage_block,
+)
 from .models import Step, StepStatus, StepType
 
 logger = logging.getLogger(__name__)
@@ -77,6 +84,26 @@ def render_step_output(step: Step) -> None:
         renderer(step)
     else:
         _default_render(step, title)
+
+    # Append the step's token-usage summary block after its own report. Only
+    # the steps CliSink actually renders reach here (it skips confirm/discovery/
+    # plan), so this naturally scopes the block to rendered steps. Steps with no
+    # LLM consumption (no token_usage in outputs) are byte-identical to before.
+    _render_step_usage(step)
+
+
+def _render_step_usage(step: Step) -> None:
+    """Render the per-step token-usage block when the step consumed tokens.
+
+    G2's ``state_machine.run_step`` writes a non-empty ``token_usage`` dict into
+    ``step.outputs`` whenever the step made at least one LLM call. Absent or
+    empty usage renders nothing (``render_usage_block`` also guards is_empty),
+    keeping non-LLM steps byte-identical.
+    """
+    usage = (step.outputs or {}).get("token_usage")
+    if not usage:
+        return
+    render_usage_block(usage, title="Step Token Usage")
 
 
 # ---------------------------------------------------------------------------

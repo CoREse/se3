@@ -11,6 +11,7 @@ from rich.text import Text
 from se3.engine import display
 from se3.engine.display import (
     _BLOCK_FOOTER_WIDTH,
+    _USAGE_BLOCK_COLOR,
     _reverse_footer,
     _reverse_title,
     render_block_footer,
@@ -20,8 +21,10 @@ from se3.engine.display import (
     render_full,
     render_markdown,
     render_text,
+    render_usage_block,
     set_console,
 )
+from se3.engine.token_usage import UsageTotals
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +36,19 @@ def _make_recording_console(width: int = 80) -> tuple[Console, StringIO]:
     """Build a Console that writes captured output to a StringIO buffer."""
     buf = StringIO()
     console = Console(file=buf, width=width, force_terminal=True, color_system="truecolor")
+    return console, buf
+
+
+def _make_plain_console(width: int = 80) -> tuple[Console, StringIO]:
+    """A recording console with number/repr auto-highlighting disabled.
+
+    Rich's default highlighter colorizes numbers, splitting a value like
+    ``12,345`` with ANSI escapes mid-token. For deterministic *content*
+    assertions we disable highlighting; the styled/visual behavior is covered
+    separately.
+    """
+    buf = StringIO()
+    console = Console(file=buf, width=width, force_terminal=True, highlight=False)
     return console, buf
 
 
@@ -216,3 +232,85 @@ class TestHeadingGroupFooter:
         assert set(footer.plain) == {" "}
         assert footer.style.bgcolor.name == "blue"
         assert isinstance(blank3, Text) and blank3.plain == ""
+
+
+# ---------------------------------------------------------------------------
+# render_usage_block (G3 — CLI token-usage summary)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderUsageBlock:
+    def _populated(self) -> UsageTotals:
+        return UsageTotals(
+            input_tokens=12345,
+            output_tokens=6789,
+            cache_creation_input_tokens=200,
+            cache_read_input_tokens=1000,
+            total_cost_usd=0.0123,
+        )
+
+    def test_populated_renders_aligned_block(self):
+        console, buf = _make_plain_console()
+        set_console(console)
+        render_usage_block(self._populated(), title="Step Token Usage")
+        out = buf.getvalue()
+
+        # Reverse-color title block present
+        assert " ## Step Token Usage " in out
+        # Labels with units
+        assert "Input tokens" in out
+        assert "Output tokens" in out
+        assert "Cache read" in out
+        assert "Cache creation" in out
+        assert "Cost" in out
+        # Thousands separators on token counts
+        assert "12,345" in out
+        assert "6,789" in out
+        assert "1,000" in out
+        # Cost formatted as $X.XXXX
+        assert "$0.0123" in out
+
+    def test_empty_usagetotals_renders_nothing(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_usage_block(UsageTotals())
+        assert buf.getvalue() == ""
+
+    def test_none_renders_nothing(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_usage_block(None)
+        assert buf.getvalue() == ""
+
+    def test_accepts_dict_input(self):
+        console, buf = _make_plain_console()
+        set_console(console)
+        # The JSON-primitive dict form persisted in step.outputs / state.
+        render_usage_block(
+            {
+                "input_tokens": 5,
+                "output_tokens": 7,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "total_cost_usd": 1.5,
+            }
+        )
+        out = buf.getvalue()
+        assert " ## Token Usage " in out
+        assert "$1.5000" in out
+
+    def test_empty_dict_renders_nothing(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_usage_block({})
+        assert buf.getvalue() == ""
+
+    def test_footer_uses_usage_color_and_fixed_width(self):
+        console, buf = _make_recording_console(width=120)
+        set_console(console)
+        render_usage_block(self._populated())
+        out = buf.getvalue()
+        # No Rule / Panel border characters from this block
+        assert "─" not in out
+        # Footer color constant is cyan (auxiliary/summary accent)
+        assert _USAGE_BLOCK_COLOR == "cyan"
