@@ -587,9 +587,11 @@ def daemon_start_cmd(
         None,
         "--server-url",
         help=(
-            "Central server URL the daemon dials out to. A port may be given "
-            "explicitly (ws://host:9000); when omitted it is completed to the "
-            "default server port 8080 (matching the se3-server default)."
+            "Central server URL the daemon dials out to. An explicit port "
+            "(wss://host:9000) is always preserved; when the port is omitted it "
+            "is completed per the scheme — wss:// (and https://) default to 443, "
+            "ws:// (and http://) default to 8080 (the se3-server plaintext "
+            "default). So a bare wss://host dials :443, not :8080."
         ),
     ),
     daemon_key: Optional[str] = typer.Option(
@@ -692,8 +694,19 @@ def daemon_status_cmd(
     elif status.get("connected"):
         lines.append("Connection: connected")
     else:
-        reason = status.get("last_error") or "not connected"
-        lines.append(f"Connection: not connected ({reason})")
+        # Surface the real failure reason. Earlier this fell back to the literal
+        # "not connected" when last_error was empty, rendering the useless
+        # "Connection: not connected (not connected)"; an empty reason now drops
+        # the parenthetical entirely and points at the log instead of repeating
+        # an information-free literal.
+        reason = (status.get("last_error") or "").strip()
+        if reason:
+            lines.append(f"Connection: not connected ({reason})")
+        else:
+            lines.append(
+                "Connection: not connected "
+                "(reason unavailable — see daemon.log)"
+            )
     tracked = status.get("tracked_flows") or []
     lines.append(f"Tracked flows: {len(tracked)}")
     for rec in tracked:
