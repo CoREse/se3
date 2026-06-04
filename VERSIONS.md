@@ -14,6 +14,15 @@
 
 
 
+
+## 8.6.1 - 2026-06-04
+
+- Fix daemon connecting wss:// URLs without an explicit port to :8080 instead of :443, which caused silent 'not connected' failures behind TLS reverse proxies
+- Make default WebSocket port completion scheme-aware: wss/https default to 443, ws/http keep defaulting to 8080
+- Preserve existing behavior for URLs with explicit ports, custom paths (e.g. /ws), and IPv6 literals
+- Fix se3 daemon status showing an empty reason: every connection failure (handshake, TLS/port mismatch, WELCOME rejection, missing websockets) now records a readable cause, with a 'reason unavailable — see daemon.log' fallback
+- Correct the --server-url help text to describe scheme-aware port completion
+- Add a wss reverse-proxy deployment section to daemon-and-server docs (and zh mirror) with nginx/Caddy examples and a curl --http1.1 101 handshake probe
 ## 8.6.0 - 2026-06-04
 
 - Add a phone-portrait responsive layout (@media max-width:600px) covering all webui screens: login, Machines+Flows list, flow-view console, History, and all modals

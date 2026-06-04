@@ -1731,12 +1731,20 @@ registered home.
   Supplied via `se3 daemon start --server-url <url>`; when unset
   (default: `null`/`None`) the daemon runs purely locally and does not
   open an outbound connection. When the supplied URL omits an explicit
-  port, the daemon client normalizes it by completing the port to the
-  shared default server port (`DEFAULT_SERVER_PORT`); an explicit port
-  in the URL is preserved as given. This prevents a bare `ws://host`
-  from silently falling back to the WebSocket-standard port 80 while
-  the server listens on the default port, which left the central
-  server with no machine registration.
+  port, the daemon client normalizes it by completing the port with a
+  *scheme-aware* default: a `ws://` URL (and `http://` normalized to
+  `ws://`) is completed to the plaintext `DEFAULT_SERVER_PORT` (`8080`,
+  the `se3-server --port` default), while a `wss://` URL (and `https://`
+  normalized to `wss://`) is completed to `DEFAULT_SERVER_TLS_PORT`
+  (`443`), because a TLS connection terminates at the reverse proxy's
+  HTTPS port rather than at se3-server's plaintext default. An explicit
+  port in the URL is preserved as given, and so are a custom path (e.g.
+  an already-present `/ws`) and an IPv6 literal host (`[::1]`). This
+  prevents a bare `ws://host` from silently falling back to the
+  WebSocket-standard port 80 while the server listens on the default
+  port, and prevents a bare `wss://host` (behind a reverse proxy) from
+  being dialed on `8080` instead of `443` — both of which left the
+  central server with no machine registration.
 - `daemon.daemon_key` — The secret daemon credential the daemon presents
   in its HELLO so the multi-tenant server can resolve it to an owner
   (`key → owner_id`) and bind the reporting machine to that trust domain
@@ -1811,13 +1819,17 @@ registered home.
   the version value is read from the single
   `se3.__version__` source (sourced from `pyproject.toml`).
 
-**Shared default port.** The default server port is defined once as the
-`DEFAULT_SERVER_PORT` constant (value `8080`) in
+**Shared default ports.** The default server ports are defined once in
 `src/se3/daemon/protocol.py` — the single source of truth for the
-daemon↔server protocol — and is referenced by both the `se3-server`
-`--port` default and the daemon client's URL normalization. The two
-sides therefore cannot drift apart, and the value is not duplicated as
-a magic number.
+daemon↔server protocol — so the value is not duplicated as a magic
+number and the two sides cannot drift apart. `DEFAULT_SERVER_PORT`
+(value `8080`) is the plaintext / `ws://` default and is referenced by
+both the `se3-server` `--port` default and the daemon client's URL
+normalization. `DEFAULT_SERVER_TLS_PORT` (value `443`) is the
+scheme-aware `wss://` default referenced only by the daemon client's
+URL normalization; introducing it does not change the value or meaning
+of `DEFAULT_SERVER_PORT` and therefore does not alter `se3-server`'s
+plaintext default.
 
 #### Scenario: Daemon runs locally without a server URL
 - **WHEN** the daemon is started without `--server-url`
@@ -1832,12 +1844,21 @@ a magic number.
   `server.port` `DEFAULT_SERVER_PORT` (`8080`)
 - **AND** supplying `--host` / `--port` overrides those defaults
 
-#### Scenario: Server URL without an explicit port is completed to the default
+#### Scenario: Server URL without an explicit port is completed scheme-aware
 - **WHEN** the daemon is started with `--server-url ws://host` (no port)
 - **THEN** the daemon client normalizes the URL by completing the port
-  to `DEFAULT_SERVER_PORT` (`8080`), matching the server's default
+  to `DEFAULT_SERVER_PORT` (`8080`), matching the server's plaintext
+  default
+- **AND** when the daemon is started with `--server-url wss://host` (no
+  port, e.g. behind a TLS reverse proxy), the port is completed to
+  `DEFAULT_SERVER_TLS_PORT` (`443`) rather than to `8080`
+- **AND** an `http://` URL is normalized to `ws://` and completed to
+  `8080`, while an `https://` URL is normalized to `wss://` and
+  completed to `443`
 - **AND** when the URL already carries an explicit port, that port is
-  preserved unchanged
+  preserved unchanged regardless of scheme
+- **AND** a custom path already present in the URL (e.g. `/ws`) and an
+  IPv6 literal host (`[::1]`) are preserved unchanged
 
 #### Scenario: `se3-server --version` prints the version and exits
 - **WHEN** the user runs `se3-server --version` (or `se3-server -v`)
