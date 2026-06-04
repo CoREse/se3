@@ -32,18 +32,28 @@ from se3.daemon.daemon import Daemon, DaemonConfig
         # A non-default explicit port is never overwritten.
         ("ws://host:9000", "ws://host:9000/ws"),
         ("ws://host:9000/ws", "ws://host:9000/ws"),
-        # No port -> the shared DEFAULT_SERVER_PORT is filled in.
+        # No port -> a scheme-aware default is filled in: ws/http -> 8080,
+        # wss/https -> 443 (TLS terminates at the reverse proxy's HTTPS port).
         ("ws://host", "ws://host:8080/ws"),
-        ("wss://host", "wss://host:8080/ws"),
-        ("https://host", "wss://host:8080/ws"),
+        ("wss://host", "wss://host:443/ws"),
+        ("https://host", "wss://host:443/ws"),
         ("http://host", "ws://host:8080/ws"),
         ("host", "ws://host:8080/ws"),
         ("host/ws", "ws://host:8080/ws"),
+        # An explicit port is always preserved, even when it equals a default
+        # for the *other* scheme (no scheme-aware overwrite of explicit ports).
+        ("wss://host:443", "wss://host:443/ws"),
+        ("wss://host:8080", "wss://host:8080/ws"),
+        ("wss://host:9000", "wss://host:9000/ws"),
         # A custom path is preserved alongside the filled-in port.
         ("ws://host/daemon", "ws://host:8080/daemon"),
         ("ws://host:9000/daemon", "ws://host:9000/daemon"),
-        # IPv6 literals: brackets are not mistaken for a port separator.
+        ("wss://host/daemon", "wss://host:443/daemon"),
+        ("wss://host/ws", "wss://host:443/ws"),
+        # IPv6 literals: brackets are not mistaken for a port separator, and
+        # the scheme-aware default still applies.
         ("ws://[::1]", "ws://[::1]:8080/ws"),
+        ("wss://[::1]", "wss://[::1]:443/ws"),
         ("ws://[::1]:9000", "ws://[::1]:9000/ws"),
         ("ws://[::1]:9000/ws", "ws://[::1]:9000/ws"),
     ],
@@ -55,6 +65,16 @@ def test_normalize_ws_url(given, expected):
 def test_normalize_ws_url_default_port_is_shared_constant():
     """The filled-in port comes from protocol.DEFAULT_SERVER_PORT."""
     assert _normalize_ws_url("ws://host") == f"ws://host:{protocol.DEFAULT_SERVER_PORT}/ws"
+
+
+def test_normalize_ws_url_tls_default_port_is_shared_constant():
+    """The wss fill-in port comes from protocol.DEFAULT_SERVER_TLS_PORT."""
+    assert protocol.DEFAULT_SERVER_PORT == 8080
+    assert protocol.DEFAULT_SERVER_TLS_PORT == 443
+    assert (
+        _normalize_ws_url("wss://host")
+        == f"wss://host:{protocol.DEFAULT_SERVER_TLS_PORT}/ws"
+    )
 
 
 # --------------------------------------------------------------------------

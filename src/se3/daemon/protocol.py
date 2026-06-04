@@ -61,6 +61,17 @@ PROTOCOL_VERSION = "2"
 # both sides agree and removes the duplicated ``8080`` magic numbers.
 DEFAULT_SERVER_PORT = 8080
 
+# Default TCP port for the *TLS* (``wss://``) scheme. The daemon client fills
+# this in — instead of :data:`DEFAULT_SERVER_PORT` — when ``--server-url``
+# carries a ``wss://`` (or ``https://`` normalized to ``wss://``) scheme with
+# no explicit port, because a TLS connection terminates at the reverse proxy's
+# HTTPS port (443), not at se3-server's plaintext default (8080). In short:
+# 8080 is the plaintext / ``ws`` default (and ``se3-server --port`` default),
+# 443 is the ``wss`` scheme-aware default. This keeps both defaults as named
+# constants here — the single source of truth — rather than as magic numbers
+# scattered through the client.
+DEFAULT_SERVER_TLS_PORT = 443
+
 # -- message types: daemon -> server --------------------------------------
 MSG_HELLO = "hello"
 MSG_STATUS_UPDATE = "status_update"

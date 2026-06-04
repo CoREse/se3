@@ -76,14 +76,25 @@ CallsSignatureProvider = Callable[[], Dict[str, Any]]
 
 
 def _normalize_ws_url(server_url: str) -> str:
-    """Return a ``ws://host:port/ws`` URL from a user-supplied server URL.
+    """Return a ``ws(s)://host:port/ws`` URL from a user-supplied server URL.
 
     Accepts bare hosts (``host`` or ``host:8080``), ``http(s)://`` and
     ``ws(s)://`` URLs, and appends the ``/ws`` daemon endpoint path when none
-    is present. When the host carries no explicit port, the shared
-    :data:`~se3.daemon.protocol.DEFAULT_SERVER_PORT` is filled in so the
-    daemon and ``se3-server`` agree on the same default (a bare ``ws://host``
-    would otherwise fall back to the WebSocket-standard port 80).
+    is present. When the host carries no explicit port, a *scheme-aware*
+    default is filled in so the daemon and ``se3-server`` agree on the same
+    default (a bare ``ws://host`` would otherwise fall back to the
+    WebSocket-standard port 80):
+
+    - ``ws://`` (and ``http://`` normalized to ``ws://``) → the plaintext
+      :data:`~se3.daemon.protocol.DEFAULT_SERVER_PORT` (8080, the
+      ``se3-server --port`` default).
+    - ``wss://`` (and ``https://`` normalized to ``wss://``) →
+      :data:`~se3.daemon.protocol.DEFAULT_SERVER_TLS_PORT` (443), because a
+      TLS connection terminates at the reverse proxy's HTTPS port, not at
+      se3-server's plaintext default.
+
+    An explicit port in the URL is always preserved, including IPv6 literals
+    (``[::1]``) and custom paths (``/daemon``, an already-supplied ``/ws``).
     """
     url = server_url.strip()
     if url.startswith("http://"):
@@ -95,16 +106,23 @@ def _normalize_ws_url(server_url: str) -> str:
     # Split off any path component already supplied.
     scheme, _, rest = url.partition("://")
     host, slash, path = rest.partition("/")
-    # Fill in the default port when the host carries none. An IPv6 literal is
-    # bracketed (``[::1]``), so only a ``:`` *after* the closing bracket is a
-    # port separator; a bare host has a port iff it contains a ``:``.
+    # Fill in the default port when the host carries none. The default is
+    # scheme-aware: ``wss`` terminates at the TLS port (443), ``ws`` at the
+    # plaintext default (8080). An IPv6 literal is bracketed (``[::1]``), so
+    # only a ``:`` *after* the closing bracket is a port separator; a bare host
+    # has a port iff it contains a ``:``.
     if host:
         if host.startswith("["):
             has_port = "]:" in host
         else:
             has_port = ":" in host
         if not has_port:
-            host = f"{host}:{protocol.DEFAULT_SERVER_PORT}"
+            default_port = (
+                protocol.DEFAULT_SERVER_TLS_PORT
+                if scheme == "wss"
+                else protocol.DEFAULT_SERVER_PORT
+            )
+            host = f"{host}:{default_port}"
     if not slash or not path or path == "/":
         return f"{scheme}://{host}/ws"
     return f"{scheme}://{host}/{path}"
