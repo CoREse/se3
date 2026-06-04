@@ -75,6 +75,27 @@ HistoryProvider = Any
 CallsSignatureProvider = Callable[[], Dict[str, Any]]
 
 
+def _format_exc(exc: BaseException) -> str:
+    """Return a non-empty, human-readable one-line description of *exc*.
+
+    Several connection failures stringify to an empty string — most notably
+    :class:`asyncio.TimeoutError`, raised by ``websockets.connect(open_timeout=…)``
+    when a ``wss://`` URL is dialed against the wrong port (the classic
+    "TLS to :8080 instead of :443" misconfiguration). A bare ``str(exc)`` then
+    left :attr:`DaemonClient.last_error` blank and ``se3 daemon status`` rendered
+    ``Connection: not connected ()`` — an empty, uninformative reason. Falling
+    back to the exception's type name guarantees the recorded reason is always
+    non-empty and usable for diagnosis.
+
+    The exception text never carries the daemon key (the credential only ever
+    travels on the HELLO wire, not through any exception raised here), so the
+    formatted reason is safe to record in the status file and to log.
+    """
+    text = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {text}" if text else name
+
+
 def _normalize_ws_url(server_url: str) -> str:
     """Return a ``ws://host:port/ws`` URL from a user-supplied server URL.
 
@@ -268,8 +289,16 @@ class DaemonClient:
             except asyncio.CancelledError:  # pragma: no cover - shutdown
                 raise
             except Exception as exc:
-                self._last_error = str(exc)
-                logger.warning("Server connection lost (%s); retrying in %.0fs", exc, backoff)
+                # Format to a guaranteed non-empty, readable reason: a bare
+                # str(exc) is empty for asyncio.TimeoutError (the open_timeout
+                # fired — typically a wss:// URL dialed at the wrong port), which
+                # is exactly the empty-parens root cause this fixes. The reason
+                # never contains the daemon key, so it is safe to record/log.
+                reason = _format_exc(exc)
+                self._last_error = reason
+                logger.warning(
+                    "Server connection lost (%s); retrying in %.0fs", reason, backoff
+                )
             finally:
                 self._connected = False
             if stop_event.is_set():

@@ -248,7 +248,9 @@ def test_run_loop_keeps_reconnecting_on_transient_failure():
     asyncio.run(scenario())
     assert sessions == [1]
     assert client._auth_rejected is False
-    assert client.last_error == "network blip"
+    # The reason is formatted as "<Type>: <message>" so an exception whose
+    # str() is empty still yields a non-empty, readable last_error.
+    assert client.last_error == "RuntimeError: network blip"
 
 
 # --------------------------------------------------------------------------
