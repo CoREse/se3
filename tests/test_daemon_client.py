@@ -11,7 +11,12 @@ import time
 import pytest
 
 from se3.daemon import protocol
-from se3.daemon.client import DaemonClient, _default_respond_handler, _normalize_ws_url
+from se3.daemon.client import (
+    DaemonClient,
+    _default_respond_handler,
+    _format_exc,
+    _normalize_ws_url,
+)
 from se3.daemon.daemon import Daemon, DaemonConfig
 
 
@@ -75,6 +80,74 @@ def test_normalize_ws_url_tls_default_port_is_shared_constant():
         _normalize_ws_url("wss://host")
         == f"wss://host:{protocol.DEFAULT_SERVER_TLS_PORT}/ws"
     )
+
+
+# --------------------------------------------------------------------------
+# connection-failure reason formatting (last_error diagnostics)
+# --------------------------------------------------------------------------
+
+
+def test_format_exc_falls_back_to_type_name_when_str_is_empty():
+    """asyncio.TimeoutError stringifies to '' — the empty-parens root cause.
+
+    The open_timeout firing (e.g. a wss:// URL dialed at the wrong port) raises
+    a TimeoutError whose str() is empty; the formatter must still yield a
+    non-empty, readable reason so ``se3 daemon status`` never shows
+    ``not connected ()``.
+    """
+    assert str(asyncio.TimeoutError()) == ""  # documents the root cause
+    assert _format_exc(asyncio.TimeoutError()) == "TimeoutError"
+
+
+def test_format_exc_includes_message_when_present():
+    assert _format_exc(ValueError("boom")) == "ValueError: boom"
+
+
+def test_format_exc_is_always_nonempty_and_readable():
+    for exc in (
+        asyncio.TimeoutError(),
+        ConnectionRefusedError(),
+        OSError(),
+        ValueError("x"),
+    ):
+        reason = _format_exc(exc)
+        assert reason and reason.strip()
+        # Never the bare, information-free literal that produced empty parens.
+        assert reason != "not connected"
+
+
+def test_run_records_nonempty_last_error_on_connection_failure():
+    """A failed dial records a non-empty, readable reason in ``last_error``.
+
+    Connecting to a port with nothing listening makes ``websockets.connect``
+    raise; ``run`` must format that into a non-empty reason (not the old bare
+    ``str(exc)`` that could be empty), which ``se3 daemon status`` then surfaces.
+    """
+    pytest.importorskip("websockets")
+    port = _free_port()  # nothing is listening here
+
+    client = DaemonClient(
+        f"ws://127.0.0.1:{port}",
+        machine_id="m-fail",
+        hostname="fail-host",
+        se3_version="6.4.0",
+        snapshot_provider=lambda: {},
+    )
+
+    async def scenario():
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(stop))
+        for _ in range(200):
+            if client.last_error:
+                break
+            await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+        return client.last_error
+
+    err = asyncio.run(scenario())
+    assert err and err.strip()
+    assert err != "not connected"
 
 
 # --------------------------------------------------------------------------
@@ -749,3 +822,86 @@ def test_client_reconnects_after_server_drop():
             _stop_server(server2, thread2)
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# `se3 daemon status` connection-line rendering
+# --------------------------------------------------------------------------
+
+
+def _invoke_daemon_status(monkeypatch, status_payload):
+    """Run ``se3 daemon status`` with a stubbed ``daemon_status`` and return stdout."""
+    from typer.testing import CliRunner
+
+    import se3.daemon as daemon_pkg
+    from se3.cli import app
+
+    monkeypatch.setattr(daemon_pkg, "daemon_status", lambda config: status_payload)
+    result = CliRunner().invoke(app, ["daemon", "status"])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_status_shows_reason_when_last_error_present(monkeypatch):
+    out = _invoke_daemon_status(
+        monkeypatch,
+        {
+            "running": True,
+            "pid": 123,
+            "machine_id": "m",
+            "server_url": "wss://se3.example",
+            "connected": False,
+            "last_error": "TimeoutError",
+            "tracked_flows": [],
+        },
+    )
+    assert "not connected (TimeoutError)" in out
+
+
+def test_status_no_empty_parens_when_last_error_blank(monkeypatch):
+    out = _invoke_daemon_status(
+        monkeypatch,
+        {
+            "running": True,
+            "pid": 123,
+            "machine_id": "m",
+            "server_url": "wss://se3.example",
+            "connected": False,
+            "last_error": "",
+            "tracked_flows": [],
+        },
+    )
+    # No empty parens, and no information-free "(not connected)" repetition.
+    assert "not connected ()" not in out
+    assert "not connected (not connected)" not in out
+    assert "reason unavailable" in out
+
+
+def test_status_connected_branch_unchanged(monkeypatch):
+    out = _invoke_daemon_status(
+        monkeypatch,
+        {
+            "running": True,
+            "pid": 1,
+            "machine_id": "m",
+            "server_url": "wss://se3.example",
+            "connected": True,
+            "tracked_flows": [],
+        },
+    )
+    assert "Connection: connected" in out
+
+
+def test_status_local_only_branch_unchanged(monkeypatch):
+    out = _invoke_daemon_status(
+        monkeypatch,
+        {
+            "running": True,
+            "pid": 1,
+            "machine_id": "m",
+            "server_url": None,
+            "connected": False,
+            "tracked_flows": [],
+        },
+    )
+    assert "local-only" in out
