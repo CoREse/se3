@@ -42,6 +42,130 @@ def test_get_unknown_owner_returns_none(store):
     assert store.get_owner("does-not-exist") is None
 
 
+def test_set_admin_flip_roundtrip(store):
+    oid = store.create_owner("Mallory", is_admin=False)
+    assert store.get_owner(oid).is_admin is False
+    # False -> True
+    assert store.set_admin(oid, True) is True
+    assert store.get_owner(oid).is_admin is True
+    # True -> False
+    assert store.set_admin(oid, False) is True
+    assert store.get_owner(oid).is_admin is False
+
+
+def test_set_admin_unknown_owner_returns_false(store):
+    assert store.set_admin("does-not-exist", True) is False
+    # No spurious owner row was created.
+    assert store.get_owner("does-not-exist") is None
+
+
+# --------------------------------------------------------------------------- #
+# Atomic last-real-admin guards (delete_owner_guarded / set_admin_guarded)     #
+# --------------------------------------------------------------------------- #
+
+
+def test_delete_owner_guarded_unknown_returns_not_found(store):
+    assert store.delete_owner_guarded("ghost") == "not_found"
+
+
+def test_delete_owner_guarded_last_admin_refused(store):
+    only_admin = store.create_owner("solo", is_admin=True)
+    assert store.delete_owner_guarded(only_admin) == "last_admin"
+    assert store.get_owner(only_admin) is not None
+
+
+def test_delete_owner_guarded_non_admin_always_allowed(store):
+    store.create_owner("admin", is_admin=True)
+    user = store.create_owner("user", is_admin=False)
+    assert store.delete_owner_guarded(user) == "deleted"
+    assert store.get_owner(user) is None
+
+
+def test_delete_owner_guarded_second_admin_allowed(store):
+    a = store.create_owner("a", is_admin=True)
+    b = store.create_owner("b", is_admin=True)
+    # Deleting one of two real admins leaves one — permitted.
+    assert store.delete_owner_guarded(a) == "deleted"
+    assert store.get_owner(a) is None
+    # Now b is the last admin — deleting it is refused.
+    assert store.delete_owner_guarded(b) == "last_admin"
+
+
+def test_delete_owner_guarded_breakglass_not_counted_as_headroom(store):
+    real_admin = store.create_owner("real", is_admin=True)
+    bg = store.create_owner("bg", is_admin=True)
+    # Even though two admin rows exist, break-glass is excluded from the count,
+    # so the single real admin is still the last real admin and is protected.
+    assert store.delete_owner_guarded(real_admin, breakglass_owner_id=bg) == "last_admin"
+    assert store.get_owner(real_admin) is not None
+
+
+def test_set_admin_guarded_unknown_returns_not_found(store):
+    assert store.set_admin_guarded("ghost", False) == "not_found"
+
+
+def test_set_admin_guarded_promote_is_unguarded(store):
+    user = store.create_owner("user", is_admin=False)
+    assert store.set_admin_guarded(user, True) == "updated"
+    assert store.get_owner(user).is_admin is True
+
+
+def test_set_admin_guarded_demote_last_admin_refused(store):
+    only_admin = store.create_owner("solo", is_admin=True)
+    assert store.set_admin_guarded(only_admin, False) == "last_admin"
+    assert store.get_owner(only_admin).is_admin is True
+
+
+def test_set_admin_guarded_demote_second_admin_allowed(store):
+    a = store.create_owner("a", is_admin=True)
+    b = store.create_owner("b", is_admin=True)
+    assert store.set_admin_guarded(a, False) == "updated"
+    assert store.get_owner(a).is_admin is False
+    # b is now the last real admin — demotion refused.
+    assert store.set_admin_guarded(b, False) == "last_admin"
+
+
+def test_set_admin_guarded_breakglass_not_counted_as_headroom(store):
+    real_admin = store.create_owner("real", is_admin=True)
+    bg = store.create_owner("bg", is_admin=True)
+    assert (
+        store.set_admin_guarded(real_admin, False, breakglass_owner_id=bg)
+        == "last_admin"
+    )
+    assert store.get_owner(real_admin).is_admin is True
+
+
+def test_guarded_delete_concurrent_keeps_one_real_admin(tmp_path):
+    """Two concurrent deletions of two distinct real admins must not both win.
+
+    This is the exact race the guard exists to prevent: a non-atomic
+    read-then-write would let both threads observe count == 2 and both delete,
+    leaving zero real admins. The atomic in-store guard must keep at least one.
+    """
+    store = Store(tmp_path / "race.db")
+    a = store.create_owner("a", is_admin=True)
+    b = store.create_owner("b", is_admin=True)
+
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def worker(target):
+        barrier.wait()
+        results[target] = store.delete_owner_guarded(target)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in (a, b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly one deletion succeeded; the other was refused as the last admin.
+    outcomes = sorted(results.values())
+    assert outcomes == ["deleted", "last_admin"]
+    remaining = [o for o in store.list_owners() if o.is_admin]
+    assert len(remaining) == 1
+
+
 def test_owner_decoupled_from_provider_identity_with_many_bindings(store):
     oid = store.create_owner("Bob")
     # A single owner carries multiple (provider, external_id) bindings.

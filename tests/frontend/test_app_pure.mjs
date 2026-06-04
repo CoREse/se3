@@ -3130,6 +3130,11 @@ replyBoxCollapseMod.registerReplyBoxPromptCollapseTests({ app, check, findOne, f
 const tokenUsageMod = await import("./token_usage.test.mjs");
 tokenUsageMod.registerTokenUsageTests({ app, check, findOne, findAll });
 
+// Register the G3 admin-only user-management row-model tests (separate module —
+// same `check` reporter, same `app` module, same shared DOM stub).
+const userMgmtMod = await import("./user_mgmt.test.mjs");
+userMgmtMod.registerUserMgmtTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

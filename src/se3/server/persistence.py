@@ -286,6 +286,106 @@ class Store:
             conn.commit()
             return cur.rowcount > 0
 
+    def set_admin(self, owner_id: str, is_admin: bool) -> bool:
+        """Update an owner's ``is_admin`` flag; return whether the owner existed.
+
+        Backs the admin user-management "toggle admin" endpoint. Returns
+        ``True`` when an owner row matched ``owner_id`` (the flag was written),
+        ``False`` for an unknown ``owner_id`` (no row touched, no error).
+        """
+        with self._lock:
+            conn = self._conn()
+            cur = conn.execute(
+                "UPDATE owners SET is_admin = ? WHERE owner_id = ?",
+                (1 if is_admin else 0, owner_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def _count_real_admins(
+        self, conn: sqlite3.Connection, breakglass_owner_id: Optional[str]
+    ) -> int:
+        """Count admin owners excluding the break-glass subject (lock-held).
+
+        Helper for the guarded mutations below: it runs on an already-open
+        connection while ``self._lock`` is held, so the count and the
+        subsequent write commit as one critical section. The break-glass
+        escape-hatch owner (if any) is excluded — it is a fallback entrance,
+        never counted as real-admin headroom.
+        """
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM owners "
+            "WHERE is_admin = 1 AND (? IS NULL OR owner_id != ?)",
+            (breakglass_owner_id, breakglass_owner_id),
+        ).fetchone()
+        return int(row["c"])
+
+    def delete_owner_guarded(
+        self, owner_id: str, *, breakglass_owner_id: Optional[str] = None
+    ) -> str:
+        """Delete an owner, refusing atomically if it is the last real admin.
+
+        Like :meth:`delete_owner`, but the last-real-admin invariant is checked
+        and the row deleted inside the *same* held write lock, so two concurrent
+        deletions of two distinct real admins cannot each observe a stale
+        ``count > 1`` and both commit (which would leave zero real admins and
+        lock management out). Returns one of:
+
+        - ``"not_found"`` — no owner matched ``owner_id`` (nothing deleted)
+        - ``"last_admin"`` — the target is the last real admin (refused)
+        - ``"deleted"`` — the owner (and its cascade) was removed
+        """
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT is_admin FROM owners WHERE owner_id = ?", (owner_id,)
+            ).fetchone()
+            if row is None:
+                return "not_found"
+            if row["is_admin"] and self._count_real_admins(conn, breakglass_owner_id) <= 1:
+                return "last_admin"
+            conn.execute("DELETE FROM owners WHERE owner_id = ?", (owner_id,))
+            conn.commit()
+            return "deleted"
+
+    def set_admin_guarded(
+        self,
+        owner_id: str,
+        is_admin: bool,
+        *,
+        breakglass_owner_id: Optional[str] = None,
+    ) -> str:
+        """Set an owner's admin flag, refusing a last-real-admin demotion atomically.
+
+        Promotion (``is_admin=True``) is unguarded. A demotion is checked and
+        applied inside the *same* held write lock, so two concurrent demotions
+        of two distinct real admins cannot both pass a stale count and both
+        commit. Returns one of:
+
+        - ``"not_found"`` — no owner matched ``owner_id``
+        - ``"last_admin"`` — demoting would remove the last real admin (refused)
+        - ``"updated"`` — the flag was written
+        """
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT is_admin FROM owners WHERE owner_id = ?", (owner_id,)
+            ).fetchone()
+            if row is None:
+                return "not_found"
+            if (
+                not is_admin
+                and row["is_admin"]
+                and self._count_real_admins(conn, breakglass_owner_id) <= 1
+            ):
+                return "last_admin"
+            conn.execute(
+                "UPDATE owners SET is_admin = ? WHERE owner_id = ?",
+                (1 if is_admin else 0, owner_id),
+            )
+            conn.commit()
+            return "updated"
+
     def create_local_user(
         self,
         provider: str,

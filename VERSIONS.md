@@ -11,6 +11,15 @@
 
 
 
+
+## 8.5.0 - 2026-06-04
+
+- Add GET /api/users to list owners with a strict field whitelist (no password or key hashes) and break-glass identities excluded
+- Add DELETE /api/users/{owner_id} to remove a user with cascade cleanup of bindings, credentials, and keys
+- Add POST /api/users/{owner_id}/password to reset passwords for local-provider users only (409 for OIDC/proxy-header users)
+- Add POST /api/users/{owner_id}/admin to toggle a user's admin flag, backed by a new Store.set_admin persistence method
+- Enforce server-side authorization on all user-management routes: non-admin 403, no self or last-admin delete/demote (atomic guard), break-glass owner hidden as 404
+- Add an admin-only '用户管理' top-bar panel mirroring the daemon-key modal for listing, creating, deleting, resetting passwords, and toggling admin
 ## 8.4.0 - 2026-06-03
 
 - Add a post-update_spec verification gate (mechanism A): after a flow edits spec.md, validate the spec structure and ensure requirements are not silently dropped, then re-run the full test suite so spec-content regressions are caught before commit.

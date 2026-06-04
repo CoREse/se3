@@ -1,0 +1,26 @@
+id: '180'
+title: Pre-existing test failures (1 test)
+description: '**1 pre-existing test failure(s)** detected during flow execution.
+
+  These failures were NOT introduced by the current change.
+
+
+  **Failing tests:**
+
+  - `tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count`:
+  test failed (details in pytest output)
+
+
+  **Task:** 用break glass 登录webui后，并没有管理用户（新建用户等）的界面啊
+
+
+  These tests should be investigated and fixed to prevent the broken-window effect.'
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:test-pre-existing
+created_at: '2026-06-04T10:23:44.961360'
+updated_at: '2026-06-04T10:23:44.961360'

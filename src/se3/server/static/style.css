@@ -1968,3 +1968,58 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 .keys-status-active { color: var(--green); border: 1px solid var(--green); }
 .keys-status-revoked { color: var(--grey); border: 1px solid var(--grey); }
 .keys-revoke-btn { font-size: 12px; padding: 4px 10px; }
+
+/* -- user-management panel (G3) ------------------------------------- */
+/* Reuses the daemon-key row idiom so the two admin modals stay visually
+   consistent; only the per-row layout (label + provider + admin badge +
+   actions) and the admin/local distinctions are panel-specific. */
+
+.users-create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0 6px;
+}
+.users-create input[type="text"],
+.users-create input[type="password"] { flex: 1; min-width: 120px; }
+
+.users-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.users-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+/* The signed-in admin's own row — non-deletable / non-demotable, called out. */
+.users-row.is-self { border-color: var(--accent); }
+.users-row-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.users-row-label { font-size: 13px; color: var(--fg); }
+.users-row-provider {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-family: ui-monospace, monospace;
+}
+.users-row-admin {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+/* admin vs ordinary user is colour-coded; local-only reset availability is
+   conveyed by the presence of the 重置密码 button rather than extra chrome. */
+.users-admin-admin { color: var(--accent); border: 1px solid var(--accent); }
+.users-admin-user { color: var(--grey); border: 1px solid var(--grey); }
+.users-row-self { font-size: 11px; color: var(--accent); }
+.users-row-actions { display: flex; gap: 6px; }
+.users-row-actions button { font-size: 12px; padding: 4px 10px; }
+.users-delete-btn { color: var(--red); border-color: var(--red); }

@@ -147,6 +147,18 @@ class CreateUserRequest(BaseModel):
     is_admin: bool = False
 
 
+class SetPasswordRequest(BaseModel):
+    """Body of ``POST /api/users/{owner_id}/password`` — admin resets a password."""
+
+    password: str
+
+
+class SetAdminRequest(BaseModel):
+    """Body of ``POST /api/users/{owner_id}/admin`` — admin toggles the admin flag."""
+
+    is_admin: bool
+
+
 def _scope_for(identity: OwnerIdentity) -> Optional[str]:
     """Map an authenticated identity to the owner-scoping value for queries.
 
@@ -593,6 +605,43 @@ def create_app(
         await asyncio.to_thread(store.revoke_daemon_key, key_id)
         return {"status": "revoked", "key_id": key_id}
 
+    # -- admin user-management guards --------------------------------------
+    # Every user-management route enforces admin independently (no reliance on
+    # the frontend hiding the entry), then layers the break-glass / self /
+    # last-admin / local-only protections on top. These local helpers keep the
+    # guard logic in one place so no route can forget a check.
+
+    def _require_admin(identity_: OwnerIdentity, action: str = "manage users") -> None:
+        """Reject a non-admin caller with 403 (independent per-route check)."""
+        if not identity_.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail=f"admin privileges required to {action}",
+            )
+
+    def _breakglass_owner_id() -> Optional[str]:
+        """Resolve the break-glass admin owner_id, or ``None`` if not yet created.
+
+        This is a pure *lookup* — unlike :func:`_ensure_breakglass_admin` it never
+        creates the owner. Break-glass is a real owner but a reserved escape-hatch
+        subject: it is filtered out of the manageable user list and refused for
+        every delete / demote / password-reset operation.
+        """
+        return store.resolve_owner_by_identity(
+            BREAKGLASS_PROVIDER, BREAKGLASS_EXTERNAL_ID
+        )
+
+    def _owner_provider_set(owner_id: str) -> set:
+        """Return the set of auth providers bound to ``owner_id``."""
+        return {provider for provider, _external in store.list_identities(owner_id)}
+
+    # The last-real-admin invariant is no longer counted here on the event loop
+    # and then mutated separately (that read-then-write was racy: two concurrent
+    # demote/delete requests could each observe count > 1 and both commit). It is
+    # now enforced atomically inside ``Store.delete_owner_guarded`` /
+    # ``Store.set_admin_guarded`` — the count check and the write share one held
+    # write lock — with the break-glass subject excluded as non-admin headroom.
+
     # -- admin user provisioning -------------------------------------------
     # An admin creates / invites a local user: a new owner + ("local",
     # username) binding + password hash, in one atomic insert. v1 deliberately
@@ -606,10 +655,7 @@ def create_app(
     ) -> JSONResponse:
         # Only an admin (a local admin owner, or the break-glass admin subject)
         # may provision users.
-        if not identity_.is_admin:
-            raise HTTPException(
-                status_code=403, detail="admin privileges required to create users"
-            )
+        _require_admin(identity_, "create users")
         username = req.username.strip()
         if not username:
             raise HTTPException(status_code=422, detail="'username' must not be empty")
@@ -647,6 +693,158 @@ def create_app(
                 "is_admin": req.is_admin,
             },
         )
+
+    @app.get("/api/users")
+    async def list_users(
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """List manageable owners (admin only).
+
+        The break-glass escape-hatch owner is filtered out server-side — it is a
+        reserved subject, not a manageable account. Only a whitelist of
+        non-sensitive fields is serialized; password / key hashes never appear.
+        """
+        _require_admin(identity_, "list users")
+        bg = _breakglass_owner_id()
+        users = []
+        for owner in store.list_owners():
+            if owner.owner_id == bg:
+                continue
+            identities = store.list_identities(owner.owner_id)
+            providers = {provider for provider, _external in identities}
+            # The first binding's provider is the account's origin; ``can_reset_
+            # password`` is true only for owners carrying a local credential.
+            provider = identities[0][0] if identities else None
+            users.append(
+                {
+                    "owner_id": owner.owner_id,
+                    "display_name": owner.display_name,
+                    "is_admin": owner.is_admin,
+                    "created_at": owner.created_at,
+                    "provider": provider,
+                    "can_reset_password": PROVIDER_LOCAL in providers,
+                }
+            )
+        return {"users": users, "count": len(users)}
+
+    @app.delete("/api/users/{owner_id}")
+    async def delete_user(
+        owner_id: str, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> dict:
+        """Delete a user (admin only), cascading its bindings / creds / keys.
+
+        Refuses to delete the caller themselves, the break-glass subject (hidden
+        as 404), or the last remaining real admin (409) — none of these may be
+        removed via the regular UI without locking out management.
+        """
+        _require_admin(identity_, "delete users")
+        owner = store.get_owner(owner_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        if owner_id == identity_.owner_id:
+            raise HTTPException(
+                status_code=403, detail="cannot delete your own account"
+            )
+        if owner_id == _breakglass_owner_id():
+            # Hide the reserved subject's existence rather than confirm it.
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        # The last-real-admin guard is enforced atomically inside the store: the
+        # admin-count check and the DELETE commit happen under one held write
+        # lock, so two concurrent deletions of two distinct real admins cannot
+        # each observe a stale count > 1 and both commit (leaving zero admins).
+        result = await asyncio.to_thread(
+            store.delete_owner_guarded,
+            owner_id,
+            breakglass_owner_id=_breakglass_owner_id(),
+        )
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        if result == "last_admin":
+            raise HTTPException(
+                status_code=409, detail="cannot delete the last remaining admin"
+            )
+        logger.info("admin %s deleted user %s", identity_.owner_id, owner_id)
+        return {"status": "deleted", "owner_id": owner_id}
+
+    @app.post("/api/users/{owner_id}/password")
+    async def reset_user_password(
+        owner_id: str,
+        req: SetPasswordRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Reset a *local* user's password (admin only).
+
+        Only owners carrying a local credential may have their password reset;
+        OIDC / proxy-header owners have no local credential, so resetting one is
+        meaningless (409). The plaintext is hashed off the event loop and never
+        logged.
+        """
+        _require_admin(identity_, "reset passwords")
+        owner = store.get_owner(owner_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        if owner_id == _breakglass_owner_id():
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        if PROVIDER_LOCAL not in _owner_provider_set(owner_id):
+            raise HTTPException(
+                status_code=409,
+                detail="password reset is only available for local users",
+            )
+        if not req.password:
+            raise HTTPException(status_code=422, detail="'password' must not be empty")
+        # argon2 hashing is CPU-bound — keep it off the event loop. The plaintext
+        # never reaches the log; only the owner_id and outcome are recorded.
+        password_hash = await asyncio.to_thread(crypto.hash_password, req.password)
+        await asyncio.to_thread(store.set_password, owner_id, password_hash)
+        logger.info("admin %s reset the password for user %s", identity_.owner_id, owner_id)
+        return {"status": "password_reset", "owner_id": owner_id}
+
+    @app.post("/api/users/{owner_id}/admin")
+    async def set_user_admin(
+        owner_id: str,
+        req: SetAdminRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Toggle a user's admin flag (admin only).
+
+        Promotion is unrestricted (besides the break-glass refusal). Demotion is
+        guarded: the caller cannot demote themselves (403), nor demote the last
+        remaining real admin (409), which would lock management out.
+        """
+        _require_admin(identity_, "change admin status")
+        owner = store.get_owner(owner_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        if owner_id == _breakglass_owner_id():
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        # Self-demotion is rejected up front (an unconditional rule). The
+        # last-real-admin demotion guard is enforced atomically inside the store
+        # (count check + UPDATE under one held write lock), so two concurrent
+        # demotions of two distinct real admins cannot both pass a stale count.
+        if not req.is_admin and owner_id == identity_.owner_id:
+            raise HTTPException(
+                status_code=403,
+                detail="cannot revoke your own admin privileges",
+            )
+        result = await asyncio.to_thread(
+            store.set_admin_guarded,
+            owner_id,
+            req.is_admin,
+            breakglass_owner_id=_breakglass_owner_id(),
+        )
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"user '{owner_id}' not found")
+        if result == "last_admin":
+            raise HTTPException(
+                status_code=409, detail="cannot demote the last remaining admin"
+            )
+        logger.info(
+            "admin %s set admin=%s for user %s",
+            identity_.owner_id,
+            req.is_admin,
+            owner_id,
+        )
+        return {"owner_id": owner_id, "is_admin": req.is_admin}
 
     # -- history API -------------------------------------------------------
     # The server is a pure in-memory relay: ``/api/history`` serves the

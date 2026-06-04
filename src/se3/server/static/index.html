@@ -15,6 +15,10 @@
       <!-- Auth-only controls: hidden until an owner is resolved. -->
       <button id="history-btn" type="button" class="ghost-btn auth-only hidden">History</button>
       <button id="keys-btn" type="button" class="ghost-btn auth-only hidden">Daemon&nbsp;Keys</button>
+      <!-- Admin-only control: hidden for non-admin owners even once authenticated
+           (the .admin-only class is toggled by applyAuthState off is_admin). The
+           server enforces admin on every /api/users route — this is UX only. -->
+      <button id="users-btn" type="button" class="ghost-btn admin-only hidden">用户管理</button>
       <button id="new-task-btn" type="button" class="auth-only hidden">+ New Task</button>
       <span id="owner-label" class="owner-label auth-only hidden"></span>
       <button id="logout-btn" type="button" class="ghost-btn auth-only hidden">Logout</button>
@@ -227,6 +231,45 @@
 
         <div id="keys-list" class="keys-list">
           <p class="empty">Loading keys&hellip;</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- User-management modal (admin only). Mirrors the daemon-key modal shell.
+       Visibility / actions are re-enforced server-side on every /api/users
+       route — the frontend gating here is purely a UX nicety. -->
+  <div id="users-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>用户管理</h3>
+        <button id="users-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="form-hint">
+          创建、删除本地用户，重置本地用户密码，或切换管理员标志。
+          所有权限判定均在服务端强制执行——你无法删除或降权自己、系统中最后一个管理员，
+          或保留的 break-glass 管理账户。
+        </p>
+
+        <form id="users-create-form" class="users-create">
+          <input type="text" id="users-username" placeholder="用户名"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" />
+          <input type="password" id="users-password" placeholder="密码"
+                 autocomplete="new-password" />
+          <input type="text" id="users-display-name" placeholder="显示名（可选）"
+                 autocomplete="off" spellcheck="false" />
+          <label class="checkbox-label" for="users-is-admin">
+            <input type="checkbox" id="users-is-admin">
+            管理员
+          </label>
+          <button type="submit" id="users-create-submit">新建用户</button>
+        </form>
+
+        <p id="users-error" class="form-error hidden"></p>
+
+        <div id="users-list" class="users-list">
+          <p class="empty">Loading users&hellip;</p>
         </div>
       </div>
     </div>

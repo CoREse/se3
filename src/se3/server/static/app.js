@@ -30,6 +30,10 @@ const state = {
   // Daemon keys owned by the current owner (metadata only — the plaintext is
   // shown once at creation and never stored here).
   daemonKeys: [],
+  // Manageable owners shown in the admin-only user-management panel (a
+  // whitelist of non-sensitive fields; the break-glass subject is filtered
+  // server-side and never appears here).
+  users: [],
 
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
@@ -213,6 +217,58 @@ function daemonKeyRowModel(key) {
     statusLabel: revoked ? "Revoked" : "Active",
     statusClass: revoked ? "revoked" : "active",
     createdAt: key.created_at || null,
+  };
+}
+
+// View model for one user-management row. Normalizes the label / provider /
+// admin presentation and — mirroring the server-side guards — decides which
+// per-row actions are offered. This is purely a UX projection; every action is
+// independently re-enforced by the backend (`require_owner` + admin + self /
+// last-admin / break-glass / local-only checks), so a tampered frontend can
+// never bypass a rule. `currentOwnerId` is the signed-in admin's own owner_id.
+//
+// Rules encoded here (kept in lockstep with app.py's /api/users guards):
+//   * is_self  → cannot delete or toggle-admin yourself (self-lockout guard).
+//   * provider must be local to reset a password (the backend serializes
+//     `can_reset_password`; we also fall back to a `provider === "local"`
+//     check so the model is robust if that flag is absent).
+//   * the break-glass subject is already filtered out server-side and never
+//     appears in the list, so no per-row break-glass handling is needed here.
+function userRowModel(user, currentOwnerId) {
+  user = user && typeof user === "object" ? user : {};
+  const ownerId = typeof user.owner_id === "string" ? user.owner_id : "";
+  const isSelf = Boolean(ownerId) && ownerId === currentOwnerId;
+  const isAdmin = Boolean(user.is_admin);
+  const provider = typeof user.provider === "string" ? user.provider : "";
+  const isLocal = provider === "local";
+  // Prefer the backend's explicit flag; fall back to the provider check so the
+  // model degrades gracefully when an older payload omits `can_reset_password`.
+  const canResetPassword =
+    user.can_reset_password != null ? Boolean(user.can_reset_password) : isLocal;
+  const label =
+    (typeof user.display_name === "string" && user.display_name.trim()) ||
+    ownerId ||
+    "(unknown)";
+  return {
+    ownerId,
+    label,
+    provider: provider || "—",
+    isSelf,
+    isAdmin,
+    isLocal,
+    adminLabel: isAdmin ? "admin" : "user",
+    adminClass: isAdmin ? "admin" : "user",
+    // You may delete anyone except yourself; last-admin / break-glass are
+    // additionally caught server-side (and surfaced as a toast on failure).
+    canDelete: Boolean(ownerId) && !isSelf,
+    // Password reset is local-only; never offered for yourself either (self
+    // password change is out of scope for this admin panel).
+    canResetPassword: Boolean(ownerId) && canResetPassword,
+    // You may flip anyone's admin flag except your own (no self-demotion).
+    canToggleAdmin: Boolean(ownerId) && !isSelf,
+    // The label/intent of the admin toggle action for this row.
+    toggleAdminTo: !isAdmin,
+    toggleAdminLabel: isAdmin ? "取消管理员" : "设为管理员",
   };
 }
 
@@ -6513,6 +6569,14 @@ function applyAuthState() {
   for (const node of document.querySelectorAll(".auth-only")) {
     node.classList.toggle("hidden", !authed);
   }
+  // Admin-only controls (e.g. the user-management entry) are a *further*
+  // narrowing on top of auth-only: shown only when the resolved owner is an
+  // admin. A non-admin owner — even fully authenticated — never sees them.
+  // This is UX gating only; every /api/users route re-checks admin server-side.
+  const isAdmin = authed && Boolean(state.identity && state.identity.is_admin);
+  for (const node of document.querySelectorAll(".admin-only")) {
+    node.classList.toggle("hidden", !isAdmin);
+  }
   const label = $("owner-label");
   if (label) label.textContent = authed ? ownerLabel(state.identity) : "";
 }
@@ -6748,6 +6812,206 @@ async function revokeDaemonKey(keyId) {
 }
 
 // ---------------------------------------------------------------------------
+// User-management panel (admin only)
+// ---------------------------------------------------------------------------
+
+function openUsers() {
+  $("users-error").classList.add("hidden");
+  $("users-username").value = "";
+  $("users-password").value = "";
+  $("users-display-name").value = "";
+  $("users-is-admin").checked = false;
+  $("users-modal").classList.remove("hidden");
+  loadUsers();
+}
+
+function closeUsers() {
+  $("users-modal").classList.add("hidden");
+}
+
+async function loadUsers() {
+  const listBox = $("users-list");
+  listBox.innerHTML = "";
+  listBox.appendChild(el("p", "empty", "Loading users…"));
+  try {
+    const resp = await authedFetch("/api/users");
+    if (!resp.ok) {
+      state.users = [];
+      renderUsers();
+      return;
+    }
+    const data = await resp.json().catch(() => ({ users: [] }));
+    state.users = Array.isArray(data.users) ? data.users : [];
+  } catch (_) {
+    state.users = [];
+  }
+  renderUsers();
+}
+
+function renderUsers() {
+  const listBox = $("users-list");
+  listBox.innerHTML = "";
+  if (!state.users.length) {
+    listBox.appendChild(el("p", "empty", "No manageable users."));
+    return;
+  }
+  const currentOwnerId = state.identity && state.identity.owner_id;
+  for (const user of state.users) {
+    const model = userRowModel(user, currentOwnerId);
+    const row = el("div", "users-row" + (model.isSelf ? " is-self" : ""));
+
+    const main = el("div", "users-row-main");
+    main.append(
+      el("span", "users-row-label", model.label),
+      el("span", "users-row-provider", model.provider),
+      el("span", "users-row-admin users-admin-" + model.adminClass, model.adminLabel),
+    );
+    if (model.isSelf) main.appendChild(el("span", "users-row-self", "（本人）"));
+    row.appendChild(main);
+
+    const actions = el("div", "users-row-actions");
+    if (model.canToggleAdmin) {
+      const btn = el("button", "ghost-btn users-admin-btn", model.toggleAdminLabel);
+      btn.type = "button";
+      btn.addEventListener("click", () =>
+        toggleAdmin(model.ownerId, model.toggleAdminTo));
+      actions.appendChild(btn);
+    }
+    if (model.canResetPassword) {
+      const btn = el("button", "ghost-btn users-password-btn", "重置密码");
+      btn.type = "button";
+      btn.addEventListener("click", () => resetPassword(model.ownerId, model.label));
+      actions.appendChild(btn);
+    }
+    if (model.canDelete) {
+      const btn = el("button", "ghost-btn users-delete-btn", "删除");
+      btn.type = "button";
+      btn.addEventListener("click", () => deleteUser(model.ownerId, model.label));
+      actions.appendChild(btn);
+    }
+    row.appendChild(actions);
+    listBox.appendChild(row);
+  }
+}
+
+async function createUser(event) {
+  event.preventDefault();
+  const errBox = $("users-error");
+  errBox.classList.add("hidden");
+  const username = $("users-username").value.trim();
+  const password = $("users-password").value;
+  if (!username) return showFormError(errBox, "用户名不能为空。");
+  if (!password) return showFormError(errBox, "密码不能为空。");
+
+  const submit = $("users-create-submit");
+  submit.disabled = true;
+  try {
+    const resp = await authedFetch("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username,
+        password,
+        display_name: $("users-display-name").value.trim(),
+        is_admin: $("users-is-admin").checked,
+      }),
+    });
+    if (resp.ok) {
+      $("users-username").value = "";
+      $("users-password").value = "";
+      $("users-display-name").value = "";
+      $("users-is-admin").checked = false;
+      showToast("success", "用户已创建。");
+      loadUsers();
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not create the user.");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function deleteUser(ownerId, label) {
+  if (!ownerId) return;
+  const errBox = $("users-error");
+  errBox.classList.add("hidden");
+  try {
+    const resp = await authedFetch(
+      `/api/users/${encodeURIComponent(ownerId)}`,
+      { method: "DELETE" },
+    );
+    if (resp.ok) {
+      showToast("success", `已删除用户 ${label || ownerId}。`);
+      loadUsers();
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not delete the user.");
+  }
+}
+
+async function resetPassword(ownerId, label) {
+  if (!ownerId) return;
+  const errBox = $("users-error");
+  errBox.classList.add("hidden");
+  const password = typeof prompt === "function"
+    ? prompt(`为 ${label || ownerId} 设置新密码：`)
+    : null;
+  // A null result means the admin dismissed the prompt; an empty string would
+  // be rejected by the backend (422), so guard both here.
+  if (password == null) return;
+  if (!password) return showFormError(errBox, "新密码不能为空。");
+  try {
+    const resp = await authedFetch(
+      `/api/users/${encodeURIComponent(ownerId)}/password`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      },
+    );
+    if (resp.ok) {
+      showToast("success", `已重置 ${label || ownerId} 的密码。`);
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not reset the password.");
+  }
+}
+
+async function toggleAdmin(ownerId, isAdmin) {
+  if (!ownerId) return;
+  const errBox = $("users-error");
+  errBox.classList.add("hidden");
+  try {
+    const resp = await authedFetch(
+      `/api/users/${encodeURIComponent(ownerId)}/admin`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_admin: Boolean(isAdmin) }),
+      },
+    );
+    if (resp.ok) {
+      showToast("success", isAdmin ? "已设为管理员。" : "已取消管理员。");
+      loadUsers();
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not change admin status.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -6775,6 +7039,14 @@ function init() {
   $("keys-create-form").addEventListener("submit", createDaemonKey);
   $("keys-modal").addEventListener("click", (e) => {
     if (e.target.id === "keys-modal") closeKeys();
+  });
+
+  // User-management panel (admin only).
+  $("users-btn").addEventListener("click", openUsers);
+  $("users-close").addEventListener("click", closeUsers);
+  $("users-create-form").addEventListener("submit", createUser);
+  $("users-modal").addEventListener("click", (e) => {
+    if (e.target.id === "users-modal") closeUsers();
   });
 
   $("flow-reply-form").addEventListener("submit", submitReply);
@@ -6934,6 +7206,9 @@ if (typeof module !== "undefined" && module.exports) {
     canOwnerControlMachine,
     visibleMachinesForOwner,
     daemonKeyRowModel,
+    // User-management row model (G3) — exposed for the DOM-free tests in
+    // tests/frontend/user_mgmt.test.mjs.
+    userRowModel,
     state,
   };
 }
