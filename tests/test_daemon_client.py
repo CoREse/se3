@@ -150,6 +150,35 @@ def test_run_records_nonempty_last_error_on_connection_failure():
     assert err != "not connected"
 
 
+def test_welcome_rejection_records_reason_in_last_error():
+    """The WELCOME(accepted=false) failure path also writes a readable reason.
+
+    Beyond a failed dial / handshake timeout (covered above) and the empty
+    ``str()`` of :class:`asyncio.TimeoutError` (``_format_exc`` tests), an
+    authentication rejection — the server resolving the daemon key to no owner —
+    is another failure path that must leave ``last_error`` non-empty so
+    ``se3 daemon status`` surfaces *why* the daemon is ``not connected``. The
+    full behavior (the reject also halts the reconnect storm and never leaks the
+    key) lives in ``tests/test_daemon_key_hello.py``
+    (``test_handle_welcome_rejected_flags_and_signals`` and friends); this is a
+    focused diagnostics assertion that the rejection reason reaches the same
+    ``last_error`` channel as the connection-failure reasons above.
+    """
+    client = DaemonClient(
+        "ws://server",
+        machine_id="m-reject",
+        hostname="h",
+        se3_version="6.4.0",
+        snapshot_provider=lambda: {},
+        daemon_key="k",
+    )
+    client._auth_rejected_event = asyncio.Event()
+    client._handle_welcome({"accepted": False, "reason": "unknown daemon key"})
+    assert client.last_error == "unknown daemon key"
+    assert client.last_error.strip()
+    assert client.last_error != "not connected"
+
+
 # --------------------------------------------------------------------------
 # response-file writer
 # --------------------------------------------------------------------------
