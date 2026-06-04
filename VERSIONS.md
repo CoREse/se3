@@ -15,6 +15,15 @@
 
 
 
+
+## 8.7.0 - 2026-06-04
+
+- Enforce that the discovery step's Proposed Task Description (refined_description) is always a clean, finalized, zero-open-item executable description
+- Forbid any to-be-confirmed/TBD/待确认/待定/undecided either-or phrasing inside refined_description across both initial and continue discovery prompts
+- Route true blockers into questions, keeping discovery looping and out of the confirmation gate until all genuine open decisions are resolved
+- Route non-blockers into refined_description as already-made decisions, with a changeable-default note surfaced in content for the user
+- Document the new 'Discovery refined_description Clean-Final Invariant' requirement and scenarios in the requirement-intake spec
+- Eliminate the case where a user is asked to confirm (type 1) a description that still carries unresolved items
 ## 8.6.1 - 2026-06-04
 
 - Fix daemon connecting wss:// URLs without an explicit port to :8080 instead of :443, which caused silent 'not connected' failures behind TLS reverse proxies

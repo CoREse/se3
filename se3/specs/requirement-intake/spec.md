@@ -188,6 +188,44 @@ The system SHALL require explicit user confirmation via a programmatic gate befo
 - **AND** a "Discovery paused" message is displayed with resume instructions
 - **AND** the run exits cleanly
 
+### Requirement: Discovery refined_description Clean-Final Invariant
+
+The discovery step prompts SHALL enforce, at the prompt layer, that the `refined_description` field (the **Proposed Task Description**) is always a clean, finalized, directly-executable task description with ZERO open items. This invariant complements the [[Discovery Programmatic Confirmation Gate]] by guaranteeing that whatever reaches the gate is confirmable as-is.
+
+**Hard invariant (encoded in both prompt variants):**
+- Both the initial-round prompt (`_INITIAL_DISCOVERY_PROMPT_SUFFIX`) and the continue-round prompt (`_CONTINUE_DISCOVERY_PROMPT_SUFFIX`) in `src/se3/engine/steps/discovery.py` SHALL state — in both the JSON schema field descriptions and the `Guidelines` section — that `refined_description` MUST NOT contain any open-item phrasing whatsoever.
+- Forbidden open-item phrasings include (non-exhaustively): "to be confirmed", "TBD", "to be decided", "to be determined", "to be supplemented", "open question(s)", "pending", "either A or B (undecided)", and their Chinese equivalents (`待确认`, `待定`, `待补充`, `二选一未决`).
+- No matter that is not yet settled may survive inside `refined_description` in the form of a "question".
+
+**Two destinations for unsettled matters:**
+- **True blocker** — an item that cannot proceed at all without the user's adjudication — SHALL be placed in `questions`. A non-empty `questions` keeps discovery looping and does NOT reach the confirmation gate; as long as a genuine open decision remains, the user is never asked to confirm.
+- **Non-blocker** — an item for which the LLM can reasonably pick a sensible default or make the decision itself — SHALL be written into `refined_description` as an already-made decision (e.g. "Decided: use default value X"), with the meta-note that "this is a default picked on the user's behalf and can be changed" placed in the `content` field for the user's reference. Non-blockers SHALL NOT be placed in `questions`.
+
+**Implementation constraints:**
+- The invariant is enforced purely at the prompt layer (field descriptions plus `Guidelines`). The system SHALL NOT add any programmatic keyword fallback validation (e.g. scanning for "TBD"/`待确认` strings) to enforce it.
+- No new schema field is introduced; the existing `mode`, `content`, `questions`, `refined_description`, (and continue-round `ready_to_proceed`), `thinking` fields are unchanged.
+- The binary routing remains `refined_description and not questions` → confirmation gate, otherwise continue the discovery loop (see [[Discovery Programmatic Confirmation Gate]]). The routing logic itself is unchanged by this requirement.
+
+**Resulting invariant on the gate:** `questions` is either non-empty (all entries are true blockers, discovery keeps looping, the gate is not entered) or empty (in which case `refined_description` is already a clean, finalized description that can be cleanly confirmed with a single `1`). This eliminates the situation where the user is asked to confirm a description that still carries unresolved items.
+
+#### Scenario: Non-blocker resolved as an in-description decision
+- **GIVEN** the discovery LLM identifies a detail it can reasonably default (a non-blocker)
+- **WHEN** it produces its response
+- **THEN** the defaulted detail is written into `refined_description` as an already-made decision rather than as a question
+- **AND** a meta-note explaining the default was picked on the user's behalf and is changeable is placed in `content`
+- **AND** the detail does NOT appear in `questions`
+
+#### Scenario: True blocker keeps discovery looping
+- **GIVEN** the discovery LLM identifies an item that cannot proceed without user adjudication (a true blocker)
+- **WHEN** it produces its response
+- **THEN** the blocker is placed in `questions` and `questions` is non-empty
+- **AND** the binary routing keeps the flow in the discovery loop without entering the confirmation gate
+
+#### Scenario: refined_description carries no open-item phrasing
+- **WHEN** the discovery step routes a `refined_description` to the confirmation gate (`questions` is empty)
+- **THEN** the `refined_description` contains no "to be confirmed" / "TBD" / "to be decided" / `待确认` / `待定` / undecided either-or phrasing
+- **AND** the user can confirm it as-is by typing `1`
+
 ### Requirement: Flow State Persistence
 
 The system SHALL persist flow state after each step for resumability.
