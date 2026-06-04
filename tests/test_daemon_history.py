@@ -756,6 +756,62 @@ def test_enumerate_handles_empty_input():
     assert enumerate_historical_project_roots([]) == []
 
 
+def test_enumerate_warns_once_per_unreadable_file(tmp_path, caplog):
+    """A permanently corrupt file warns once, then logs DEBUG on later scans.
+
+    Guards against the daemon.log flooding bug where every status-tick
+    enumeration re-warned about the same broken ``_meta.json``.
+    """
+    # Reset the module-level dedup set so the assertion is deterministic
+    # regardless of test ordering.
+    history_mod._warned_unreadable_paths.clear()
+
+    flow_dir = tmp_path / "se3" / "history" / "flow-broken"
+    flow_dir.mkdir(parents=True)
+    meta = flow_dir / "_meta.json"
+    meta.write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("DEBUG", logger="se3.daemon.history"):
+        enumerate_historical_project_roots([tmp_path])
+        enumerate_historical_project_roots([tmp_path])
+        enumerate_historical_project_roots([tmp_path])
+
+    meta_warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelname == "WARNING" and "_meta.json" in rec.message
+    ]
+    meta_debugs = [
+        rec
+        for rec in caplog.records
+        if rec.levelname == "DEBUG" and "_meta.json" in rec.message
+    ]
+    # Exactly one WARNING for the same file across three enumerations.
+    assert len(meta_warnings) == 1
+    # The repeat sightings are demoted to DEBUG (two more scans).
+    assert len(meta_debugs) == 2
+
+
+def test_enumerate_warns_once_per_distinct_file(tmp_path, caplog):
+    """Each distinct corrupt file still gets its own first WARNING."""
+    history_mod._warned_unreadable_paths.clear()
+
+    history_root = tmp_path / "se3" / "history"
+    for name in ("flow-a", "flow-b"):
+        flow_dir = history_root / name
+        flow_dir.mkdir(parents=True)
+        (flow_dir / "_meta.json").write_text("{broken", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+        enumerate_historical_project_roots([tmp_path])
+
+    warned_files = {
+        rec.message for rec in caplog.records if rec.levelname == "WARNING"
+    }
+    assert any("flow-a" in m for m in warned_files)
+    assert any("flow-b" in m for m in warned_files)
+
+
 # --------------------------------------------------------------------------
 # active_flow_signature — the "result JSON arrived" incremental-push signal
 # --------------------------------------------------------------------------

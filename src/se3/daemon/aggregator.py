@@ -31,6 +31,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 2.0
 
+# TTL (seconds) for the cached on-disk *historical* project-root enumeration in
+# :meth:`DaemonAggregator.all_project_roots`. The history enumeration walks the
+# whole ``se3/history`` tree (reading every ``_meta.json``) and is far too
+# expensive to repeat on every status tick once a project has accumulated
+# history. Caching it behind a conservative TTL collapses that per-tick full
+# scan to at most one walk per window. Only the *historical* discovery is
+# throttled: the active base (``_project_roots`` ∪ registry) is always merged
+# fresh, so a newly active / registered root is still visible immediately. A
+# conservative value keeps newly-appearing *pure history* roots visible within
+# a window without scanning every tick.
+HISTORICAL_ROOTS_TTL = 60.0
+
 # Call kinds that are *exempt* from the ``status == "failed"`` staleness rule
 # applied by :meth:`DaemonAggregator._filter_stale_calls`. A call of one of
 # these kinds keyed to the flow's current step stays pending even when that
@@ -188,6 +200,16 @@ class DaemonAggregator:
         self._registry_persist = registry_persist
         # engine.json mtime per project root, for change detection.
         self._mtimes: Dict[str, float] = {}
+        # TTL cache for the expensive on-disk historical-root enumeration used by
+        # ``all_project_roots``. ``_hist_roots_cache`` holds the last enumeration
+        # result, ``_hist_roots_at`` the monotonic timestamp of that enumeration,
+        # and ``_hist_roots_base`` the base fingerprint (frozenset of active ∪
+        # registry roots) it was computed from. The cache is reused only while
+        # the TTL has not elapsed *and* the base fingerprint is unchanged; it is
+        # also invalidated eagerly by ``add_project_root``.
+        self._hist_roots_cache: Optional[List[str]] = None
+        self._hist_roots_at: Optional[float] = None
+        self._hist_roots_base: Optional[FrozenSet[str]] = None
 
     # -- project-root registry --------------------------------------------
 
@@ -202,7 +224,21 @@ class DaemonAggregator:
         registry I/O hiccup can't break aggregation.
         """
         resolved = Path(path).resolve()
+        # Only a *genuinely new* root needs to bust the historical-roots cache.
+        # The daemon poll loop re-adds every active flow's already-known root on
+        # every ~2s tick; invalidating unconditionally there would re-run the
+        # full ``se3/history`` walk every tick (the exact high-frequency disk
+        # scan this cache exists to eliminate). When the root is already tracked,
+        # the active base is unchanged, so the base-fingerprint guard in
+        # ``_historical_roots`` already keeps the warm cache valid — leave it be.
+        is_new = resolved not in self._project_roots
         self._project_roots.add(resolved)
+        if is_new:
+            # A new active root must be discoverable on the very next
+            # ``all_project_roots`` call, not after the TTL — invalidate the
+            # cached historical enumeration so "register and it's immediately
+            # visible" holds even mid-window.
+            self._invalidate_hist_roots_cache()
         if self._registry_persist is not None:
             try:
                 self._registry_persist(str(resolved))
@@ -214,10 +250,23 @@ class DaemonAggregator:
     def remove_project_root(self, path: object) -> None:
         """Stop polling *path*."""
         self._project_roots.discard(Path(path).resolve())
+        self._invalidate_hist_roots_cache()
 
     def set_project_roots(self, paths: object) -> None:
         """Replace the polled project-root set with *paths*."""
         self._project_roots = {Path(p).resolve() for p in paths}
+        self._invalidate_hist_roots_cache()
+
+    def _invalidate_hist_roots_cache(self) -> None:
+        """Drop the cached historical-root enumeration.
+
+        Forces the next :meth:`all_project_roots` to re-run the on-disk history
+        walk. Called whenever the active root set changes so a freshly
+        registered / removed root is reflected without waiting out the TTL.
+        """
+        self._hist_roots_cache = None
+        self._hist_roots_at = None
+        self._hist_roots_base = None
 
     @property
     def project_roots(self) -> List[Path]:
@@ -255,7 +304,14 @@ class DaemonAggregator:
         """
         flows: List[FlowSnapshot] = []
         all_calls: List[PendingCall] = []
-        for root in sorted(self._project_roots):
+        # Snapshot the live set into a local list before iterating: this build
+        # runs in a worker thread (offloaded from ``_push_status`` /
+        # ``_resolve_interject_root`` / the poll loop), while the event loop may
+        # call ``add_project_root`` (e.g. a webui SPAWN_FLOW for a not-yet-tracked
+        # root). Iterating the live set directly would raise ``RuntimeError: Set
+        # changed size during iteration`` and drop the STATUS_UPDATE — the same
+        # guard ``all_project_roots`` applies for this race.
+        for root in sorted(list(self._project_roots)):
             snapshot = self._snapshot_for_root(root)
             if snapshot is None:
                 continue
@@ -292,9 +348,21 @@ class DaemonAggregator:
         Crucially this view is **not** what per-flow polling iterates: that loop
         stays on ``self._project_roots`` (the active set) so adding many
         historical roots here never widens the per-tick snapshot work.
+
+        The active base (active ∪ registry roots) is *always* recomputed fresh
+        so a newly active / registered root appears immediately. Only the
+        expensive on-disk *historical* enumeration is throttled behind a TTL +
+        base-fingerprint cache (see :data:`HISTORICAL_ROOTS_TTL`): repeating its
+        full ``se3/history`` walk on every status tick is what previously stalled
+        the event loop. Iteration over ``self._project_roots`` is snapshotted
+        into a local set up front so a concurrent ``add_project_root`` (the
+        snapshot build runs in a worker thread) cannot raise ``RuntimeError``.
         """
         base: Set[str] = set()
-        for path in self._project_roots:
+        # Local snapshot of the live set first: ``all_project_roots`` may run in
+        # a worker thread (offloaded snapshot build) while the event loop calls
+        # ``add_project_root``, so iterate a copy, never the live set.
+        for path in list(self._project_roots):
             try:
                 base.add(os.path.realpath(str(path)))
             except OSError:  # pragma: no cover - defensive
@@ -311,13 +379,51 @@ class DaemonAggregator:
             except Exception:  # pragma: no cover - defensive
                 logger.exception("aggregator: registry_load failed")
 
+        historical = self._historical_roots(base)
+
         merged: Set[str] = set(base)
+        merged.update(historical)
+        return sorted(merged)
+
+    def _historical_roots(self, base: Set[str]) -> List[str]:
+        """Return the on-disk historical roots for *base*, TTL-cached.
+
+        Reuses the previous enumeration when it is still within
+        :data:`HISTORICAL_ROOTS_TTL` *and* the *base* fingerprint is unchanged;
+        otherwise it re-runs :func:`enumerate_historical_project_roots` and
+        refreshes the cache. This is the single throttle point that keeps the
+        full ``se3/history`` walk off the per-tick hot path.
+        """
+        base_fp = frozenset(base)
+        now = time.monotonic()
+        # Capture the three cache fields into locals once. This method runs in a
+        # worker thread (the snapshot build is offloaded via asyncio.to_thread)
+        # while the event loop may concurrently call ``_invalidate_hist_roots_cache``
+        # and null all three fields. Reading the instance attributes repeatedly
+        # across the guard could let one pass the ``is not None`` check and then
+        # be nulled before ``now - at`` / the return, yielding ``None`` (or a
+        # ``TypeError`` on ``now - None``) — which would bubble up as
+        # ``merged.update(None)`` and drop the STATUS_UPDATE. A single read of
+        # each field makes the guard atomic with respect to the use.
+        cache = self._hist_roots_cache
+        cached_at = self._hist_roots_at
+        cached_base = self._hist_roots_base
+        if (
+            cache is not None
+            and cached_at is not None
+            and cached_base == base_fp
+            and (now - cached_at) < HISTORICAL_ROOTS_TTL
+        ):
+            return cache
+        result: List[str] = []
         try:
-            for path in enumerate_historical_project_roots(base):
-                merged.add(path)
+            result = list(enumerate_historical_project_roots(base))
         except Exception:  # pragma: no cover - defensive
             logger.exception("aggregator: enumerate_historical_project_roots failed")
-        return sorted(merged)
+        self._hist_roots_cache = result
+        self._hist_roots_at = now
+        self._hist_roots_base = base_fp
+        return result
 
     def pending_calls_signature(self) -> Dict[str, Any]:
         """Return a cheap stat-based fingerprint of every ``se3/calls/`` file.

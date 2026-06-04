@@ -533,7 +533,7 @@ class DaemonClient:
         elif message.type == protocol.MSG_RESPOND_CALL:
             self._handle_respond(message.payload)
         elif message.type == protocol.MSG_INTERJECT_FLOW:
-            self._handle_interject(message.payload)
+            await self._handle_interject(message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
@@ -621,7 +621,7 @@ class DaemonClient:
         except Exception:
             logger.exception("RESPOND_CALL handler failed")
 
-    def _handle_interject(self, payload: Dict[str, Any]) -> None:
+    async def _handle_interject(self, payload: Dict[str, Any]) -> None:
         """Route an INTERJECT_FLOW instruction to the interjection-file writer."""
         text = str(payload.get("text") or "").strip()
         if not text:
@@ -630,7 +630,7 @@ class DaemonClient:
         flow_id = str(payload.get("flow_id") or "")
         project_root = str(payload.get("project_root") or "").strip()
         if not project_root:
-            project_root = self._resolve_interject_root(flow_id)
+            project_root = await self._resolve_interject_root(flow_id)
         if not project_root:
             logger.warning(
                 "INTERJECT_FLOW: cannot resolve project root for flow %s; dropping",
@@ -650,15 +650,19 @@ class DaemonClient:
         self._trigger_fast_push()
         logger.info("INTERJECT_FLOW handled for flow %s", flow_id)
 
-    def _resolve_interject_root(self, flow_id: str) -> str:
+    async def _resolve_interject_root(self, flow_id: str) -> str:
         """Resolve a flow's project root from the current machine snapshot.
 
         Used when an INTERJECT_FLOW payload carries no ``project_root`` — the
         daemon matches *flow_id* against its own snapshot. Returns an empty
         string when the flow cannot be located.
+
+        The snapshot build is the same heavy disk walk offloaded in
+        :meth:`_push_status`, so it is likewise run in a worker thread to keep
+        the event loop free for heartbeats / SPAWN_FLOW / reconnects.
         """
         try:
-            snapshot = self._snapshot_provider()
+            snapshot = await asyncio.to_thread(self._snapshot_provider)
         except Exception:
             logger.debug("Snapshot lookup for INTERJECT_FLOW failed", exc_info=True)
             return ""
@@ -744,7 +748,16 @@ class DaemonClient:
     async def _push_status(self, ws: Any) -> None:
         """Build and send a STATUS_UPDATE from the snapshot provider."""
         try:
-            snapshot = self._snapshot_provider()
+            # Building the snapshot walks ``se3/state`` and (via the aggregator's
+            # all_project_roots → enumerate_historical_project_roots) the whole
+            # ``se3/history`` tree, reading every ``_meta.json``. On a large
+            # history this synchronous walk is heavy enough to stall the event
+            # loop for seconds each tick, which makes the daemon miss heartbeats
+            # (server marks it offline → machine greys out) and stops it from
+            # consuming inbound SPAWN_FLOW or triggering a reconnect. Offload it
+            # to a worker thread, the same pattern used for read_flow /
+            # build_index / read_active_flows above.
+            snapshot = await asyncio.to_thread(self._snapshot_provider)
         except Exception:
             logger.exception("Snapshot provider failed; skipping STATUS_UPDATE")
             return

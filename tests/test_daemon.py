@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -571,7 +573,62 @@ class TestDaemonLifecycle:
         config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
         daemon = Daemon(config)
         config.pid_dir.mkdir(parents=True, exist_ok=True)
-        daemon._poll_once()
+        asyncio.run(daemon._poll_once())
+        assert config.status_file.exists()
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["snapshot"]["flows"]
+
+    def test_poll_once_offloads_snapshot_build(self, tmp_path):
+        """The heavy snapshot build must not block the event loop.
+
+        ``get_snapshot`` can fan out into a full ``se3/history`` walk; running it
+        synchronously on the loop stalls heartbeats and inbound SPAWN_FLOW. This
+        test installs a deliberately blocking ``get_snapshot`` and asserts a
+        concurrent coroutine (standing in for the heartbeat / receive loop)
+        keeps making progress while the snapshot is being built — which is only
+        possible if the build runs in a worker thread via ``asyncio.to_thread``.
+        """
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+
+        real_get_snapshot = daemon.aggregator.get_snapshot
+        snapshot_started = threading.Event()
+        release_snapshot = threading.Event()
+
+        def _blocking_get_snapshot():
+            # Signal the loop, then block this worker thread until the
+            # concurrent coroutine has had a chance to run.
+            snapshot_started.set()
+            assert release_snapshot.wait(timeout=5.0)
+            return real_get_snapshot()
+
+        daemon.aggregator.get_snapshot = _blocking_get_snapshot
+
+        async def _drive():
+            ticks = 0
+
+            async def _heartbeat():
+                nonlocal ticks
+                # Wait until the snapshot build is in flight, then prove the
+                # loop is still live by advancing several times before letting
+                # the (offloaded, blocking) snapshot build finish.
+                while not snapshot_started.is_set():
+                    await asyncio.sleep(0)
+                for _ in range(3):
+                    ticks += 1
+                    await asyncio.sleep(0)
+                release_snapshot.set()
+
+            await asyncio.gather(daemon._poll_once(), _heartbeat())
+            return ticks
+
+        ticks = asyncio.run(_drive())
+        # The heartbeat advanced while the snapshot build was blocked => the
+        # build ran off the event loop.
+        assert ticks == 3
         assert config.status_file.exists()
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["snapshot"]["flows"]
@@ -584,7 +641,7 @@ class TestDaemonLifecycle:
         daemon = Daemon(config)
         config.pid_dir.mkdir(parents=True, exist_ok=True)
         assert daemon._client is None
-        daemon._poll_once()  # must not raise with _client is None
+        asyncio.run(daemon._poll_once())  # must not raise with _client is None
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["connected"] is False
         assert payload["last_error"] is None
@@ -598,7 +655,7 @@ class TestDaemonLifecycle:
         daemon = Daemon(config)
         config.pid_dir.mkdir(parents=True, exist_ok=True)
         daemon._client = _FakeClient(connected=True, last_error=None)
-        daemon._poll_once()
+        asyncio.run(daemon._poll_once())
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["connected"] is True
         assert payload["last_error"] is None
@@ -614,7 +671,7 @@ class TestDaemonLifecycle:
         daemon._client = _FakeClient(
             connected=False, last_error="websockets not installed"
         )
-        daemon._poll_once()
+        asyncio.run(daemon._poll_once())
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["connected"] is False
         assert payload["last_error"] == "websockets not installed"
@@ -1051,7 +1108,7 @@ class TestRegistryWriteThrough:
             daemon.supervisor, "discover_flows", lambda: [_FakeRecord(proj)]
         )
         config.pid_dir.mkdir(parents=True, exist_ok=True)
-        daemon._poll_once()
+        asyncio.run(daemon._poll_once())
         roots = _read_project_roots(config.project_roots_file)
         assert os.path.realpath(str(proj)) in roots
 

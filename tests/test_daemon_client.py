@@ -244,6 +244,67 @@ def test_push_status_sends_status_update():
     assert ws.sent[0].payload["snapshot"]["machine_id"] == "m1"
 
 
+def test_push_status_does_not_block_event_loop():
+    """A slow synchronous snapshot provider must be offloaded to a thread.
+
+    The snapshot build walks ``se3/history`` and can take seconds on a large
+    history; if it ran inline on the event loop it would starve the heartbeat
+    and SPAWN_FLOW handling (the bug this fixes). We model the heavy build with
+    a blocking ``time.sleep`` and assert a concurrently-scheduled coroutine
+    (standing in for the heartbeat) keeps making progress while it runs.
+    """
+
+    def slow_provider():
+        time.sleep(0.3)
+        return {"machine_id": "m1", "flows": []}
+
+    client = _make_client(snapshot_provider=slow_provider)
+    ws = _FakeWS()
+
+    async def scenario():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        beat = asyncio.ensure_future(heartbeat())
+        await client._push_status(ws)
+        beat.cancel()
+        return ticks
+
+    ticks = asyncio.run(scenario())
+    # If the snapshot ran inline on the loop, the heartbeat would have been
+    # frozen for the whole 0.3s and ticked at most ~once. Offloaded, it keeps
+    # ticking throughout.
+    assert ticks >= 5
+    assert ws.sent[0].type == protocol.MSG_STATUS_UPDATE
+
+
+def test_resolve_interject_root_offloaded_and_matches_flow():
+    """``_resolve_interject_root`` is async and finds the flow's project root."""
+    snapshot = {
+        "machine_id": "m1",
+        "flows": [
+            {"flow_id": "F1", "project_root": "/p/one"},
+            {"flow_id": "F2", "project_root": "/p/two"},
+        ],
+    }
+    client = _make_client(snapshot_provider=lambda: snapshot)
+
+    async def scenario():
+        return (
+            await client._resolve_interject_root("F2"),
+            await client._resolve_interject_root("missing"),
+        )
+
+    found, missing = asyncio.run(scenario())
+    assert found == "/p/two"
+    assert missing == ""
+
+
 # --------------------------------------------------------------------------
 # history push: signature-gated trigger + cursor pruning
 # --------------------------------------------------------------------------

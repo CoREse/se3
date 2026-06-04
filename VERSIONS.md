@@ -12,6 +12,13 @@
 
 
 
+
+## 8.5.1 - 2026-06-04
+
+- Fix daemon incorrectly showing as offline/'未连接' and not auto-recovering when creating a task in the webui, by offloading the status-snapshot build (including the historical project-root disk walk) off the asyncio event loop so heartbeats and SPAWN_FLOW handling are no longer stalled
+- Throttle historical project-root enumeration with a 60s TTL cache so the full se3/history directory is no longer traversed on every status tick, while still merging active roots immediately and invalidating the cache when a new root is added
+- Stop daemon.log flooding (previously growing to ~210MB) by deduplicating 'skipping unreadable meta/archive file' warnings per file path and demoting repeats to DEBUG
+- Eliminate the need to manually restart the daemon to recover connectivity after task creation under large history sizes
 ## 8.5.0 - 2026-06-04
 
 - Add GET /api/users to list owners with a strict field whitelist (no password or key hashes) and break-glass identities excluded

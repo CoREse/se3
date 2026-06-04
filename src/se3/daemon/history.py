@@ -49,6 +49,29 @@ from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 logger = logging.getLogger(__name__)
 
+#: Paths already reported as unreadable at WARNING level. The first time a
+#: corrupt archive / meta file is seen it gets one WARNING; every subsequent
+#: encounter of the *same* path is logged at DEBUG. This keeps a permanently
+#: corrupt ``_meta.json`` (re-scanned on every historical enumeration) from
+#: flooding ``daemon.log`` while preserving first-sight observability. The set
+#: is naturally bounded by the (small) number of corrupt files on disk.
+_warned_unreadable_paths: Set[str] = set()
+
+
+def _warn_once_unreadable(path: Path, kind: str) -> None:
+    """Log an unreadable history file, deduplicated by path.
+
+    *kind* is a short noun (``"archive file"`` / ``"meta file"``) spliced into
+    the message. The first sighting of *path* is a WARNING; repeats are DEBUG.
+    """
+    key = str(path)
+    if key in _warned_unreadable_paths:
+        logger.debug("history: skipping unreadable %s %s", kind, path)
+        return
+    _warned_unreadable_paths.add(key)
+    logger.warning("history: skipping unreadable %s %s", kind, path)
+
+
 #: Hard cap on the number of history records a single :func:`read_flow` call
 #: returns. When a flow has more new records than this, the read is truncated
 #: and the returned cursor advances only as far as the truncation point, so the
@@ -719,10 +742,7 @@ def enumerate_historical_project_roots(
                 has_artifacts = True
                 data = _read_json(archive_file)
                 if data is None:
-                    logger.warning(
-                        "history: skipping unreadable archive file %s",
-                        archive_file,
-                    )
+                    _warn_once_unreadable(archive_file, "archive file")
                     continue
                 _maybe_add_root(candidates, data.get("project_root"))
 
@@ -737,9 +757,7 @@ def enumerate_historical_project_roots(
                     continue
                 data = _read_json(meta_path)
                 if data is None:
-                    logger.warning(
-                        "history: skipping unreadable meta file %s", meta_path
-                    )
+                    _warn_once_unreadable(meta_path, "meta file")
                     continue
                 _maybe_add_root(candidates, data.get("project_root"))
 

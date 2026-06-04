@@ -11,6 +11,7 @@ matches the current flow (or is unattributed), while
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from se3.daemon import protocol
@@ -265,6 +266,45 @@ def test_machine_status_project_roots(tmp_path: Path) -> None:
     assert sorted(payload["project_roots"]) == sorted(status.project_roots)
 
 
+def test_get_snapshot_copies_root_set_before_iterating(tmp_path: Path) -> None:
+    """get_snapshot must iterate a copy of _project_roots, not the live set.
+
+    The snapshot build is offloaded to a worker thread (``_push_status`` /
+    ``_resolve_interject_root`` / the poll loop), while the event loop can call
+    ``add_project_root`` (e.g. a webui SPAWN_FLOW for a not-yet-tracked root).
+    If get_snapshot iterated the live set, a concurrent add could raise
+    ``RuntimeError: Set changed size during iteration`` and silently drop the
+    STATUS_UPDATE during task creation. This asserts the loop tolerates the set
+    being mutated while the snapshot build is in progress (here driven from the
+    per-root callback, standing in for the concurrent add) without raising.
+    """
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    agg = DaemonAggregator()
+    agg.add_project_root(proj_a)
+    agg.add_project_root(proj_b)
+
+    extra = tmp_path / "proj-c"
+    extra.mkdir()
+    original = agg._snapshot_for_root
+    state = {"added": False}
+
+    def _mutate_then_snapshot(root: Path):
+        # Mutate the underlying set while the snapshot build is mid-flight; a
+        # build that iterated the live set rather than a copy would be at risk.
+        if not state["added"]:
+            agg.add_project_root(extra)
+            state["added"] = True
+        return original(root)
+
+    agg._snapshot_for_root = _mutate_then_snapshot  # type: ignore[assignment]
+
+    status = agg.get_snapshot()  # must not raise
+    assert extra.resolve() in {Path(p) for p in status.project_roots}
+
+
 def test_machine_status_project_roots_includes_historical(tmp_path: Path) -> None:
     """project_roots merges active registrations with historical project roots.
 
@@ -432,3 +472,137 @@ def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:
         "other_02",
         "unattributed_03",
     }
+
+
+# ---- all_project_roots: TTL cache for historical enumeration ---------------
+
+
+def test_all_project_roots_caches_historical_enumeration(monkeypatch) -> None:
+    """Within the TTL window, the disk history walk runs at most once."""
+    import se3.daemon.aggregator as agg_mod
+
+    calls: list = []
+
+    def spy(base):
+        calls.append(set(base))
+        return ["/hist/root"]
+
+    monkeypatch.setattr(agg_mod, "enumerate_historical_project_roots", spy)
+
+    aggregator = DaemonAggregator()
+    aggregator.set_project_roots(["/p/one"])
+
+    first = aggregator.all_project_roots()
+    second = aggregator.all_project_roots()
+    third = aggregator.all_project_roots()
+
+    # Only one disk enumeration despite three calls.
+    assert len(calls) == 1
+    # The cached historical root is still merged into every result.
+    assert first == second == third
+    assert "/hist/root" in first
+
+
+def test_all_project_roots_active_root_visible_immediately(monkeypatch) -> None:
+    """A newly added active root appears at once, not after the TTL."""
+    import se3.daemon.aggregator as agg_mod
+
+    monkeypatch.setattr(
+        agg_mod, "enumerate_historical_project_roots", lambda base: []
+    )
+
+    aggregator = DaemonAggregator()
+    aggregator.set_project_roots(["/p/one"])
+    first = aggregator.all_project_roots()
+    assert os.path.realpath("/p/one") in first
+
+    # Adding a root mid-window must surface it immediately (cache invalidated).
+    aggregator.add_project_root("/p/two")
+    second = aggregator.all_project_roots()
+    assert os.path.realpath("/p/two") in second
+
+
+def test_readd_existing_root_keeps_history_cache_warm(monkeypatch) -> None:
+    """Re-adding an already-tracked root must NOT bust the historical cache.
+
+    The daemon poll loop re-adds every active flow's already-known root on
+    every ~2s tick. If that idempotent re-add invalidated the cache, the full
+    ``se3/history`` walk would re-run every tick — the exact high-frequency
+    disk scan the cache exists to eliminate.
+    """
+    import se3.daemon.aggregator as agg_mod
+
+    calls: list = []
+    monkeypatch.setattr(
+        agg_mod,
+        "enumerate_historical_project_roots",
+        lambda base: calls.append(set(base)) or [],
+    )
+
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root("/p/one")
+    aggregator.all_project_roots()
+    assert len(calls) == 1
+
+    # Re-adding the same root (poll-loop rediscovery) must reuse the cache.
+    aggregator.add_project_root("/p/one")
+    aggregator.add_project_root("/p/one")
+    aggregator.all_project_roots()
+    assert len(calls) == 1  # cache stayed warm — no extra disk walk
+
+    # But a genuinely new root still invalidates and re-enumerates immediately.
+    aggregator.add_project_root("/p/two")
+    aggregator.all_project_roots()
+    assert len(calls) == 2
+    assert os.path.realpath("/p/two") in calls[1]
+
+
+def test_all_project_roots_reenumerates_after_ttl(monkeypatch) -> None:
+    """Once the TTL elapses the disk history walk runs again."""
+    import se3.daemon.aggregator as agg_mod
+
+    calls: list = []
+    monkeypatch.setattr(
+        agg_mod,
+        "enumerate_historical_project_roots",
+        lambda base: calls.append(1) or [],
+    )
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(agg_mod.time, "monotonic", lambda: clock["now"])
+
+    aggregator = DaemonAggregator()
+    aggregator.set_project_roots(["/p/one"])
+
+    aggregator.all_project_roots()
+    aggregator.all_project_roots()
+    assert len(calls) == 1  # still within TTL
+
+    # Advance past the TTL -> a fresh enumeration.
+    clock["now"] += agg_mod.HISTORICAL_ROOTS_TTL + 1
+    aggregator.all_project_roots()
+    assert len(calls) == 2
+
+
+def test_all_project_roots_reenumerates_on_base_change(monkeypatch) -> None:
+    """A changed base fingerprint forces re-enumeration even within the TTL."""
+    import se3.daemon.aggregator as agg_mod
+
+    calls: list = []
+    monkeypatch.setattr(
+        agg_mod,
+        "enumerate_historical_project_roots",
+        lambda base: calls.append(set(base)) or [],
+    )
+
+    aggregator = DaemonAggregator()
+    aggregator.set_project_roots(["/p/one"])
+    aggregator.all_project_roots()
+    assert len(calls) == 1
+
+    # set_project_roots invalidates the cache, so the next call re-enumerates
+    # with the new base.
+    aggregator.set_project_roots(["/p/one", "/p/two"])
+    aggregator.all_project_roots()
+    assert len(calls) == 2
+    assert os.path.realpath("/p/two") in calls[1]

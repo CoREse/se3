@@ -383,7 +383,7 @@ class Daemon:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
             try:
-                self._poll_once()
+                await self._poll_once()
             except Exception:  # pragma: no cover - defensive
                 logger.exception("Daemon poll iteration failed")
             try:
@@ -393,13 +393,29 @@ class Daemon:
             except asyncio.TimeoutError:
                 continue
 
-    def _poll_once(self) -> None:
-        """A single aggregation tick: discover flows, snapshot, persist status."""
+    async def _poll_once(self) -> None:
+        """A single aggregation tick: discover flows, snapshot, persist status.
+
+        Process discovery and spawner reaping are cheap, bounded probes (psutil
+        scan + a handful of stat/read calls) and stay on the event loop. The
+        snapshot build, however, fans out through ``get_snapshot`` ->
+        ``_merge_project_roots`` -> ``all_project_roots`` ->
+        ``enumerate_historical_project_roots`` into a full ``se3/history`` walk
+        (reading every ``_meta.json``) whenever the aggregator's historical-root
+        TTL cache is cold, expired, or freshly invalidated — and
+        ``add_project_root`` invalidates that cache exactly when a brand-new
+        project root is registered (e.g. a SPAWN_FLOW for a never-before-seen
+        project). Running that walk on the loop would block heartbeats and
+        inbound SPAWN_FLOW for its whole duration, the very hazard the offload in
+        :meth:`DaemonClient._push_status` was meant to relieve. Offload it to a
+        worker thread with the same ``asyncio.to_thread`` pattern so no
+        history-sized disk traversal ever executes synchronously on the loop.
+        """
         flows = self.supervisor.discover_flows()
         for record in flows:
             self.aggregator.add_project_root(record.project_root)
         self.spawner.reap()
-        snapshot = self.aggregator.get_snapshot()
+        snapshot = await asyncio.to_thread(self.aggregator.get_snapshot)
         self._write_status(snapshot, flows)
 
     # -- signal handling ---------------------------------------------------
