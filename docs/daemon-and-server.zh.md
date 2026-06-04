@@ -34,6 +34,7 @@ SE3 的核心（`se3 run`、`se3 sync` ……）是一次性的 CLI：每个命�
    - [引导首个管理员(`bootstrap-token`)](#引导首个管理员bootstrap-token)
    - [登录并创建用户](#登录并创建用户)
    - [签发 daemon key 并绑定机器](#签发-daemon-key-并绑定机器)
+   - [在 TLS 反向代理后部署(wss)](#在-tls-反向代理后部署wss)
    - [owner 隔离](#owner-隔离)
 5. [网页前端](#网页前端)
 
@@ -74,7 +75,7 @@ se3 daemon status --json                  # 以 JSON 形式输出状态
 
 | 子命令 | 选项 | 行为 |
 |--------|------|------|
-| `start` | `--server-url <url>`、`--foreground` | 启动 daemon。默认以**脱离终端的后台进程**启动;`--foreground` 则改为在当前终端中运行。`--server-url` 记录 daemon 要拨入的中心服务器地址 —— 端口可显式指定(`ws://host:9000`),未指定时会补全为默认服务器端口 **8080**(与 `se3-server` 默认值一致)。若已有 daemon 在运行,命令会报告并以非零码退出。 |
+| `start` | `--server-url <url>`、`--daemon-key <key>`、`--foreground` | 启动 daemon。默认以**脱离终端的后台进程**启动;`--foreground` 则改为在当前终端中运行。`--server-url` 记录 daemon 要拨入的中心服务器地址 —— 端口可显式指定(`ws://host:9000`、`wss://host:8443`),未指定时**按 scheme 补全**:`wss://`(及 `https://`)默认补 **443**,`ws://`(及 `http://`)默认补 **8080**(`se3-server` 的明文默认值)。因此裸写 `wss://host` 会拨 `:443`,而不是 `:8080` —— 见[端口处理](#出站连接模型)。`--daemon-key` 记录 daemon 在 HELLO 中出示的密钥,使多租户服务器把机器绑定到某个 owner。若已有 daemon 在运行,命令会报告并以非零码退出。 |
 | `stop` | —— | 停止运行中的 daemon(发送 `SIGTERM` 并等待其退出)。若没有 daemon 在运行,报告 `not running` 并以 `0` 退出;若进程在宽限期内未退出,报告停止超时并以非零码退出。 |
 | `status` | `--json`、`-j` | 报告 daemon 是否在运行、其 pid、机器 id、配置的服务器地址、**真实的出站连接状态**(见下文),以及已跟踪流程的列表。`--json` 以 JSON 形式输出同样的信息,而非渲染的面板。 |
 
@@ -166,11 +167,23 @@ WebSocket。服务器永远不会反向主动连接 daemon。
 未带 `--server-url` 启动的 daemon 会跳过上述全部环节 —— 它不开启任何出站连接,
 只在本地监管并聚合流程。
 
-**端口处理。** `--server-url` 的取值可携带显式端口(`ws://host:9000`)。当端口
-被省略时(`ws://host`),daemon 会把 URL 补全为**默认服务器端口 8080**,而不是
-让 WebSocket scheme 回退到它隐式的 80 端口。`8080` 正是 `se3-server` 默认绑定的
-端口,因此用 `ws://host` 启动的 daemon 与不带 `--port` 启动的服务器开箱即对齐;
-默认端口在一处共享常量中定义,使两端始终一致。
+**端口处理。** `--server-url` 的取值可携带显式端口(`ws://host:9000`、
+`wss://host:8443`),显式端口一律原样保留。当端口被省略时,daemon 会用一个
+**随 scheme 而定的默认值**补全 URL,而不是让 WebSocket scheme 回退到它隐式的
+端口(`ws` 为 80,`wss` 为 443):
+
+| Scheme(归一 `http→ws`、`https→wss` 之后) | 补全的默认端口 |
+|--------------------------------------------|----------------|
+| `ws://`(及 `http://`) | **8080** —— `se3-server` 的明文默认端口 |
+| `wss://`(及 `https://`) | **443** —— TLS 反向代理监听的标准 HTTPS 端口 |
+
+这之所以重要,是因为 `wss://` 的 daemon 几乎总是在反向代理的 **443** 端口终结
+TLS,而不是 se3-server 的明文 **8080**。在引入此规则之前,裸写的 `wss://host`
+会被错误补全为 `wss://host:8080`,于是 daemon 把 TLS 拨到了错误的端口、永远连
+不上(`se3 daemon status` 显示 `not connected`)。现在 `wss://host` 开箱即拨
+`:443`,而 `ws://host` 仍与不带 `--port` 启动的服务器一致。明文 / TLS 两个默认
+端口都定义在同一个共享模块(`se3.daemon.protocol`)里,使两端不会漂移。需要非标准
+端口?显式写出即可 —— `wss://host:8443` 会被原样保留。
 
 **查看真实的连接状态。** 连上服务器是尽力而为的:若缺少 `se3[server]` extra 或
 拨号失败,daemon 会记录原因并降级为纯本地运行,而不是崩溃。由于 `--server-url`
@@ -215,9 +228,13 @@ URL;`se3 daemon status` 会把它呈现在专门的 `Connection:` 行上:
 - `Connection: local-only (no server configured)` —— 启动时未带 `--server-url`。
 - `Connection: connected` —— 到服务器的出站 WebSocket 已建立。
 - `Connection: not connected (<原因>)` —— 给了 `--server-url` 但 daemon 未连接;
-  原因会原样显示,例如 `websockets not installed`(缺少 `se3[server]` extra)
-  或拨号错误。正是这种情形下,即便 `se3 daemon start` 报告了成功,该机器仍**不会**
-  出现在服务器的机器列表中。
+  会原样显示**真实、可读的原因**,因此你无需翻日志即可诊断失败。该原因在每条失败
+  路径上都会被写入 —— 缺依赖(`websockets not installed`,即缺 `se3[server]`
+  extra)、握手失败、连接被拒 / 超时(`TimeoutError`)、TLS / 端口错配,或对 daemon
+  key 的 `WELCOME(accepted=false)` 拒绝 —— 且绝不会塌缩成空的 `()`(消息为空的纯
+  超时会回退到异常类型名)。正是这种情形下,即便 `se3 daemon start` 报告了成功,
+  该机器仍**不会**出现在服务器的机器列表中。万一原因实在不可得,该行会指引你去看
+  `~/.se3/daemon.log`,而不是重复一句没有信息量的字面量。
 
 因此,配置了 `Server:` URL 却同时出现 `Connection: not connected` 行,就是静默
 降级的特征 —— 修复办法通常是 `pip install 'se3[server]'`,或更正 URL / 端口。
@@ -419,6 +436,139 @@ daemon 在它的 HELLO 握手中携带该 key;服务器解析 `key → owner_id`
 daemon→服务器的反向信任由 **TLS** 承载:daemon 拨入一个已知的 `wss://` 地址,
 其服务器身份由证书背书(服务器自身不终结 TLS —— 由反向代理终结)。应用层不在其上
 另建一套服务器鉴权机制。
+
+### 在 TLS 反向代理后部署(wss)
+
+`se3-server` 只讲明文 HTTP/WebSocket,自身**不**终结 TLS。要做公网 `wss://`
+部署,你需要在它前面放一个反向代理(nginx、Caddy ……)来终结 TLS,并转发到
+`se3-server` 的明文端口(默认 `8080`)。代理把两类很不一样的流量转发到**同一个**
+后端:
+
+- **静态网页请求** —— 自带前端的普通 HTTP `GET`/`POST`(`/`、`/app.js`、
+  `/api/*`)。这些无需特殊处理。
+- **WebSocket 长连接** —— daemon 拨 `/ws`,浏览器前端拨 `/ws/ui`。它们以一个携带
+  `Upgrade: websocket` 头的 HTTP `GET` 开始,必须被**升级为一条持久连接**;代理
+  得把 `Upgrade`/`Connection` 头透传过去,并保持连接不关。
+
+**单个 `location /`** 即可兜住二者 —— 你无需为每个端点各写一段。诀窍是无条件透传
+升级头:普通请求本身就不带 `Upgrade` 头、按纯 HTTP 转发即可,而 `/ws` 或 `/ws/ui`
+请求带着它、于是被升级。
+
+#### nginx
+
+WebSocket 升级需要 HTTP/1.1,并把 `Upgrade`/`Connection` 头原样透传。nginx 的
+惯用写法是用一个 `map` 从请求自身的 `Upgrade` 头推导出 `Connection` 头的值:
+
+```nginx
+# 必须写在 http{} 层(例如 conf.d 或主 nginx.conf 内),而**不是** server{} 里
+# —— `map` 只在 http 上下文里合法。宝塔(BT)/ openresty 等面板若把你的片段塞进
+# server 块,会报 "map directive is not allowed here"。
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name se3.example.com;
+
+    ssl_certificate     /etc/ssl/se3.example.com.crt;
+    ssl_certificate_key /etc/ssl/se3.example.com.key;
+
+    # 一个 location 同时兜住静态前端与 /ws、/ws/ui 长连接。^~ 胜过面板可能注入的
+    # 正则 location。
+    location ^~ / {
+        proxy_pass http://127.0.0.1:8080;
+
+        # WebSocket 升级 —— 握手只能走 HTTP/1.1。
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # 把原始 host / 客户端信息传给后端。
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # /ws 连接在两次状态快照之间大多空闲;默认 60s 读超时会把它拆掉。
+        # 把它调得宽松些。
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+注意 / 常见坑:
+
+- **`map` 必须在 `http{}` 层。** 它不能写进 `server{}` 里。宝塔(BT)/ openresty
+  等面板的「反向代理」框会把你的片段塞进 `server` 块,在那里定义 `map` 会让 nginx
+  启动失败 —— 把 `map` 放到面板的主配置 / 一个 `http` 层的 include 里,再从 server
+  块引用 `$connection_upgrade`。
+- **`proxy_http_version 1.1` 不可省。** nginx 默认对上游用 HTTP/1.0,无法升级;
+  不写它,握手永远拿不到 `101`。
+- **调大 `proxy_read_timeout`。** daemon 的 `/ws` 连接在两次状态推送之间空闲;
+  默认 60s 超时会静默把它拆掉,你会看到 daemon 反复重连抖动。
+
+#### Caddy
+
+Caddy 自动终结 TLS(Let's Encrypt),并无需任何额外指令即可代理 WebSocket ——
+`reverse_proxy` 透明处理升级:
+
+```caddy
+se3.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+若你想要和上面 nginx 范例一样宽松的空闲超时:
+
+```caddy
+se3.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        transport http {
+            read_timeout 3600s
+        }
+    }
+}
+```
+
+#### 验证代理:`curl --http1.1` 握手探测
+
+要确认代理确实把一次 WebSocket 升级穿透到了后端,用 `curl` 发一个原始握手,
+看是否返回 **`HTTP/1.1 101 Switching Protocols`**:
+
+```bash
+curl -i --http1.1 \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
+  https://se3.example.com/ws
+```
+
+期望的响应(升级端到端成功):
+
+```
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: <你的 key 的 base64 摘要>
+```
+
+读结果时的避坑点:
+
+- **对 `/ws` 发普通 `GET` 返回 FastAPI 的 `404 {"detail":"Not Found"}` 是预期的
+  —— 而且是*好消息*。** 它证明请求穿过了代理、抵达了 se3-server 后端;`/ws` 只是
+  拒绝一个非升级的 GET。如果你看到的是代理自己的 404/502 页面,说明请求根本没到
+  后端。
+- **WebSocket 握手只能走 HTTP/1.1。** 在 HTTP/2 上你*永远*拿不到 `101` —— 去掉
+  `--http1.1`,一个用 HTTP/2 打头的代理会返回普通响应,而不是升级。这正是 nginx
+  范例要钉死 `proxy_http_version 1.1` 的原因。
+- **默认端口随 scheme 走。** 不带端口的 `wss://host` 会被补全为 **443**(TLS 反向
+  代理的 HTTPS 端口),`ws://host` 则补 **8080**(见
+  [端口处理](#出站连接模型))。因此裸写的 `wss://se3.example.com` 会自动拨
+  `:443` —— 只有当你的代理监听在别处时才需要显式加 `:port`。
 
 ### owner 隔离
 

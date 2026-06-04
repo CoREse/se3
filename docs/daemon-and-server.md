@@ -38,6 +38,7 @@ neither.
    - [Bootstrapping the first admin (`bootstrap-token`)](#bootstrapping-the-first-admin-bootstrap-token)
    - [Logging in and creating users](#logging-in-and-creating-users)
    - [Issuing daemon keys and binding machines](#issuing-daemon-keys-and-binding-machines)
+   - [Deploying behind a TLS reverse proxy (wss)](#deploying-behind-a-tls-reverse-proxy-wss)
    - [Owner isolation](#owner-isolation)
 5. [The Web Frontend](#the-web-frontend)
 
@@ -81,7 +82,7 @@ se3 daemon status --json                  # Emit the status as JSON
 
 | Subcommand | Options | Behavior |
 |------------|---------|----------|
-| `start` | `--server-url <url>`, `--foreground` | Starts the daemon. By default it is launched as a **detached background process**; `--foreground` runs it in the current terminal instead. `--server-url` records the central-server URL the daemon dials out to — a port may be given explicitly (`ws://host:9000`), and when omitted it is completed to the default server port **8080** (matching the `se3-server` default). If a daemon is already running, the command reports it and exits non-zero. |
+| `start` | `--server-url <url>`, `--daemon-key <key>`, `--foreground` | Starts the daemon. By default it is launched as a **detached background process**; `--foreground` runs it in the current terminal instead. `--server-url` records the central-server URL the daemon dials out to — a port may be given explicitly (`ws://host:9000`, `wss://host:8443`), and when omitted it is completed **per the scheme**: `wss://` (and `https://`) default to **443**, `ws://` (and `http://`) default to **8080** (the `se3-server` plaintext default). So a bare `wss://host` dials `:443`, not `:8080` — see [Port handling](#the-outbound-connection-model). `--daemon-key` records the secret the daemon presents in HELLO so a multi-tenant server binds the machine to an owner. If a daemon is already running, the command reports it and exits non-zero. |
 | `stop` | — | Stops the running daemon (sends `SIGTERM` and waits for it to exit). Reports `not running` and exits `0` when none is up; reports a stop timeout with a non-zero exit if the process does not exit within the grace period. |
 | `status` | `--json`, `-j` | Reports whether the daemon is running, its pid, machine id, configured server URL, the **real outbound-connection state** (see below), and the list of tracked flows. `--json` emits the same information as JSON instead of a rendered panel. |
 
@@ -180,12 +181,25 @@ A daemon started **without** `--server-url` skips all of this — it opens no
 outbound connection and just supervises and aggregates flows locally.
 
 **Port handling.** The `--server-url` value may carry an explicit port
-(`ws://host:9000`). When the port is omitted (`ws://host`), the daemon
-completes the URL to the **default server port 8080** instead of letting the
-WebSocket scheme fall back to its implicit port 80. `8080` is the same default
-`se3-server` binds to, so a daemon started with `ws://host` and a server
-started with no `--port` flag agree out of the box; defining the default in a
-single shared constant keeps the two ends aligned.
+(`ws://host:9000`, `wss://host:8443`), which is always preserved as given.
+When the port is omitted, the daemon completes the URL with a **scheme-aware
+default** instead of letting the WebSocket scheme fall back to its implicit
+port (80 for `ws`, 443 for `wss`):
+
+| Scheme (after normalizing `http→ws`, `https→wss`) | Default port filled in |
+|---------------------------------------------------|------------------------|
+| `ws://` (and `http://`) | **8080** — the `se3-server` plaintext default |
+| `wss://` (and `https://`) | **443** — the standard HTTPS port a TLS reverse proxy listens on |
+
+This matters because a `wss://` daemon almost always terminates TLS at a
+reverse proxy on **443**, not at se3-server's plaintext **8080**. Before this
+rule, a bare `wss://host` was wrongly completed to `wss://host:8080`, so the
+daemon dialed TLS at the wrong port and never connected (`se3 daemon status`
+showed `not connected`). Now `wss://host` dials `:443` out of the box, while
+`ws://host` still agrees with a server started with no `--port` flag. The two
+plaintext/TLS defaults live in a single shared module
+(`se3.daemon.protocol`), so the two ends cannot drift. Need a non-standard
+port? Give it explicitly — `wss://host:8443` is preserved untouched.
 
 **Seeing the real connection state.** Connecting to a server is best-effort:
 if the `se3[server]` extra is missing or the dial fails, the daemon logs the
@@ -237,10 +251,17 @@ dedicated `Connection:` line:
   `--server-url`.
 - `Connection: connected` — the outbound WebSocket to the server is up.
 - `Connection: not connected (<reason>)` — a `--server-url` was given but the
-  daemon is not connected; the reason is shown verbatim, e.g.
-  `websockets not installed` (the `se3[server]` extra is missing) or the dial
-  error. This is the case where the machine will *not* appear in the server's
-  machine list even though `se3 daemon start` reported success.
+  daemon is not connected; the **real, readable reason** is shown verbatim, so
+  you can diagnose the failure without digging through logs. The reason is
+  populated on every failure path — a missing dependency
+  (`websockets not installed`, the `se3[server]` extra), a handshake failure,
+  a connection refused / timeout (`TimeoutError`), a TLS / wrong-port error, or
+  a `WELCOME(accepted=false)` rejection of the daemon key — and never collapses
+  to an empty `()` (a bare timeout whose message is empty falls back to the
+  exception type name). This is the case where the machine will *not* appear in
+  the server's machine list even though `se3 daemon start` reported success.
+  If the reason is somehow unavailable, the line points you at
+  `~/.se3/daemon.log` instead of repeating an information-free literal.
 
 So a configured `Server:` URL plus a `Connection: not connected` line is the
 signature of a silent degrade — the fix is usually `pip install 'se3[server]'`
@@ -476,6 +497,151 @@ The daemon→server reverse trust is carried by **TLS**: the daemon dials a know
 `wss://` address whose server identity is certificate-backed (the server itself
 does not terminate TLS — a reverse proxy does). The application layer builds no
 separate server-authentication mechanism on top of that.
+
+### Deploying behind a TLS reverse proxy (wss)
+
+`se3-server` speaks plaintext HTTP/WebSocket and does **not** terminate TLS
+itself. For a public `wss://` deployment you put a reverse proxy (nginx, Caddy,
+…) in front of it to terminate TLS and forward to `se3-server` on its plaintext
+port (default `8080`). The proxy carries two very different kinds of traffic to
+the *same* backend:
+
+- **Static web requests** — ordinary HTTP `GET`/`POST` for the bundled frontend
+  (`/`, `/app.js`, `/api/*`). These need no special handling.
+- **WebSocket long-lived connections** — the daemon dials `/ws` and the browser
+  frontend dials `/ws/ui`. These start as an HTTP `GET` carrying an
+  `Upgrade: websocket` header and must be **upgraded to a persistent
+  connection**; the proxy has to pass the `Upgrade`/`Connection` headers through
+  and keep the connection open.
+
+A **single `location /`** can cover both — you do not need a separate block per
+endpoint. The trick is to forward the upgrade headers unconditionally; an
+ordinary request simply carries no `Upgrade` header and is proxied as plain
+HTTP, while a `/ws` or `/ws/ui` request carries one and gets upgraded.
+
+#### nginx
+
+WebSocket upgrade needs HTTP/1.1 and the `Upgrade`/`Connection` headers passed
+through verbatim. The idiomatic nginx pattern uses a `map` to derive the
+`Connection` header value from the request's own `Upgrade` header:
+
+```nginx
+# MUST live at the http{} level (e.g. inside conf.d or the main nginx.conf),
+# NOT inside server{} — `map` is only valid in the http context. Panels such as
+# 宝塔(BT)/ openresty that drop your snippet into the server block will error
+# with "map directive is not allowed here".
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name se3.example.com;
+
+    ssl_certificate     /etc/ssl/se3.example.com.crt;
+    ssl_certificate_key /etc/ssl/se3.example.com.key;
+
+    # One location bottoms out both the static frontend and the /ws, /ws/ui
+    # long-lived WebSockets. ^~ wins over regex locations a panel may inject.
+    location ^~ / {
+        proxy_pass http://127.0.0.1:8080;
+
+        # WebSocket upgrade — handshake can ONLY ride HTTP/1.1.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # Preserve the original host / client for the backend.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # The /ws connection is mostly idle between status snapshots; the
+        # default 60s read timeout would tear it down. Lengthen it generously.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+Notes / common pitfalls:
+
+- **`map` must be at the `http{}` level.** It cannot live inside `server{}`. On
+  宝塔 (BT) / openresty panels whose "reverse proxy" box drops your snippet into
+  the `server` block, defining `map` there fails to start nginx — put the `map`
+  in the panel's main config / an `http`-level include and reference
+  `$connection_upgrade` from the server block.
+- **`proxy_http_version 1.1` is mandatory.** nginx defaults to HTTP/1.0
+  upstream, which cannot upgrade; without it the handshake never reaches `101`.
+- **Lengthen `proxy_read_timeout`.** A daemon `/ws` connection is idle between
+  status pushes; the stock 60s timeout silently drops it and you see the daemon
+  flap reconnect.
+
+#### Caddy
+
+Caddy terminates TLS automatically (Let's Encrypt) and proxies WebSockets with
+no extra directives — `reverse_proxy` handles the upgrade transparently:
+
+```caddy
+se3.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+If you want the same generous idle timeout as the nginx example:
+
+```caddy
+se3.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        transport http {
+            read_timeout 3600s
+        }
+    }
+}
+```
+
+#### Verifying the proxy: a `curl --http1.1` handshake probe
+
+To confirm the proxy actually upgrades a WebSocket through to the backend,
+send a raw handshake with `curl` and look for **`HTTP/1.1 101 Switching
+Protocols`**:
+
+```bash
+curl -i --http1.1 \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
+  https://se3.example.com/ws
+```
+
+Expected response (the upgrade succeeded end-to-end):
+
+```
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: <base64 digest of your key>
+```
+
+Avoidance points when reading the result:
+
+- **A plain `GET /ws` returning a FastAPI `404 {"detail":"Not Found"}` is
+  expected — and is *good news*.** It proves the request traversed the proxy and
+  reached the se3-server backend; `/ws` simply rejects a non-upgrade GET. If you
+  get the proxy's own 404/502 page instead, the request never reached the
+  backend.
+- **The WebSocket handshake can only ride HTTP/1.1.** Over HTTP/2 you will
+  *never* get a `101` — drop `--http1.1` and an HTTP/2-fronted proxy returns a
+  normal response, not an upgrade. This is why the nginx example pins
+  `proxy_http_version 1.1`.
+- **The default port follows the scheme.** A `wss://host` with no port is
+  completed to **443** (a TLS reverse proxy's HTTPS port), and `ws://host` to
+  **8080** (see [Port handling](#the-outbound-connection-model)). A bare
+  `wss://se3.example.com` therefore dials `:443` automatically — only add an
+  explicit `:port` if your proxy listens elsewhere.
 
 ### Owner isolation
 
