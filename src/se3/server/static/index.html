@@ -12,16 +12,31 @@
     <div class="topbar-right">
       <span id="se3-version" class="se3-version"></span>
       <span id="conn-status" class="conn conn-connecting">connecting&hellip;</span>
-      <!-- Auth-only controls: hidden until an owner is resolved. -->
-      <button id="history-btn" type="button" class="ghost-btn auth-only hidden">History</button>
-      <button id="keys-btn" type="button" class="ghost-btn auth-only hidden">Daemon&nbsp;Keys</button>
-      <!-- Admin-only control: hidden for non-admin owners even once authenticated
-           (the .admin-only class is toggled by applyAuthState off is_admin). The
-           server enforces admin on every /api/users route — this is UX only. -->
-      <button id="users-btn" type="button" class="ghost-btn admin-only hidden">用户管理</button>
-      <button id="new-task-btn" type="button" class="auth-only hidden">+ New Task</button>
-      <span id="owner-label" class="owner-label auth-only hidden"></span>
-      <button id="logout-btn" type="button" class="ghost-btn auth-only hidden">Logout</button>
+      <!-- Hamburger toggle for the mobile-portrait overflow menu. Hidden on
+           desktop (@media min-width:601px) and while unauthenticated (auth-only);
+           on a narrow screen it expands #nav-menu into a dropdown. No top-bar
+           function is removed — every control still lives inside #nav-menu. -->
+      <button id="nav-menu-toggle" type="button"
+              class="nav-menu-toggle auth-only hidden"
+              aria-label="Menu" aria-haspopup="true" aria-expanded="false"
+              aria-controls="nav-menu">&#9776;</button>
+      <!-- Overflow-menu container wrapping every functional control. On desktop
+           it is `display: contents` so the buttons stay inline exactly as
+           before; on a narrow screen it collapses behind the hamburger above.
+           All button ids and their auth-only/admin-only classes are unchanged,
+           so applyAuthState's global querySelectorAll gating still applies. -->
+      <div id="nav-menu" class="nav-menu">
+        <!-- Auth-only controls: hidden until an owner is resolved. -->
+        <button id="history-btn" type="button" class="ghost-btn auth-only hidden">History</button>
+        <button id="keys-btn" type="button" class="ghost-btn auth-only hidden">Daemon&nbsp;Keys</button>
+        <!-- Admin-only control: hidden for non-admin owners even once authenticated
+             (the .admin-only class is toggled by applyAuthState off is_admin). The
+             server enforces admin on every /api/users route — this is UX only. -->
+        <button id="users-btn" type="button" class="ghost-btn admin-only hidden">用户管理</button>
+        <button id="new-task-btn" type="button" class="auth-only hidden">+ New Task</button>
+        <span id="owner-label" class="owner-label auth-only hidden"></span>
+        <button id="logout-btn" type="button" class="ghost-btn auth-only hidden">Logout</button>
+      </div>
     </div>
   </header>
 
@@ -69,6 +84,11 @@
     </aside>
 
     <section class="flows-pane">
+      <!-- Narrow-screen only: return from the Flows panel to the machine list
+           (single-view panel switch). Hidden on desktop, where both panes show
+           side by side. -->
+      <button id="flows-back-btn" type="button" class="flows-back-btn"
+              aria-label="返回机器列表">&larr; 机器</button>
       <h2 id="flows-heading">Flows</h2>
       <div id="flow-list" class="flow-list">
         <p class="empty">Select a machine to view its flows.</p>
@@ -93,6 +113,12 @@
         </div>
       </aside>
       <section class="history-detail-pane">
+        <!-- Narrow-screen only: return from the session detail back to the
+             session list (single-view panel switch, mirrors the main list's
+             flows-back-btn). Hidden on desktop, where both panes show side by
+             side. -->
+        <button id="history-back-btn" type="button" class="history-back-btn"
+                aria-label="返回会话列表">&larr; 会话列表</button>
         <h4 id="history-detail-title">Session</h4>
         <div id="history-detail" class="history-detail">
           <p class="empty">Select a session to view its step records.</p>
@@ -106,6 +132,14 @@
        main body, prominent intervention items, and a docked reply box. -->
   <div id="flow-view" class="flow-view hidden">
     <div class="flow-view-head">
+      <!-- Mobile-only (G4): toggles the off-canvas sidebar drawer that holds
+           Overview / Steps / Machine info. On desktop the sidebar is always
+           rendered in the grid, so this control is hidden (see the
+           min-width:601px guard in style.css). -->
+      <button id="flow-sidebar-toggle" type="button"
+              class="icon-btn flow-sidebar-toggle"
+              aria-expanded="false" aria-controls="flow-sidebar-body"
+              title="显示 / 隐藏 flow 详情">&#9776;</button>
       <h3 id="flow-view-title">Flow</h3>
       <button id="flow-view-close" type="button" class="icon-btn">&times;</button>
     </div>
@@ -113,6 +147,9 @@
       &#9888; 连接断开，数据可能陈旧
     </div>
     <div class="flow-view-body">
+      <!-- Mobile-only (G4): tap-to-close backdrop behind the open sidebar
+           drawer. Hidden on desktop and whenever the drawer is shut. -->
+      <div id="flow-sidebar-backdrop" class="flow-sidebar-backdrop"></div>
       <aside class="flow-sidebar">
         <div id="flow-sidebar-body" class="flow-sidebar-body">
           <p class="empty">Loading flow details&hellip;</p>

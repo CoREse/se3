@@ -48,6 +48,33 @@ h1, h2, h3 { font-weight: 600; }
 
 .topbar-right { display: flex; align-items: center; gap: 14px; }
 
+/* -- topbar overflow menu (desktop side) ---------------------------- *
+ * The overflow menu (hamburger + #nav-menu wrapper) is a mobile-portrait
+ * affordance. To keep the desktop top bar byte-for-byte unchanged, the only
+ * rules that touch it on wide screens live here, scoped to >600px so they can
+ * never apply to a phone: the wrapper is made transparent (`display: contents`)
+ * so its children stay inline flex items of .topbar-right exactly as before,
+ * and the hamburger toggle is hidden. The collapse/expand dropdown styling is
+ * authored entirely inside the @media (max-width: 600px) block at end-of-file. */
+@media (min-width: 601px) {
+  .nav-menu { display: contents; }
+  .nav-menu-toggle { display: none; }
+  /* The Flows-pane "back to machines" button is a mobile-only affordance for
+   * the single-view panel switch; on desktop both panes render side by side,
+   * so it is hidden here (scoped >600px to never touch a phone). */
+  .flows-back-btn { display: none; }
+  /* The History detail-pane "back to sessions" button is a mobile-only
+   * affordance for the single-view panel switch (G5); on desktop both History
+   * panes show side by side, so it is hidden here (scoped >600px to never
+   * touch a phone). */
+  .history-back-btn { display: none; }
+  /* The flow-view sidebar drawer toggle + its backdrop are mobile-only (G4):
+   * on desktop the sidebar is always part of the grid, so both are hidden
+   * here (scoped >600px to never touch a phone). */
+  .flow-sidebar-toggle,
+  .flow-sidebar-backdrop { display: none; }
+}
+
 .conn {
   font-size: 12px;
   padding: 3px 9px;
@@ -2023,3 +2050,435 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 .users-row-actions { display: flex; gap: 6px; }
 .users-row-actions button { font-size: 12px; padding: 4px 10px; }
 .users-delete-btn { color: var(--red); border-color: var(--red); }
+
+/* ============================================================================
+ * MOBILE PORTRAIT BASELINE  —  @media (max-width: 600px)
+ * ============================================================================
+ *
+ * Breakpoint strategy
+ * -------------------
+ * This block is the shared base for the mobile-phone-portrait experience. It is
+ * an INCREMENTAL OVERLAY: every rule below lives strictly inside this (or the
+ * pre-existing 720 / 480) breakpoint, so the desktop layout above is never
+ * touched and stays byte-for-byte identical. A wide viewport never matches this
+ * query, so none of these rules apply on desktop.
+ *
+ * Why 600px (not the pre-existing 720px):
+ *   - 600px reliably covers mainstream phone portrait widths (<=430 logical px
+ *     and their browser-zoom / large-text scaled variants) while staying clear
+ *     of the ~768px tablet class, which this pass deliberately does NOT polish.
+ *   - The existing 720px block (tablet single-column stacking) is preserved as
+ *     is; it still matches phones too, but because this 600px block is authored
+ *     LAST in source order it wins on equal specificity for phone-portrait,
+ *     letting later mobile groups layer panel-switching / drawers / full-screen
+ *     modals on top of this baseline.
+ *
+ * This baseline group (G1) provides only the foundation that every later mobile
+ * group builds on:
+ *   1. a global guard against accidental horizontal scrolling, and
+ *   2. unified touch-target sizing + iOS-safe form font sizes + a more compact
+ *      top bar.
+ * Layout re-flows (overflow menu, panel switching, off-canvas drawers,
+ * full-screen modals) are added by the later groups within this same breakpoint.
+ */
+@media (max-width: 600px) {
+  /* -- global horizontal-scroll guard -------------------------------- *
+   * Phones have no comfortable horizontal scroll affordance, so any element
+   * wider than the viewport reads as a layout bug. Clamp the document to the
+   * viewport width and stop oversized media / embeds from forcing the page
+   * wider than the screen. Per-element long-text wrapping (code blocks, raw
+   * JSON, etc.) is handled by the Long-Content Wrapping rules elsewhere; this
+   * is the catch-all backstop. */
+  html, body {
+    overflow-x: hidden;
+    max-width: 100%;
+  }
+  img, video, canvas, svg, iframe {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* -- unified touch targets ----------------------------------------- *
+   * Bump the interactive controls to a finger-friendly minimum height so they
+   * are comfortable to tap. ~40px is the practical floor for the chrome here;
+   * larger primary actions already exceed it. Chips stay inline-flex and keep
+   * vertical centering so the taller box does not misalign their glyph+label. */
+  button,
+  .icon-btn,
+  .intervention-chip,
+  .ghost-btn {
+    min-height: 40px;
+  }
+  .intervention-chip {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* -- iOS-safe form fields ------------------------------------------ *
+   * A font-size below 16px makes mobile Safari auto-zoom the viewport on focus,
+   * which then leaves the page scrolled/zoomed. Pin form controls to 16px to
+   * suppress that zoom; this only affects the narrow breakpoint. */
+  select,
+  textarea,
+  input {
+    font-size: 16px;
+  }
+
+  /* -- compact top bar ----------------------------------------------- *
+   * Reclaim horizontal room on a narrow screen without hiding any control —
+   * tighter padding and gaps only. The functional controls are tucked into the
+   * overflow menu below; the version + connection badges stay inline. The
+   * top bar is the positioning context for the dropdown. */
+  .topbar {
+    padding: 8px 12px;
+    position: relative;
+  }
+  .topbar-right {
+    gap: 8px;
+  }
+
+  /* -- topbar overflow menu (mobile) --------------------------------- *
+   * On a narrow screen the auth/admin actions collapse behind the hamburger
+   * toggle, preserving every function (nothing is hidden or downgraded — the
+   * controls are only relocated into a dropdown). The toggle is shown here and
+   * sized as a comfortable touch target; the G1 baseline already pins buttons
+   * to a 40px min-height. */
+  .nav-menu-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    padding: 6px 10px;
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  /* Collapsed by default: the menu is removed from flow so it occupies no
+   * space when shut. When `.open`, it drops down as an absolutely-positioned
+   * panel anchored to the top bar's bottom-right, stacking its controls
+   * vertically as full-width tap targets. */
+  .nav-menu {
+    display: none;
+  }
+  .nav-menu.open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    position: absolute;
+    top: 100%;
+    right: 8px;
+    margin-top: 6px;
+    padding: 10px;
+    min-width: 180px;
+    max-width: calc(100vw - 16px);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    z-index: 28;
+  }
+  /* Each control fills the dropdown width and centers its label; the owner
+   * label reads as a non-interactive heading row. */
+  .nav-menu.open > button {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+  .nav-menu.open > .owner-label {
+    width: 100%;
+    text-align: center;
+    padding: 4px 0;
+  }
+
+  /* -- main list: single-view panel switch (Machines <-> Flows) ------ *
+   * The desktop two-column grid, merely stacked (the 720px rule), would push
+   * the Flows list below the entire machine list and off the first screen. On
+   * a phone we instead show exactly one panel at a time: both panes are placed
+   * in the same single grid cell and toggled by display. The machine list is
+   * the default; once a machine is picked, `#main-layout` gains `active-flows`
+   * (set from JS) to reveal the Flows pane, and the back button returns to the
+   * list. Desktop never matches this breakpoint, so its grid is untouched. */
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  .machines-pane,
+  .flows-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  /* Default: machines visible, flows hidden. */
+  .flows-pane { display: none; }
+  /* active-flows: flows visible, machines hidden. */
+  .layout.active-flows .machines-pane { display: none; }
+  .layout.active-flows .flows-pane { display: block; }
+
+  /* The back button leads from the Flows panel back to the machine list; it is
+   * a comfortable touch target (the G1 baseline pins buttons to 40px min). */
+  .flows-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 10px;
+    padding: 6px 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+    font-size: 14px;
+  }
+
+  /* -- History view: single-view panel switch (Sessions <-> Detail) -------- *
+   * Isomorphic to the main-list switch above. The desktop two-column grid,
+   * merely stacked (the existing 720px rule), would push the session detail
+   * below the whole session list and off the first screen. On a phone we show
+   * exactly one panel at a time: both panes share the same single grid cell and
+   * are toggled by display. The session list is the default; once a session is
+   * picked, `#history-view` gains `active-detail` (set from JS) to reveal the
+   * detail pane, and the back button returns to the list. Desktop never matches
+   * this breakpoint, so its History grid is untouched. */
+  .history-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  .history-list-pane,
+  .history-detail-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  /* Default: session list visible, detail hidden. */
+  .history-detail-pane { display: none; }
+  /* active-detail: detail visible, list hidden. */
+  .history-view.active-detail .history-list-pane { display: none; }
+  .history-view.active-detail .history-detail-pane { display: block; }
+
+  /* The back button leads from the session detail back to the session list; a
+   * comfortable touch target (the G1 baseline pins buttons to 40px min). */
+  .history-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 10px;
+    padding: 6px 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+    font-size: 14px;
+  }
+
+  /* -- running console (#flow-view): off-canvas sidebar drawer (G4) -------- *
+   * The desktop two-column grid (sidebar | conversation) would, when merely
+   * stacked, push the conversation below the whole Overview/Steps/Machine
+   * sidebar and off the first screen. On a phone we instead let the
+   * conversation own the full main column and turn the sidebar into a drawer
+   * that slides in over the conversation when the head toggle is tapped, with
+   * a tap-to-close backdrop. Desktop never matches this breakpoint, so its
+   * grid is untouched. */
+
+  /* The head toggle (☰) becomes a visible touch target. The G1 baseline pins
+   * buttons to a 40px min-height; .icon-btn already centers its glyph. */
+  .flow-sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Collapse the body to a single cell so the conversation/main column fills
+   * the whole width (overriding the 720px stacked grid). The sidebar is lifted
+   * out of flow below, so the lone remaining grid item is the main column. */
+  .flow-view-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  .flow-main {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  /* The sidebar becomes a fixed off-canvas drawer: parked just off the left
+   * edge by default, slid in when `#flow-view.sidebar-open`. It keeps its own
+   * vertical scroll for long Overview/Steps content. */
+  .flow-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 84%;
+    max-width: 320px;
+    z-index: 30;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: 2px 0 18px rgba(0, 0, 0, 0.5);
+    -webkit-overflow-scrolling: touch;
+  }
+  .flow-view.sidebar-open .flow-sidebar {
+    transform: translateX(0);
+  }
+
+  /* The backdrop dims the conversation behind the open drawer and is the
+   * tap-to-close target. Hidden until the drawer is open. */
+  .flow-sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .flow-view.sidebar-open .flow-sidebar-backdrop {
+    display: block;
+  }
+
+  /* -- running console: docked reply area touch optimisation (G4) --------- *
+   * Enlarge the reply controls and stack them vertically so a thumb can
+   * comfortably pick a chip, draft a multi-line reply, and Interject / Send.
+   * The textarea stays always-editable and the Send gating is untouched —
+   * these are purely layout/sizing rules. */
+  .flow-reply {
+    /* Respect the home-bar safe area on notched phones so Send is reachable. */
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Intervention chips: roomier tap targets that wrap freely. */
+  .flow-interventions {
+    gap: 8px;
+  }
+  .intervention-chip {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  /* Option buttons (confirm / retry choices) get finger-friendly padding. */
+  .flow-reply-option {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  /* Reply row: textarea on its own full-width line, then the Interject and
+   * Send buttons share the row below it as tall, easy-to-hit controls. */
+  .flow-reply-row {
+    gap: 8px;
+  }
+  .flow-reply-row textarea {
+    order: 1;
+    flex: 1 1 100%;
+    min-height: 104px;
+  }
+  .reply-icon-btn {
+    order: 2;
+    align-self: stretch;
+    width: auto;
+    min-width: 52px;
+    min-height: 44px;
+  }
+  #flow-reply-submit {
+    order: 3;
+    flex: 1 1 auto;
+    align-self: stretch;
+    min-height: 44px;
+  }
+
+  /* -- modals: near full-screen on phone portrait (G6) -------------------- *
+   * Desktop centers a 480px card (`width: min(480px, 92vw); max-height: 90vh`),
+   * which on a phone leaves cramped side gutters and a short inner scroll area.
+   * Here every modal (New Task / Daemon Keys / 用户管理) fills the viewport:
+   * the overlay stops centering, the card spans the full width/height with
+   * squared corners and no margin, and the body becomes the sole scroller so
+   * long forms and lists stay fully reachable. Desktop never matches this
+   * breakpoint, so the centered-card look is byte-for-byte intact. */
+  .modal {
+    align-items: stretch;
+    justify-content: stretch;
+  }
+  .modal-card {
+    width: 100vw;
+    max-width: 100vw;
+    /* 100dvh tracks the dynamic viewport (mobile URL bar) so the card never
+     * overshoots; the 100vh line is the fallback for browsers without dvh. */
+    height: 100vh;
+    height: 100dvh;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border: none;
+    /* Card is the flex frame: fixed head + scrolling body. Overflow moves from
+     * the card (desktop) onto the body below, so the head stays pinned. */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-head {
+    flex: 0 0 auto;
+  }
+  .modal-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    /* Keep the last control clear of the home-bar safe area on notched phones. */
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* -- in-modal create forms: vertical stacking (G6) --------------------- *
+   * The daemon-key and user create forms lay their input(s) + button out in a
+   * horizontal row on desktop; on a phone that squeezes each field too narrow
+   * to tap. Stack them vertically as full-width controls instead. The G1
+   * baseline already pins inputs to 16px and buttons to a 40px touch height. */
+  .keys-create,
+  .users-create {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .keys-create input,
+  .users-create input[type="text"],
+  .users-create input[type="password"] {
+    flex: none;
+    width: 100%;
+    min-width: 0;
+  }
+  .keys-create button,
+  .users-create button {
+    width: 100%;
+  }
+
+  /* -- per-user rows: wrap actions onto their own line (G6) -------------- *
+   * A users-row packs an identity block plus delete / reset / admin-toggle
+   * actions. On a phone those buttons would crush against the label; let the
+   * row wrap so the action cluster drops to a full-width line and each button
+   * grows to a comfortable touch target. keys-row wraps defensively too. */
+  .users-row,
+  .keys-row {
+    flex-wrap: wrap;
+  }
+  .users-row-actions {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 8px;
+  }
+  .users-row-actions button {
+    flex: 1 1 auto;
+    min-height: 40px;
+    font-size: 13px;
+    padding: 8px 12px;
+  }
+
+  /* -- login gate + break-glass: narrow-screen margins/sizing (G6) ------- *
+   * Let the login card use the full phone width (minus a small gutter) and
+   * top-align it so the on-screen keyboard does not shove a vertically centered
+   * card off-screen. The G1 baseline already pins the form fields to 16px. */
+  .login-view {
+    align-items: flex-start;
+    padding: 24px 16px;
+    overflow-y: auto;
+  }
+  .login-card {
+    width: 100%;
+    max-width: 100%;
+    padding: 22px 18px 18px;
+  }
+  .login-form button,
+  .login-breakglass button[type="submit"] {
+    width: 100%;
+  }
+}

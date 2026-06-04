@@ -679,6 +679,83 @@ function applyMachines(machines) {
 }
 
 // ---------------------------------------------------------------------------
+// Main-list panel switch (mobile-portrait): Machines <-> Flows
+// ---------------------------------------------------------------------------
+//
+// On a phone the desktop two-column grid is collapsed to a single visible
+// panel: the machine list shows by default, and selecting a machine switches
+// to the Flows panel (with a back button to return). The state lives as an
+// `active-flows` class on `#main-layout`. On desktop that class has no matching
+// styles (both columns always render), so these flips are inert and the desktop
+// layout is unchanged.
+//
+// listPanelState is the DOM-free transition helper (exported for the pure
+// tests): given the current panel and an action it returns the next panel.
+
+function listPanelState(current, action) {
+  switch (action) {
+    case "select-machine":
+      return "flows";
+    case "back":
+    case "reset":
+      return "machines";
+    default:
+      return current === "flows" ? "flows" : "machines";
+  }
+}
+
+function currentListPanel() {
+  const layout = $("main-layout");
+  return layout && layout.classList.contains("active-flows") ? "flows" : "machines";
+}
+
+function setListPanel(panel) {
+  const layout = $("main-layout");
+  if (layout) layout.classList.toggle("active-flows", panel === "flows");
+}
+
+function applyListPanelAction(action) {
+  setListPanel(listPanelState(currentListPanel(), action));
+}
+
+// History view (G5) — same single-view panel switch, mirroring the main list
+// above. On a phone the History session list and the session detail share one
+// grid cell and only one is visible at a time: the list is the default, and
+// selecting a session reveals the detail (with a back button to return). The
+// state lives as an `active-detail` class on `#history-view`. On desktop that
+// class has no matching styles (both panes always render), so these flips are
+// inert and the desktop History layout is unchanged.
+//
+// historyPanelState is the DOM-free transition helper (exported for the pure
+// tests): given the current panel and an action it returns the next panel.
+
+function historyPanelState(current, action) {
+  switch (action) {
+    case "select-session":
+      return "detail";
+    case "back":
+    case "reset":
+      return "list";
+    default:
+      return current === "detail" ? "detail" : "list";
+  }
+}
+
+function currentHistoryPanel() {
+  const view = $("history-view");
+  return view && view.classList.contains("active-detail") ? "detail" : "list";
+}
+
+function setHistoryPanel(panel) {
+  const view = $("history-view");
+  if (view) view.classList.toggle("active-detail", panel === "detail");
+}
+
+function applyHistoryPanelAction(action) {
+  setHistoryPanel(historyPanelState(currentHistoryPanel(), action));
+}
+
+// ---------------------------------------------------------------------------
 // Render: machine list
 // ---------------------------------------------------------------------------
 
@@ -704,6 +781,8 @@ function renderMachines() {
     li.append(dot, name, count);
     li.addEventListener("click", () => {
       state.selectedMachineId = m.machine_id;
+      // Narrow screens switch to the Flows panel; inert on desktop.
+      applyListPanelAction("select-machine");
       renderMachines();
       renderFlows();
     });
@@ -828,6 +907,8 @@ function openFlowView(flowId) {
   }
 
   $("flow-view").classList.remove("hidden");
+  // Always open with the mobile sidebar drawer collapsed; inert on desktop.
+  closeFlowSidebar();
   $("flow-view-title").textContent = "Flow";
   renderSidebarPlaceholder("Loading flow details…");
   $("flow-interventions").innerHTML = "";
@@ -869,6 +950,8 @@ function doCloseFlowView() {
   state.pendingSendBaselineCallIds = null;
   state.interjectionPhases = {};
   state.interjectionToastsSeen = {};
+  // Reset the mobile sidebar drawer so the next opened flow starts collapsed.
+  closeFlowSidebar();
   $("flow-view").classList.add("hidden");
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
@@ -887,6 +970,45 @@ function closeFlowView() {
     return;
   }
   doCloseFlowView();
+}
+
+// ---------------------------------------------------------------------------
+// Flow-view sidebar drawer (mobile, G4)
+// ---------------------------------------------------------------------------
+//
+// On a narrow screen the Overview / Steps / Machine sidebar is an off-canvas
+// drawer: hidden by default, slid in when the user taps the head toggle, and
+// dismissed by tapping the backdrop. The drawer state is a single
+// `sidebar-open` class on `#flow-view`; on desktop that class has no matching
+// styles (the sidebar always renders in the grid and the toggle/backdrop are
+// hidden), so these flips are inert and the desktop layout is unchanged.
+//
+// flowSidebarNextState is the DOM-free transition helper (exported for the pure
+// tests, mirroring navMenuNextState): given the drawer's current open flag it
+// returns the next one.
+
+function flowSidebarNextState(open) {
+  return !open;
+}
+
+function isFlowSidebarOpen() {
+  const view = $("flow-view");
+  return Boolean(view && view.classList.contains("sidebar-open"));
+}
+
+function setFlowSidebarOpen(open) {
+  const view = $("flow-view");
+  const toggle = $("flow-sidebar-toggle");
+  if (view) view.classList.toggle("sidebar-open", open);
+  if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function toggleFlowSidebar() {
+  setFlowSidebarOpen(flowSidebarNextState(isFlowSidebarOpen()));
+}
+
+function closeFlowSidebar() {
+  setFlowSidebarOpen(false);
 }
 
 // Fetch the initial conversation snapshot for the open flow. Mirrors the
@@ -1712,12 +1834,16 @@ function isHistoryOpen() {
 
 function openHistory() {
   $("history-view").classList.remove("hidden");
+  // Start on the session list panel (inert on desktop).
+  applyHistoryPanelAction("reset");
   renderHistoryList();
   fetchHistoryIndex();
 }
 
 function closeHistory() {
   $("history-view").classList.add("hidden");
+  // Reset the narrow-screen panel back to the session list (inert on desktop).
+  applyHistoryPanelAction("reset");
   state.selectedHistoryId = null;
   state.historyRecords = [];
   state.historySelectedProjectRoot = null;
@@ -2016,6 +2142,8 @@ function historyTitle(flowId) {
 async function openHistorySession(flowId) {
   state.selectedHistoryId = flowId;
   state.historyRecords = [];
+  // Narrow screens switch to the detail panel; inert on desktop.
+  applyHistoryPanelAction("select-session");
   renderHistoryList();
   $("history-detail-title").textContent = historyTitle(flowId);
 
@@ -6553,6 +6681,42 @@ function showFormError(node, message) {
 }
 
 // ---------------------------------------------------------------------------
+// Topbar overflow menu (mobile-portrait)
+// ---------------------------------------------------------------------------
+//
+// On a narrow screen the auth/admin top-bar actions are tucked behind a
+// hamburger toggle; on desktop the #nav-menu wrapper is `display: contents`
+// and the toggle is hidden, so the buttons stay inline and these class flips
+// are inert (no matching styles) — the desktop top bar is unchanged.
+//
+// navMenuNextState is the DOM-free state-transition helper (exported for the
+// pure tests): given the menu's current open flag it returns the next one.
+
+function navMenuNextState(open) {
+  return !open;
+}
+
+function isNavMenuOpen() {
+  const menu = $("nav-menu");
+  return Boolean(menu && menu.classList.contains("open"));
+}
+
+function setNavMenuOpen(open) {
+  const menu = $("nav-menu");
+  const toggle = $("nav-menu-toggle");
+  if (menu) menu.classList.toggle("open", open);
+  if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function toggleNavMenu() {
+  setNavMenuOpen(navMenuNextState(isNavMenuOpen()));
+}
+
+function closeNavMenu() {
+  setNavMenuOpen(false);
+}
+
+// ---------------------------------------------------------------------------
 // Auth flow — login gate, session bootstrap, logout
 // ---------------------------------------------------------------------------
 
@@ -6691,6 +6855,8 @@ async function handleLogout() {
   state.identity = null;
   state.machines = [];
   state.selectedMachineId = null;
+  // Reset the mobile panel switch so a fresh login lands on the machine list.
+  applyListPanelAction("reset");
   state.authState = nextAuthState(state.authState, "logout");
   teardownWs();
   // Wipe any rendered owner data so a different owner signing in next sees a
@@ -7024,8 +7190,56 @@ function init() {
 
   $("flow-view-close").addEventListener("click", closeFlowView);
 
+  // Narrow-screen flow-view sidebar drawer (G4): the head toggle opens it, the
+  // backdrop dismisses it. On desktop both controls are hidden and the
+  // `sidebar-open` class has no styles, so these bindings are harmless no-ops.
+  const sidebarToggle = $("flow-sidebar-toggle");
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener("click", toggleFlowSidebar);
+  }
+  const sidebarBackdrop = $("flow-sidebar-backdrop");
+  if (sidebarBackdrop) {
+    sidebarBackdrop.addEventListener("click", closeFlowSidebar);
+  }
+
+  // Narrow-screen main-list panel switch: return from Flows to the machine
+  // list. Inert on desktop (the back button is hidden and both panes render).
+  const flowsBack = $("flows-back-btn");
+  if (flowsBack) {
+    flowsBack.addEventListener("click", () => applyListPanelAction("back"));
+  }
+
   $("history-btn").addEventListener("click", openHistory);
   $("history-close").addEventListener("click", closeHistory);
+
+  // Narrow-screen History panel switch: return from the session detail to the
+  // session list. Inert on desktop (the back button is hidden and both panes
+  // render).
+  const historyBack = $("history-back-btn");
+  if (historyBack) {
+    historyBack.addEventListener("click", () => applyHistoryPanelAction("back"));
+  }
+
+  // Topbar overflow menu (mobile): the hamburger opens it, activating any menu
+  // item or clicking outside closes it. On desktop the toggle is hidden and the
+  // menu wrapper is `display: contents`, so these bindings are harmless no-ops.
+  const navToggle = $("nav-menu-toggle");
+  if (navToggle) {
+    navToggle.addEventListener("click", toggleNavMenu);
+  }
+  const navMenu = $("nav-menu");
+  if (navMenu) {
+    // Activating any control inside the menu collapses it.
+    navMenu.addEventListener("click", (e) => {
+      if (e.target.closest("button")) closeNavMenu();
+    });
+  }
+  // A click anywhere outside the menu / toggle dismisses an open menu.
+  document.addEventListener("click", (e) => {
+    if (!isNavMenuOpen()) return;
+    if (e.target.closest("#nav-menu") || e.target.closest("#nav-menu-toggle")) return;
+    closeNavMenu();
+  });
 
   // Auth gate: login / break-glass / logout.
   $("login-form").addEventListener("submit", handleLogin);
@@ -7209,6 +7423,18 @@ if (typeof module !== "undefined" && module.exports) {
     // User-management row model (G3) — exposed for the DOM-free tests in
     // tests/frontend/user_mgmt.test.mjs.
     userRowModel,
+    // Topbar overflow-menu state helper (G2) — exposed for the DOM-free tests
+    // in tests/frontend/mobile_responsive.test.mjs.
+    navMenuNextState,
+    // Main-list panel-switch state helper (G3) — exposed for the DOM-free tests
+    // in tests/frontend/mobile_responsive.test.mjs.
+    listPanelState,
+    // History panel-switch state helper (G5) — exposed for the DOM-free tests
+    // in tests/frontend/mobile_responsive.test.mjs.
+    historyPanelState,
+    // Flow-view sidebar-drawer state helper (G4) — exposed for the DOM-free
+    // tests in tests/frontend/mobile_responsive.test.mjs.
+    flowSidebarNextState,
     state,
   };
 }

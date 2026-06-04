@@ -3135,6 +3135,14 @@ tokenUsageMod.registerTokenUsageTests({ app, check, findOne, findAll });
 const userMgmtMod = await import("./user_mgmt.test.mjs");
 userMgmtMod.registerUserMgmtTests({ app, check, findOne, findAll });
 
+// Register the G7 mobile-responsive pure-helper tests (separate module — same
+// `check` reporter, same `app` module, same shared DOM stub already installed
+// above). These exercise the DOM-free state-transition helpers the mobile pass
+// added (navMenuNextState / listPanelState / historyPanelState /
+// flowSidebarNextState).
+const mobileResponsiveMod = await import("./mobile_responsive.test.mjs");
+mobileResponsiveMod.registerMobileResponsiveTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

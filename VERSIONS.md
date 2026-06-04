@@ -13,6 +13,15 @@
 
 
 
+
+## 8.6.0 - 2026-06-04
+
+- Add a phone-portrait responsive layout (@media max-width:600px) covering all webui screens: login, Machines+Flows list, flow-view console, History, and all modals
+- Introduce a top-bar overflow menu and single-view panel switches so two-pane interfaces stay fully usable on narrow screens
+- Add an off-canvas sidebar drawer for the running flow-view console, letting the conversation fill the main column with no horizontal scroll
+- Provide a touch-optimized docked reply area for interjection/call replies on mobile
+- Render modals near-full-screen on phones for easier touch interaction
+- Preserve full feature parity with desktop on mobile — no controls hidden or downgraded — while keeping the desktop layout unchanged via narrow-screen-scoped breakpoints
 ## 8.5.1 - 2026-06-04
 
 - Fix daemon incorrectly showing as offline/'未连接' and not auto-recovering when creating a task in the webui, by offloading the status-snapshot build (including the historical project-root disk walk) off the asyncio event loop so heartbeats and SPAWN_FLOW handling are no longer stalled

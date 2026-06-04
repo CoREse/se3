@@ -2395,3 +2395,79 @@ Task form itself need not require the user to pre-initialize the directory.
 - **THEN** the request is rejected as not-found (404) and no flow is spawned on
   `M2`, because the owner check gates the target machine regardless of the
   `project_root` path being absolute
+
+### Requirement: Mobile Portrait Responsive Layout
+
+On a narrow-screen (phone-portrait) breakpoint — `@media (max-width: 600px)` —
+`#flow-view` MUST adapt its full-screen chat console for one-handed phone use
+while remaining **full-feature-equivalent to the desktop layout**: no control
+operation may be hidden, removed, or downgraded, only relocated. The desktop
+full-screen chat layout and every existing behavior (the strict-chronological
+conversation, the docked reply box, the chip-bar interaction model, the
+collapsible reply-context prompt, the history-back close path, etc.) MUST be
+left unchanged outside the narrow-screen breakpoints; all phone-portrait rules
+live strictly inside those breakpoints so the desktop experience does not
+regress.
+
+Within the narrow-screen breakpoint, the observable behavior is:
+
+1. **Off-canvas sidebar drawer** — the auxiliary sidebar (Overview / Steps /
+   machine info) is NOT rendered as a permanent column that squeezes or stacks
+   above the conversation. It becomes a button-summoned off-canvas drawer: a
+   visible toggle control opens it as an overlay, and tapping the backdrop (or
+   the toggle / close affordance) dismisses it. Closing or backing out of
+   `#flow-view` resets the drawer to its closed state.
+2. **Conversation fills the main column** — with the sidebar off-canvas, the
+   `#flow-conversation` chat-stream occupies the full width of the main column
+   and remains the sole vertical scroller, with NO unexpected horizontal
+   scrolling (long content wraps per the *Long-Content Wrapping* requirement).
+3. **Touch-optimized docked reply area** — the docked reply area (the pending
+   intervention chip bar, the reply-context panel, the reply textarea, and the
+   inline Interject / Send controls) is laid out for touch: chips and buttons
+   meet a minimum touch-target size, the textarea uses a ≥16px font so mobile
+   browsers do not auto-zoom, and the row wraps sensibly instead of overflowing
+   the viewport width. The reply area keeps its full desktop semantics — the
+   always-enabled textarea, the send-button settle gate, the inline Interject
+   opt-in, and the chip-selection targeting all behave exactly as on desktop.
+
+The narrow-screen layout is driven only by CSS rules inside the breakpoint plus
+a minimal class toggle backed by an exported pure state helper
+(`flowSidebarNextState`) for DOM-free testing; because the desktop stylesheet
+defines no styling for these narrow-screen classes, toggling them on a desktop
+viewport is a no-op, guaranteeing zero desktop regression.
+
+#### Scenario: Sidebar becomes an off-canvas drawer on a phone-portrait viewport
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint (`max-width: 600px`)
+- **WHEN** the view is rendered
+- **THEN** the Overview / Steps / machine sidebar is NOT shown as a permanent
+  column; instead a visible toggle control summons it as an off-canvas drawer
+- **AND** tapping the drawer's backdrop (or its toggle / close control) dismisses
+  the drawer
+- **AND** closing `#flow-view` or backing out of it resets the drawer to closed
+
+#### Scenario: Conversation fills the column with no horizontal scroll
+- **WHEN** `#flow-view` is rendered at the narrow-screen breakpoint with the
+  sidebar drawer closed
+- **THEN** `#flow-conversation` occupies the full main-column width and stays the
+  sole vertical scroller
+- **AND** no element inside `#flow-view` introduces unexpected horizontal page
+  scrolling — long lines wrap per the *Long-Content Wrapping* requirement
+
+#### Scenario: Docked reply area is touch-optimized but functionally identical
+- **WHEN** the docked reply area is rendered at the narrow-screen breakpoint
+- **THEN** the chip bar, reply-context panel, textarea, and Interject / Send
+  controls are sized and wrapped for touch (minimum touch-target sizes, a ≥16px
+  textarea font, no overflow past the viewport width)
+- **AND** the always-enabled textarea, the send-button settle gate, the inline
+  Interject opt-in, and chip-selection targeting all behave exactly as on desktop
+  (no control is hidden or downgraded)
+
+#### Scenario: Desktop layout is unaffected outside the breakpoint
+- **WHEN** `#flow-view` is rendered on a viewport wider than the narrow-screen
+  breakpoint
+- **THEN** the sidebar remains a permanent column, the reply area keeps its
+  desktop sizing, and none of the phone-portrait drawer / panel-switch behavior
+  applies
+- **AND** toggling the narrow-screen-only classes on a desktop viewport is a
+  no-op because the desktop stylesheet defines no rules for them
