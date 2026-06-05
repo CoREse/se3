@@ -2429,11 +2429,67 @@ Within the narrow-screen breakpoint, the observable behavior is:
    the viewport width. The reply area keeps its full desktop semantics — the
    always-enabled textarea, the send-button settle gate, the inline Interject
    opt-in, and the chip-selection targeting all behave exactly as on desktop.
+4. **Reclaimed chat-area horizontal whitespace** — in the narrow-screen
+   breakpoint, scoped to the `.flow-conversation` chat area, the per-record
+   identity decoration that the conversation inherits from the history-list view
+   is removed so each turn approaches full column width. Concretely: the
+   `.flow-conversation .history-record` left identity bar (`border-left`, the
+   3px accent/green stripe) is removed (or zeroed) and its left/right padding
+   collapsed; the outer `.flow-conversation` left/right padding is narrowed from
+   ~16px to ~8px (keeping a small margin so text does not touch the screen
+   edge); and the `.conv-record.role-user .conv-bubble` /
+   `.conv-record.role-assistant .conv-bubble` `max-width` is widened from 88% to
+   near-full width (`max-width: 100%` / `align-self: stretch`). Speaker identity
+   is then carried solely by each bubble's own colored border + tinted
+   background (role-user blue border + light-blue fill, role-assistant green
+   border + light-green fill); the bubble's inner `padding: 8px 11px` is kept so
+   text keeps breathing room from the border. The combined effect removes the
+   thick colored stripe, the ~30px left indent, and the right-side dead space so
+   every line maximizes content while the speaker stays distinguishable by color.
+   This narrowing MUST NOT affect the non-flow history-list view, where
+   `.history-record`'s left stripe and padding are retained.
+5. **Single-line tool-marker chip** — in the narrow-screen breakpoint, scoped to
+   the `.flow-conversation` chat area, a `.tool-marker` summary row
+   (`.tool-marker-name` / `.tool-marker-glyph` / `.tool-marker-detail` /
+   `.tool-marker-toggle`) is compressed from the desktop `flex-wrap: wrap`
+   multi-line layout onto a single line (`flex-wrap: nowrap`): name and detail
+   share one row, an over-long detail is truncated with a single-line ellipsis
+   (`white-space: nowrap; overflow: hidden; text-overflow: ellipsis`) rather than
+   wrapping, and the expand/collapse toggle stays inline at the row's end. The
+   expandable details panel (`.tool-marker-details`, holding diff / text / bash
+   output) is unaffected and still expands to show full content.
+6. **Tiled reply meta row** — in the narrow-screen breakpoint, the docked reply
+   region's `.flow-reply-head` (TO / KIND / callid) and the
+   "▸ expand message details" toggle (`.flow-reply-prompt-toggle`) are collapsed
+   from the desktop vertical multi-line stack into a single horizontal tiled row
+   that uses the right-side whitespace and reduces vertical footprint. The
+   expanded prompt body (`.flow-reply-prompt`) still respects its existing 30vh
+   cap and scrolls internally.
+7. **WeChat-style auto-grow reply textarea** — in the narrow-screen breakpoint
+   the reply textarea (`#flow-reply-input`) behaves like a chat app's composer:
+   it opens at a single-line height, grows automatically as the user types, stops
+   growing at a maximum height (~35vh, ≈5–6 rows) and scrolls internally beyond
+   that, and falls back toward single-line height when content is deleted or
+   cleared. The narrow-screen rules therefore drop the mobile fixed
+   `min-height: 104px` and the manual `resize: vertical` handle (`resize: none`
+   on mobile), handing height control to JS. The auto-grow logic recomputes the
+   height on the textarea's `input` event and resets it after a successful send
+   clears the field and after switching / selecting a different chip resets the
+   content. The textarea stays editable at all times (only Send is briefly
+   disabled in-flight); the Send enable-gate and Ctrl/Cmd+Enter submit behavior
+   are unchanged. On desktop this behavior is a no-op: the six-row default height
+   and `resize: vertical` are untouched.
 
 The narrow-screen layout is driven only by CSS rules inside the breakpoint plus
-a minimal class toggle backed by an exported pure state helper
-(`flowSidebarNextState`) for DOM-free testing; because the desktop stylesheet
-defines no styling for these narrow-screen classes, toggling them on a desktop
+minimal class toggles / height assignments backed by exported pure helpers for
+DOM-free testing — the sidebar drawer state via `flowSidebarNextState`, and the
+auto-grow textarea height via `replyTextareaHeight(scrollHeight, minPx, maxPx)`,
+which clamps the measured `scrollHeight` to the single-line/maximum bounds with
+boolean/numeric fallback for invalid input, in the same style as
+`navMenuNextState` / `flowSidebarNextState`. The application layer gates the
+auto-grow behavior behind `matchMedia('(max-width: 600px)')`. Because the
+desktop stylesheet defines no styling for these narrow-screen classes and the JS
+is a matchMedia-gated no-op on wide viewports, toggling them on a desktop
 viewport is a no-op, guaranteeing zero desktop regression.
 
 #### Scenario: Sidebar becomes an off-canvas drawer on a phone-portrait viewport
@@ -2471,3 +2527,36 @@ viewport is a no-op, guaranteeing zero desktop regression.
   applies
 - **AND** toggling the narrow-screen-only classes on a desktop viewport is a
   no-op because the desktop stylesheet defines no rules for them
+
+#### Scenario: Chat rows reclaim horizontal whitespace without the identity stripe
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint (`max-width: 600px`) with conversation records rendered as
+  `.history-record conv-record role-<role>`
+- **WHEN** the `.flow-conversation` chat area is rendered
+- **THEN** each row no longer shows the `.history-record` left identity stripe
+  (`border-left`) or the ~30px outer indent, the outer `.flow-conversation`
+  left/right padding is narrowed (~8px), and the `.conv-bubble` widens to near
+  full column width (`max-width: 100%` / `align-self: stretch`)
+- **AND** speaker identity is still distinguishable solely by the bubble's own
+  colored border + tinted background (role-user blue, role-assistant green),
+  with the bubble's inner `padding: 8px 11px` retained
+- **AND** the non-flow history-list view (`.history-record` outside
+  `.flow-conversation`) keeps its left stripe and padding, and the desktop
+  chat layout is unaffected outside the breakpoint
+
+#### Scenario: Reply textarea auto-grows WeChat-style within bounds
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint (`max-width: 600px`)
+- **WHEN** the user types into the reply textarea (`#flow-reply-input`)
+- **THEN** the textarea opens at a single-line height and grows automatically as
+  content is added, stopping at a maximum height (~35vh) beyond which it scrolls
+  internally
+- **AND** when content is deleted or cleared — and after a successful send clears
+  the field or after switching / selecting a different chip resets the content —
+  the height falls back toward single-line
+- **AND** the textarea stays editable throughout, the Send enable-gate and
+  Ctrl/Cmd+Enter submit behavior are unchanged, and the height is derived from
+  the DOM-free pure helper `replyTextareaHeight(scrollHeight, minPx, maxPx)`
+- **AND** on a viewport wider than the breakpoint the desktop six-row default
+  height and `resize: vertical` are unaffected (the auto-grow logic is a
+  `matchMedia`-gated no-op)

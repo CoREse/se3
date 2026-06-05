@@ -18,6 +18,15 @@
 
 
 
+
+## 8.9.0 - 2026-06-05
+
+- Reclaim horizontal whitespace in the mobile-portrait flow chat area by removing the redundant history-record left stripe and indent and widening conversation bubbles to near-full width, with sender identity conveyed by bubble color alone
+- Add a WeChat-style auto-grow reply textarea on mobile portrait that starts single-line, grows with content up to ~35vh then scrolls internally, and resets height on send, clear, or chip switch
+- Compress tool-call markers to a single line on mobile portrait with ellipsis-truncated detail while keeping the expandable details panel fully functional
+- Tile the docked reply meta row (TO/KIND/callid and the expand-message toggle) horizontally on mobile portrait to reduce vertical space usage
+- Introduce the DOM-free pure helper `replyTextareaHeight` for testable auto-grow height computation, consistent with existing mobile state helpers
+- Keep desktop appearance and the non-flow history-list view unchanged, scoping all refinements to the running-flow console under the 600px media query
 ## 8.8.0 - 2026-06-05
 
 - Show the user's original input as the title in `se3 history` and the web UI history list, instead of the system-prompt-prefixed raw prompt

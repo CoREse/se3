@@ -141,6 +141,8 @@ def test_frontend_mobile_node_suite_passes():
         "G7 flowSidebarNextState toggles the open flag",
         "G7 listPanelState: select-machine → flows",
         "G7 historyPanelState: select-session → detail",
+        "G7 replyTextareaHeight clamps below-min up to minPx",
+        "G7 replyTextareaHeight clamps above-max down to maxPx",
     ):
         assert needle in combined, (
             f"expected G7 check {needle!r} in node output:\n{combined}"
@@ -208,6 +210,80 @@ def test_mobile_block_has_topbar_overflow_menu():
     block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
     assert ".nav-menu-toggle" in block, "missing hamburger toggle rule"
     assert ".nav-menu.open" in block, "missing the open-dropdown rule for the nav menu"
+
+
+def test_mobile_block_reclaims_chat_horizontal_whitespace():
+    """G1: the flow chat drops the redundant left bar + record padding and lets
+    bubbles reach (near) full width, scoped under `.flow-conversation`."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+    # The 3px identity bar on the record is removed and its side padding zeroed.
+    assert ".flow-conversation .history-record" in block, (
+        "missing the flow-chat record override"
+    )
+    assert "border-left: none" in block, "the flow-chat record's left bar must be removed"
+    # Outer padding narrowed from 16px to ~8px (top/bottom kept at 14px).
+    assert "padding: 14px 8px" in block, "flow-conversation side padding must narrow to 8px"
+    # Bubbles reach (near) full width — no 88% cap, no left/right offset.
+    assert ".flow-conversation .conv-record.role-user .conv-bubble" in block
+    assert ".flow-conversation .conv-record.role-assistant .conv-bubble" in block
+    assert "max-width: 100%" in block, "chat bubbles must widen to (near) full width"
+    assert "align-self: stretch" in block, "chat bubbles must stop offsetting left/right"
+
+
+def test_mobile_block_compresses_tool_marker_to_one_line():
+    """G2: the tool-call chip summary detail truncates to a single line, scoped
+    under `.flow-conversation`. The expandable panel is left able to wrap."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+    assert ".flow-conversation .tool-marker-detail" in block, (
+        "missing the mobile tool-marker detail override"
+    )
+    assert "white-space: nowrap" in block, "the chip detail must not wrap"
+    assert "text-overflow: ellipsis" in block, "an over-long chip detail must ellipsis-truncate"
+
+
+def test_mobile_block_tiles_reply_meta_horizontally():
+    """G2: the docked reply head + prompt toggle tile on one horizontal row,
+    scoped under `#flow-view`; the prompt body / options drop to their own rows."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+    assert "#flow-view .flow-reply-context.active" in block, (
+        "missing the mobile reply-meta tiling rule"
+    )
+    assert "flex-direction: row" in block, "reply meta must tile horizontally"
+
+
+def test_mobile_block_textarea_is_auto_grow_not_fixed():
+    """G3: the mobile reply textarea is a WeChat-style auto-grow box — capped at
+    35vh with internal scroll, no manual resize, and the old fixed 104px min is
+    gone."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+    assert "max-height: 35vh" in block, "the auto-grow textarea must cap at 35vh"
+    assert "resize: none" in block, "the mobile textarea must drop the manual resize handle"
+    assert "min-height: 104px" not in block, (
+        "the old fixed mobile textarea min-height (104px) must be removed"
+    )
+
+
+def test_app_js_has_auto_grow_textarea_logic():
+    """G3: app.js carries the pure clamp, the matchMedia-gated grower, and the
+    `input` listener that drives the WeChat-style auto-grow."""
+    js = APP_JS.read_text(encoding="utf-8")
+    assert "function replyTextareaHeight" in js, "missing the pure clamp helper"
+    assert "function autoGrowReplyTextarea" in js, "missing the auto-grow grower"
+    assert '(max-width: 600px)' in js, "the grower must be matchMedia-gated to the breakpoint"
+    # The input event must drive the grow as the user types.
+    assert '"input", autoGrowReplyTextarea' in js, (
+        "the auto-grow must be wired to the textarea's input event"
+    )
+
+
+def test_app_js_exports_reply_textarea_height():
+    """The pure clamp is exported for the DOM-free mjs tests."""
+    js = APP_JS.read_text(encoding="utf-8")
+    start = js.find("module.exports")
+    assert start != -1, "app.js has no module.exports block"
+    assert "replyTextareaHeight" in js[start:], (
+        "replyTextareaHeight is not exported for the pure tests"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +365,11 @@ def test_mobile_visual_rules_are_inside_media_queries():
         "sidebar-open",
         "translateX(-100%)",
         "100dvh",
+        # New visual rules from this pass — each unique to the mobile block, so
+        # a leak to the top level (changing desktop) fails here.
+        ".flow-conversation .tool-marker-detail",
+        "#flow-view .flow-reply-context.active",
+        "max-height: 35vh",
     )
     for token in mobile_only_tokens:
         idx = css.find(token)

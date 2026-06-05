@@ -1011,6 +1011,88 @@ function closeFlowSidebar() {
   setFlowSidebarOpen(false);
 }
 
+// ---------------------------------------------------------------------------
+// WeChat-style auto-grow reply textarea (mobile portrait only)
+// ---------------------------------------------------------------------------
+//
+// replyTextareaHeight is the DOM-free clamp behind the auto-grow textarea
+// (exported for the pure tests, mirroring navMenuNextState /
+// flowSidebarNextState). Given the textarea's measured `scrollHeight` and the
+// [minPx, maxPx] pixel bounds it returns the height to apply: the content
+// height clamped into [minPx, maxPx]. Inputs are floored to whole pixels;
+// non-finite / non-positive / out-of-order values degrade deterministically
+// (a bad measurement falls back to the minimum and never yields NaN), in the
+// same defensive style as the other mobile state helpers.
+function replyTextareaHeight(scrollHeight, minPx, maxPx) {
+  const min = Number.isFinite(minPx) && minPx > 0 ? Math.floor(minPx) : 0;
+  let max = Number.isFinite(maxPx) && maxPx > 0 ? Math.floor(maxPx) : min;
+  if (max < min) max = min;
+  const sh = Number.isFinite(scrollHeight) ? Math.floor(scrollHeight) : min;
+  return Math.max(min, Math.min(sh, max));
+}
+
+// Single-line floor for the auto-grow textarea, kept in sync with the mobile
+// `.flow-reply-row textarea { min-height: 40px }` rule in style.css.
+const REPLY_TEXTAREA_MIN_PX = 40;
+
+// matchMedia gate: the auto-grow behavior only runs on the phone-portrait
+// breakpoint. On desktop the textarea keeps its 6-row default height and manual
+// `resize: vertical`, so the grower must be a no-op there.
+function isMobilePortrait() {
+  try {
+    return (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(max-width: 600px)").matches
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+// WeChat-style auto-grow: on mobile portrait, size the reply textarea to its
+// content between the single-line minimum and ~35vh, then scroll internally
+// past the cap. Content shrinking / clearing lets it fall back to a single
+// line. On desktop (or absent matchMedia) this clears any JS-applied inline
+// height so the stylesheet default governs, and otherwise returns immediately.
+function autoGrowReplyTextarea() {
+  const input = $("flow-reply-input");
+  if (!input) return;
+  if (!isMobilePortrait()) {
+    // Desktop: only undo an inline height that THIS auto-grow logic applied
+    // (i.e. when transitioning back out of mobile portrait). A blanket clear on
+    // every input event would discard the user's manual `resize: vertical` drag
+    // — which is itself recorded as an inline `style.height` — and snap the box
+    // back to the CSS min-height on the next keystroke. The flag distinguishes
+    // a JS-applied height from a user-dragged one, so manual resizes survive
+    // typing on desktop.
+    if (input.style && input.__autoGrowApplied) {
+      input.style.height = "";
+      input.style.overflowY = "";
+      input.__autoGrowApplied = false;
+    }
+    return;
+  }
+  const vh = typeof window !== "undefined" && window.innerHeight
+    ? window.innerHeight
+    : 0;
+  const maxPx = Math.floor(vh * 0.35);
+  // Reset to auto first so scrollHeight reflects the true content height rather
+  // than the previously applied (possibly larger) height.
+  input.style.height = "auto";
+  const target = replyTextareaHeight(
+    input.scrollHeight,
+    REPLY_TEXTAREA_MIN_PX,
+    maxPx,
+  );
+  input.style.height = target + "px";
+  // Only show the internal scrollbar once the content overflows the cap.
+  input.style.overflowY = input.scrollHeight > target ? "auto" : "hidden";
+  // Mark that the auto-grow applied an inline height so a later desktop pass
+  // (e.g. on viewport widening) knows it is safe to clear.
+  input.__autoGrowApplied = true;
+}
+
 // Fetch the initial conversation snapshot for the open flow. Mirrors the
 // history view: a one-shot `/api/history/{flow_id}` pull, after which the WS
 // `history_data` push keeps an active flow's conversation up to date.
@@ -1653,6 +1735,9 @@ function updateReplyBox(flow) {
 function resetReplyBox() {
   const input = $("flow-reply-input");
   input.value = "";
+  // Reset the auto-grow height back to a single line on a fresh flow / chip
+  // switch (mobile portrait only; a no-op on desktop).
+  autoGrowReplyTextarea();
   // Textarea stays enabled so the user can begin drafting immediately;
   // Send remains disabled until a target chip is available.
   input.disabled = false;
@@ -1762,7 +1847,11 @@ async function sendReply(flowId, target, text) {
       });
     }
     if (resp.ok) {
-      if (state.selectedFlowId === flowId) $("flow-reply-input").value = "";
+      if (state.selectedFlowId === flowId) {
+        $("flow-reply-input").value = "";
+        // Cleared content collapses the auto-grow textarea back to one line.
+        autoGrowReplyTextarea();
+      }
       // Keep the synthetic interject chip visible in `pending` visual state
       // until the real interjection chip materializes (via ws push) — that
       // gives the user immediate feedback that the submission is in flight
@@ -7272,6 +7361,9 @@ function init() {
       $("flow-reply-form").requestSubmit();
     }
   });
+  // WeChat-style auto-grow: resize the textarea to its content as the user
+  // types (mobile portrait only; a no-op on desktop).
+  $("flow-reply-input").addEventListener("input", autoGrowReplyTextarea);
 
   // Click the modal backdrop to dismiss.
   $("new-task-modal").addEventListener("click", (e) => {
@@ -7435,6 +7527,9 @@ if (typeof module !== "undefined" && module.exports) {
     // Flow-view sidebar-drawer state helper (G4) — exposed for the DOM-free
     // tests in tests/frontend/mobile_responsive.test.mjs.
     flowSidebarNextState,
+    // WeChat-style auto-grow reply textarea clamp — exposed for the DOM-free
+    // tests in tests/frontend/mobile_responsive.test.mjs.
+    replyTextareaHeight,
     state,
   };
 }

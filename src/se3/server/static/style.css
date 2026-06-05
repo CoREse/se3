@@ -2364,7 +2364,16 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   .flow-reply-row textarea {
     order: 1;
     flex: 1 1 100%;
-    min-height: 104px;
+    /* WeChat-style auto-grow (G3): start at a single-line minimum and let
+     * `autoGrowReplyTextarea` in app.js size it to the content up to ~35vh,
+     * then scroll internally. The desktop 6-row default + manual
+     * `resize: vertical` are dropped on the phone (the height is JS-driven and
+     * the manual handle is removed), so the old fixed 104px floor is gone.
+     * Desktop never matches this breakpoint, so its textarea is intact. */
+    min-height: 40px;
+    max-height: 35vh;
+    overflow-y: auto;
+    resize: none;
   }
   .reply-icon-btn {
     order: 2;
@@ -2378,6 +2387,77 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     flex: 1 1 auto;
     align-self: stretch;
     min-height: 44px;
+  }
+
+  /* -- chat conversation: reclaim horizontal whitespace (G1) -------------- *
+   * Each flow chat record is a `.history-record.conv-record.role-*` node, so it
+   * inherits the history-LIST view's row identity markers: a 3px colored left
+   * bar (role-user blue / role-assistant green) plus 11px side padding. In the
+   * bubble chat view the bubble already carries its own colored border + tint,
+   * so that bar is redundant; combined with the outer `.flow-conversation` 16px
+   * padding and the record's own 11px it eats ~30px on the left, while the 88%
+   * bubble cap leaves a big right-side gap. On a phone we strip the bar +
+   * record padding, narrow the outer padding to 8px, and let the bubble reach
+   * (near) full width — identity stays legible from the bubble's own colored
+   * border + tint alone. All rules are scoped under `.flow-conversation`, so
+   * the history-LIST view's `.history-record` bar/padding are untouched. */
+  .flow-conversation {
+    padding: 14px 8px;
+  }
+  .flow-conversation .history-record {
+    border-left: none;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  /* Bubbles go (near) full width and stop offsetting left/right; the bubble's
+   * own `padding: 8px 11px` + colored border / tint are kept for breathing room
+   * and identity. */
+  .flow-conversation .conv-record.role-user .conv-bubble,
+  .flow-conversation .conv-record.role-assistant .conv-bubble {
+    max-width: 100%;
+    align-self: stretch;
+  }
+
+  /* -- tool-call chip: compress the summary to one line (G2) -------------- *
+   * Desktop lets the chip head wrap; on a narrow screen the name + detail then
+   * spill onto multiple lines. Keep the name and detail on one row by letting
+   * the detail shrink and single-line ellipsis-truncate (instead of growing and
+   * wrapping); the toggle stays pinned at the row end via its existing
+   * `margin-left: auto`. The expandable details panel (`.tool-marker-details`,
+   * `flex-basis: 100%`) still wraps onto its own row and shows the full diff /
+   * bash / text content when expanded — its `flex-wrap: wrap` parent is left
+   * intact so the panel keeps dropping to a new line. */
+  .flow-conversation .tool-marker-detail {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* -- docked reply meta: tile head + prompt toggle on one row (G2) ------- *
+   * Desktop stacks the reply-context children vertically (the TO/KIND head
+   * row, then the "▸ 展开消息详情" prompt toggle row, then the options row),
+   * wasting the right-side whitespace and eating vertical room. On a phone lay
+   * the active context out as a wrapping row so the head and the prompt toggle
+   * share one line; the expandable prompt body and the options buttons drop to
+   * their own full-width rows below. The expanded `.flow-reply-prompt` keeps its
+   * `max-height: 30vh` internal scroll (defined at the top level). */
+  #flow-view .flow-reply-context.active {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 10px;
+  }
+  #flow-view .flow-reply-context.active .flow-reply-head {
+    flex: 0 0 auto;
+  }
+  #flow-view .flow-reply-context.active .flow-reply-prompt-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  #flow-view .flow-reply-context.active .flow-reply-options {
+    flex-basis: 100%;
   }
 
   /* -- modals: near full-screen on phone portrait (G6) -------------------- *

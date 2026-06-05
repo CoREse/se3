@@ -108,6 +108,40 @@ export function registerMobileResponsiveTests(ctx) {
     assert.equal(panel, "list");
   });
 
+  // -- replyTextareaHeight (G3 WeChat-style auto-grow clamp) ----------------
+  // Pure clamp: the applied height is the content scrollHeight clamped into
+  // [minPx, maxPx]. below-min → minPx, in-range → scrollHeight, above-max →
+  // maxPx; non-finite / out-of-order inputs degrade deterministically.
+  check("G7 replyTextareaHeight clamps below-min up to minPx", () => {
+    assert.equal(app.replyTextareaHeight(20, 40, 200), 40);
+    assert.equal(app.replyTextareaHeight(40, 40, 200), 40);
+  });
+  check("G7 replyTextareaHeight returns scrollHeight when in range", () => {
+    assert.equal(app.replyTextareaHeight(100, 40, 200), 100);
+    assert.equal(app.replyTextareaHeight(199, 40, 200), 199);
+  });
+  check("G7 replyTextareaHeight clamps above-max down to maxPx", () => {
+    assert.equal(app.replyTextareaHeight(500, 40, 200), 200);
+    assert.equal(app.replyTextareaHeight(200, 40, 200), 200);
+  });
+  check("G7 replyTextareaHeight floors fractional pixels", () => {
+    assert.equal(app.replyTextareaHeight(100.9, 40.2, 200.7), 100);
+  });
+  check("G7 replyTextareaHeight degrades on non-finite / illegal input", () => {
+    // Bad scrollHeight → fall back to the minimum, never NaN.
+    assert.equal(app.replyTextareaHeight(NaN, 40, 200), 40);
+    assert.equal(app.replyTextareaHeight(undefined, 40, 200), 40);
+    // Bad min → treated as 0 floor; content still honored / capped.
+    assert.equal(app.replyTextareaHeight(100, NaN, 200), 100);
+    assert.equal(app.replyTextareaHeight(300, NaN, 200), 200);
+    // Bad max → collapses to min so the result never exceeds the floor.
+    assert.equal(app.replyTextareaHeight(300, 40, NaN), 40);
+    // Out-of-order bounds (max < min) → max raised to min.
+    assert.equal(app.replyTextareaHeight(300, 80, 40), 80);
+    const h = app.replyTextareaHeight("garbage", "x", "y");
+    assert.ok(Number.isFinite(h), "result is always a finite number");
+  });
+
   // -- cross-helper invariant: the two panel switches never cross-leak -------
   // list uses machines/flows, history uses list/detail; their vocabularies are
   // disjoint so a stray action on one never yields the other's panel name.
