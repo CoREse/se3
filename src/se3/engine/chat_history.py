@@ -29,6 +29,7 @@ from .tool_formatters import (
     format_tool_use_preview,
     truncate_preview,
 )
+from .token_usage import UsageTotals
 
 
 # Default project root for history storage
@@ -64,9 +65,26 @@ class ChatMessage:
     # bubbles but ``format_history_for_retry`` skips so they are not
     # re-fed to the LLM as part of the retry prompt.
     kind: str = ""
+    # Optional per-call token-usage increment for this message. Set only on
+    # assistant records by :func:`record_response` from the LLM stream's
+    # ``type == "result"`` line (see :func:`parse_usage_from_ndjson`). Left
+    # ``None`` for user prompts and for assistant turns that issued no LLM
+    # call / reported no usage. Carries the same five fields as
+    # ``UsageTotals.to_dict()`` (the four token counts + ``total_cost_usd``),
+    # so the web frontend can render a per-turn footnote and run a per-step
+    # cumulative sum. When ``None`` it is omitted from serialization (see
+    # :meth:`to_dict`) so legacy jsonl readers and user records stay
+    # byte-identical to the pre-extension schema.
+    token_usage: Optional[dict] = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        # Drop the optional usage field when absent so user prompts and
+        # usage-free assistant turns serialize identically to before this
+        # field existed (backward-compatible on-disk schema).
+        if data.get("token_usage") is None:
+            data.pop("token_usage", None)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> ChatMessage:
@@ -148,6 +166,11 @@ def record_response(
                     raw_json.append(parsed)
             except (json.JSONDecodeError, TypeError):
                 continue
+    # Capture this call's token-usage increment from the stream's result line
+    # so the web frontend can render a per-turn usage footnote and a per-step
+    # cumulative sum. Empty (no result line / no usage) → leave the field unset
+    # so the on-disk record stays backward-compatible.
+    usage = parse_usage_from_ndjson(raw_ndjson)
     msg = ChatMessage(
         role="assistant",
         content=text,
@@ -156,6 +179,7 @@ def record_response(
         step_type=step_type,
         attempt=attempt,
         fix_iteration=fix_iteration,
+        token_usage=usage or None,
     )
     _append_message(project_root, flow_id, step_id, msg)
 
@@ -984,6 +1008,82 @@ def format_history_for_retry(
     parts.append("")
 
     return "\n".join(parts)
+
+
+def parse_usage_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> dict:
+    """Parse per-call token usage + cost from an LLM stream's result line.
+
+    Scans the raw NDJSON output for the terminal ``type == "result"`` line and
+    extracts the four token counts (``input_tokens`` / ``output_tokens`` /
+    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``) plus the
+    top-level ``total_cost_usd``, using the exact same field semantics as
+    ``StreamJSONTracker._capture_usage`` in ``llm_caller.py`` — both the nested
+    ``message.usage`` shape and a flat top-level ``usage`` object are accepted,
+    missing fields default to ``0``, and ``total_cost_usd`` is read from the
+    result line's top level (not from inside ``usage``).
+
+    Returns the usage as a JSON-primitive dict (``UsageTotals.to_dict()`` shape)
+    when a result line carrying any usage/cost is found, otherwise an **empty
+    dict** ``{}`` (no result line, no usage payload, or an all-zero total). All
+    parsing is best-effort: a malformed line, missing field, or any structural
+    surprise is swallowed and yields ``{}`` rather than raising, mirroring the
+    tracker's never-break-the-stream contract.
+
+    Args:
+        raw_ndjson: The raw NDJSON output (str) or a pre-parsed list[dict].
+
+    Returns:
+        A dict with the five usage keys, or ``{}`` when no usage is present.
+    """
+    if not raw_ndjson:
+        return {}
+
+    try:
+        # Normalize to an iterable of parsed dicts.
+        if isinstance(raw_ndjson, list):
+            items = raw_ndjson
+        else:
+            items = []
+            for line in raw_ndjson.strip().split("\n"):
+                line = line.strip()
+                if not line or line.startswith("==="):
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                items.append(parsed)
+
+        for data in items:
+            if not isinstance(data, dict) or data.get("type") != "result":
+                continue
+            # Prefer the nested message.usage shape, fall back to a flat
+            # top-level usage object — same precedence as the tracker.
+            usage_obj = None
+            message = data.get("message")
+            if isinstance(message, dict):
+                usage_obj = message.get("usage")
+            if not isinstance(usage_obj, dict):
+                top_usage = data.get("usage")
+                if isinstance(top_usage, dict):
+                    usage_obj = top_usage
+            captured = UsageTotals.from_dict(
+                usage_obj if isinstance(usage_obj, dict) else None
+            )
+            # total_cost_usd lives at the result line's top level, not inside
+            # usage, so fill it from there (matching _capture_usage).
+            if "total_cost_usd" in data:
+                captured.total_cost_usd = UsageTotals.from_dict(
+                    {"total_cost_usd": data.get("total_cost_usd")}
+                ).total_cost_usd
+            if captured.is_empty():
+                return {}
+            return captured.to_dict()
+    except Exception:  # pragma: no cover - defensive; never raise to caller
+        logger.debug("Failed to parse usage from ndjson", exc_info=True)
+        return {}
+
+    return {}
 
 
 def extract_assistant_text(raw_ndjson: str) -> str:
