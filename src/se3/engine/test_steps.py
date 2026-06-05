@@ -725,5 +725,159 @@ class TestStepSequences:
         assert StepType.PROJECT_SUMMARY not in seq
 
 
+class TestFormatRoundUsageFooter:
+    """The shared compact per-round usage footer formatter (G1 task 1)."""
+
+    def test_normal_values_render_round_and_cumulative(self):
+        from .token_usage import UsageTotals, format_round_usage_footer
+
+        footer = format_round_usage_footer(
+            UsageTotals(input_tokens=1234, output_tokens=567),
+            UsageTotals(input_tokens=12345, output_tokens=6789),
+        )
+        assert footer == "本轮 1,234 in / 567 out · 累计 12,345 in / 6,789 out"
+
+    def test_uses_thousands_separators_not_abbreviation(self):
+        from .token_usage import UsageTotals, format_round_usage_footer
+
+        footer = format_round_usage_footer(
+            UsageTotals(input_tokens=1200, output_tokens=3400),
+            UsageTotals(input_tokens=1200, output_tokens=3400),
+        )
+        # Comma thousands separators (consistent with render_usage_block),
+        # never a 1.2k-style abbreviation.
+        assert "1,200" in footer
+        assert "3,400" in footer
+        assert "1.2k" not in footer
+
+    def test_zero_values_render_zeros(self):
+        from .token_usage import UsageTotals, format_round_usage_footer
+
+        footer = format_round_usage_footer(UsageTotals(), UsageTotals())
+        assert footer == "本轮 0 in / 0 out · 累计 0 in / 0 out"
+
+    def test_none_inputs_degrade_to_zero(self):
+        from .token_usage import format_round_usage_footer
+
+        # The function does not gate on emptiness itself — that is the caller's
+        # job — but None must degrade to zeros rather than raise.
+        assert format_round_usage_footer(None, None) == (
+            "本轮 0 in / 0 out · 累计 0 in / 0 out"
+        )
+
+    def test_only_input_output_shown(self):
+        from .token_usage import UsageTotals, format_round_usage_footer
+
+        footer = format_round_usage_footer(
+            UsageTotals(
+                input_tokens=10,
+                output_tokens=20,
+                cache_read_input_tokens=999,
+                cache_creation_input_tokens=888,
+                total_cost_usd=1.23,
+            ),
+            UsageTotals(input_tokens=30, output_tokens=40),
+        )
+        # Per the task copy format only input/output are surfaced — no cache
+        # breakdown and no cost in the compact footer.
+        assert footer == "本轮 10 in / 20 out · 累计 30 in / 40 out"
+        assert "cache" not in footer
+        assert "$" not in footer
+
+
+class TestDiscoveryCarriedTokenUsage:
+    """Discovery carries token usage across rounds despite step.outputs.clear().
+
+    Regression for the bug where discovery_handler's mid-handler
+    ``step.outputs.clear()`` wiped the ``carried_token_usage`` written by
+    run_step's finally block on the previous PAUSED round, so the terminal
+    ``token_usage`` only reflected the last round instead of the whole
+    discovery's real cumulative total (G1 task 2).
+    """
+
+    def test_carried_usage_accumulates_across_rounds_and_clear(self):
+        from .state_machine import StateMachine
+        from .steps import discovery as discovery_mod
+        from .token_usage import UsageTotals, add_call_usage
+
+        rounds = [
+            (
+                UsageTotals(input_tokens=100, output_tokens=10, total_cost_usd=0.01),
+                {"mode": "question", "content": "c1", "questions": ["q1?"]},
+            ),
+            (
+                UsageTotals(input_tokens=50, output_tokens=5, total_cost_usd=0.02),
+                {"mode": "question", "content": "c2", "questions": ["q2?"]},
+            ),
+            (
+                UsageTotals(input_tokens=30, output_tokens=3, total_cost_usd=0.03),
+                {"mode": "confirmation", "content": "c3", "refined_description": "final task"},
+            ),
+        ]
+        calls = {"n": 0}
+
+        def fake_round(*args, **kwargs):
+            idx = calls["n"]
+            calls["n"] += 1
+            usage, result = rounds[idx]
+            add_call_usage(usage)
+            return result, f"raw {idx}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+            sm.register_handler(StepType.DISCOVERY, discovery_mod.discovery_handler)
+
+            flow = sm.create_flow("multi-round discovery", task_type="discovery")
+            step = flow.state.get_current_step()
+            assert step.step_type == StepType.DISCOVERY
+            step.inputs["task_description"] = "build something"
+
+            with patch.object(discovery_mod, "_run_discovery_round", side_effect=fake_round), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                # Round 1 (question) — PAUSED: carry holds round 1 only.
+                sm.run_step(flow, step)
+                assert step.status == StepStatus.PAUSED
+                assert "token_usage" not in step.outputs
+                assert step.outputs["carried_token_usage"]["input_tokens"] == 100
+
+                # Round 2 (question) — PAUSED: carry survives the clear and
+                # accumulates round 1 + round 2.
+                step.status = StepStatus.PENDING
+                step.inputs["resumed"] = True
+                step.inputs["user_response"] = "answer 1"
+                sm.run_step(flow, step)
+                assert step.status == StepStatus.PAUSED
+                assert "token_usage" not in step.outputs
+                assert step.outputs["carried_token_usage"]["input_tokens"] == 150
+
+                # Round 3 (confirmation gate) — still PAUSED, carry now sums all
+                # three rounds.
+                step.status = StepStatus.PENDING
+                step.inputs["user_response"] = "answer 2"
+                sm.run_step(flow, step)
+                assert step.status == StepStatus.PAUSED
+                assert step.outputs.get("awaiting_programmatic_confirm") is True
+                assert step.outputs["carried_token_usage"]["input_tokens"] == 180
+
+            # Final round: user confirms via the programmatic gate (no LLM call).
+            # The terminal token_usage must reflect the FULL cumulative total of
+            # every round, and the carry is cleared.
+            step.status = StepStatus.PENDING
+            step.inputs["programmatic_confirmed"] = True
+            sm.run_step(flow, step)
+            assert step.status == StepStatus.COMPLETED
+            assert "carried_token_usage" not in step.outputs
+            tu = step.outputs["token_usage"]
+            assert tu["input_tokens"] == 180  # 100 + 50 + 30
+            assert tu["output_tokens"] == 18  # 10 + 5 + 3
+            assert tu["total_cost_usd"] == pytest.approx(0.06)  # 0.01+0.02+0.03
+
+            # The CLI authoritative session total folds every run independently
+            # and must agree with the rolled-up terminal record.
+            su = flow.state.session_token_usage
+            assert su.input_tokens == 180
+            assert su.total_cost_usd == pytest.approx(0.06)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

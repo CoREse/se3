@@ -510,8 +510,17 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         }
 
         # Store mode-specific outputs for user-facing display
-        # Clear previous outputs to avoid confusion
+        # Clear previous outputs to avoid confusion. The cross-round token-usage
+        # carry (`carried_token_usage`, written by run_step's finally block on a
+        # PAUSED round) MUST survive this clear: discovery PAUSEs every round, so
+        # without preserving it each round's carry would degrade to a single
+        # round and the terminal token_usage would only reflect the last round
+        # instead of the whole discovery's real cumulative total. Preserving it
+        # also makes it the data source for the CLI per-round cumulative footer.
+        carried_token_usage = step.outputs.get("carried_token_usage")
         step.outputs.clear()
+        if carried_token_usage is not None:
+            step.outputs["carried_token_usage"] = carried_token_usage
         step.outputs["message"] = content
         step.outputs["raw_result_text"] = raw_result_text
 

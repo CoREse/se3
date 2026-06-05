@@ -264,6 +264,37 @@ def _format_tokens(n: int) -> str:
     return f"{n:,}"
 
 
+def format_round_usage_footer(
+    round_totals: Optional[UsageTotals],
+    cumulative_totals: Optional[UsageTotals],
+) -> str:
+    """Render a compact single-line per-round usage footer for CLI interactive steps.
+
+    Used by the interactive multi-round steps (discovery / confirm) to show, at
+    the tail of an assistant message block, both this round's incremental token
+    usage and the running cumulative total. Example::
+
+        本轮 1,234 in / 567 out · 累计 12,345 in / 6,789 out
+
+    Only the input / output token counts are shown (per the task copy format),
+    rendered with the same thousands-separator style as
+    :func:`format_usage_line` / ``render_usage_block`` so the numbers stay
+    consistent across the whole project. ``None`` inputs degrade to zeros; the
+    decision to suppress the footer for a round that issued no LLM call is the
+    caller's (it gates on :meth:`UsageTotals.is_empty`), not this function's.
+    """
+    if round_totals is None:
+        round_totals = UsageTotals()
+    if cumulative_totals is None:
+        cumulative_totals = UsageTotals()
+    return (
+        f"本轮 {_format_tokens(round_totals.input_tokens)} in"
+        f" / {_format_tokens(round_totals.output_tokens)} out"
+        f" · 累计 {_format_tokens(cumulative_totals.input_tokens)} in"
+        f" / {_format_tokens(cumulative_totals.output_tokens)} out"
+    )
+
+
 def format_usage_line(totals: Optional[UsageTotals]) -> str:
     """Render a compact, single-line labelled usage summary.
 
