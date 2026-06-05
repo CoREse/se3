@@ -370,6 +370,73 @@ class TestStateTransitions:
 
             assert flow.status == FlowStatus.COMPLETED
 
+    def test_completion_advances_step_index_to_total(self):
+        """On completion, current_step_index advances to len(selected_steps).
+
+        This unifies the "completed steps / total steps" counting semantics so
+        every consumer of engine state (aggregator, history, web console)
+        reports total/total (e.g. 13/13) and progress 1.0.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def mock_handler(step, flow):
+                step.status = StepStatus.COMPLETED
+                return StepStatus.COMPLETED
+
+            for step_type in StepType:
+                sm.register_handler(step_type, mock_handler)
+
+            flow = sm.create_flow("Test completion index", task_type="small")
+            flow.status = FlowStatus.RUNNING
+
+            max_steps = 20
+            steps_taken = 0
+            while flow.status == FlowStatus.RUNNING and steps_taken < max_steps:
+                step = flow.state.get_current_step()
+                if not step:
+                    break
+                sm.run_step(flow, step)
+                sm.transition_to_next(flow)
+                steps_taken += 1
+
+            assert flow.status == FlowStatus.COMPLETED
+            assert flow.state.current_step_index == len(flow.state.selected_steps)
+
+    def test_resume_completed_flow_does_not_raise(self):
+        """Calling transition_to_next on a completed flow self-heals the index.
+
+        The completion branch leaves current_step_index out of range; the
+        next transition recovers the real index via selected.index(...) rather
+        than raising TransitionError.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def mock_handler(step, flow):
+                step.status = StepStatus.COMPLETED
+                return StepStatus.COMPLETED
+
+            for step_type in StepType:
+                sm.register_handler(step_type, mock_handler)
+
+            flow = sm.create_flow("Test resume completed", task_type="small")
+            flow.status = FlowStatus.RUNNING
+
+            steps_taken = 0
+            while flow.status == FlowStatus.RUNNING and steps_taken < 20:
+                step = flow.state.get_current_step()
+                if not step:
+                    break
+                sm.run_step(flow, step)
+                sm.transition_to_next(flow)
+                steps_taken += 1
+
+            assert flow.state.current_step_index == len(flow.state.selected_steps)
+            # Out-of-range index must not raise on a subsequent transition.
+            result = sm.transition_to_next(flow)
+            assert result is None
+
     def test_failed_step_handling(self):
         """Test handling of failed steps."""
         with tempfile.TemporaryDirectory() as tmpdir:

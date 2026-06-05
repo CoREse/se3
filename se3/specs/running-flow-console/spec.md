@@ -2455,16 +2455,35 @@ Within the narrow-screen breakpoint, the observable behavior is:
    multi-line layout onto a single line (`flex-wrap: nowrap`): name and detail
    share one row, an over-long detail is truncated with a single-line ellipsis
    (`white-space: nowrap; overflow: hidden; text-overflow: ellipsis`) rather than
-   wrapping, and the expand/collapse toggle stays inline at the row's end. The
-   expandable details panel (`.tool-marker-details`, holding diff / text / bash
-   output) is unaffected and still expands to show full content.
+   wrapping, and the expand/collapse toggle stays inline at the row's end. For the
+   ellipsis truncation to actually engage, the flexible `.tool-marker-detail`
+   segment MUST be allowed to shrink below its intrinsic content width: its
+   `flex-basis` MUST be zeroed (`flex: 1 1 0` / `min-width: 0`) rather than left at
+   the default `auto`. With `flex-basis: auto` the `nowrap` header still overflows
+   because the detail's intrinsic width pins the row wider than the column (the
+   prior session added the `nowrap`/ellipsis rule but it had no effect for exactly
+   this reason); zeroing the basis lets the detail collapse and the ellipsis take
+   over. The expandable details panel (`.tool-marker-details`, holding diff / text
+   / bash output) is unaffected and still expands to show full content on its own
+   line(s).
 6. **Tiled reply meta row** — in the narrow-screen breakpoint, the docked reply
    region's `.flow-reply-head` (TO / KIND / callid) and the
    "▸ expand message details" toggle (`.flow-reply-prompt-toggle`) are collapsed
    from the desktop vertical multi-line stack into a single horizontal tiled row
    that uses the right-side whitespace and reduces vertical footprint. The
    expanded prompt body (`.flow-reply-prompt`) still respects its existing 30vh
-   cap and scrolls internally.
+   cap and scrolls internally. Additionally, when a single `call`-kind
+   intervention chip is pending (the `⚙` "Pending reply" chip in
+   `#flow-interventions`), that chip — which on the desktop / unscoped layout
+   occupies its own full-width row above the reply-context panel — is tiled onto
+   the **same** horizontal row as the active reply-context header
+   (`.flow-reply-context.active .flow-reply-head`) via a wrapping `.flow-reply`
+   container, instead of standing alone on its own line with an oversized button.
+   This reclaims the vertical space the lone chip used to consume on a phone
+   viewport. The chip keeps its full selection / targeting semantics (tapping it
+   still selects the intervention and drives the shared reply textarea); only its
+   placement changes, and only inside the breakpoint, so the desktop chip-bar
+   layout is unchanged.
 7. **WeChat-style auto-grow reply textarea** — in the narrow-screen breakpoint
    the reply textarea (`#flow-reply-input`) behaves like a chat app's composer:
    it opens at a single-line height, grows automatically as the user types, stops
@@ -2475,10 +2494,18 @@ Within the narrow-screen breakpoint, the observable behavior is:
    on mobile), handing height control to JS. The auto-grow logic recomputes the
    height on the textarea's `input` event and resets it after a successful send
    clears the field and after switching / selecting a different chip resets the
-   content. The textarea stays editable at all times (only Send is briefly
-   disabled in-flight); the Send enable-gate and Ctrl/Cmd+Enter submit behavior
-   are unchanged. On desktop this behavior is a no-op: the six-row default height
-   and `resize: vertical` are untouched.
+   content. Because the textarea's static markup carries `rows="6"`, the auto-grow
+   logic MUST NOT measure `scrollHeight` against that six-row intrinsic height —
+   doing so (e.g. resetting to `height: "auto"` before measuring) leaves an
+   empty / default-state field reporting a ~6-row `scrollHeight` and so renders ~6
+   rows tall, masking the chat history. To make the empty / default state truly
+   collapse to a single line, the measurement MUST first force the field's height
+   to `0` (or use an explicit single-line baseline) before reading `scrollHeight`,
+   so an empty field measures one line and grows only as real content is added.
+   The textarea stays editable at all times (only Send is briefly disabled
+   in-flight); the Send enable-gate and Ctrl/Cmd+Enter submit behavior are
+   unchanged. On desktop this behavior is a no-op: the six-row default height and
+   `resize: vertical` are untouched.
 
 The narrow-screen layout is driven only by CSS rules inside the breakpoint plus
 minimal class toggles / height assignments backed by exported pure helpers for
@@ -2560,3 +2587,30 @@ viewport is a no-op, guaranteeing zero desktop regression.
 - **AND** on a viewport wider than the breakpoint the desktop six-row default
   height and `resize: vertical` are unaffected (the auto-grow logic is a
   `matchMedia`-gated no-op)
+
+#### Scenario: Empty / default reply textarea collapses to a single line
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint and the reply textarea is empty (default state, no message typed),
+  even though its static markup carries `rows="6"`
+- **WHEN** the auto-grow logic measures the field to set its height
+- **THEN** it forces the field's height to `0` (or a single-line baseline) before
+  reading `scrollHeight`, so the empty field measures one line rather than the
+  six-row intrinsic height
+- **AND** the empty / default textarea renders at single-line height and does NOT
+  occupy ~6 rows or mask the chat history below it
+- **AND** as soon as the user types real content the field grows from the
+  single-line baseline up to the ~35vh cap, then scrolls internally
+
+#### Scenario: Single call-kind chip is tiled onto the reply-context header row
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint with a single pending `call`-kind intervention (the `⚙`
+  "Pending reply" chip in `#flow-interventions`) and its reply-context panel active
+- **WHEN** the docked reply region is rendered
+- **THEN** the call chip shares the same horizontal row as the active
+  reply-context header (`.flow-reply-context.active .flow-reply-head`) via a
+  wrapping `.flow-reply` container, instead of standing alone on its own
+  full-width row with an oversized button, reclaiming vertical space
+- **AND** tapping the chip still selects the intervention and targets the shared
+  reply textarea exactly as before — only its placement changes
+- **AND** on a viewport wider than the breakpoint the chip keeps its desktop
+  chip-bar placement (the tiling is scoped strictly inside the breakpoint)

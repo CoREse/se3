@@ -238,6 +238,100 @@ def test_snapshot_no_engine_json_passthrough(tmp_path: Path) -> None:
     assert {c.call_id for c in snapshot.pending_calls} == {"alpha", "beta"}
 
 
+def test_snapshot_completed_flow_reports_total_and_full_progress(tmp_path: Path) -> None:
+    """A completed engine.json (current_step_index == total) yields total/total
+    and progress 1.0, matching the unified completed-steps/total-steps semantics
+    set by the engine completion branch.
+    """
+    _write(
+        tmp_path / "se3" / "state" / "engine.json",
+        {
+            "flow_id": "flow-done",
+            "task_description": "t",
+            "task_type": "feature",
+            "status": "COMPLETED",
+            "state": {
+                "current_step_id": "s3",
+                "selected_steps": ["analyze", "plan", "implement"],
+                "current_step_index": 3,
+                "steps": {"s3": {"step_type": "implement"}},
+            },
+        },
+    )
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(tmp_path)
+
+    snapshot = aggregator._snapshot_for_root(tmp_path)
+    assert snapshot is not None
+    assert snapshot.total_steps == 3
+    assert snapshot.current_step_index == 3
+    assert snapshot.progress == 1.0
+
+
+def test_run_fallback_completion_advances_index_to_total(tmp_path: Path) -> None:
+    """The run.py no-current-step fallback advances current_step_index to total.
+
+    Pins the fallback completion path in ``run._run_flow_impl``: when
+    ``State.get_current_step()`` returns ``None`` (a resume whose
+    ``current_step_id`` is stale/dangling — it names a step no longer present in
+    ``state.steps``), the run loop marks the flow COMPLETED and MUST advance
+    ``current_step_index`` to ``len(selected_steps)`` so the unified
+    "completed steps / total steps" semantics report total/total and progress
+    1.0. Without the advance, a flow finished via this fallback would surface a
+    mid-flow index (e.g. 1/3 / progress 0.33). This test drives the actual
+    helper over the real models and then feeds the resulting engine.json through
+    the aggregator to confirm the end-to-end value, rather than hand-crafting a
+    completed snapshot.
+    """
+    from se3.commands import run as run_mod
+    from se3.engine import persistence as persistence_mod
+    from se3.engine.models import (
+        FlowInstance,
+        FlowStatus,
+        State,
+        StepType,
+    )
+
+    selected = [StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT]
+    # current_step_id points at a step that is NOT in state.steps -> dangling,
+    # so get_current_step() returns None and the run loop takes the fallback.
+    state = State(
+        current_step_id="99_implement_dangling",
+        selected_steps=selected,
+        current_step_index=1,
+        steps={},
+    )
+    flow = FlowInstance(
+        flow_id="flow-fallback",
+        task_description="t",
+        task_type="feature",
+        status=FlowStatus.RUNNING,
+        state=state,
+    )
+
+    assert flow.state.get_current_step() is None  # precondition: dangling step
+
+    run_mod._complete_flow_via_fallback(flow)
+
+    assert flow.status == FlowStatus.COMPLETED
+    assert flow.state.current_step_index == len(selected) == 3
+
+    # Persist the completed flow exactly as the run loop would and confirm the
+    # aggregator computes total/total + progress 1.0 from it.
+    project_root = tmp_path
+    (project_root / "se3" / "state").mkdir(parents=True)
+    persistence = persistence_mod.PersistenceManager(project_root=project_root)
+    persistence.save_flow(flow)
+
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(project_root)
+    snapshot = aggregator._snapshot_for_root(project_root)
+    assert snapshot is not None
+    assert snapshot.total_steps == 3
+    assert snapshot.current_step_index == 3
+    assert snapshot.progress == 1.0
+
+
 def test_machine_status_project_roots(tmp_path: Path) -> None:
     """Aggregator surfaces its registered project roots in MachineStatus.
 

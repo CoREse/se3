@@ -239,6 +239,37 @@ def test_mobile_block_compresses_tool_marker_to_one_line():
     )
     assert "white-space: nowrap" in block, "the chip detail must not wrap"
     assert "text-overflow: ellipsis" in block, "an over-long chip detail must ellipsis-truncate"
+    # Root-cause fix: the detail's flex-basis must be 0 (not `auto`), otherwise a
+    # long detail's hypothetical main size overflows the flex-wrap head line and
+    # wraps onto a second row before the nowrap/ellipsis ever applies.
+    _, _, detail_block = block.partition(".flow-conversation .tool-marker-detail")
+    detail_rule = detail_block.split("}", 1)[0]
+    assert "flex: 1 1 0" in detail_rule, (
+        "the chip detail must use flex-basis 0 (flex: 1 1 0) so the head stays "
+        "single-line; flex-basis auto wraps before truncating"
+    )
+
+
+def test_mobile_block_shares_call_chip_with_reply_head_row():
+    """problem 2: a single call chip shares the docked reply-head row instead of
+    claiming its own tall row, by flipping `.flow-reply` to a wrapping row so the
+    chip bar and the reply-context (whose first line is `.flow-reply-head`) sit
+    side by side, with the input row forced onto its own full-width line."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+    assert "#flow-view .flow-reply {" in block, (
+        "missing the mobile docked-reply row layout"
+    )
+    _, _, reply_block = block.partition("#flow-view .flow-reply {")
+    reply_rule = reply_block.split("}", 1)[0]
+    assert "flex-direction: row" in reply_rule, (
+        "the docked reply form must tile the chip bar and reply-context on one row"
+    )
+    assert "#flow-view .flow-reply .flow-interventions" in block, (
+        "the chip bar must be sized to share the reply-head row"
+    )
+    assert "#flow-view .flow-reply .flow-reply-row" in block, (
+        "the input row must be forced onto its own full-width line"
+    )
 
 
 def test_mobile_block_tiles_reply_meta_horizontally():
@@ -273,6 +304,18 @@ def test_app_js_has_auto_grow_textarea_logic():
     # The input event must drive the grow as the user types.
     assert '"input", autoGrowReplyTextarea' in js, (
         "the auto-grow must be wired to the textarea's input event"
+    )
+    # Problem 4 root cause: the height must be pinned to 0 before measuring
+    # scrollHeight, otherwise an empty / default field falls back to the
+    # `rows="6"` intrinsic height and never collapses to a single line.
+    _, _, grower = js.partition("function autoGrowReplyTextarea")
+    grower_body = grower.split("\n}", 1)[0]
+    assert 'input.style.height = "0px"' in grower_body, (
+        "auto-grow must reset height to 0 (not 'auto') before measuring so the "
+        "empty/default textarea collapses to a single line"
+    )
+    assert 'input.style.height = "auto"' not in grower_body, (
+        "resetting to 'auto' regresses the empty field back to the 6-row height"
     )
 
 

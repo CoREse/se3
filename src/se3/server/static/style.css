@@ -2420,15 +2420,25 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 
   /* -- tool-call chip: compress the summary to one line (G2) -------------- *
    * Desktop lets the chip head wrap; on a narrow screen the name + detail then
-   * spill onto multiple lines. Keep the name and detail on one row by letting
-   * the detail shrink and single-line ellipsis-truncate (instead of growing and
-   * wrapping); the toggle stays pinned at the row end via its existing
-   * `margin-left: auto`. The expandable details panel (`.tool-marker-details`,
-   * `flex-basis: 100%`) still wraps onto its own row and shows the full diff /
-   * bash / text content when expanded — its `flex-wrap: wrap` parent is left
-   * intact so the panel keeps dropping to a new line. */
+   * spill onto multiple lines. Root cause: the chip head is `flex-wrap: wrap`,
+   * and the previous `flex: 1 1 auto` left the detail with a flex-basis of
+   * `auto` — i.e. its hypothetical main size was its full content width. When
+   * the content was long that hypothetical size overflowed the line, so the
+   * flex line-collection step wrapped the detail onto a second row BEFORE
+   * flex-shrink ever applied, and the nowrap/ellipsis never engaged. Pinning
+   * `flex-basis: 0` (via `flex: 1 1 0`) drops the detail's hypothetical main
+   * size to 0 (clamped by `min-width: 0`), so it never forces a wrap; it then
+   * grows to fill the remaining width on the single head line and
+   * single-line-ellipsis-truncates an over-long detail. The fixed-size head
+   * children (`.tool-marker-name` / `.tool-marker-glyph` / `.tool-marker-toggle`)
+   * already carry `flex-shrink: 0`, so they keep their natural width and the
+   * grown detail pushes the toggle to the row end. The expandable details panel
+   * (`.tool-marker-details`, `flex-basis: 100%`) still wraps onto its own row
+   * and shows the full diff / bash / text content when expanded — its
+   * `flex-wrap: wrap` parent is left intact so the panel keeps dropping to a new
+   * line, and its folded state stays `display: none`. */
   .flow-conversation .tool-marker-detail {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
     white-space: nowrap;
     overflow: hidden;
@@ -2458,6 +2468,44 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   }
   #flow-view .flow-reply-context.active .flow-reply-options {
     flex-basis: 100%;
+  }
+
+  /* -- docked reply: share the chip bar with the reply-head row (problem 2) *
+   * Desktop stacks the docked reply area as a column: the `#flow-interventions`
+   * chip bar on its own row, the `.flow-reply-context` (whose first line is the
+   * "回复中 · <kind>" `.flow-reply-head`) below it, then the input row. On a
+   * phone a single `call` chip then claims a full, tall, mostly-empty row above
+   * a head that says almost the same thing — wasted vertical space.
+   *
+   * Flip the docked `.flow-reply` form itself to a wrapping row so the chip bar
+   * and the reply-context sit side by side on the first visual line (the chip
+   * keeps its natural width, the context takes the rest), while the input row
+   * (`.flow-reply-row`) is forced onto its own full-width line below. The
+   * `.flow-reply-context.active` is itself laid out as a wrapping row (rule
+   * above), so its `.flow-reply-head` lands at the top-left of that remaining
+   * width — i.e. on the same visual line as the chip — reclaiming the chip's
+   * former dedicated row. The chip-selection / Send gating semantics are
+   * untouched (these are pure layout rules). Scoped to the 600px breakpoint, so
+   * the desktop column stack is byte-for-byte intact. */
+  #flow-view .flow-reply {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    column-gap: 8px;
+  }
+  #flow-view .flow-reply .flow-interventions {
+    flex: 0 0 auto;
+    max-width: 60%;
+    /* The G1 baseline pins chips to a 40px touch target; keep that but let the
+     * chip hug its content so it does not bloat the shared row. */
+    margin: 0;
+  }
+  #flow-view .flow-reply .flow-reply-context {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  #flow-view .flow-reply .flow-reply-row {
+    flex: 0 0 100%;
   }
 
   /* -- modals: near full-screen on phone portrait (G6) -------------------- *

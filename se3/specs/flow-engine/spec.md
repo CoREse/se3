@@ -367,6 +367,14 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **THEN** it selects the subsequent required steps from a fixed step pool based on the analysis results
 - **AND** the step pool is a predefined finite set, not generated out of thin air by the LLM
 
+#### Scenario: Completion advances the step index to total so progress reads total/total
+- **GIVEN** a flow whose `selected_steps` has `N` entries and whose last step has just finished, so `transition_to_next` is about to set the flow's status to `FlowStatus.COMPLETED`
+- **WHEN** the completion branch of `transition_to_next` runs (and likewise the `run.py` fallback completion path)
+- **THEN** `state.current_step_index` is advanced to `len(selected_steps)` (== `N`, one past the last step) and the flow is persisted
+- **AND** a downstream consumer that derives progress from engine state — notably the daemon aggregator's `current_step_index` / `total_steps` and `progress` computation in `_snapshot_for_root` — reports `N/N` and `progress == 1.0` at completion, not `N-1/N`
+- **AND** the fix is applied in the engine, not as a frontend special case, so the daemon-reported `progress` and every other reader of engine state observe the same completed-steps / total-steps semantics
+- **AND** the out-of-range index is safe on resume because the engine self-heals it from `current_step_id` via `selected_steps.index(...)`
+
 ### Requirement: 16-Step Flow Pool
 
 The flow engine SHALL define a fixed pool of step types (the StepType enum), and all flow steps are selected from this pool. The pool grew to 17 entries with the addition of the `spec_gate` step (mechanism A — the post-`update_spec` verification gate; see *Post-update_spec Spec Verification Gate*); it consists of 6 active steps + CONFIRM + DISCOVERY + 4 deprecated steps + others. The table below lists the main steps; for the backward-compatible behavior of deprecated steps, see the *Deprecated Step Type Backward Compatibility* requirement.
@@ -3219,7 +3227,7 @@ The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state
 | `steps` | `Dict[str, Step]` | `{}` | Map of `step_id` → `Step` instances for all steps created in this flow. |
 | `context` | `Dict[str, Any]` | `{}` | Global context shared across steps. Used as a side-channel for the state machine to expose computed values (e.g. `resolved_type`, `fix_iterations`, `fix_history` mirrors) to handlers without changing step inputs. |
 | `selected_steps` | `List[StepType]` | `[]` | The dynamically selected sequence of step types for this flow (chosen by `analyze` and the CONFIRM-insertion step). |
-| `current_step_index` | `int` | `0` | Position within `selected_steps` of the next step to execute. The state machine advances this when transitioning forward; it does NOT advance during fix-loop or revision routing back. |
+| `current_step_index` | `int` | `0` | Position within `selected_steps` of the next step to execute. The state machine advances this when transitioning forward; it does NOT advance during fix-loop or revision routing back. **On flow completion** — in `transition_to_next`'s completion branch, after the flow's status is set to `FlowStatus.COMPLETED` and before it returns (and mirrored in the `run.py` fallback completion path) — the state machine advances `current_step_index` to `len(selected_steps)` (one past the last selected step) and persists the flow, so the index encodes "completed steps == total steps". The count semantics are uniformly **completed-steps / total-steps**: while a flow is running, executing the last of N steps still reads `N-1` here (the first N-1 steps are done, the Nth is in flight); only on completion does it reach `N`. Setting this index out of range on completion is safe because resume self-heals it from `current_step_id` via `selected_steps.index(...)`. |
 | `review_iterations` | `Dict[str, int]` | `{}` | Per-step review iteration counter, keyed by the **reviewed** step's `step_id`. Used by the CONFIRM step's LLM reviewer to bound iterations against `confirmation.steps.<step>.max_iterations`. |
 | `fix_iterations` | `int` | `0` | Global fix-loop counter shared by `test`, `self_check`, and `verify_spec`. Bounded by `workflow.max_fix_iterations` (see *verify_spec Unified Priority and Scope Mechanism*). |
 | `fix_history` | `List[Dict[str, Any]]` | `[]` | Append-only log of fix-loop iterations, capped at `FIX_HISTORY_MAX_ENTRIES` (see *Fix History Structure*). Each entry follows the schema documented under that Requirement. |

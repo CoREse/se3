@@ -127,6 +127,17 @@ export function registerMobileResponsiveTests(ctx) {
   check("G7 replyTextareaHeight floors fractional pixels", () => {
     assert.equal(app.replyTextareaHeight(100.9, 40.2, 200.7), 100);
   });
+  check("G7 replyTextareaHeight collapses an empty/default field to one line", () => {
+    // Problem 4: the auto-grow measures scrollHeight after pinning the textarea
+    // height to 0, so an empty / default field reports a tiny content height
+    // (≈ one line + padding, and in the degenerate stub case 0). That small
+    // measurement must clamp UP to the single-line minimum (40px), never the
+    // old ~6-row height — proving the default state collapses to one row.
+    assert.equal(app.replyTextareaHeight(0, 40, 300), 40);
+    assert.equal(app.replyTextareaHeight(38, 40, 300), 40);
+    // The first content line past the floor grows past it.
+    assert.equal(app.replyTextareaHeight(64, 40, 300), 64);
+  });
   check("G7 replyTextareaHeight degrades on non-finite / illegal input", () => {
     // Bad scrollHeight → fall back to the minimum, never NaN.
     assert.equal(app.replyTextareaHeight(NaN, 40, 200), 40);

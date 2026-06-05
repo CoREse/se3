@@ -19,6 +19,14 @@
 
 
 
+
+## 8.9.1 - 2026-06-05
+
+- Fix step counter so a completed flow shows total/total (e.g. 13/13) with progress 1.0 instead of stopping one short, corrected in the engine so the daemon and all status consumers report it consistently
+- Tile the call-type intervention chip onto the reply context header row on mobile portrait to reclaim vertical space
+- Collapse the running tool-call chip to a single line with ellipsis when collapsed on mobile portrait, expanding to full detail only when toggled open
+- Collapse the reply input box to a single line by default on mobile portrait so it no longer hides chat history, still growing WeChat-style up to ~35vh while typing
+- Leave desktop layout and behavior unchanged; all WebUI fixes are scoped to the mobile-portrait breakpoint
 ## 8.9.0 - 2026-06-05
 
 - Reclaim horizontal whitespace in the mobile-portrait flow chat area by removing the redundant history-record left stripe and indent and widening conversation bubbles to near-full width, with sender identity conveyed by bubble color alone

@@ -1077,9 +1077,14 @@ function autoGrowReplyTextarea() {
     ? window.innerHeight
     : 0;
   const maxPx = Math.floor(vh * 0.35);
-  // Reset to auto first so scrollHeight reflects the true content height rather
-  // than the previously applied (possibly larger) height.
-  input.style.height = "auto";
+  // Collapse to 0 before measuring so `scrollHeight` reflects the TRUE content
+  // height. Resetting to "auto" (the previous approach) let the textarea fall
+  // back to its `rows="6"` intrinsic height, so an empty / default field still
+  // measured ~6 rows and never shrank to a single line. With the height pinned
+  // to 0, `scrollHeight` is the content's own height (one line + padding when
+  // empty), which `replyTextareaHeight` then clamps up to the single-line
+  // minimum — so the default/empty state truly collapses to one row.
+  input.style.height = "0px";
   const target = replyTextareaHeight(
     input.scrollHeight,
     REPLY_TEXTAREA_MIN_PX,

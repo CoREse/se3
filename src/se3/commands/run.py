@@ -858,6 +858,24 @@ def _consume_paused_interjection_prefix(flow: FlowInstance) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _complete_flow_via_fallback(flow: FlowInstance) -> None:
+    """Mark ``flow`` COMPLETED via the no-current-step fallback path.
+
+    Invoked from the run loop when :meth:`State.get_current_step` returns
+    ``None`` (e.g. a resume whose ``current_step_id`` is stale/dangling, so the
+    step it names is gone from ``state.steps``). Besides flipping the status, it
+    mirrors the engine-side completion fix
+    (:meth:`StateMachine.transition_to_next`) by advancing the step index to the
+    total step count, so the unified "completed steps / total steps" semantics
+    report total/total and progress 1.0 to every consumer of engine state
+    (the daemon aggregator, history, the web console). Without this advance, a
+    flow completed via this fallback would surface a mid-flow index
+    (e.g. 5/13 / progress 0.38) despite being done.
+    """
+    flow.status = FlowStatus.COMPLETED
+    flow.state.current_step_index = len(flow.state.selected_steps)
+
+
 def handle_resume_interactive(project_root: Path) -> Optional[str]:
     """Handle interactive resume flow.
 
@@ -1998,7 +2016,8 @@ def _run_flow_impl(
         current_step = flow.state.get_current_step()
         if not current_step:
             get_console().print("[dim]No current step — marking flow complete[/dim]")
-            flow.status = FlowStatus.COMPLETED
+            _complete_flow_via_fallback(flow)
+            persistence.save_flow(flow)
             break
 
         # If the current step already finished (process crashed after the step

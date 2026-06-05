@@ -706,6 +706,14 @@ class StateMachine:
             logger.info("Flow completed - all steps finished")
             flow.status = FlowStatus.COMPLETED
             flow.completed_at = datetime.now()
+            # Advance the step index to the total step count so the unified
+            # "completed steps / total steps" semantics report total/total
+            # (e.g. 13/13) and progress 1.0 to every consumer of engine state
+            # (the daemon aggregator, history, the web console). This is safe
+            # for resume: ``transition_to_next`` self-heals an out-of-range
+            # index via ``selected.index(current_step.step_type)`` above, and
+            # ``_current_step`` keys off ``current_step_id``, not this index.
+            flow.state.current_step_index = len(selected)
             self.persistence.save_flow(flow)
             return None
 
