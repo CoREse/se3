@@ -1769,6 +1769,21 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   word-break: break-word;
 }
 
+/* Per-round token-usage footnote (G5): a discreet small-print line at the tail
+ * of an interactive assistant bubble (discovery / confirm / …) reporting this
+ * round's increment plus the running per-step cumulative. Reuses the dim,
+ * tabular-aligned visual of the per-step footnote so it informs without
+ * breaking the conversation's continuity. */
+.round-usage {
+  margin-top: 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.round-usage__text {
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
 .step-report__files {
   display: flex;
   flex-direction: column;

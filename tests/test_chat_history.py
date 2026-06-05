@@ -22,6 +22,7 @@ from se3.engine.chat_history import (
     get_flow_history,
     get_step_history,
     list_flows,
+    parse_usage_from_ndjson,
     record_prompt,
     record_response,
     render_session_detailed,
@@ -379,6 +380,197 @@ class TestRecordAndRetrieve:
         assert session.messages[0].content == "Valid response"
         # raw_json should still contain the valid parsed dict
         assert session.messages[0].raw_json == [ndjson_dict]
+
+
+# --- Per-call token usage capture ---
+
+class TestParseUsageFromNdjson:
+    def test_nested_message_usage(self):
+        """usage nested under message.usage is parsed; cost from top level."""
+        raw = "\n".join([
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "hi"}]},
+            }),
+            json.dumps({
+                "type": "result",
+                "total_cost_usd": 0.0123,
+                "message": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 10,
+                        "cache_read_input_tokens": 5,
+                    }
+                },
+            }),
+        ])
+        usage = parse_usage_from_ndjson(raw)
+        assert usage == {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 10,
+            "cache_read_input_tokens": 5,
+            "total_cost_usd": 0.0123,
+        }
+
+    def test_flat_top_level_usage(self):
+        """A flat top-level usage object is accepted too."""
+        raw = json.dumps({
+            "type": "result",
+            "total_cost_usd": 0.5,
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+        })
+        usage = parse_usage_from_ndjson(raw)
+        assert usage["input_tokens"] == 7
+        assert usage["output_tokens"] == 3
+        assert usage["total_cost_usd"] == 0.5
+
+    def test_missing_fields_default_to_zero(self):
+        """Absent token fields fall back to 0 rather than raising."""
+        raw = json.dumps({
+            "type": "result",
+            "message": {"usage": {"input_tokens": 42}},
+        })
+        usage = parse_usage_from_ndjson(raw)
+        assert usage["input_tokens"] == 42
+        assert usage["output_tokens"] == 0
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
+        assert usage["total_cost_usd"] == 0.0
+
+    def test_no_result_line_returns_empty(self):
+        """An NDJSON stream with no result line yields an empty dict."""
+        raw = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        })
+        assert parse_usage_from_ndjson(raw) == {}
+
+    def test_empty_input_returns_empty(self):
+        assert parse_usage_from_ndjson("") == {}
+        assert parse_usage_from_ndjson(None) == {}  # type: ignore[arg-type]
+        assert parse_usage_from_ndjson([]) == {}
+
+    def test_all_zero_usage_returns_empty(self):
+        """A result line with zero usage and zero cost is treated as empty."""
+        raw = json.dumps({
+            "type": "result",
+            "total_cost_usd": 0.0,
+            "message": {"usage": {"input_tokens": 0, "output_tokens": 0}},
+        })
+        assert parse_usage_from_ndjson(raw) == {}
+
+    def test_malformed_lines_do_not_raise(self):
+        """Garbage lines are skipped; a valid result is still found."""
+        raw = "\n".join([
+            "not json at all",
+            "=== Command: analyze ===",
+            json.dumps({
+                "type": "result",
+                "total_cost_usd": 0.01,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }),
+        ])
+        usage = parse_usage_from_ndjson(raw)
+        assert usage["input_tokens"] == 1
+        assert usage["total_cost_usd"] == 0.01
+
+    def test_accepts_pre_parsed_list(self):
+        """A pre-parsed list[dict] is handled like a raw string."""
+        items = [
+            {"type": "assistant", "message": {"content": []}},
+            {
+                "type": "result",
+                "total_cost_usd": 0.02,
+                "message": {"usage": {"input_tokens": 9, "output_tokens": 4}},
+            },
+        ]
+        usage = parse_usage_from_ndjson(items)
+        assert usage["input_tokens"] == 9
+        assert usage["output_tokens"] == 4
+        assert usage["total_cost_usd"] == 0.02
+
+
+class TestRecordResponseUsage:
+    def _result_ndjson(self):
+        return "\n".join([
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "done"}]},
+            }),
+            json.dumps({
+                "type": "result",
+                "total_cost_usd": 0.0099,
+                "message": {
+                    "usage": {
+                        "input_tokens": 200,
+                        "output_tokens": 80,
+                        "cache_creation_input_tokens": 12,
+                        "cache_read_input_tokens": 34,
+                    }
+                },
+            }),
+        ])
+
+    def test_record_response_writes_token_usage(self, tmp_project):
+        record_response(
+            tmp_project, "flow1", "step1", "analyze", self._result_ndjson(), 0
+        )
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        msg = session.messages[0]
+        assert msg.token_usage is not None
+        assert msg.token_usage["input_tokens"] == 200
+        assert msg.token_usage["output_tokens"] == 80
+        assert msg.token_usage["cache_creation_input_tokens"] == 12
+        assert msg.token_usage["cache_read_input_tokens"] == 34
+        assert msg.token_usage["total_cost_usd"] == 0.0099
+
+    def test_record_response_without_usage_omits_field(self, tmp_project):
+        """No result line → field stays None and is absent from the jsonl."""
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "no usage"}]},
+        })
+        record_response(tmp_project, "flow1", "step1", "analyze", ndjson, 0)
+
+        # In-memory record carries None.
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].token_usage is None
+
+        # On-disk line does NOT carry the key (backward-compatible schema).
+        path = tmp_project / "se3" / "history" / "flow1" / "step1.jsonl"
+        line = path.read_text(encoding="utf-8").strip().splitlines()[0]
+        assert "token_usage" not in json.loads(line)
+
+    def test_user_prompt_record_omits_token_usage(self, tmp_project):
+        """record_prompt never writes a token_usage key."""
+        record_prompt(tmp_project, "flow1", "step1", "analyze", "hi", 0)
+        path = tmp_project / "se3" / "history" / "flow1" / "step1.jsonl"
+        line = path.read_text(encoding="utf-8").strip().splitlines()[0]
+        assert "token_usage" not in json.loads(line)
+
+    def test_legacy_record_without_field_still_reads(self, tmp_project):
+        """An old jsonl line lacking token_usage deserializes (field=None)."""
+        msg = ChatMessage(
+            role="assistant",
+            content="legacy",
+            raw_json=[],
+            timestamp="2026-01-01T00:00:00",
+            step_type="analyze",
+            attempt=0,
+        )
+        data = msg.to_dict()
+        assert "token_usage" not in data  # None → omitted
+        restored = ChatMessage.from_dict(data)
+        assert restored.token_usage is None
 
 
 # --- Flow history ---

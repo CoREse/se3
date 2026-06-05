@@ -3130,6 +3130,12 @@ replyBoxCollapseMod.registerReplyBoxPromptCollapseTests({ app, check, findOne, f
 const tokenUsageMod = await import("./token_usage.test.mjs");
 tokenUsageMod.registerTokenUsageTests({ app, check, findOne, findAll });
 
+// Register the G5 per-round token-usage footnote tests (separate module — same
+// `check` reporter, same `app` module, same shared DOM stub already installed
+// above).
+const roundUsageMod = await import("./round_usage.test.mjs");
+roundUsageMod.registerRoundUsageTests({ app, check, findOne, findAll });
+
 // Register the G3 admin-only user-management row-model tests (separate module —
 // same `check` reporter, same `app` module, same shared DOM stub).
 const userMgmtMod = await import("./user_mgmt.test.mjs");
