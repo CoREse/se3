@@ -469,12 +469,7 @@ def test_cli_sink_skips_interactive_terminal_events(captured_console, step_type_
     assert captured_console.export_text() == ""
 
 
-@pytest.mark.parametrize("step_type_value", ["plan", "discovery"])
-def test_cli_sink_renders_usage_for_skipped_step_types(captured_console, step_type_value):
-    """Even though CliSink skips the full report for plan/discovery, it MUST
-    still render the per-step token-usage block when those (token-heavy) steps
-    consumed LLM tokens — keeping CLI per-step usage symmetric with analyze/
-    test/etc. (which the WebUI report cards already surface)."""
+def _usage_step(step_type_value):
     step = _completed_step(step_type_value, f"00_{step_type_value}")
     step.outputs = {
         "summary": "done",
@@ -486,17 +481,49 @@ def test_cli_sink_renders_usage_for_skipped_step_types(captured_console, step_ty
             "total_cost_usd": 0.01,
         },
     }
+    return step
+
+
+def test_cli_sink_plan_renders_big_usage_block(captured_console):
+    """plan keeps the established big per-step usage block ("Step Token Usage"),
+    while its full report stays owned by the orchestrator's special path."""
+    step = _usage_step("plan")
     CliSink().consume(new_event(
         EventType.STEP_COMPLETED,
         step_id=step.step_id,
-        step_type=step_type_value,
+        step_type="plan",
         step=step,
     ))
     out = captured_console.export_text()
-    # The usage block renders, but the full step report does NOT (the
-    # orchestrator owns that). The usage block carries the "Step Token Usage"
-    # title.
     assert "Step Token Usage" in out
+
+
+def test_cli_sink_confirm_renders_compact_footer(captured_console):
+    """confirm renders a compact dim per-round footer (round == cumulative for a
+    single LLM review), NOT the big reverse-color "Step Token Usage" block."""
+    step = _usage_step("confirm")
+    CliSink().consume(new_event(
+        EventType.STEP_COMPLETED,
+        step_id=step.step_id,
+        step_type="confirm",
+        step=step,
+    ))
+    out = captured_console.export_text()
+    assert "本轮 100 in / 50 out · 累计 100 in / 50 out" in out
+    assert "Step Token Usage" not in out
+
+
+def test_cli_sink_discovery_renders_no_usage(captured_console):
+    """discovery's per-round footer is rendered inline by the discovery handler,
+    so CliSink renders nothing for a discovery terminal event (no duplication)."""
+    step = _usage_step("discovery")
+    CliSink().consume(new_event(
+        EventType.STEP_COMPLETED,
+        step_id=step.step_id,
+        step_type="discovery",
+        step=step,
+    ))
+    assert captured_console.export_text() == ""
 
 
 @pytest.mark.parametrize("step_type_value", ["confirm", "discovery", "plan"])

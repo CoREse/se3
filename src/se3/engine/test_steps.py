@@ -879,5 +879,123 @@ class TestDiscoveryCarriedTokenUsage:
             assert su.total_cost_usd == pytest.approx(0.06)
 
 
+class TestCliSinkUsageRendering:
+    """CliSink per-step usage routing for the interactive/special step types (G3).
+
+    discovery → no usage block (its per-round footer is rendered inline by the
+    discovery handler); confirm → compact dim single-line footer from
+    ``step.outputs['token_usage']`` (only when the LLM was actually called);
+    plan → the unchanged big ``Step Token Usage`` block; other types →
+    ``render_step_output`` unchanged.
+    """
+
+    def _completed_event(self, step):
+        from .event_stream import EventType, new_event
+
+        return new_event(
+            EventType.STEP_COMPLETED,
+            step_type=step.step_type.value,
+            step=step,
+        )
+
+    def test_confirm_renders_compact_dim_footer(self):
+        from rich.console import Console
+
+        from .sink import CliSink
+
+        step = Step(step_type=StepType.CONFIRM)
+        step.outputs["token_usage"] = {"input_tokens": 1234, "output_tokens": 567}
+
+        console = Console(record=True, width=200)
+        sink = CliSink(console=console)
+        with patch("se3.engine.step_renderers.render_step_usage") as big_block:
+            sink.consume(self._completed_event(step))
+
+        out = console.export_text()
+        # Compact footer, round == cumulative (single LLM review per confirm step).
+        assert "本轮 1,234 in / 567 out · 累计 1,234 in / 567 out" in out
+        # NOT the big reverse-color per-step block.
+        assert "Step Token Usage" not in out
+        big_block.assert_not_called()
+
+    def test_confirm_human_mode_no_usage_renders_nothing(self):
+        from rich.console import Console
+
+        from .sink import CliSink
+
+        # Human-reviewer confirm makes no LLM call -> no token_usage in outputs.
+        step = Step(step_type=StepType.CONFIRM)
+
+        console = Console(record=True, width=200)
+        sink = CliSink(console=console)
+        sink.consume(self._completed_event(step))
+
+        assert console.export_text().strip() == ""
+
+    def test_confirm_empty_usage_renders_nothing(self):
+        from rich.console import Console
+
+        from .sink import CliSink
+
+        step = Step(step_type=StepType.CONFIRM)
+        step.outputs["token_usage"] = {"input_tokens": 0, "output_tokens": 0}
+
+        console = Console(record=True, width=200)
+        sink = CliSink(console=console)
+        sink.consume(self._completed_event(step))
+
+        assert console.export_text().strip() == ""
+
+    def test_discovery_renders_no_usage(self):
+        from rich.console import Console
+
+        from .sink import CliSink
+
+        step = Step(step_type=StepType.DISCOVERY)
+        step.outputs["token_usage"] = {"input_tokens": 999, "output_tokens": 111}
+
+        console = Console(record=True, width=200)
+        sink = CliSink(console=console)
+        with patch("se3.engine.step_renderers.render_step_usage") as big_block, \
+             patch("se3.engine.step_renderers.render_step_output") as full_report:
+            sink.consume(self._completed_event(step))
+
+        # Discovery's per-round footer is owned by the handler; the sink renders
+        # nothing for discovery (neither usage block nor full report).
+        assert console.export_text().strip() == ""
+        big_block.assert_not_called()
+        full_report.assert_not_called()
+
+    def test_plan_keeps_big_usage_block(self):
+        from .sink import CliSink
+
+        step = Step(step_type=StepType.PLAN)
+        step.outputs["token_usage"] = {"input_tokens": 1000, "output_tokens": 200}
+
+        sink = CliSink()
+        with patch("se3.engine.step_renderers.render_step_usage") as big_block, \
+             patch("se3.engine.step_renderers.render_step_output") as full_report:
+            sink.consume(self._completed_event(step))
+
+        # plan retains the established big per-step usage block and is still
+        # skipped from the full report (orchestrator owns the plan presentation).
+        big_block.assert_called_once_with(step)
+        full_report.assert_not_called()
+
+    def test_non_interactive_step_uses_full_report(self):
+        from .sink import CliSink
+
+        step = Step(step_type=StepType.ANALYZE)
+        step.outputs["token_usage"] = {"input_tokens": 10, "output_tokens": 20}
+
+        sink = CliSink()
+        with patch("se3.engine.step_renderers.render_step_output") as full_report:
+            sink.consume(self._completed_event(step))
+
+        # Non-skipped types go through the full report renderer (which itself
+        # appends the big usage block) — unchanged behaviour.
+        full_report.assert_called_once_with(step)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
