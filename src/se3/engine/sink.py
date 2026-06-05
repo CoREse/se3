@@ -113,13 +113,21 @@ class CliSink(Sink):
         Their events still reach HistorySink (web report cards) and JsonSink
         (daemon NDJSON).
 
-        However, the orchestrator's interactive/special paths never render the
-        per-step token-usage block, so for these skipped step types CliSink
-        still renders just the usage block directly. This keeps per-step usage
-        symmetric on the CLI: token-heavy steps like ``plan`` and ``discovery``
-        show their consumption exactly as ``analyze`` / ``test`` / etc. do
-        (and the WebUI report cards already surface it). The block self-guards
-        on empty ``token_usage``, so steps that made no LLM call print nothing.
+        The orchestrator's interactive/special paths never render token usage,
+        so CliSink still surfaces per-step usage for the skipped types — but
+        with a per-type rule, because the interactive multi-round steps want a
+        compact inline footer rather than the big reverse-color block:
+
+        * ``discovery`` — skip usage entirely. Discovery shows a compact
+          ``本轮 … · 累计 …`` footer inline at the tail of each round's message
+          block (``steps/discovery.py``); rendering a usage block here too
+          would duplicate it.
+        * ``confirm`` — render a compact dim single-line footer (NOT the big
+          ``Step Token Usage`` block) from ``step.outputs['token_usage']``. The
+          confirm LLM review runs once per confirm step, so this step's total
+          is both the round and the cumulative figure; a human-mode confirm
+          makes no LLM call, leaving ``token_usage`` empty so nothing renders.
+        * ``plan`` — keep the full ``render_step_usage`` block unchanged.
         """
         step = event.data.get("step")
         if step is None:
@@ -129,6 +137,14 @@ class CliSink(Sink):
             st = getattr(step, "step_type", None)
             step_type = getattr(st, "value", st)
         if step_type in self._CLI_SKIP_STEP_TYPES:
+            if step_type == "discovery":
+                # Per-round footer is rendered inline by the discovery handler;
+                # do not render any usage block here (would duplicate it).
+                return
+            if step_type == "confirm":
+                self._render_confirm_usage_footer(step)
+                return
+            # plan keeps the established big per-step usage block.
             from .step_renderers import render_step_usage
 
             render_step_usage(step)
@@ -136,6 +152,33 @@ class CliSink(Sink):
         from .step_renderers import render_step_output
 
         render_step_output(step)
+
+    @staticmethod
+    def _render_confirm_usage_footer(step: object) -> None:
+        """Render confirm's per-round usage as a compact dim single-line footer.
+
+        Reuses the shared ``format_round_usage_footer`` so the wording / number
+        format stays identical to discovery's inline footer and the rest of the
+        project. Because the confirm reviewer calls the LLM at most once per
+        confirm step, the round increment equals the cumulative total, so the
+        same ``UsageTotals`` is passed for both. Nothing is rendered when the
+        step made no LLM call (empty / absent ``token_usage`` — e.g. the human
+        reviewer path).
+        """
+        usage = (getattr(step, "outputs", None) or {}).get("token_usage")
+        if not usage:
+            return
+        from .token_usage import UsageTotals, format_round_usage_footer
+
+        totals = UsageTotals.from_dict(usage)
+        if totals.is_empty():
+            return
+        from rich.text import Text
+
+        from .display import get_console
+
+        footer = format_round_usage_footer(totals, totals)
+        get_console().print(Text(footer, style="dim"))
 
 
 class JsonSink(Sink):
