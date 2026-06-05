@@ -349,7 +349,11 @@ class DaemonClient:
         is honoured even while blocked waiting for an inbound frame.
         """
         logger.info("Dialing central server at %s", self.server_url)
-        async with websockets.connect(self.server_url, open_timeout=10) as ws:
+        async with websockets.connect(
+            self.server_url,
+            open_timeout=10,
+            max_size=protocol.MAX_WS_MESSAGE_BYTES,
+        ) as ws:
             self._connected = True
             self._last_error = None
             # A new session: forget prior history state so the server gets a

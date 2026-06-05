@@ -515,3 +515,39 @@ def test_ui_ws_broadcasts_daemon_status_update(client_and_app):
             machines = update["machines"]
             assert machines and machines[0]["machine_id"] == "m1"
             assert machines[0]["flows"][0]["flow_id"] == "f1"
+
+
+# --------------------------------------------------------------------------
+# uvicorn launch: large WebSocket frame cap (large MSG_HISTORY_DATA frames)
+# --------------------------------------------------------------------------
+
+
+def test_run_passes_ws_max_size_to_uvicorn(monkeypatch):
+    """``app.run`` must pass ``ws_max_size=protocol.MAX_WS_MESSAGE_BYTES`` to
+    ``uvicorn.run`` so the server's default 16 MiB inbound frame cap is raised
+    and large ``MSG_HISTORY_DATA`` frames are accepted instead of being dropped
+    (the direct cause of the history-pull 504). Host / port are still threaded
+    through unchanged.
+    """
+    import sys
+    import types
+
+    from se3.server import app as app_module
+
+    captured = {}
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+
+    def _fake_run(app_obj, **kwargs):
+        captured["kwargs"] = kwargs
+
+    fake_uvicorn.run = _fake_run
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    # Avoid building the real FastAPI app / auth stack for this launch check.
+    monkeypatch.setattr(app_module, "create_app", lambda **kw: object())
+
+    app_module.run(host="0.0.0.0", port=12345, db_path=":memory:")
+
+    assert captured["kwargs"]["ws_max_size"] == protocol.MAX_WS_MESSAGE_BYTES
+    assert captured["kwargs"]["host"] == "0.0.0.0"
+    assert captured["kwargs"]["port"] == 12345

@@ -16,6 +16,14 @@
 
 
 
+
+## 8.7.1 - 2026-06-05
+
+- Fix GET /api/history/{flow_id} returning 504 when flow history exceeded the default WebSocket frame size
+- Raise the daemon↔server WebSocket inbound frame cap to 256 MiB so large MSG_HISTORY_DATA frames are no longer silently dropped
+- Add a shared MAX_WS_MESSAGE_BYTES constant in protocol.py as the single source of truth for the frame cap on both ends
+- Apply the cap via max_size on the daemon WebSocket client and ws_max_size on the server's uvicorn runtime
+- Add regression tests covering the new constant and its propagation through both the daemon and server WebSocket setup
 ## 8.7.0 - 2026-06-04
 
 - Enforce that the discovery step's Proposed Task Description (refined_description) is always a clean, finalized, zero-open-item executable description

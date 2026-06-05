@@ -934,3 +934,59 @@ def test_status_local_only_branch_unchanged(monkeypatch):
         },
     )
     assert "local-only" in out
+
+
+# --------------------------------------------------------------------------
+# WebSocket max-frame size (large MSG_HISTORY_DATA frames)
+# --------------------------------------------------------------------------
+
+
+def test_max_ws_message_bytes_is_large_enough():
+    """The shared inbound frame cap must comfortably exceed today's ~39MB
+    history frames; guard it against being lowered back near a library default.
+    """
+    assert hasattr(protocol, "MAX_WS_MESSAGE_BYTES")
+    assert protocol.MAX_WS_MESSAGE_BYTES >= 64 * 1024 * 1024
+
+
+def test_session_connects_with_raised_ws_max_size():
+    """``_session`` must dial ``websockets.connect`` with ``max_size`` set to
+    the shared protocol cap so the daemon's inbound 1 MiB default is removed
+    and large ``MSG_HISTORY_DATA`` frames are no longer dropped.
+
+    A fake ``websockets`` module records the ``connect`` kwargs, then its fake
+    connection bails out of the ``async with`` immediately so the heavy
+    HELLO / push session machinery never runs (no real network involved).
+    """
+    captured = {}
+
+    class _BailOut(RuntimeError):
+        pass
+
+    class _FakeConn:
+        async def __aenter__(self):
+            # Connect kwargs are already recorded; abort before the session
+            # body so we exercise only the connect call.
+            raise _BailOut()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeWebsockets:
+        @staticmethod
+        def connect(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return _FakeConn()
+
+    client = _make_client()
+
+    async def scenario():
+        stop_event = asyncio.Event()
+        with pytest.raises(_BailOut):
+            await client._session(stop_event, _FakeWebsockets())
+
+    asyncio.run(scenario())
+    assert captured["kwargs"]["max_size"] == protocol.MAX_WS_MESSAGE_BYTES
+    # Pre-existing connect parameters are untouched.
+    assert captured["kwargs"]["open_timeout"] == 10

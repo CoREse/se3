@@ -72,6 +72,22 @@ DEFAULT_SERVER_PORT = 8080
 # scattered through the client.
 DEFAULT_SERVER_TLS_PORT = 443
 
+# Maximum size, in bytes, of a single daemon↔server WebSocket message frame.
+# This is the *single source of truth* for the per-frame inbound cap on both
+# sides: the daemon passes it as ``websockets.connect(max_size=…)`` and the
+# server passes it as ``uvicorn.run(ws_max_size=…)``. Sharing the one constant
+# keeps the two ends from drifting apart, exactly like DEFAULT_SERVER_PORT.
+#
+# It is raised well above the library defaults (websockets' 1 MiB, uvicorn's
+# 16 MiB) because a ``MSG_HISTORY_DATA`` frame carrying a full session's
+# conversation records is currently ~33-39 MB — under the old defaults the
+# server silently dropped the oversized frame, so ``GET /api/history/{flow_id}``
+# never resolved and returned 504. 256 MiB is a bounded large ceiling: it
+# comfortably absorbs today's frames with headroom while still capping a
+# pathological frame to protect server memory (we deliberately do not use
+# ``None``/unbounded).
+MAX_WS_MESSAGE_BYTES = 256 * 1024 * 1024
+
 # -- message types: daemon -> server --------------------------------------
 MSG_HELLO = "hello"
 MSG_STATUS_UPDATE = "status_update"

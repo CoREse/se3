@@ -1028,7 +1028,13 @@ def run(
         session_store=session_store,
         rate_limiter=rate_limiter,
     )
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+        ws_max_size=protocol.MAX_WS_MESSAGE_BYTES,
+    )
 
 
 def main(argv: Optional[list] = None) -> None:
