@@ -2537,12 +2537,25 @@ function normalizeRecord(rec) {
   const toolDetail =
     toolDetailRaw && typeof toolDetailRaw === "object" ? toolDetailRaw : null;
 
+  // Per-call token usage (G5): record_response (chat_history.py) attaches a
+  // `token_usage` dict — the increment for THIS LLM call, parsed from the
+  // stream's `type=='result'` line — to the assistant ChatMessage. The daemon
+  // forwards it inside the `message` envelope verbatim, so a final (non-partial)
+  // assistant record carries the round's usage here. Partial stream fragments
+  // and non-LLM records have none → null, so the per-round footnote (which
+  // gates on a non-empty round usage) renders only when this turn actually
+  // called the LLM. Shape mirrors `UsageTotals.to_dict()`.
+  const tokenUsageRaw = pick("token_usage");
+  const tokenUsage =
+    tokenUsageRaw && typeof tokenUsageRaw === "object" ? tokenUsageRaw : null;
+
   return {
     role: role,
     content: content,
     timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
     stepType: pickStepType(),
     stepId: pick("step_id") || "",
+    tokenUsage: tokenUsage,
     // `envelope` carries the record's original .jsonl envelope ({step_id,
     // step_type, message} — the JSON envelope of the standardized persistence
     // layer). It is the stable data source for the user side's Layer-3 "查看原始"
@@ -2855,6 +2868,11 @@ function addConversationRecords(container, st, records, startIndex) {
   // running only at the end of the loop (a just-closed segment's stale bubble
   // still lingers mid-loop, so a DOM probe would mis-merge the next round).
   const segments = partialSegments(records);
+  // Per-record cumulative round usage (G5), grouped by step_id over the FULL
+  // ordered array so the cumulative is stable regardless of how the batch was
+  // sliced. Attached to each norm below so the interactive assistant renderers
+  // can show『本轮 … · 累计 …』without re-walking the records.
+  const roundCumulative = accumulateRoundUsageByStep(records);
   for (let i = startIndex; i < records.length; i++) {
     const segKey = segments[i];
 
@@ -2899,6 +2917,8 @@ function addConversationRecords(container, st, records, startIndex) {
     let bubble;
     try {
       norm = normalizeRecord(records[i]);
+      // Per-step running cumulative for the per-round usage footnote (G5).
+      if (norm) norm.cumulativeUsage = roundCumulative[i];
       bubble = renderConversationRecord(norm);
     } catch (err) {
       try { console.warn("conversation record render failed", i, err); }
@@ -4588,6 +4608,9 @@ function renderDiscoveryAssistant(content, norm) {
     if (narWrap.childNodes.length) frag.appendChild(narWrap);
   }
   frag.appendChild(resultFrag);
+  // Per-round usage footnote at the bubble tail (G5) — only when this round
+  // actually called the LLM (non-empty round usage).
+  appendRoundUsageFootnote(frag, norm);
   return frag;
 }
 registerAssistantRenderer("discovery", renderDiscoveryAssistant);
@@ -4680,6 +4703,9 @@ function makeStructuredAssistantRenderer(stepType) {
     bodyWrap.appendChild(body);
     wrap.appendChild(bodyWrap);
     frag.appendChild(wrap);
+    // Per-round usage footnote at the bubble tail (G5) — covers confirm and
+    // every other structured interactive step that actually called the LLM.
+    appendRoundUsageFootnote(frag, norm);
     return frag;
   };
 }
@@ -5160,6 +5186,9 @@ function renderAssistantBubble(content, norm) {
           if (narWrap.childNodes.length) resultWrap.appendChild(narWrap);
         }
         resultWrap.appendChild(body);
+        // Per-round usage footnote (G5) for unregistered structured steps
+        // (confirm / project_summary / …) that called the LLM.
+        appendRoundUsageFootnote(resultWrap, norm);
         frag.appendChild(resultWrap);
         // Single "查看原始" entry holds this turn's original record.
         frag.appendChild(makeAssistantRawToggle(content, norm));
@@ -5177,6 +5206,10 @@ function renderAssistantBubble(content, norm) {
   // and otherwise falls back to the unrendered content literal, so the original
   // record is always reachable without contracting the inline process to empty.
   frag.appendChild(renderAssistantProcessInline(content, norm));
+  // Per-round usage footnote (G5): a no-result turn that nevertheless called the
+  // LLM (e.g. an assistant turn carrying token_usage but no structured result)
+  // still reports its round / cumulative usage at the tail.
+  appendRoundUsageFootnote(frag, norm);
   frag.appendChild(makeAssistantRawToggle(content, norm));
   return frag;
 }
@@ -5641,6 +5674,111 @@ function buildStepUsageFootnote(usage) {
     el("span", "step-report__usage-value", formatTokenUsage(usage)),
   );
   return foot;
+}
+
+// ---------------------------------------------------------------------------
+// Per-round token-usage footnote (G5)
+// ---------------------------------------------------------------------------
+//
+// Unlike the per-step report card (driven by step_completed `outputs.token_usage`,
+// the engine's per-STEP total), the per-round footnote is driven by the per-CALL
+// `token_usage` that record_response attaches to each assistant ChatMessage
+// (exposed as `norm.tokenUsage`). Every time the console shows content to the
+// user — each discovery round, each confirm review — the footnote reports both
+// this round's increment AND the running cumulative for the same interactive
+// step. The cumulative is derived client-side by summing the per-round usages
+// grouped by `step_id` (an interactive step keeps one step_id across its rounds),
+// mirroring the CLI footer's `carried + current` arithmetic.
+
+const ROUND_USAGE_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+  "total_cost_usd",
+];
+
+function emptyUsageTotals() {
+  const t = {};
+  for (const k of ROUND_USAGE_FIELDS) t[k] = 0;
+  return t;
+}
+
+function addUsageInto(totals, usage) {
+  for (const k of ROUND_USAGE_FIELDS) totals[k] += usageNum(usage[k]);
+}
+
+// Pure: given the full ordered records array, return an array (same length as
+// `records`) where element [i] is the cumulative token usage for record i's
+// `step_id` — the running sum of every per-round usage seen at or before i that
+// shares its step_id — or null when record i carries no (non-empty) round usage.
+//
+// De-dups by full record identity (`recordKey`, the same key accumulateSessionUsage
+// uses): a record re-delivered across snapshots / reconnects must NOT advance the
+// running sum, but it still snapshots the current cumulative so the duplicate
+// renders the same footnote. Grouping by step_id keeps each interactive step's
+// cumulative independent. O(n), DOM-free, exposed for unit testing.
+function accumulateRoundUsageByStep(records) {
+  const n = Array.isArray(records) ? records.length : 0;
+  const result = new Array(n).fill(null);
+  if (!n) return result;
+  const perStep = Object.create(null); // step_id -> running totals
+  const seen = new Set();
+  for (let i = 0; i < n; i++) {
+    let norm;
+    let key;
+    try {
+      norm = normalizeRecord(records[i]);
+      key = recordKey(records[i]);
+    } catch (_) {
+      continue; // a malformed record must never break the running sum
+    }
+    const usage = norm && norm.tokenUsage;
+    if (isTokenUsageEmpty(usage)) continue;
+    const stepId = String((norm && norm.stepId) || "");
+    let totals = perStep[stepId];
+    if (!totals) {
+      totals = emptyUsageTotals();
+      perStep[stepId] = totals;
+    }
+    // Advance the running sum once per distinct record; a re-delivered identical
+    // record shares its key and is not double-counted.
+    if (!seen.has(key)) {
+      seen.add(key);
+      addUsageInto(totals, usage);
+    }
+    result[i] = Object.assign({}, totals);
+  }
+  return result;
+}
+
+// Build the compact, low-key per-round usage footnote, or null when this round
+// consumed no tokens (so a round that made no LLM call — empty redraw, resume
+// re-display — shows nothing extra). Wording: 『本轮 X in / Y out · 累计 X in / Y out』.
+// `cumulativeUsage` falls back to the round itself when missing/empty, so a
+// single-round step or a direct (test) call without a precomputed cumulative
+// still reads cleanly. Numbers reuse formatTokenCount for project-wide parity.
+function buildRoundUsageFootnote(roundUsage, cumulativeUsage) {
+  if (isTokenUsageEmpty(roundUsage)) return null;
+  const cum = isTokenUsageEmpty(cumulativeUsage) ? roundUsage : cumulativeUsage;
+  const text =
+    "本轮 " + formatTokenCount(roundUsage.input_tokens) + " in / " +
+    formatTokenCount(roundUsage.output_tokens) + " out · 累计 " +
+    formatTokenCount(cum.input_tokens) + " in / " +
+    formatTokenCount(cum.output_tokens) + " out";
+  const foot = el("div", "round-usage");
+  foot.appendChild(el("span", "round-usage__text", text));
+  return foot;
+}
+
+// Append the per-round usage footnote to `container` from a normalized record's
+// `tokenUsage` (this round) + `cumulativeUsage` (running per-step total, set by
+// the render loop). No-op when the round consumed no tokens. Shared by every
+// interactive assistant render path so the footnote placement never drifts.
+function appendRoundUsageFootnote(container, norm) {
+  if (!container || !norm) return;
+  const foot = buildRoundUsageFootnote(norm.tokenUsage, norm.cumulativeUsage);
+  if (foot) container.appendChild(foot);
 }
 
 // Recompute and render the flow-view session-usage badge from the conversation
@@ -7441,6 +7579,10 @@ if (typeof module !== "undefined" && module.exports) {
     formatCostUsd,
     buildStepUsageFootnote,
     updateFlowUsageBadge,
+    // Per-round usage footnote (G5) — exposed for the DOM-free tests in
+    // tests/frontend/round_usage.test.mjs.
+    buildRoundUsageFootnote,
+    accumulateRoundUsageByStep,
     renderProposalFields,
     renderDesignFields,
     renderPlanReport,
