@@ -447,10 +447,52 @@ The `--active-only` option on `se3 history list` (and the default `se3 history` 
 
 Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 
+**Task-description (title) extraction for history-only flows:** For a flow sourced
+only from `se3/history/{flow_id}/` (no engine/archive record carrying an explicit
+`task_description`), the displayed title is recomputed from the flow's first
+`*.jsonl` file by `PersistenceManager.extract_history_summary`. The extractor
+recovers the **user's original input** rather than the raw system-prompt opener,
+following a three-tier priority that mirrors the web console's chat-history user
+bubble (`splitUserPromptByMarker`):
+
+1. The user's literal input delimited by the shared `USER_CONTENT` sentinel
+   markers, extracted via `prompt_markers.extract_user_content` (which reuses the
+   `TEMPLATE_PREFIX_END` / `USER_CONTENT_BEGIN` / `USER_CONTENT_END` constants). A
+   missing/empty middle segment, or the legacy two-marker `BEGIN`-without-`END`
+   layout, is treated as "no user content" and falls through to the next tier.
+2. Otherwise the embedded `Task description:\s*-+\s*(.*?)\s*-+` block (covering the
+   first-step-not-discovery `se3 run "task"` flow).
+3. Otherwise the raw first-line content as a final fallback.
+
+The CLI clips the resulting title to 100 characters with an ellipsis. The same
+three-tier priority is shared with the daemon→web console title extractor
+(`history.py::_extract_history_summary`, see the base spec), so the CLI and the web
+history list show consistent titles. Because the title is computed live at
+index-build time and `task_description` is not persisted to `_meta.json`, existing
+history flows pick up the corrected title with no data migration.
+
 #### Scenario: List all flows
 - **WHEN** user runs `se3 history` or `se3 history list`
 - **THEN** all flows from all three sources are displayed in a table
 - **AND** each row includes flow_id, status, task description, progress, updated time, and source
+
+#### Scenario: History-only title shows the user's original input
+- **GIVEN** a history-only flow whose first `*.jsonl` first-line prompt embeds the
+  user's literal input between the `USER_CONTENT_BEGIN` and `USER_CONTENT_END`
+  sentinel markers, preceded by the system-prompt template prefix
+- **WHEN** the user runs `se3 history` (or `se3 history list`)
+- **THEN** the row's task-description title is the user's original input (the
+  marker-delimited middle segment), NOT the truncated system-prompt opener
+- **AND** the title is clipped to 100 characters with an ellipsis when longer
+
+#### Scenario: History-only title falls back to Task description block then raw content
+- **GIVEN** a history-only flow whose first-line prompt has no `USER_CONTENT`
+  markers (or only the legacy `BEGIN`-without-`END` pair) but does contain an
+  embedded `Task description: --- … ---` block
+- **WHEN** the user runs `se3 history`
+- **THEN** the title is taken from the `Task description` block
+- **AND** when neither the markers nor the `Task description` block are present, the
+  title falls back to the raw first-line content
 
 #### Scenario: Filter active or archived flows
 - **WHEN** user adds `--active-only` or `--archived-only`

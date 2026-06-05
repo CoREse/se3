@@ -37,9 +37,72 @@ existing whole-message chip behavior in that case.
 
 from __future__ import annotations
 
+from typing import Optional
+
 TEMPLATE_PREFIX_END = "<!--SE3:TEMPLATE_END-->"
 USER_CONTENT_BEGIN = "<!--SE3:USER_CONTENT-->"
 USER_CONTENT_END = "<!--SE3:USER_CONTENT_END-->"
+
+
+def _strip_edge_newlines(s: str) -> str:
+    """Strip leading and trailing CR/LF from a marker-bounded segment.
+
+    The Python-side equivalent of the web console's
+    ``stripTrailingNewlines(stripLeadingNewlines(...))``: the engine joins
+    the markers with ``\\n`` on both sides, so the user-content middle segment
+    is wrapped in newline glue that is not part of the user's literal input.
+    Only ``\\n`` / ``\\r`` are removed (matching the JS helpers); other
+    whitespace is preserved.
+    """
+    i = 0
+    n = len(s)
+    while i < n and s[i] in "\n\r":
+        i += 1
+    j = n
+    while j > i and s[j - 1] in "\n\r":
+        j -= 1
+    return s[i:j]
+
+
+def extract_user_content(content: str) -> Optional[str]:
+    """Extract the user's literal input out of a step-prompt body, or ``None``.
+
+    The Python-side equivalent of the web console's ``splitUserPromptByMarker``
+    (``src/se3/server/static/app.js``), reusing the same marker constants so the
+    two implementations cannot drift. It locates the three markers in canonical
+    order — :data:`TEMPLATE_PREFIX_END` → :data:`USER_CONTENT_BEGIN` →
+    :data:`USER_CONTENT_END` — and returns the middle (user-content) segment
+    only when the full three-segment layout is present and that segment is
+    non-empty after stripping its surrounding newline glue.
+
+    Returns ``None`` (i.e. "no user literal input here") when:
+
+    * any of the three markers is missing or out of order;
+    * the layout is the legacy two-segment ``BEGIN``-without-``END`` form (the
+      post-``BEGIN`` tail there is framework-injected text, not a user literal,
+      exactly as the web console routes it into the collapsed suffix chip);
+    * the middle segment is empty / only newlines after stripping.
+
+    This is a pure function: no disk access, no side effects, no third-party
+    dependency.
+    """
+    if not isinstance(content, str) or not content:
+        return None
+    tpe = content.find(TEMPLATE_PREFIX_END)
+    if tpe < 0:
+        return None
+    ucb = content.find(USER_CONTENT_BEGIN, tpe + len(TEMPLATE_PREFIX_END))
+    if ucb < 0:
+        return None
+    uce = content.find(USER_CONTENT_END, ucb + len(USER_CONTENT_BEGIN))
+    if uce < 0:
+        # Two-segment legacy layout (BEGIN with no END): the remainder is
+        # framework-injected text, not a user literal.
+        return None
+    middle = _strip_edge_newlines(content[ucb + len(USER_CONTENT_BEGIN):uce])
+    if not middle:
+        return None
+    return middle
 
 
 def _marker_pair_present(text: str) -> bool:

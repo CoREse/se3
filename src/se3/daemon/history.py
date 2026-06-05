@@ -784,8 +784,18 @@ def _extract_history_summary(flow_dir: Path) -> str:
     """Recover a short task description from a history directory's first jsonl.
 
     Mirrors ``PersistenceManager.extract_history_summary`` so a history-only
-    flow still carries a human-readable description in the index.
+    flow still carries a human-readable description in the index. Title
+    extraction follows the same three-tier priority, aligned with the web
+    chat-history display (``splitUserPromptByMarker``):
+
+    1. The user's literal input cut out by the ``USER_CONTENT`` markers
+       (:func:`~se3.engine.prompt_markers.extract_user_content`);
+    2. otherwise the embedded ``Task description: --- ... ---`` block;
+    3. otherwise the raw content (untruncated — clipping is applied by the
+       caller via :func:`_clip`).
     """
+    from ..engine.prompt_markers import extract_user_content
+
     jsonl_files = sorted(flow_dir.glob("*.jsonl"))
     if not jsonl_files:
         return "(no history data)"
@@ -800,11 +810,17 @@ def _extract_history_summary(flow_dir: Path) -> str:
                     break
             else:
                 content = str(content)
+        # 1. Prefer the user's literal input delimited by USER_CONTENT markers.
+        user_content = extract_user_content(content)
+        if user_content is not None:
+            return user_content
+        # 2. Extract embedded task description if present.
         match = re.search(
             r"Task description:\s*-+\s*(.*?)\s*-+", str(content), re.DOTALL
         )
         if match:
             return match.group(1).strip()
+        # 3. Fallback: raw content (clipped by the caller).
         return str(content)
     except Exception:
         return "(no state data)"

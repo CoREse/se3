@@ -407,8 +407,26 @@ class PersistenceManager:
 
     @staticmethod
     def extract_history_summary(flow_dir: "Path") -> str:
-        """Extract a short task description from the first JSONL file in a history dir."""
+        """Extract a short task description from the first JSONL file in a history dir.
+
+        Title extraction follows a three-tier priority, aligned with the web
+        chat-history display (``splitUserPromptByMarker``) and the daemon's
+        ``_extract_history_summary``:
+
+        1. The user's literal input cut out by the ``USER_CONTENT`` markers
+           (:func:`~se3.engine.prompt_markers.extract_user_content`);
+        2. otherwise the embedded ``Task description: --- ... ---`` block (the
+           first-step-not-discovery ``se3 run "task"`` flow);
+        3. otherwise the truncated raw content.
+
+        The CLI clips the result to 100 characters with an ellipsis.
+        """
         import re
+
+        from .prompt_markers import extract_user_content
+
+        def _clip(text: str) -> str:
+            return text[:100] + "..." if len(text) > 100 else text
 
         jsonl_files = sorted(flow_dir.glob("*.jsonl"))
         if not jsonl_files:
@@ -424,17 +442,20 @@ class PersistenceManager:
                         break
                 else:
                     content = str(content)
-            # Extract embedded task description if present
+            # 1. Prefer the user's literal input delimited by USER_CONTENT markers.
+            user_content = extract_user_content(content)
+            if user_content is not None:
+                return _clip(user_content)
+            # 2. Extract embedded task description if present.
             match = re.search(
                 r"Task description:\s*-+\s*(.*?)\s*-+",
                 content,
                 re.DOTALL,
             )
             if match:
-                desc = match.group(1).strip()
-                return desc[:100] + "..." if len(desc) > 100 else desc
-            # Fallback: truncated raw content
-            return content[:100] + "..." if len(content) > 100 else content
+                return _clip(match.group(1).strip())
+            # 3. Fallback: truncated raw content.
+            return _clip(content)
         except Exception:
             return "(no state data)"
 

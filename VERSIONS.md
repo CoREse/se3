@@ -17,6 +17,14 @@
 
 
 
+
+## 8.8.0 - 2026-06-05
+
+- Show the user's original input as the title in `se3 history` and the web UI history list, instead of the system-prompt-prefixed raw prompt
+- Align history-list titles with the web chat view by reusing the USER_CONTENT marker logic (splitUserPromptByMarker equivalent)
+- Add a three-tier title extraction: USER_CONTENT markers, then `Task description:` regex, then raw-content fallback
+- Recompute flow titles live from the first jsonl at index-build time, so existing history self-heals with no data migration
+- Add prompt_markers.extract_user_content, a pure Python helper mirroring the web console's marker-based extraction
 ## 8.7.1 - 2026-06-05
 
 - Fix GET /api/history/{flow_id} returning 504 when flow history exceeded the default WebSocket frame size
