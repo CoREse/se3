@@ -460,6 +460,23 @@ Each call invokes the current agent's `Runner.run_with_monitor` with stream-json
 - **THEN** `_record_response(result.output or "", external_attempt)` is called
 - **AND** failures inside `record_response` are caught and debug-logged
 
+#### Scenario: Per-call token usage parsed into the assistant record
+- **GIVEN** `record_response` is writing an `assistant` chat-history record whose
+  `raw_ndjson` contains a `type == "result"` line carrying `usage.input_tokens` /
+  `usage.output_tokens` / `usage.cache_creation_input_tokens` /
+  `usage.cache_read_input_tokens` and a top-level `total_cost_usd`
+- **WHEN** the record is persisted
+- **THEN** `record_response` parses that result line's usage (via the shared
+  `parse_usage_from_ndjson(raw_ndjson)` helper, defaulting any missing field to
+  `0` and swallowing any parse exception) and stores it on the record's optional
+  `token_usage` field, which is included in the record's serialization
+- **AND** the parsed per-call `token_usage` is the per-round increment the
+  running-flow console renders as an interactive-turn usage footnote (see the
+  `running-flow-console` *Per-Step Report Cards* requirement)
+- **AND** a legacy `assistant` record written before this field existed (no
+  `token_usage` key) still deserializes without error, so the change is backward
+  compatible
+
 #### Scenario: Ctrl+C re-raised after partial save
 - **WHEN** `result.interrupted` is `True`
 - **THEN** an info log records partial-output save, and `KeyboardInterrupt` is raised

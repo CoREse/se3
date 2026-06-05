@@ -2102,6 +2102,27 @@ identity (e.g. a `recordKey`) so a step re-delivered across snapshots is counted
 once. When no step has reported usage, the badge is absent or empty. The badge
 reflects the final session total once the flow completes.
 
+**Per-round usage on interactive assistant turns.** Beyond the per-step report
+card, the running-flow console MUST also surface **per-round** token usage at
+the tail of each interactive `assistant` turn (discovery clarification rounds,
+confirm reviews, and any other interactive assistant bubble). Each such bubble
+renders a small-print footnote showing both **this round's increment** and the
+**cumulative** total — `本轮 X in / Y out · 累计 X in / Y out` — using the same
+`formatTokenCount` number formatting as the per-step footnote, and only when the
+record actually carries a non-empty `token_usage` (a round that made no LLM call
+renders no footnote). The round increment is the per-call `token_usage` carried
+on that assistant conversation record; the cumulative is computed **client-side**
+as a running sum over the records sharing the same `step_id`, de-duplicated by
+record identity so a record re-delivered across snapshots is counted once. The
+data path introduces **no new daemon↔server protocol field**: the per-call
+`token_usage` is attached to the assistant chat-history record (see `llm-caller:
+Subprocess Invocation and History Recording`) and reaches the frontend through
+the conversation record stream that `normalizeRecord` already parses (exposed as
+`norm.tokenUsage`); the daemon passes the record through verbatim. Because
+webui footnotes are already small-print and do not interrupt the conversation
+continuity, the web surface needs no separate compact-form design — only the
+per-round / per-step usage data presented as an unobtrusive footnote.
+
 Crucially, the orchestrator MUST emit a terminal `step_completed` /
 `step_failed` event for **every** step type, including the interactive
 DISCOVERY and CONFIRM steps, PLAN, and `summarize` — step types whose CLI
@@ -2215,6 +2236,22 @@ not re-render them.
   step re-delivered across snapshots is counted once, keeping the badge equal to
   the engine's authoritative `session_token_usage`
 - **AND** once the flow completes the badge reflects the final session total
+
+#### Scenario: Interactive assistant turn shows a per-round usage footnote
+- **GIVEN** a discovery / confirm interactive `assistant` conversation record
+  whose normalized `tokenUsage` (the per-call `token_usage` carried on the
+  record) is non-empty
+- **WHEN** the bubble is rendered in `#flow-view`
+- **THEN** a small-print footnote at the tail of the bubble shows both this
+  round's increment and the cumulative total
+  (`本轮 X in / Y out · 累计 X in / Y out`) using the same `formatTokenCount`
+  number formatting as the per-step footnote
+- **AND** the cumulative is computed client-side as a running sum over records
+  sharing the same `step_id`, de-duplicated by record identity
+- **AND** an interactive assistant record with an empty / absent `token_usage`
+  (a round that made no LLM call) renders no footnote
+- **AND** the per-round usage data rides the existing conversation record stream
+  (no new daemon↔server protocol field is introduced)
 
 ### Requirement: Live Per-Group DAG Status Markers
 

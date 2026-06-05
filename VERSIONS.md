@@ -20,6 +20,16 @@
 
 
 
+
+## 8.10.0 - 2026-06-05
+
+- Show per-round and cumulative token usage on each interactive turn, so discovery and confirm now report consumption every round instead of only at completion
+- Render a compact dim single-line footer ('本轮 X in / Y out · 累计 X in / Y out') inline at the tail of CLI assistant messages, preserving interaction continuity without the large reverse-video table
+- Display per-round and cumulative token usage on web running-flow console assistant bubbles, with cumulative summed client-side per step
+- Fix discovery cumulative token undercount where per-round step.outputs.clear() dropped carried_token_usage, so the terminal total now reflects the whole discovery run
+- Only show usage footers on rounds/steps that actually invoked the LLM; empty-input redraws and --resume re-displays no longer fabricate a footer
+- Persist per-call token_usage on assistant chat-history records (parsed from result NDJSON), remaining backward compatible with legacy records lacking the field
+- Leave the existing non-interactive per-step 'Step Token Usage' tables unchanged
 ## 8.9.1 - 2026-06-05
 
 - Fix step counter so a completed flow shows total/total (e.g. 13/13) with progress 1.0 instead of stopping one short, corrected in the engine so the daemon and all status consumers report it consistently

@@ -2500,7 +2500,7 @@ Custom renderers MAY call `_render_remaining(step, title, skip_keys)` to display
 
 **Per-step token-usage block:**
 
-When `step.outputs` carries a non-empty `token_usage` total (written by `run_step`; see *Step-Scoped Token Usage Aggregation*), `render_step_output` SHALL append a compact, aligned token/cost usage summary block at the end of that step's report — labeling the input/output tokens, the `cache_read` / `cache_creation` breakdown, and the `total_cost_usd` cost with clear units rather than bare numbers — rendered through the shared `display.py` block primitive so it follows the established Block Rendering Visual Style. When `step.outputs` has no `token_usage` or it is empty, no usage block is rendered.
+When `step.outputs` carries a non-empty `token_usage` total (written by `run_step`; see *Step-Scoped Token Usage Aggregation*), `render_step_output` SHALL append a compact, aligned token/cost usage summary block at the end of that step's report — labeling the input/output tokens, the `cache_read` / `cache_creation` breakdown, and the `total_cost_usd` cost with clear units rather than bare numbers — rendered through the shared `display.py` block primitive so it follows the established Block Rendering Visual Style. When `step.outputs` has no `token_usage` or it is empty, no usage block is rendered. This big-block behaviour governs the non-interactive steps; the interactive multi-round steps (`discovery`, `confirm`) instead show a compact inline footer (see *Interactive Per-Round Token Usage Footer*) and are routed away from this block by `CliSink`.
 
 **Registered renderers beyond the base set:**
 
@@ -2595,6 +2595,13 @@ Retained for backward compatibility with persisted flows containing pre-unificat
 #### Scenario: Step without token usage renders no usage block
 - **WHEN** `render_step_output(step)` renders a step whose `outputs` has no `token_usage` key or an empty one
 - **THEN** no usage summary block is appended
+
+#### Scenario: CliSink routes interactive steps' usage away from the big block
+- **GIVEN** the terminal events for a `discovery`, a `confirm`, and a `plan` step (all in `CliSink`'s `_CLI_SKIP_STEP_TYPES`), plus a non-interactive step
+- **WHEN** `CliSink` consumes each terminal event
+- **THEN** `discovery` renders no usage at all (its per-round footer was already rendered inline by the discovery handler)
+- **AND** `confirm` renders the compact dim single-line `format_round_usage_footer` footer from `step.outputs["token_usage"]`, not the big `render_step_usage` block
+- **AND** `plan` keeps the established big `render_step_usage` block unchanged, and every non-interactive step keeps appending its big usage block via `render_step_output` as before
 
 ### Requirement: Pre-implement Test Baseline
 
@@ -3308,6 +3315,8 @@ The flow engine SHALL aggregate LLM token usage and cost at two granularities �
 
 **DAG-parallel implement re-binding:** When the `implement` step runs groups in parallel worker threads (see *Implement Step DAG Execution Strategy*), each worker SHALL re-bind the step accumulator into its own thread so concurrent groups' usage still folds into the same step total under a lock, rather than being lost because the contextvar default is per-thread.
 
+**Discovery multi-round carried total:** The `discovery` step is interactive and re-enters its handler once per clarification round, calling `step.outputs.clear()` between rounds to drop the previous round's rendered payload. That `clear()` MUST preserve the `carried_token_usage` entry so the discovery step's terminal `token_usage` total reflects the **whole-discovery cumulative** across every round, not just the last round's increment (the prior behaviour, which cleared `carried_token_usage` and thereby under-reported the discovery total to the per-round increment of the final round). Concretely, on each round the handler computes the round increment from `token_usage.current_step_usage()` (the contextvar accumulator at the post-LLM-call display point) and the cumulative as `carried_token_usage + round_increment`, persists the cumulative back into `carried_token_usage` for the next round, and lets `run_step` write the final cumulative into `step.outputs["token_usage"]`. This carried total is the authoritative data source for both the discovery terminal usage and the CLI per-round cumulative footer (see *Interactive Per-Round Token Usage Footer*).
+
 #### Scenario: Step total written to step.outputs and folded into the session total
 - **GIVEN** a step whose handler makes one or more LLM calls
 - **WHEN** `run_step` finishes the handler (normally or via exception)
@@ -3325,6 +3334,48 @@ The flow engine SHALL aggregate LLM token usage and cost at two granularities �
 - **WHEN** each group's LLM calls report usage
 - **THEN** every group's usage is folded into the one step-scoped accumulator (re-bound into each worker thread, merged under a lock)
 - **AND** the step's `token_usage` total is the sum across all groups, not just the group that ran on the originating thread
+
+#### Scenario: Discovery carried total survives the per-round outputs.clear()
+- **GIVEN** an interactive `discovery` step that runs multiple clarification rounds, each issuing an LLM call and calling `step.outputs.clear()` before rendering the next round
+- **WHEN** the discovery step reaches its terminal status
+- **THEN** the `carried_token_usage` entry is preserved across every `step.outputs.clear()`, so the cumulative total accumulates each round's increment rather than being reset to a single round
+- **AND** the discovery step's `step.outputs["token_usage"]` (and the session total it folds into) equals the whole-discovery cumulative across all rounds, not just the final round's increment
+
+### Requirement: Interactive Per-Round Token Usage Footer
+
+The interactive multi-round steps — `discovery` (each clarification round) and `confirm` (each review) — SHALL surface their LLM token usage as a **compact, single-line dim footer** appended to the assistant content they show the user, rather than the big reverse-color `render_usage_block` / "Step Token Usage" table the non-interactive steps use at step completion. This keeps the interaction continuous: the footer sits at the tail of the assistant message block so the following input prompt flows naturally underneath it, instead of being split off by a full-width table.
+
+**Shared footer builder (`token_usage.format_round_usage_footer`):** Given a round-increment `UsageTotals` and a cumulative `UsageTotals`, the builder returns the single line `本轮 {in} in / {out} out · 累计 {in} in / {out} out`, showing the input / output token counts only. The numbers reuse the same thousands-separator formatting (`_format_tokens`, e.g. `12,345`) as `format_usage_line` / `render_usage_block`, so the wording and number style stay identical across discovery, confirm, and the rest of the project. `None` inputs degrade to zeros.
+
+**Display rule — only when the round actually called the LLM:** A footer is rendered for a round / review **only** when that round actually issued an LLM call (its round-increment total is non-empty). Rounds that issued no LLM call — discovery's empty-input redraw, the `--resume` discovery re-display, or a human-mode confirm that made no LLM review call — leave the round increment (or the step's `token_usage`) empty and render no footer.
+
+**Discovery (handler-rendered, inline):** The discovery handler renders the footer itself, inline inside the Discovery message block (as the last renderable of the block's `Group`, before the closing blue rule), so the footer is part of that round's assistant content. The round increment is `token_usage.current_step_usage()` taken at the post-LLM-call display point; the cumulative is `carried_token_usage + round_increment` (see *Step-Scoped Token Usage Aggregation*). Non-LLM redraw / resume re-display paths pass no round usage (or `None`) so no footer is shown.
+
+**Confirm (CliSink-rendered, at completion):** Because the confirm review runs inside the handler and CliSink observes only the terminal event (by which point the contextvar accumulator has been reset), the confirm footer is rendered by `CliSink` at the confirm step's terminal event, reading `step.outputs["token_usage"]`. The confirm LLM reviewer calls the LLM at most once per confirm step (a fresh confirm step is created per revision), so the step-level total **is** both the round and the cumulative figure — the same `UsageTotals` is passed for both arguments. CliSink does NOT render any usage for `discovery` (its per-round footer is already rendered inline by the handler) to avoid duplication.
+
+**Non-interactive steps unchanged:** This requirement adds the compact footer **only** for the interactive steps. The per-step `render_step_usage` / `render_usage_block` big-table behaviour for every non-interactive step (analyze, plan, implement, test, summarize, …) is unchanged.
+
+#### Scenario: Discovery round shows an inline compact usage footer
+- **GIVEN** a `discovery` clarification round that issued an LLM call before pausing for the user
+- **WHEN** the discovery message block is rendered on the CLI
+- **THEN** a single dim line `本轮 {round_in} in / {round_out} out · 累计 {cum_in} in / {cum_out} out` is appended at the tail of that round's message block, before the closing rule
+- **AND** the round figures are this round's increment (`current_step_usage()`) and the cumulative figures are `carried_token_usage + round_increment`
+- **AND** the numbers use the same thousands-separator format as `render_usage_block`
+
+#### Scenario: A discovery redraw or resume re-display shows no footer
+- **WHEN** the discovery display is re-rendered without a new LLM call (an empty-input redraw or the `--resume` re-display path)
+- **THEN** no round usage is passed and no usage footer is appended to the message block
+
+#### Scenario: Confirm renders a compact footer, not the big block
+- **GIVEN** a `confirm` step whose LLM reviewer made one call, leaving a non-empty `step.outputs["token_usage"]`
+- **WHEN** `CliSink` consumes the confirm step's terminal event
+- **THEN** it renders the compact dim single-line `format_round_usage_footer` footer (with the round and cumulative arguments equal to the step total), NOT the big `render_step_usage` "Step Token Usage" block
+- **AND** a human-mode confirm that made no LLM call has an empty / absent `token_usage`, so no footer is rendered
+
+#### Scenario: CliSink does not render discovery usage
+- **WHEN** `CliSink` consumes a `discovery` step's terminal event
+- **THEN** it renders no usage block or footer for discovery, because the per-round footer was already rendered inline by the discovery handler
+- **AND** the non-interactive steps' big `render_usage_block` tables are unaffected
 
 ### Requirement: Transition Data Model
 
