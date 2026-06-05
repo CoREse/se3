@@ -879,5 +879,125 @@ class TestDiscoveryCarriedTokenUsage:
             assert su.total_cost_usd == pytest.approx(0.06)
 
 
+class TestDiscoveryRoundUsageFooter:
+    """Per-round CLI usage footer rendering and gating (G2 tasks 1-3).
+
+    The discovery message block appends a compact dim ``本轮 … · 累计 …`` footer
+    only when this round actually invoked the LLM (a non-empty round usage); an
+    empty / ``None`` round usage (empty-input redraw, ``--resume`` re-display)
+    must render no footer.
+    """
+
+    def _render_to_text(self, **kwargs) -> str:
+        import io
+
+        from rich.console import Console
+
+        from . import display
+        from .steps import discovery as discovery_mod
+
+        buf = Console(file=io.StringIO(), width=200, record=True)
+        prev = display.get_console()
+        display.set_console(buf)
+        try:
+            discovery_mod._display_discovery_message("hello world", None, **kwargs)
+        finally:
+            display.set_console(prev)
+        return buf.export_text()
+
+    def test_footer_rendered_when_round_usage_non_empty(self):
+        from .token_usage import UsageTotals
+
+        out = self._render_to_text(
+            round_usage=UsageTotals(input_tokens=1234, output_tokens=567),
+            cumulative_usage=UsageTotals(input_tokens=12345, output_tokens=6789),
+        )
+        assert "本轮 1,234 in / 567 out · 累计 12,345 in / 6,789 out" in out
+
+    def test_no_footer_when_round_usage_none(self):
+        out = self._render_to_text()
+        assert "本轮" not in out
+        assert "累计" not in out
+
+    def test_no_footer_when_round_usage_empty(self):
+        from .token_usage import UsageTotals
+
+        out = self._render_to_text(
+            round_usage=UsageTotals(),
+            cumulative_usage=UsageTotals(input_tokens=100, output_tokens=10),
+        )
+        # An empty round increment (no LLM call this round) suppresses the footer
+        # even though a cumulative total exists.
+        assert "本轮" not in out
+        assert "累计" not in out
+
+    def test_handler_passes_round_and_cumulative_usage(self):
+        """discovery_handler computes round=current_step_usage(), cumulative=carried+round."""
+        from .state_machine import StateMachine
+        from .steps import discovery as discovery_mod
+        from .token_usage import UsageTotals, add_call_usage
+
+        captured = {}
+
+        def fake_display(*args, **kwargs):
+            captured["round_usage"] = kwargs.get("round_usage")
+            captured["cumulative_usage"] = kwargs.get("cumulative_usage")
+
+        def fake_round(*args, **kwargs):
+            add_call_usage(UsageTotals(input_tokens=30, output_tokens=3))
+            return (
+                {"mode": "question", "content": "c2", "questions": ["q2?"]},
+                "raw 2",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+            sm.register_handler(StepType.DISCOVERY, discovery_mod.discovery_handler)
+
+            flow = sm.create_flow("usage footer discovery", task_type="discovery")
+            step = flow.state.get_current_step()
+            step.inputs["task_description"] = "build something"
+            # Simulate a prior round's carried cumulative total surviving the
+            # outputs.clear() inside the handler.
+            step.outputs["carried_token_usage"] = UsageTotals(
+                input_tokens=100, output_tokens=10
+            ).to_dict()
+            step.inputs["resumed"] = True
+            step.inputs["user_response"] = "answer 1"
+
+            with patch.object(discovery_mod, "_run_discovery_round", side_effect=fake_round), \
+                 patch.object(discovery_mod, "_display_discovery_message", side_effect=fake_display):
+                sm.run_step(flow, step)
+
+        assert step.status == StepStatus.PAUSED
+        # This round's increment only.
+        assert captured["round_usage"].input_tokens == 30
+        assert captured["round_usage"].output_tokens == 3
+        # Carried prior total (100/10) + this round (30/3).
+        assert captured["cumulative_usage"].input_tokens == 130
+        assert captured["cumulative_usage"].output_tokens == 13
+
+    def test_programmatic_confirm_path_renders_no_footer(self):
+        """The programmatic-confirmed early return makes no LLM call and no display."""
+        from .state_machine import StateMachine
+        from .steps import discovery as discovery_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+            sm.register_handler(StepType.DISCOVERY, discovery_mod.discovery_handler)
+
+            flow = sm.create_flow("confirm discovery", task_type="discovery")
+            step = flow.state.get_current_step()
+            step.inputs["task_description"] = "build something"
+            step.inputs["programmatic_confirmed"] = True
+
+            with patch.object(discovery_mod, "_display_discovery_message") as mock_display:
+                sm.run_step(flow, step)
+
+            assert step.status == StepStatus.COMPLETED
+            # No footer / message rendered on the confirm fast-path.
+            mock_display.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -529,6 +529,19 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         questions = result.get("questions", [])
 
+        # Per-round token usage for the inline CLI footer. The display point sits
+        # *after* this round's LLM call, so the in-scope step accumulator
+        # (current_step_usage) holds exactly this round's increment. The
+        # cumulative is the carried prior total (preserved across the
+        # outputs.clear() above) plus this round's increment. A round that
+        # issued no LLM call yields an empty round_usage and the footer is
+        # suppressed downstream (see _display_discovery_message).
+        from ..token_usage import UsageTotals, current_step_usage
+
+        round_usage = current_step_usage()
+        cumulative_usage = UsageTotals.from_dict(carried_token_usage)
+        cumulative_usage.add(round_usage)
+
         if refined_description and not questions:
             # All cases with a refined description and no pending questions
             # route through the programmatic confirmation gate (user types "1" to confirm).
@@ -544,6 +557,8 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 questions=None,
                 is_confirmation=True,
                 raw_result_text=raw_result_text,
+                round_usage=round_usage,
+                cumulative_usage=cumulative_usage,
             )
 
             return StepStatus.PAUSED
@@ -553,7 +568,14 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["questions"] = questions
             if refined_description:
                 step.outputs["proposed_description"] = refined_description
-            _display_discovery_message(content, refined_description, questions, raw_result_text=raw_result_text)
+            _display_discovery_message(
+                content,
+                refined_description,
+                questions,
+                raw_result_text=raw_result_text,
+                round_usage=round_usage,
+                cumulative_usage=cumulative_usage,
+            )
             return StepStatus.PAUSED
 
     except LLMCallError as e:
@@ -897,6 +919,8 @@ def _display_discovery_message(
     is_confirmation: bool = False,
     *,
     raw_result_text: Optional[str] = None,
+    round_usage: Optional["UsageTotals"] = None,
+    cumulative_usage: Optional["UsageTotals"] = None,
 ) -> None:
     """Display discovery message to user.
 
@@ -906,12 +930,21 @@ def _display_discovery_message(
         questions: List of questions (if in question mode)
         is_confirmation: If True, this is a final confirmation display (not asking for input)
         raw_result_text: The raw LLM result text (may contain narrative outside JSON)
+        round_usage: This round's incremental token usage. When non-empty, a
+            compact dim footer (``本轮 … · 累计 …``) is appended at the tail of
+            the Discovery block (inside it, before the closing blue footer). When
+            ``None`` / empty (a round that issued no LLM call — empty-input
+            redraw, ``--resume`` re-display), no footer is rendered.
+        cumulative_usage: The cumulative token usage up to and including this
+            round (carried prior total + ``round_usage``). Paired with
+            ``round_usage`` to render the ``累计 …`` portion of the footer.
     """
     from rich.console import Group
     from rich.markdown import Markdown
     from rich.text import Text
     from .. import display
     from ..display import get_console
+    from ..token_usage import UsageTotals, format_round_usage_footer
 
     renderables = []
 
@@ -959,6 +992,16 @@ def _display_discovery_message(
         # General message mode
         renderables.append(Markdown(content))
         renderables.append(Text(""))
+
+    # Per-round token-usage footer: a single dim line tying off the message
+    # block. Only rendered when this round actually invoked the LLM (round_usage
+    # non-empty), so empty-input redraws and --resume re-displays — which carry
+    # no fresh LLM call — stay footer-free (the gate is the caller's None vs.
+    # the round being empty here). It is the last renderable inside the
+    # Discovery block, so the input prompt that follows flows on naturally.
+    if round_usage is not None and not round_usage.is_empty():
+        footer_text = format_round_usage_footer(round_usage, cumulative_usage)
+        renderables.append(Text(footer_text, style="dim"))
 
     console = get_console()
     display.render_block_header("Discovery", "blue")

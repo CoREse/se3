@@ -1050,6 +1050,8 @@ def _restore_discovery_display(current_step: Any) -> None:
         is_confirmation = current_step.outputs.get("awaiting_programmatic_confirm", False)
         # Pass the raw result text so narrative outside JSON blocks is rendered
         raw_result_text = last_assistant.get("content", "")
+        # No round/cumulative usage passed: --resume re-display issues no LLM
+        # call, so the per-round footer must not be (re-)rendered here.
         _display_discovery_message(
             content, proposed, questions,
             is_confirmation=is_confirmation,
@@ -1517,6 +1519,8 @@ def _handle_discovery_programmatic_confirm(
                 )
                 raw_result_text = current_step.outputs.get("raw_result_text", "")
 
+                # No round/cumulative usage passed: an empty-input redraw issues
+                # no LLM call, so the per-round footer must not be rendered.
                 _display_discovery_message(
                     content, refined, is_confirmation=True, raw_result_text=raw_result_text
                 )
