@@ -1633,8 +1633,15 @@ function updateReplyBox(flow) {
     // pending-Send bookkeeping; an in-flight submission would have kept its
     // target around in `entries` while it was still pending.
     submit.disabled = true;
+    // The shortened idle placeholder is mobile-only so the desktop wording
+    // stays byte-for-byte unchanged (desktop zero-change hard constraint);
+    // reuse the same `isMobilePortrait()` matchMedia('(max-width: 600px)')
+    // gate the auto-grow textarea logic already relies on (it also guards
+    // against a missing `window` in the DOM-stub test environment).
     input.placeholder = isActiveFlow(flow)
-      ? "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…"
+      ? (isMobilePortrait()
+          ? "可先草拟回复,或点 ✎ 插话…"
+          : "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…")
       : "暂无待处理项…";
     ctx.className = "flow-reply-context";
     ctx.innerHTML = "";

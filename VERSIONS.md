@@ -21,6 +21,13 @@
 
 
 
+
+## 8.10.1 - 2026-06-08
+
+- Fix the tool-call card details toggle being inflated by the mobile touch-target rule, so the card no longer stretches on screens ≤600px
+- Fix the idle reply-box placeholder wrapping on mobile by shrinking its font size and showing a shortened single-line prompt
+- Tidy the discovery_confirm dock on mobile: remove the duplicate status head, restyle the expand toggle as a lightweight aligned text link, and align the chip, link, and confirm button
+- Preserve desktop appearance and behavior unchanged — all fixes are confined to the ≤600px breakpoint or gated behind isMobilePortrait()
 ## 8.10.0 - 2026-06-05
 
 - Show per-round and cumulative token usage on each interactive turn, so discovery and confirm now report consumption every round instead of only at completion

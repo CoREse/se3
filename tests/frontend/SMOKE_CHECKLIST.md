@@ -35,8 +35,10 @@ interaction-call backend (`protocol.py`, `aggregator.py`,
 - [ ] The **textarea is always enabled** so the user can draft text at any
       time (chat-application parity); the **Send button is the gate**.
 - [ ] With **no pending interaction**, the textarea is enabled but Send is
-      **disabled**, and the placeholder hints there is no target yet (e.g.
-      "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…").
+      **disabled**, and the placeholder hints there is no target yet. On
+      **desktop** (>600px) the wording is the full
+      "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…"; on **mobile** (≤600px)
+      it is shortened to "可先草拟回复,或点 ✎ 插话…".
 - [ ] An inline **Interject (✎) icon button** sits at the left of the reply
       row (symmetric to Send); clicking it materializes a synthetic
       `interjection` chip and enables Send.

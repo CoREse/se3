@@ -2466,6 +2466,20 @@ Within the narrow-screen breakpoint, the observable behavior is:
    the viewport width. The reply area keeps its full desktop semantics — the
    always-enabled textarea, the send-button settle gate, the inline Interject
    opt-in, and the chip-selection targeting all behave exactly as on desktop.
+   Because the textarea carries the ≥16px iOS-zoom-guard font, the idle
+   no-pending-interaction **placeholder** would otherwise wrap to two lines in
+   the default single-line (collapsed) textarea. To keep that hint on one line,
+   the narrow-screen breakpoint shrinks ONLY the placeholder font
+   (`#flow-reply-input::placeholder { font-size: 13px }`) — the textarea's own
+   16px input font is untouched, so real typing keeps the zoom guard and normal
+   input size. The shrink is paired with a **mobile-shortened placeholder
+   string**: the idle-flow placeholder is gated through the same
+   `isMobilePortrait()` (`matchMedia('(max-width: 600px)')`) helper as the
+   auto-grow textarea, rendering a shorter phrase on mobile while the desktop
+   wording stays byte-for-byte unchanged (the only `app.js` change in this
+   adaptation; the desktop idle placeholder of the *Docked Persistent Reply Box*
+   requirement is preserved exactly). Together the smaller font and shorter
+   string guarantee the idle placeholder fits one line on a phone.
 4. **Reclaimed chat-area horizontal whitespace** — in the narrow-screen
    breakpoint, scoped to the `.flow-conversation` chat area, the per-record
    identity decoration that the conversation inherits from the history-list view
@@ -2502,7 +2516,20 @@ Within the narrow-screen breakpoint, the observable behavior is:
    this reason); zeroing the basis lets the detail collapse and the ellipsis take
    over. The expandable details panel (`.tool-marker-details`, holding diff / text
    / bash output) is unaffected and still expands to show full content on its own
-   line(s).
+   line(s). Additionally, the chip's "details" expand affordance
+   (`.tool-marker-toggle`) is a `<button>`, so the breakpoint's baseline
+   `button { min-height: 40px }` touch-target rule grabs this tiny secondary
+   toggle and inflates it to 40px, which stretches the whole `.tool-marker` chip
+   row far taller than its text. The narrow-screen breakpoint MUST therefore
+   relax the 40px touch target for THIS one toggle — scoped precisely to
+   `.flow-conversation .tool-marker-toggle` — collapsing only its vertical size
+   (`min-height: auto`, `line-height: 1`, zeroed top/bottom padding) so the
+   button hugs its text and the card returns to its natural height. The toggle's
+   horizontal padding (6px) and font-size (10.5px) are inherited from the desktop
+   rule unchanged, and every other control caught by `button { min-height: 40px }`
+   (icon buttons, intervention chips, reply option buttons, …) keeps its full
+   touch target. Desktop never matches this breakpoint, so the desktop toggle is
+   byte-for-byte intact.
 6. **Tiled reply meta row** — in the narrow-screen breakpoint, the docked reply
    region's `.flow-reply-head` (TO / KIND / callid) and the
    "▸ expand message details" toggle (`.flow-reply-prompt-toggle`) are collapsed
@@ -2520,7 +2547,31 @@ Within the narrow-screen breakpoint, the observable behavior is:
    viewport. The chip keeps its full selection / targeting semantics (tapping it
    still selects the intervention and drives the shared reply textarea); only its
    placement changes, and only inside the breakpoint, so the desktop chip-bar
-   layout is unchanged.
+   layout is unchanged. For the **`discovery_confirm`** kind specifically, whose
+   dock otherwise crowds four mismatched blocks together on a phone — a large
+   green `✓ 确认任务描述` status chip, a near-duplicate `回复中 · 确认任务描述`
+   head, a boxed/uppercase `▸ 展开消息详情` prompt-toggle stranded alone on its
+   own row, and the `确认并继续(输入 1)` confirm button — the narrow-screen
+   breakpoint additionally tidies the panel, with every rule scoped to
+   `.flow-reply-context.kind-discovery_confirm` so other kinds and the entire
+   desktop panel are untouched (no markup / logic change — the existing
+   `kind-discovery_confirm` class is reused): **(a) de-dup** — the
+   `.flow-reply-head` is hidden (`display: none`) because the status chip already
+   carries the same `✓ 确认任务描述` label, eliminating the repeated text;
+   **(b) lightweight expand entry** — the `.flow-reply-prompt-toggle` is
+   restyled from a boxed/uppercase button into a plain text link (border removed,
+   `text-transform: none`, letter-spacing zeroed, font-size matching the
+   surrounding secondary text, accent color, underline on hover), and the
+   expanded-state desktop rule that re-adds a border is overridden to keep the
+   link lightweight; **(c) alignment + hierarchy** — the chip and the expand
+   link are vertically centered against each other and tiled onto the shared
+   first row (the chip via the wrapping `.flow-reply` container, the link as the
+   context's first visible child after the head is hidden), while the confirm
+   button drops to its own full-width row (`.flow-reply-options` basis 100%, the
+   primary confirm option stretched and centered) so it reads as the panel's
+   clear primary action rather than one more same-size chip. The confirm value
+   and channel are unchanged — the button still sends the literal `"1"` through
+   the shared call/response reply path (see *Unified Intervention Items*).
 7. **WeChat-style auto-grow reply textarea** — in the narrow-screen breakpoint
    the reply textarea (`#flow-reply-input`) behaves like a chat app's composer:
    it opens at a single-line height, grows automatically as the user types, stops
@@ -2651,3 +2702,55 @@ viewport is a no-op, guaranteeing zero desktop regression.
   reply textarea exactly as before — only its placement changes
 - **AND** on a viewport wider than the breakpoint the chip keeps its desktop
   chip-bar placement (the tiling is scoped strictly inside the breakpoint)
+
+#### Scenario: Tool-marker details toggle does not stretch the chip on mobile
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint (`max-width: 600px`) and the conversation contains a `.tool-marker`
+  chip whose `.tool-marker-toggle` "details" affordance is a `<button>`
+- **WHEN** the `.flow-conversation` chat area is rendered
+- **THEN** the breakpoint relaxes the `button { min-height: 40px }` touch target
+  for `.flow-conversation .tool-marker-toggle` only (`min-height: auto`,
+  `line-height: 1`, zeroed top/bottom padding) so the toggle hugs its text and
+  the `.tool-marker` row returns to its natural height instead of being inflated
+  to a 40px-tall button
+- **AND** the toggle's horizontal padding (6px) and font-size (10.5px) are
+  unchanged, and every other `<button>` caught by the touch-target rule keeps
+  its full 40px minimum
+- **AND** on a viewport wider than the breakpoint the toggle keeps its desktop
+  sizing (the override lives strictly inside the breakpoint)
+
+#### Scenario: Idle reply placeholder fits one line on mobile
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint (`max-width: 600px`) for an active flow with no pending
+  interaction, so the reply textarea shows its idle placeholder in the default
+  single-line (collapsed) state
+- **WHEN** the docked reply area is rendered
+- **THEN** the placeholder font is shrunk via
+  `#flow-reply-input::placeholder { font-size: 13px }` and the placeholder
+  string is the mobile-shortened phrase (gated through `isMobilePortrait()` /
+  `matchMedia('(max-width: 600px)')`), so the hint fits on one line without
+  wrapping
+- **AND** the textarea's own input font stays at the ≥16px iOS-zoom-guard size,
+  so normal typing is unaffected
+- **AND** on a viewport wider than the breakpoint the placeholder keeps its
+  full desktop wording byte-for-byte and the desktop placeholder font is
+  unchanged
+
+#### Scenario: discovery_confirm dock is de-duplicated and aligned on mobile
+- **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
+  breakpoint (`max-width: 600px`) with a pending `discovery_confirm`
+  intervention whose reply-context panel (`.flow-reply-context.kind-discovery_confirm`)
+  is active
+- **WHEN** the docked reply region is rendered
+- **THEN** the `.flow-reply-head` is hidden so its `回复中 · 确认任务描述` text no
+  longer duplicates the `✓ 确认任务描述` status chip
+- **AND** the `.flow-reply-prompt-toggle` is rendered as a lightweight plain-text
+  link (no border, no uppercase, font-size matched to the surrounding secondary
+  text) tiled onto the same row as the status chip rather than standing alone in
+  a boxed button on its own row
+- **AND** the `确认并继续(输入 1)` confirm button drops to its own full-width
+  row as the panel's emphasized primary action, still sending the literal `"1"`
+  through the shared call/response channel
+- **AND** all of these rules are scoped to `kind-discovery_confirm` inside the
+  breakpoint, so other intervention kinds and the desktop `discovery_confirm`
+  panel are unchanged

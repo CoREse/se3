@@ -2460,6 +2460,38 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     text-overflow: ellipsis;
   }
 
+  /* -- tool-call chip: un-stretch the "details" toggle button (problem 1) - *
+   * `.tool-marker-toggle` is a <button>, so the G1 baseline `button { min-height:
+   * 40px }` touch-target rule above grabs this tiny secondary "details" expand
+   * affordance and inflates it to 40px, which in turn stretches the whole
+   * `.tool-marker` chip row far taller than its text. This override DELIBERATELY
+   * relaxes the 40px touch target for THIS one minor toggle so the button hugs
+   * its text and the card returns to its natural height. It is scoped precisely
+   * to `.flow-conversation .tool-marker-toggle`, so every other control caught by
+   * `button { min-height: 40px }` (icon-btn / intervention-chip / ghost-btn /
+   * reply option buttons …) keeps its full touch target. Only the vertical size
+   * is collapsed (min-height + line-height + zeroed vertical padding); the
+   * horizontal padding (6px) and font-size (10.5px) are inherited from the
+   * desktop `.tool-marker-toggle` rule unchanged. Desktop never matches this
+   * breakpoint, so the desktop toggle is byte-for-byte intact. */
+  .flow-conversation .tool-marker-toggle {
+    min-height: auto;
+    line-height: 1;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  /* -- idle reply placeholder: shrink so it fits one line (problem 2) ------ *
+   * The idle "可先草拟回复,或点 ✎ 插话…" placeholder rides the 16px form-field
+   * floor (the iOS-zoom guard above), which on a phone wraps to two lines in the
+   * default single-line (collapsed) textarea. Shrink ONLY the placeholder so the
+   * hint fits one line; the textarea's own 16px input text is left untouched, so
+   * real typing keeps the iOS-zoom guard and the normal input size. Paired with
+   * the shortened placeholder string (app.js). Desktop is unaffected. */
+  #flow-reply-input::placeholder {
+    font-size: 13px;
+  }
+
   /* -- docked reply meta: tile head + prompt toggle on one row (G2) ------- *
    * Desktop stacks the reply-context children vertically (the TO/KIND head
    * row, then the "▸ 展开消息详情" prompt toggle row, then the options row),
@@ -2521,6 +2553,73 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   }
   #flow-view .flow-reply .flow-reply-row {
     flex: 0 0 100%;
+  }
+
+  /* -- discovery_confirm dock: tidy the scattered mobile layout (problem 3) *
+   * The discovery confirmation dock crowds four mismatched blocks together: a
+   * big green "✓ 确认任务描述" chip, a near-duplicate "回复中 · 确认任务描述" head,
+   * a boxed uppercase "▸ 展开消息详情" toggle stranded alone on its own row, and
+   * the "确认并继续 (输入 1)" button — unaligned, uneven in size, and repeating the
+   * same label. Every rule below is scoped to `kind-discovery_confirm` inside the
+   * 600px breakpoint, so other kinds and the entire desktop panel are untouched.
+   *
+   * (a) De-dup: the chip already reads "✓ 确认任务描述", so hide the head that
+   *     repeats it. After this, the context's first visible child is the
+   *     prompt-toggle, which then tiles next to the chip on the shared row. */
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-head {
+    display: none;
+  }
+
+  /* (b) Lightweight expand entry: drop the boxed/uppercase look of the
+   *     "展开消息详情" toggle and render it as a plain text link whose size matches
+   *     the surrounding secondary text, so it stops standing out and stops eating
+   *     a whole empty row. It is given the chip's 40px height + centering so it
+   *     aligns with the chip on the shared row (see (c)). */
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-prompt-toggle {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    align-self: center;
+    border: none;
+    padding: 0;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-prompt-toggle:hover {
+    border: none;
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  /* Keep the expanded-state toggle the same lightweight link (override the
+   * desktop expanded rule that re-adds a yellow border). */
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-prompt-wrap.expanded .flow-reply-prompt-toggle {
+    border: none;
+    color: var(--accent);
+  }
+
+  /* (c) Alignment + hierarchy: with the head gone, the chip and the expand link
+   *     share the first row (the chip via `.flow-reply` flex-wrap, the link as
+   *     the context's first child). Center them vertically against each other and
+   *     keep the prompt-toggle row tight; the confirm button drops to its own
+   *     full-width row below as the clear primary action. */
+  #flow-view .flow-reply-context.kind-discovery_confirm.active {
+    align-items: center;
+    row-gap: 8px;
+  }
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-prompt-wrap {
+    gap: 0;
+  }
+  /* Confirm button: full-width, emphasized primary CTA so it reads as the
+   * panel's main action rather than one more same-size chip. */
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-options {
+    flex-basis: 100%;
+  }
+  #flow-view .flow-reply-context.kind-discovery_confirm .flow-reply-option-primary {
+    flex: 1 1 auto;
+    text-align: center;
+    justify-content: center;
   }
 
   /* -- modals: near full-screen on phone portrait (G6) -------------------- *
