@@ -2877,6 +2877,7 @@ const STEP_HEADER_TITLES = {
   self_check: "SELF CHECK",
   verify_spec: "VERIFY SPEC",
   update_spec: "UPDATE SPEC",
+  spec_gate: "SPEC GATE",
   version_analyze: "VERSION ANALYZE",
   commit: "COMMIT",
   summarize: "SUMMARY",
@@ -4458,6 +4459,8 @@ const STEP_RESULT_FIELDS = {
   verify_spec: ["verified", "summary", "issues", "recommendations",
     "verification_result", "fix_needed"],
   update_spec: ["updated_specs", "specs_updated", "new_capabilities"],
+  spec_gate: ["gate_passed", "gate_route", "gate_skipped", "fix_needed",
+    "test_results"],
   commit: ["committed", "commit_hash", "commit_message"],
   version_analyze: ["current_version", "suggested_version", "bump_type",
     "confidence", "reasoning"],
@@ -5663,6 +5666,7 @@ const STEP_REPORT_TITLES = {
   self_check: "Self Check",
   verify_spec: "Spec Verification",
   update_spec: "Spec Update",
+  spec_gate: "Spec Gate",
   version_analyze: "Version Analysis",
   commit: "Commit",
   summarize: "Work Summary",
@@ -6798,6 +6802,53 @@ function renderDiscoveryReport(step, outputs) {
   return frag;
 }
 
+// -- spec_gate (parity with step_renderers.py:_render_spec_gate) ------------
+//
+// Renders the gate conclusion (PASSED / FAILED, the fallback route to
+// update_spec / implement, the no-op skip) and, when the phase-2 re-test ran,
+// reuses renderTestReport's summary-only rendering — it MUST NOT dump the raw
+// pytest stdout/stderr the way the generic fallback would.
+function renderSpecGateReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const gatePassed = !!outputs.gate_passed;
+  const gateRoute = String(outputs.gate_route || "");
+  const gateSkipped = !!outputs.gate_skipped;
+
+  const bar = el("div", "step-report__status-bar");
+  if (gateSkipped) {
+    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+    bar.append(el("span", "step-report__sep", "│"),
+      el("span", "step-report__muted", "no spec change — gate skipped (no-op)"));
+  } else if (gatePassed) {
+    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+  } else {
+    bar.appendChild(el("span", "step-report__label fail", "✗ FAILED"));
+  }
+  frag.appendChild(bar);
+
+  if (gateRoute === "update_spec") {
+    frag.appendChild(el("div", "step-report__muted",
+      "Route: back to update_spec (invalid spec artifact)"));
+  } else if (gateRoute === "implement") {
+    frag.appendChild(el("div", "step-report__muted",
+      "Route: to implement (spec edit broke a test)"));
+  }
+
+  if (!gatePassed && outputs.fix_instructions) {
+    frag.appendChild(reportSection("Fix Instructions",
+      String(outputs.fix_instructions)));
+  }
+
+  // Phase-2 re-test summary — reuse the test report's summary-only renderer so
+  // the raw stdout/stderr never leaks into the DOM.
+  const results = outputs.test_results;
+  if (results && typeof results === "object") {
+    frag.appendChild(reportSection("Re-test",
+      renderTestReport(step, { test_results: results })));
+  }
+  return frag;
+}
+
 const STEP_REPORT_RENDERERS = {
   analyze: renderAnalyzeReport,
   plan: renderPlanReport,
@@ -6810,6 +6861,7 @@ const STEP_REPORT_RENDERERS = {
   version_analyze: renderVersionAnalyzeReport,
   summarize: renderSummarizeReport,
   discovery: renderDiscoveryReport,
+  spec_gate: renderSpecGateReport,
 };
 
 // Build the role / attempt / timestamp header line for one record.

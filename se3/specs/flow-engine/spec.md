@@ -389,7 +389,7 @@ The flow engine SHALL define a fixed pool of step types (the StepType enum), and
 | `self_check` | LLM code review: logic completeness, code robustness, functional omissions, test-uncovered areas (does not check spec compliance) | Yes | TWO_PHASE | **Yes** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | self_check_result, issues (structured list with description, severity, location), actionable_count |
 | `verify_spec` | Check the implementation's consistency with the spec | Yes | EXTRACT | **Yes** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context, **verified** (rule-based, computed by code: `(in_scope_count == 0) and tests_passed` — see *verify_spec Unified Priority and Scope Mechanism*) |
 | `update_spec` | Update the spec to record changes | Yes | EXTRACT | No | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
-| `spec_gate` | **Mechanism A**: post-`update_spec` gate — programmatically validate each edited/new spec, then re-run the full test suite (see *Post-update_spec Spec Verification Gate*) | No (program execution) | - | No | changes_made, baseline_failures, spec_requirement_baseline | gate_passed, gate_route, fix_needed, fix_instructions, fix_context |
+| `spec_gate` | **Mechanism A**: post-`update_spec` gate — programmatically validate each edited/new spec, then re-run the full test suite (see *Post-update_spec Spec Verification Gate*) | No (program execution) | - | No | changes_made, baseline_failures, spec_requirement_baseline | gate_passed, gate_route, gate_skipped, fix_needed, fix_instructions, fix_context, test_results |
 | `version_analyze` | Analyze changes to determine suggested_version (authoritative) + generate commit message | Yes | EXTRACT | **Yes** | changes_made, summary, verification_result, task_type | **suggested_version** (authoritative), bump_type, confidence, reasoning, commit_message |
 | `commit` | Commit changes | No (program execution) | - | No | changes_made, bump_type, commit_message, proposal, updated_specs | commit_hash |
 | `summarize` | Generate a summary and handoff | Yes | Text | **Yes** | all_previous_outputs | summary (Markdown text) |
@@ -2539,6 +2539,20 @@ When `outputs["test_results"]` is not a dict, falls back to `_default_render`. O
 
 Rendered under title "Testing".
 
+The summary-building logic (status line, phases line, command line) MUST be factored into a shared helper (`_build_test_summary_lines(test_results)`) so the `SPEC_GATE` renderer can reuse the identical summary-only presentation rather than re-implementing it or dumping the raw pytest output.
+
+#### Spec Gate Renderer (`SPEC_GATE`)
+
+Renders the spec_gate result as a **gate-conclusion summary**, never as a raw dump of the phase-2 re-test output. Because the spec_gate step writes the full `verdict.test_results` (including the raw pytest stdout/stderr) into `step.outputs`, the registry MUST provide a dedicated renderer so the step does NOT fall through to `_default_render`, which would dump the entire `test_results` dict (raw stdout/stderr included) and overwhelm the CLI reader. The renderer renders, in order:
+
+1. **Gate conclusion** — a `PASSED` / `FAILED` status line derived from `outputs["gate_passed"]`; when `outputs["gate_skipped"]` is true the line is annotated as a no-op skip (no spec change, the gate ran neither the artifact check nor the re-test).
+2. **Route annotation** — when `outputs["gate_route"]` is `update_spec` it notes the fallback to `update_spec` (invalid spec artifact); when it is `implement` it notes the fallback to `implement` (a spec edit broke a test). No route line is rendered when the gate passed.
+3. **Fix instructions** — when the gate did not pass and `outputs["fix_instructions"]` is present, the instructions text (not the raw test output).
+4. **Test summary** — when `outputs["test_results"]` is a non-empty dict (the phase-2 re-test ran), the **same** summary lines the `TEST` renderer produces via the shared `_build_test_summary_lines` helper (overall PASSED/FAILED, phase pass/fail counts and list, command) — the raw pytest stdout/stderr is NOT rendered.
+5. **Error** — when `step.error_message` is present, rendered in red.
+
+Rendered under title "Spec Gate". The no-op skip path and the `update_spec` route (an invalid artifact caught in phase 1, before any re-test) carry no `test_results`, so only the gate conclusion is rendered for them.
+
 #### Propose Renderer (`PROPOSE`, deprecated)
 
 Searches `outputs` for the first present key in `("proposal", "proposal_data")` that maps to a dict; when found, delegates to `render_proposal()`, then renders remaining outputs via `_render_remaining` with skip set `{proposal_key, "summary", "files_to_modify", "files_to_create"}`. When no proposal dict is found, falls back to `_default_render`.
@@ -2576,6 +2590,15 @@ Retained for backward compatibility with persisted flows containing pre-unificat
 #### Scenario: Test renderer with structured results
 - **WHEN** the test step completes with `outputs["test_results"]` containing `phases`
 - **THEN** the renderer shows per-phase pass/fail indicators and an overall PASSED/FAILED status line
+
+#### Scenario: Spec gate renderer shows a gate summary, not raw test output
+- **WHEN** the spec_gate step completes with `outputs["test_results"]` carrying the full phase-2 re-test verdict (including raw pytest stdout/stderr)
+- **THEN** `_render_spec_gate` renders the gate conclusion (PASSED/FAILED, any `update_spec` / `implement` route annotation) followed by the shared `_build_test_summary_lines` summary (overall status, per-phase pass/fail counts and list, command)
+- **AND** the raw pytest stdout/stderr is NOT dumped — the step does not fall through to `_default_render`
+
+#### Scenario: Spec gate renderer renders only the conclusion when the gate skipped or routed pre-test
+- **WHEN** the spec_gate step returns `gate_skipped=true` (no spec change) or routes to `update_spec` on an invalid artifact, so `outputs` carries no `test_results`
+- **THEN** the renderer outputs only the gate-conclusion summary (including the no-op skip annotation or the `update_spec` route note) and invokes no test-summary logic
 
 #### Scenario: Deprecated PROPOSE renderer retained
 - **WHEN** a persisted flow with a `PROPOSE` step is loaded and rendered

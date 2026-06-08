@@ -660,10 +660,11 @@ check("normalizeRecord on real jsonl sample yields authoritative step types", ()
 });
 
 // -- step report renderer registry -----------------------------------------
-check("STEP_REPORT_RENDERERS covers the 11 named step types", () => {
+check("STEP_REPORT_RENDERERS covers the 12 named step types", () => {
   const expected = [
     "analyze", "plan", "implement", "test", "self_check", "verify_spec",
-    "update_spec", "commit", "version_analyze", "summarize", "discovery",
+    "update_spec", "spec_gate", "commit", "version_analyze", "summarize",
+    "discovery",
   ];
   for (const t of expected) {
     assert.equal(
@@ -671,8 +672,9 @@ check("STEP_REPORT_RENDERERS covers the 11 named step types", () => {
       "missing renderer for " + t,
     );
   }
-  // Exactly 11 — the CLI registry has 11 custom renderers (PROPOSE/DESIGN are
-  // deprecated and intentionally excluded; DISCOVERY adds a frontend renderer).
+  // Exactly 12 — the prior 11 plus the spec_gate summary renderer (PROPOSE/
+  // DESIGN are deprecated and intentionally excluded; DISCOVERY adds a frontend
+  // renderer).
   assert.equal(Object.keys(app.STEP_REPORT_RENDERERS).length, expected.length);
 });
 check("STEP_REPORT_TITLES covers every step type from models.StepType", () => {
@@ -4295,6 +4297,86 @@ check("implement Summary degrades to plain numbers 1…n when groups empty", () 
   assert.deepEqual(ids, ["1.", "2.", "3."]);
   assert.equal(frag.textContent.includes("GNaN"), false);
   assert.equal(frag.textContent.includes("NaN"), false);
+});
+
+// -- spec_gate report renderer ---------------------------------------------
+// A raw pytest-style blob that MUST NOT reach the DOM via the spec_gate card.
+const SPEC_GATE_RAW = "tests/test_foo.py::test_bar FAILED\nE AssertionError\n"
+  + "Traceback (most recent call last): ...raw stderr dump...";
+const SPEC_GATE_TEST_RESULTS = {
+  overall_passed: false,
+  passed: false,
+  command: "python -m pytest -v",
+  phases: [{ name: "default", passed: false }, { name: "e2e", passed: true }],
+  stdout: SPEC_GATE_RAW,
+  stderr: "raw stderr dump...",
+};
+
+check("spec_gate report renders PASSED gate with re-test summary, no raw dump", () => {
+  const step = { status: "completed", step_type: "spec_gate" };
+  const outputs = {
+    gate_passed: true,
+    gate_route: "",
+    test_results: { ...SPEC_GATE_TEST_RESULTS, overall_passed: true, passed: true },
+  };
+  const frag = app.STEP_REPORT_RENDERERS.spec_gate(step, outputs);
+  const label = findOne(frag, "step-report__label");
+  assert.ok(label && label.textContent.includes("PASSED"), "expected PASSED label");
+  // Re-test command summary present, raw stdout/stderr absent.
+  assert.ok(frag.textContent.includes("python -m pytest -v"), "expected command line");
+  assert.equal(frag.textContent.includes(SPEC_GATE_RAW), false, "raw stdout leaked");
+  assert.equal(frag.textContent.includes("raw stderr dump"), false, "raw stderr leaked");
+  assert.equal(frag.textContent.includes("Traceback"), false, "traceback leaked");
+});
+
+check("spec_gate report renders no-op skip conclusion", () => {
+  const step = { status: "completed", step_type: "spec_gate" };
+  const frag = app.STEP_REPORT_RENDERERS.spec_gate(step, {
+    gate_passed: true, gate_route: "", gate_skipped: true,
+  });
+  assert.ok(frag.textContent.includes("PASSED"), "expected PASSED");
+  assert.ok(/skipped|no-op/i.test(frag.textContent), "expected skip note");
+});
+
+check("spec_gate report annotates the update_spec route", () => {
+  const step = { status: "completed", step_type: "spec_gate" };
+  const frag = app.STEP_REPORT_RENDERERS.spec_gate(step, {
+    gate_passed: false,
+    gate_route: "update_spec",
+    fix_instructions: "Re-apply the intended spec update.",
+  });
+  assert.ok(findOne(frag, "step-report__label").textContent.includes("FAILED"),
+    "expected FAILED");
+  assert.ok(frag.textContent.includes("update_spec"), "expected update_spec route");
+  assert.ok(frag.textContent.includes("Re-apply the intended spec update."),
+    "expected fix instructions");
+});
+
+check("spec_gate report annotates the implement route with summary only", () => {
+  const step = { status: "completed", step_type: "spec_gate" };
+  const frag = app.STEP_REPORT_RENDERERS.spec_gate(step, {
+    gate_passed: false,
+    gate_route: "implement",
+    test_results: SPEC_GATE_TEST_RESULTS,
+  });
+  assert.ok(frag.textContent.includes("FAILED"), "expected FAILED");
+  assert.ok(frag.textContent.includes("implement"), "expected implement route");
+  assert.ok(frag.textContent.includes("python -m pytest -v"), "expected command summary");
+  assert.equal(frag.textContent.includes(SPEC_GATE_RAW), false, "raw output leaked");
+  assert.equal(frag.textContent.includes("raw stderr dump"), false, "raw stderr leaked");
+});
+
+check("spec_gate STEP_RESULT_FIELDS recognizes gate result records", () => {
+  assert.ok(Array.isArray(app.STEP_RESULT_FIELDS.spec_gate), "spec_gate fields missing");
+  // A bare gate verdict counts as a result (presence, not non-emptiness).
+  assert.equal(app.isStepResultDict("spec_gate", { gate_passed: true }), true);
+  assert.equal(app.isStepResultDict("spec_gate", { test_results: {} }), true);
+  // A tool-call JSON carrying none of the fields is not a result.
+  assert.equal(app.isStepResultDict("spec_gate", { command: "ls" }), false);
+});
+
+check("spec_gate has a header title", () => {
+  assert.equal(app.stepHeaderLabel("spec_gate", "01_spec_gate_x"), "SPEC GATE");
 });
 
 console.log(`\n${passed} checks passed.`);

@@ -551,6 +551,144 @@ class TestRenderSelfCheck:
 
 
 # ---------------------------------------------------------------------------
+# _render_spec_gate
+# ---------------------------------------------------------------------------
+
+# A raw pytest-style blob that MUST NOT appear in any spec_gate render output.
+_RAW_TEST_OUTPUT = (
+    "============================= test session starts =====================\n"
+    "tests/test_foo.py::test_bar FAILED\n"
+    "E   AssertionError: assert 44 == 45\n"
+    "----------------------------- Captured stderr ------------------------\n"
+    "Traceback (most recent call last): ...raw stderr dump...\n"
+)
+
+_TEST_RESULTS_FAIL = {
+    "overall_passed": False,
+    "passed": False,
+    "command": "python -m pytest -v",
+    "phases": [
+        {"name": "default", "passed": False},
+        {"name": "e2e", "passed": True},
+    ],
+    # Fields a naive full-dump renderer would surface (the bug being fixed):
+    "stdout": _RAW_TEST_OUTPUT,
+    "stderr": "raw stderr dump...",
+}
+
+_TEST_RESULTS_PASS = {
+    "overall_passed": True,
+    "passed": True,
+    "command": "python -m pytest -v",
+    "phases": [{"name": "default", "passed": True}],
+    "stdout": _RAW_TEST_OUTPUT,
+}
+
+
+class TestRenderSpecGate:
+    @patch("se3.engine.step_renderers.render_full")
+    def test_registered_in_registry(self, _mock_render_full):
+        """SPEC_GATE has a registered renderer — render_step_output won't default-render."""
+        from se3.engine.step_renderers import STEP_RENDERERS, STEP_DISPLAY_TITLES
+
+        assert StepType.SPEC_GATE in STEP_RENDERERS
+        assert StepType.SPEC_GATE in STEP_DISPLAY_TITLES
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_gate_passed_clean(self, mock_render_full):
+        step = _make_step(StepType.SPEC_GATE, {
+            "gate_passed": True,
+            "gate_route": "",
+            "fix_needed": False,
+            "test_results": _TEST_RESULTS_PASS,
+        })
+
+        from se3.engine.step_renderers import _render_spec_gate
+        _render_spec_gate(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "PASSED" in content
+        assert "FAILED" not in content
+        # Summary present, raw output absent.
+        assert "python -m pytest -v" in content
+        assert _RAW_TEST_OUTPUT not in content
+        assert "raw stderr dump" not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_gate_skipped_noop(self, mock_render_full):
+        step = _make_step(StepType.SPEC_GATE, {
+            "gate_passed": True,
+            "gate_route": "",
+            "gate_skipped": True,
+            "fix_needed": False,
+        })
+
+        from se3.engine.step_renderers import _render_spec_gate
+        _render_spec_gate(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "PASSED" in content
+        assert "skipped" in content.lower() or "no-op" in content.lower()
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_route_update_spec(self, mock_render_full):
+        step = _make_step(StepType.SPEC_GATE, {
+            "gate_passed": False,
+            "gate_route": "update_spec",
+            "fix_needed": True,
+            "fix_instructions": "Re-apply the intended spec update.",
+        })
+
+        from se3.engine.step_renderers import _render_spec_gate
+        _render_spec_gate(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "FAILED" in content
+        assert "update_spec" in content
+        assert "Re-apply the intended spec update." in content
+        # No test_results → no re-test summary, definitely no raw output.
+        assert _RAW_TEST_OUTPUT not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_route_implement_with_test_results(self, mock_render_full):
+        step = _make_step(StepType.SPEC_GATE, {
+            "gate_passed": False,
+            "gate_route": "implement",
+            "fix_needed": True,
+            "fix_instructions": "Update the stale assertion 44 → 45.",
+            "test_results": _TEST_RESULTS_FAIL,
+        })
+
+        from se3.engine.step_renderers import _render_spec_gate
+        _render_spec_gate(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "FAILED" in content
+        assert "implement" in content
+        # Phase summary rendered (status + phase list + command).
+        assert "1 passed, 1 failed" in content
+        assert "python -m pytest -v" in content
+        # Raw stdout/stderr never leak.
+        assert _RAW_TEST_OUTPUT not in content
+        assert "raw stderr dump" not in content
+        assert "Traceback" not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_no_test_results_renders_conclusion_only(self, mock_render_full):
+        step = _make_step(StepType.SPEC_GATE, {
+            "gate_passed": True,
+            "gate_route": "",
+            "fix_needed": False,
+        })
+
+        from se3.engine.step_renderers import _render_spec_gate
+        _render_spec_gate(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "PASSED" in content
+
+
+# ---------------------------------------------------------------------------
 # Per-step token-usage block appended by render_step_output (G3)
 # ---------------------------------------------------------------------------
 

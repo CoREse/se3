@@ -2143,11 +2143,42 @@ The report card MUST:
   the same structured fields the CLI Panel reads from `step.outputs`. Field
   parity with `step_renderers.py` is required: every step type that has a CLI
   Panel renderer MUST have a corresponding web renderer (analyze, plan,
-  implement, test, self_check, verify_spec, update_spec, commit,
+  implement, test, self_check, verify_spec, update_spec, spec_gate, commit,
   version_analyze, summarize, discovery — adding new step types adds a new
   renderer).
 - Render structured output (markdown, tables, field lists) rather than
   re-dumping the raw JSON blob.
+
+**`spec_gate` report card (summary, never a raw test dump).** The `spec_gate`
+step (mechanism A — see `flow-engine` *Post-update_spec Spec Verification Gate*)
+writes the full phase-2 `verdict.test_results` — including the raw pytest
+stdout/stderr — into `step.outputs`, which `Step.to_dict()` forwards verbatim to
+the web console. Without a dedicated entry in `STEP_REPORT_RENDERERS`, a
+`spec_gate` report card would fall through to the generic field-style fallback
+(`renderDefaultReport` → `renderGenericOutputs`) and dump the entire
+`test_results` dict, raw output included, exactly the unfriendly behavior the
+`test` step avoids by having its own summary-only renderer. The frontend
+therefore MUST register a dedicated `spec_gate` report renderer
+(`renderSpecGateReport`, the web counterpart of `step_renderers._render_spec_gate`)
+that renders, in order: (1) the **gate conclusion** — a PASSED / FAILED status
+from `outputs.gate_passed`, annotated as a no-op skip when `outputs.gate_skipped`
+is true; (2) a **route annotation** when `outputs.gate_route` is `update_spec`
+(invalid spec artifact, routed back to update_spec) or `implement` (a spec edit
+broke a test, routed into the fix loop); and (3) when `outputs.test_results` is a
+non-empty dict (the phase-2 re-test ran), the **same summary-only rendering the
+`test` report card uses** (reusing `renderTestReport`'s summary path — overall
+PASSED/FAILED, phase pass/fail counts, phase list, command) — the raw
+pytest stdout/stderr is NEVER rendered. The no-op skip path and the
+`update_spec` route (an invalid artifact caught before any re-test) carry no
+`test_results`, so the card degrades to the gate-conclusion summary alone. To
+make a `spec_gate` structured record be recognized as a step result, the
+`STEP_RESULT_FIELDS` registry MUST enumerate `spec_gate`'s result keys (at least
+`gate_passed`, `gate_route`, `gate_skipped`, `fix_needed`, `test_results`). The
+data layer (the `spec_gate_handler`-written `step.outputs`) is left unchanged —
+as with the `test` step, the raw content stays reachable through the record's
+"View raw" affordance and is merely collapsed to a summary by default. Because
+`spec_gate` is a pure program step (no LLM), it has a report card and a CLI
+renderer but is NOT registered in `STEP_ASSISTANT_RENDERERS`.
 
 Field parity also covers any **per-item ordinal numbering** a report card
 renders. When a report renderer enumerates a list whose items are labeled with
@@ -2279,6 +2310,29 @@ not re-render them.
   index for every item
 - **AND** callers whose callback takes only the item are unaffected, because
   the extra positional argument is ignored
+
+#### Scenario: spec_gate report card shows a gate summary, not a raw test dump
+- **GIVEN** a `spec_gate` `step_completed` event whose `outputs` carries
+  `gate_passed`, an optional `gate_route`, and a full `test_results` dict that
+  includes the raw phase-2 pytest stdout/stderr
+- **WHEN** the report card is rendered in `#flow-view`
+- **THEN** the dispatch routes the step to the dedicated `renderSpecGateReport`
+  (not the generic `renderDefaultReport` → `renderGenericOutputs` fallback),
+  which renders the gate conclusion (PASSED/FAILED, any `update_spec` /
+  `implement` route annotation) followed by the same summary-only test rendering
+  the `test` report card uses (overall status, phase pass/fail counts, phase
+  list, command)
+- **AND** the raw pytest stdout/stderr does NOT appear in the card; it stays
+  reachable only through the record's existing "View raw" affordance
+
+#### Scenario: spec_gate report card renders only the conclusion when skipped or routed pre-test
+- **GIVEN** a `spec_gate` event that returned `gate_skipped=true` (no spec
+  change) or routed to `update_spec` on an invalid artifact, so `outputs` carries
+  no `test_results`
+- **WHEN** the report card is rendered
+- **THEN** the card shows only the gate-conclusion summary (the no-op skip
+  annotation or the `update_spec` route note) and invokes no test-summary
+  rendering
 
 #### Scenario: Report card does NOT replace the raw event record
 - **GIVEN** a `step_completed` event for a step

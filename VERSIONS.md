@@ -23,6 +23,15 @@
 
 
 
+
+## 8.10.3 - 2026-06-08
+
+- Fix spec_gate steps dumping full raw pytest stdout/stderr to the web console; they now render a friendly summary card
+- Add a dedicated web spec_gate report renderer showing gate conclusion (PASSED/FAILED), fallback route (update_spec/implement), and no-op skips
+- Reuse the test step's summary-only rendering for spec_gate test_results, showing pass/fail counts, phase totals, and command instead of raw output
+- Add a matching CLI spec_gate summary renderer so the terminal no longer dumps full test output
+- Register spec_gate result fields so its structured records are recognized correctly across CLI and web
+- Keep the spec_gate data layer unchanged so raw output stays reachable via the 'View raw' entry
 ## 8.10.2 - 2026-06-08
 
 - Fix mobile portrait (max-width:600px) folded tool-call cards staying tall by suppressing the native button's intrinsic vertical floor (appearance:none) and centering the chip row, so the details toggle no longer stretches the card

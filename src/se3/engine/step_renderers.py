@@ -42,6 +42,7 @@ STEP_DISPLAY_TITLES: Dict[StepType, str] = {
     StepType.SELF_CHECK: "Self Check",
     StepType.VERIFY_SPEC: "Spec Verification",
     StepType.UPDATE_SPEC: "Spec Update",
+    StepType.SPEC_GATE: "Spec Gate",
     StepType.VERSION_ANALYZE: "Version Analysis",
     StepType.COMMIT: "Commit",
     StepType.SUMMARIZE: "Work Summary",
@@ -225,14 +226,13 @@ def _render_summarize(step: Step) -> None:
         render_markdown(summary, title="Work Summary")
 
 
-@register_renderer(StepType.TEST)
-def _render_test(step: Step) -> None:
-    outputs = step.outputs or {}
-    test_results = outputs.get("test_results")
-    if not test_results or not isinstance(test_results, dict):
-        _default_render(step, "Testing")
-        return
+def _build_test_summary_lines(test_results: Dict[str, Any]) -> list[str]:
+    """Build the summary lines for a ``test_results`` dict (no raw stdout/stderr).
 
+    Shared by the ``test`` and ``spec_gate`` renderers so both present the same
+    summary-only view (overall status, phase pass/fail counts and list, command)
+    instead of dumping the raw pytest output.
+    """
     overall_passed = test_results.get("overall_passed", test_results.get("passed", False))
     status = "[bold green]PASSED[/bold green]" if overall_passed else "[bold red]FAILED[/bold red]"
 
@@ -254,7 +254,73 @@ def _render_test(step: Step) -> None:
     if command:
         lines.append(f"[bold]Command:[/bold] {command}")
 
+    return lines
+
+
+@register_renderer(StepType.TEST)
+def _render_test(step: Step) -> None:
+    outputs = step.outputs or {}
+    test_results = outputs.get("test_results")
+    if not test_results or not isinstance(test_results, dict):
+        _default_render(step, "Testing")
+        return
+
+    lines = _build_test_summary_lines(test_results)
     render_full("\n".join(lines), title="Testing")
+
+
+@register_renderer(StepType.SPEC_GATE)
+def _render_spec_gate(step: Step) -> None:
+    """Render the spec_gate result as a gate-conclusion summary.
+
+    Mirrors the ``test`` step's summary-only presentation: when ``test_results``
+    is present it reuses ``_build_test_summary_lines`` rather than dumping the
+    raw pytest stdout/stderr. The gate conclusion (PASSED/FAILED, the fallback
+    route to update_spec / implement, the no-op skip) is rendered first.
+    """
+    outputs = step.outputs or {}
+
+    gate_passed = outputs.get("gate_passed", False)
+    gate_route = outputs.get("gate_route", "")
+    gate_skipped = outputs.get("gate_skipped", False)
+
+    lines: list[str] = []
+
+    # ── Gate conclusion ────────────────────────────────────────────
+    if gate_skipped:
+        lines.append("[bold green]✓ PASSED[/bold green]  [dim](no spec change — gate skipped, no-op)[/dim]")
+    elif gate_passed:
+        lines.append("[bold green]✓ PASSED[/bold green]")
+    else:
+        lines.append("[bold red]✗ FAILED[/bold red]")
+
+    if gate_route == "update_spec":
+        lines.append("[bold yellow]Route:[/bold yellow] back to [bold]update_spec[/bold] (invalid spec artifact)")
+    elif gate_route == "implement":
+        lines.append("[bold yellow]Route:[/bold yellow] to [bold]implement[/bold] (spec edit broke a test)")
+
+    # ── Fix instructions (no raw test output) ──────────────────────
+    fix_instructions = outputs.get("fix_instructions", "")
+    if not gate_passed and fix_instructions:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"  {fix_instructions}")
+
+    # ── Test summary (re-test phase; summary only) ─────────────────
+    test_results = outputs.get("test_results")
+    if isinstance(test_results, dict) and test_results:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.extend(_build_test_summary_lines(test_results))
+
+    # ── Error ──────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Spec Gate")
 
 
 @register_renderer(StepType.PROPOSE)
