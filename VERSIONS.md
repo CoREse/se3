@@ -22,6 +22,14 @@
 
 
 
+
+## 8.10.2 - 2026-06-08
+
+- Fix mobile portrait (max-width:600px) folded tool-call cards staying tall by suppressing the native button's intrinsic vertical floor (appearance:none) and centering the chip row, so the details toggle no longer stretches the card
+- Keep the mobile tool-marker fix strictly scoped to the mobile breakpoint, leaving desktop tool-marker appearance unchanged
+- Fix desktop user replies rendering twice by reconciling the optimistic local echo against the daemon's authoritative record, so each reply shows exactly once
+- Preserve reply ordering and prevent reply loss when de-duplicating optimistic echoes against authoritative history
+- Update frontend smoke checklist and tests to cover the mobile chip height and desktop single-reply render checks
 ## 8.10.1 - 2026-06-08
 
 - Fix the tool-call card details toggle being inflated by the mobile touch-target rule, so the card no longer stretches on screens ≤600px

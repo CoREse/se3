@@ -250,6 +250,87 @@ def test_mobile_block_compresses_tool_marker_to_one_line():
     )
 
 
+def test_mobile_block_tool_marker_toggle_strips_native_appearance():
+    """Defect 1: the folded tool-call card stays tall on real mobile WebKit even
+    after the min-height/line-height/padding relaxation, because the toggle is a
+    native `<button>` (`appearance: auto`) whose intrinsic vertical control
+    metrics those declarations cannot remove. The fix adds
+    `-webkit-appearance: none; appearance: none;` (scoped to the mobile
+    breakpoint) so the button collapses to its text height. Also assert the
+    parent chip re-centers its head line so the flattened button can't re-inflate
+    the row via baseline alignment."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+    assert ".flow-conversation .tool-marker-toggle {" in block, (
+        "missing the mobile tool-marker toggle override"
+    )
+    _, _, toggle_block = block.partition(".flow-conversation .tool-marker-toggle {")
+    toggle_rule = toggle_block.split("}", 1)[0]
+    assert "-webkit-appearance: none" in toggle_rule, (
+        "the toggle must strip the native control with -webkit-appearance: none "
+        "(the real root cause of the still-tall card on mobile WebKit)"
+    )
+    assert "appearance: none" in toggle_rule, (
+        "the toggle must strip the native control with appearance: none"
+    )
+    assert "min-height: auto" in toggle_rule, (
+        "the toggle must keep relaxing the 40px touch-target floor"
+    )
+    # The parent chip re-centers its head line on the cross axis so the compacted
+    # toggle never drives the row height via baseline math.
+    assert ".flow-conversation .tool-marker {" in block, (
+        "missing the mobile .tool-marker baseline-row adjustment"
+    )
+    _, _, marker_block = block.partition(".flow-conversation .tool-marker {")
+    marker_rule = marker_block.split("}", 1)[0]
+    assert "align-items: center" in marker_rule, (
+        "the mobile chip head must center its line so the flattened toggle "
+        "cannot re-inflate the row height via baseline alignment"
+    )
+
+
+def test_desktop_tool_marker_toggle_rule_unchanged():
+    """Defect 1 hard constraint: the desktop (non-media) `.tool-marker-toggle`
+    rule must be byte-for-byte unchanged — the mobile fix lives strictly inside
+    the breakpoint. Pin the exact desktop body and assert it carries no
+    `appearance` declaration (which would mean the fix leaked to desktop)."""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    start = css.find("\n.tool-marker-toggle {")
+    assert start != -1, "desktop .tool-marker-toggle rule is missing"
+    brace = css.find("{", start)
+    depth = 0
+    j = brace
+    while j < len(css):
+        if css[j] == "{":
+            depth += 1
+        elif css[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    desktop_body = css[brace : j + 1]
+    expected = (
+        "{\n"
+        "  margin-left: auto;\n"
+        "  flex-shrink: 0;\n"
+        "  background: transparent;\n"
+        "  border: 1px solid rgba(160, 160, 160, 0.4);\n"
+        "  border-radius: 3px;\n"
+        "  color: var(--fg-dim);\n"
+        "  cursor: pointer;\n"
+        "  font-family: inherit;\n"
+        "  font-size: 10.5px;\n"
+        "  padding: 1px 6px;\n"
+        "}"
+    )
+    assert desktop_body == expected, (
+        "the desktop .tool-marker-toggle rule changed — the mobile defect-1 fix "
+        "must be scoped strictly inside the @media (max-width: 600px) breakpoint"
+    )
+    assert "appearance" not in desktop_body, (
+        "appearance:none must NOT appear on the desktop toggle rule"
+    )
+
+
 def test_mobile_block_shares_call_chip_with_reply_head_row():
     """problem 2: a single call chip shares the docked reply-head row instead of
     claiming its own tall row, by flipping `.flow-reply` to a wrapping row so the
@@ -411,6 +492,7 @@ def test_mobile_visual_rules_are_inside_media_queries():
         # New visual rules from this pass — each unique to the mobile block, so
         # a leak to the top level (changing desktop) fails here.
         ".flow-conversation .tool-marker-detail",
+        ".flow-conversation .tool-marker {",
         "#flow-view .flow-reply-context.active",
         "max-height: 35vh",
     )

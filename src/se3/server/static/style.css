@@ -2473,12 +2473,40 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
    * is collapsed (min-height + line-height + zeroed vertical padding); the
    * horizontal padding (6px) and font-size (10.5px) are inherited from the
    * desktop `.tool-marker-toggle` rule unchanged. Desktop never matches this
-   * breakpoint, so the desktop toggle is byte-for-byte intact. */
+   * breakpoint, so the desktop toggle is byte-for-byte intact.
+   *
+   * REAL ROOT CAUSE (verified by headless render): on the actual mobile WebKit
+   * browser the toggle is STILL tall after the min-height/line-height/padding
+   * relaxation above, because a `<button>` defaults to `appearance: auto` — a
+   * NATIVE form control whose intrinsic vertical metrics (the platform button's
+   * own min size + internal vertical padding) are NOT removable by `min-height`
+   * / `padding` / `line-height` alone. Desktop Chrome happens not to impose that
+   * native floor, so the earlier fix "looked like it worked" on desktop but
+   * showed no change on the phone — matching the reported "改了没区别". The fix
+   * is `-webkit-appearance: none; appearance: none;`, which strips the native
+   * control so the button becomes a plain box that finally honors the compacting
+   * declarations on mobile WebKit too. It is a no-op on desktop Chrome (already
+   * compact) and is scoped inside this breakpoint, so desktop stays byte-intact. */
   .flow-conversation .tool-marker-toggle {
+    -webkit-appearance: none;
+    appearance: none;
     min-height: auto;
     line-height: 1;
     padding-top: 0;
     padding-bottom: 0;
+  }
+
+  /* The chip head aligns its children on the text BASELINE
+   * (`.tool-marker { align-items: baseline }`). Once the toggle is compacted to
+   * its text height, baseline math can still let the row's height be driven by
+   * the tallest item's ascent+descent. Re-centering the head line on the cross
+   * axis (scoped to the mobile breakpoint only) guarantees the now-flattened
+   * toggle button can never re-inflate the row via baseline alignment, so the
+   * folded `.tool-marker` card stays at its natural compact height. The desktop
+   * rule keeps `align-items: baseline` untouched. The expandable details panel
+   * (`flex-basis: 100%`) still wraps to its own row. */
+  .flow-conversation .tool-marker {
+    align-items: center;
   }
 
   /* -- idle reply placeholder: shrink so it fits one line (problem 2) ------ *

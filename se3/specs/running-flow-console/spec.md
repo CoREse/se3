@@ -269,6 +269,97 @@ this gate — the gate is the source of truth for "submission settled".
   hidden DOM attributes (e.g. `data-call-id`) or hover `title` tooltips —
   never in the rendered text content
 
+### Requirement: Optimistic Reply Echo Reconciliation
+
+To satisfy *Submitted reply is inlined into the conversation* with instant
+feedback, submitting a reply (`sendReply` → `appendLocalReply` in `app.js`)
+optimistically splices a local **echo** of the user's text into
+`state.flowConversationRecords` immediately, before the daemon has persisted and
+pushed back its own **authoritative** `user` record. The echo and the daemon's
+record carry different `step_id` / `timestamp`, so they hash to different
+`recordKey` values and `mergeSnapshotWithLiveAppends`' identity-based dedup
+cannot pair them. Without a reconciliation pass the echo and the authoritative
+record therefore BOTH render, and the desktop user reply is shown twice (the
+observed duplicate-reply defect). The view MUST reconcile the two so a submitted
+reply is shown **exactly once**, while preserving the no-loss / no-reorder
+guarantees of *Conversation Strict Chronological Order*.
+
+Reconciliation is content-based and rank-stable:
+
+1. **Echo tagging** — each optimistic record `appendLocalReply` produces MUST be
+   tagged (`__localEcho`) and MUST retain the original literal reply text
+   (`__localEchoText`) so a later pass can match it by content even after the
+   daemon wraps the same reply in the prompt-marker envelope (e.g. a discovery
+   continuation). Comparison is performed on a **marker-stripped, trimmed**
+   normalization (`comparableUserText`, which runs `splitUserPromptByMarker` and
+   falls back to the trimmed raw text) so an echo equals its authoritative copy
+   regardless of envelope.
+2. **Stable per-text rank** — at creation each echo MUST record its rank among
+   all copies of the same comparable text — the count of prior copies that
+   already exist, counting BOTH authoritative `user` records AND still-pending
+   echoes (`__localEchoPriorAuth`). This gives every echo of an identical reply
+   (repeated "yes" / "continue", repeated interjections sent before any daemon
+   record returns) a distinct rank `0, 1, 2, …`.
+3. **Reconcile pass** — `reconcileLocalEchoes(records)` runs after every merge
+   that could introduce an authoritative copy: after the snapshot merge in
+   `loadFlowConversation` (over `mergeSnapshotWithLiveAppends`' output) and after
+   the live-append merge in `applyHistoryData`. For each comparable text it
+   counts authoritative (non-echo) `user` records (`auth`) and removes exactly
+   those echoes whose `rank < auth` — i.e. the `auth` earliest pending echoes
+   for that text. An echo is therefore removed ONLY once THIS reply's own
+   authoritative copy has landed, never when a reconcile pass merely finds an
+   earlier already-recorded duplicate, and a single daemon arrival never sweeps
+   away more than one pending echo. The authoritative record is never removed, so
+   it keeps its real timestamp and lands in its correct chronological slot.
+
+The pass MUST be render-safe: when it removes a mid-list echo (which shifts
+array indices), `applyHistoryData` MUST force a full conversation rebuild rather
+than the cheap incremental tail-append render, because the append path only
+re-reads the tail and would otherwise corrupt the DOM. When nothing is removed,
+`reconcileLocalEchoes` MUST return the same array reference so the caller can
+keep the incremental render path. `reconcileLocalEchoes` and `comparableUserText`
+are exported for DOM-stub tests. This mechanism is independent of, and does not
+disturb, the mobile tool-marker layout fix.
+
+#### Scenario: Optimistic echo is replaced by the authoritative record, shown once
+- **GIVEN** the user submits a reply and `appendLocalReply` splices an optimistic
+  `__localEcho` user record into the conversation for instant feedback
+- **WHEN** the daemon later pushes the authoritative `user` record for the same
+  reply (via a live `history_data` append or a refetched snapshot), which carries
+  a different `step_id` / `timestamp` and therefore a different `recordKey`
+- **THEN** `reconcileLocalEchoes` removes the matching optimistic echo and keeps
+  the authoritative record, so the reply is rendered exactly once
+- **AND** the surviving authoritative record stays in its correct
+  timestamp-ordered slot (no reorder) and the reply is never dropped (no loss)
+
+#### Scenario: Echo persists until its own authoritative copy arrives
+- **GIVEN** the user sends the same reply text more than once (e.g. two
+  successive "continue" replies), so multiple `__localEcho` records with distinct
+  ranks (`__localEchoPriorAuth` = 0, 1, …) are pending for the same comparable
+  text
+- **WHEN** a single authoritative `user` record for that text arrives
+- **THEN** `reconcileLocalEchoes` removes exactly one echo — the one whose rank
+  is now below the authoritative count — and leaves the other still-pending
+  echo(es) visible until their own authoritative copies arrive
+- **AND** no pending echo flickers out merely because an earlier duplicate reply
+  was already recorded
+
+#### Scenario: Marker-wrapped daemon reply still matches the plain echo
+- **GIVEN** an optimistic echo holding the user's literal reply text and a daemon
+  authoritative record whose body wraps that same reply in the prompt-marker
+  envelope (`TEMPLATE_PREFIX_END` / `USER_CONTENT_BEGIN` / `USER_CONTENT_END`)
+- **WHEN** `reconcileLocalEchoes` compares them via `comparableUserText`
+- **THEN** the marker-stripped, trimmed forms compare equal and the echo is
+  reconciled away, so the wrapped daemon reply is shown once
+
+#### Scenario: Mid-list echo removal forces a full rebuild
+- **WHEN** `reconcileLocalEchoes` removes an echo that is not at the tail of the
+  conversation array during an `applyHistoryData` live append
+- **THEN** the conversation is re-rendered with a full rebuild rather than the
+  incremental tail-append path, so index shifts do not corrupt the DOM
+- **AND** when no echo is removed, `reconcileLocalEchoes` returns the same array
+  reference and the incremental-append render path is preserved
+
 ### Requirement: Unified Intervention Items
 
 All human-in-the-loop interactions inside a running flow MUST be presented as
@@ -2519,17 +2610,32 @@ Within the narrow-screen breakpoint, the observable behavior is:
    line(s). Additionally, the chip's "details" expand affordance
    (`.tool-marker-toggle`) is a `<button>`, so the breakpoint's baseline
    `button { min-height: 40px }` touch-target rule grabs this tiny secondary
-   toggle and inflates it to 40px, which stretches the whole `.tool-marker` chip
-   row far taller than its text. The narrow-screen breakpoint MUST therefore
-   relax the 40px touch target for THIS one toggle — scoped precisely to
-   `.flow-conversation .tool-marker-toggle` — collapsing only its vertical size
-   (`min-height: auto`, `line-height: 1`, zeroed top/bottom padding) so the
-   button hugs its text and the card returns to its natural height. The toggle's
+   toggle and inflates it, which stretches the whole `.tool-marker` chip row far
+   taller than its text. The narrow-screen breakpoint MUST therefore compact this
+   one toggle — scoped precisely to `.flow-conversation .tool-marker-toggle` —
+   down to its text height. **The real, render-verified cause is that
+   `min-height`, `line-height`, and zeroed padding alone are NOT sufficient on a
+   mobile WebKit browser:** a `<button>` defaults to `appearance: auto`, i.e. a
+   **native form control whose intrinsic vertical metrics** (the platform
+   button's own minimum size plus internal vertical padding) cannot be removed by
+   `min-height` / `padding` / `line-height`. Desktop Chrome happens not to impose
+   that native floor, so the prior session's `min-height`/`line-height`/padding
+   relaxation "looked fixed" on desktop yet showed no visible change on the phone
+   (the reported "改了没区别"). The breakpoint MUST therefore ALSO strip the native
+   control with `-webkit-appearance: none; appearance: none;` so the toggle
+   becomes a plain box that finally honors the compacting declarations
+   (`min-height: auto`, `line-height: 1`, zeroed top/bottom padding) on mobile
+   WebKit too. Because `.tool-marker` aligns its head children on the text
+   baseline (`align-items: baseline`), the breakpoint MUST additionally re-center
+   the chip head on the cross axis — scoped to `.flow-conversation .tool-marker`
+   with `align-items: center` — so the now-flattened toggle can never re-inflate
+   the folded row's height via baseline ascent/descent math. The toggle's
    horizontal padding (6px) and font-size (10.5px) are inherited from the desktop
    rule unchanged, and every other control caught by `button { min-height: 40px }`
    (icon buttons, intervention chips, reply option buttons, …) keeps its full
-   touch target. Desktop never matches this breakpoint, so the desktop toggle is
-   byte-for-byte intact.
+   touch target. Desktop never matches this breakpoint, so the desktop
+   `.tool-marker` and `.tool-marker-toggle` are byte-for-byte intact (the desktop
+   chip keeps `align-items: baseline`).
 6. **Tiled reply meta row** — in the narrow-screen breakpoint, the docked reply
    region's `.flow-reply-head` (TO / KIND / callid) and the
    "▸ expand message details" toggle (`.flow-reply-prompt-toggle`) are collapsed
@@ -2705,19 +2811,29 @@ viewport is a no-op, guaranteeing zero desktop regression.
 
 #### Scenario: Tool-marker details toggle does not stretch the chip on mobile
 - **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen
-  breakpoint (`max-width: 600px`) and the conversation contains a `.tool-marker`
-  chip whose `.tool-marker-toggle` "details" affordance is a `<button>`
+  breakpoint (`max-width: 600px`) and the conversation contains a folded
+  `.tool-marker` chip whose `.tool-marker-toggle` "details" affordance is a
+  `<button>`
 - **WHEN** the `.flow-conversation` chat area is rendered
-- **THEN** the breakpoint relaxes the `button { min-height: 40px }` touch target
-  for `.flow-conversation .tool-marker-toggle` only (`min-height: auto`,
-  `line-height: 1`, zeroed top/bottom padding) so the toggle hugs its text and
-  the `.tool-marker` row returns to its natural height instead of being inflated
-  to a 40px-tall button
+- **THEN** the breakpoint strips the toggle's native control with
+  `-webkit-appearance: none; appearance: none` AND compacts it for
+  `.flow-conversation .tool-marker-toggle` only (`min-height: auto`,
+  `line-height: 1`, zeroed top/bottom padding), so the toggle is no longer held
+  tall by the native `<button>` vertical floor that `min-height` / `padding` /
+  `line-height` alone cannot remove on mobile WebKit
+- **AND** the breakpoint re-centers the chip head with
+  `.flow-conversation .tool-marker { align-items: center }` (overriding the
+  desktop `align-items: baseline`) so the flattened toggle cannot re-inflate the
+  row via baseline math, and the folded `.tool-marker` card is visibly shorter
+  rather than "changed but looking the same"
 - **AND** the toggle's horizontal padding (6px) and font-size (10.5px) are
   unchanged, and every other `<button>` caught by the touch-target rule keeps
   its full 40px minimum
-- **AND** on a viewport wider than the breakpoint the toggle keeps its desktop
-  sizing (the override lives strictly inside the breakpoint)
+- **AND** on a viewport wider than the breakpoint the `.tool-marker` and
+  `.tool-marker-toggle` keep their desktop appearance byte-for-byte (the
+  `appearance: none` and `align-items: center` overrides live strictly inside
+  the breakpoint, and the expanded `.tool-marker-details` panel's padding is
+  unchanged on both viewports)
 
 #### Scenario: Idle reply placeholder fits one line on mobile
 - **GIVEN** `#flow-view` is open on a viewport at or below the narrow-screen

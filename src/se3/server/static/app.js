@@ -1123,8 +1123,12 @@ async function loadFlowConversation(flowId) {
     // Merge the snapshot with whatever is already in the array: `history_data`
     // appends that arrived during the await, plus any locally-spliced replies.
     const snapshot = Array.isArray(data.records) ? data.records : [];
-    state.flowConversationRecords = mergeSnapshotWithLiveAppends(
-      snapshot, state.flowConversationRecords);
+    // Reconcile after the merge: if the freshly-fetched snapshot already holds
+    // the daemon's authoritative copy of a reply, the still-pending local echo
+    // (a live append with a different recordKey) would otherwise survive the
+    // merge and duplicate it.
+    state.flowConversationRecords = reconcileLocalEchoes(
+      mergeSnapshotWithLiveAppends(snapshot, state.flowConversationRecords));
     renderConversation(container, state.flowConversationRecords);
     updateFlowUsageBadge(state.flowConversationRecords);
     scrollFlowConversationToBottom();
@@ -1904,8 +1908,40 @@ async function sendReply(flowId, target, text) {
 function appendLocalReply(flowId, target, text) {
   if (state.selectedFlowId !== flowId) return;
   const meta = KIND_META[target.kind] || KIND_META.call;
+  // Snapshot this reply's *rank* among all copies of the same text — i.e. how
+  // many prior copies already exist, counting BOTH authoritative (non-echo)
+  // user records AND still-pending optimistic echoes of the same text. This
+  // gives every echo a stable, distinct rank (0, 1, 2, …) even when several
+  // identical replies ("yes" / "continue", repeated interjections) are sent in
+  // rapid succession before any daemon record returns. `reconcileLocalEchoes`
+  // removes an echo only once the authoritative count for the text grows past
+  // its rank — i.e. once THIS reply's own daemon record lands — so each pending
+  // echo stays visible continuously until its own copy arrives, and a single
+  // daemon arrival never sweeps away more than one pending echo.
+  const echoText = comparableUserText(text);
+  let priorCopies = 0;
+  for (const r of state.flowConversationRecords) {
+    if (r && r.__localEcho) {
+      const t = comparableUserText(
+        r.__localEchoText != null ? r.__localEchoText : normalizeRecord(r).content);
+      if (t === echoText) priorCopies += 1;
+      continue;
+    }
+    const n = normalizeRecord(r);
+    if (n.role === "user" && comparableUserText(n.content) === echoText) priorCopies += 1;
+  }
   const record = {
     step_id: "interaction",
+    // Mark this as the optimistic echo and keep the original literal text so
+    // `reconcileLocalEchoes` can drop it once the daemon pushes the authoritative
+    // copy of the same reply — otherwise the echo and the daemon record (which
+    // carry different step_id / timestamp, so different recordKey) both render
+    // and the desktop user reply shows twice.
+    __localEcho: true,
+    __localEchoText: text,
+    // The reply's rank among all copies of this text (prior authoritative
+    // records + pending echoes). Field name kept for backward compatibility.
+    __localEchoPriorAuth: priorCopies,
     message: {
       role: "user",
       content: text,
@@ -2013,11 +2049,18 @@ function applyHistoryData(msg) {
   // -- running-flow view consumer --
   if (state.selectedFlowId === msg.flow_id) {
     const stick = !append || isNearBottom($("flow-conversation"));
-    state.flowConversationRecords = append
+    const merged = append
       ? state.flowConversationRecords.concat(records)
       : records;
+    // When the daemon's authoritative user record lands, drop the matching
+    // optimistic local echo so the reply is shown once. A mid-list removal
+    // shifts indices, so the incremental-append render (which only re-reads the
+    // tail) can no longer be trusted — force a full rebuild in that case.
+    const reconciled = reconcileLocalEchoes(merged);
+    const echoRemoved = reconciled !== merged;
+    state.flowConversationRecords = reconciled;
     renderConversation(
-      $("flow-conversation"), state.flowConversationRecords, append);
+      $("flow-conversation"), state.flowConversationRecords, append && !echoRemoved);
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) scrollFlowConversationToBottom();
   }
@@ -2600,6 +2643,87 @@ function mergeSnapshotWithLiveAppends(snapshot, liveAppends) {
   const seen = new Set(snapshot.map(recordKey));
   const extra = liveAppends.filter((r) => !seen.has(recordKey(r)));
   return extra.length ? snapshot.concat(extra) : snapshot;
+}
+
+// Reduce a user record's text to its literal, marker-stripped, trimmed form so
+// an optimistic local echo and the daemon's authoritative record compare equal
+// even when the daemon wrapped the reply in the prompt-marker envelope (e.g. a
+// discovery continuation). With no markers it is just the trimmed content.
+function comparableUserText(content) {
+  if (typeof content !== "string") return "";
+  const split = splitUserPromptByMarker(content);
+  if (split && split.content) return split.content.trim();
+  return content.trim();
+}
+
+// Drop optimistic local-echo user records (the instant-feedback copies appended
+// by `appendLocalReply`) once the daemon's authoritative record for the same
+// reply has arrived, so a submitted reply is shown exactly once. The echo and
+// the daemon record carry different step_id / timestamp — hence different
+// `recordKey` — so `mergeSnapshotWithLiveAppends`' identity dedup cannot pair
+// them; this content-based pass does.
+//
+// Safety invariants (match the spec's no-loss / no-reorder rules):
+//   - an echo is removed ONLY once THIS reply's own authoritative copy has
+//     landed — detected by the per-text authoritative count growing past the
+//     echo's stable rank (`__localEchoPriorAuth`, the count of prior copies —
+//     authoritative records + pending echoes — at creation). A reply whose text
+//     duplicates an earlier, already-recorded reply (repeated "yes" /
+//     "continue", identical interjections) therefore stays visible continuously
+//     until its OWN daemon record arrives, never flickering out when a reconcile
+//     pass finds the earlier duplicate, and a single daemon arrival never sweeps
+//     away more than one pending echo even when several identical replies are
+//     pending at once;
+//   - the authoritative daemon record is never removed — it keeps its real
+//     timestamp and so lands in the correct chronological slot;
+//   - the same array reference is returned when nothing changed, letting the
+//     caller keep the cheap incremental-append render path.
+function reconcileLocalEchoes(records) {
+  if (!Array.isArray(records) || records.length < 2) return records;
+  // Count authoritative (non-echo) user records per comparable reply text.
+  const authCount = new Map();
+  // Gather echo indices per text, in array (chronological) order.
+  const echoesByText = new Map();
+  let echoCount = 0;
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    if (r && r.__localEcho) {
+      echoCount += 1;
+      const t = comparableUserText(
+        r.__localEchoText != null ? r.__localEchoText : normalizeRecord(r).content);
+      if (!t) continue;
+      if (!echoesByText.has(t)) echoesByText.set(t, []);
+      echoesByText.get(t).push(i);
+      continue;
+    }
+    const n = normalizeRecord(r);
+    if (n.role === "user") {
+      const t = comparableUserText(n.content);
+      if (t) authCount.set(t, (authCount.get(t) || 0) + 1);
+    }
+  }
+  if (!echoCount || !authCount.size) return records;
+  // For each text, an echo is the daemon copy's twin once the authoritative
+  // count has grown past that echo's rank (`__localEchoPriorAuth` = the number
+  // of prior copies — authoritative records + pending echoes — at creation).
+  // Each echo carries a distinct rank (0, 1, 2, …), so removing every echo
+  // whose rank < auth removes exactly the `auth` earliest pending echoes and
+  // is stable across passes: a record removed in an earlier pass no longer
+  // affects the survivors' ranks, so a later daemon arrival clears only its own
+  // echo and never sweeps away a later still-pending one. Legacy echoes without
+  // the field default to rank 0, preserving the original single-reply behavior.
+  const removeIdx = new Set();
+  for (const [t, idxs] of echoesByText) {
+    const auth = authCount.get(t) || 0;
+    if (!auth) continue;
+    for (const i of idxs) {
+      const p = records[i].__localEchoPriorAuth;
+      const rank = typeof p === "number" && p >= 0 ? p : 0;
+      if (rank < auth) removeIdx.add(i);
+    }
+  }
+  if (!removeIdx.size) return records;
+  return records.filter((_, i) => !removeIdx.has(i));
 }
 
 // Comparable epoch-ms value for a timestamp of unknown shape, for sorting.
@@ -7643,6 +7767,8 @@ if (typeof module !== "undefined" && module.exports) {
     stepKey,
     recordKey,
     mergeSnapshotWithLiveAppends,
+    reconcileLocalEchoes,
+    comparableUserText,
     // History list rendering + shared mutable state (exposed for the DOM-stub
     // tests in tests/frontend/test_app_pure.mjs).
     renderHistoryList,

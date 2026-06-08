@@ -153,6 +153,35 @@ chain hop-by-hop; the manual pass confirms the rendered result matches.
       (`test_summarize_records_user_and_assistant_to_jsonl`,
       `test_summarize_records_incrementally_readable_in_frontend_shape`).
 
+## Bugfix smoke (actual-render acceptance)
+
+These two are **actual-render** checks — the acceptance for the current bugfix
+is what the browser paints, not just that the CSS/JS source contains a rule.
+
+- [ ] **Defect 1 — mobile folded tool-call card is visibly shorter.** On a
+      **phone-portrait viewport (≤600px)**, open a running/historical flow whose
+      conversation contains a `.tool-marker` tool-call chip in its **folded**
+      state (a Read/Edit/Bash chip with a `details` toggle). The card must be
+      **clearly short** — the `details` toggle (`.tool-marker-toggle`) hugs its
+      text with **no tall top/bottom padding** and does **not** get re-inflated
+      to the 40px touch-target height, so the whole chip is at its natural
+      compact height. Verify on a **real iOS Safari / mobile WebKit** browser (or
+      device emulation that renders native `<button>` controls): the earlier
+      `min-height/line-height/padding` relaxation alone left it tall because the
+      native `<button>` (`appearance: auto`) keeps its own vertical control
+      metrics — the fix adds `-webkit-appearance: none; appearance: none;`. It
+      must no longer "look the same as before the change."
+- [ ] **Defect 1 — desktop is byte-for-byte unchanged.** On **desktop**
+      (>600px) the same `.tool-marker` / `.tool-marker-toggle` look identical to
+      before (the fix is scoped strictly inside `@media (max-width: 600px)`).
+- [ ] **Defect 2 — desktop user reply shows exactly once.** On **desktop**,
+      submit a reply / interjection in `#flow-view`. It appears immediately
+      (optimistic echo). When the daemon pushes its authoritative copy of the
+      same reply, the message must **remain a single bubble** — it must NOT
+      duplicate into two identical user bubbles. The surviving bubble sits in the
+      correct chronological slot (daemon timestamp). No reply is lost, dropped,
+      or reordered.
+
 ## Bugfix smoke (collectJsonRegions structural robustness)
 
 - [ ] **Discovery / structured-step assistant rendering — load a session
