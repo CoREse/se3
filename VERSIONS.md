@@ -26,6 +26,14 @@
 
 
 
+
+## 8.11.2 - 2026-06-09
+
+- Fix daemon event-loop starvation that caused webui-initiated flows to grey out and fail repeatedly by collapsing expensive per-tick full history-tree walks into a TTL-cached build_index with explicit invalidation on state changes
+- Add BUILD_INDEX_TTL (3s) monotonic-clock cache to DaemonHistoryReader.build_index to prevent thread-pool worker saturation from repeated directory walks and JSON parses
+- Add invalidate_index_cache() call sites in client push loop (on history_changed), spawn handler, and force-index-request handler to ensure fresh data when disk state changes
+- Add _is_still_active() live single-engine.json re-check in read_active_flows to preserve active-flow liveness despite cached stale active flags
+- Add regression test proving force-index path invalidates the TTL cache so newly-spawned flows are immediately visible
 ## 8.11.1 - 2026-06-09
 
 - Fix the running-flow console reply box auto-collapsing the 'message details' block whenever a status update or websocket push triggered a re-render

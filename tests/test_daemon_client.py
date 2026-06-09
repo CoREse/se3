@@ -563,6 +563,57 @@ def test_dispatch_history_index_request_swallows_provider_errors():
     assert not [m for m in ws.sent if m.type == protocol.MSG_HISTORY_INDEX]
 
 
+def test_dispatch_history_index_request_invalidates_cache(tmp_path):
+    """Force-index invalidates the build_index TTL cache so new flows are visible.
+
+    Regression guard: without the invalidate call, a flow added within the
+    TTL window would be invisible until the cache expires, contradicting the
+    MSG_HISTORY_INDEX_REQUEST contract of "rebuild from disk immediately".
+    """
+    from se3.daemon.history import DaemonHistoryReader
+
+    root = tmp_path / "proj"
+    state = root / "se3" / "state"
+    state.mkdir(parents=True)
+    (state / "engine.json").write_text(
+        json.dumps({"flow_id": "f1", "status": "RUNNING"}), encoding="utf-8"
+    )
+    hist = root / "se3" / "history" / "f1"
+    hist.mkdir(parents=True)
+    (hist / "01_analyze.jsonl").write_text(
+        json.dumps({"role": "user", "content": "hello"}) + "\n", encoding="utf-8"
+    )
+
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
+    # Prime the cache.
+    r1 = reader.build_index()
+    assert [m.flow_id for m in r1] == ["f1"]
+
+    # Add a new flow; the cache is still warm so build_index would miss it.
+    hist2 = root / "se3" / "history" / "f2"
+    hist2.mkdir(parents=True)
+    (hist2 / "01_analyze.jsonl").write_text(
+        json.dumps({"role": "user", "content": "world"}) + "\n", encoding="utf-8"
+    )
+
+    # Wire up the client with the real reader.
+    client = _make_client(history_provider=reader)
+    ws = _FakeWS()
+
+    async def scenario():
+        await client._dispatch(ws, protocol.make_history_index_request())
+
+    asyncio.run(scenario())
+
+    index_frames = [m for m in ws.sent if m.type == protocol.MSG_HISTORY_INDEX]
+    assert len(index_frames) == 1
+    pushed_ids = {meta["flow_id"] for meta in index_frames[0].payload["sessions"]}
+    # After invalidation the new flow must be visible.
+    assert "f2" in pushed_ids, (
+        f"force-index did not rebuild from disk; got {pushed_ids}"
+    )
+
+
 # --------------------------------------------------------------------------
 # Daemon integration
 # --------------------------------------------------------------------------

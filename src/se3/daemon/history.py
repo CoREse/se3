@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -209,6 +210,17 @@ def parse_step_type_from_step_id(stem: str) -> str:
 #: Index task-description fields are clipped to this many characters.
 _DESC_CLIP = 200
 
+#: TTL (seconds) for the cached :meth:`DaemonHistoryReader.build_index` result.
+#: The daemon client's :meth:`~se3.daemon.client.DaemonClient._push_loop` calls
+#: ``build_index`` every fast tick (1 s) via ``_push_history``.  On a machine
+#: with a large history tree the full directory walk + JSON parse is expensive
+#: enough to saturate the thread-pool workers and starve the event loop of CPU
+#: (the same class of stall the aggregator's ``HISTORICAL_ROOTS_TTL`` fixed for
+#: ``all_project_roots``).  Caching the index for a conservative window
+#: collapses repeated identical rebuilds into one, while still reflecting new
+#: flows within the window.
+BUILD_INDEX_TTL = 3.0
+
 #: Type of the project-roots provider — a zero-arg callable returning the roots
 #: the daemon currently tracks (typically ``aggregator.project_roots``).
 ProjectRootsProvider = Callable[[], Iterable[Any]]
@@ -283,6 +295,22 @@ class DaemonHistoryReader:
                 lock-step with the rest of the daemon's tracked roots.
         """
         self._provider = project_roots_provider
+        # TTL cache for :meth:`build_index`.  The daemon client's push loop
+        # calls ``build_index`` every fast tick (1 s); on a large history tree
+        # the full directory walk + JSON parse is expensive enough to saturate
+        # thread-pool workers.  Caching for a conservative window collapses
+        # repeated identical rebuilds into one.
+        self._index_cache: Optional[List[SessionMeta]] = None
+        self._index_cache_at: float = 0.0
+
+    def invalidate_index_cache(self) -> None:
+        """Drop the cached index, forcing the next ``build_index`` to rebuild.
+
+        Called when a new flow is spawned or a flow status changes, so the
+        index reflects the new state promptly rather than waiting out the TTL.
+        """
+        self._index_cache = None
+        self._index_cache_at = 0.0
 
     # -- project roots -----------------------------------------------------
 
@@ -313,7 +341,26 @@ class DaemonHistoryReader:
         Flows are deduplicated by ``flow_id`` (the active ``engine.json`` flow
         wins over an archive copy, which wins over a history-only directory)
         and sorted by ``updated_at`` descending.
+
+        Results are cached for :data:`BUILD_INDEX_TTL` seconds so the daemon
+        client's per-tick ``_push_history`` call does not trigger a full
+        directory walk + JSON parse on every fast tick.
+
+        Callers that need *live* active-status (e.g. :meth:`read_active_flows`)
+        must re-check the on-disk ``engine.json`` status because a cached index
+        may carry stale ``active`` flags for up to the TTL window.
         """
+        now = time.monotonic()
+        cached = self._index_cache
+        if cached is not None and (now - self._index_cache_at) < BUILD_INDEX_TTL:
+            return cached
+        metas = self._build_index_fresh()
+        self._index_cache = metas
+        self._index_cache_at = now
+        return metas
+
+    def _build_index_fresh(self) -> List[SessionMeta]:
+        """Uncached index build — walks all roots from disk."""
         metas: List[SessionMeta] = []
         seen: set = set()
         for root in self._iter_roots():
@@ -323,6 +370,34 @@ class DaemonHistoryReader:
                 logger.exception("history: failed to index root %s", root)
         metas.sort(key=lambda m: m.updated_at or "", reverse=True)
         return metas
+
+    @staticmethod
+    def _is_still_active(meta: SessionMeta) -> bool:
+        """Re-check whether *meta*'s flow is still active on disk.
+
+        The :meth:`build_index` cache may carry stale ``active`` flags for up
+        to :data:`BUILD_INDEX_TTL` seconds.  This lightweight re-check reads
+        only the single ``engine.json`` for the flow's project root (a
+        ``stat`` + small JSON parse), which is dramatically cheaper than the
+        full index rebuild it replaces.
+        """
+        if not meta.active:
+            return False
+        if meta.source != "active":
+            return False
+        engine_json = Path(meta.project_root) / "se3" / "state" / "engine.json"
+        data = _read_json(engine_json)
+        if not isinstance(data, dict):
+            return False
+        # Confirm the engine.json still describes *this* flow.  Without this
+        # check, if flow F1 completed and a different flow F2 is now the
+        # active engine.json flow (status RUNNING), _is_still_active(F1_meta)
+        # would read F2's RUNNING status and incorrectly return True — keeping
+        # the stale F1 meta in the active set and missing F2 entirely.
+        if str(data.get("flow_id") or "") != meta.flow_id:
+            return False
+        status = str(data.get("status") or "")
+        return _is_active_status(status)
 
     def _index_root(
         self, root: Path, metas: List[SessionMeta], seen: set
@@ -542,7 +617,9 @@ class DaemonHistoryReader:
         reads: List[FlowRead] = []
         active_ids: Set[str] = set()
         for meta in self.build_index():
-            if not meta.active:
+            # Re-check live status on disk: the build_index cache may carry
+            # stale ``active`` flags for up to BUILD_INDEX_TTL seconds.
+            if not self._is_still_active(meta):
                 continue
             active_ids.add(meta.flow_id)
             reads.append(

@@ -460,7 +460,18 @@ class DaemonClient:
                 last_status = now
                 await self._push_status(ws)
             # Push history on a real disk change, or on the status tick (backstop).
-            if status_due or self._history_changed():
+            history_changed = self._history_changed()
+            if status_due or history_changed:
+                # A real disk change (engine.json rewrite / jsonl append) means
+                # the on-disk state diverged from the cached index.  Invalidate
+                # so the next build_index() rebuilds from disk instead of
+                # returning a stale snapshot for up to BUILD_INDEX_TTL.
+                if history_changed:
+                    invalidate = getattr(
+                        self._history_provider, "invalidate_index_cache", None
+                    )
+                    if invalidate is not None:
+                        invalidate()
                 await self._push_history(ws)
 
     async def _wait_next_tick(self, stop_event: asyncio.Event) -> bool:
@@ -657,6 +668,14 @@ class DaemonClient:
             logger.info("SPAWN_FLOW handled: %s", task[:80])
         except Exception:
             logger.exception("SPAWN_FLOW handler failed")
+            return
+        # The new flow's engine.json is now on disk.  Invalidate the history
+        # index cache so the next _push_history call rebuilds from disk and
+        # includes the freshly-spawned flow in both the index and the active-
+        # flow reads, instead of waiting out the BUILD_INDEX_TTL window.
+        invalidate = getattr(self._history_provider, "invalidate_index_cache", None)
+        if invalidate is not None:
+            invalidate()
 
     def _handle_respond(self, payload: Dict[str, Any]) -> None:
         """Route a RESPOND_CALL instruction to the response-file writer."""
@@ -785,6 +804,13 @@ class DaemonClient:
             logger.debug("Ignoring HISTORY_INDEX_REQUEST: no history provider")
             return
         try:
+            # Bypass the build_index TTL cache so the re-push reflects
+            # on-disk state rather than returning a (possibly stale)
+            # cached snapshot.  Guard for compatibility with older reader
+            # stubs that may not have the method.
+            invalidate = getattr(self._history_provider, "invalidate_index_cache", None)
+            if invalidate is not None:
+                invalidate()
             await self._push_history(ws, force_index=True)
             logger.info("HISTORY_INDEX_REQUEST handled: forced index re-push")
         except Exception:
