@@ -107,6 +107,14 @@ const state = {
   // — the user gets a brief pending → consumed transition before the chip
   // disappears for good.
   interjectionConsumedAfterimages: [],
+  // Session-level UI preference: tracks which reply-context collapsible
+  // prompt bodies the user has manually expanded, keyed by intervention id
+  // (e.g. 'call:<callId>'). Survives automatic re-renders (STATUS_UPDATE /
+  // ws push → renderInterventions → updateReplyBox) so the user's
+  // expand/collapse choice is preserved. Reset on openFlowView /
+  // doCloseFlowView so switching or closing a flow returns to the default
+  // collapsed state.
+  flowReplyPromptExpanded: {},
 };
 
 // Lifetime of a consumed-state afterimage chip in milliseconds.
@@ -889,6 +897,7 @@ function openFlowView(flowId) {
   state.pendingSendBaselineCallIds = null;
   state.interjectionPhases = {};
   state.interjectionToastsSeen = {};
+  state.flowReplyPromptExpanded = {};
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
 
@@ -950,6 +959,7 @@ function doCloseFlowView() {
   state.pendingSendBaselineCallIds = null;
   state.interjectionPhases = {};
   state.interjectionToastsSeen = {};
+  state.flowReplyPromptExpanded = {};
   // Reset the mobile sidebar drawer so the next opened flow starts collapsed.
   closeFlowSidebar();
   $("flow-view").classList.add("hidden");
@@ -1594,21 +1604,34 @@ function safeStringify(value) {
 // CSS height cap that only applies in the expanded state) keep working. Kept as
 // a small pure function so the DOM-stub tests can assemble it directly. Scope:
 // only the #flow-view docked reply box (updateReplyBox) consumes this.
-function buildCollapsiblePrompt(promptText) {
+//
+// opts — optional second argument (backward-compatible: callers that omit it
+//   get the original default-collapsed, no-persist behaviour):
+//   opts.expanded  — initial expanded state (default false);
+//   opts.onToggle  — callback invoked on every user click with the new
+//                    expanded boolean, so the caller can persist the choice.
+function buildCollapsiblePrompt(promptText, opts) {
+  const initialExpanded = opts && opts.expanded;
+  const onToggle = opts && opts.onToggle;
   const wrap = el("div", "flow-reply-prompt-wrap");
   const collapsedLabel = "▸ 展开消息详情";
   const expandedLabel = "▾ 收起消息详情";
-  const btn = el("button", "flow-reply-prompt-toggle", collapsedLabel);
+  const btn = el("button", "flow-reply-prompt-toggle",
+    initialExpanded ? expandedLabel : collapsedLabel);
   btn.type = "button";
-  const body = el("div", "flow-reply-prompt hidden");
+  const body = el("div", "flow-reply-prompt" + (initialExpanded ? "" : " hidden"));
   body.appendChild(renderMarkdown(promptText));
-  let expanded = false;
+  let expanded = !!initialExpanded;
+  if (initialExpanded) {
+    wrap.classList.add("expanded");
+  }
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     expanded = !expanded;
     body.classList.toggle("hidden", !expanded);
     wrap.classList.toggle("expanded", expanded);
     btn.textContent = expanded ? expandedLabel : collapsedLabel;
+    if (onToggle) onToggle(expanded);
     if (expanded) {
       requestAnimationFrame(() => body.scrollIntoView({ block: "nearest" }));
     }
@@ -1702,7 +1725,10 @@ function updateReplyBox(flow) {
   // whose prompt embeds an entire refined task description — can never push the
   // textarea / options / Send out of view.
   if (target.prompt) {
-    ctx.appendChild(buildCollapsiblePrompt(target.prompt));
+    ctx.appendChild(buildCollapsiblePrompt(target.prompt, {
+      expanded: !!state.flowReplyPromptExpanded[target.id],
+      onToggle(v) { state.flowReplyPromptExpanded[target.id] = v; },
+    }));
   } else {
     ctx.appendChild(el("p", "flow-reply-hint", meta.hint));
   }

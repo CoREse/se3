@@ -25,6 +25,14 @@
 
 
 
+
+## 8.11.1 - 2026-06-09
+
+- Fix the running-flow console reply box auto-collapsing the 'message details' block whenever a status update or websocket push triggered a re-render
+- Preserve a manually expanded message-details block across automatic re-renders until the user collapses it themselves
+- Reset the message-details expand state to default-collapsed only when the flow view is opened or closed, keeping it as a per-session UI preference
+- Update the running-flow-console spec to document session-level, intervention-id-keyed persistence of the reply-context prompt expand state
+- Add DOM-stub unit coverage verifying the expanded state survives re-render
 ## 8.11.0 - 2026-06-09
 
 - Add an 'auto' option to the Web Console New Task 'Task type' form that submits the existing 'pending' auto-classification value and is selected by default, matching the CLI's pending default

@@ -540,8 +540,12 @@ DOM-stub tests) and has these properties:
    height-capped region and therefore remain visible and clickable regardless of
    prompt length.
 
-The expand state is **panel-local** and resets to collapsed on every panel
-re-render — no global toggle state is introduced. The synthesized
+The expand state is persisted as a session-level UI preference keyed by
+intervention id (e.g. `call:<callId>`), so a user's manual expand/collapse
+choice survives automatic re-renders (STATUS_UPDATE / ws push →
+renderInterventions → updateReplyBox). The persisted map is reset when
+opening or closing `#flow-view`, so switching to a different flow or
+closing the view returns to the default collapsed state. The synthesized
 `discovery_confirm` confirm button (see *Unified Intervention Items*) and all
 other `options` buttons remain outside the collapsible body so they are reachable
 without expanding the prompt.
@@ -568,13 +572,14 @@ without expanding the prompt.
 - **AND** the header, trigger, `options` buttons, textarea, and Send button
   remain outside the height-capped region and stay visible
 
-#### Scenario: Collapsing the prompt does not scroll and resets on re-render
+#### Scenario: Collapsing the prompt does not scroll, and expand state persists across re-render
 - **GIVEN** an expanded prompt body
 - **WHEN** the user clicks the trigger to collapse it
 - **THEN** the body is hidden again and the view does NOT scroll
-- **AND** when the panel is re-rendered (e.g. a new snapshot), the prompt body
-  returns to its default-collapsed state without any global toggle state being
-  retained
+- **AND** the collapsed state is persisted so that subsequent automatic
+  re-renders (e.g. a new snapshot) keep the prompt collapsed
+- **AND** when `#flow-view` is closed or a different flow is opened, the
+  expand state resets to the default collapsed
 
 ### Requirement: Interjection Lifecycle Events
 
