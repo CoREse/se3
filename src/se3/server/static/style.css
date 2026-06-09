@@ -2492,8 +2492,8 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     appearance: none;
     min-height: auto;
     line-height: 1;
-    padding-top: 0;
-    padding-bottom: 0;
+    padding-top: 3px;
+    padding-bottom: 3px;
   }
 
   /* The chip head aligns its children on the text BASELINE
@@ -2507,6 +2507,14 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
    * (`flex-basis: 100%`) still wraps to its own row. */
   .flow-conversation .tool-marker {
     align-items: center;
+    /* Reassign the card's top/bottom padding onto the toggle button above:
+     * the toggle gains 3px top+bottom padding so its text no longer hugs its
+     * own border, and the card sheds an equal amount of vertical padding
+     * (desktop 5px → 2px top/bottom) so the folded chip's total height stays
+     * essentially unchanged. Left/right padding (9px) is inherited from the
+     * desktop rule untouched. */
+    padding-top: 2px;
+    padding-bottom: 2px;
   }
 
   /* -- idle reply placeholder: shrink so it fits one line (problem 2) ------ *

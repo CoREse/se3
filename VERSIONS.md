@@ -24,6 +24,13 @@
 
 
 
+
+## 8.11.0 - 2026-06-09
+
+- Add an 'auto' option to the Web Console New Task 'Task type' form that submits the existing 'pending' auto-classification value and is selected by default, matching the CLI's pending default
+- Retain the existing feature, bugfix, and other task-type options so users can still pick an explicit step sequence
+- Fix malformed spacing of the mobile tool-marker Detail toggle by giving the button 3px vertical padding for readable breathing room
+- Keep folded tool-marker chip height stable on mobile by shedding an equal 3px of vertical padding from the card, leaving desktop layout unchanged
 ## 8.10.3 - 2026-06-08
 
 - Fix spec_gate steps dumping full raw pytest stdout/stderr to the web console; they now render a friendly summary card

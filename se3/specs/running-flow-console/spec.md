@@ -2678,8 +2678,8 @@ Within the narrow-screen breakpoint, the observable behavior is:
    (the reported "改了没区别"). The breakpoint MUST therefore ALSO strip the native
    control with `-webkit-appearance: none; appearance: none;` so the toggle
    becomes a plain box that finally honors the compacting declarations
-   (`min-height: auto`, `line-height: 1`, zeroed top/bottom padding) on mobile
-   WebKit too. Because `.tool-marker` aligns its head children on the text
+   (`min-height: auto`, `line-height: 1`, and a small symmetric top/bottom
+   padding) on mobile WebKit too. Because `.tool-marker` aligns its head children on the text
    baseline (`align-items: baseline`), the breakpoint MUST additionally re-center
    the chip head on the cross axis — scoped to `.flow-conversation .tool-marker`
    with `align-items: center` — so the now-flattened toggle can never re-inflate
@@ -2687,9 +2687,20 @@ Within the narrow-screen breakpoint, the observable behavior is:
    horizontal padding (6px) and font-size (10.5px) are inherited from the desktop
    rule unchanged, and every other control caught by `button { min-height: 40px }`
    (icon buttons, intervention chips, reply option buttons, …) keeps its full
-   touch target. Desktop never matches this breakpoint, so the desktop
-   `.tool-marker` and `.tool-marker-toggle` are byte-for-byte intact (the desktop
-   chip keeps `align-items: baseline`).
+   touch target. **Vertical padding is reassigned between the card and the
+   toggle, not added to the row's total height.** The earlier breakpoint zeroed
+   the toggle's top/bottom padding, which left the toggle label hugging its own
+   button border. The breakpoint MUST instead give the toggle a small symmetric
+   top/bottom padding (`padding-top: 3px; padding-bottom: 3px`) so its label has
+   breathing room from its border, AND shed an equal amount of vertical padding
+   from the `.tool-marker` card itself (desktop `5px` → `2px` top/bottom, with the
+   card's left/right padding inherited unchanged). Because the toggle's gain and
+   the card's loss are equal and opposite, the folded chip's total height stays
+   essentially unchanged — the reassignment only redistributes the existing
+   whitespace from the card's border gap into the toggle's own padding. Desktop
+   never matches this breakpoint, so the desktop `.tool-marker` and
+   `.tool-marker-toggle` are byte-for-byte intact (the desktop chip keeps
+   `align-items: baseline`).
 6. **Tiled reply meta row** — in the narrow-screen breakpoint, the docked reply
    region's `.flow-reply-head` (TO / KIND / callid) and the
    "▸ expand message details" toggle (`.flow-reply-prompt-toggle`) are collapsed
@@ -2872,14 +2883,18 @@ viewport is a no-op, guaranteeing zero desktop regression.
 - **THEN** the breakpoint strips the toggle's native control with
   `-webkit-appearance: none; appearance: none` AND compacts it for
   `.flow-conversation .tool-marker-toggle` only (`min-height: auto`,
-  `line-height: 1`, zeroed top/bottom padding), so the toggle is no longer held
-  tall by the native `<button>` vertical floor that `min-height` / `padding` /
-  `line-height` alone cannot remove on mobile WebKit
+  `line-height: 1`, and a small symmetric `3px` top/bottom padding), so the
+  toggle is no longer held tall by the native `<button>` vertical floor that
+  `min-height` / `padding` / `line-height` alone cannot remove on mobile WebKit
 - **AND** the breakpoint re-centers the chip head with
   `.flow-conversation .tool-marker { align-items: center }` (overriding the
   desktop `align-items: baseline`) so the flattened toggle cannot re-inflate the
   row via baseline math, and the folded `.tool-marker` card is visibly shorter
   rather than "changed but looking the same"
+- **AND** the toggle's `3px` top/bottom padding is balanced by an equal `3px`
+  reduction in the `.tool-marker` card's own vertical padding (desktop `5px` →
+  `2px` top/bottom), so the toggle label gains breathing room from its border
+  while the folded chip's total height stays essentially unchanged
 - **AND** the toggle's horizontal padding (6px) and font-size (10.5px) are
   unchanged, and every other `<button>` caught by the touch-target rule keeps
   its full 40px minimum

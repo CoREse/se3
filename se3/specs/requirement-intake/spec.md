@@ -98,6 +98,9 @@ The system SHALL associate every flow with a task type, defaulting to `feature` 
 - When `--discover` is supplied, the task type is forced to `discovery` regardless of the `--type` value.
 - When the user explicitly passes `--type pending`, no `explicit_type` is recorded and the analyze step is responsible for classifying the task based on its description.
 
+**Web Console Intake Default:**
+The web console New Task form (`#nt-type` in `server/static/index.html`) exposes the same task types as a `<select>` and submits the chosen value verbatim as `task_type`. Its first and default-selected option SHALL present the display label `auto` while submitting the value `pending`, so a user who does not change the field opts into auto-classification by the analyze step — the explicit `feature`, `bugfix`, and the other type options remain available below it for users who want to pin a specific step sequence. Because `pending` is the existing auto-classification sentinel, the web console submits it directly and requires no additional backend type mapping. The web console intake default therefore differs deliberately from the CLI `--type` default (`feature`): the GUI favors auto-detection, while the CLI favors an explicit `feature` flow.
+
 **Classification Factors (analyze step, when type is `pending`):**
 - Scope of changes
 - Complexity
@@ -110,6 +113,13 @@ The system SHALL associate every flow with a task type, defaulting to `feature` 
 - **THEN** the task type is set to `feature` by default
 - **AND** `explicit_type` is recorded as `feature` on the flow
 - **AND** the analyze step does not override the task type
+
+#### Scenario: Web console New Task form defaults to auto-classification
+- **GIVEN** a user opens the web console New Task form without changing the Task type field
+- **WHEN** the form is submitted
+- **THEN** the `auto`-labeled option is the default selection and its submitted `task_type` value is `pending`
+- **AND** the flow opts into auto-classification by the analyze step exactly as `se3 run --type pending` would
+- **AND** the `feature`, `bugfix`, and other explicit type options remain selectable for users who want to pin a specific step sequence
 
 #### Scenario: Opt-in auto-classification with --type pending
 - **GIVEN** user executes `se3 run "Fix typo in README" --type=pending`
