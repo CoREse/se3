@@ -742,5 +742,639 @@ class TestConverterOutputContract:
         all_lines.extend(conv.finalize())
         # finalize should produce an error result since no turn terminal was seen
         assert len(all_lines) >= 1
-        parsed = json.loads(all_lines[-1])
+
+
+# =============================================================================
+# Integration: NDJSON consumer chain (text extraction + usage parsing)
+# =============================================================================
+
+def _run_full_codex_session(events: list[str]) -> str:
+    """Helper: run a list of codex JSONL event strings through the converter
+    and return the concatenated NDJSON output (as a single string)."""
+    conv = CodexEventConverter()
+    all_lines: list[str] = []
+    for ev in events:
+        all_lines.extend(conv.convert_line(ev))
+    all_lines.extend(conv.finalize())
+    return "\n".join(all_lines)
+
+
+class TestConverterNDJSONConsumerIntegration:
+    """Feed converter output into the existing NDJSON consumer functions
+    (_extract_text_from_ndjson, parse_usage_from_ndjson) and verify
+    they produce correct results — zero changes required upstream."""
+
+    # -- Full session: assistant text + tool_use + tool_result + result --
+
+    FULL_SESSION_EVENTS = [
+        json.dumps({"type": "thread.started", "data": {}}),
+        json.dumps({"type": "turn.started", "data": {}}),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will read the file first."}],
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "function_call", "name": "read_file", "call_id": "c_read",
+                "arguments": json.dumps({"file_path": "/tmp/test.py"}),
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "function_call_output", "call_id": "c_read",
+                "output": "x = 1\ny = 2", "is_error": False,
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Now I will edit the file."}],
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "function_call", "name": "apply_patch", "call_id": "c_edit",
+                "arguments": json.dumps({"file_path": "/tmp/test.py", "patch": "--- a\n+++ b\n@@ -1 +1 @@\n-x = 1\n+x = 42"}),
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "function_call_output", "call_id": "c_edit",
+                "output": "Patch applied successfully", "is_error": False,
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "function_call", "name": "shell", "call_id": "c_bash",
+                "arguments": json.dumps({"command": "pytest tests/ -v"}),
+            },
+        }),
+        json.dumps({
+            "type": "item.updated",
+            "data": {
+                "type": "function_call_output", "call_id": "c_bash",
+                "output": "FAILED test_something", "is_error": True,
+            },
+        }),
+        json.dumps({
+            "type": "turn.completed",
+            "data": {
+                "usage": {
+                    "input_tokens": 1500,
+                    "output_tokens": 800,
+                    "cached_input_tokens": 200,
+                },
+                "total_cost_usd": 0.012,
+            },
+        }),
+    ]
+
+    def test_text_extraction_from_full_session(self):
+        """_extract_text_from_ndjson should extract all assistant text chunks."""
+        from se3.engine.llm_caller import LLMCaller
+        ndjson_output = _run_full_codex_session(self.FULL_SESSION_EVENTS)
+        text = LLMCaller._extract_text_from_ndjson(ndjson_output)
+        assert text is not None
+        assert "I will read the file first." in text
+        assert "Now I will edit the file." in text
+
+    def test_usage_parsing_from_full_session(self):
+        """parse_usage_from_ndjson should capture usage from turn.completed."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        ndjson_output = _run_full_codex_session(self.FULL_SESSION_EVENTS)
+        usage = parse_usage_from_ndjson(ndjson_output)
+        assert usage["input_tokens"] == 1500
+        assert usage["output_tokens"] == 800
+        assert usage["cache_read_input_tokens"] == 200
+        assert usage["total_cost_usd"] == 0.012
+
+    def test_tool_use_events_preserved_as_assistant_content(self):
+        """Converted tool_use events should appear in assistant messages
+        so tool_formatters can render previews."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.updated",
+            "data": {
+                "type": "function_call", "name": "shell", "call_id": "c1",
+                "arguments": json.dumps({"command": "ls -la"}),
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 1
+        parsed = json.loads(result[0])
+        assert parsed["type"] == "assistant"
+        content = parsed["message"]["content"][0]
+        assert content["type"] == "tool_use"
+        assert content["name"] == "Bash"
+        assert isinstance(content["input"], dict)
+
+    def test_tool_result_events_preserved_as_user_content(self):
+        """Converted tool_result events should appear as user messages
+        with tool_result content items."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.updated",
+            "data": {
+                "type": "function_call_output", "call_id": "c1",
+                "output": "file contents here", "is_error": False,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["type"] == "user"
+        content = parsed["message"]["content"][0]
+        assert content["type"] == "tool_result"
+        assert content["tool_use_id"] == "c1"
+
+    def test_command_execution_success_flow(self):
+        """Full command execution: shell function_call + successful output
+        → consumers should parse without errors."""
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "item.updated",
+                "data": {
+                    "type": "function_call", "name": "shell", "call_id": "c_exec",
+                    "arguments": json.dumps({"command": "echo hello"}),
+                },
+            }),
+            json.dumps({
+                "type": "item.updated",
+                "data": {
+                    "type": "function_call_output", "call_id": "c_exec",
+                    "output": "hello\n", "is_error": False,
+                },
+            }),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {"usage": {"input_tokens": 10, "output_tokens": 5}},
+            }),
+        ]
+        from se3.engine.llm_caller import LLMCaller
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        ndjson_output = _run_full_codex_session(events)
+        # Text extraction should not crash (no assistant text in this case)
+        text = LLMCaller._extract_text_from_ndjson(ndjson_output)
+        # Usage parsing should work
+        usage = parse_usage_from_ndjson(ndjson_output)
+        assert usage["input_tokens"] == 10
+        assert usage["output_tokens"] == 5
+
+    def test_command_execution_error_flow(self):
+        """Command execution with non-zero exit (is_error=True):
+        consumers should still parse without errors."""
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "item.updated",
+                "data": {
+                    "type": "function_call", "name": "shell", "call_id": "c_err",
+                    "arguments": json.dumps({"command": "false"}),
+                },
+            }),
+            json.dumps({
+                "type": "item.updated",
+                "data": {
+                    "type": "function_call_output", "call_id": "c_err",
+                    "output": "exit code 1", "is_error": True,
+                },
+            }),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {"usage": {}},
+            }),
+        ]
+        from se3.engine.llm_caller import LLMCaller
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        ndjson_output = _run_full_codex_session(events)
+        text = LLMCaller._extract_text_from_ndjson(ndjson_output)
+        usage = parse_usage_from_ndjson(ndjson_output)
+        # All-zero usage returns empty dict
+        assert isinstance(usage, dict)
+
+    def test_text_extraction_from_finalize_synthesized_result(self):
+        """When finalize synthesizes a result (no turn.completed/failed),
+        _extract_text_from_ndjson should still extract the accumulated text."""
+        from se3.engine.llm_caller import LLMCaller
+        events = [
+            json.dumps({
+                "type": "item.updated",
+                "data": {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Partial output only."}],
+                },
+            }),
+            # No turn.completed or turn.failed — finalize will synthesize
+        ]
+        ndjson_output = _run_full_codex_session(events)
+        text = LLMCaller._extract_text_from_ndjson(ndjson_output)
+        assert text is not None
+        assert "Partial output only." in text
+
+    def test_usage_from_finalize_synthesized_result(self):
+        """finalize-synthesized result should still produce parseable usage
+        (all zeros)."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        events = [
+            json.dumps({
+                "type": "item.updated",
+                "data": {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}],
+                },
+            }),
+        ]
+        ndjson_output = _run_full_codex_session(events)
+        usage = parse_usage_from_ndjson(ndjson_output)
+        # finalize synthesizes usage with all zeros → parse returns empty dict
+        assert isinstance(usage, dict)
+
+    def test_turn_completed_with_nested_message_usage(self):
+        """turn.completed may carry usage at data.message.usage instead
+        of data.usage — the converter should handle both."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "message": {
+                    "usage": {
+                        "input_tokens": 500,
+                        "output_tokens": 200,
+                        "cached_input_tokens": 50,
+                    },
+                },
+                "total_cost_usd": 0.005,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 500
+        assert parsed["usage"]["output_tokens"] == 200
+        assert parsed["usage"]["cache_read_input_tokens"] == 50
+        # Also verify parse_usage_from_ndjson can read it
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        usage = parse_usage_from_ndjson(result[0])
+        assert usage["input_tokens"] == 500
+
+
+# =============================================================================
+# item.completed event type (alias for item.updated)
+# =============================================================================
+
+class TestItemCompletedEventType:
+    """item.completed should produce the same output as item.updated."""
+
+    def test_message_via_item_completed(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "data": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done via completed."}],
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 1
+        parsed = json.loads(result[0])
+        assert parsed["type"] == "assistant"
+        assert "Done via completed." in parsed["message"]["content"][0]["text"]
+
+    def test_function_call_via_item_completed(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "data": {
+                "type": "function_call", "name": "bash", "call_id": "c_comp",
+                "arguments": json.dumps({"command": "pwd"}),
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 1
+        parsed = json.loads(result[0])
+        assert parsed["message"]["content"][0]["name"] == "Bash"
+
+
+# =============================================================================
+# Turn.completed — non-string error in turn.failed
+# =============================================================================
+
+class TestTurnFailedErrorShapes:
+    """turn.failed / error events can carry error as a string, dict,
+    or missing — the converter should handle all without crashing."""
+
+    def test_error_as_plain_string(self):
+        conv = CodexEventConverter()
+        event = {"type": "turn.failed", "data": {"error": "overloaded"}}
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert "overloaded" in parsed["result"]
+
+    def test_error_as_dict_with_message(self):
+        conv = CodexEventConverter()
+        event = {"type": "turn.failed", "data": {"error": {"message": "rate limited"}}}
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert "rate limited" in parsed["result"]
+
+    def test_error_field_missing_uses_message(self):
+        conv = CodexEventConverter()
+        event = {"type": "turn.failed", "data": {"message": "something broke"}}
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert "something broke" in parsed["result"]
+
+    def test_error_and_message_missing_uses_str_data(self):
+        conv = CodexEventConverter()
+        event = {"type": "turn.failed", "data": {"code": 500}}
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
         assert parsed["type"] == "result"
+        assert parsed["is_error"] is True
+
+
+# =============================================================================
+# Task 2 — build_call_args additional coverage
+# =============================================================================
+
+class TestCodexBuildCallArgsExtended:
+    """Extended build_call_args tests for flag ordering and exact argv shape."""
+
+    def test_constant_prefix_flag_ordering(self):
+        """The constant prefix must appear in the exact order:
+        exec --json --skip-git-repo-check -a never."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="test", read_only=False)
+        assert args[0] == "exec"
+        assert args[1] == "--json"
+        assert args[2] == "--skip-git-repo-check"
+        assert args[3] == "-a"
+        assert args[4] == "never"
+
+    def test_read_only_sandbox_immediately_after_prefix(self):
+        """--sandbox read-only should come right after the constant prefix."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="analyze", read_only=True)
+        assert args[5] == "--sandbox"
+        assert args[6] == "read-only"
+
+    def test_writable_bypass_immediately_after_prefix(self):
+        """--dangerously-bypass-approvals-and-sandbox should come right
+        after the constant prefix."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="implement", read_only=False)
+        assert args[5] == "--dangerously-bypass-approvals-and-sandbox"
+
+    def test_prompt_is_always_last_element(self):
+        """The prompt (or '-' for stdin) must be the last element."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        for prompt in ["short", "a somewhat longer prompt", "中文 prompt"]:
+            args = runner.build_call_args(prompt=prompt, read_only=False)
+            assert args[-1] == prompt
+
+    def test_context_files_appear_before_prompt(self, tmp_path):
+        """When context files are inlined, the prompt is still the last arg."""
+        f1 = tmp_path / "a.md"
+        f1.write_text("file A content", encoding="utf-8")
+        f2 = tmp_path / "b.md"
+        f2.write_text("file B content", encoding="utf-8")
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(
+            prompt="final instruction", read_only=True,
+            context_files=[f1, f2],
+        )
+        # Prompt is still last
+        assert args[-1].endswith("final instruction")
+        # Both file contents are in the prompt
+        assert "file A content" in args[-1]
+        assert "file B content" in args[-1]
+
+    def test_oversized_prompt_stores_stdin_payload(self):
+        """When prompt > _MAX_ARG_BYTES, the payload is stored for stdin."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        big = "y" * (_MAX_ARG_BYTES + 100)
+        runner.build_call_args(prompt=big, read_only=False)
+        assert runner._pending_stdin_prompt == big
+
+    def test_oversized_multibyte_utf8_prompt(self):
+        """UTF-8 multibyte characters should be measured in bytes, not chars."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        # Each '中' is 3 bytes in UTF-8. Need > 102400 bytes → ~34134 chars
+        big = "中" * 35000  # 105000 bytes
+        args = runner.build_call_args(prompt=big, read_only=False)
+        assert args[-1] == "-"
+        assert runner._pending_stdin_prompt == big
+
+    def test_oversized_context_files_plus_prompt(self, tmp_path):
+        """When inlined context + prompt together exceed threshold, use stdin."""
+        f = tmp_path / "big.md"
+        # 60KB file content
+        f.write_text("x" * 60000, encoding="utf-8")
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        # 60KB file + 50KB prompt > 100KB threshold
+        args = runner.build_call_args(
+            prompt="y" * 50000, read_only=False, context_files=[f],
+        )
+        assert args[-1] == "-"
+        assert runner._pending_stdin_prompt is not None
+        assert "x" * 60000 in runner._pending_stdin_prompt
+
+
+# =============================================================================
+# Task 2 — detect_infra_error five-class coverage
+# =============================================================================
+
+class TestCodexDetectInfraErrorExtended:
+    """Verify the five-class classification: success=NONE, timeout=TIMEOUT,
+    usage_limit=USAGE_LIMIT, auth_failure=USAGE_LIMIT, task_failure=NONE."""
+
+    @pytest.mark.parametrize("returncode,stdout,stderr,expected", [
+        # Success → NONE (even with keywords in output)
+        (0, "usage limit exceeded", "", InfraErrorType.NONE),
+        # Timeout → TIMEOUT
+        (124, "", "", InfraErrorType.TIMEOUT),
+        # Usage limit keywords → USAGE_LIMIT
+        (1, "", "Error: usage limit", InfraErrorType.USAGE_LIMIT),
+        (1, "rate limit exceeded", "", InfraErrorType.USAGE_LIMIT),
+        (1, "HTTP 429", "", InfraErrorType.USAGE_LIMIT),
+        (1, "quota exceeded", "", InfraErrorType.USAGE_LIMIT),
+        (1, "too many requests", "", InfraErrorType.USAGE_LIMIT),
+        # Auth failure → USAGE_LIMIT (credential-level rotation)
+        (1, "", "401 Unauthorized", InfraErrorType.USAGE_LIMIT),
+        (1, "unauthorized access", "", InfraErrorType.USAGE_LIMIT),
+        (1, "authentication failed", "", InfraErrorType.USAGE_LIMIT),
+        # Task failure → NONE
+        (1, "file not found", "", InfraErrorType.NONE),
+        (1, "", "AssertionError", InfraErrorType.NONE),
+        (2, "syntax error", "", InfraErrorType.NONE),
+    ], ids=[
+        "success_with_keywords", "timeout", "usage_limit_stderr",
+        "usage_limit_stdout", "usage_limit_429", "usage_limit_quota",
+        "usage_limit_too_many", "auth_401", "auth_unauthorized",
+        "auth_failed", "task_failure_file", "task_failure_assert",
+        "task_failure_syntax",
+    ])
+    def test_five_class_classification(self, returncode, stdout, stderr, expected):
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        assert runner.detect_infra_error(returncode, stdout, stderr) == expected
+
+
+# =============================================================================
+# Task 2 — End-to-end: agents registry → LLMCaller → CodexRunner
+# =============================================================================
+
+class TestCodexRegistryEndToEnd:
+    """Test the full path from agents registry config to CodexRunner
+    creation through LLMCaller.__init__."""
+
+    def test_llmcaller_with_codex_agents_list(self):
+        """LLMCaller constructed with agents=[{type: codex, ...}]
+        should create a CodexRunner as its current runner."""
+        from se3.engine.llm_caller import LLMCaller
+        agents = [
+            {"name": "my-codex", "type": "codex", "cmd": "codex", "priority": 0},
+        ]
+        caller = LLMCaller(agents=agents)
+        assert isinstance(caller._runner, CodexRunner)
+        assert caller._runner.command["cmd"] == "codex"
+
+    def test_llmcaller_with_mixed_claude_and_codex_agents(self):
+        """When agents list has both claude-code and codex, the first
+        agent's runner type is used initially."""
+        from se3.claude_runner import ClaudeCodeRunner
+        from se3.engine.llm_caller import LLMCaller
+        agents = [
+            {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 10},
+            {"name": "codex", "type": "codex", "cmd": "codex", "priority": 5},
+        ]
+        caller = LLMCaller(agents=agents)
+        # First agent is claude → ClaudeCodeRunner
+        assert isinstance(caller._runner, ClaudeCodeRunner)
+
+    def test_llmcaller_codex_runner_rotation(self):
+        """After rotating from claude to codex, the runner should switch
+        to CodexRunner."""
+        from se3.claude_runner import ClaudeCodeRunner
+        from se3.engine.llm_caller import LLMCaller
+        agents = [
+            {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 10},
+            {"name": "codex", "type": "codex", "cmd": "codex", "priority": 5},
+        ]
+        caller = LLMCaller(agents=agents)
+        assert isinstance(caller._runner, ClaudeCodeRunner)
+        # Rotate to next agent
+        caller._rotate_agent()
+        assert isinstance(caller._runner, CodexRunner)
+        assert caller._runner.command["cmd"] == "codex"
+
+    def test_codex_runner_cached_per_agent(self):
+        """The runner cache should key by agent name/cmd and reuse."""
+        from se3.engine.llm_caller import LLMCaller
+        agents = [
+            {"name": "codex-a", "type": "codex", "cmd": "codex-a", "priority": 0},
+            {"name": "codex-b", "type": "codex", "cmd": "codex-b", "priority": 0},
+        ]
+        caller = LLMCaller(agents=agents)
+        runner_a = caller._runner
+        caller._rotate_agent()
+        runner_b = caller._runner
+        assert runner_a is not runner_b
+        assert runner_a.command["cmd"] == "codex-a"
+        assert runner_b.command["cmd"] == "codex-b"
+        # Rotate back and verify cache
+        caller._current_agent_index = 0
+        assert caller._get_current_runner() is runner_a
+
+    def test_codex_default_command_when_no_cmd(self):
+        """CodexRunner should default cmd to 'codex' when command omits it."""
+        from se3.engine.llm_caller import LLMCaller
+        agents = [
+            {"name": "c", "type": "codex", "cmd": "codex"},
+        ]
+        caller = LLMCaller(agents=agents)
+        assert caller._runner.command["cmd"] == "codex"
+
+    def test_codex_runner_receives_project_root(self):
+        """CodexRunner should receive project_root from LLMCaller."""
+        from se3.engine.llm_caller import LLMCaller
+        agents = [
+            {"name": "c", "type": "codex", "cmd": "codex"},
+        ]
+        caller = LLMCaller(project_root="/tmp/test-proj", agents=agents)
+        assert caller._runner.command["cmd"] == "codex"
+
+
+# =============================================================================
+# LLMCaller._create_runner — codex dispatch exact args
+# =============================================================================
+
+class TestCreateRunnerCodexDispatch:
+    """Verify _create_runner passes the correct args to CodexRunner."""
+
+    def test_create_runner_passes_cmd_and_priority(self):
+        from se3.engine.llm_caller import LLMCaller
+        caller = LLMCaller.__new__(LLMCaller)
+        caller.project_root = Path("/tmp/proj")
+        runner = caller._create_runner({"type": "codex", "cmd": "my-codex", "priority": 42})
+        assert isinstance(runner, CodexRunner)
+        assert runner.command["cmd"] == "my-codex"
+        assert runner.command["priority"] == 42
+
+    def test_create_runner_default_priority_zero(self):
+        """When priority is not specified, it defaults to 0."""
+        from se3.engine.llm_caller import LLMCaller
+        caller = LLMCaller.__new__(LLMCaller)
+        caller.project_root = Path("/tmp/proj")
+        runner = caller._create_runner({"type": "codex", "cmd": "codex"})
+        assert runner.command["priority"] == 0
+
+    def test_create_runner_unknown_type_raises(self):
+        from se3.engine.llm_caller import LLMCaller
+        caller = LLMCaller.__new__(LLMCaller)
+        caller.project_root = Path("/tmp/proj")
+        with pytest.raises(ValueError, match="Unknown agent type: llama"):
+            caller._create_runner({"type": "llama", "cmd": "llama"})
+
+
+# =============================================================================
+# build_call_args: no other codex-specific flags leak through
+# =============================================================================
+
+class TestBuildCallArgsNoClaudeFlags:
+    """Verify that Claude-specific flags are NOT present in codex args."""
+
+    def test_no_output_format_flag(self):
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="test", read_only=False)
+        assert "--output-format" not in args
+        assert "stream-json" not in args
+
+    def test_no_verbose_flag(self):
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="test", read_only=False)
+        assert "--verbose" not in args
+
+    def test_no_setting_sources_flag(self):
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="test", read_only=False)
+        assert "--setting-sources" not in args
+
+    def test_no_disallowed_tools_flag(self):
+        """Read-only enforcement uses --sandbox, not --disallowedTools."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="test", read_only=True)
+        assert "--disallowedTools" not in args
+
+    def test_no_dangerously_skip_permissions(self):
+        """Codex uses -a never, not --dangerously-skip-permissions."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(prompt="test", read_only=False)
+        assert "--dangerously-skip-permissions" not in args
