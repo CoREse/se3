@@ -32,6 +32,13 @@
 
 
 
+
+## 8.12.4 - 2026-06-11
+
+- Fix History view list and detail panes producing horizontal page overflow on phone-portrait screens
+- Constrain project dropdown, item meta, step titles, and message chips within mobile viewport bounds
+- Add CSS guardrail tests verifying #history-view containers enforce mobile overflow containment
+- Add DOM-level regression tests for long-path and unbreakable-string rendering in history detail
 ## 8.12.3 - 2026-06-10
 
 - Fix long file paths and unbreakable text overflowing step report card boundaries in the running flow console

@@ -2288,6 +2288,79 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     font-size: 14px;
   }
 
+  /* -- History view: mobile overflow hardening -------------------------------- *
+   * The History list+detail two-column grid collapses to a single-view panel
+   * switch above, but the panes and their inner content can still overflow
+   * horizontally on a narrow viewport. Two layers fix that:
+   *
+   * (a) Container shrink — every flex/grid child that could blow out its parent
+   *     gets `min-width: 0` so flex-shrink / grid sizing can actually compress it
+   *     below its content's intrinsic width. The two panes additionally carry
+   *     `overflow-x: hidden` as a backstop: even if an inner element somehow
+   *     exceeds the pane width, the pane clips it rather than introducing a
+   *     horizontal scrollbar. (Desktop keeps its natural `overflow-y: auto` on
+   *     the panes; the hidden x is mobile-only.)
+   *
+   * (b) Long-content wrapping — text nodes that naturally produce unbreakable
+   *     long runs (project-select option text, session meta spans, step titles,
+   *     message chips) get `overflow-wrap: anywhere` + `word-break: break-word`
+   *     so they wrap character-by-character instead of pushing the container
+   *     wider. The `<select>` flex-basis is zeroed (`flex: 1 1 0`) for the same
+   *     reason the `.tool-marker-detail` fix zeroes it: with `flex-basis: auto`
+   *     the select's min-content width (its longest `<option>`) pins the flex
+   *     line wider than the column before flex-shrink applies. Zeroing the basis
+   *     lets the select shrink and the ellipsis/wrapping take over.
+   *
+   * Every selector carries the `#history-view` prefix so it is unique to the
+   * History view and never affects the flow-view or any other surface sharing
+   * the same class names. */
+
+  /* (a) Container shrink */
+  #history-view .history-body {
+    max-width: 100%;
+  }
+  #history-view .history-list-pane,
+  #history-view .history-detail-pane {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  #history-view .history-detail,
+  #history-view .history-step {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* (b) Long-content wrapping */
+  #history-view .history-project-select-row {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  /* flex-basis 0 (same root cause as .tool-marker-detail): the native <select>
+   * min-content width is its longest <option>, which with flex-basis auto pins
+   * the row wider than the viewport. Zeroing the basis lets the select shrink. */
+  #history-view .history-project-select {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 100%;
+  }
+  #history-view .history-item-meta {
+    flex-wrap: wrap;
+  }
+  #history-view .history-item-meta > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  #history-view .history-step-title {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  #history-view .msg-chip {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
   /* -- running console (#flow-view): off-canvas sidebar drawer (G4) -------- *
    * The desktop two-column grid (sidebar | conversation) would, when merely
    * stacked, push the conversation below the whole Overview/Steps/Machine

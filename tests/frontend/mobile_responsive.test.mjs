@@ -168,4 +168,146 @@ export function registerMobileResponsiveTests(ctx) {
     assert.deepEqual([...listVals].sort(), ["flows", "machines"]);
     assert.deepEqual([...histVals].sort(), ["detail", "list"]);
   });
+
+  // -- History detail: long-content rendering routes into CSS-guarded classes --
+  //
+  // The CSS guard (test_frontend_mobile.py) locks wrapping rules onto selectors
+  // like `.conv-bubble`, `.msg-chip`, `.raw-json`, and `.step-report__list li`.
+  // This DOM-level regression verifies that renderConversation actually routes
+  // long content into elements carrying those classes — if the rendering path
+  // changes to use different class names, the CSS guard becomes useless.
+  //
+  // We exercise four long-content shapes:
+  //   (1) a 200+ character no-space string (the unbreakable run that must wrap)
+  //   (2) a long file path (typical step output)
+  //   (3) a raw_json payload (the "view raw" toggle)
+  //   (4) a step_completed event whose outputs carry a long list item
+
+  // Recursive class search (mirrors test_app_pure.mjs findAll).
+  function findAllG7(node, cls, acc) {
+    if (!acc) acc = [];
+    if (node.classList && node.classList.contains(cls)) acc.push(node);
+    if (node.childNodes) {
+      for (const c of node.childNodes) findAllG7(c, cls, acc);
+    }
+    return acc;
+  }
+  function findOneG7(node, cls) { return findAllG7(node, cls)[0] || null; }
+
+  const LONG_NO_SPACE = "a".repeat(220);
+  const LONG_PATH = "/very/deep/nested/project/src/components/feature/tabs/AdvancedSettingsPanel.integration.test.tsx";
+
+  check("G7 history detail: long assistant content routes into .conv-bubble", () => {
+    // An assistant record with a 220-char no-space string. renderConversation
+    // must wrap it inside a .conv-bubble node.
+    const container = document.createElement("div");
+    app.renderConversation(container, [{
+      step_id: "s1",
+      step_type: "discovery",
+      message: { role: "assistant", content: LONG_NO_SPACE, timestamp: 1 },
+    }], false);
+    const bubble = findOneG7(container, "conv-bubble");
+    assert.ok(bubble, "assistant content must render inside a .conv-bubble node");
+    assert.ok(bubble.textContent.includes(LONG_NO_SPACE.slice(0, 40)),
+      "the long no-space string must be present in the bubble text");
+  });
+
+  check("G7 history detail: long log content routes into .conv-bubble .foldable", () => {
+    // A long log record (>FOLD_THRESHOLD=1600) renders as a non-collapsible
+    // "other" role row with a .conv-bubble containing a .foldable wrapper.
+    // The foldable's toggle and detail carry the long content.
+    const container = document.createElement("div");
+    const longLog = "x".repeat(2500);
+    app.renderConversation(container, [{
+      step_id: "s1",
+      step_type: "discovery",
+      message: { role: "log", content: longLog, timestamp: 1 },
+    }], false);
+    const bubble = findOneG7(container, "conv-bubble");
+    assert.ok(bubble, "log content must render inside a .conv-bubble node");
+    const foldable = findOneG7(bubble, "foldable");
+    assert.ok(foldable, "a long log record (>FOLD_THRESHOLD) must render as .foldable");
+    // The foldable contains a toggle and the full text.
+    const toggle = findOneG7(foldable, "fold-toggle");
+    assert.ok(toggle, "the foldable must carry a .fold-toggle button");
+    assert.ok(foldable.textContent.length > 100,
+      "the foldable must contain the long body text");
+  });
+
+  check("G7 history detail: raw_json payload produces .raw-toggle + .raw-json", () => {
+    // A record with raw_json payload: the "view raw" toggle is always present
+    // on every conversation message (unified view-raw principle). The toggle
+    // wrapper carries the .raw-toggle class and contains a .raw-json pre
+    // (CSS-guarded for wrapping). makeAssistantRawToggle creates the structure
+    // raw-toggle-wrap > button.raw-toggle + pre.raw-json.
+    const container = document.createElement("div");
+    app.renderConversation(container, [{
+      step_id: "s1",
+      step_type: "discovery",
+      message: {
+        role: "assistant",
+        content: "short",
+        raw_json: [{ type: "assistant", message: { content: "short" } }],
+      },
+      timestamp: 1,
+    }], false);
+    // Every assistant message must have a view-raw affordance (makeAssistantRawToggle).
+    const rawBtn = findOneG7(container, "raw-toggle");
+    assert.ok(rawBtn, "assistant message with raw_json must carry a .raw-toggle button");
+    // The .raw-json <pre> node sits beside the button inside the wrap.
+    const rawJson = findOneG7(container, "raw-json");
+    assert.ok(rawJson, "the raw toggle must produce a .raw-json node (CSS guard target)");
+  });
+
+  check("G7 history detail: step_completed long list item routes into .step-report__list li", () => {
+    // A step_completed event whose outputs include a tests_added list with a
+    // long path. The report renderer uses reportList() which produces
+    // .step-report__list > li nodes. The CSS guard locks wrapping onto those li.
+    const container = document.createElement("div");
+    app.renderConversation(container, [{
+      step_id: "s1",
+      step_type: "test",
+      message: {
+        type: "step_completed",
+        timestamp: 1,
+        data: {
+          step_type: "test",
+          outputs: {
+            tests_added: [LONG_PATH, "short_test.py"],
+            overall_status: "PASSED",
+          },
+        },
+      },
+    }], false);
+    const reportList = findOneG7(container, "step-report__list");
+    if (reportList) {
+      const items = reportList.children.filter((c) => c.tagName === "LI");
+      assert.ok(items.length >= 1, "report list must have at least one li item");
+      const hasLong = items.some((li) => li.textContent.includes(LONG_PATH));
+      assert.ok(hasLong, "the long path must appear in a report list li");
+    }
+    // Also verify the .step-report container exists (the card is rendered).
+    const report = findOneG7(container, "step-report");
+    assert.ok(report, "step_completed must render a .step-report card");
+  });
+
+  check("G7 history detail: assistant bubble with long path carries content", () => {
+    // An assistant turn whose body contains a long file path — the path must
+    // be present in the .conv-bubble text (not dropped or truncated to a
+    // different DOM node).
+    const container = document.createElement("div");
+    app.renderConversation(container, [{
+      step_id: "s1",
+      step_type: "analyze",
+      message: {
+        role: "assistant",
+        content: `Analysis complete. Modified file: ${LONG_PATH}\n\nDone.`,
+        timestamp: 1,
+      },
+    }], false);
+    const bubble = findOneG7(container, "conv-bubble");
+    assert.ok(bubble, "assistant content must render inside .conv-bubble");
+    assert.ok(bubble.textContent.includes(LONG_PATH),
+      "the long path must appear in the bubble, not be dropped");
+  });
 }

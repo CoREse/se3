@@ -363,6 +363,113 @@ def test_mobile_block_tiles_reply_meta_horizontally():
     assert "flex-direction: row" in block, "reply meta must tile horizontally"
 
 
+def test_mobile_block_hardens_history_overflow():
+    """History mobile overflow hardening: the two panes carry min-width: 0 +
+    overflow-x: hidden, the project-select is shrinkable (flex: 1 1 0), the
+    item-meta wraps, and long text (step-title, msg-chip) breaks-word. None of
+    these rules use overflow-x: auto."""
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+
+    # --- container shrink layer ---
+    # The two panes must carry min-width: 0 and overflow-x: hidden so they
+    # clip rather than introduce a horizontal scrollbar.
+    for pane_sel in (
+        "#history-view .history-list-pane",
+        "#history-view .history-detail-pane",
+    ):
+        assert pane_sel in block, (
+            f"missing container-shrink rule for {pane_sel!r}"
+        )
+        _, _, after = block.partition(pane_sel)
+        rule_body = after.split("}", 1)[0]
+        assert "min-width: 0" in rule_body, (
+            f"{pane_sel} must carry min-width: 0"
+        )
+        assert "overflow-x: hidden" in rule_body, (
+            f"{pane_sel} must carry overflow-x: hidden"
+        )
+        assert "overflow-x: auto" not in rule_body, (
+            f"{pane_sel} must NOT use overflow-x: auto"
+        )
+
+    # history-detail and history-step also need min-width: 0 + max-width: 100%
+    for sel in (
+        "#history-view .history-detail",
+        "#history-view .history-step",
+    ):
+        assert sel in block, f"missing shrink rule for {sel!r}"
+        _, _, after = block.partition(sel)
+        rule_body = after.split("}", 1)[0]
+        assert "min-width: 0" in rule_body, (
+            f"{sel} must carry min-width: 0"
+        )
+
+    # --- long-content wrapping layer ---
+    # Project select: flex-basis 0 + min-width 0 (same root cause as
+    # .tool-marker-detail). Use exact selector with trailing " {" to avoid
+    # matching the -row variant.
+    select_sel = "#history-view .history-project-select {"
+    assert select_sel in block, (
+        "missing project-select shrink rule"
+    )
+    _, _, sel_block = block.partition(select_sel)
+    sel_rule = sel_block.split("}", 1)[0]
+    assert "flex: 1 1 0" in sel_rule, (
+        "project-select must use flex-basis 0 (flex: 1 1 0)"
+    )
+    assert "min-width: 0" in sel_rule, (
+        "project-select must carry min-width: 0"
+    )
+
+    # Project select row: flex-wrap: wrap
+    row_sel = "#history-view .history-project-select-row {"
+    assert row_sel in block, (
+        "missing project-select-row rule"
+    )
+    _, _, row_block = block.partition(row_sel)
+    row_rule = row_block.split("}", 1)[0]
+    assert "flex-wrap: wrap" in row_rule, (
+        "project-select-row must carry flex-wrap: wrap"
+    )
+
+    # Item meta: flex-wrap: wrap + overflow-wrap on children.
+    # Use exact selector with trailing " {" to avoid matching the > span variant.
+    meta_sel = "#history-view .history-item-meta {"
+    assert meta_sel in block, (
+        "missing item-meta rule"
+    )
+    _, _, meta_block = block.partition(meta_sel)
+    meta_rule = meta_block.split("}", 1)[0]
+    assert "flex-wrap: wrap" in meta_rule, (
+        "item-meta must carry flex-wrap: wrap"
+    )
+    assert "#history-view .history-item-meta > span" in block, (
+        "missing item-meta > span wrapping rule"
+    )
+    _, _, span_block = block.partition("#history-view .history-item-meta > span")
+    span_rule = span_block.split("}", 1)[0]
+    assert "overflow-wrap: anywhere" in span_rule or "word-break: break-word" in span_rule, (
+        "item-meta > span must carry a per-character break rule"
+    )
+
+    # Step title and msg-chip: overflow-wrap / word-break
+    for text_sel in (
+        "#history-view .history-step-title",
+        "#history-view .msg-chip",
+    ):
+        assert text_sel in block, (
+            f"missing wrapping rule for {text_sel!r}"
+        )
+        _, _, after = block.partition(text_sel)
+        rule_body = after.split("}", 1)[0]
+        assert "overflow-wrap: anywhere" in rule_body or "word-break: break-word" in rule_body, (
+            f"{text_sel} must carry a per-character break rule"
+        )
+        assert "overflow-x: auto" not in rule_body, (
+            f"{text_sel} must NOT use overflow-x: auto"
+        )
+
+
 def test_mobile_block_textarea_is_auto_grow_not_fixed():
     """G3: the mobile reply textarea is a WeChat-style auto-grow box — capped at
     35vh with internal scroll, no manual resize, and the old fixed 104px min is
@@ -495,6 +602,13 @@ def test_mobile_visual_rules_are_inside_media_queries():
         ".flow-conversation .tool-marker {",
         "#flow-view .flow-reply-context.active",
         "max-height: 35vh",
+        # History mobile overflow hardening — every new #history-view selector
+        # must stay inside the breakpoint.
+        "#history-view .history-list-pane",
+        "#history-view .history-detail-pane",
+        "#history-view .history-project-select",
+        "#history-view .history-step-title",
+        "#history-view .msg-chip",
     )
     for token in mobile_only_tokens:
         idx = css.find(token)
