@@ -404,6 +404,55 @@ class ClaudeCodeRunner(AgentRunner):
                 return None
         return None
 
+    def build_call_args(
+        self,
+        prompt: str,
+        read_only: bool,
+        context_files: Optional[List[Path]] = None,
+    ) -> List[str]:
+        """Build Claude Code CLI arguments from intent-level parameters.
+
+        Produces the same argv that :class:`LLMCaller` previously assembled
+        inline, preserving byte-for-byte compatibility with the existing
+        behaviour:
+
+        * Base flags: ``--output-format stream-json --verbose -p <prompt>``
+        * Read-only enforcement: ``--disallowedTools Write Edit
+          NotebookEdit AskUserQuestion``
+        * Context files: ``--file <path>`` for each existing file
+
+        Args:
+            prompt: The effective prompt text.
+            read_only: Whether the current step is read-only.
+            context_files: Optional list of files to include as context.
+
+        Returns:
+            CLI argument list (excluding the command name and the runner's
+            own ``--dangerously-skip-permissions`` / ``--setting-sources``
+            flags, which are prepended by the execution methods).
+        """
+        args: List[str] = [
+            "--output-format", "stream-json",
+            "--verbose",
+            "-p", prompt,
+        ]
+
+        if read_only:
+            args += [
+                "--disallowedTools",
+                "Write",
+                "Edit",
+                "NotebookEdit",
+                "AskUserQuestion",
+            ]
+
+        if context_files:
+            for f in context_files:
+                if f.exists():
+                    args.extend(["--file", str(f)])
+
+        return args
+
     @staticmethod
     def detect_usage_limit(returncode: int, stdout: str, stderr: str) -> bool:
         """Detect if the failure is due to usage/rate limit.
