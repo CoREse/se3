@@ -1677,6 +1677,111 @@ check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live 
   assert.equal(app.mergeSnapshotWithLiveAppends(snap, []), snap);
 });
 
+// -- dedupeAppendRecords: filter duplicate records from WS append batches -----
+//
+// Covers the symmetric race: HTTP snapshot lands AFTER server cache write but
+// BEFORE WS broadcast, so the snapshot already contains the batch. When the
+// same batch arrives as a `history_data` append, dedupeAppendRecords strips
+// the duplicates before concat.
+
+check("dedupeAppendRecords returns empty array when all incoming records already exist", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const existing = [r1, r2];
+  const incoming = [r1, r2];
+  const fresh = app.dedupeAppendRecords(existing, incoming);
+  assert.equal(fresh.length, 0);
+});
+
+check("dedupeAppendRecords returns only new records, preserving incoming order", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  const r4 = asstRecord("A4", 4, "s1", "discovery");
+  const existing = [r1, r2];
+  const incoming = [r2, r3, r4];
+  const fresh = app.dedupeAppendRecords(existing, incoming);
+  assert.equal(fresh.length, 2);
+  assert.equal(app.recordKey(fresh[0]), app.recordKey(r3));
+  assert.equal(app.recordKey(fresh[1]), app.recordKey(r4));
+});
+
+check("dedupeAppendRecords returns all records when existing array is empty", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const fresh = app.dedupeAppendRecords([], [r1, r2]);
+  assert.equal(fresh.length, 2);
+  assert.equal(app.recordKey(fresh[0]), app.recordKey(r1));
+  assert.equal(app.recordKey(fresh[1]), app.recordKey(r2));
+});
+
+check("dedupeAppendRecords returns all records when incoming array is empty", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const fresh = app.dedupeAppendRecords([r1], []);
+  assert.equal(fresh.length, 0);
+});
+
+check("dedupeAppendRecords: partial/stream_progress records with accumulating content are NOT deduplicated", () => {
+  // Simulates a partial record whose content grows each push — the recordKey
+  // changes because content.length and the content prefix differ, so it should
+  // NOT be filtered out even if a prior partial with the same stepId/role/ts
+  // already exists.
+  const partial1 = asstRecord("🔧 Read src/foo.py", 1, "s1", "analyze");
+  const partial2 = asstRecord("🔧 Read src/foo.py\n✅ Read ✓", 1, "s1", "analyze");
+  // Same stepId, role, timestamp, attempt — but different content.
+  const fresh = app.dedupeAppendRecords([partial1], [partial2]);
+  assert.equal(fresh.length, 1,
+    "accumulating partial with different content must not be filtered");
+});
+
+check("dedupeAppendRecords race regression: snapshot already contains batch, same batch arrives as append", () => {
+  // Simulate: fetch snapshot completes, containing records R1-R3.
+  // Then the same R1-R3 arrive via WS history_data append.
+  // Without dedupeAppendRecords, concat would produce 6 records (3 dupes).
+  const r1 = asstRecord("Step output 1", 1, "s1", "discovery");
+  const r2 = asstRecord("Step output 2", 2, "s1", "discovery");
+  const r3 = asstRecord("Step output 3", 3, "s1", "discovery");
+
+  // State after snapshot merge (records already in the array)
+  const existing = [r1, r2, r3];
+  // Same batch arrives as WS append
+  const incoming = [r1, r2, r3];
+
+  const fresh = app.dedupeAppendRecords(existing, incoming);
+  assert.equal(fresh.length, 0, "entire duplicate batch must be filtered");
+
+  // Simulate the full path: dedup then concat — result should have exactly 3
+  const final = fresh.length ? existing.concat(fresh) : existing;
+  assert.equal(final.length, 3);
+
+  // Verify no duplicate recordKeys
+  const keys = final.map(app.recordKey);
+  const uniqueKeys = new Set(keys);
+  assert.equal(keys.length, uniqueKeys.size, "no duplicate recordKey in final array");
+});
+
+check("dedupeAppendRecords race regression: partial new records after snapshot", () => {
+  // Snapshot already has R1, R2. WS append carries R2 (dup), R3 (new), R4 (new).
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  const r4 = asstRecord("A4", 4, "s1", "discovery");
+
+  const existing = [r1, r2];
+  const incoming = [r2, r3, r4];
+
+  const fresh = app.dedupeAppendRecords(existing, incoming);
+  assert.equal(fresh.length, 2, "only R3 and R4 should pass through");
+  assert.equal(app.recordKey(fresh[0]), app.recordKey(r3));
+  assert.equal(app.recordKey(fresh[1]), app.recordKey(r4));
+
+  // Final merged array: R1, R2, R3, R4 — no duplicates
+  const final = existing.concat(fresh);
+  assert.equal(final.length, 4);
+  const keys = final.map(app.recordKey);
+  assert.equal(keys.length, new Set(keys).size);
+});
+
 // ---------------------------------------------------------------------------
 // Assistant two-layer progressive disclosure (DOM)
 // ---------------------------------------------------------------------------

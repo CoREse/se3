@@ -2065,19 +2065,32 @@ function applyHistoryData(msg) {
     // Capture the reader's position BEFORE re-rendering: an append grows
     // scrollHeight, so "near bottom" must be measured against the old layout.
     const stick = !append || isNearBottom(historyScrollContainer());
-    state.historyRecords = append
-      ? state.historyRecords.concat(records)
-      : records;
-    renderHistoryRecords(msg.flow_id, state.historyRecords, append);
-    if (stick) scrollHistoryToBottom();
+    if (append) {
+      const fresh = dedupeAppendRecords(state.historyRecords, records);
+      if (fresh.length) {
+        state.historyRecords = state.historyRecords.concat(fresh);
+        renderHistoryRecords(msg.flow_id, state.historyRecords, append);
+        if (stick) scrollHistoryToBottom();
+      }
+      // else: all duplicates — skip state update and render entirely
+    } else {
+      state.historyRecords = records;
+      renderHistoryRecords(msg.flow_id, state.historyRecords, append);
+      if (stick) scrollHistoryToBottom();
+    }
   }
 
   // -- running-flow view consumer --
   if (state.selectedFlowId === msg.flow_id) {
     const stick = !append || isNearBottom($("flow-conversation"));
-    const merged = append
-      ? state.flowConversationRecords.concat(records)
-      : records;
+    let merged;
+    if (append) {
+      const fresh = dedupeAppendRecords(state.flowConversationRecords, records);
+      if (!fresh.length) return;            // all duplicates — skip entirely
+      merged = state.flowConversationRecords.concat(fresh);
+    } else {
+      merged = records;
+    }
     // When the daemon's authoritative user record lands, drop the matching
     // optimistic local echo so the reply is shown once. A mid-list removal
     // shifts indices, so the incremental-append render (which only re-reads the
@@ -2669,6 +2682,21 @@ function mergeSnapshotWithLiveAppends(snapshot, liveAppends) {
   const seen = new Set(snapshot.map(recordKey));
   const extra = liveAppends.filter((r) => !seen.has(recordKey(r)));
   return extra.length ? snapshot.concat(extra) : snapshot;
+}
+
+// Filter incoming append records against an existing array, returning only
+// those whose recordKey is not already present. This covers the symmetric
+// race direction that mergeSnapshotWithLiveAppends cannot: the HTTP snapshot
+// lands AFTER the server cache write but BEFORE the WS broadcast, so the
+// snapshot already contains the batch; when the same batch arrives as a
+// `history_data` append moments later, blindly concating would duplicate
+// every record. Deduping here prevents that. Partial / stream_progress
+// records naturally have a different recordKey as their content accumulates,
+// so they are never incorrectly filtered out.
+function dedupeAppendRecords(existing, incoming) {
+  if (!incoming.length || !existing.length) return incoming;
+  const seen = new Set(existing.map(recordKey));
+  return incoming.filter((r) => !seen.has(recordKey(r)));
 }
 
 // Reduce a user record's text to its literal, marker-stripped, trimmed form so
@@ -7845,6 +7873,7 @@ if (typeof module !== "undefined" && module.exports) {
     stepKey,
     recordKey,
     mergeSnapshotWithLiveAppends,
+    dedupeAppendRecords,
     reconcileLocalEchoes,
     comparableUserText,
     // History list rendering + shared mutable state (exposed for the DOM-stub

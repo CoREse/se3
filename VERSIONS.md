@@ -29,6 +29,14 @@
 
 
 
+
+## 8.12.1 - 2026-06-10
+
+- Fix duplicate rendering of batched records during live flow streaming when snapshot fetch overlaps with WS broadcast delivery
+- Add dedupeAppendRecords pure function to deduplicate incoming records against already-held records before merging
+- Apply append deduplication to both running-flow and history-view record consumers
+- Preserve incremental-render cursor semantics when no new records arrive after deduplication
+- Ensure partial and stream_progress accumulating fragments are not falsely deduplicated
 ## 8.12.0 - 2026-06-10
 
 - Add CodexRunner agent type (type: codex) allowing OpenAI Codex CLI to be registered and used as an agent alongside Claude

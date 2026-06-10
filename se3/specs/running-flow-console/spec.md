@@ -360,6 +360,99 @@ disturb, the mobile tool-marker layout fix.
 - **AND** when no echo is removed, `reconcileLocalEchoes` returns the same array
   reference and the incremental-append render path is preserved
 
+### Requirement: Live-Append Record Deduplication Against Snapshot
+
+A running flow's conversation (and the history view) is built from two sources
+that can deliver the **same** records: the `GET /api/history/{flow_id}` snapshot
+fetched by `loadFlowConversation` / `openHistorySession`, and the incremental
+`history_data` appends pushed over the `/ws/ui` channel and merged by
+`applyHistoryData`. On the server, `ws.py` handles `MSG_HISTORY_DATA` by first
+writing the cache (`state.append_history`) and then broadcasting the batch to UI
+(`_push_history_data`). When a snapshot fetch lands in the window **after** the
+cache write but **before** the WS broadcast arrives, the snapshot already
+contains that batch; the subsequently-arriving `history_data` append for the
+**same** batch would then be `concat`-ed in a second time. The result is a batch
+of records (non-interactive `user` / `system` prompt chips, `step_completed`
+report cards, etc.) rendered twice during live streaming, which vanishes on a
+manual reload because the reload re-fetches the clean, non-duplicated server
+cache. The view MUST suppress this duplication on the **append** path so each
+record is held — and rendered — exactly once, without changing the daemon push
+logic, the server `append_history` / `_push_history_data` cache-then-broadcast
+order, or the WS protocol. This is a **pure-frontend** fix: the server cache
+itself is never duplicated, so `mergeSnapshotWithLiveAppends` is left unchanged.
+
+`mergeSnapshotWithLiveAppends` already dedups the *opposite* race — appends that
+arrive **during** the fetch `await` — but it cannot cover appends that arrive
+**after** the fetch has already resolved into state. The two symmetric races are
+therefore each owned by one pure function, both keyed on the **same** record
+identity function `recordKey`:
+
+1. **`dedupeAppendRecords(existing, incoming)`** — a new DOM-free, side-effect-free
+   exported pure function (same export-block pattern as
+   `mergeSnapshotWithLiveAppends` / `historyListEmptyState`). It builds a
+   `Set(existing.map(recordKey))` and returns only those `incoming` records whose
+   `recordKey` is not already present in `existing`: an empty array when every
+   incoming record is already held, an array equivalent to `incoming` when all are
+   new, and the new-only subset otherwise. Because `partial` / `stream_progress`
+   segmented records' `recordKey` naturally varies as their content accumulates,
+   later fragments of the same streaming record are NOT falsely deduped.
+2. **Both append consumers filtered** — `applyHistoryData`'s append branch MUST
+   run `incoming` through `dedupeAppendRecords` against the *current* held array
+   before merging, for **both** the running-flow view (`state.flowConversationRecords`)
+   and the history view (`state.historyRecords`). When the filtered result is
+   empty, that consumer MUST short-circuit: it makes no state change and triggers
+   no render, preserving the existing incremental semantics (no spurious
+   re-render). When the result is a non-empty subset, only the genuinely new
+   records are `concat`-ed, so the `st.count` incremental-cursor render path
+   (`renderConversation` / `renderHistoryRecords`) and the downstream stick
+   judgement / `reconcileLocalEchoes` calls keep working unchanged.
+
+The `mode: full` (non-append) snapshot-replacement path is NOT affected by this
+dedup — it replaces the held array wholesale and is left exactly as-is.
+
+#### Scenario: Same batch in snapshot and live append is held once
+- **GIVEN** a snapshot fetch for a running flow resolves in the window after the
+  server wrote a `history_data` batch to its cache but before the matching WS
+  `history_data` append has been delivered, so the snapshot already contains that
+  batch
+- **WHEN** the WS `history_data` append for the **same** batch later arrives and
+  `applyHistoryData` runs its append branch
+- **THEN** `dedupeAppendRecords` filters out every record whose `recordKey` is
+  already present in the held array, so no record is `concat`-ed a second time
+- **AND** the conversation / history record array contains no duplicate
+  `recordKey`, and the batch is rendered exactly once
+
+#### Scenario: Append of all-already-present records makes no change
+- **GIVEN** an incremental `history_data` append whose records are all already
+  held in `state.flowConversationRecords` (or `state.historyRecords`)
+- **WHEN** `applyHistoryData` filters the append through `dedupeAppendRecords`
+- **THEN** the filtered result is empty and that consumer short-circuits — no
+  state mutation and no re-render — preserving the incremental-render semantics
+
+#### Scenario: Append with a mix of seen and new records merges only the new ones
+- **GIVEN** an incremental append whose records partly overlap the held array by
+  `recordKey` and partly introduce new `recordKey`s
+- **WHEN** `applyHistoryData` filters the append through `dedupeAppendRecords`
+- **THEN** only the records with previously-unseen `recordKey`s are `concat`-ed
+- **AND** the `st.count` incremental cursor advances by exactly the number of new
+  records, so `renderConversation` / `renderHistoryRecords` render only the
+  genuinely new tail
+
+#### Scenario: Append of all-new records behaves as before
+- **GIVEN** an incremental append whose records are all new (no `recordKey`
+  overlap with the held array)
+- **WHEN** `applyHistoryData` filters the append through `dedupeAppendRecords`
+- **THEN** every record passes through and is merged, identical to the
+  pre-fix behavior
+
+#### Scenario: Accumulating streaming fragments are not falsely deduped
+- **GIVEN** a `partial` / `stream_progress` record whose `recordKey` changes as
+  its content accumulates across successive fragments
+- **WHEN** later fragments arrive via incremental append
+- **THEN** `dedupeAppendRecords` treats each accumulated fragment as a distinct
+  record (its `recordKey` differs from the prior fragment) and does NOT suppress
+  it
+
 ### Requirement: Unified Intervention Items
 
 All human-in-the-loop interactions inside a running flow MUST be presented as
