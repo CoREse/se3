@@ -341,7 +341,7 @@ class TestEnsureSe3Project:
             raise AssertionError("subprocess.run should not be invoked")
 
         monkeypatch.setattr(spawner_mod.subprocess, "run", fake_run)
-        spawner = DaemonSpawner()
+        spawner = DaemonSpawner(login_shell_path=None)
         result = spawner.ensure_se3_project(str(tmp_path))
         assert result.initialized is False
         assert result.error == ""
@@ -366,7 +366,7 @@ class TestEnsureSe3Project:
             return _FakeCompleted()
 
         monkeypatch.setattr(spawner_mod.subprocess, "run", fake_run)
-        spawner = DaemonSpawner()
+        spawner = DaemonSpawner(login_shell_path=None)
         result = spawner.ensure_se3_project(str(tmp_path))
         assert result.initialized is True
         assert result.error == ""
@@ -385,7 +385,7 @@ class TestEnsureSe3Project:
         monkeypatch.setattr(
             spawner_mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
         )
-        spawner = DaemonSpawner()
+        spawner = DaemonSpawner(login_shell_path=None)
         result = spawner.ensure_se3_project(str(tmp_path))
         assert result.initialized is False
         assert "exit code 2" in result.error
@@ -404,7 +404,7 @@ class TestEnsureSe3Project:
         monkeypatch.setattr(
             spawner_mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
         )
-        spawner = DaemonSpawner()
+        spawner = DaemonSpawner(login_shell_path=None)
         result = spawner.ensure_se3_project(str(tmp_path))
         assert "marker" in result.error
 

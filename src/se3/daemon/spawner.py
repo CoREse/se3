@@ -31,6 +31,80 @@ from typing import Callable, Dict, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# -- login-shell PATH resolution -------------------------------------------
+
+def resolve_login_shell_path(timeout: float = 5.0) -> Optional[str]:
+    """Resolve the ``PATH`` a login shell would expose.
+
+    Executes ``$SHELL -lc 'echo $PATH'`` (falling back to ``/bin/bash`` when
+    ``$SHELL`` is unset) with a short timeout. Returns the PATH string on
+    success, or ``None`` on any failure (timeout, non-zero exit, unparseable
+    output). Never raises.
+
+    This is the VSCode-style "shell environment resolution" approach: one
+    probe at daemon startup, cached for the daemon's lifetime, so spawned
+    ``se3 run`` children inherit the full login-shell PATH even when the
+    daemon itself was started from a sparse environment (systemd, cron,
+    container).
+    """
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    try:
+        result = subprocess.run(
+            [shell, "-lc", "echo $PATH"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    stdout = (result.stdout or b"").decode("utf-8", errors="replace").strip()
+    # Take the last non-empty line — login profiles may print noise before it.
+    for line in reversed(stdout.splitlines()):
+        candidate = line.strip()
+        if candidate and os.pathsep in candidate:
+            return candidate
+    return None
+
+
+def merge_path_env(current: Optional[str], login: Optional[str]) -> Optional[str]:
+    """Merge *login*-shell PATH entries ahead of *current* PATH entries.
+
+    Returns a combined PATH string with login entries first (preserving their
+    order) followed by current entries not already present (preserving order).
+    When either input is ``None`` or empty, returns the other. When both are
+    ``None``/empty, returns ``None``.
+
+    The merge is idempotent: running it on a *current* that already contains
+    every login entry produces *current* unchanged (login entries land first
+    but the dedup keeps the original positions of the overlapping tail).
+    """
+    if not login and not current:
+        return None
+    if not login:
+        return current
+    if not current:
+        return login
+    sep = os.pathsep
+    login_parts = login.split(sep)
+    current_parts = current.split(sep)
+    seen: set = set()
+    merged: List[str] = []
+    for entry in login_parts:
+        if entry not in seen:
+            seen.add(entry)
+            merged.append(entry)
+    for entry in current_parts:
+        if entry not in seen:
+            seen.add(entry)
+            merged.append(entry)
+    return sep.join(merged)
+
+
 SpawnCallback = Callable[["SpawnedProcess"], None]
 
 
@@ -163,6 +237,7 @@ class DaemonSpawner:
         *,
         on_spawn: Optional[SpawnCallback] = None,
         on_exit: Optional[SpawnCallback] = None,
+        login_shell_path: Optional[str] = ...,  # type: ignore[assignment]
     ) -> None:
         """Create a spawner.
 
@@ -172,12 +247,29 @@ class DaemonSpawner:
                 de-registered on reap.
             on_spawn: Optional callback invoked just after a child starts.
             on_exit: Optional callback invoked when a child is reaped.
+            login_shell_path: Override for the cached login-shell PATH. When
+                left at the default sentinel, ``resolve_login_shell_path()``
+                is called once during construction and cached. Pass ``None``
+                to disable PATH merging entirely (e.g. for testing).
         """
         self._supervisor = supervisor
         self._on_spawn = on_spawn
         self._on_exit = on_exit
         self._processes: Dict[int, SpawnedProcess] = {}
         self._spawn_counter = 0
+        # Resolve and cache the login-shell PATH once at daemon startup.
+        # _launch / ensure_se3_project merge this into child_env so spawned
+        # flows inherit the full PATH even when the daemon was started from
+        # a sparse environment (systemd, cron, container).
+        if login_shell_path is ...:
+            self._login_shell_path = resolve_login_shell_path()
+            if self._login_shell_path is None:
+                logger.warning(
+                    "Could not resolve login-shell PATH; spawned flows will "
+                    "inherit the daemon's current PATH only"
+                )
+        else:
+            self._login_shell_path = login_shell_path
 
     # -- pre-spawn initialization -----------------------------------------
 
@@ -216,11 +308,16 @@ class DaemonSpawner:
             return EnsureResult(error=f"cannot create {root}: {exc}")
         args = _resolve_se3_command() + ["init", "-p", str(root)]
         logger.info("Auto-initializing SE3 project at %s via `se3 init`", root)
+        init_env = os.environ.copy()
+        if self._login_shell_path is not None:
+            init_env["PATH"] = merge_path_env(
+                init_env.get("PATH"), self._login_shell_path
+            )
         try:
             result = subprocess.run(
                 args,
                 cwd=str(root),
-                env=os.environ.copy(),
+                env=init_env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -342,6 +439,10 @@ class DaemonSpawner:
         identical.
         """
         child_env = os.environ.copy()
+        if self._login_shell_path is not None:
+            child_env["PATH"] = merge_path_env(
+                child_env.get("PATH"), self._login_shell_path
+            )
         if env:
             child_env.update(env)
 
