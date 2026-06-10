@@ -249,7 +249,7 @@ class ClaudeCodeRunner(AgentRunner):
             all_commands = load_claude_commands(project_root)
             self.command = all_commands[0] if all_commands else {"cmd": "claude", "priority": 0}
 
-        # Keep a commands list view for backward compatibility (popen, retry_with_next, helpers)
+        # Keep a commands list view for backward compatibility (get_command, get_next_command helpers)
         if commands is not None:
             self.commands = commands
         else:
@@ -385,113 +385,6 @@ class ClaudeCodeRunner(AgentRunner):
             return subprocess.CompletedProcess(
                 args=full_cmd, returncode=124, stdout="", stderr="timeout"
             )
-
-    def popen(
-        self,
-        args: List[str],
-        cwd: Optional[Path] = None,
-        env: Optional[Dict[str, str]] = None,
-        stdout: Any = subprocess.PIPE,
-        stderr: Any = subprocess.PIPE,
-        cmd_index: int = 0,
-        **kwargs: Any,
-    ) -> Tuple[subprocess.Popen, int]:
-        """Start Claude asynchronously (for collab workers/managers).
-
-        Handles @file syntax for prompt files to avoid command-line length issues.
-        Temp files created by ``_resolve_args`` are attached to the returned
-        process as ``proc._se3_temp_files`` (list of Path).  Callers SHOULD
-        clean them up after the process finishes.
-
-        Args:
-            args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
-            cwd: Working directory.
-            env: Environment variables.
-            stdout: stdout handling (default PIPE).
-            stderr: stderr handling (default PIPE).
-            cmd_index: Index into commands list to start from.
-            **kwargs: Additional Popen arguments.
-
-        Returns:
-            Tuple of (Popen process, cmd_index used).
-        """
-        if cmd_index >= len(self.commands):
-            cmd_index = len(self.commands) - 1
-
-        cmd_entry = self.commands[cmd_index]
-        resolved_args, stdin_prompt = self._resolve_args(args, cwd)
-
-        full_cmd = [
-            cmd_entry["cmd"],
-            "--dangerously-skip-permissions",
-            "--setting-sources",
-            self._setting_sources_arg,
-        ] + resolved_args
-
-        # If we need to feed a prompt via stdin, force stdin=PIPE regardless
-        # of what the caller passed in kwargs, and write the prompt in a
-        # background thread so we don't deadlock on a full pipe buffer.
-        if stdin_prompt is not None:
-            kwargs = dict(kwargs)
-            kwargs["stdin"] = subprocess.PIPE
-
-        proc = subprocess.Popen(
-            full_cmd,
-            cwd=cwd,
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
-            **kwargs,
-        )
-
-        if stdin_prompt is not None:
-            _spawn_stdin_writer(proc, stdin_prompt)
-
-        # Temp-file cleanup remains a no-op field for backward compat with
-        # callers that iterate over it.
-        proc._se3_temp_files = []
-        return proc, cmd_index
-
-    def retry_with_next(
-        self,
-        cmd_index: int,
-        args: List[str],
-        cwd: Optional[Path] = None,
-        env: Optional[Dict[str, str]] = None,
-        stdout: Any = subprocess.PIPE,
-        stderr: Any = subprocess.PIPE,
-        **kwargs: Any,
-    ) -> Optional[Tuple[subprocess.Popen, int]]:
-        """Retry with the next command after the given index.
-
-        .. deprecated::
-            Agent rotation is now handled by LLMCaller.  This method is
-            kept for backward compatibility with collab modules.
-
-        Returns:
-            Tuple of (Popen process, new cmd_index) or None if exhausted.
-            The returned process may have a ``_se3_temp_files`` attribute
-            (list of Path) attached by :meth:`popen`.  Callers SHOULD
-            clean them up after the process finishes.
-        """
-        warnings.warn(
-            "retry_with_next is deprecated; agent rotation is handled by LLMCaller",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        next_index = cmd_index + 1
-        if next_index >= len(self.commands):
-            return None
-
-        return self.popen(
-            args=args,
-            cwd=cwd,
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
-            cmd_index=next_index,
-            **kwargs,
-        )
 
     def get_command(self, index: int = 0) -> str:
         """Get the command string at the given index."""

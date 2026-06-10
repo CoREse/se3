@@ -5,7 +5,6 @@ Tests cover:
 - Usage limit detection (keywords, exit codes)
 - Timeout detection
 - detect_infra_error() composite method
-- popen and retry_with_next (backward compat)
 - ClaudeRunner alias
 - Helper methods
 """
@@ -270,65 +269,6 @@ class TestClaudeCodeRunnerRun:
 
 
 # =============================================================================
-# ClaudeCodeRunner.popen() — Async (backward compat)
-# =============================================================================
-
-class TestClaudeCodeRunnerPopen:
-    """Test async process spawning."""
-
-    def test_popen_uses_command(self):
-        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            proc, idx = runner.popen(["-p", "hi"])
-        assert idx == 0
-        assert proc is mock_proc
-        assert mock_popen.call_args[0][0][0] == "claude-a"
-
-    def test_popen_with_cmd_index(self):
-        """cmd_index still works for backward compat with commands list."""
-        runner = ClaudeCodeRunner(commands=[
-            {"cmd": "claude-a", "priority": 10},
-            {"cmd": "claude-b", "priority": 5},
-        ])
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            proc, idx = runner.popen(["-p", "hi"], cmd_index=1)
-        assert idx == 1
-        assert mock_popen.call_args[0][0][0] == "claude-b"
-
-
-# =============================================================================
-# ClaudeCodeRunner.retry_with_next() — Deprecated
-# =============================================================================
-
-class TestRetryWithNext:
-    """Test retry_with_next (deprecated, kept for collab compat)."""
-
-    def test_retry_emits_deprecation_warning(self):
-        runner = ClaudeCodeRunner(commands=[
-            {"cmd": "claude-a", "priority": 10},
-            {"cmd": "claude-b", "priority": 5},
-        ])
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        with patch("subprocess.Popen", return_value=mock_proc):
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                runner.retry_with_next(0, ["-p", "hi"])
-                assert len(w) == 1
-                assert issubclass(w[0].category, DeprecationWarning)
-
-    def test_retry_exhausted(self):
-        runner = ClaudeCodeRunner(commands=[
-            {"cmd": "claude-a", "priority": 10},
-        ])
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            result = runner.retry_with_next(0, ["-p", "hi"])
-        assert result is None
-
-
-# =============================================================================
 # Helper Methods
 # =============================================================================
 
@@ -515,37 +455,6 @@ class TestStdinLifecycle:
         tmp_dir = tmp_path / "se3" / "tmp"
         assert not tmp_dir.exists() or list(tmp_dir.glob("*.prompt")) == []
 
-    def test_popen_forces_stdin_pipe_for_large_prompt(self, tmp_path):
-        prompt = "x" * (_MAX_ARG_BYTES + 1)
-        runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        mock_proc.stdin = MagicMock()
-        captured_kwargs = {}
-
-        def mock_popen_ctor(cmd, **kwargs):
-            captured_kwargs.update(kwargs)
-            return mock_proc
-
-        with patch("subprocess.Popen", side_effect=mock_popen_ctor):
-            proc, _ = runner.popen(["-p", prompt], cwd=tmp_path)
-
-        assert captured_kwargs.get("stdin") == subprocess.PIPE
-        assert proc._se3_temp_files == []
-
-    def test_popen_small_prompt_does_not_override_stdin(self, tmp_path):
-        """Small prompt — caller's stdin kwarg should be respected."""
-        runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        captured_kwargs = {}
-
-        def mock_popen_ctor(cmd, **kwargs):
-            captured_kwargs.update(kwargs)
-            return mock_proc
-
-        with patch("subprocess.Popen", side_effect=mock_popen_ctor):
-            runner.popen(["-p", "small"], cwd=tmp_path, stdin=subprocess.DEVNULL)
-        assert captured_kwargs.get("stdin") == subprocess.DEVNULL
-
 
 # =============================================================================
 # Setting Sources Isolation (--setting-sources)
@@ -570,16 +479,6 @@ class TestClaudeSubprocessSettingSources:
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             runner.run(["-p", "hi"])
         argv = mock_run.call_args[0][0]
-        tail = _argv_after_skip_perms(argv)
-        assert tail[0] == "--setting-sources"
-        assert tail[1] == "user"
-
-    def test_popen_default_argv_contains_setting_sources_user(self):
-        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            runner.popen(["-p", "hi"])
-        argv = mock_popen.call_args[0][0]
         tail = _argv_after_skip_perms(argv)
         assert tail[0] == "--setting-sources"
         assert tail[1] == "user"
@@ -677,10 +576,12 @@ class TestClaudeSubprocessSettingSources:
             )
         assert runner.setting_sources == ["user", "project"]
 
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            runner.popen(["-p", "hi"])
-        argv = mock_popen.call_args[0][0]
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            runner.run(["-p", "hi"])
+        argv = mock_run.call_args[0][0]
         tail = _argv_after_skip_perms(argv)
         assert tail[0] == "--setting-sources"
         assert tail[1] == "user,project"
@@ -724,21 +625,6 @@ class TestStderrIsolation:
             side_effect=fake_monitor,
         ):
             runner.run_with_monitor(["-p", "hi"], cwd=tmp_path)
-
-    def test_popen_stderr_uses_pipe_not_devnull(self):
-        """popen() passes stderr=PIPE (not DEVNULL) to subprocess.Popen
-        so the runner can drain it without merging into stdout."""
-        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
-        mock_proc = MagicMock(spec=subprocess.Popen)
-
-        captured_kwargs = {}
-        def mock_popen_ctor(cmd, **kwargs):
-            captured_kwargs.update(kwargs)
-            return mock_proc
-
-        with patch("subprocess.Popen", side_effect=mock_popen_ctor):
-            runner.popen(["-p", "small"])
-        assert captured_kwargs.get("stderr") == subprocess.PIPE
 
     def test_monitored_child_uses_separate_stderr(self):
         """_run_single_with_monitor passes stderr=PIPE, not STDOUT."""

@@ -487,9 +487,7 @@ def has_framework_file_changes(project_root: Path) -> tuple[bool, List[str]]:
         "tools/se3_tools/progress.py",
         "tools/se3_tools/human_calls.py",
         "tools/se3_tools/config.py",
-        "scripts/collab-",
         "scripts/rules-",
-        "scripts/mcp-",
     ]
 
     changed_framework_files = []

@@ -80,14 +80,14 @@ class TestTierACopy:
         source_se3 = source / "se3"
         target_se3 = target / "se3"
 
-        (source_se3 / "collab" / "tasks" / "sub").mkdir(parents=True)
-        (source_se3 / "collab" / "tasks" / "sub" / "task.md").write_text("task")
+        (source_se3 / "state" / "archive" / "sub").mkdir(parents=True)
+        (source_se3 / "state" / "archive" / "sub" / "snapshot.md").write_text("snapshot")
 
         call = _make_sync_call(source, target)
         report = call("feature")
 
-        assert "collab/tasks/sub/task.md" in report.copied
-        assert (target_se3 / "collab" / "tasks" / "sub" / "task.md").exists()
+        assert "state/archive/sub/snapshot.md" in report.copied
+        assert (target_se3 / "state" / "archive" / "sub" / "snapshot.md").exists()
 
     def test_tier_a_preserves_mtime_and_permissions(self, tmp_path: Path) -> None:
         import os
@@ -129,8 +129,6 @@ class TestTierACopy:
         (source_se3 / "state" / "archive" / "a.md").write_text("a")
         (source_se3 / "calls").mkdir(parents=True)
         (source_se3 / "calls" / "confirm_y.json").write_text("c")
-        (source_se3 / "collab" / "tasks").mkdir(parents=True)
-        (source_se3 / "collab" / "tasks" / "t.md").write_text("t")
 
         call = _make_sync_call(source, target)
         report = call("feature")
@@ -141,7 +139,6 @@ class TestTierACopy:
         assert "state/summary-x.md" in copied_set
         assert "state/archive/a.md" in copied_set
         assert "calls/confirm_y.json" in copied_set
-        assert "collab/tasks/t.md" in copied_set
 
     def test_entry_path_symlink_outside_source_skipped(self, tmp_path: Path) -> None:
         """When a TIER_A_DIRS entry itself is a symlink to outside source_se3,

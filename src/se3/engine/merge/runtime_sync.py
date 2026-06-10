@@ -307,7 +307,6 @@ TIER_A_DIRS = [
     "history",
     "logs",
     "state/archive",
-    "collab/tasks",
 ]
 
 # Tier A: glob patterns (relative to se3/).
@@ -1376,10 +1375,10 @@ def sync_branch_runtime(
     """Sync runtime content from *branch*'s bound worktree into current branch's se3/.
 
     Tier A files (``history/``, ``logs/``, ``state/summary-*``,
-    ``state/archive/``, ``calls/confirm_*``, ``collab/tasks/``) are copied
-    from the source worktree's ``se3/`` to the current branch's ``se3/`` if
-    the target does not already have a file at the same relative path. If a
-    collision is detected:
+    ``state/archive/``, ``calls/confirm_*``) are copied from the source
+    worktree's ``se3/`` to the current branch's ``se3/`` if the target does
+    not already have a file at the same relative path. If a collision is
+    detected:
     - ``strict=True``: ``RuntimeSyncCollision`` is raised (legacy behaviour).
     - ``strict=False``: the source version is written to a sidecar file
       ``<dest>.from-<branch>`` and recorded in ``SyncReport.collisions``.
