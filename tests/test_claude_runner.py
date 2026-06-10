@@ -801,3 +801,123 @@ class TestStderrIsolation:
         assert result.output.startswith("=== Command: claude-a ===")
         assert "[claude-runner] Running command" not in result.output
         assert "[claude-runner] Command" not in result.output
+
+
+# =============================================================================
+# build_call_args() — Intent-to-argv translation
+# =============================================================================
+
+class TestBuildCallArgs:
+    """build_call_args translates intent into Claude Code CLI arguments.
+
+    The output must be byte-for-byte identical to the old inline assembly
+    in ``LLMCaller._call_with_retry`` (before the intent-passing refactor).
+    """
+
+    def test_basic_prompt(self):
+        """Normal prompt → --output-format stream-json --verbose -p <prompt>."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="hello world",
+            read_only=False,
+        )
+        assert args == [
+            "--output-format", "stream-json",
+            "--verbose",
+            "-p", "hello world",
+        ]
+
+    def test_read_only_appends_disallowed_tools(self):
+        """read_only=True → appends --disallowedTools for write tools."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="analyze this",
+            read_only=True,
+        )
+        assert "--disallowedTools" in args
+        di = args.index("--disallowedTools")
+        disallowed = args[di + 1:]
+        assert disallowed == ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+
+    def test_writable_step_no_disallowed_tools(self):
+        """read_only=False → no --disallowedTools in args."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="implement this",
+            read_only=False,
+        )
+        assert "--disallowedTools" not in args
+
+    def test_context_files_appended(self, tmp_path):
+        """Existing context files → --file <path> pairs."""
+        f1 = tmp_path / "spec.md"
+        f1.write_text("# Spec", encoding="utf-8")
+        f2 = tmp_path / "notes.md"
+        f2.write_text("# Notes", encoding="utf-8")
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="do it",
+            read_only=False,
+            context_files=[f1, f2],
+        )
+        assert "--file" in args
+        fi = args.index("--file")
+        assert args[fi + 1] == str(f1)
+        assert args[fi + 2] == "--file"
+        assert args[fi + 3] == str(f2)
+
+    def test_nonexistent_context_file_skipped(self, tmp_path):
+        """Context files that don't exist are silently skipped."""
+        missing = tmp_path / "does_not_exist.md"
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="do it",
+            read_only=False,
+            context_files=[missing],
+        )
+        assert "--file" not in args
+
+    def test_read_only_with_context_files(self, tmp_path):
+        """Both read_only and context_files → all flags present."""
+        f = tmp_path / "spec.md"
+        f.write_text("# Spec", encoding="utf-8")
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="analyze",
+            read_only=True,
+            context_files=[f],
+        )
+        assert "--disallowedTools" in args
+        assert "--file" in args
+        # --file comes after --disallowedTools
+        di = args.index("--disallowedTools")
+        fi = args.index("--file")
+        assert fi > di
+
+    def test_no_context_files_none(self):
+        """context_files=None → no --file in args."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="hi",
+            read_only=False,
+            context_files=None,
+        )
+        assert "--file" not in args
+
+    def test_empty_context_files_list(self):
+        """context_files=[] → no --file in args."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="hi",
+            read_only=False,
+            context_files=[],
+        )
+        assert "--file" not in args
+
+    def test_prompt_preserved_verbatim(self):
+        """Prompt with special chars is preserved verbatim in args."""
+        prompt = "line1\nline2\ttab\"quotes'中文"
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(prompt=prompt, read_only=False)
+        p_idx = args.index("-p")
+        assert args[p_idx + 1] == prompt

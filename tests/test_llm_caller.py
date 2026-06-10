@@ -184,10 +184,31 @@ class _FakeResult:
 
 
 class _ArgsCapturingRunner:
-    """Fake runner that records the args passed to run_with_monitor."""
+    """Fake runner that records the args passed to run_with_monitor.
+
+    Implements ``build_call_args`` so the new intent-delegation path works.
+    The implementation mirrors ``ClaudeCodeRunner.build_call_args`` so the
+    existing end-to-end assertions remain valid.
+    """
 
     def __init__(self) -> None:
         self.captured_args = None
+
+    def build_call_args(self, prompt, read_only, context_files=None):
+        args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
+        if read_only:
+            args += [
+                "--disallowedTools",
+                "Write",
+                "Edit",
+                "NotebookEdit",
+                "AskUserQuestion",
+            ]
+        if context_files:
+            for f in context_files:
+                if f.exists():
+                    args.extend(["--file", str(f)])
+        return args
 
     def run_with_monitor(self, args, **kwargs):
         self.captured_args = list(args)

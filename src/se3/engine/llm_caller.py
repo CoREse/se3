@@ -1360,30 +1360,6 @@ class LLMCaller:
                     logger.warning("deduplicate_prompt_lines failed, using original prompt", exc_info=True)
                 effective_prompt = _post_dedup_safety_cap(effective_prompt)
 
-            args = ["--output-format", "stream-json", "--verbose", "-p", effective_prompt]
-
-            # Tool-layer read-only enforcement. Under
-            # ``--dangerously-skip-permissions`` the prompt-level read-only
-            # constraint alone cannot reliably stop a sub-agent from writing
-            # files, so for read-only steps we forbid the write tools at the
-            # CLI layer while keeping Read/Grep/Glob/Bash available. Writable
-            # steps (implement / update_spec / sync_resolve) are unaffected.
-            # This makes se3 itself the only writer for sync-discovered specs.
-            from .context_builder import is_step_read_only
-            if is_step_read_only(self.step_type):
-                args += [
-                    "--disallowedTools",
-                    "Write",
-                    "Edit",
-                    "NotebookEdit",
-                    "AskUserQuestion",
-                ]
-
-            if context_files:
-                for f in context_files:
-                    if f.exists():
-                        args.extend(["--file", str(f)])
-
             # Record the original prompt (NOT effective_prompt) to chat history.
             # effective_prompt on retries contains the retry-context block (marker..separator).
             # If we recorded that, the next retry's format_history_for_retry would read it back
@@ -1395,6 +1371,16 @@ class LLMCaller:
             try:
                 current_runner = self._get_current_runner()
                 current_agent_name = self._agents[self._current_agent_index].get("name", "?")
+
+                # Delegate CLI argument construction to the runner.  Each
+                # runner translates the caller's intent (prompt, read-only
+                # flag, context files) into its own agent-specific CLI flags.
+                from .context_builder import is_step_read_only
+                args = current_runner.build_call_args(
+                    prompt=effective_prompt,
+                    read_only=is_step_read_only(self.step_type),
+                    context_files=context_files,
+                )
                 logger.debug(
                     f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, "
                     f"external_attempt {self.external_attempt}, agent '{current_agent_name}'"
