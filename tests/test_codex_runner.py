@@ -30,11 +30,18 @@ from se3.codex_runner import (
 
 
 # =============================================================================
-# CodexEventConverter — event mapping
+# CodexEventConverter — event mapping (using actual codex exec --json schema)
 # =============================================================================
 
 class TestCodexEventConverterMapping:
-    """Test that codex JSONL events are converted to Claude NDJSON."""
+    """Test that codex JSONL events are converted to Claude NDJSON.
+
+    All events use the actual codex ``exec --json`` schema where item events
+    carry the item payload under the ``item`` key (not ``data``) and use item
+    types ``agent_message``, ``command_execution``, ``file_change``,
+    ``mcp_tool_call`` (not ``message``, ``function_call``,
+    ``function_call_output``).
+    """
 
     def test_thread_started_returns_empty(self):
         conv = CodexEventConverter()
@@ -49,11 +56,10 @@ class TestCodexEventConverterMapping:
     def test_agent_message_produces_assistant_event(self):
         conv = CodexEventConverter()
         event = {
-            "type": "item.updated",
-            "data": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Hello world"}],
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Hello world",
             },
         }
         result = conv.convert_line(json.dumps(event))
@@ -63,72 +69,206 @@ class TestCodexEventConverterMapping:
         assert parsed["message"]["content"][0]["type"] == "text"
         assert parsed["message"]["content"][0]["text"] == "Hello world"
 
-    def test_function_call_produces_tool_use(self):
+    def test_agent_message_via_item_updated(self):
+        """item.updated should also work for agent_message."""
         conv = CodexEventConverter()
         event = {
             "type": "item.updated",
-            "data": {
-                "type": "function_call",
-                "name": "shell",
-                "call_id": "call_123",
-                "arguments": json.dumps({"command": "ls -la"}),
+            "item": {
+                "type": "agent_message",
+                "text": "Streaming text...",
             },
         }
         result = conv.convert_line(json.dumps(event))
         assert len(result) == 1
         parsed = json.loads(result[0])
         assert parsed["type"] == "assistant"
-        content = parsed["message"]["content"][0]
+        assert parsed["message"]["content"][0]["text"] == "Streaming text..."
+
+    def test_command_execution_produces_tool_use_and_result(self):
+        """command_execution produces a Bash tool_use + tool_result pair."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "ls -la",
+                "output": "file1.txt\nfile2.txt",
+                "exit_code": 0,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 2  # tool_use + tool_result
+
+        # First: tool_use
+        tool_use = json.loads(result[0])
+        assert tool_use["type"] == "assistant"
+        content = tool_use["message"]["content"][0]
         assert content["type"] == "tool_use"
-        assert content["name"] == "Bash"  # mapped from "shell"
-        assert content["id"] == "call_123"
+        assert content["name"] == "Bash"
         assert content["input"]["command"] == "ls -la"
 
-    def test_function_call_output_produces_tool_result(self):
-        conv = CodexEventConverter()
-        event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call_output",
-                "call_id": "call_123",
-                "output": "file1.txt\nfile2.txt",
-                "is_error": False,
-            },
-        }
-        result = conv.convert_line(json.dumps(event))
-        assert len(result) == 1
-        parsed = json.loads(result[0])
-        assert parsed["type"] == "user"
-        content = parsed["message"]["content"][0]
-        assert content["type"] == "tool_result"
-        assert content["tool_use_id"] == "call_123"
-        assert content["content"] == "file1.txt\nfile2.txt"
-        assert content["is_error"] is False
+        # Second: tool_result
+        tool_result = json.loads(result[1])
+        assert tool_result["type"] == "user"
+        tr_content = tool_result["message"]["content"][0]
+        assert tr_content["type"] == "tool_result"
+        assert tr_content["content"] == "file1.txt\nfile2.txt"
+        assert tr_content["is_error"] is False
 
-    def test_function_call_output_error(self):
+    def test_command_execution_error_sets_is_error(self):
+        """command_execution with non-zero exit_code sets is_error=True."""
         conv = CodexEventConverter()
         event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call_output",
-                "call_id": "call_456",
-                "output": "Permission denied",
-                "is_error": True,
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "false",
+                "output": "exit code 1",
+                "exit_code": 1,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 2
+        tool_result = json.loads(result[1])
+        tr_content = tool_result["message"]["content"][0]
+        assert tr_content["is_error"] is True
+
+    def test_file_change_maps_to_write_tool(self):
+        """file_change events should map to Write tool_use."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "path": "/tmp/test.py",
+                "content": "x=1",
+                "change_type": "write",
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 2  # tool_use + tool_result
+
+        tool_use = json.loads(result[0])
+        content = tool_use["message"]["content"][0]
+        assert content["type"] == "tool_use"
+        assert content["name"] == "Write"
+        assert content["input"]["file_path"] == "/tmp/test.py"
+        assert content["input"]["content"] == "x=1"
+
+        # Touched files should be recorded
+        assert "/tmp/test.py" in conv.touched_files
+
+    def test_file_change_create_maps_to_write(self):
+        """file_change with change_type=create maps to Write."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "path": "/tmp/new.py",
+                "content": "print('hi')",
+                "change_type": "create",
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        tool_use = json.loads(result[0])
+        assert tool_use["message"]["content"][0]["name"] == "Write"
+
+    def test_file_change_modify_maps_to_edit(self):
+        """file_change with change_type=modify maps to Edit."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "path": "/tmp/existing.py",
+                "content": "new content",
+                "change_type": "modify",
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        tool_use = json.loads(result[0])
+        content = tool_use["message"]["content"][0]
+        assert content["name"] == "Edit"
+        assert content["input"]["file_path"] == "/tmp/existing.py"
+        assert content["input"]["new_string"] == "new content"
+
+    def test_file_change_records_touched_files(self):
+        """Multiple file_change items accumulate touched files."""
+        conv = CodexEventConverter()
+        for path in ["/a.py", "/b.py", "/c.py"]:
+            event = {
+                "type": "item.completed",
+                "item": {
+                    "type": "file_change",
+                    "path": path,
+                    "content": "",
+                    "change_type": "write",
+                },
+            }
+            conv.convert_line(json.dumps(event))
+        assert conv.touched_files == {"/a.py", "/b.py", "/c.py"}
+
+    def test_mcp_tool_call_preserves_name(self):
+        """MCP tool calls keep their original name."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "name": "mcp_my_server__search",
+                "call_id": "call_mcp",
+                "arguments": {"query": "test"},
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) >= 1
+        parsed = json.loads(result[0])
+        assert parsed["message"]["content"][0]["name"] == "mcp_my_server__search"
+
+    def test_mcp_tool_call_with_arguments_as_string(self):
+        """MCP tool call arguments may be a JSON string."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "name": "my_tool",
+                "call_id": "call_str",
+                "arguments": json.dumps({"key": "value"}),
             },
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["message"]["content"][0]["is_error"] is True
+        assert parsed["message"]["content"][0]["input"]["key"] == "value"
+
+    def test_mcp_tool_call_with_output_generates_result(self):
+        """MCP tool call with output field generates tool_result."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "name": "my_tool",
+                "call_id": "call_out",
+                "arguments": {},
+                "output": "tool output here",
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 2  # tool_use + tool_result
+        tool_result = json.loads(result[1])
+        assert tool_result["message"]["content"][0]["content"] == "tool output here"
 
     def test_turn_completed_produces_result_with_usage(self):
         conv = CodexEventConverter()
         # First send an agent message to accumulate
         msg_event = {
-            "type": "item.updated",
-            "data": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Done!"}],
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Done!",
             },
         }
         conv.convert_line(json.dumps(msg_event))
@@ -198,6 +338,16 @@ class TestCodexEventConverterMapping:
         result = conv.convert_line(json.dumps(event))
         assert result == []
 
+    def test_unknown_item_type_returns_empty_no_crash(self):
+        """An item with an unknown type should be silently skipped."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {"type": "some_future_item_type", "data": 123},
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert result == []
+
     def test_non_json_line_returns_empty_no_crash(self):
         conv = CodexEventConverter()
         result = conv.convert_line("this is not json at all")
@@ -208,62 +358,83 @@ class TestCodexEventConverterMapping:
         result = conv.convert_line("")
         assert result == []
 
-    def test_file_change_maps_to_write_tool(self):
-        """file_change events should map to Write tool_use."""
+    def test_command_execution_with_call_id(self):
+        """command_execution with explicit call_id uses it as tool_use_id."""
         conv = CodexEventConverter()
         event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call",
-                "name": "write_file",
-                "call_id": "call_fc",
-                "arguments": json.dumps({"file_path": "/tmp/test.py", "content": "x=1"}),
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "pwd",
+                "output": "/tmp",
+                "exit_code": 0,
+                "call_id": "my_custom_id",
             },
         }
         result = conv.convert_line(json.dumps(event))
-        parsed = json.loads(result[0])
-        assert parsed["message"]["content"][0]["name"] == "Write"
+        tool_use = json.loads(result[0])
+        assert tool_use["message"]["content"][0]["id"] == "my_custom_id"
+        tool_result = json.loads(result[1])
+        assert tool_result["message"]["content"][0]["tool_use_id"] == "my_custom_id"
 
-    def test_mcp_tool_call_preserves_name(self):
-        """MCP tool calls keep their original name."""
+    def test_file_change_with_file_path_key(self):
+        """file_change may use file_path instead of path."""
         conv = CodexEventConverter()
         event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call",
-                "name": "mcp_my_server__search",
-                "call_id": "call_mcp",
-                "arguments": json.dumps({"query": "test"}),
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "file_path": "/tmp/alt.py",
+                "content": "y=2",
+                "change_type": "write",
             },
         }
         result = conv.convert_line(json.dumps(event))
-        parsed = json.loads(result[0])
-        assert parsed["message"]["content"][0]["name"] == "mcp_my_server__search"
+        tool_use = json.loads(result[0])
+        assert tool_use["message"]["content"][0]["input"]["file_path"] == "/tmp/alt.py"
+        assert "/tmp/alt.py" in conv.touched_files
 
-    def test_tool_name_mapping_shell_to_bash(self):
-        conv = CodexEventConverter()
-        assert conv._map_tool_name("shell") == "Bash"
-        assert conv._map_tool_name("bash") == "Bash"
-        assert conv._map_tool_name("apply_patch") == "Edit"
-        assert conv._map_tool_name("write_file") == "Write"
-        assert conv._map_tool_name("read_file") == "Read"
-        assert conv._map_tool_name("unknown_tool") == "unknown_tool"
-
-    def test_function_call_arguments_as_dict(self):
-        """Arguments may already be a dict (not a JSON string)."""
+    def test_command_execution_missing_fields_defaults(self):
+        """command_execution with missing fields doesn't crash."""
         conv = CodexEventConverter()
         event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call",
-                "name": "shell",
-                "call_id": "call_dict",
-                "arguments": {"command": "echo hi"},
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
             },
         }
         result = conv.convert_line(json.dumps(event))
-        parsed = json.loads(result[0])
-        assert parsed["message"]["content"][0]["input"]["command"] == "echo hi"
+        assert len(result) == 2
+        tool_use = json.loads(result[0])
+        assert tool_use["message"]["content"][0]["name"] == "Bash"
+        assert tool_use["message"]["content"][0]["input"]["command"] == ""
+
+    def test_file_change_missing_fields_defaults(self):
+        """file_change with missing fields doesn't crash."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 2
+        tool_use = json.loads(result[0])
+        assert tool_use["message"]["content"][0]["name"] == "Write"
+
+    def test_agent_message_empty_text_skipped(self):
+        """agent_message with empty text produces no output."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "",
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        assert result == []
 
     def test_all_output_lines_are_valid_json(self):
         """Every line from convert_line must be valid JSON."""
@@ -271,9 +442,9 @@ class TestCodexEventConverterMapping:
         events = [
             {"type": "thread.started", "data": {}},
             {"type": "turn.started", "data": {}},
-            {"type": "item.updated", "data": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}},
-            {"type": "item.updated", "data": {"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{}"}},
-            {"type": "item.updated", "data": {"type": "function_call_output", "call_id": "c1", "output": "ok"}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}},
+            {"type": "item.completed", "item": {"type": "command_execution", "command": "ls", "output": "ok", "exit_code": 0}},
+            {"type": "item.completed", "item": {"type": "file_change", "path": "/tmp/x.py", "content": "x=1", "change_type": "write"}},
             {"type": "turn.completed", "data": {"usage": {}}},
         ]
         all_lines = []
@@ -305,8 +476,8 @@ class TestCodexEventConverterFinalize:
     def test_finalize_with_accumulated_messages_synthesizes_result(self):
         conv = CodexEventConverter()
         conv.convert_line(json.dumps({
-            "type": "item.updated",
-            "data": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "partial"}]},
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "partial"},
         }))
         result = conv.finalize()
         assert len(result) == 1
@@ -693,11 +864,9 @@ class TestConverterOutputContract:
     SAMPLE_EVENTS = [
         '{"type": "thread.started", "data": {}}',
         '{"type": "turn.started", "data": {}}',
-        json.dumps({"type": "item.updated", "data": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}}),
-        json.dumps({"type": "item.updated", "data": {"type": "function_call", "name": "shell", "call_id": "c1", "arguments": json.dumps({"command": "ls"})}}),
-        json.dumps({"type": "item.updated", "data": {"type": "function_call_output", "call_id": "c1", "output": "ok", "is_error": False}}),
-        json.dumps({"type": "item.updated", "data": {"type": "function_call", "name": "write_file", "call_id": "c2", "arguments": json.dumps({"file_path": "/tmp/x.py", "content": "x=1"})}}),
-        json.dumps({"type": "item.updated", "data": {"type": "function_call_output", "call_id": "c2", "output": "written", "is_error": False}}),
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "hello"}}),
+        json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "ls", "output": "ok", "exit_code": 0}}),
+        json.dumps({"type": "item.completed", "item": {"type": "file_change", "path": "/tmp/x.py", "content": "x=1", "change_type": "write"}}),
         json.dumps({"type": "turn.completed", "data": {"usage": {"input_tokens": 100, "output_tokens": 50}}}),
     ]
 
@@ -732,7 +901,7 @@ class TestConverterOutputContract:
         conv = CodexEventConverter()
         unknown_events = [
             '{"type": "v2.new_feature", "data": {"x": 1}}',
-            '{"type": "item.updated", "data": {"type": "unknown_future_type"}}',
+            '{"type": "item.completed", "item": {"type": "unknown_future_type"}}',
             'not json at all',
             '',
         ]
@@ -764,65 +933,50 @@ class TestConverterNDJSONConsumerIntegration:
     (_extract_text_from_ndjson, parse_usage_from_ndjson) and verify
     they produce correct results — zero changes required upstream."""
 
-    # -- Full session: assistant text + tool_use + tool_result + result --
+    # -- Full session: assistant text + command_execution + result --
 
     FULL_SESSION_EVENTS = [
         json.dumps({"type": "thread.started", "data": {}}),
         json.dumps({"type": "turn.started", "data": {}}),
         json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "I will read the file first."}],
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "I will read the file first.",
             },
         }),
         json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "function_call", "name": "read_file", "call_id": "c_read",
-                "arguments": json.dumps({"file_path": "/tmp/test.py"}),
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "cat /tmp/test.py",
+                "output": "x = 1\ny = 2",
+                "exit_code": 0,
             },
         }),
         json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "function_call_output", "call_id": "c_read",
-                "output": "x = 1\ny = 2", "is_error": False,
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Now I will edit the file.",
             },
         }),
         json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "Now I will edit the file."}],
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "path": "/tmp/test.py",
+                "content": "x = 42\ny = 2",
+                "change_type": "write",
             },
         }),
         json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "function_call", "name": "apply_patch", "call_id": "c_edit",
-                "arguments": json.dumps({"file_path": "/tmp/test.py", "patch": "--- a\n+++ b\n@@ -1 +1 @@\n-x = 1\n+x = 42"}),
-            },
-        }),
-        json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "function_call_output", "call_id": "c_edit",
-                "output": "Patch applied successfully", "is_error": False,
-            },
-        }),
-        json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "function_call", "name": "shell", "call_id": "c_bash",
-                "arguments": json.dumps({"command": "pytest tests/ -v"}),
-            },
-        }),
-        json.dumps({
-            "type": "item.updated",
-            "data": {
-                "type": "function_call_output", "call_id": "c_bash",
-                "output": "FAILED test_something", "is_error": True,
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "pytest tests/ -v",
+                "output": "FAILED test_something",
+                "exit_code": 1,
             },
         }),
         json.dumps({
@@ -857,61 +1011,47 @@ class TestConverterNDJSONConsumerIntegration:
         assert usage["cache_read_input_tokens"] == 200
         assert usage["total_cost_usd"] == 0.012
 
-    def test_tool_use_events_preserved_as_assistant_content(self):
-        """Converted tool_use events should appear in assistant messages
+    def test_command_execution_produces_tool_use_and_result(self):
+        """command_execution should produce Bash tool_use + tool_result
         so tool_formatters can render previews."""
         conv = CodexEventConverter()
         event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call", "name": "shell", "call_id": "c1",
-                "arguments": json.dumps({"command": "ls -la"}),
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "ls -la",
+                "output": "file1.txt",
+                "exit_code": 0,
             },
         }
         result = conv.convert_line(json.dumps(event))
-        assert len(result) == 1
-        parsed = json.loads(result[0])
-        assert parsed["type"] == "assistant"
-        content = parsed["message"]["content"][0]
+        assert len(result) == 2
+
+        tool_use = json.loads(result[0])
+        assert tool_use["type"] == "assistant"
+        content = tool_use["message"]["content"][0]
         assert content["type"] == "tool_use"
         assert content["name"] == "Bash"
         assert isinstance(content["input"], dict)
 
-    def test_tool_result_events_preserved_as_user_content(self):
-        """Converted tool_result events should appear as user messages
-        with tool_result content items."""
-        conv = CodexEventConverter()
-        event = {
-            "type": "item.updated",
-            "data": {
-                "type": "function_call_output", "call_id": "c1",
-                "output": "file contents here", "is_error": False,
-            },
-        }
-        result = conv.convert_line(json.dumps(event))
-        parsed = json.loads(result[0])
-        assert parsed["type"] == "user"
-        content = parsed["message"]["content"][0]
-        assert content["type"] == "tool_result"
-        assert content["tool_use_id"] == "c1"
+        tool_result = json.loads(result[1])
+        assert tool_result["type"] == "user"
+        tr = tool_result["message"]["content"][0]
+        assert tr["type"] == "tool_result"
+        assert tr["tool_use_id"] == content["id"]
 
     def test_command_execution_success_flow(self):
-        """Full command execution: shell function_call + successful output
+        """Full command execution: successful command_execution
         → consumers should parse without errors."""
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
-                "type": "item.updated",
-                "data": {
-                    "type": "function_call", "name": "shell", "call_id": "c_exec",
-                    "arguments": json.dumps({"command": "echo hello"}),
-                },
-            }),
-            json.dumps({
-                "type": "item.updated",
-                "data": {
-                    "type": "function_call_output", "call_id": "c_exec",
-                    "output": "hello\n", "is_error": False,
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "echo hello",
+                    "output": "hello\n",
+                    "exit_code": 0,
                 },
             }),
             json.dumps({
@@ -935,17 +1075,12 @@ class TestConverterNDJSONConsumerIntegration:
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
-                "type": "item.updated",
-                "data": {
-                    "type": "function_call", "name": "shell", "call_id": "c_err",
-                    "arguments": json.dumps({"command": "false"}),
-                },
-            }),
-            json.dumps({
-                "type": "item.updated",
-                "data": {
-                    "type": "function_call_output", "call_id": "c_err",
-                    "output": "exit code 1", "is_error": True,
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "false",
+                    "output": "exit code 1",
+                    "exit_code": 1,
                 },
             }),
             json.dumps({
@@ -967,10 +1102,10 @@ class TestConverterNDJSONConsumerIntegration:
         from se3.engine.llm_caller import LLMCaller
         events = [
             json.dumps({
-                "type": "item.updated",
-                "data": {
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Partial output only."}],
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "Partial output only.",
                 },
             }),
             # No turn.completed or turn.failed — finalize will synthesize
@@ -986,10 +1121,10 @@ class TestConverterNDJSONConsumerIntegration:
         from se3.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({
-                "type": "item.updated",
-                "data": {
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Done."}],
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "Done.",
                 },
             }),
         ]
@@ -1025,6 +1160,14 @@ class TestConverterNDJSONConsumerIntegration:
         usage = parse_usage_from_ndjson(result[0])
         assert usage["input_tokens"] == 500
 
+    def test_touched_files_from_full_session(self):
+        """file_change items should populate touched_files."""
+        conv = CodexEventConverter()
+        for ev in self.FULL_SESSION_EVENTS:
+            conv.convert_line(ev)
+        # The full session has one file_change for /tmp/test.py
+        assert "/tmp/test.py" in conv.touched_files
+
 
 # =============================================================================
 # item.completed event type (alias for item.updated)
@@ -1033,13 +1176,13 @@ class TestConverterNDJSONConsumerIntegration:
 class TestItemCompletedEventType:
     """item.completed should produce the same output as item.updated."""
 
-    def test_message_via_item_completed(self):
+    def test_agent_message_via_item_completed(self):
         conv = CodexEventConverter()
         event = {
             "type": "item.completed",
-            "data": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "Done via completed."}],
+            "item": {
+                "type": "agent_message",
+                "text": "Done via completed.",
             },
         }
         result = conv.convert_line(json.dumps(event))
@@ -1048,19 +1191,22 @@ class TestItemCompletedEventType:
         assert parsed["type"] == "assistant"
         assert "Done via completed." in parsed["message"]["content"][0]["text"]
 
-    def test_function_call_via_item_completed(self):
+    def test_command_execution_via_item_updated(self):
+        """item.updated should also work for command_execution."""
         conv = CodexEventConverter()
         event = {
-            "type": "item.completed",
-            "data": {
-                "type": "function_call", "name": "bash", "call_id": "c_comp",
-                "arguments": json.dumps({"command": "pwd"}),
+            "type": "item.updated",
+            "item": {
+                "type": "command_execution",
+                "command": "pwd",
+                "output": "/tmp",
+                "exit_code": 0,
             },
         }
         result = conv.convert_line(json.dumps(event))
-        assert len(result) == 1
-        parsed = json.loads(result[0])
-        assert parsed["message"]["content"][0]["name"] == "Bash"
+        assert len(result) == 2
+        tool_use = json.loads(result[0])
+        assert tool_use["message"]["content"][0]["name"] == "Bash"
 
 
 # =============================================================================

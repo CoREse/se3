@@ -90,9 +90,14 @@ The caller exposes module-level state for prompts that must be injected into the
 
 ### Requirement: Tool-Layer Read-Only Enforcement
 
-Because read-only sub-agents run under `--dangerously-skip-permissions`, the prompt-level read-only constraint alone cannot reliably stop a sub-agent from writing files. For read-only steps the caller therefore ALSO forbids the write tools at the CLI layer when constructing the agent-runner argv, while keeping the read tools available. This makes se3 itself the only writer for sync-discovered specs and prevents stray files from being created in a managed project.
+Because read-only sub-agents run without a permission gate (`--dangerously-skip-permissions` for Claude, the bypass flag for Codex), the prompt-level read-only constraint alone cannot reliably stop a sub-agent from writing files. For read-only steps the caller therefore ALSO enforces read-only at the CLI layer. The caller does this by passing the read-only *intent* through `build_call_args`, NOT by appending CLI flags itself; each runner then translates that intent into its own enforcement mechanism: `ClaudeCodeRunner` forbids the write tools (`--disallowedTools`, a tool-level restriction) while keeping the read tools available, and `CodexRunner` selects `--sandbox read-only` (an OS-level restriction, stronger than the tool-level form). This makes se3 itself the only writer for sync-discovered specs and prevents stray files from being created in a managed project.
 
-The read-only decision uses the same `is_step_read_only(step_type)` classifier as the prompt-level injection, so the prompt and tool layers can never disagree about which steps are read-only.
+The read-only decision uses the same `is_step_read_only(step_type)` classifier as the prompt-level injection — it remains the single source of truth — so the prompt and tool layers can never disagree about which steps are read-only. The classifier output is the intent the caller hands to the runner; the runner owns the translation.
+
+#### Scenario: Read-only step passes read-only intent to the runner
+- **GIVEN** a read-only step (any STEP_POOL step with `read_only=True`, or the sync pseudo-steps `sync_scan` / `sync_analyze`)
+- **WHEN** the caller builds the agent-runner args via `build_call_args(prompt, read_only=True, context_files)`
+- **THEN** the runner translates the read-only intent into its own enforcement: `ClaudeCodeRunner` appends `--disallowedTools Write Edit NotebookEdit AskUserQuestion` (read tools `Read` / `Grep` / `Glob` / `Bash` remain available), while `CodexRunner` adds `--sandbox read-only`
 
 #### Scenario: Read-only step disallows the write tools
 - **GIVEN** a read-only step (any STEP_POOL step with `read_only=True`, or the sync pseudo-steps `sync_scan` / `sync_analyze`)
@@ -102,8 +107,8 @@ The read-only decision uses the same `is_step_read_only(step_type)` classifier a
 
 #### Scenario: Writable steps are unaffected by the tool-layer restriction
 - **GIVEN** a writable step (e.g., `implement`, `update_spec`, or the sync update path `sync_resolve`)
-- **WHEN** the caller builds the agent-runner args
-- **THEN** no `--disallowedTools` argument is added, so the step retains its full default tool set
+- **WHEN** the caller builds the agent-runner args via `build_call_args(prompt, read_only=False, context_files)`
+- **THEN** no read-only restriction is added by either runner, so the step retains its full default tool set
 - **AND** `sync_resolve` in particular keeps `Edit` so its Way-A path can modify `se3/specs/<name>/spec.md` in place
 
 ### Requirement: JSON Mode Resolution and Dispatch
@@ -439,8 +444,8 @@ Each call invokes the current agent's `Runner.run_with_monitor` with stream-json
 
 #### Scenario: Args composed for subprocess
 - **WHEN** the call is dispatched
-- **THEN** args are `["--output-format", "stream-json", "--verbose", "-p", effective_prompt]`
-- **AND** existing `context_files` are appended as `--file <path>` pairs
+- **THEN** `LLMCaller` does NOT assemble any LLM-specific CLI flags itself; it calls `current_runner.build_call_args(effective_prompt, read_only, context_files)` and uses the returned arg list verbatim
+- **AND** the read-only / writable intent and the `context_files` list are passed as intent, leaving each runner to translate them into its own flags (`ClaudeCodeRunner` emits `--output-format stream-json --verbose -p <prompt>` with `--file <path>` pairs for context files; `CodexRunner` emits its `codex exec --json` form with context files inlined)
 
 #### Scenario: CLAUDECODE env var stripped
 - **WHEN** the subprocess env is built

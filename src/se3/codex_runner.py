@@ -80,6 +80,12 @@ class CodexEventConverter:
         self._agent_messages: List[str] = []
         self._seen_turn_terminal: bool = False
         self._tool_counter: int = 0
+        self._touched_files: set = set()
+
+    @property
+    def touched_files(self) -> set:
+        """Set of file paths from ``file_change`` items."""
+        return self._touched_files
 
     def _next_tool_id(self) -> str:
         self._tool_counter += 1
@@ -103,7 +109,6 @@ class CodexEventConverter:
             return []
 
         event_type = event.get("type", "")
-        data = event.get("data", event)
 
         try:
             if event_type == "thread.started":
@@ -113,13 +118,13 @@ class CodexEventConverter:
                 return []
 
             if event_type == "item.updated" or event_type == "item.completed":
-                return self._handle_item_event(event_type, data)
+                return self._handle_item_event(event_type, event)
 
             if event_type == "turn.completed":
-                return self._handle_turn_completed(data)
+                return self._handle_turn_completed(event.get("data", event))
 
             if event_type in ("turn.failed", "error"):
-                return self._handle_turn_failed(data)
+                return self._handle_turn_failed(event.get("data", event))
 
             # Unknown event type — log and skip
             logger.debug(
@@ -135,23 +140,28 @@ class CodexEventConverter:
             )
             return []
 
-    def _handle_item_event(self, event_type: str, data: Dict[str, Any]) -> List[str]:
-        """Handle ``item.updated`` / ``item.completed`` events."""
-        item_type = data.get("type", "")
+    def _handle_item_event(self, event_type: str, event: Dict[str, Any]) -> List[str]:
+        """Handle ``item.updated`` / ``item.completed`` events.
+
+        The actual codex ``exec --json`` schema nests items under the ``item``
+        key with types ``agent_message``, ``command_execution``,
+        ``file_change``, and ``mcp_tool_call``::
+
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Hello"}}
+            {"type": "item.completed", "item": {"type": "command_execution", "command": "ls", "output": "...", "exit_code": 0}}
+            {"type": "item.completed", "item": {"type": "file_change", "path": "/tmp/x.py", "content": "x=1"}}
+            {"type": "item.completed", "item": {"type": "mcp_tool_call", "name": "...", ...}}
+        """
         results: List[str] = []
 
-        if item_type == "message" and data.get("role") == "assistant":
-            # Assistant text message
-            content_parts = data.get("content", [])
-            text_chunks: List[str] = []
-            for part in content_parts:
-                if isinstance(part, dict) and part.get("type") == "output_text":
-                    text_chunks.append(part.get("text", ""))
-                elif isinstance(part, str):
-                    text_chunks.append(part)
+        # Codex items are nested under the "item" key; fall back to the whole
+        # event for forward-compat with possible schema variants.
+        item = event.get("item", event)
+        item_type = item.get("type", "")
 
-            if text_chunks:
-                text = "".join(text_chunks)
+        if item_type == "agent_message":
+            text = item.get("text", "")
+            if text:
                 self._agent_messages.append(text)
                 assistant_event = {
                     "type": "assistant",
@@ -161,21 +171,62 @@ class CodexEventConverter:
                 }
                 results.append(json.dumps(assistant_event, ensure_ascii=False))
 
-        elif item_type == "function_call":
-            # Tool invocation (codex's function_call → Claude tool_use)
-            tool_name = data.get("name", "unknown")
-            call_id = data.get("call_id", data.get("id", self._next_tool_id()))
-            arguments = data.get("arguments", "{}")
-            if isinstance(arguments, str):
-                try:
-                    tool_input = json.loads(arguments)
-                except (json.JSONDecodeError, ValueError):
-                    tool_input = {"raw": arguments}
-            else:
-                tool_input = arguments
+        elif item_type == "command_execution":
+            tool_use_id = item.get("call_id", item.get("id", self._next_tool_id()))
+            command = item.get("command", "")
+            output = item.get("output", "")
+            exit_code = item.get("exit_code", 0)
+            is_error = exit_code != 0 if isinstance(exit_code, int) else False
 
-            # Map codex function names to Claude tool names
-            mapped_name = self._map_tool_name(tool_name)
+            # tool_use event
+            tool_use_event = {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": "Bash",
+                            "input": {"command": command},
+                        }
+                    ],
+                },
+            }
+            results.append(json.dumps(tool_use_event, ensure_ascii=False))
+
+            # tool_result event
+            tool_result_event = {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": output,
+                            "is_error": is_error,
+                        }
+                    ],
+                },
+            }
+            results.append(json.dumps(tool_result_event, ensure_ascii=False))
+
+        elif item_type == "file_change":
+            tool_use_id = item.get("call_id", item.get("id", self._next_tool_id()))
+            path = item.get("path", item.get("file_path", ""))
+            content = item.get("content", "")
+            change_type = item.get("change_type", "write")
+
+            # Map to the closest Claude tool
+            mapped_name = "Write" if change_type in ("write", "create") else "Edit"
+            tool_input: Dict[str, Any] = {"file_path": path}
+            if change_type in ("write", "create"):
+                tool_input["content"] = content
+            else:
+                tool_input["new_string"] = content
+
+            # Record touched file for dependency tracking
+            if path:
+                self._touched_files.add(path)
 
             tool_use_event = {
                 "type": "assistant",
@@ -183,7 +234,7 @@ class CodexEventConverter:
                     "content": [
                         {
                             "type": "tool_use",
-                            "id": call_id,
+                            "id": tool_use_id,
                             "name": mapped_name,
                             "input": tool_input,
                         }
@@ -192,26 +243,66 @@ class CodexEventConverter:
             }
             results.append(json.dumps(tool_use_event, ensure_ascii=False))
 
-        elif item_type == "function_call_output":
-            # Tool result (codex's function_call_output → Claude tool_result)
-            call_id = data.get("call_id", data.get("id", self._next_tool_id()))
-            output_text = data.get("output", "")
-            is_error = data.get("is_error", False)
-
+            # Synthesize a successful tool_result for file changes
             tool_result_event = {
                 "type": "user",
                 "message": {
                     "content": [
                         {
                             "type": "tool_result",
-                            "tool_use_id": call_id,
-                            "content": output_text,
-                            "is_error": is_error,
+                            "tool_use_id": tool_use_id,
+                            "content": f"File {change_type}: {path}",
+                            "is_error": False,
                         }
                     ],
                 },
             }
             results.append(json.dumps(tool_result_event, ensure_ascii=False))
+
+        elif item_type == "mcp_tool_call":
+            tool_use_id = item.get("call_id", item.get("id", self._next_tool_id()))
+            tool_name = item.get("name", "unknown")
+            arguments = item.get("arguments", item.get("input", {}))
+            if isinstance(arguments, str):
+                try:
+                    tool_input = json.loads(arguments)
+                except (json.JSONDecodeError, ValueError):
+                    tool_input = {"raw": arguments}
+            else:
+                tool_input = arguments
+
+            tool_use_event = {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": tool_name,
+                            "input": tool_input,
+                        }
+                    ],
+                },
+            }
+            results.append(json.dumps(tool_use_event, ensure_ascii=False))
+
+            # Check for embedded output in the mcp_tool_call item
+            output = item.get("output", item.get("result", ""))
+            if output:
+                tool_result_event = {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": str(output),
+                                "is_error": False,
+                            }
+                        ],
+                    },
+                }
+                results.append(json.dumps(tool_result_event, ensure_ascii=False))
 
         return results
 

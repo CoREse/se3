@@ -7,6 +7,7 @@ to verify the fix loop mechanism works correctly.
 import json
 import logging
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -56,7 +57,7 @@ def test_handler_with_fail_loop(step: Step, flow: FlowInstance) -> StepStatus:
         
         step.outputs["tests_passed"] = tests_passed
         step.outputs["test_results"] = {
-            "command": "python -m pytest -v",
+            "command": f"{sys.executable} -m pytest -v",
             "returncode": result.returncode,
             "passed": tests_passed,
             "stdout": result.stdout,
@@ -124,7 +125,7 @@ def _introduce_temporary_bug(project_root: Path):
 def _run_pytest(project_root: Path) -> subprocess.CompletedProcess:
     """Run pytest and return result."""
     return subprocess.run(
-        ["python", "-m", "pytest", "-v"],
+        [sys.executable, "-m", "pytest", "-v"],
         cwd=project_root,
         capture_output=True,
         text=True,

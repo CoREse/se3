@@ -96,6 +96,8 @@ class TestAgentRunnerABC:
                 return None
             def detect_infra_error(self, returncode, stdout, stderr):
                 return InfraErrorType.NONE
+            def build_call_args(self, prompt, read_only, context_files=None):
+                return ["-p", prompt]
 
         runner = CompleteRunner()
         assert isinstance(runner, AgentRunner)

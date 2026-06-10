@@ -19,6 +19,7 @@ import logging
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
@@ -1135,7 +1136,7 @@ def _detect_test_command(project_root: Path) -> list[str]:
         List of command arguments
     """
     if (project_root / "pytest.ini").exists() or (project_root / "pyproject.toml").exists():
-        return ["python", "-m", "pytest", "-v"]
+        return [sys.executable, "-m", "pytest", "-v"]
 
     if (project_root / "package.json").exists():
         return ["npm", "test"]
@@ -1146,7 +1147,7 @@ def _detect_test_command(project_root: Path) -> list[str]:
     if (project_root / "go.mod").exists():
         return ["go", "test", "./..."]
 
-    return ["python", "-m", "pytest", "-v"]
+    return [sys.executable, "-m", "pytest", "-v"]
 
 
 def _record_test_history(

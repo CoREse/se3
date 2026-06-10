@@ -28,6 +28,16 @@
 
 
 
+
+## 8.12.0 - 2026-06-10
+
+- Add CodexRunner agent type (type: codex) allowing OpenAI Codex CLI to be registered and used as an agent alongside Claude
+- Implement intent-passing architecture for CLI argument construction, moving runner-specific flags out of the shared LLMCaller into each runner
+- Support read-only sandbox enforcement for Codex via --sandbox read-only on read-only steps
+- Inline context files into the prompt for Codex (codex has no --file equivalent)
+- Add CodexEventConverter to normalize Codex JSONL output into Claude-compatible stream-json NDJSON format
+- Implement infrastructure error detection for Codex runner (usage limits, auth failures, timeouts) to participate in agent rotation
+- Remove dead collab remnants: popen/retry_with_next methods, test_collab.py, framework_patterns entries, and TIER_A_DIRS collab/tasks entry
 ## 8.11.3 - 2026-06-10
 
 - Fix daemon-spawned flows failing with exit 127 when launched under systemd or other environments with an impoverished PATH

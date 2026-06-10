@@ -1383,6 +1383,11 @@ class TestCallWithRetryDedup:
             result_obj.output = "test output"
             result_obj.interrupted = False
             runner_inst.run_with_monitor.return_value = result_obj
+            # Configure build_call_args to return a proper args list
+            # (mirrors ClaudeCodeRunner.build_call_args output for a writable step)
+            runner_inst.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
+                "--output-format", "stream-json", "--verbose", "-p", prompt,
+            ]
             mock_get_runner.return_value = runner_inst
 
             # Use a simple on_output callback to avoid StreamJSONTracker setup
@@ -1434,6 +1439,11 @@ class TestCallWithRetryDedup:
             result_obj.output = "test output"
             result_obj.interrupted = False
             runner_inst.run_with_monitor.return_value = result_obj
+            # Configure build_call_args to return a proper args list so that
+            # the test can inspect the -p value after dedup.
+            runner_inst.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
+                "--output-format", "stream-json", "--verbose", "-p", prompt,
+            ]
             mock_get_runner.return_value = runner_inst
 
             output_lines = []
@@ -1500,6 +1510,9 @@ class TestCallWithRetryDedup:
             result_obj.output = "test output"
             result_obj.interrupted = False
             runner_inst.run_with_monitor.return_value = result_obj
+            runner_inst.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
+                "--output-format", "stream-json", "--verbose", "-p", prompt,
+            ]
             mock_get_runner.return_value = runner_inst
 
             output_lines = []
@@ -1570,6 +1583,9 @@ class TestCallWithRetryDedup:
             result_obj.output = "test output"
             result_obj.interrupted = False
             runner_inst.run_with_monitor.return_value = result_obj
+            runner_inst.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
+                "--output-format", "stream-json", "--verbose", "-p", prompt,
+            ]
             mock_get_runner.return_value = runner_inst
 
             output_lines = []
@@ -1670,6 +1686,9 @@ class TestCallWithRetryDedup:
              patch.object(caller, "_rotate_agent"):
             runner_inst = MagicMock()
             runner_inst.run_with_monitor.side_effect = fake_run_with_monitor
+            runner_inst.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
+                "--output-format", "stream-json", "--verbose", "-p", prompt,
+            ]
             mock_get_runner.return_value = runner_inst
 
             output_lines = []
@@ -1721,6 +1740,9 @@ class TestCallWithRetryDedup:
             result_obj.output = "test output"
             result_obj.raw_lines = []
             runner_inst.run_with_monitor.return_value = result_obj
+            runner_inst.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
+                "--output-format", "stream-json", "--verbose", "-p", prompt,
+            ]
             mock_get_runner.return_value = runner_inst
 
             caller._call_with_retry(

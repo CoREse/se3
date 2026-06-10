@@ -71,6 +71,9 @@ class _FakeRunner:
 
         return InfraErrorType.NONE
 
+    def build_call_args(self, prompt, read_only, context_files=None):
+        return ["--output-format", "stream-json", "--verbose", "-p", prompt]
+
 
 def _discovery_ndjson(result_obj: dict) -> str:
     """Build a Claude stream-json NDJSON output carrying *result_obj* as the

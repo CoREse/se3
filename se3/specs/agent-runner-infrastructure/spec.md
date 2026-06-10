@@ -3,13 +3,17 @@
 
 ## Purpose
 
-The agent-runner-infrastructure subsystem is the subprocess execution layer that drives the Claude Code CLI for every LLM call made by SE3. It defines an abstract `AgentRunner` interface (with a `RunResult` dataclass and `InfraErrorType` taxonomy) plus a concrete `ClaudeCodeRunner` adapter that handles process spawning, real-time output streaming, stdout/stderr capture, hang detection via psutil resource probes, wall-clock and inactivity timeout enforcement, usage-limit keyword scanning, a large-prompt rerouting path that moves oversized `-p`/`--prompt` values to stdin to avoid Linux `execve()` `E2BIG` failures, and a conservative CLI-subprocess confirmation-prompt capture path that surfaces interactive child prompts (e.g. `按 1 确定` / `Press 1 to confirm`) to the engine via an optional `on_confirm` callback. The runner wraps exactly one Claude CLI command per instance; multi-command rotation/fallback is owned by `LLMCaller` upstream.
+The agent-runner-infrastructure subsystem is the subprocess execution layer that drives agent CLIs for every LLM call made by SE3. It defines an abstract `AgentRunner` interface (with a `RunResult` dataclass and `InfraErrorType` taxonomy) plus two concrete adapters: a `ClaudeCodeRunner` (Claude Code CLI) and a `CodexRunner` (OpenAI Codex CLI). The Claude adapter handles process spawning, real-time output streaming, stdout/stderr capture, hang detection via psutil resource probes, wall-clock and inactivity timeout enforcement, usage-limit keyword scanning, a large-prompt rerouting path that moves oversized `-p`/`--prompt` values to stdin to avoid Linux `execve()` `E2BIG` failures, and a conservative CLI-subprocess confirmation-prompt capture path that surfaces interactive child prompts (e.g. `按 1 确定` / `Press 1 to confirm`) to the engine via an optional `on_confirm` callback. The `CodexRunner` wraps a single `codex exec --json` command and normalizes Codex's JSONL event stream into Claude-compatible stream-json NDJSON so all upstream consumers are runner-agnostic. Each runner wraps exactly one CLI command per instance; multi-command rotation/fallback is owned by `LLMCaller` upstream.
+
+LLM-agnostic concerns (the stream-json NDJSON contract, history recording, retry-context reconstruction, web-console rendering) are shared and taken from Claude's stream-json model; LLM-specific concerns (CLI argument construction and output-message parsing) are each runner's own responsibility, surfaced through the `build_call_args` intent-translation method.
 
 ## Requirements
 
 ### Requirement: Abstract AgentRunner Interface
 
-The subsystem MUST expose an `AgentRunner` abstract base class defining the contract that `LLMCaller` (and any other caller) uses to interact with agent implementations. The contract has three abstract methods — `run`, `run_with_monitor`, and `detect_infra_error` — and is implementation-agnostic so future runner types (API-based, other CLIs) can satisfy it.
+The subsystem MUST expose an `AgentRunner` abstract base class defining the contract that `LLMCaller` (and any other caller) uses to interact with agent implementations. The contract has four abstract methods — `run`, `run_with_monitor`, `detect_infra_error`, and `build_call_args` — and is implementation-agnostic so future runner types (API-based, other CLIs) can satisfy it. Two concrete implementations exist: `ClaudeCodeRunner` and `CodexRunner`.
+
+`build_call_args` is the intent-translation seam that keeps `LLMCaller` free of any LLM-specific CLI knowledge: the caller passes the *intent* of a call (the effective prompt, whether the step is read-only, and the list of context files), and each runner translates that intent into its own concrete CLI flags. This is what lets a single centralized dispatch in `LLMCaller` serve every runner without per-runner branching.
 
 #### Scenario: run method signature
 - **WHEN** a subclass implements `AgentRunner.run`
@@ -25,6 +29,11 @@ The subsystem MUST expose an `AgentRunner` abstract base class defining the cont
 - **WHEN** a subclass implements `AgentRunner.detect_infra_error`
 - **THEN** it MUST accept `returncode: int`, `stdout: str`, `stderr: str`
 - **AND** it MUST return an `InfraErrorType` enum value
+
+#### Scenario: build_call_args method signature
+- **WHEN** a subclass implements `AgentRunner.build_call_args`
+- **THEN** it MUST accept the effective `prompt: str`, a `read_only: bool` flag indicating whether the step is read-only, and a `context_files: List[str]` (or equivalent) list
+- **AND** it MUST return a `List[str]` of the runner-specific CLI args that express that intent (the CLI-flag translation is the runner's own responsibility, not `LLMCaller`'s)
 
 ### Requirement: InfraErrorType Taxonomy
 
@@ -63,6 +72,58 @@ The subsystem MUST define a `RunResult` dataclass that bundles the outcome of an
 - **WHEN** any of the constructor paths above is used
 - **THEN** the runner exposes a `self.commands` list view (either the legacy list if supplied, or `[self.command]`) for callers that still iterate
 
+### Requirement: ClaudeCodeRunner Argument Construction
+
+`ClaudeCodeRunner.build_call_args` MUST translate the caller's call-intent into the exact Claude CLI argv that `LLMCaller` previously hard-coded, so that the parameter-construction down-shift from `LLMCaller` into the runner is behavior-preserving. The translated argv MUST be byte-for-byte identical to the prior hard-coded form.
+
+#### Scenario: Claude argv translated from intent
+- **WHEN** `build_call_args(prompt, read_only, context_files)` is called
+- **THEN** it emits `["--output-format", "stream-json", "--verbose", "-p", prompt]` as the base argv
+- **AND** each entry in `context_files` is appended as a `--file <path>` pair
+- **AND** when `read_only` is true it appends `--disallowedTools Write Edit NotebookEdit AskUserQuestion` (tool-layer read-only enforcement), leaving the read tools `Read` / `Grep` / `Glob` / `Bash` available
+- **AND** when `read_only` is false no `--disallowedTools` argument is added
+
+### Requirement: Codex CLI Runner
+
+`CodexRunner` (`src/se3/codex_runner.py`) MUST implement the `AgentRunner` ABC (`run`, `run_with_monitor`, `build_call_args`, `detect_infra_error`) to wrap a single OpenAI Codex CLI command, registered for `type: codex` agents via `LLMCaller._create_runner`. Like `ClaudeCodeRunner` it wraps exactly one command per instance and performs no rotation/fallback internally. The runner's design split mirrors the subsystem's principle: the LLM-agnostic transport (stream-json NDJSON, history, retry-context) is shared, while the Codex-specific argv construction and event parsing live entirely inside this runner. Authentication is out of scope — the `codex` command is assumed to be runnable in the environment, the same assumption made for `claude`.
+
+#### Scenario: Codex argv translated from intent
+- **WHEN** `build_call_args(prompt, read_only, context_files)` is called
+- **THEN** the base argv form is `codex exec --json --skip-git-repo-check -a never` followed by the prompt as a positional argument (defensive explicit no-approval via `-a never`; `--skip-git-repo-check` so Codex runs outside a git repo check)
+- **AND** when `read_only` is true the sandbox flag `--sandbox read-only` is added (OS-level enforcement, stronger than Claude's tool-level `--disallowedTools`)
+- **AND** when `read_only` is false the flag `--dangerously-bypass-approvals-and-sandbox` is added (the Codex equivalent of Claude's `--dangerously-skip-permissions`: no sandbox, no approvals)
+- **AND** because Codex has no `--file` equivalent, each `context_files` entry's content is inlined into the prompt rather than passed as a flag
+- **AND** a prompt whose UTF-8 byte length exceeds the safe argv threshold is routed to the child's stdin (via the `-` marker) rather than passed as a positional argument
+
+#### Scenario: Codex JSONL normalized to Claude-compatible stream-json
+- **GIVEN** a `CodexEventConverter` consuming Codex's `--json` JSONL event stream (`thread.started`, `turn.started` / `turn.completed` / `turn.failed`, and `item.*` events such as `agent_message`, `command_execution`, `file_change`, `mcp_tool_call`)
+- **WHEN** each event is converted in real time
+- **THEN** an `agent_message` becomes an `assistant` text event
+- **AND** a `command_execution` becomes a `tool_use` (Bash semantics) plus its result event
+- **AND** a `file_change` becomes a file-writing `tool_use` (so `_last_touched_files` extraction works unchanged)
+- **AND** an `mcp_tool_call` becomes the corresponding `tool_use` / result events
+- **AND** a `turn.completed` (carrying usage) becomes the final `type: "result"` event with usage
+- **AND** a `turn.failed` / `error` event becomes an error `type: "result"` event
+- **AND** the output is Claude-compatible stream-json NDJSON, so `StreamJSONTracker`, chat-history persistence, retry/continue context reconstruction, web-console rendering, `last_raw_result`, and `_last_touched_files` all consume it with zero changes
+
+#### Scenario: Unknown Codex event types tolerated
+- **GIVEN** the Codex `--json` schema is historically unversioned and has changed over time
+- **WHEN** the converter encounters an event type it does not recognize, or a non-JSON line
+- **THEN** it degrades to a log line and skips the event rather than raising, so an unknown event never crashes the conversion
+- **AND** a `finalize()` fallback synthesizes a terminal `result` event when the stream ended without one
+
+#### Scenario: Codex infrastructure-error classification
+- **WHEN** `detect_infra_error(returncode, stdout, stderr)` is called for a Codex run
+- **THEN** a usage-limit signal (an `error` / `turn.failed` message containing a "usage limit"-class substring, matched defensively) or an authentication failure (e.g. `401 Unauthorized`) is classified as `USAGE_LIMIT`
+- **AND** `returncode == 124` (the shared inactivity/timeout signal) is classified as `TIMEOUT`
+- **AND** a successful run is classified as `NONE`
+- **AND** this lets a Codex agent participate correctly in `LLMCaller`'s rotation mechanism
+
+#### Scenario: Retry/continue reuses the agent-agnostic mechanism
+- **WHEN** a Codex attempt is retried or continued
+- **THEN** the runner does NOT use Codex's native `codex exec resume`; retry context is reconstructed from the chat-history NDJSON by SE3's existing agent-agnostic retry-context mechanism
+- **AND** this guarantees a Claude attempt and a Codex attempt can hand off to each other within a single rotation chain
+
 ### Requirement: Setting-Sources Injection
 
 Every spawned Claude subprocess MUST be invoked with `--setting-sources <csv>` so SE3 workers are not constrained by a downstream project's `.claude/settings.json` `permissions.deny` rules.
@@ -80,7 +141,7 @@ Every spawned Claude subprocess MUST be invoked with `--setting-sources <csv>` s
 - **THEN** the runner defaults to `["user"]`
 
 #### Scenario: argv injection
-- **WHEN** any `run` / `popen` / `run_with_monitor` invocation builds the argv
+- **WHEN** any `run` / `run_with_monitor` invocation builds the argv
 - **THEN** the argv MUST be `[cmd_name, "--dangerously-skip-permissions", "--setting-sources", <csv>] + resolved_args`
 
 ### Requirement: Large-Prompt Auto-Filing via Stdin

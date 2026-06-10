@@ -1144,8 +1144,15 @@ needs an agent (`llm_caller.defaults`, `llm_caller.steps.<step>`,
 `agents` MUST be a dict whose keys are unique agent names and whose
 values are `AgentDef` dicts. Each `AgentDef` has:
 
-- `type`: agent type identifier (default `"claude-code"`)
-- `cmd`: CLI command invoked when the agent is selected (required)
+- `type`: agent type identifier (default `"claude-code"`). Recognized
+  values are `"claude-code"` (constructs a `ClaudeCodeRunner`) and
+  `"codex"` (constructs a `CodexRunner` for the OpenAI Codex CLI) — see
+  the agent-runner-infrastructure *Codex CLI Runner* requirement.
+  `LLMCaller._create_runner` dispatches on this value.
+- `cmd`: CLI command invoked when the agent is selected (required).
+  Model selection and other extra parameters are expressed via flags
+  carried directly on `cmd` (e.g. `-m <model>`); no additional config
+  surface is introduced for them.
 - `priority`: integer used to order a chain; higher priority is tried
   first (default `0`)
 
@@ -1227,6 +1234,19 @@ value is not looked up in the registry.
 - **THEN** each entry is parsed into an `AgentDef` with the given
   `type`, `cmd`, and `priority`
 - **AND** the name is taken from the dict key
+
+#### Scenario: Codex agent registered and referenced in caller chains
+- **GIVEN** an `agents` entry declaring `type: codex` (with its own
+  `cmd` such as `codex` or `codex -m <model>`, and an optional
+  `priority`), e.g.
+  `agents: { gpt: { type: codex, cmd: codex, priority: 5 } }`
+- **WHEN** the entry is referenced by name from `llm_caller.defaults`
+  or `llm_caller.steps.<step>`
+- **THEN** config loading/validation accepts the `codex` type value and
+  the reference resolves to the registry entry
+- **AND** `LLMCaller._create_runner` constructs a `CodexRunner` for that
+  agent, so it participates in the default chain, per-step override, and
+  agent rotation exactly like a `claude-code` agent
 
 #### Scenario: String shorthand expands to AgentDef with defaults
 - **GIVEN** `agents.primary: "claude"` in se3.yaml (a bare string value

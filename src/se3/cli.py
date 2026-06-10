@@ -219,11 +219,21 @@ def run_cmd(
     # Handle preset prompts (common-task library). A preset carries its own
     # task type, so it is mutually exclusive with an explicit --type.
     if preset is not None:
-        import click
+        # Detect whether --type was explicitly passed on the command line.
+        # Typer versions that vendor click expose ParameterSource via
+        # typer._click; older versions delegate to the system click.
+        try:
+            from typer._click import core as _click_core
+
+            _cmdline = _click_core.ParameterSource.COMMANDLINE
+        except (ImportError, ModuleNotFoundError):
+            from click.core import ParameterSource as _PS
+
+            _cmdline = _PS.COMMANDLINE
 
         from .preset_loader import PresetError, list_presets, resolve
 
-        if ctx.get_parameter_source("type") == click.core.ParameterSource.COMMANDLINE:
+        if ctx.get_parameter_source("type") == _cmdline:
             raise typer.BadParameter(
                 "--preset and --type are mutually exclusive; a preset carries "
                 "its own task type.",
