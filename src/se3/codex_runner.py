@@ -537,9 +537,9 @@ class CodexRunner(AgentRunner):
 
         Produces the argv for ``codex exec --json``:
 
-        * Constant prefix: ``exec --json --skip-git-repo-check -a never``
+        * Constant prefix: ``exec --json --skip-git-repo-check``
         * Read-only: ``--sandbox read-only``
-        * Writable: ``--dangerously-bypass-approvals-and-sandbox``
+        * Writable: ``--sandbox danger-full-access``
         * Context files: content inlined into the prompt (codex has no
           ``--file`` equivalent)
         * Prompt: positional argument at the end, or ``-`` (stdin marker)
@@ -553,14 +553,13 @@ class CodexRunner(AgentRunner):
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "-a", "never",
         ]
 
         # Sandbox / approval flags
         if read_only:
             args.extend(["--sandbox", "read-only"])
         else:
-            args.append("--dangerously-bypass-approvals-and-sandbox")
+            args.extend(["--sandbox", "danger-full-access"])
 
         # Context files — codex has no --file flag, so inline content into prompt
         effective_prompt = prompt

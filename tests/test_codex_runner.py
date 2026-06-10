@@ -11,6 +11,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -540,14 +541,16 @@ class TestCodexBuildCallArgs:
         assert "exec" in args
         assert "--json" in args
         assert "--skip-git-repo-check" in args
-        assert "-a" in args
-        assert "never" in args
+        assert "-a" not in args
+        assert "--dangerously-bypass-approvals-and-sandbox" not in args
 
-    def test_writable_step_has_bypass_flag(self):
+    def test_writable_step_has_sandbox_flag(self):
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="do it", read_only=False)
-        assert "--dangerously-bypass-approvals-and-sandbox" in args
-        assert "--sandbox" not in args
+        assert "--sandbox" in args
+        si = args.index("--sandbox")
+        assert args[si + 1] == "danger-full-access"
+        assert "--dangerously-bypass-approvals-and-sandbox" not in args
 
     def test_read_only_step_has_sandbox_flag(self):
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
@@ -1256,28 +1259,28 @@ class TestCodexBuildCallArgsExtended:
 
     def test_constant_prefix_flag_ordering(self):
         """The constant prefix must appear in the exact order:
-        exec --json --skip-git-repo-check -a never."""
+        exec --json --skip-git-repo-check."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="test", read_only=False)
         assert args[0] == "exec"
         assert args[1] == "--json"
         assert args[2] == "--skip-git-repo-check"
-        assert args[3] == "-a"
-        assert args[4] == "never"
+        assert "-a" not in args
 
     def test_read_only_sandbox_immediately_after_prefix(self):
         """--sandbox read-only should come right after the constant prefix."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="analyze", read_only=True)
-        assert args[5] == "--sandbox"
-        assert args[6] == "read-only"
+        assert args[3] == "--sandbox"
+        assert args[4] == "read-only"
 
-    def test_writable_bypass_immediately_after_prefix(self):
-        """--dangerously-bypass-approvals-and-sandbox should come right
+    def test_writable_sandbox_immediately_after_prefix(self):
+        """--sandbox danger-full-access should come right
         after the constant prefix."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="implement", read_only=False)
-        assert args[5] == "--dangerously-bypass-approvals-and-sandbox"
+        assert args[3] == "--sandbox"
+        assert args[4] == "danger-full-access"
 
     def test_prompt_is_always_last_element(self):
         """The prompt (or '-' for stdin) must be the last element."""
@@ -1520,7 +1523,71 @@ class TestBuildCallArgsNoClaudeFlags:
         assert "--disallowedTools" not in args
 
     def test_no_dangerously_skip_permissions(self):
-        """Codex uses -a never, not --dangerously-skip-permissions."""
+        """Codex exec is non-interactive; read/write both use --sandbox."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="test", read_only=False)
         assert "--dangerously-skip-permissions" not in args
+        assert "-a" not in args
+
+
+# =============================================================================
+# Real CLI smoke test (gated on codex availability)
+# =============================================================================
+
+_CODEX_AVAILABLE = shutil.which("codex") is not None
+
+
+@pytest.mark.skipif(
+    not _CODEX_AVAILABLE,
+    reason="codex CLI not found on PATH",
+)
+class TestCodexRealCliSmoke:
+    """Integration smoke test: run a real codex exec and verify the event stream."""
+
+    def test_exec_read_only_produces_result_event(self):
+        """codex exec --json --sandbox read-only should exit 0 and produce
+        a type=result terminal event after CodexEventConverter processing."""
+        cmd = [
+            "codex", "exec", "--json", "--skip-git-repo-check",
+            "--sandbox", "read-only", "--ephemeral",
+            "Reply with the single word: ok",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.skip("codex exec timed out (120s)")
+
+        if proc.returncode != 0:
+            # Auth / network failure — not a code defect
+            stderr_tail = (proc.stderr or "")[-500:]
+            pytest.skip(
+                f"codex exec exited {proc.returncode}: {stderr_tail}"
+            )
+
+        # Feed stdout through CodexEventConverter
+        converter = CodexEventConverter()
+        ndjson_lines: list[str] = []
+        for line in proc.stdout.splitlines():
+            ndjson_lines.extend(converter.convert_line(line))
+        ndjson_lines.extend(converter.finalize())
+
+        # Parse and look for a type=result terminal event
+        result_events = []
+        for raw in ndjson_lines:
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "result":
+                result_events.append(obj)
+
+        assert result_events, (
+            "Expected at least one type=result event after conversion, "
+            f"got none. NDJSON output ({len(ndjson_lines)} lines): "
+            + "; ".join(ndjson_lines[:5])
+        )

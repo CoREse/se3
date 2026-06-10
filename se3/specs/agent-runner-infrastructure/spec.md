@@ -89,9 +89,11 @@ The subsystem MUST define a `RunResult` dataclass that bundles the outcome of an
 
 #### Scenario: Codex argv translated from intent
 - **WHEN** `build_call_args(prompt, read_only, context_files)` is called
-- **THEN** the base argv form is `codex exec --json --skip-git-repo-check -a never` followed by the prompt as a positional argument (defensive explicit no-approval via `-a never`; `--skip-git-repo-check` so Codex runs outside a git repo check)
+- **THEN** the base argv form is `codex exec --json --skip-git-repo-check` followed by a `--sandbox <mode>` pair and then the prompt as a positional argument (`--skip-git-repo-check` so Codex runs outside a git repo check)
+- **AND** the argv MUST NOT contain `-a` / `--ask-for-approval` (the `codex exec` subcommand is non-interactive and has no approval step; passing `-a` causes `error: unexpected argument '-a' found`)
+- **AND** the argv MUST NOT contain the legacy `--dangerously-bypass-approvals-and-sandbox` flag (superseded by the explicit `--sandbox danger-full-access` mode below)
 - **AND** when `read_only` is true the sandbox flag `--sandbox read-only` is added (OS-level enforcement, stronger than Claude's tool-level `--disallowedTools`)
-- **AND** when `read_only` is false the flag `--dangerously-bypass-approvals-and-sandbox` is added (the Codex equivalent of Claude's `--dangerously-skip-permissions`: no sandbox, no approvals)
+- **AND** when `read_only` is false the flag `--sandbox danger-full-access` is added (the non-legacy explicit "no sandbox" mode; under the non-interactive `exec` mode its effect is equivalent to the legacy `--dangerously-bypass-approvals-and-sandbox`, while remaining symmetric with the read-only branch's `--sandbox read-only`)
 - **AND** because Codex has no `--file` equivalent, each `context_files` entry's content is inlined into the prompt rather than passed as a flag
 - **AND** a prompt whose UTF-8 byte length exceeds the safe argv threshold is routed to the child's stdin (via the `-` marker) rather than passed as a positional argument
 

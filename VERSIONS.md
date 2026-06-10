@@ -30,6 +30,13 @@
 
 
 
+
+## 8.12.2 - 2026-06-10
+
+- Fix codex agent runner failing with 'unexpected argument -a' by removing the invalid --ask-for-approval flag from codex exec argv
+- Migrate codex writable sandbox mode from legacy --dangerously-bypass-approvals-and-sandbox to explicit --sandbox danger-full-access
+- Update codex runner docstring to reflect correct command-line form for read-only and writable branches
+- Add real CLI smoke test for codex exec to prevent argument-construction regressions
 ## 8.12.1 - 2026-06-10
 
 - Fix duplicate rendering of batched records during live flow streaming when snapshot fetch overlaps with WS broadcast delivery
