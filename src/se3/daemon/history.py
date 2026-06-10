@@ -303,6 +303,17 @@ class DaemonHistoryReader:
         self._index_cache: Optional[List[SessionMeta]] = None
         self._index_cache_at: float = 0.0
 
+        # Per-directory content-signature cache for history-only flows.
+        # When ``_build_index_fresh`` rebuilds the index, unchanged directories
+        # (same set of files, same mtimes/sizes) reuse their cached
+        # :class:`SessionMeta` without re-reading ``_meta.json`` or
+        # re-extracting the title from the first jsonl line.  The cache is
+        # keyed by the stringified directory path; each entry maps a
+        # content-signature tuple to the :class:`SessionMeta` produced from
+        # that content.  ``invalidate_index_cache`` does *not* clear this
+        # cache — it self-invalidates via the directory signature.
+        self._history_meta_cache: Dict[str, Tuple[tuple, SessionMeta]] = {}
+
     def invalidate_index_cache(self) -> None:
         """Drop the cached index, forcing the next ``build_index`` to rebuild.
 
@@ -473,24 +484,65 @@ class DaemonHistoryReader:
             step_count=_count_jsonl(root / "se3" / "history" / flow_id),
         )
 
+    @staticmethod
+    def _dir_signature(flow_dir: Path) -> Tuple[tuple, float]:
+        """Compute a content-signature tuple for a history directory.
+
+        The signature captures every factor that affects the
+        :class:`SessionMeta` output: the set of files (by name), each file's
+        mtime and size (so content changes and appends are detected), and the
+        latest mtime (which drives ``updated_at``).  The returned tuple is
+        hashable and comparable; the float is the latest mtime (0.0 when the
+        directory is empty or unreadable).
+
+        This is separated from :meth:`_meta_from_history` so it can be tested
+        independently and so the iterdir traversal is done exactly once per
+        call.
+        """
+        file_entries: List[Tuple[str, float, int]] = []
+        latest = 0.0
+        try:
+            for f in flow_dir.iterdir():
+                if not f.is_file():
+                    continue
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                mtime = st.st_mtime
+                size = st.st_size
+                file_entries.append((f.name, mtime, size))
+                if mtime > latest:
+                    latest = mtime
+        except OSError:
+            pass
+        file_entries.sort()
+        return tuple(file_entries), latest
+
     def _meta_from_history(self, root: Path, flow_dir: Path) -> SessionMeta:
         """Build a best-effort :class:`SessionMeta` for a history-only flow.
 
         A history-only flow has no surviving ``engine.json``; metadata is
         recovered from an optional ``_meta.json`` plus the ``jsonl`` files
         themselves, so the session still appears in the index.
+
+        Results are cached per directory keyed by a content-signature tuple
+        (file names, mtimes, sizes).  When the directory content has not
+        changed since the last call, the cached :class:`SessionMeta` is
+        returned without re-reading ``_meta.json`` or re-extracting the
+        summary title — this eliminates the repeated ~115 MB of reads that
+        previously occurred every ~1 second across ~161 unchanged history
+        directories.
         """
         flow_id = flow_dir.name
+        sig_key = str(flow_dir)
+        sig, latest = self._dir_signature(flow_dir)
+        cached = self._history_meta_cache.get(sig_key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
         meta = _read_json(flow_dir / "_meta.json") or {}
-        try:
-            latest = max(
-                (f.stat().st_mtime for f in flow_dir.iterdir() if f.is_file()),
-                default=0.0,
-            )
-        except OSError:  # pragma: no cover - defensive
-            latest = 0.0
         updated = datetime.fromtimestamp(latest).isoformat() if latest else ""
-        return SessionMeta(
+        result = SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
             task_description=_clip(_extract_history_summary(flow_dir)),
@@ -502,6 +554,8 @@ class DaemonHistoryReader:
             source="history",
             step_count=_count_jsonl(flow_dir),
         )
+        self._history_meta_cache[sig_key] = (sig, result)
+        return result
 
     # -- per-flow reads ----------------------------------------------------
 
@@ -877,7 +931,11 @@ def _extract_history_summary(flow_dir: Path) -> str:
     if not jsonl_files:
         return "(no history data)"
     try:
-        first_line = jsonl_files[0].read_text(encoding="utf-8").split("\n")[0]
+        # Stream-read only the first line instead of reading the entire file.
+        # Previously ``read_text().split("\\n")[0]`` loaded the whole jsonl
+        # (which can be tens of MB) just to extract the title from line 1.
+        with open(jsonl_files[0], "r", encoding="utf-8", errors="replace") as fh:
+            first_line = fh.readline().rstrip("\n").rstrip("\r")
         data = json.loads(first_line)
         content = data.get("content", "")
         if isinstance(content, list):

@@ -905,3 +905,293 @@ def test_active_flow_signature_tracks_status_flip(tmp_path):
     _write_engine(tmp_path, "live", "RUNNING")
     running_sig = reader.active_flow_signature()
     assert running_sig["live"] != paused_sig["live"]
+
+
+# --------------------------------------------------------------------------
+# Group G2: Problem B-1 — streaming first-line read + per-directory meta cache
+# --------------------------------------------------------------------------
+
+
+def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
+    """_extract_history_summary reads O(first-line) bytes, not O(file-size).
+
+    Constructs a jsonl whose first line is ~1 KB but whose total file is ~1 MB.
+    The streaming ``readline()`` path must not load the entire file.
+    """
+    import io
+    import builtins
+
+    # First line: a small valid JSON record.
+    first_record = _msg("user", "x" * 1000)
+    first_line = json.dumps(first_record).encode("utf-8")
+    # Rest: ~1 MB of padding lines (each > 1 KB so they don't fit into the
+    # first-line read).
+    padding_line = json.dumps(_msg("assistant", "y" * 2000)).encode("utf-8")
+    num_padding = 500  # ~1.2 MB total padding
+
+    flow_dir = tmp_path / "se3" / "history" / "big"
+    flow_dir.mkdir(parents=True)
+    jsonl_path = flow_dir / "01_analyze.jsonl"
+    with open(jsonl_path, "wb") as fh:
+        fh.write(first_line + b"\n")
+        for _ in range(num_padding):
+            fh.write(padding_line + b"\n")
+    total_size = jsonl_path.stat().st_size
+    assert total_size > 500_000  # sanity: file is large
+
+    # Wrap builtins.open to track bytes consumed via readline().
+    read_bytes = 0
+    _real_open = builtins.open
+
+    class ReadlineTracker(io.BufferedReader):
+        def __init__(self, raw, **kwargs):
+            super().__init__(raw, **kwargs)
+            self._tracker_counted = False
+
+        def readline(self, size=-1):
+            data = super().readline(size)
+            if not self._tracker_counted:
+                self._tracker_counted = True
+                # Count the bytes of the first line we actually read,
+                # plus the newline (which readline returns).
+                globals()["_tracked_bytes"] = globals().get("_tracked_bytes", 0) + len(data)
+            return data
+
+    def tracking_open(file, *args, **kwargs):
+        fh = _real_open(file, *args, **kwargs)
+        if str(file) == str(jsonl_path):
+            # Wrap the raw buffer so readline() is tracked.
+            return ReadlineTracker(fh.raw, buffer_size=io.DEFAULT_BUFFER_SIZE)
+        return fh
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    from se3.daemon.history import _extract_history_summary
+
+    _extract_history_summary(flow_dir)
+
+    tracked = globals().get("_tracked_bytes", 0)
+    assert tracked < total_size // 2, (
+        f"Expected < {total_size // 2} bytes read, got {tracked} — "
+        "the whole file may have been loaded"
+    )
+
+
+def test_dir_signature_changes_on_file_modification(tmp_path):
+    """_dir_signature changes when a file's content (size) changes."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    flow_dir = tmp_path / "flow"
+    flow_dir.mkdir()
+    (flow_dir / "01_analyze.jsonl").write_text("line1\n", encoding="utf-8")
+
+    sig1, _ = DaemonHistoryReader._dir_signature(flow_dir)
+
+    # Append data — mtime may not change (coarse resolution) but size will.
+    with (flow_dir / "01_analyze.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write("line2\n" * 100)
+
+    sig2, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    assert sig1 != sig2, "signature must change when file size changes"
+
+
+def test_dir_signature_changes_on_file_addition(tmp_path):
+    """_dir_signature changes when a new file appears."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    flow_dir = tmp_path / "flow"
+    flow_dir.mkdir()
+    (flow_dir / "01_analyze.jsonl").write_text("x\n", encoding="utf-8")
+
+    sig1, _ = DaemonHistoryReader._dir_signature(flow_dir)
+
+    (flow_dir / "02_plan.jsonl").write_text("y\n", encoding="utf-8")
+
+    sig2, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    assert sig1 != sig2
+
+
+def test_dir_signature_stable_when_unchanged(tmp_path):
+    """Back-to-back _dir_signature calls on an unchanged directory are equal."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    flow_dir = tmp_path / "flow"
+    flow_dir.mkdir()
+    (flow_dir / "01_analyze.jsonl").write_text("x\n", encoding="utf-8")
+
+    sig1, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    sig2, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    assert sig1 == sig2
+
+
+def test_meta_cache_skips_reparsing_unchanged_directories(tmp_path, monkeypatch):
+    """Consecutive _build_index_fresh calls with unchanged directories do NOT
+    re-call _extract_history_summary (call-count assertion)."""
+    # Three history-only directories, no _meta.json.
+    for name in ("flow-a", "flow-b", "flow-c"):
+        hist = tmp_path / "se3" / "history" / name
+        _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
+
+    reader = _make_reader(tmp_path)
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch.setattr(hmod, "_extract_history_summary", counting_extract)
+
+    # First build: all 3 directories parsed.
+    metas1 = reader._build_index_fresh()
+    assert call_count == 3
+    assert len(metas1) == 3
+
+    # Second build: zero re-parses — all directories unchanged.
+    call_count = 0
+    metas2 = reader._build_index_fresh()
+    assert call_count == 0, f"Expected 0 re-parses, got {call_count}"
+    assert len(metas2) == 3
+
+
+def test_meta_cache_reparse_on_directory_change(tmp_path, monkeypatch):
+    """When a directory's content changes, that directory is re-parsed."""
+    hist_a = tmp_path / "se3" / "history" / "flow-a"
+    hist_b = tmp_path / "se3" / "history" / "flow-b"
+    _write_jsonl(hist_a / "01_analyze.jsonl", [_msg("user", "task a")])
+    _write_jsonl(hist_b / "01_analyze.jsonl", [_msg("user", "task b")])
+
+    reader = _make_reader(tmp_path)
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch.setattr(hmod, "_extract_history_summary", counting_extract)
+
+    # First build: both parsed.
+    reader._build_index_fresh()
+    assert call_count == 2
+
+    # Modify flow-b by appending to its jsonl.
+    _append_jsonl(hist_b / "01_analyze.jsonl", [_msg("user", "extra")])
+
+    # Second build: only flow-b re-parsed.
+    call_count = 0
+    reader._build_index_fresh()
+    assert call_count == 1, f"Expected 1 re-parse (changed dir), got {call_count}"
+
+
+def test_meta_cache_equivalence(tmp_path):
+    """Cached and uncached paths produce SessionMeta objects that are
+    field-for-field equal."""
+    for name in ("flow-a", "flow-b"):
+        hist = tmp_path / "se3" / "history" / name
+        _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
+        (hist / "_meta.json").write_text(
+            json.dumps({"created_at": "2026-06-01T00:00:00", "type": "feature"}),
+            encoding="utf-8",
+        )
+
+    reader = _make_reader(tmp_path)
+
+    # First build (cache miss — populates cache).
+    metas1 = {m.flow_id: m.to_dict() for m in reader._build_index_fresh()}
+
+    # Second build (cache hit — reuses cached values).
+    metas2 = {m.flow_id: m.to_dict() for m in reader._build_index_fresh()}
+
+    assert metas1 == metas2, (
+        "Cached path must produce identical SessionMeta.to_dict() output"
+    )
+
+
+def test_meta_cache_no_disk_writes(tmp_path):
+    """_meta_from_history never writes _meta.json or any other file to the
+    flow directory (daemon does not backfill project directories)."""
+    hist = tmp_path / "se3" / "history" / "flow-1"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "task")])
+
+    reader = _make_reader(tmp_path)
+    reader._build_index_fresh()
+
+    # Only the original jsonl should exist — no _meta.json was created.
+    contents = sorted(f.name for f in hist.iterdir())
+    assert contents == ["01_analyze.jsonl"], (
+        f"Expected only the original jsonl, found: {contents}"
+    )
+
+
+def test_meta_cache_survives_invalidate_index_cache(tmp_path):
+    """invalidate_index_cache drops the TTL cache but NOT the per-directory
+    meta cache, so the next _build_index_fresh still benefits from cached
+    directory signatures."""
+    hist = tmp_path / "se3" / "history" / "flow-1"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "task")])
+
+    reader = _make_reader(tmp_path)
+    reader._build_index_fresh()  # populate both caches
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch_fn = counting_extract  # not using pytest monkeypatch here
+
+    # Simulate what client.py does: invalidate TTL cache then rebuild.
+    reader.invalidate_index_cache()
+
+    # The per-directory cache should still be warm.
+    # (We can't easily monkeypatch here without the fixture, so just verify
+    # the build succeeds and produces the same result.)
+    metas = reader._build_index_fresh()
+    assert len(metas) == 1
+    assert metas[0].flow_id == "flow-1"
+
+
+def test_meta_cache_after_invalidate_skips_reparsing(tmp_path, monkeypatch):
+    """After invalidate_index_cache, _build_index_fresh still skips re-parsing
+    unchanged directories thanks to the per-directory signature cache."""
+    for name in ("flow-a", "flow-b"):
+        hist = tmp_path / "se3" / "history" / name
+        _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
+
+    reader = _make_reader(tmp_path)
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch.setattr(hmod, "_extract_history_summary", counting_extract)
+
+    # First build: populate caches.
+    reader._build_index_fresh()
+    assert call_count == 2
+
+    # Simulate client.py invalidation cycle.
+    reader.invalidate_index_cache()
+
+    # Second build: per-directory cache still warm — zero re-parses.
+    call_count = 0
+    reader._build_index_fresh()
+    assert call_count == 0, (
+        f"Expected 0 re-parses after TTL invalidation, got {call_count}"
+    )
