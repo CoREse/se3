@@ -754,6 +754,12 @@ class LLMCaller:
                 project_root=self.project_root,
                 command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
             )
+        if agent_type == "codex":
+            from se3.codex_runner import CodexRunner
+            return CodexRunner(
+                project_root=self.project_root,
+                command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
+            )
         # Future: add other agent types here
         raise ValueError(f"Unknown agent type: {agent_type}")
 
