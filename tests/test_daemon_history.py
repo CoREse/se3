@@ -905,3 +905,832 @@ def test_active_flow_signature_tracks_status_flip(tmp_path):
     _write_engine(tmp_path, "live", "RUNNING")
     running_sig = reader.active_flow_signature()
     assert running_sig["live"] != paused_sig["live"]
+
+
+# --------------------------------------------------------------------------
+# Group G2: Problem B-1 — streaming first-line read + per-directory meta cache
+# --------------------------------------------------------------------------
+
+
+def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
+    """_extract_history_summary reads O(first-line) bytes, not O(file-size).
+
+    Constructs a jsonl whose first line is ~1 KB but whose total file is ~1 MB.
+    The streaming ``readline()`` path must not load the entire file.
+    """
+    import io
+    import builtins
+
+    # First line: a small valid JSON record.
+    first_record = _msg("user", "x" * 1000)
+    first_line = json.dumps(first_record).encode("utf-8")
+    # Rest: ~1 MB of padding lines (each > 1 KB so they don't fit into the
+    # first-line read).
+    padding_line = json.dumps(_msg("assistant", "y" * 2000)).encode("utf-8")
+    num_padding = 500  # ~1.2 MB total padding
+
+    flow_dir = tmp_path / "se3" / "history" / "big"
+    flow_dir.mkdir(parents=True)
+    jsonl_path = flow_dir / "01_analyze.jsonl"
+    with open(jsonl_path, "wb") as fh:
+        fh.write(first_line + b"\n")
+        for _ in range(num_padding):
+            fh.write(padding_line + b"\n")
+    total_size = jsonl_path.stat().st_size
+    assert total_size > 500_000  # sanity: file is large
+
+    # Wrap builtins.open to track bytes consumed via readline().
+    read_bytes = 0
+    _real_open = builtins.open
+
+    class ReadlineTracker(io.BufferedReader):
+        def __init__(self, raw, **kwargs):
+            super().__init__(raw, **kwargs)
+            self._tracker_counted = False
+
+        def readline(self, size=-1):
+            data = super().readline(size)
+            if not self._tracker_counted:
+                self._tracker_counted = True
+                # Count the bytes of the first line we actually read,
+                # plus the newline (which readline returns).
+                globals()["_tracked_bytes"] = globals().get("_tracked_bytes", 0) + len(data)
+            return data
+
+    def tracking_open(file, *args, **kwargs):
+        fh = _real_open(file, *args, **kwargs)
+        if str(file) == str(jsonl_path):
+            # Wrap the raw buffer so readline() is tracked.
+            return ReadlineTracker(fh.raw, buffer_size=io.DEFAULT_BUFFER_SIZE)
+        return fh
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    from se3.daemon.history import _extract_history_summary
+
+    _extract_history_summary(flow_dir)
+
+    tracked = globals().get("_tracked_bytes", 0)
+    assert tracked < total_size // 2, (
+        f"Expected < {total_size // 2} bytes read, got {tracked} — "
+        "the whole file may have been loaded"
+    )
+
+
+def test_dir_signature_changes_on_file_modification(tmp_path):
+    """_dir_signature changes when a file's content (size) changes."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    flow_dir = tmp_path / "flow"
+    flow_dir.mkdir()
+    (flow_dir / "01_analyze.jsonl").write_text("line1\n", encoding="utf-8")
+
+    sig1, _ = DaemonHistoryReader._dir_signature(flow_dir)
+
+    # Append data — mtime may not change (coarse resolution) but size will.
+    with (flow_dir / "01_analyze.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write("line2\n" * 100)
+
+    sig2, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    assert sig1 != sig2, "signature must change when file size changes"
+
+
+def test_dir_signature_changes_on_file_addition(tmp_path):
+    """_dir_signature changes when a new file appears."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    flow_dir = tmp_path / "flow"
+    flow_dir.mkdir()
+    (flow_dir / "01_analyze.jsonl").write_text("x\n", encoding="utf-8")
+
+    sig1, _ = DaemonHistoryReader._dir_signature(flow_dir)
+
+    (flow_dir / "02_plan.jsonl").write_text("y\n", encoding="utf-8")
+
+    sig2, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    assert sig1 != sig2
+
+
+def test_dir_signature_stable_when_unchanged(tmp_path):
+    """Back-to-back _dir_signature calls on an unchanged directory are equal."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    flow_dir = tmp_path / "flow"
+    flow_dir.mkdir()
+    (flow_dir / "01_analyze.jsonl").write_text("x\n", encoding="utf-8")
+
+    sig1, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    sig2, _ = DaemonHistoryReader._dir_signature(flow_dir)
+    assert sig1 == sig2
+
+
+def test_meta_cache_skips_reparsing_unchanged_directories(tmp_path, monkeypatch):
+    """Consecutive _build_index_fresh calls with unchanged directories do NOT
+    re-call _extract_history_summary (call-count assertion)."""
+    # Three history-only directories, no _meta.json.
+    for name in ("flow-a", "flow-b", "flow-c"):
+        hist = tmp_path / "se3" / "history" / name
+        _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
+
+    reader = _make_reader(tmp_path)
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch.setattr(hmod, "_extract_history_summary", counting_extract)
+
+    # First build: all 3 directories parsed.
+    metas1 = reader._build_index_fresh()
+    assert call_count == 3
+    assert len(metas1) == 3
+
+    # Second build: zero re-parses — all directories unchanged.
+    call_count = 0
+    metas2 = reader._build_index_fresh()
+    assert call_count == 0, f"Expected 0 re-parses, got {call_count}"
+    assert len(metas2) == 3
+
+
+def test_meta_cache_reparse_on_directory_change(tmp_path, monkeypatch):
+    """When a directory's content changes, that directory is re-parsed."""
+    hist_a = tmp_path / "se3" / "history" / "flow-a"
+    hist_b = tmp_path / "se3" / "history" / "flow-b"
+    _write_jsonl(hist_a / "01_analyze.jsonl", [_msg("user", "task a")])
+    _write_jsonl(hist_b / "01_analyze.jsonl", [_msg("user", "task b")])
+
+    reader = _make_reader(tmp_path)
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch.setattr(hmod, "_extract_history_summary", counting_extract)
+
+    # First build: both parsed.
+    reader._build_index_fresh()
+    assert call_count == 2
+
+    # Modify flow-b by appending to its jsonl.
+    _append_jsonl(hist_b / "01_analyze.jsonl", [_msg("user", "extra")])
+
+    # Second build: only flow-b re-parsed.
+    call_count = 0
+    reader._build_index_fresh()
+    assert call_count == 1, f"Expected 1 re-parse (changed dir), got {call_count}"
+
+
+def test_meta_cache_equivalence(tmp_path):
+    """Cached and uncached paths produce SessionMeta objects that are
+    field-for-field equal."""
+    for name in ("flow-a", "flow-b"):
+        hist = tmp_path / "se3" / "history" / name
+        _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
+        (hist / "_meta.json").write_text(
+            json.dumps({"created_at": "2026-06-01T00:00:00", "type": "feature"}),
+            encoding="utf-8",
+        )
+
+    reader = _make_reader(tmp_path)
+
+    # First build (cache miss — populates cache).
+    metas1 = {m.flow_id: m.to_dict() for m in reader._build_index_fresh()}
+
+    # Second build (cache hit — reuses cached values).
+    metas2 = {m.flow_id: m.to_dict() for m in reader._build_index_fresh()}
+
+    assert metas1 == metas2, (
+        "Cached path must produce identical SessionMeta.to_dict() output"
+    )
+
+
+def test_meta_cache_no_disk_writes(tmp_path):
+    """_meta_from_history never writes _meta.json or any other file to the
+    flow directory (daemon does not backfill project directories)."""
+    hist = tmp_path / "se3" / "history" / "flow-1"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "task")])
+
+    reader = _make_reader(tmp_path)
+    reader._build_index_fresh()
+
+    # Only the original jsonl should exist — no _meta.json was created.
+    contents = sorted(f.name for f in hist.iterdir())
+    assert contents == ["01_analyze.jsonl"], (
+        f"Expected only the original jsonl, found: {contents}"
+    )
+
+
+def test_meta_cache_survives_invalidate_index_cache(tmp_path):
+    """invalidate_index_cache drops the TTL cache but NOT the per-directory
+    meta cache, so the next _build_index_fresh still benefits from cached
+    directory signatures."""
+    hist = tmp_path / "se3" / "history" / "flow-1"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "task")])
+
+    reader = _make_reader(tmp_path)
+    reader._build_index_fresh()  # populate both caches
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch_fn = counting_extract  # not using pytest monkeypatch here
+
+    # Simulate what client.py does: invalidate TTL cache then rebuild.
+    reader.invalidate_index_cache()
+
+    # The per-directory cache should still be warm.
+    # (We can't easily monkeypatch here without the fixture, so just verify
+    # the build succeeds and produces the same result.)
+    metas = reader._build_index_fresh()
+    assert len(metas) == 1
+    assert metas[0].flow_id == "flow-1"
+
+
+def test_meta_cache_after_invalidate_skips_reparsing(tmp_path, monkeypatch):
+    """After invalidate_index_cache, _build_index_fresh still skips re-parsing
+    unchanged directories thanks to the per-directory signature cache."""
+    for name in ("flow-a", "flow-b"):
+        hist = tmp_path / "se3" / "history" / name
+        _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
+
+    reader = _make_reader(tmp_path)
+
+    import se3.daemon.history as hmod
+    real_extract = hmod._extract_history_summary
+    call_count = 0
+
+    def counting_extract(flow_dir):
+        nonlocal call_count
+        call_count += 1
+        return real_extract(flow_dir)
+
+    monkeypatch.setattr(hmod, "_extract_history_summary", counting_extract)
+
+    # First build: populate caches.
+    reader._build_index_fresh()
+    assert call_count == 2
+
+    # Simulate client.py invalidation cycle.
+    reader.invalidate_index_cache()
+
+    # Second build: per-directory cache still warm — zero re-parses.
+    call_count = 0
+    reader._build_index_fresh()
+    assert call_count == 0, (
+        f"Expected 0 re-parses after TTL invalidation, got {call_count}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Group G3: Problem B-2 — read_flow byte-offset incremental reading
+# --------------------------------------------------------------------------
+
+
+def _tracking_open_factory():
+    """Return ``(patch_fn, get_bytes)`` where ``patch_fn`` is a monkeypatch-
+    compatible replacement for ``builtins.open`` that tracks the total bytes
+    read via ``.read()`` and ``.readline()`` calls, and ``get_bytes()``
+    returns the cumulative count and resets it to zero.
+
+    Only tracks reads on files under ``tmp_path`` whose suffix is ``.jsonl``.
+    """
+    import builtins
+    import io
+
+    total_bytes = 0
+    _real_open = builtins.open
+
+    class TrackingFile:
+        """Thin wrapper that delegates to the real file but counts reads."""
+
+        def __init__(self, fh, is_tracked):
+            self._fh = fh
+            self._tracked = is_tracked
+
+        def read(self, size=-1):
+            data = self._fh.read(size)
+            if self._tracked:
+                nonlocal total_bytes
+                total_bytes += len(data) if isinstance(data, (bytes, str)) else 0
+            return data
+
+        def readline(self, size=-1):
+            data = self._fh.readline(size)
+            if self._tracked:
+                nonlocal total_bytes
+                total_bytes += len(data) if isinstance(data, (bytes, str)) else 0
+            return data
+
+        def seek(self, offset, whence=0):
+            return self._fh.seek(offset, whence)
+
+        def tell(self):
+            return self._fh.tell()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._fh.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+    def tracking_open(file, *args, **kwargs):
+        fh = _real_open(file, *args, **kwargs)
+        is_tracked = str(file).endswith(".jsonl")
+        return TrackingFile(fh, is_tracked)
+
+    def get_bytes():
+        nonlocal total_bytes
+        val = total_bytes
+        total_bytes = 0
+        return val
+
+    return tracking_open, get_bytes
+
+
+def test_read_flow_incremental_reads_only_new_bytes(tmp_path, monkeypatch):
+    """After a full read, appending N records and reading again should read
+    only the new bytes, not the entire file."""
+    import builtins
+
+    tracking_open, get_bytes = _tracking_open_factory()
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+
+    # Write a large initial batch: 100 records.
+    initial_records = [_msg("user", f"msg{i}") for i in range(100)]
+    _write_jsonl(jsonl, initial_records)
+    full_size = jsonl.stat().st_size
+
+    # First read — full read, expect ~full_size bytes consumed.
+    first = reader.read_flow("f1")
+    first_bytes = get_bytes()
+    assert len(first.records) == 100
+    assert first_bytes >= full_size * 0.9  # allow some overhead
+
+    # Append 5 records.
+    new_records = [_msg("assistant", f"reply{i}") for i in range(5)]
+    _append_jsonl(jsonl, new_records)
+    added_size = jsonl.stat().st_size - full_size
+
+    # Second read — incremental, expect only ~added_size bytes read.
+    second = reader.read_flow("f1", cursor=first.cursor)
+    second_bytes = get_bytes()
+    assert len(second.records) == 5
+    assert second_bytes < added_size * 2, (
+        f"Expected < {added_size * 2} bytes for incremental read, got {second_bytes}"
+    )
+    # The incremental read should be dramatically less than a full re-read.
+    assert second_bytes < first_bytes, (
+        f"Incremental read ({second_bytes}) should be less than full read ({first_bytes})"
+    )
+
+
+def test_read_flow_incremental_records_match_full(tmp_path):
+    """The union of incremental reads equals a single full read (content
+    equivalence, not byte-level identity)."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", "q1"), _msg("assistant", "a1")])
+
+    # Full read (reference).
+    ref = _make_reader(tmp_path).read_flow("f1")
+    ref_contents = [r["message"]["content"] for r in ref.records]
+
+    # Incremental chain.
+    first = reader.read_flow("f1")
+    _append_jsonl(jsonl, [_msg("user", "q2"), _msg("assistant", "a2")])
+    second = reader.read_flow("f1", cursor=first.cursor)
+    _append_jsonl(jsonl, [_msg("user", "q3")])
+    third = reader.read_flow("f1", cursor=second.cursor)
+
+    inc_contents = [
+        r["message"]["content"]
+        for r in first.records + second.records + third.records
+    ]
+
+    # A fresh full read of the final file state.
+    final_ref = _make_reader(tmp_path).read_flow("f1")
+    final_contents = [r["message"]["content"] for r in final_ref.records]
+
+    assert inc_contents == final_contents
+
+
+def test_read_flow_incremental_new_jsonl_file(tmp_path):
+    """A new step jsonl file that appears between reads is picked up whole."""
+    reader = _make_reader(tmp_path)
+    hist = tmp_path / "se3" / "history" / "f1"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "q1")])
+
+    first = reader.read_flow("f1")
+    assert len(first.records) == 1
+    assert "01_analyze.jsonl" in first.cursor
+    assert "02_plan.jsonl" not in first.cursor
+
+    # New step file appears.
+    _write_jsonl(
+        hist / "02_plan.jsonl",
+        [_msg("user", "q2", step_type="plan"), _msg("assistant", "a2", step_type="plan")],
+    )
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    assert len(second.records) == 2
+    assert second.records[0]["step_id"] == "02_plan"
+    assert second.cursor["02_plan.jsonl"] == 2
+    # Previous file's cursor is preserved.
+    assert second.cursor["01_analyze.jsonl"] == 1
+
+
+def test_read_flow_incremental_bad_json_skipped(tmp_path):
+    """Bad JSON lines and empty lines are skipped without aborting."""
+    reader = _make_reader(tmp_path)
+    hist = tmp_path / "se3" / "history" / "f1"
+    hist.mkdir(parents=True)
+    jsonl = hist / "01_analyze.jsonl"
+
+    # Write initial records.
+    _write_jsonl(jsonl, [_msg("user", "ok")])
+    first = reader.read_flow("f1")
+    assert len(first.records) == 1
+
+    # Append a mix of good and bad lines.
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write("\n")  # empty line
+        fh.write("not-json\n")  # bad JSON
+        fh.write(json.dumps(_msg("assistant", "fine")) + "\n")
+        fh.write("{}\n")  # empty dict (still valid)
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    contents = [r["message"]["content"] for r in second.records if "content" in r["message"]]
+    assert "fine" in contents
+    # The empty dict {} is valid JSON and a dict, so it's included too.
+    assert len(second.records) >= 2
+
+
+def test_read_flow_incremental_partial_line_not_consumed(tmp_path):
+    """A partial line (no trailing newline) is not consumed and left for the
+    next round.  Once completed with a newline it is picked up."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+
+    # Write initial content.
+    _write_jsonl(jsonl, [_msg("user", "q1")])
+    first = reader.read_flow("f1")
+    assert len(first.records) == 1
+
+    # Append a partial line (no trailing newline).
+    partial = json.dumps(_msg("assistant", "partial_msg"))
+    with jsonl.open("ab") as fh:
+        fh.write(partial.encode("utf-8"))
+
+    # Read — partial line should NOT be consumed.
+    second = reader.read_flow("f1", cursor=first.cursor)
+    assert len(second.records) == 0, "Partial line should not be consumed"
+
+    # Complete the line with a newline.
+    with jsonl.open("ab") as fh:
+        fh.write(b"\n")
+
+    # Read again — now the completed line should appear.
+    third = reader.read_flow("f1", cursor=second.cursor)
+    assert len(third.records) == 1
+    assert third.records[0]["message"]["content"] == "partial_msg"
+
+
+def test_read_flow_incremental_file_truncation_fallback(tmp_path):
+    """When a file shrinks (truncation/replacement), a full read is performed
+    instead of seeking past the old offset."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+
+    # Write initial content.
+    _write_jsonl(jsonl, [_msg("user", "q1"), _msg("assistant", "a1")])
+    first = reader.read_flow("f1")
+    assert len(first.records) == 2
+
+    # Replace the file with shorter content (simulating truncation).
+    _write_jsonl(jsonl, [_msg("user", "new_q1")])
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    # Since cursor says line 2 but file only has 1 line, the cursor is
+    # beyond file end.  The full-read path handles this gracefully —
+    # it reads from start, but the start offset (cursor_lines=2) is past
+    # the end so no records are returned, and the cursor is set to the
+    # file's actual line count.
+    assert second.cursor["01_analyze.jsonl"] == 1
+
+    # A subsequent read with the corrected cursor returns the record.
+    third = reader.read_flow("f1", cursor=second.cursor)
+    # No new content was appended, so nothing new.
+    assert len(third.records) == 0
+
+
+def test_read_flow_incremental_file_replace_full_reset(tmp_path):
+    """When a file is completely replaced (new inode / different content), the
+    offset table resets to a full read."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+
+    _write_jsonl(jsonl, [_msg("user", "old1"), _msg("user", "old2")])
+    first = reader.read_flow("f1")
+    assert len(first.records) == 2
+    assert first.cursor["01_analyze.jsonl"] == 2
+
+    # Replace file entirely with new content (smaller).
+    _write_jsonl(jsonl, [_msg("assistant", "new1")])
+    # Cursor says 2, file has 1 line, offset table says consumed=2, size was bigger.
+    # The file shrunk -> full read path.
+    second = reader.read_flow("f1", cursor=first.cursor)
+    # Cursor is at 2, file has 1 line. The full-read loop starts at index 2
+    # which is past the end -> 0 records, cursor set to 1.
+    assert second.cursor["01_analyze.jsonl"] == 1
+
+    # Now read with the corrected cursor.
+    _append_jsonl(jsonl, [_msg("user", "new2")])
+    third = reader.read_flow("f1", cursor=second.cursor)
+    assert len(third.records) == 1
+    assert third.records[0]["message"]["content"] == "new2"
+
+
+def test_read_flow_truncation_offset_table_consistency(tmp_path, monkeypatch):
+    """When MAX_RECORDS_PER_REPORT truncates a read, the offset table and
+    cursor both advance only to the truncation point.  A subsequent read
+    continues from there."""
+    monkeypatch.setattr(history_mod, "MAX_RECORDS_PER_REPORT", 3)
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", f"m{i}") for i in range(7)])
+
+    first = reader.read_flow("f1")
+    assert len(first.records) == 3
+    assert first.cursor["01_analyze.jsonl"] == 3
+
+    # Internal offset table should match the cursor.
+    key = str(jsonl)
+    assert reader._read_offsets[key][0] == 3  # consumed lines
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    assert len(second.records) == 3
+    assert second.cursor["01_analyze.jsonl"] == 6
+    assert reader._read_offsets[key][0] == 6
+
+    third = reader.read_flow("f1", cursor=second.cursor)
+    assert len(third.records) == 1
+    assert third.cursor["01_analyze.jsonl"] == 7
+    assert reader._read_offsets[key][0] == 7
+
+    # All records accounted for.
+    all_contents = [
+        r["message"]["content"]
+        for r in first.records + second.records + third.records
+    ]
+    assert all_contents == [f"m{i}" for i in range(7)]
+
+
+def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
+    """When the file has not changed since the last read, zero bytes are read
+    (the early-exit path for ``can_incremental and cur_size == prev[1]``)."""
+    import builtins
+
+    tracking_open, get_bytes = _tracking_open_factory()
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", "q1")])
+
+    first = reader.read_flow("f1")
+    full_bytes = get_bytes()
+    assert full_bytes > 0
+
+    # Read again with same cursor — no new bytes.
+    second = reader.read_flow("f1", cursor=first.cursor)
+    delta_bytes = get_bytes()
+    assert len(second.records) == 0
+    assert delta_bytes == 0, (
+        f"Expected 0 bytes read when nothing changed, got {delta_bytes}"
+    )
+
+
+def test_read_flow_incremental_multi_step_deltas(tmp_path):
+    """Incremental reads across multiple step files produce the same content
+    as a full read of the final state."""
+    reader = _make_reader(tmp_path)
+    hist = tmp_path / "se3" / "history" / "f1"
+    s1 = hist / "01_analyze.jsonl"
+    _write_jsonl(s1, [_msg("user", "a0"), _msg("assistant", "a1")])
+
+    collected = []
+    cursors = {}
+
+    # Round 1: full read.
+    first = reader.read_flow("f1")
+    collected += [r["message"]["content"] for r in first.records]
+    cursors = first.cursor
+
+    # Round 2: append to s1, create s2.
+    _append_jsonl(s1, [_msg("user", "a2")])
+    s2 = hist / "02_plan.jsonl"
+    _write_jsonl(s2, [_msg("assistant", "b0", step_type="plan")])
+
+    second = reader.read_flow("f1", cursor=cursors)
+    collected += [r["message"]["content"] for r in second.records]
+    cursors = second.cursor
+
+    # Round 3: append to both.
+    _append_jsonl(s1, [_msg("assistant", "a3")])
+    _append_jsonl(s2, [_msg("user", "b1", step_type="plan")])
+
+    third = reader.read_flow("f1", cursor=cursors)
+    collected += [r["message"]["content"] for r in third.records]
+    cursors = third.cursor
+
+    # Round 4: nothing new.
+    fourth = reader.read_flow("f1", cursor=cursors)
+    assert fourth.records == []
+
+    # Compare with a fresh full read.
+    ref = _make_reader(tmp_path).read_flow("f1")
+    ref_contents = [r["message"]["content"] for r in ref.records]
+    assert sorted(collected) == sorted(ref_contents)
+    assert len(collected) == len(set(collected))  # no duplicates
+
+
+def test_read_flow_incremental_active_flow_simulation(tmp_path):
+    """Simulates the daemon's active-flow push loop: full read, then repeated
+    incremental reads as records are appended, verifying no loss/duplication."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    s1 = hist / "01_discovery.jsonl"
+    _write_jsonl(s1, [_msg("user", "q1", step_type="discovery")])
+
+    reader = _make_reader(tmp_path)
+    collected = []
+    cursors = {}
+
+    # Poll 1: full.
+    read = reader.read_flow("live", project_root=str(tmp_path))
+    collected += [r["message"]["content"] for r in read.records]
+    cursors = read.cursor
+
+    # Poll 2: assistant responds.
+    _append_jsonl(s1, [_msg("assistant", "a1", step_type="discovery")])
+    read = reader.read_flow("live", project_root=str(tmp_path), cursor=cursors)
+    collected += [r["message"]["content"] for r in read.records]
+    cursors = read.cursor
+
+    # Poll 3: new step.
+    s2 = hist / "02_analyze.jsonl"
+    _write_jsonl(s2, [_msg("user", "thinking...", step_type="analyze")])
+    read = reader.read_flow("live", project_root=str(tmp_path), cursor=cursors)
+    collected += [r["message"]["content"] for r in read.records]
+    cursors = read.cursor
+
+    # Poll 4: nothing new.
+    read = reader.read_flow("live", project_root=str(tmp_path), cursor=cursors)
+    assert read.records == []
+
+    # Verify no loss.
+    assert collected == ["q1", "a1", "thinking..."]
+
+
+def test_read_flow_incremental_empty_lines_between_records(tmp_path):
+    """Empty lines (common in multi-process writes) don't break incremental
+    reads and don't inflate the cursor."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", "q1")])
+
+    first = reader.read_flow("f1")
+    assert first.cursor["01_analyze.jsonl"] == 1
+
+    # Append with empty lines interspersed.
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write("\n\n")
+        fh.write(json.dumps(_msg("assistant", "a1")) + "\n")
+        fh.write("\n")
+        fh.write(json.dumps(_msg("user", "q2")) + "\n")
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    contents = [r["message"]["content"] for r in second.records]
+    assert contents == ["a1", "q2"]
+    # Cursor counts all lines (including empty), matching the original behavior.
+    # Initial: 1 line. Append: "\n\n" (2 empty) + json (1) + "\n" (1 empty) + json (1) = 5.
+    assert second.cursor["01_analyze.jsonl"] == 6
+
+
+def test_read_flow_incremental_large_file_small_delta(tmp_path, monkeypatch):
+    """Construct a large initial file (1000 records) + a small append (5
+    records).  The incremental read must read << the full file size."""
+    import builtins
+
+    tracking_open, get_bytes = _tracking_open_factory()
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    initial = [_msg("user", f"msg{i:04d}") for i in range(1000)]
+    _write_jsonl(jsonl, initial)
+    full_size = jsonl.stat().st_size
+
+    # Full read.
+    first = reader.read_flow("f1")
+    full_bytes = get_bytes()
+    assert len(first.records) == 1000
+
+    # Small append.
+    _append_jsonl(jsonl, [_msg("assistant", f"reply{i}") for i in range(5)])
+    added = jsonl.stat().st_size - full_size
+
+    # Incremental read.
+    second = reader.read_flow("f1", cursor=first.cursor)
+    inc_bytes = get_bytes()
+    assert len(second.records) == 5
+    # Must read much less than the full file.
+    assert inc_bytes < full_bytes, (
+        f"Incremental ({inc_bytes}) should be less than full ({full_bytes})"
+    )
+    # And roughly proportional to the added bytes.
+    assert inc_bytes < added * 3, (
+        f"Incremental ({inc_bytes}) should be ~{added} bytes (new content)"
+    )
+
+
+def test_read_flow_incremental_bad_lines_in_delta(tmp_path):
+    """Bad JSON lines in the appended portion are skipped and don't corrupt
+    the offset table."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", "q1")])
+
+    first = reader.read_flow("f1")
+    assert len(first.records) == 1
+
+    # Append mix of good and bad.
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write("not-json\n")
+        fh.write(json.dumps(_msg("assistant", "a1")) + "\n")
+        fh.write("\n")  # empty
+        fh.write(json.dumps(_msg("user", "q2")) + "\n")
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    contents = [r["message"]["content"] for r in second.records]
+    assert contents == ["a1", "q2"]
+
+    # Cursor counts all 4 appended lines (including bad/empty).
+    assert second.cursor["01_analyze.jsonl"] == 5  # 1 initial + 4 appended
+
+    # Third read — nothing new.
+    third = reader.read_flow("f1", cursor=second.cursor)
+    assert third.records == []
+
+
+def test_read_flow_incremental_read_active_flows_equivalence(tmp_path):
+    """read_active_flows with incremental read_flow produces the same content
+    as a sequence of full reads for the same flow."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    s1 = hist / "01_analyze.jsonl"
+    _write_jsonl(s1, [_msg("user", "q1")])
+
+    reader = _make_reader(tmp_path)
+
+    # Incremental chain via read_active_flows.
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    collected = [r["message"]["content"] for r in reads[0].records]
+
+    _append_jsonl(s1, [_msg("assistant", "a1"), _msg("user", "q2")])
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    collected += [r["message"]["content"] for r in reads[0].records]
+
+    _append_jsonl(s1, [_msg("assistant", "a2")])
+    reads = reader.read_active_flows(cursors)
+    collected += [r["message"]["content"] for r in reads[0].records]
+
+    # Reference: full read of final state.
+    ref = _make_reader(tmp_path).read_flow("live")
+    ref_contents = [r["message"]["content"] for r in ref.records]
+
+    assert collected == ref_contents

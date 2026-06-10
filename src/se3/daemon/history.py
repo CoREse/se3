@@ -44,7 +44,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
@@ -303,6 +303,32 @@ class DaemonHistoryReader:
         self._index_cache: Optional[List[SessionMeta]] = None
         self._index_cache_at: float = 0.0
 
+        # Per-directory content-signature cache for history-only flows.
+        # When ``_build_index_fresh`` rebuilds the index, unchanged directories
+        # (same set of files, same mtimes/sizes) reuse their cached
+        # :class:`SessionMeta` without re-reading ``_meta.json`` or
+        # re-extracting the title from the first jsonl line.  The cache is
+        # keyed by the stringified directory path; each entry maps a
+        # content-signature tuple to the :class:`SessionMeta` produced from
+        # that content.  ``invalidate_index_cache`` does *not* clear this
+        # cache — it self-invalidates via the directory signature.
+        self._history_meta_cache: Dict[str, Tuple[tuple, SessionMeta]] = {}
+
+        # Per-file byte-offset table for incremental reads in :meth:`read_flow`.
+        # Key: absolute path of the jsonl file (str).
+        # Value: ``(consumed_lines, byte_offset, mtime, size)`` where
+        # *consumed_lines* is the count of fully consumed newline-terminated
+        # lines, *byte_offset* is the file position after the last consumed
+        # newline, and *mtime*/*size* are the file stat at the time of the last
+        # read (used to detect truncation / replacement).
+        #
+        # When the caller's cursor line-count matches *consumed_lines* and the
+        # current file size is >= *byte_offset*, only the new bytes past the
+        # offset are read (seek + incremental parse).  Otherwise (first read,
+        # cursor rollback, file shrunk) a full read from the start is performed
+        # and the entry is rebuilt.
+        self._read_offsets: Dict[str, Tuple[int, int, float, int]] = {}
+
     def invalidate_index_cache(self) -> None:
         """Drop the cached index, forcing the next ``build_index`` to rebuild.
 
@@ -473,24 +499,65 @@ class DaemonHistoryReader:
             step_count=_count_jsonl(root / "se3" / "history" / flow_id),
         )
 
+    @staticmethod
+    def _dir_signature(flow_dir: Path) -> Tuple[tuple, float]:
+        """Compute a content-signature tuple for a history directory.
+
+        The signature captures every factor that affects the
+        :class:`SessionMeta` output: the set of files (by name), each file's
+        mtime and size (so content changes and appends are detected), and the
+        latest mtime (which drives ``updated_at``).  The returned tuple is
+        hashable and comparable; the float is the latest mtime (0.0 when the
+        directory is empty or unreadable).
+
+        This is separated from :meth:`_meta_from_history` so it can be tested
+        independently and so the iterdir traversal is done exactly once per
+        call.
+        """
+        file_entries: List[Tuple[str, float, int]] = []
+        latest = 0.0
+        try:
+            for f in flow_dir.iterdir():
+                if not f.is_file():
+                    continue
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                mtime = st.st_mtime
+                size = st.st_size
+                file_entries.append((f.name, mtime, size))
+                if mtime > latest:
+                    latest = mtime
+        except OSError:
+            pass
+        file_entries.sort()
+        return tuple(file_entries), latest
+
     def _meta_from_history(self, root: Path, flow_dir: Path) -> SessionMeta:
         """Build a best-effort :class:`SessionMeta` for a history-only flow.
 
         A history-only flow has no surviving ``engine.json``; metadata is
         recovered from an optional ``_meta.json`` plus the ``jsonl`` files
         themselves, so the session still appears in the index.
+
+        Results are cached per directory keyed by a content-signature tuple
+        (file names, mtimes, sizes).  When the directory content has not
+        changed since the last call, the cached :class:`SessionMeta` is
+        returned without re-reading ``_meta.json`` or re-extracting the
+        summary title — this eliminates the repeated ~115 MB of reads that
+        previously occurred every ~1 second across ~161 unchanged history
+        directories.
         """
         flow_id = flow_dir.name
+        sig_key = str(flow_dir)
+        sig, latest = self._dir_signature(flow_dir)
+        cached = self._history_meta_cache.get(sig_key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
         meta = _read_json(flow_dir / "_meta.json") or {}
-        try:
-            latest = max(
-                (f.stat().st_mtime for f in flow_dir.iterdir() if f.is_file()),
-                default=0.0,
-            )
-        except OSError:  # pragma: no cover - defensive
-            latest = 0.0
         updated = datetime.fromtimestamp(latest).isoformat() if latest else ""
-        return SessionMeta(
+        result = SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
             task_description=_clip(_extract_history_summary(flow_dir)),
@@ -502,6 +569,8 @@ class DaemonHistoryReader:
             source="history",
             step_count=_count_jsonl(flow_dir),
         )
+        self._history_meta_cache[sig_key] = (sig, result)
+        return result
 
     # -- per-flow reads ----------------------------------------------------
 
@@ -530,6 +599,16 @@ class DaemonHistoryReader:
         cursor: Optional[Dict[str, int]] = None,
     ) -> FlowRead:
         """Read the conversation records of *flow_id* incrementally.
+
+        Uses an internal byte-offset table (:attr:`_read_offsets`) to avoid
+        re-reading already-consumed bytes.  When the caller's cursor line-count
+        matches the offset table's consumed-line count and the file has not
+        shrunk, only the new bytes past the recorded offset are read (``seek``
+        + incremental parse).  Otherwise (first read, cursor rollback, file
+        truncation/replacement) a full read from the start is performed.
+
+        Only complete (newline-terminated) lines are consumed; a partial line
+        at the end of the file (no trailing ``\\n``) is left for the next round.
 
         Args:
             flow_id: The flow whose ``se3/history/<flow_id>`` is read.
@@ -561,36 +640,153 @@ class DaemonHistoryReader:
                 break
             step_id = jsonl.stem
             step_type = parse_step_type_from_step_id(step_id)
+            jsonl_key = str(jsonl)
+
+            # --- Determine whether we can do an incremental read -----------
+            cursor_lines = int(cursor.get(jsonl.name, 0) or 0)
+            if cursor_lines < 0:
+                cursor_lines = 0
+
             try:
-                lines = jsonl.read_text(encoding="utf-8").splitlines()
-            except OSError:  # pragma: no cover - defensive
+                st = jsonl.stat()
+                cur_size = st.st_size
+                cur_mtime = st.st_mtime
+            except OSError:
                 continue
-            start = int(cursor.get(jsonl.name, 0) or 0)
-            if start < 0:
-                start = 0
-            consumed = min(start, len(lines))
-            for idx in range(start, len(lines)):
-                consumed = idx + 1
-                line = lines[idx].strip()
-                if not line:
-                    continue
+
+            prev = self._read_offsets.get(jsonl_key)
+            can_incremental = (
+                prev is not None
+                and cursor_lines == prev[0]       # cursor matches consumed lines
+                and cur_size >= prev[1]            # file has not shrunk
+                and prev[1] >= 0                   # offset is valid
+            )
+
+            if can_incremental and cur_size == prev[1]:
+                # No new bytes — file is unchanged since last read.
+                new_cursor[jsonl.name] = prev[0]
+                continue
+
+            # --- Read lines ------------------------------------------------
+            if can_incremental:
+                # Incremental: seek past already-consumed bytes.
                 try:
-                    message = json.loads(line)
-                except (ValueError, TypeError):
+                    with open(jsonl, "r", encoding="utf-8") as fh:
+                        fh.seek(prev[1])
+                        new_bytes = fh.read()
+                except OSError:
                     continue
-                if not isinstance(message, dict):
+                # consumed_lines so far from prior reads.
+                consumed = prev[0]
+                offset = prev[1]
+                raw_lines = new_bytes.split("\n")
+                # The last element may be a partial line (no trailing \n).
+                # Only process elements that end with a newline — i.e. all
+                # but the last element when it is non-empty (partial).
+                if raw_lines and raw_lines[-1] != "":
+                    # Last element is a partial line — don't consume it.
+                    complete_lines = raw_lines[:-1]
+                    # Adjust the raw_lines buffer so the offset calculation
+                    # below doesn't count the partial tail.
+                else:
+                    # Last element is "" (file ends with \n) — all lines
+                    # are complete.  The trailing "" is an artifact of
+                    # split("\n") and doesn't correspond to a real line.
+                    complete_lines = raw_lines[:-1] if raw_lines else []
+                for line_text in complete_lines:
+                    consumed += 1
+                    offset += len(line_text.encode("utf-8")) + 1  # +1 for \n
+                    stripped = line_text.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        message = json.loads(stripped)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    records.append(
+                        {
+                            "step_id": step_id,
+                            "step_type": step_type,
+                            "message": message,
+                        }
+                    )
+                    if len(records) >= MAX_RECORDS_PER_REPORT:
+                        truncated = True
+                        # Only advance the offset table to the truncation
+                        # point.  The caller's cursor will match consumed
+                        # and the next read continues from here.
+                        self._read_offsets[jsonl_key] = (
+                            consumed, offset, cur_mtime, cur_size,
+                        )
+                        new_cursor[jsonl.name] = consumed
+                        break
+                else:
+                    # No truncation — update offset table with full state.
+                    self._read_offsets[jsonl_key] = (
+                        consumed, offset, cur_mtime, cur_size,
+                    )
+                    new_cursor[jsonl.name] = consumed
+            else:
+                # Full read: first read, cursor rollback, or file replaced.
+                try:
+                    with open(jsonl, "r", encoding="utf-8") as fh:
+                        raw = fh.read()
+                except OSError:
                     continue
-                records.append(
-                    {
-                        "step_id": step_id,
-                        "step_type": step_type,
-                        "message": message,
-                    }
+                raw_lines = raw.split("\n")
+                # For a full read we process ALL lines, including a last line
+                # without a trailing newline (a complete file written by
+                # write_text without "\n").  Unlike the incremental path,
+                # there is no concurrent writer risk here — the file was
+                # either just created or fully replaced.
+                if raw_lines and raw_lines[-1] == "":
+                    # Trailing newline: drop the split artifact.
+                    all_lines = raw_lines[:-1]
+                else:
+                    # No trailing newline: every element is a real line.
+                    all_lines = raw_lines
+                consumed = 0
+                offset = 0
+                start = cursor_lines
+                num_lines = len(all_lines)
+                for idx, line_text in enumerate(all_lines):
+                    consumed = idx + 1
+                    line_bytes = len(line_text.encode("utf-8"))
+                    # Add 1 for the \n delimiter — except for the very last
+                    # line when the file has no trailing newline (the writer
+                    # hasn't finished that line yet, or simply omitted \n).
+                    has_trailing_nl = (raw_lines[-1] == "" if raw_lines else False)
+                    if idx < num_lines - 1 or has_trailing_nl:
+                        offset += line_bytes + 1
+                    else:
+                        offset += line_bytes
+                    if idx < start:
+                        continue
+                    stripped = line_text.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        message = json.loads(stripped)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    records.append(
+                        {
+                            "step_id": step_id,
+                            "step_type": step_type,
+                            "message": message,
+                        }
+                    )
+                    if len(records) >= MAX_RECORDS_PER_REPORT:
+                        truncated = True
+                        break
+                self._read_offsets[jsonl_key] = (
+                    consumed, offset, cur_mtime, cur_size,
                 )
-                if len(records) >= MAX_RECORDS_PER_REPORT:
-                    truncated = True
-                    break
-            new_cursor[jsonl.name] = consumed
+                new_cursor[jsonl.name] = consumed
 
         return FlowRead(flow_id=flow_id, mode=mode, records=records, cursor=new_cursor)
 
@@ -877,7 +1073,11 @@ def _extract_history_summary(flow_dir: Path) -> str:
     if not jsonl_files:
         return "(no history data)"
     try:
-        first_line = jsonl_files[0].read_text(encoding="utf-8").split("\n")[0]
+        # Stream-read only the first line instead of reading the entire file.
+        # Previously ``read_text().split("\\n")[0]`` loaded the whole jsonl
+        # (which can be tens of MB) just to extract the title from line 1.
+        with open(jsonl_files[0], "r", encoding="utf-8", errors="replace") as fh:
+            first_line = fh.readline().rstrip("\n").rstrip("\r")
         data = json.loads(first_line)
         content = data.get("content", "")
         if isinstance(content, list):
