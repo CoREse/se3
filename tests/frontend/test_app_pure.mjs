@@ -4404,6 +4404,37 @@ check("implement Summary degrades to plain numbers 1…n when groups empty", () 
   assert.equal(frag.textContent.includes("NaN"), false);
 });
 
+// -- implement report: tests_added long path wrapping regression -------------
+// Regression: a long path like 'tests/frontend/reply_box_prompt_collapse.test.mjs'
+// in tests_added must appear fully in the rendered .step-report__list li,
+// proving the list item does not truncate or lose content.
+check("implement report tests_added li contains full long path text", () => {
+  const longPath = "tests/frontend/reply_box_prompt_collapse.test.mjs";
+  const step = {
+    step_type: "implement",
+    outputs: {
+      completion_status: "complete",
+      summary: "done",
+      implemented_groups: [],
+      files_changed: [],
+      tests_added: [longPath],
+    },
+  };
+  const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
+  const uls = findAll(frag, "step-report__list");
+  assert.ok(uls.length >= 1, "expected at least one .step-report__list for tests_added");
+  const liTexts = [];
+  for (const ul of uls) {
+    for (const li of ul.childNodes) {
+      liTexts.push(li.textContent);
+    }
+  }
+  const match = liTexts.find((t) => t.includes(longPath));
+  assert.ok(match, `expected a li containing '${longPath}', got: ${liTexts.join(", ")}`);
+  // The li text must start with '+ ' (the formatItem prefix).
+  assert.ok(match.startsWith("+ "), `li text should start with '+ ', got: ${match}`);
+});
+
 // -- spec_gate report renderer ---------------------------------------------
 // A raw pytest-style blob that MUST NOT reach the DOM via the spec_gate card.
 const SPEC_GATE_RAW = "tests/test_foo.py::test_bar FAILED\nE AssertionError\n"

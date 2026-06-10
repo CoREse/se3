@@ -809,6 +809,25 @@ overflow MUST be `hidden` or removed for these selectors. The
 `overflow-y: auto` to bound its visual footprint, but horizontal scroll is
 still forbidden.
 
+Long-content wrapping is NOT limited to `<pre>` / code-style blocks: step
+report card list items (`.step-report__list li`) — the normal-flow list rows
+produced by `reportList()` for **every** report list section (e.g. `Tests
+Added`, `Incomplete Tasks`, `Restricted Edits`, and any current or future
+`reportList()` consumer) — MUST also wrap long content inside their report
+card. Because these rows carry long file paths, long single words, or
+whitespace-free long text, the `.step-report__list li` rule MUST set a
+per-character break rule (`overflow-wrap: anywhere` and/or
+`word-break: break-word`). As list items are normal flow text rather than
+preformatted code, they MUST NOT require `white-space: pre-wrap`; the existing
+`line-height`, list indentation, default-expand behavior, and visual style of
+the report card MUST be preserved unchanged. Because each list item is a flex
+item of the `.step-report__list` flex column, the rule MUST also set
+`min-width: 0` so the item can shrink below its content's intrinsic width and
+wrap instead of pushing the report card boundary out. A long list item MUST
+NOT widen the report card, and MUST NOT cause `#flow-view` or the page to gain
+an unintended horizontal scrollbar; the fix MUST NOT introduce
+`overflow-x: auto` on the list item.
+
 #### Scenario: Long single-line JSON wraps inside a code block
 - **GIVEN** an assistant bubble renders a Markdown code block whose body
   is a single 200+ character JSON string with no whitespace
@@ -826,6 +845,22 @@ still forbidden.
   scrollbar appearing inside the viewer
 - **AND** the viewer MAY still cap its height and scroll vertically via
   `overflow-y: auto`
+
+#### Scenario: Long step report list item wraps inside the report card
+- **GIVEN** a step report card whose `reportList()` section (e.g. a
+  `Tests Added` list) contains a list item carrying a long file path such as
+  `+ tests/frontend/reply_box_prompt_collapse.test.mjs`
+- **WHEN** the report card is rendered in `#flow-view`
+- **THEN** the `.step-report__list li` wraps the long path inside the report
+  card via a per-character break rule (`overflow-wrap: anywhere` and/or
+  `word-break: break-word`) plus `min-width: 0`, so the item never widens the
+  card boundary
+- **AND** the full path text is rendered without truncation and is readable
+  without relying on a horizontal scrollbar
+- **AND** neither `#flow-view` nor the page gains an unintended horizontal
+  scrollbar, and `overflow-x: auto` is NOT applied to the list item
+- **AND** the report card's existing `line-height`, list indentation,
+  default-expand behavior, and visual style are unchanged
 
 ### Requirement: Flow-Scoped Pending Interventions
 

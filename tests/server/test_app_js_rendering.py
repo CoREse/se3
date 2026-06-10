@@ -502,6 +502,35 @@ def test_conversation_code_block_wraps_long_lines(selector: str):
     )
 
 
+def test_step_report_list_items_wrap_long_text():
+    """The ``.step-report__list li`` rule must wrap long text (e.g. a long
+    file path in ``Tests Added``) so it never overflows the report card
+    boundary.
+
+    Concretely we require a per-character break rule
+    (``overflow-wrap: anywhere`` or ``word-break: break-word``) and forbid
+    ``overflow-x: auto``.  We do NOT require ``white-space: pre-wrap``
+    (unlike the code-block selectors) because list items are normal flow
+    text, not ``<pre>`` blocks.
+
+    Regression guard for: long paths in ``tests_added`` overflowing the
+    ``#flow-view`` container horizontally.
+    """
+    body = _extract_rule_body(_read_style_css(), ".step-report__list li")
+    assert (
+        "overflow-wrap: anywhere" in body
+        or "word-break: break-word" in body
+    ), (
+        ".step-report__list li must declare a per-character break rule "
+        "(overflow-wrap: anywhere / word-break: break-word) so long paths "
+        "wrap inside the report card"
+    )
+    assert "overflow-x: auto" not in body, (
+        ".step-report__list li must NOT use 'overflow-x: auto'; long text "
+        "should wrap rather than open an inner horizontal scrollbar"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3b. Static guardrail: tool-call chip folded state collapses the whole wrapper
 # ---------------------------------------------------------------------------

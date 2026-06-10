@@ -31,6 +31,13 @@
 
 
 
+
+## 8.12.3 - 2026-06-10
+
+- Fix long file paths and unbreakable text overflowing step report card boundaries in the running flow console
+- Prevent unintended horizontal scrollbar in #flow-view when report lists contain long paths or no-space text
+- Apply consistent word-break and overflow-wrap rules to all reportList() consumers (Tests Added, Incomplete Tasks, Restricted Edits, etc.)
+- Add CSS guardrail and DOM-stub regression tests for step report list item text wrapping
 ## 8.12.2 - 2026-06-10
 
 - Fix codex agent runner failing with 'unexpected argument -a' by removing the invalid --ask-for-approval flag from codex exec argv

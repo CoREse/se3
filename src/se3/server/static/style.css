@@ -1679,7 +1679,12 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   flex-direction: column;
   gap: 2px;
 }
-.step-report__list li { line-height: 1.45; }
+.step-report__list li {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
 
 .step-report__kv { display: flex; flex-direction: column; gap: 2px; }
 .step-report__kv-row {
