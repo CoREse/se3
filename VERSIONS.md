@@ -27,6 +27,15 @@
 
 
 
+
+## 8.11.3 - 2026-06-10
+
+- Fix daemon-spawned flows failing with exit 127 when launched under systemd or other environments with an impoverished PATH
+- Resolve login shell PATH at daemon startup and merge it into spawned child process environments
+- Add streaming first-line extraction for history title parsing instead of reading entire JSONL files
+- Cache history directory metadata by content signature to skip re-parsing unchanged directories during index rebuilds
+- Switch incremental flow reads from whole-file line splitting to byte-offset-based partial reads
+- Reduce daemon CPU usage from near-continuous full-core consumption to negligible levels during normal operation
 ## 8.11.2 - 2026-06-09
 
 - Fix daemon event-loop starvation that caused webui-initiated flows to grey out and fail repeatedly by collapsing expensive per-tick full history-tree walks into a TTL-cached build_index with explicit invalidation on state changes
