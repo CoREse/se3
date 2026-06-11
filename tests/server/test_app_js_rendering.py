@@ -662,3 +662,71 @@ def test_running_flow_console_spec_passes_structural_validation():
         assert required_heading in content, (
             f"running-flow-console spec is missing heading: {required_heading!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Resume-flow frontend guardrails
+# ---------------------------------------------------------------------------
+
+
+def test_resume_button_css_exists():
+    """The ``.btn-resume`` class must be defined in the stylesheet so the
+    Resume button renders with the correct inline style."""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert ".btn-resume" in css, "missing .btn-resume CSS class"
+    # The button must be visually distinct (uppercase label, accent colour).
+    assert "text-transform: uppercase" in css
+
+
+def test_app_js_defines_is_flow_resumable():
+    """The pure ``isFlowResumable`` helper must exist and be exported."""
+    js = APP_JS.read_text(encoding="utf-8")
+    assert "function isFlowResumable(" in js, "missing isFlowResumable function"
+    assert "isFlowResumable," in js, "isFlowResumable not exported"
+
+
+def test_app_js_defines_resume_flow():
+    """The ``resumeFlow`` async function must exist and call the resume API."""
+    js = APP_JS.read_text(encoding="utf-8")
+    assert "async function resumeFlow(" in js, "missing resumeFlow function"
+    assert "/resume" in js, "resume endpoint not referenced"
+
+
+def test_app_js_defines_make_resume_button():
+    """The ``makeResumeButton`` factory must exist and create a btn-resume."""
+    js = APP_JS.read_text(encoding="utf-8")
+    assert "function makeResumeButton(" in js, "missing makeResumeButton function"
+    assert 'btn-resume' in js, "btn-resume class not used"
+
+
+def test_resume_button_appears_in_flow_card():
+    """``renderFlowCard`` must call ``makeResumeButton`` to inject the button."""
+    js = APP_JS.read_text(encoding="utf-8")
+    # renderFlowCard should reference makeResumeButton
+    card_section = js[js.index("function renderFlowCard("):]
+    card_section = card_section[:card_section.index("\nfunction ")]
+    assert "makeResumeButton" in card_section, (
+        "renderFlowCard does not call makeResumeButton"
+    )
+
+
+def test_resume_button_appears_in_sidebar():
+    """``renderFlowSidebar`` must call ``makeResumeButton`` to add a Resume
+    action in the flow detail sidebar."""
+    js = APP_JS.read_text(encoding="utf-8")
+    sidebar_section = js[js.index("function renderFlowSidebar("):]
+    sidebar_section = sidebar_section[:sidebar_section.index("\n// ---")]
+    assert "makeResumeButton" in sidebar_section, (
+        "renderFlowSidebar does not call makeResumeButton"
+    )
+
+
+def test_resume_button_appears_in_history_list():
+    """``renderHistoryList`` must call ``makeResumeButton`` for each session
+    card so failed/paused sessions offer a Resume action."""
+    js = APP_JS.read_text(encoding="utf-8")
+    list_section = js[js.index("function renderHistoryList("):]
+    list_section = list_section[:list_section.index("\nfunction historyTitle")]
+    assert "makeResumeButton" in list_section, (
+        "renderHistoryList does not call makeResumeButton"
+    )

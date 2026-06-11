@@ -218,6 +218,29 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   cursor: pointer;
 }
 
+/* Resume button — inline inside flow cards, history items, and the sidebar. */
+.btn-resume {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 2px 10px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+.btn-resume:hover:not(:disabled) { filter: brightness(1.15); }
+.btn-resume:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Resume bar injected below the history detail title. */
+.history-resume-bar {
+  margin: 4px 0 8px;
+}
+
 .progress {
   height: 6px;
   background: var(--bg-raised);
