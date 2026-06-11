@@ -64,6 +64,30 @@ check("unknown status is not resumable", () => {
 });
 
 // ---------------------------------------------------------------------------
+// isFlowResumable — source-based exclusion (archived/history)
+// ---------------------------------------------------------------------------
+check("archived flow is not resumable even with failed status", () => {
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "failed", source: "archived" }), false);
+});
+
+check("history flow is not resumable even with failed status", () => {
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "failed", source: "history" }), false);
+});
+
+check("active flow with failed status is resumable", () => {
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "failed", source: "active" }), true);
+});
+
+check("source exclusion is case-insensitive", () => {
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "failed", source: "Archived" }), false);
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "paused", source: "History" }), false);
+});
+
+check("archived paused flow is not resumable", () => {
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "paused", source: "archived" }), false);
+});
+
+// ---------------------------------------------------------------------------
 // isFlowResumable — missing / invalid inputs
 // ---------------------------------------------------------------------------
 check("null flow is not resumable", () => {

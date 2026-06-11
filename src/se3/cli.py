@@ -301,7 +301,8 @@ def run_cmd(
 
             render_text("Open issues:", title="Select Issue")
             for iss in open_issues:
-                typer.echo(f"  [{iss.id}] {iss.title} ({iss.priority})")
+                prio = iss.priority if iss.priority else "-"
+                typer.echo(f"  [{iss.id}] {iss.display_title} ({prio})")
 
             issue_id = typer.prompt("Enter issue ID")
 

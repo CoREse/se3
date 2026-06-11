@@ -6,6 +6,7 @@ stored as YAML files in se3/issues/open/ and se3/issues/closed/ directories.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import re
 import shutil
@@ -126,10 +127,17 @@ class Issue:
         raw_type = data.get("type")
         issue_type = str(raw_type) if raw_type is not None else None
 
+        # description degrades gracefully for legacy data — missing or empty
+        # defaults to "" so the issue remains listable, viewable, and editable.
+        # Write paths (create / update_fields) enforce non-empty description.
+        desc = data.get("description", "")
+        if not desc or not str(desc).strip():
+            desc = ""
+
         return cls(
             id=str(data["id"]),
             title=title,
-            description=data.get("description", ""),
+            description=str(desc) if desc else "",
             status=IssueStatus(data.get("status", "open")),
             priority=priority,
             scope=data.get("scope", "in_scope"),
@@ -196,34 +204,51 @@ class IssueManager:
         Uses a counter file (se3/issues/.next_id) for monotonic IDs.
         Falls back to scanning existing files if the counter file doesn't
         exist yet (first run or migration).
+
+        The read-modify-write on the counter file is serialized via
+        ``fcntl.flock(LOCK_EX)`` so concurrent creators (CLI, webui,
+        programmatic discovery) never allocate the same ID.
         """
+        self._ensure_dirs()
         counter_file = self.issues_dir / ".next_id"
 
-        # Read current counter
-        next_val = None
-        if counter_file.exists():
+        # Open (or create) the counter file and acquire an exclusive lock
+        # before reading/incrementing.  ``a+`` mode creates the file if it
+        # does not exist and allows reading after seeking to 0.
+        with open(counter_file, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
             try:
-                next_val = int(counter_file.read_text().strip())
-            except (ValueError, OSError):
-                pass
+                fh.seek(0)
+                raw = fh.read().strip()
 
-        if next_val is None:
-            # Bootstrap: scan existing files to find the max
-            max_id = 0
-            for directory in [self.open_dir, self.closed_dir]:
-                if not directory.exists():
-                    continue
-                for f in directory.glob("*.yaml"):
-                    match = re.match(r"^(\d+)_", f.name)
-                    if match:
-                        num = int(match.group(1))
-                        if num > max_id:
-                            max_id = num
-            next_val = max_id + 1
+                next_val = None
+                if raw:
+                    try:
+                        next_val = int(raw)
+                    except ValueError:
+                        pass
 
-        # Atomically write the incremented counter
-        self._ensure_dirs()
-        counter_file.write_text(str(next_val + 1))
+                if next_val is None:
+                    # Bootstrap: scan existing files to find the max
+                    max_id = 0
+                    for directory in [self.open_dir, self.closed_dir]:
+                        if not directory.exists():
+                            continue
+                        for f in directory.glob("*.yaml"):
+                            match = re.match(r"^(\d+)_", f.name)
+                            if match:
+                                num = int(match.group(1))
+                                if num > max_id:
+                                    max_id = num
+                    next_val = max_id + 1
+
+                # Write the incremented counter (overwrite the file)
+                fh.seek(0)
+                fh.truncate()
+                fh.write(str(next_val + 1))
+                fh.flush()
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
         return f"{next_val:03d}"
 
@@ -508,6 +533,7 @@ class IssueManager:
         description: Optional[str] = None,
         priority: Optional[str] = None,
         type: Optional[str] = None,
+        scope: Optional[str] = None,
         tags: Optional[List[str]] = None,
     ) -> Issue:
         """Update editable fields on an issue, renaming the YAML file when the
@@ -523,6 +549,9 @@ class IssueManager:
             description: New description body.
             priority: New priority (empty string clears to ``None``).
             type: New issue type (empty string clears to ``None``).
+            scope: New scope classification (e.g. ``"in_scope"`` or
+                ``"out_of_scope"``).  Empty string clears to the default
+                ``"in_scope"``.
             tags: New tag list.
 
         Returns:
@@ -539,7 +568,12 @@ class IssueManager:
         if not issue:
             raise ValueError(f"Issue '{issue_id}' could not be read")
 
-        old_slug = _derive_slug_for_issue(issue)
+        # Use the canonical stored ID (e.g. "001") rather than the caller-supplied
+        # potentially unpadded ID (e.g. "1") so the filename preserves zero-padding.
+        canonical_id = issue.id
+
+        # Extract the actual slug from the filename on disk (e.g. "001_untitled.yaml" → "untitled")
+        actual_slug_on_disk = filepath.stem[len(canonical_id) + 1:] if filepath.stem.startswith(canonical_id + "_") else filepath.stem
 
         # Apply field changes — empty string means "clear to None"
         if title is not None:
@@ -552,16 +586,18 @@ class IssueManager:
             issue.priority = priority.strip() or None
         if type is not None:
             issue.type = type.strip() or None
+        if scope is not None:
+            issue.scope = scope.strip() or "in_scope"
         if tags is not None:
             issue.tags = tags
 
         issue.updated_at = datetime.now()
 
-        new_slug = _derive_slug_for_issue(issue)
-        new_filename = f"{issue_id}_{new_slug}.yaml"
+        canonical_slug = _derive_slug_for_issue(issue)
+        new_filename = f"{canonical_id}_{canonical_slug}.yaml"
 
         # Write to the canonical path (may be the same file or a rename)
-        if new_slug != old_slug:
+        if canonical_slug != actual_slug_on_disk:
             target_path = filepath.parent / new_filename
             # Remove any stale file with the new slug that might linger
             if target_path != filepath and target_path.exists():
@@ -572,7 +608,7 @@ class IssueManager:
                 filepath.unlink()
                 logger.info(
                     "Renamed issue %s file: %s -> %s",
-                    issue_id,
+                    canonical_id,
                     filepath.name,
                     new_filename,
                 )

@@ -1387,10 +1387,18 @@ se3 issue                              # List open issues (default)
 se3 issue list                         # List open issues
 se3 issue list --all                   # List all issues including closed
 se3 issue list --type <type>           # Filter by issue type
+se3 issue list --source <human|system> # Filter by issue origin
 se3 issue show <id>                    # Show detailed information about an issue
-se3 issue create                       # Create a new issue interactively
+se3 issue create "<description>"       # Create from a positional description
+echo "<description>" | se3 issue create   # Create from piped stdin
+se3 issue create                       # Create from a single interactive description prompt
+se3 issue create --editor              # Create via an external editor ($EDITOR, fallback vi)
+se3 issue edit <id>                    # Edit an issue's YAML in an external editor
+se3 issue close <id> [--reason TEXT]   # Close an issue with an optional reason
 se3 issue reset <id>                   # Reset an in-progress issue back to open
 ```
+
+`se3 issue create` accepts optional `--title`, `--type`, `--priority`, `--scope`, and `--tags` flags alongside the description; only `description` is required.
 
 **Project root resolution:** The command walks up from the current working directory looking for `.git` or any SE3 config file (`se3.yaml`, `se3.local.yaml`, `se3.config.yaml`). If none is found, the current working directory is used.
 
@@ -1400,8 +1408,12 @@ se3 issue reset <id>                   # Reset an in-progress issue back to open
 | `list` | `--all` | `-a` |
 | `list` | `--type` | `-t` |
 
+**External editor resolution:** `se3 issue create --editor` and `se3 issue edit <id>` launch the editor named by the `$EDITOR` environment variable, falling back to `vi` when `$EDITOR` is unset or empty.
+
 **Issue fields and rendering:**
-- Each issue carries an ID, title, type, status, priority, tags, description, created timestamp, and updated timestamp.
+- Each issue carries an ID, an optional title, optional type, status, optional priority, tags, description, a `source` (`human` / `system`) origin, created timestamp, and updated timestamp. Only `description` is required; `title`, `type`, and `priority` may be unset.
+- When `title` is unset the displayed title and the file slug are derived from the description's first non-empty line; when `type` or `priority` is unset it renders as `-` and does not contribute to sort weighting.
+- A `source` missing from an issue's YAML (legacy data) is read as `system`.
 - Status values include `open`, `in_progress`, `resolved`, `wont_fix`, and `closed`.
 - Lists render via a Rich table whose columns are ID, Title (truncated to 50 characters with an ellipsis when longer), Type, Status, Priority, Tags, and Created.
 - Status, priority, and type are color-coded for readability.
@@ -1418,6 +1430,12 @@ se3 issue reset <id>                   # Reset an in-progress issue back to open
 - **WHEN** the user runs `se3 issue list --type bug`
 - **THEN** only issues with type `bug` are displayed
 
+#### Scenario: Filter list by source
+- **WHEN** the user runs `se3 issue list --source human`
+- **THEN** only issues whose `source` is `human` are displayed
+- **AND** `--source system` shows only system-originated issues (including legacy issues with no `source` field)
+- **AND** an invalid `--source` value is rejected with a usage error
+
 #### Scenario: Empty list message
 - **GIVEN** no issues match the active filter
 - **WHEN** the user runs `se3 issue list` (with or without `--all` / `--type`)
@@ -1433,10 +1451,36 @@ se3 issue reset <id>                   # Reset an in-progress issue back to open
 - **WHEN** the user runs `se3 issue show <id>`
 - **THEN** the command prints an error message to stderr and exits with a non-zero exit code
 
-#### Scenario: Create issue interactively
+#### Scenario: Create issue from a positional description
+- **WHEN** the user runs `se3 issue create "<description>"`
+- **THEN** the positional argument is used as the description, the remaining fields come from optional flags, and a new issue is persisted with `source=human` and its assigned ID and display title printed
+
+#### Scenario: Create issue from piped stdin
+- **GIVEN** stdin is piped (non-TTY)
+- **WHEN** the user runs `echo "<description>" | se3 issue create`
+- **THEN** the entire stdin content is used as the description and a new `human`-sourced issue is created
+
+#### Scenario: Create issue from a single interactive description prompt
+- **GIVEN** stdin is a TTY and no positional description is given
 - **WHEN** the user runs `se3 issue create`
-- **THEN** the command prompts for title, description, type (default `bug`), priority (default `medium`), and comma-separated tags
-- **AND** persists a new issue and prints its assigned ID and title
+- **THEN** the command collects exactly one multi-line description via the shared multi-line input editor (the same one `se3 run` uses) and does NOT step through separate title/type/priority/tags prompts and does NOT open an external editor
+- **AND** an empty resolved description aborts with a non-zero exit code
+
+#### Scenario: Create issue via external editor
+- **WHEN** the user runs `se3 issue create --editor`
+- **THEN** an external editor (`$EDITOR`, falling back to `vi`) opens on a prefilled field template, and on save a new `human`-sourced issue is created with only `description` required
+
+#### Scenario: Edit an issue via external editor
+- **GIVEN** an issue with ID `<id>` exists
+- **WHEN** the user runs `se3 issue edit <id>`
+- **THEN** an external editor opens on the issue's current field values, and on save the edited fields are applied (an emptied optional field is cleared, an emptied description is rejected)
+- **AND** a missing ID prints an error to stderr and exits non-zero
+
+#### Scenario: Close an issue with an optional reason
+- **GIVEN** an open or in-progress issue with ID `<id>`
+- **WHEN** the user runs `se3 issue close <id> --reason "<text>"`
+- **THEN** the issue is closed and the reason is recorded in the close log line (not persisted into the issue YAML)
+- **AND** a missing ID, or an invalid close transition, prints an error to stderr and exits non-zero
 
 #### Scenario: Reset in-progress issue
 - **GIVEN** an issue currently in `in_progress` status

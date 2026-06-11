@@ -119,6 +119,11 @@ MSG_INTERJECT_FLOW = "interject_flow"
 #: validates the operation and delegates to :class:`IssueManager`.
 MSG_ISSUE_COMMAND = "issue_command"
 
+#: daemon → server: acknowledge the result of a :data:`MSG_ISSUE_COMMAND`.
+#: Carries ``request_id`` (echoed from the command) and either ``ok=true``
+#: or ``ok=false`` with an ``error`` message.
+MSG_ISSUE_RESULT = "issue_result"
+
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
 HISTORY_MODE_APPEND = "append"
@@ -162,6 +167,7 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_PONG,
         MSG_HISTORY_INDEX,
         MSG_HISTORY_DATA,
+        MSG_ISSUE_RESULT,
     }
 )
 #: Messages a server is allowed to send to a daemon.
@@ -398,12 +404,14 @@ def make_issue_command(
     project_root: str,
     *,
     issue_id: str = "",
-    description: str = "",
-    title: str = "",
-    priority: str = "",
-    type: str = "",
+    description: Optional[str] = None,
+    title: Optional[str] = None,
+    priority: Optional[str] = None,
+    type: Optional[str] = None,
+    scope: Optional[str] = None,
     tags: Optional[List[str]] = None,
     reason: str = "",
+    request_id: str = "",
 ) -> Message:
     """server → daemon: execute an issue write operation.
 
@@ -412,11 +420,15 @@ def make_issue_command(
     SE3 project.  The remaining fields are operation-specific:
 
     * ``create``: *description* is required; *title*, *priority*, *type*,
-      *tags* are optional.
+      *scope*, *tags* are optional.
     * ``edit``: *issue_id* is required; *title*, *description*, *priority*,
-      *type*, *tags* are optional (non-empty values overwrite the field).
+      *type*, *scope*, *tags* are optional.  ``None`` means "do not change";
+      an empty string means "clear the field".
     * ``close``: *issue_id* is required; *reason* is optional.
     * ``reopen``: *issue_id* is required.
+
+    When *request_id* is supplied the daemon will echo it back in its
+    :data:`MSG_ISSUE_RESULT` reply so the server can correlate the response.
     """
     payload: Dict[str, Any] = {
         "operation": operation,
@@ -424,19 +436,47 @@ def make_issue_command(
     }
     if issue_id:
         payload["issue_id"] = issue_id
-    if description:
+    if description is not None:
         payload["description"] = description
-    if title:
+    if title is not None:
         payload["title"] = title
-    if priority:
+    if priority is not None:
         payload["priority"] = priority
-    if type:
+    if type is not None:
         payload["type"] = type
+    if scope is not None:
+        payload["scope"] = scope
     if tags is not None:
         payload["tags"] = list(tags)
     if reason:
         payload["reason"] = reason
+    if request_id:
+        payload["request_id"] = request_id
     return Message(type=MSG_ISSUE_COMMAND, payload=payload)
+
+
+def make_issue_result(
+    request_id: str,
+    *,
+    ok: bool = True,
+    error: str = "",
+    issue_id: str = "",
+) -> Message:
+    """daemon → server: acknowledge the result of an issue write command.
+
+    *request_id* echoes the ``request_id`` from the originating
+    :data:`MSG_ISSUE_COMMAND` so the server can correlate.  When *ok* is
+    ``False`` the *error* string describes what went wrong.
+    """
+    payload: Dict[str, Any] = {
+        "request_id": request_id,
+        "ok": ok,
+    }
+    if error:
+        payload["error"] = error
+    if issue_id:
+        payload["issue_id"] = issue_id
+    return Message(type=MSG_ISSUE_RESULT, payload=payload)
 
 
 def make_ping(*, seq: int = 0) -> Message:

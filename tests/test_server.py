@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -902,20 +903,38 @@ def test_create_issue_dispatches_command(client_and_app):
         ws.send_text(_hello(app))
         protocol.decode(ws.receive_text())
 
-        resp = client.post("/api/issues", json={
-            "machine_id": "m1",
-            "project_root": "/proj",
-            "description": "Something is broken",
-            "title": "Fix it",
-            "priority": "high",
-            "type": "bug",
-        })
-        assert resp.status_code == 202
-        msg = protocol.decode(ws.receive_text())
-        assert msg.type == protocol.MSG_ISSUE_COMMAND
-        assert msg.payload["operation"] == "create"
-        assert msg.payload["description"] == "Something is broken"
-        assert msg.payload["project_root"] == "/proj"
+        result: dict = {}
+
+        def do_post():
+            result["resp"] = client.post("/api/issues", json={
+                "machine_id": "m1",
+                "project_root": "/proj",
+                "description": "Something is broken",
+                "title": "Fix it",
+                "priority": "high",
+                "type": "bug",
+            })
+
+        worker = threading.Thread(target=do_post)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "create"
+            assert msg.payload["description"] == "Something is broken"
+            assert msg.payload["project_root"] == "/proj"
+            ws.send_text(protocol.make_issue_result(
+                msg.payload.get("request_id", ""),
+                ok=True,
+                issue_id="001",
+            ).to_json())
+        finally:
+            worker.join(timeout=5)
+        resp = result["resp"]
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["status"] == "created"
+        assert body["issue_id"] == "001"
 
 
 def test_create_issue_rejects_empty_description(client_and_app):
@@ -969,15 +988,31 @@ def test_edit_issue_dispatches_command(client_and_app):
             if resp.status_code == 200:
                 break
 
-        resp = client.patch("/api/issues/042", json={
-            "description": "Updated",
-        })
+        result: dict = {}
+
+        def do_patch():
+            result["resp"] = client.patch("/api/issues/042", json={
+                "description": "Updated",
+            })
+
+        worker = threading.Thread(target=do_patch)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "edit"
+            assert msg.payload["issue_id"] == "042"
+            assert msg.payload["description"] == "Updated"
+            ws.send_text(protocol.make_issue_result(
+                msg.payload.get("request_id", ""),
+                ok=True,
+                issue_id="042",
+            ).to_json())
+        finally:
+            worker.join(timeout=5)
+        resp = result["resp"]
         assert resp.status_code == 200
-        msg = protocol.decode(ws.receive_text())
-        assert msg.type == protocol.MSG_ISSUE_COMMAND
-        assert msg.payload["operation"] == "edit"
-        assert msg.payload["issue_id"] == "042"
-        assert msg.payload["description"] == "Updated"
+        assert resp.json()["status"] == "updated"
 
 
 def test_close_issue_dispatches_command(client_and_app):
@@ -995,12 +1030,30 @@ def test_close_issue_dispatches_command(client_and_app):
             if resp.status_code == 200:
                 break
 
-        resp = client.post("/api/issues/042/close", json={"reason": "Fixed"})
+        result: dict = {}
+
+        def do_close():
+            result["resp"] = client.post(
+                "/api/issues/042/close", json={"reason": "Fixed"},
+            )
+
+        worker = threading.Thread(target=do_close)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "close"
+            assert msg.payload["reason"] == "Fixed"
+            ws.send_text(protocol.make_issue_result(
+                msg.payload.get("request_id", ""),
+                ok=True,
+                issue_id="042",
+            ).to_json())
+        finally:
+            worker.join(timeout=5)
+        resp = result["resp"]
         assert resp.status_code == 200
-        msg = protocol.decode(ws.receive_text())
-        assert msg.type == protocol.MSG_ISSUE_COMMAND
-        assert msg.payload["operation"] == "close"
-        assert msg.payload["reason"] == "Fixed"
+        assert resp.json()["status"] == "closed"
 
 
 def test_reopen_issue_dispatches_command(client_and_app):
@@ -1018,12 +1071,28 @@ def test_reopen_issue_dispatches_command(client_and_app):
             if resp.status_code == 200:
                 break
 
-        resp = client.post("/api/issues/042/reopen", json={})
+        result: dict = {}
+
+        def do_reopen():
+            result["resp"] = client.post("/api/issues/042/reopen", json={})
+
+        worker = threading.Thread(target=do_reopen)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "reopen"
+            assert msg.payload["issue_id"] == "042"
+            ws.send_text(protocol.make_issue_result(
+                msg.payload.get("request_id", ""),
+                ok=True,
+                issue_id="042",
+            ).to_json())
+        finally:
+            worker.join(timeout=5)
+        resp = result["resp"]
         assert resp.status_code == 200
-        msg = protocol.decode(ws.receive_text())
-        assert msg.type == protocol.MSG_ISSUE_COMMAND
-        assert msg.payload["operation"] == "reopen"
-        assert msg.payload["issue_id"] == "042"
+        assert resp.json()["status"] == "reopened"
 # POST /api/flows/{flow_id}/resume
 # --------------------------------------------------------------------------
 

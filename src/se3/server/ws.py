@@ -189,6 +189,41 @@ class IndexRefreshRegistry:
             self._waiters.pop(machine_id, None)
 
 
+class IssueCommandRegistry:
+    """Tracks in-flight issue write commands awaiting a daemon result.
+
+    A REST handler that dispatches an issue write (create / edit / close /
+    reopen) parks an :class:`asyncio.Future` here keyed by ``request_id``.
+    When the daemon replies with :data:`protocol.MSG_ISSUE_RESULT` the
+    matching waiter is resolved.  Lives entirely in process memory.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: Dict[str, list] = {}
+
+    def register(self, request_id: str) -> "asyncio.Future":
+        """Park and return a future that resolves when *request_id* lands."""
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiters.setdefault(request_id, []).append(fut)
+        return fut
+
+    def resolve(self, request_id: str, data: Any) -> None:
+        """Resolve every waiter parked for *request_id* with *data*."""
+        for fut in self._waiters.pop(request_id, []):
+            if not fut.done():
+                fut.set_result(data)
+
+    def discard(self, request_id: str, fut: "asyncio.Future") -> None:
+        """Drop a single waiter (e.g. after a timeout) without resolving it."""
+        waiters = self._waiters.get(request_id)
+        if not waiters:
+            return
+        if fut in waiters:
+            waiters.remove(fut)
+        if not waiters:
+            self._waiters.pop(request_id, None)
+
+
 async def broadcast_index_refresh(
     manager: ConnectionManager,
     registry: "IndexRefreshRegistry",
@@ -599,6 +634,7 @@ async def handle_daemon_connection(
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     identity: Optional["IdentityService"] = None,
+    issue_registry: Optional["IssueCommandRegistry"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -695,6 +731,7 @@ async def handle_daemon_connection(
             registry,
             index_registry,
             interjection_tracker,
+            issue_registry,
         )
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
@@ -720,6 +757,7 @@ async def _serve_loop(
     registry: Optional["HistoryRequestRegistry"] = None,
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
+    issue_registry: Optional["IssueCommandRegistry"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -741,6 +779,7 @@ async def _serve_loop(
                 registry,
                 index_registry,
                 interjection_tracker,
+                issue_registry,
             )
 
     async def heartbeat() -> None:
@@ -784,6 +823,7 @@ async def _handle_message(
     registry: Optional["HistoryRequestRegistry"] = None,
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
+    issue_registry: Optional["IssueCommandRegistry"] = None,
 ) -> None:
     """Apply one inbound daemon message to the server state."""
     if message.type == protocol.MSG_STATUS_UPDATE:
@@ -843,5 +883,11 @@ async def _handle_message(
             if registry is not None:
                 registry.resolve(flow_id, await state.get_history(flow_id))
             await _push_history_data(hub, state, machine_id, flow_id, mode, records)
+    elif message.type == protocol.MSG_ISSUE_RESULT:
+        # Daemon acknowledges an issue write command. Resolve the parked
+        # future so the originating REST endpoint can return the outcome.
+        request_id = str(message.payload.get("request_id") or "")
+        if request_id and issue_registry is not None:
+            issue_registry.resolve(request_id, message.payload)
     else:  # pragma: no cover - decode() restricts to known daemon->server types
         logger.debug("Ignoring unexpected daemon message type %s", message.type)

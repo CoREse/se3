@@ -121,7 +121,11 @@ const state = {
   issuesShowClosed: false,     // include closed/resolved/won't-fix issues
   issuesSourceFilter: "",      // filter: "human" | "system" | ""
   issuesTypeFilter: "",        // filter: issue type or ""
-  selectedIssueId: null,       // issue id shown in detail pane
+  allIssueTypes: [],           // unfiltered type universe for the dropdown
+  _issuesFetchSeq: 0,          // monotonic counter to discard stale fetchIssues responses
+  _issuesFetchInFlight: false, // true while a fetchIssues request is in-flight (coalescing guard)
+  _issuesRefreshPending: false,// true when a refresh was requested while in-flight
+  selectedIssueId: null,       // composite key (machine_id::project_root::id) shown in detail pane
   issuesLoading: false,        // true while fetching issues
   // ---- Resume flow tracking ----
   // Set of flow_ids for which a resume request is currently in-flight.
@@ -326,6 +330,10 @@ const RESUMABLE_STATUSES = ["failed", "paused"];
 function isFlowResumable(flow) {
   if (!flow || typeof flow !== "object") return false;
   if (!flow.flow_id) return false;
+  // Archived/history-only sessions cannot be resumed — they lack a live
+  // engine.json and the server would return 404.
+  const src = String(flow.source || "").toLowerCase();
+  if (src === "archived" || src === "history") return false;
   return RESUMABLE_STATUSES.includes(
     String(flow.status || "").toLowerCase()
   );
@@ -709,19 +717,11 @@ function applyMachines(machines) {
   renderMachines();
   renderFlows();
 
-  // Refresh the issues list if the issues view is open — issues ride the
-  // STATUS_UPDATE snapshot, so each push carries fresh data.
+  // Refresh the issues list if the issues view is open — re-fetch from the
+  // REST API so that daemon-side changes (new/closed/reopened issues) are
+  // reflected promptly without waiting for a manual filter toggle.
   if (isIssuesOpen()) {
-    // Merge snapshot issues into state.issues so the list stays current even
-    // without a separate /api/issues round-trip.
-    const snapshotIssues = collectAllIssues();
-    if (snapshotIssues.length) {
-      state.issues = snapshotIssues;
-      renderIssuesList();
-      refreshIssueTypeFilter();
-      // Refresh the detail pane if an issue is selected.
-      if (state.selectedIssueId) renderIssueDetail(state.selectedIssueId);
-    }
+    fetchIssues();
   }
 
   // Refresh the open flow view if its flow is still around.
@@ -918,6 +918,61 @@ function issuePriorityClass(priority) {
 
 // Known issue types for the create/edit form dropdown.
 const KNOWN_ISSUE_TYPES = ["bug", "feature", "enhancement", "idea", "task"];
+
+// Resolve the owning machine_id from an issue object returned by GET /api/issues.
+// The REST API attaches the key as ``machine_id`` (state.py get_issues); older
+// code used ``_machine_id`` (set by the now-dead collectAllIssues).  Prefer the
+// canonical key, fall back to the legacy one.  Pure — no DOM, no state.
+function issueMachineId(iss) {
+  if (!iss || typeof iss !== "object") return "";
+  return (iss.machine_id || iss._machine_id || "").toString();
+}
+
+// Composite key for disambiguating issues across machines/projects.
+// Issue IDs are per-project monotonic counters, so two projects can produce
+// the same numeric id.  The composite key prevents selection/detail-lookup
+// collisions when the aggregated issue list contains multiple projects.
+function issueCompositeKey(iss) {
+  if (!iss || typeof iss !== "object") return "";
+  const mid = (iss.machine_id || iss._machine_id || "").toString();
+  const pr = (iss.project_root || "").toString();
+  const id = (iss.id || "").toString();
+  return mid + "::" + pr + "::" + id;
+}
+
+// Build the POST body for ``POST /api/issues`` (create).  Pure.
+function buildIssueCreateBody(description, machineId, projectRoot, title, type, priority, scope, tags) {
+  const body = { description, machine_id: machineId, project_root: projectRoot };
+  if (title) body.title = title;
+  if (type) body.type = type;
+  if (priority) body.priority = priority;
+  if (scope) body.scope = scope;
+  if (tags && tags.length) body.tags = tags;
+  return body;
+}
+
+// Build the PATCH body for ``PATCH /api/issues/{id}`` (edit).  Only includes
+// fields the user actually modified (tracked via a dirty set).  Pure.
+function buildIssueEditBody(description, machineId, projectRoot, dirtyFields, formValues) {
+  const body = { description };
+  if (machineId) body.machine_id = machineId;
+  if (projectRoot) body.project_root = projectRoot;
+  if (dirtyFields.has("issue-title"))   body.title = formValues.title || "";
+  if (dirtyFields.has("issue-type"))    body.type = formValues.type || "";
+  if (dirtyFields.has("issue-priority")) body.priority = formValues.priority || "";
+  if (dirtyFields.has("issue-scope"))   body.scope = formValues.scope || "";
+  if (dirtyFields.has("issue-tags"))    body.tags = formValues.tags || [];
+  return body;
+}
+
+// Build the POST body for ``POST /api/issues/{id}/close`` or ``reopen``.  Pure.
+function buildIssueActionBody(machineId, projectRoot, reason) {
+  const body = {};
+  if (machineId) body.machine_id = machineId;
+  if (projectRoot) body.project_root = projectRoot;
+  if (reason) body.reason = reason;
+  return body;
+}
 
 // ---------------------------------------------------------------------------
 // Render: machine list
@@ -2631,6 +2686,9 @@ function openIssues() {
   applyIssuesPanelAction("reset");
   renderIssuesList();
   fetchIssues();
+  // Populate the type dropdown universe from an unfiltered fetch so that
+  // switching types works even when a type filter is already active.
+  fetchAllIssueTypes();
 }
 
 function closeIssues() {
@@ -2654,7 +2712,61 @@ function collectAllIssues() {
   return all;
 }
 
+// fetchIssuesCoalesceDecision — pure helper for the fetchIssues request-coalescing
+// entry decision.  Extracted for regression testing (the previous starvation bug
+// was caused by bumping the seq counter on every STATUS_UPDATE, discarding all
+// in-flight responses as "stale").
+//
+// Returns { action: "defer", refreshPending: true } when a request is already
+// in-flight (the caller should NOT start a new fetch; the in-flight request will
+// re-dispatch on completion if refreshPending is set in the finally block).
+// Returns { action: "proceed", seq: nextSeq } when no request is in-flight (the
+// caller should bump the seq counter and start the fetch).
+function fetchIssuesCoalesceDecision({ inFlight, seq }) {
+  if (inFlight) {
+    return { action: "defer", refreshPending: true };
+  }
+  return { action: "proceed", seq: seq + 1 };
+}
+
+// fetchIssuesFinallyDecision — pure helper for the fetchIssues finally-block
+// ordering.  The critical invariant is: render the current data BEFORE checking
+// refreshPending and re-dispatching.  Reversing the order (re-dispatch then render)
+// bumps seq before render reads it, causing the freshly-rendered data to be
+// immediately stale.
+//
+// Returns { applyResponse, reDispatch }:
+//   applyResponse is true when completedSeq === fetchSeq (no newer request has
+//   been started since this one began).
+//   reDispatch is true when refreshPending was set (a STATUS_UPDATE arrived
+//   while this request was in-flight).
+function fetchIssuesFinallyDecision(completedSeq, { fetchSeq, refreshPending }) {
+  return {
+    applyResponse: completedSeq === fetchSeq,
+    reDispatch: refreshPending,
+  };
+}
+
 async function fetchIssues() {
+  // Coalesce rapid repeated calls (e.g. STATUS_UPDATE arriving every 2s while
+  // the /api/issues response takes >2s).  If a request is already in-flight,
+  // mark that a refresh is needed and return — the in-flight request will
+  // re-trigger fetchIssues() on completion if _issuesRefreshPending is set.
+  // This prevents the old pattern where every STATUS_UPDATE bumped
+  // _issuesFetchSeq, causing every in-flight response to be discarded as
+  // "stale" and the issue list to never receive data.
+  const entryDecision = fetchIssuesCoalesceDecision({
+    inFlight: state._issuesFetchInFlight,
+    seq: state._issuesFetchSeq,
+  });
+  if (entryDecision.action === "defer") {
+    state._issuesRefreshPending = entryDecision.refreshPending;
+    return;
+  }
+
+  const seq = entryDecision.seq;
+  state._issuesFetchSeq = seq;
+  state._issuesFetchInFlight = true;
   state.issuesLoading = true;
   renderIssuesList();
   try {
@@ -2666,23 +2778,95 @@ async function fetchIssues() {
     const resp = await authedFetch("/api/issues" + (qs ? "?" + qs : ""));
     if (!resp.ok) return;
     const data = await resp.json().catch(() => ({ issues: [] }));
+    // Only apply results if no newer fetch has been started since we began.
+    if (seq !== state._issuesFetchSeq) return;
     if (Array.isArray(data.issues)) {
       state.issues = data.issues;
     }
   } catch (_) {
     /* transient — next STATUS_UPDATE will refresh */
   } finally {
+    state._issuesFetchInFlight = false;
+    // Always clear the loading flag — the critical invariant is that
+    // issuesLoading is false whenever NO request is in-flight.
     state.issuesLoading = false;
-    renderIssuesList();
-    refreshIssueTypeFilter();
+    // Use the pure decision helper to determine whether to apply this
+    // response and whether to re-dispatch a pending refresh.
+    const finallyDecision = fetchIssuesFinallyDecision(seq, {
+      fetchSeq: state._issuesFetchSeq,
+      refreshPending: state._issuesRefreshPending,
+    });
+    // Only apply data/render updates for the most recent request.
+    if (finallyDecision.applyResponse) {
+      renderIssuesList();
+      refreshIssueTypeFilter();
+      // Re-render the detail pane if one is selected so status badges and
+      // action buttons reflect the latest data (e.g. after close/reopen).
+      if (state.selectedIssueId) {
+        const stillExists = (state.issues || []).some(
+          (i) => i && issueCompositeKey(i) === state.selectedIssueId,
+        );
+        if (stillExists) {
+          renderIssueDetail(state.selectedIssueId);
+        } else {
+          // Issue dropped out of the current filter (e.g. closed with open-only
+          // view).  Clear the stale detail pane.
+          state.selectedIssueId = null;
+          applyIssuesPanelAction("reset");
+        }
+      }
+    }
+    // If a refresh was requested while this request was in-flight, kick off
+    // a new fetch *after* rendering the current data.  The new fetch will
+    // re-set issuesLoading = true and re-render with fresher data once it
+    // completes.  This ensures the issue list is never stuck in a perpetual
+    // loading state when STATUS_UPDATEs arrive faster than the API responds.
+    if (finallyDecision.reDispatch) {
+      state._issuesRefreshPending = false;
+      fetchIssues();
+    }
   }
+}
+
+// Fetch all issue types once (unfiltered) so the dropdown stays complete even
+// when a type filter is active.  Populates state.allIssueTypes.
+async function fetchAllIssueTypes() {
+  try {
+    const params = new URLSearchParams();
+    if (state.issuesShowClosed) params.set("include_closed", "true");
+    if (state.issuesSourceFilter) params.set("source", state.issuesSourceFilter);
+    // Deliberately omit 'type' param to get the full type universe.
+    const qs = params.toString();
+    const resp = await authedFetch("/api/issues" + (qs ? "?" + qs : ""));
+    if (!resp.ok) return;
+    const data = await resp.json().catch(() => ({ issues: [] }));
+    if (Array.isArray(data.issues)) {
+      state.allIssueTypes = issueTypes(data.issues);
+    }
+  } catch (_) {
+    /* best-effort */
+  }
+  refreshIssueTypeFilter();
+}
+
+// selectTypeDropdownOptions is the pure selection logic for the type-filter
+// dropdown (exported for the DOM-free tests in
+// tests/frontend/issue_management.test.mjs).  It prefers the cached
+// unfiltered type universe so the dropdown stays complete when a type filter
+// is active; it falls back to deriving types from the current (possibly
+// filtered) issues list when the cache is empty (e.g. first load or
+// fetchAllIssueTypes has not yet returned).
+function selectTypeDropdownOptions(allIssueTypes, issues) {
+  return allIssueTypes && allIssueTypes.length
+    ? allIssueTypes
+    : issueTypes(issues);
 }
 
 function refreshIssueTypeFilter() {
   const sel = $("issues-type-filter");
   if (!sel) return;
   const current = sel.value;
-  const types = issueTypes(state.issues);
+  const types = selectTypeDropdownOptions(state.allIssueTypes, state.issues);
   sel.innerHTML = '<option value="">全部类型</option>';
   for (const t of types) {
     const opt = document.createElement("option");
@@ -2718,7 +2902,7 @@ function renderIssuesList() {
 
   for (const iss of filtered) {
     const card = el("div", "issue-item");
-    if (iss.id === state.selectedIssueId) card.classList.add("selected");
+    if (issueCompositeKey(iss) === state.selectedIssueId) card.classList.add("selected");
     card.classList.add("issue-source-" + (iss.source || "system"));
 
     const head = el("div", "issue-item-head");
@@ -2736,13 +2920,16 @@ function renderIssuesList() {
     if (iss.priority) {
       meta.appendChild(el("span", issuePriorityClass(iss.priority), iss.priority));
     }
+    if (iss.scope && iss.scope !== "in_scope") {
+      meta.appendChild(el("span", null, iss.scope));
+    }
     meta.appendChild(el("span", null, iss.source || "system"));
     if (iss.created_at) {
       meta.appendChild(el("span", null, formatTime(iss.created_at)));
     }
     card.appendChild(meta);
 
-    card.addEventListener("click", () => openIssueDetail(iss.id));
+    card.addEventListener("click", () => openIssueDetail(issueCompositeKey(iss)));
     list.appendChild(card);
   }
 }
@@ -2761,7 +2948,7 @@ function renderIssueDetail(issueId) {
   if (!detail) return;
   detail.innerHTML = "";
 
-  const iss = (state.issues || []).find((i) => i && i.id === issueId);
+  const iss = (state.issues || []).find((i) => i && issueCompositeKey(i) === issueId);
   if (!iss) {
     detail.appendChild(el("p", "empty", "Issue 未找到。"));
     if (titleNode) titleNode.textContent = "Issue";
@@ -2787,6 +2974,7 @@ function renderIssueDetail(issueId) {
     ["ID", "#" + (iss.id || "?")],
     ["类型", iss.type || "-"],
     ["优先级", iss.priority || "-"],
+    ["范围", iss.scope || "in_scope"],
     ["来源", iss.source || "system"],
     ["创建时间", formatTime(iss.created_at)],
     ["更新时间", formatTime(iss.updated_at)],
@@ -2838,19 +3026,108 @@ function renderIssueDetail(issueId) {
 // Issue create / edit modal
 // ---------------------------------------------------------------------------
 
+// Parse a comma-separated tags string into a trimmed, non-empty array.
+// Pure.
+function parseTagsFromString(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// Format a tags array into a comma-separated display string.
+// Pure.
+function formatTagsForInput(tags) {
+  if (!Array.isArray(tags) || !tags.length) return "";
+  return tags.join(", ");
+}
+
+// Track which form fields the user has modified so that the edit PATCH
+// body can distinguish "user cleared a field" (send empty string) from
+// "user didn't touch a field" (don't include in the body).
+let _issueFormDirty = new Set();
+function _initIssueFormDirtyTracking() {
+  const form = $("issue-form");
+  if (form) {
+    form.addEventListener("input", (e) => {
+      if (e.target && e.target.id) _issueFormDirty.add(e.target.id);
+    });
+  }
+}
+
+function _populateIssueMachineSelect() {
+  const sel = $("issue-machine");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const online = (state.machines || []).filter((m) => m && m.online);
+  if (!online.length) {
+    sel.appendChild(new Option("(no machines connected)", ""));
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  for (const m of online) {
+    sel.appendChild(new Option(m.hostname || m.machine_id, m.machine_id));
+  }
+}
+
+function _refreshIssueProjectOptions() {
+  const sel = $("issue-project");
+  if (!sel) return;
+  const machineId = $("issue-machine") ? $("issue-machine").value.trim() : "";
+  const roots = machineProjectRoots(machineId);
+  sel.innerHTML = "";
+  // Unlike the New Task form, issue commands have no ensure_se3_project
+  // fallback — the daemon rejects unregistered paths.  Do not offer an
+  // "Other path…" manual entry; restrict to known project roots.
+  const manualInput = $("issue-project-manual");
+  if (manualInput) manualInput.classList.add("hidden");
+  if (!roots.length) {
+    sel.appendChild(new Option("(该机器无已注册项目)", ""));
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  if (roots.length === 1) {
+    sel.appendChild(new Option(roots[0], roots[0]));
+    sel.value = roots[0];
+  } else {
+    const ph = new Option("(select a project…)", "");
+    ph.disabled = true;
+    ph.selected = true;
+    sel.appendChild(ph);
+    for (const r of roots) {
+      sel.appendChild(new Option(r, r));
+    }
+  }
+}
+
+function _updateIssueProjectManualVisibility() {
+  const sel = $("issue-project");
+  const manualInput = $("issue-project-manual");
+  if (!sel || !manualInput) return;
+  manualInput.classList.toggle("hidden", sel.value !== PROJECT_MANUAL_SENTINEL);
+  if (sel.value === PROJECT_MANUAL_SENTINEL) manualInput.focus();
+}
+
 function openIssueCreateModal() {
   $("issue-modal-title").textContent = "新建 Issue";
   $("issue-description").value = "";
   $("issue-title").value = "";
   $("issue-type").value = "";
   $("issue-priority").value = "";
+  $("issue-scope").value = "in_scope";
+  $("issue-tags").value = "";
   $("issue-form-submit").textContent = "创建";
   $("issue-form-error").classList.add("hidden");
+  _issueFormDirty = new Set();
   // Store the editing context: null means create mode.
   $("issue-form").dataset.mode = "create";
   $("issue-form").dataset.issueId = "";
   $("issue-form").dataset.machineId = "";
   $("issue-form").dataset.projectRoot = "";
+  // Populate machine/project selectors for create mode.
+  $("issue-machine-row").classList.remove("hidden");
+  _populateIssueMachineSelect();
+  _refreshIssueProjectOptions();
   $("issue-modal").classList.remove("hidden");
   $("issue-description").focus();
 }
@@ -2862,12 +3139,18 @@ function openIssueEditModal(iss) {
   $("issue-title").value = iss.title || "";
   $("issue-type").value = iss.type || "";
   $("issue-priority").value = iss.priority || "";
+  $("issue-scope").value = iss.scope || "in_scope";
+  $("issue-tags").value = formatTagsForInput(iss.tags);
   $("issue-form-submit").textContent = "保存";
   $("issue-form-error").classList.add("hidden");
+  _issueFormDirty = new Set();
   $("issue-form").dataset.mode = "edit";
   $("issue-form").dataset.issueId = iss.id || "";
-  $("issue-form").dataset.machineId = iss._machine_id || "";
+  $("issue-form").dataset.machineId = issueMachineId(iss);
   $("issue-form").dataset.projectRoot = iss.project_root || "";
+  // Machine/project context is already known for existing issues — hide the
+  // selector row so the user is not confused by an irrelevant dropdown.
+  $("issue-machine-row").classList.add("hidden");
   $("issue-modal").classList.remove("hidden");
   $("issue-description").focus();
 }
@@ -2894,17 +3177,32 @@ async function submitIssueForm(event) {
   try {
     let resp;
     if (mode === "create") {
-      const body = {
-        description,
-        machine_id: form.dataset.machineId || undefined,
-        project_root: form.dataset.projectRoot || undefined,
-      };
-      const title = $("issue-title").value.trim();
-      const type = $("issue-type").value;
-      const priority = $("issue-priority").value;
-      if (title) body.title = title;
-      if (type) body.type = type;
-      if (priority) body.priority = priority;
+      // Resolve machine_id and project_root from the form's dropdowns.
+      const machineId = $("issue-machine") ? $("issue-machine").value.trim() : "";
+      if (!machineId) {
+        showFormError(errBox, "没有可用的在线机器。");
+        submit.disabled = false;
+        return;
+      }
+      let projectRoot = $("issue-project") ? $("issue-project").value.trim() : "";
+      if (projectRoot === PROJECT_MANUAL_SENTINEL) {
+        projectRoot = $("issue-project-manual")
+          ? $("issue-project-manual").value.trim()
+          : "";
+      }
+      if (!projectRoot || !isValidAbsolutePath(projectRoot)) {
+        showFormError(errBox, "请选择或输入一个有效的项目路径。");
+        submit.disabled = false;
+        return;
+      }
+      const body = buildIssueCreateBody(
+        description, machineId, projectRoot,
+        $("issue-title").value.trim(),
+        $("issue-type").value,
+        $("issue-priority").value,
+        $("issue-scope") ? $("issue-scope").value : "",
+        parseTagsFromString($("issue-tags").value),
+      );
       resp = await authedFetch("/api/issues", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2912,13 +3210,19 @@ async function submitIssueForm(event) {
       });
     } else {
       const issueId = form.dataset.issueId;
-      const body = { description };
-      const title = $("issue-title").value.trim();
-      const type = $("issue-type").value;
-      const priority = $("issue-priority").value;
-      if (title) body.title = title;
-      if (type) body.type = type;
-      if (priority) body.priority = priority;
+      const body = buildIssueEditBody(
+        description,
+        form.dataset.machineId,
+        form.dataset.projectRoot,
+        _issueFormDirty,
+        {
+          title: $("issue-title").value.trim(),
+          type: $("issue-type").value,
+          priority: $("issue-priority").value,
+          scope: $("issue-scope") ? $("issue-scope").value : "",
+          tags: parseTagsFromString($("issue-tags").value),
+        },
+      );
       resp = await authedFetch("/api/issues/" + encodeURIComponent(issueId), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2972,7 +3276,7 @@ function openIssueActionModal(action, iss) {
   const modal = $("issue-action-modal");
   modal.dataset.action = action;
   modal.dataset.issueId = iss.id || "";
-  modal.dataset.machineId = iss._machine_id || "";
+  modal.dataset.machineId = issueMachineId(iss);
   modal.dataset.projectRoot = iss.project_root || "";
   modal.classList.remove("hidden");
 }
@@ -2998,11 +3302,9 @@ async function confirmIssueAction() {
     let resp;
     if (action === "close") {
       const reason = $("issue-action-reason").value.trim();
-      const body = {
-        machine_id: modal.dataset.machineId || undefined,
-        project_root: modal.dataset.projectRoot || undefined,
-      };
-      if (reason) body.reason = reason;
+      const body = buildIssueActionBody(
+        modal.dataset.machineId, modal.dataset.projectRoot, reason,
+      );
       resp = await authedFetch(
         "/api/issues/" + encodeURIComponent(issueId) + "/close",
         {
@@ -3012,10 +3314,9 @@ async function confirmIssueAction() {
         },
       );
     } else {
-      const body = {
-        machine_id: modal.dataset.machineId || undefined,
-        project_root: modal.dataset.projectRoot || undefined,
-      };
+      const body = buildIssueActionBody(
+        modal.dataset.machineId, modal.dataset.projectRoot,
+      );
       resp = await authedFetch(
         "/api/issues/" + encodeURIComponent(issueId) + "/reopen",
         {
@@ -3030,10 +3331,6 @@ async function confirmIssueAction() {
       closeIssueActionModal();
       showToast("success", action === "close" ? "Issue 已关闭。" : "Issue 已重开。");
       fetchIssues();
-      // If the detail pane is showing this issue, refresh it.
-      if (state.selectedIssueId === issueId) {
-        // Detail will refresh via fetchIssues → renderIssuesList.
-      }
     } else {
       const detail = await resp.json().catch(() => ({}));
       showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
@@ -8372,14 +8669,16 @@ function init() {
   $("issues-show-closed").addEventListener("change", (e) => {
     state.issuesShowClosed = e.target.checked;
     fetchIssues();
+    fetchAllIssueTypes();
   });
   $("issues-source-filter").addEventListener("change", (e) => {
     state.issuesSourceFilter = e.target.value;
     fetchIssues();
+    fetchAllIssueTypes();
   });
   $("issues-type-filter").addEventListener("change", (e) => {
     state.issuesTypeFilter = e.target.value;
-    renderIssuesList();
+    fetchIssues();
   });
   $("issues-create-btn").addEventListener("click", openIssueCreateModal);
 
@@ -8391,6 +8690,15 @@ function init() {
 
   // Issue create/edit modal.
   $("issue-form").addEventListener("submit", submitIssueForm);
+  _initIssueFormDirtyTracking();
+  const issMachineSel = $("issue-machine");
+  if (issMachineSel) {
+    issMachineSel.addEventListener("change", _refreshIssueProjectOptions);
+  }
+  const issProjectSel = $("issue-project");
+  if (issProjectSel) {
+    issProjectSel.addEventListener("change", _updateIssueProjectManualVisibility);
+  }
   $("issue-modal-close").addEventListener("click", closeIssueModal);
   $("issue-modal").addEventListener("click", (e) => {
     if (e.target.id === "issue-modal") closeIssueModal();
@@ -8640,6 +8948,18 @@ if (typeof module !== "undefined" && module.exports) {
     issueStatusClass,
     issuePriorityClass,
     KNOWN_ISSUE_TYPES,
+    issueMachineId,
+    issueCompositeKey,
+    buildIssueCreateBody,
+    buildIssueEditBody,
+    buildIssueActionBody,
+    parseTagsFromString,
+    formatTagsForInput,
+    selectTypeDropdownOptions,
+    // fetchIssues request-coalescing pure helpers (G7) — exposed for the
+    // DOM-free regression tests in tests/frontend/issue_management.test.mjs.
+    fetchIssuesCoalesceDecision,
+    fetchIssuesFinallyDecision,
     // Topbar overflow-menu state helper (G2) — exposed for the DOM-free tests
     // in tests/frontend/mobile_responsive.test.mjs.
     navMenuNextState,

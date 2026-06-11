@@ -117,6 +117,43 @@ squeeze the entire flow into one viewport.
 - **AND** collapsing the same block does NOT scroll — the reader's current
   position is left untouched
 
+### Requirement: Direct Resume Entry in the Flow Sidebar
+
+When a flow opened in `#flow-view` is in a directly-resumable state, the view
+MUST present a **Resume** control in the flow's detail sidebar so the operator
+can continue the run without leaving the console. Resumability is decided by the
+same pure `isFlowResumable(flow)` predicate used by the history surface (see the
+`history-view-console` *Direct Resume Entry* requirement and the `base` spec's
+*Server Modules* requirement): the Resume control appears **only** for a flow
+whose status is `FAILED` or `PAUSED` and that is not archived/history-only, and
+it is absent for `RUNNING` / `INIT` / `RECOVERING` / `COMPLETED` flows. The
+control reuses the shared `makeResumeButton(flow)` helper, so when the flow is
+not resumable the helper returns nothing and the sidebar renders no Resume
+control at all.
+
+Activating it POSTs `POST /api/flows/{flow_id}/resume` (the same debounced,
+owner-validated path the history surface uses), which dispatches a
+`MSG_SPAWN_FLOW` carrying `resume_flow_id` to the owning daemon; it never takes
+the archived `se3 history restore` rollback path. This Resume control is
+independent of the docked reply box and its intervention chips — it continues a
+stalled flow rather than answering a pending interaction.
+
+#### Scenario: Sidebar shows Resume only for a FAILED or PAUSED resumable flow
+- **GIVEN** a flow is open in `#flow-view`
+- **WHEN** the detail sidebar is rendered
+- **THEN** a Resume control appears only when `isFlowResumable(flow)` is true
+  (status `FAILED` or `PAUSED`, not archived/history-only)
+- **AND** no Resume control is rendered for `RUNNING`, `INIT`, `RECOVERING`, or
+  `COMPLETED` flows
+
+#### Scenario: Activating the sidebar Resume dispatches a resume request
+- **GIVEN** the Resume control is visible in the flow sidebar
+- **WHEN** the user activates it
+- **THEN** the frontend POSTs `/api/flows/{flow_id}/resume`, debounced per flow
+  via `state.resumeFlowRequests`
+- **AND** the request only ever resumes the live flow, never restoring an
+  archived snapshot
+
 ### Requirement: Docked Persistent Reply Box
 
 The bottom of `#flow-view`'s main column MUST host a persistently docked

@@ -154,6 +154,7 @@ class IssueSnapshot:
     description: str = ""
     status: str = "open"
     priority: Optional[str] = None
+    scope: str = "in_scope"
     type: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     source: str = "system"
@@ -166,6 +167,7 @@ class IssueSnapshot:
             "project_root": self.project_root,
             "description": self.description,
             "status": self.status,
+            "scope": self.scope,
             "tags": list(self.tags),
             "source": self.source,
             "created_at": self.created_at,
@@ -347,18 +349,28 @@ class DaemonAggregator:
         flows: List[FlowSnapshot] = []
         all_calls: List[PendingCall] = []
         all_issues: List[IssueSnapshot] = []
-        # Snapshot the live set into a local list before iterating: this build
-        # runs in a worker thread (offloaded from ``_push_status`` /
-        # ``_resolve_interject_root`` / the poll loop), while the event loop may
-        # call ``add_project_root`` (e.g. a webui SPAWN_FLOW for a not-yet-tracked
-        # root). Iterating the live set directly would raise ``RuntimeError: Set
-        # changed size during iteration`` and drop the STATUS_UPDATE — the same
-        # guard ``all_project_roots`` applies for this race.
-        for root in sorted(list(self._project_roots)):
+        # Build flow snapshots and collect calls from ALL known project roots
+        # (active + registry + historical), not just the active set.  After a
+        # daemon restart with no live ``se3 run`` process, a FAILED/PAUSED
+        # flow's project root exists only in the persistent registry; building
+        # snapshots only from the active set would leave it invisible in
+        # MachineStatus.flows, making the webui resume button (which the
+        # history index correctly renders) resolve to a 404 because
+        # ``record.flows`` in ServerState has no entry for that flow_id.
+        # ``_snapshot_for_root`` is cheap for roots without an engine.json
+        # (a single failed file read that returns None), so the incremental
+        # cost of scanning registry roots is negligible.
+        for root_str in self.all_project_roots():
+            root = Path(root_str)
             snapshot = self._snapshot_for_root(root)
-            if snapshot is None:
-                continue
-            flows.append(snapshot)
+            if snapshot is not None:
+                flows.append(snapshot)
+            # Calls and issues are collected independently of whether an
+            # active engine.json exists.  After a flow completes and
+            # engine.json is archived, the project root still holds its
+            # issue YAML files under se3/issues/; skipping collection
+            # when _snapshot_for_root() returns None would make those
+            # issues invisible in the webui.
             all_calls.extend(self._enumerate_calls(root))
             all_issues.extend(self._collect_issues(root))
         return MachineStatus(
@@ -875,6 +887,13 @@ class DaemonAggregator:
                     raw_id = data.get("id")
                     if raw_id is None:
                         continue
+                    # Issue.from_dict tolerates empty/missing description
+                    # (degrading to ""), so the read path no longer validates
+                    # it.  Skip only files missing a valid id — description is
+                    # allowed to be empty so the webui surface matches the CLI.
+                    raw_desc = data.get("description")
+                    # Normalize description: empty/None degrades to "", mirroring
+                    # Issue.from_dict's read-tolerance.
                     result.append(
                         IssueSnapshot(
                             id=str(raw_id),
@@ -883,6 +902,7 @@ class DaemonAggregator:
                             description=str(data.get("description") or ""),
                             status=str(data.get("status") or "open"),
                             priority=data.get("priority"),
+                            scope=str(data.get("scope") or "in_scope"),
                             type=data.get("type"),
                             tags=list(data.get("tags") or []),
                             source=str(data.get("source") or "system"),

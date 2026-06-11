@@ -636,7 +636,7 @@ class TestCrossOwnerRejection:
         import asyncio
 
         async def run():
-            await client._handle_issue_command({
+            await client._handle_issue_command(None, {
                 "operation": "create",
                 "project_root": "relative/path",
                 "description": "test",
@@ -658,7 +658,7 @@ class TestCrossOwnerRejection:
         async def run():
             # This should fail because /unregistered is not in project_roots
             try:
-                await client._handle_issue_command({
+                await client._handle_issue_command(None, {
                     "operation": "create",
                     "project_root": "/unregistered",
                     "description": "test",

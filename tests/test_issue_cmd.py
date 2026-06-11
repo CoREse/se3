@@ -256,7 +256,7 @@ class TestNewIssueEditorYaml:
         assert "description" in data
         assert "title" in data
         assert "type" in data
-        assert data["type"] == "bug"
+        assert data["type"] == ""
 
 
 class TestCreateEditor:

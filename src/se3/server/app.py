@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -58,6 +59,7 @@ from .ws import (
     HistoryRequestRegistry,
     IndexRefreshRegistry,
     InterjectionEventTracker,
+    IssueCommandRegistry,
     UiHub,
     broadcast_index_refresh,
     handle_daemon_connection,
@@ -83,6 +85,11 @@ HISTORY_PULL_TIMEOUT = 30.0
 #: history list refreshes promptly on entry without blocking the response when
 #: a daemon is slow or unreachable.
 HISTORY_INDEX_REFRESH_TIMEOUT = 2.0
+
+#: Seconds an issue write endpoint (create / edit / close / reopen) waits for
+#: the daemon to acknowledge the ``MSG_ISSUE_COMMAND`` before giving up.
+#: Issue operations are lightweight YAML I/O so a short timeout suffices.
+ISSUE_COMMAND_TIMEOUT = 10.0
 
 #: The identity-binding discriminator + external id of the single break-glass
 #: admin subject. Break-glass is deliberately a *single* admin subject (not a
@@ -168,6 +175,7 @@ class CreateIssueRequest(BaseModel):
     title: str = ""
     priority: str = ""
     type: str = ""
+    scope: str = ""
     tags: list = []
 
 
@@ -180,6 +188,7 @@ class EditIssueRequest(BaseModel):
     description: Optional[str] = None
     priority: Optional[str] = None
     type: Optional[str] = None
+    scope: Optional[str] = None
     tags: Optional[list] = None
 
 
@@ -253,6 +262,7 @@ def create_app(
     ui_hub = UiHub()
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
+    issue_command_registry = IssueCommandRegistry()
     interjection_tracker = InterjectionEventTracker()
 
     # -- auth / identity wiring (fail-closed) ------------------------------
@@ -317,6 +327,7 @@ def create_app(
             index_refresh_registry,
             interjection_tracker,
             identity=identity,
+            issue_registry=issue_command_registry,
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
@@ -680,6 +691,36 @@ def create_app(
         mid, root, issue = result
         return {"machine_id": mid, "project_root": root, "issue": issue}
 
+    async def _send_issue_command(
+        machine_id: str,
+        message: protocol.Message,
+        request_id: str,
+    ) -> dict:
+        """Send an issue command and wait for the daemon's acknowledgment.
+
+        Registers a future in *issue_command_registry*, dispatches the message,
+        and awaits the result with :data:`ISSUE_COMMAND_TIMEOUT`.  Returns the
+        daemon's result payload dict on success; raises HTTPException on
+        delivery failure or timeout.
+        """
+        fut = issue_command_registry.register(request_id)
+        sent = await manager.send_to(machine_id, message)
+        if not sent:
+            issue_command_registry.discard(request_id, fut)
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+            )
+        try:
+            result = await asyncio.wait_for(fut, timeout=ISSUE_COMMAND_TIMEOUT)
+        except asyncio.TimeoutError:
+            issue_command_registry.discard(request_id, fut)
+            raise HTTPException(
+                status_code=504,
+                detail=f"timed out waiting for issue command result from '{machine_id}'",
+            )
+        return result
+
     @app.post("/api/issues")
     async def create_issue(
         req: CreateIssueRequest,
@@ -714,9 +755,10 @@ def create_app(
             )
         if not manager.is_connected(machine_id):
             raise HTTPException(
-                status_code=404,
+                status_code=503,
                 detail=f"machine '{machine_id}' is not connected",
             )
+        request_id = uuid.uuid4().hex
         message = protocol.make_issue_command(
             "create",
             project_root=project_root,
@@ -724,17 +766,23 @@ def create_app(
             title=req.title,
             priority=req.priority,
             type=req.type,
+            scope=req.scope if req.scope else None,
             tags=req.tags if req.tags else None,
+            request_id=request_id,
         )
-        ok = await manager.send_to(machine_id, message)
-        if not ok:
+        result = await _send_issue_command(machine_id, message, request_id)
+        if not result.get("ok"):
             raise HTTPException(
-                status_code=503,
-                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+                status_code=422,
+                detail=result.get("error") or "issue creation failed on daemon",
             )
         return JSONResponse(
-            status_code=202,
-            content={"status": "dispatched", "machine_id": machine_id},
+            status_code=201,
+            content={
+                "status": "created",
+                "machine_id": machine_id,
+                "issue_id": result.get("issue_id", ""),
+            },
         )
 
     @app.patch("/api/issues/{issue_id}")
@@ -752,7 +800,10 @@ def create_app(
         project_root = req.project_root.strip()
         if not machine_id or not project_root:
             result = await state.get_issue_by_id(
-                issue_id, owner=_scope_for(identity_)
+                issue_id,
+                owner=_scope_for(identity_),
+                machine_id=machine_id or None,
+                project_root=project_root or None,
             )
             if result is None:
                 raise HTTPException(
@@ -779,25 +830,29 @@ def create_app(
             kwargs["priority"] = req.priority
         if req.type is not None:
             kwargs["type"] = req.type
+        if req.scope is not None:
+            kwargs["scope"] = req.scope
         if req.tags is not None:
             kwargs["tags"] = req.tags
         if not kwargs:
             raise HTTPException(
                 status_code=422, detail="no fields to update"
             )
+        request_id = uuid.uuid4().hex
         message = protocol.make_issue_command(
             "edit",
             project_root=project_root,
             issue_id=issue_id,
+            request_id=request_id,
             **kwargs,
         )
-        ok = await manager.send_to(machine_id, message)
-        if not ok:
+        result = await _send_issue_command(machine_id, message, request_id)
+        if not result.get("ok"):
             raise HTTPException(
-                status_code=503,
-                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+                status_code=422,
+                detail=result.get("error") or "issue edit failed on daemon",
             )
-        return {"status": "dispatched", "machine_id": machine_id, "issue_id": issue_id}
+        return {"status": "updated", "machine_id": machine_id, "issue_id": issue_id}
 
     @app.post("/api/issues/{issue_id}/close")
     async def close_issue(
@@ -810,7 +865,10 @@ def create_app(
         project_root = req.project_root.strip()
         if not machine_id or not project_root:
             result = await state.get_issue_by_id(
-                issue_id, owner=_scope_for(identity_)
+                issue_id,
+                owner=_scope_for(identity_),
+                machine_id=machine_id or None,
+                project_root=project_root or None,
             )
             if result is None:
                 raise HTTPException(
@@ -827,19 +885,21 @@ def create_app(
                 status_code=503,
                 detail=f"machine '{machine_id}' is not connected",
             )
+        request_id = uuid.uuid4().hex
         message = protocol.make_issue_command(
             "close",
             project_root=project_root,
             issue_id=issue_id,
             reason=req.reason,
+            request_id=request_id,
         )
-        ok = await manager.send_to(machine_id, message)
-        if not ok:
+        result = await _send_issue_command(machine_id, message, request_id)
+        if not result.get("ok"):
             raise HTTPException(
-                status_code=503,
-                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+                status_code=422,
+                detail=result.get("error") or "issue close failed on daemon",
             )
-        return {"status": "dispatched", "machine_id": machine_id, "issue_id": issue_id}
+        return {"status": "closed", "machine_id": machine_id, "issue_id": issue_id}
 
     @app.post("/api/issues/{issue_id}/reopen")
     async def reopen_issue(
@@ -852,7 +912,10 @@ def create_app(
         project_root = req.project_root.strip()
         if not machine_id or not project_root:
             result = await state.get_issue_by_id(
-                issue_id, owner=_scope_for(identity_)
+                issue_id,
+                owner=_scope_for(identity_),
+                machine_id=machine_id or None,
+                project_root=project_root or None,
             )
             if result is None:
                 raise HTTPException(
@@ -869,18 +932,20 @@ def create_app(
                 status_code=503,
                 detail=f"machine '{machine_id}' is not connected",
             )
+        request_id = uuid.uuid4().hex
         message = protocol.make_issue_command(
             "reopen",
             project_root=project_root,
             issue_id=issue_id,
+            request_id=request_id,
         )
-        ok = await manager.send_to(machine_id, message)
-        if not ok:
+        result = await _send_issue_command(machine_id, message, request_id)
+        if not result.get("ok"):
             raise HTTPException(
-                status_code=503,
-                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+                status_code=422,
+                detail=result.get("error") or "issue reopen failed on daemon",
             )
-        return {"status": "dispatched", "machine_id": machine_id, "issue_id": issue_id}
+        return {"status": "reopened", "machine_id": machine_id, "issue_id": issue_id}
 
     # -- daemon-key self-management ----------------------------------------
     # An owner mints / lists / revokes its OWN daemon keys (the credential a

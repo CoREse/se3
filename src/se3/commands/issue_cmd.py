@@ -97,16 +97,39 @@ def _format_datetime(dt) -> str:
 
 def _get_editor() -> str:
     """Return the editor command from $EDITOR or fall back to 'vi'."""
-    return os.environ.get("EDITOR", "vi")
+    import shlex
+
+    editor = os.environ.get("EDITOR", "").strip()
+    if not editor:
+        return "vi"
+    # Guard against $EDITOR set to a value that shlex.split yields empty argv
+    # or that contains unmatched quotes (ValueError).
+    try:
+        if not shlex.split(editor):
+            return "vi"
+    except ValueError:
+        return "vi"
+    return editor
+
+
+class EditorError(Exception):
+    """Raised when the external editor cannot be launched."""
 
 
 def _open_editor_with_content(content: str) -> Optional[str]:
     """Open an external editor with the given content and return the edited text.
 
-    Returns None if the editor exits with a non-zero code or the content is
-    unchanged (treated as a no-op cancellation).
+    Returns None if the editor exits with a non-zero code (user cancelled).
+    Raises :class:`EditorError` if the editor binary cannot be found or
+    launched.
     """
-    editor = _get_editor()
+    import shlex
+
+    editor_str = _get_editor()
+    try:
+        editor_argv = shlex.split(editor_str)
+    except ValueError:
+        editor_argv = [editor_str]
     with tempfile.NamedTemporaryFile(
         suffix=".yaml", mode="w", encoding="utf-8", delete=False
     ) as tmp:
@@ -114,7 +137,15 @@ def _open_editor_with_content(content: str) -> Optional[str]:
         tmp_path = tmp.name
 
     try:
-        result = subprocess.run([editor, tmp_path])
+        try:
+            result = subprocess.run(editor_argv + [tmp_path])
+        except FileNotFoundError:
+            raise EditorError(
+                f"editor not found: {editor_argv[0]!r}. "
+                "Set $EDITOR to a valid editor command."
+            )
+        except OSError as e:
+            raise EditorError(f"failed to launch editor: {e}")
         if result.returncode != 0:
             return None
         edited = Path(tmp_path).read_text(encoding="utf-8")
@@ -131,17 +162,18 @@ def _open_editor_with_content(content: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _issue_to_editor_yaml(issue) -> str:
-    """Render an Issue as a human-editable YAML template (for edit)."""
+    """Render an Issue as a human-editable YAML template (for edit).
+
+    Only editable fields are included (id is shown as read-only context).
+    Fields like status and source are excluded so the user is not
+    invited to edit values that would be silently discarded.
+    """
     data = issue.to_dict()
-    # Ensure a deterministic field order for readability
+    # Only include editable fields plus id (read-only context).
     ordered = {}
-    for key in ["id", "title", "description", "status", "priority", "type", "scope", "tags", "source"]:
+    for key in ["id", "title", "description", "priority", "type", "scope", "tags"]:
         if key in data:
             ordered[key] = data[key]
-    # Append remaining keys (timestamps)
-    for key, val in data.items():
-        if key not in ordered:
-            ordered[key] = val
     return yaml.dump(ordered, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
@@ -150,8 +182,9 @@ def _new_issue_editor_yaml() -> str:
     template = {
         "title": "",
         "description": "",
-        "type": "bug",
+        "type": "",
         "priority": "",
+        "scope": "in_scope",
         "tags": [],
     }
     return yaml.dump(template, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -194,6 +227,12 @@ def list_cmd(
     source_filter: Optional[str] = typer.Option(None, "--source", help="Filter by source (human/system)"),
 ):
     """List issues."""
+    VALID_SOURCES = {"human", "system"}
+    if source_filter is not None and source_filter not in VALID_SOURCES:
+        raise typer.BadParameter(
+            f"Invalid source '{source_filter}'. Must be one of: human, system",
+            param_hint="--source",
+        )
     project_root = get_project_root()
     mgr = IssueManager(project_root)
     issues = mgr.list_issues(include_closed=show_all, type_filter=type_filter, source_filter=source_filter)
@@ -302,7 +341,11 @@ def create_cmd(
     # --- Editor mode ---
     if use_editor:
         template = _new_issue_editor_yaml()
-        edited = _open_editor_with_content(template)
+        try:
+            edited = _open_editor_with_content(template)
+        except EditorError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
         if edited is None:
             typer.echo("Cancelled.", err=True)
             raise typer.Exit(1)
@@ -326,7 +369,7 @@ def create_cmd(
             description=desc,
             title=str(iss_title).strip() if iss_title else None,
             priority=str(iss_priority).strip() if iss_priority else None,
-            scope=str(data.get("scope", "in_scope")),
+            scope=str(data.get("scope") or "in_scope").strip(),
             tags=iss_tags,
             type=str(iss_type).strip() if iss_type else None,
             source="human",
@@ -335,7 +378,11 @@ def create_cmd(
         return
 
     # --- Resolve description from arg, stdin pipe, or interactive prompt ---
-    description = _resolve_description(description_arg)
+    try:
+        description = _resolve_description(description_arg)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
 
     if description is None:
         typer.echo("Cancelled.", err=True)
@@ -360,21 +407,26 @@ def _resolve_description(positional: Optional[str]) -> Optional[str]:
     """Resolve the description from positional arg, piped stdin, or interactive prompt.
 
     Returns None if the user cancels (Ctrl+C).
+    Raises ValueError if the resolved input is empty or whitespace-only.
     """
     # 1. Positional argument takes priority
     if positional:
-        return positional
+        stripped = positional.strip()
+        if stripped:
+            return stripped
+        raise ValueError("Issue description must not be empty.")
 
     # 2. Piped stdin (non-TTY): read all of stdin
     if not sys.stdin.isatty():
         try:
             content = sys.stdin.read()
             if content:
-                return content.strip()
+                stripped = content.strip()
+                if stripped:
+                    return stripped
         except (EOFError, KeyboardInterrupt):
             return None
-        # Empty pipe — fall through to prompt
-        return None
+        raise ValueError("Issue description must not be empty.")
 
     # 3. Interactive TTY: single description prompt
     from ..cli import _read_multiline_input
@@ -404,9 +456,13 @@ def edit_cmd(
         raise typer.Exit(1)
 
     template = _issue_to_editor_yaml(issue)
-    edited = _open_editor_with_content(template)
+    try:
+        edited = _open_editor_with_content(template)
+    except EditorError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
     if edited is None:
-        typer.echo("Cancelled (editor exited with non-zero or unchanged).", err=True)
+        typer.echo("Cancelled (editor exited with non-zero).", err=True)
         raise typer.Exit(1)
 
     try:
@@ -415,24 +471,31 @@ def edit_cmd(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
 
-    # Apply changes via update_fields
+    # Apply changes via update_fields.
+    # The edited YAML is authoritative: a field the user removed from the
+    # template is treated as "clear to default", not "leave unchanged".
+    # We always pass every editable field (defaulting missing keys to empty
+    # string / empty list) so that update_fields receives them and applies
+    # the clearing semantics (e.g. title="" → None).
     try:
-        iss_title = data.get("title")
+        iss_title = str(data.get("title") or "").strip()
         iss_desc = str(data.get("description", "")).strip()
-        iss_priority = data.get("priority")
-        iss_type = data.get("type")
+        iss_priority = str(data.get("priority") or "").strip()
+        iss_type = str(data.get("type") or "").strip()
+        iss_scope = str(data.get("scope") or "").strip()
         iss_tags = data.get("tags")
         if isinstance(iss_tags, str):
             iss_tags = [t.strip() for t in iss_tags.split(",") if t.strip()]
         elif not isinstance(iss_tags, list):
-            iss_tags = None
+            iss_tags = []
 
         updated = mgr.update_fields(
             issue_id=issue.id,
-            title=str(iss_title) if iss_title is not None else "",
+            title=iss_title,
             description=iss_desc,
-            priority=str(iss_priority) if iss_priority is not None else "",
-            type=str(iss_type) if iss_type is not None else "",
+            priority=iss_priority,
+            type=iss_type,
+            scope=iss_scope,
             tags=iss_tags,
         )
         typer.echo(f"Updated issue {updated.id}: {updated.display_title}")

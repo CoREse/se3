@@ -28,6 +28,46 @@ overflow on a phone.
 
 ## Requirements
 
+### Requirement: Direct Resume Entry
+
+The History surface MUST offer a **Resume** entry for any past flow that the
+engine can pick back up directly via `se3 run --resume --flow-id <id>`, so a
+user can recover a stalled run straight from the history list or a session's
+detail without dropping to the CLI. The entry's visibility is governed by the
+pure `isFlowResumable(flow)` predicate, which is the frontend mirror of the
+server's authoritative `ServerState.is_flow_resumable` check (see the `base`
+spec's *Server Modules* requirement): a flow qualifies **only** when its status
+is `FAILED` or `PAUSED` and it is **not** archived/history-only (a `source` of
+`archived` or `history` disqualifies it, because such snapshots have no live
+`engine.json` to resume against). `RUNNING` / `INIT` / `RECOVERING` (already
+in-progress) and `COMPLETED` (terminal) flows show no Resume entry.
+
+Activating the entry POSTs `POST /api/flows/{flow_id}/resume`; the server
+re-validates owner scope, the resumable status, and machine connectivity, and
+on success dispatches a `MSG_SPAWN_FLOW` carrying `resume_flow_id` to the
+owning daemon. The frontend MUST debounce concurrent activations for the same
+flow (tracked in `state.resumeFlowRequests`) so a double-click cannot fire two
+resume dispatches, and MUST surface the outcome (dispatched / not-resumable /
+error) to the user. The button is intentionally **not** wired to the archived
+`se3 history restore` rollback path — resuming only ever continues the current
+live flow, never overwrites an active flow by restoring an archived snapshot.
+
+#### Scenario: Resume entry shown only for directly-resumable flows
+- **GIVEN** the history surface lists flows in assorted statuses
+- **WHEN** the list / detail is rendered
+- **THEN** a Resume entry appears only for flows that are `FAILED` or `PAUSED`
+  and not archived/history-only (`isFlowResumable` returns true)
+- **AND** no Resume entry appears for `RUNNING`, `INIT`, `RECOVERING`,
+  `COMPLETED`, or archived/history-only flows
+
+#### Scenario: Activating Resume dispatches a resume request and is debounced
+- **GIVEN** a resumable flow's Resume entry is visible
+- **WHEN** the user activates it
+- **THEN** the frontend POSTs `/api/flows/{flow_id}/resume` and records the flow
+  in `state.resumeFlowRequests` so a second activation for the same flow is
+  suppressed until the request settles
+- **AND** the user is shown the dispatched / not-resumable / error outcome
+
 ### Requirement: History View Mobile Horizontal-Overflow Containment
 
 On the narrow-screen (phone-portrait) breakpoint — `@media (max-width: 600px)`

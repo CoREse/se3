@@ -15,6 +15,10 @@
  *   (e) issuesPanelState — narrow-screen panel switch (list ↔ detail).
  *   (f) issueStatusClass / issuePriorityClass — CSS class mapping.
  *   (g) KNOWN_ISSUE_TYPES — constant correctness.
+ *   (h) issueMachineId — machine_id key contract (REST API → modal).
+ *   (i) buildIssueCreateBody — create request body construction.
+ *   (j) buildIssueEditBody — edit request body with dirty-field tracking.
+ *   (k) buildIssueActionBody — close/reopen request body construction.
  */
 import assert from "node:assert/strict";
 
@@ -231,5 +235,369 @@ export function registerIssueManagementTests(ctx) {
         `missing expected type: ${expected}`,
       );
     }
+  });
+
+  // ---- (h) issueMachineId ---------------------------------------------------
+  // Pins the key contract between GET /api/issues responses (machine_id) and
+  // what the edit/close/reopen modals read.
+
+  check("G7 issueMachineId: reads machine_id from REST API response", () => {
+    assert.equal(app.issueMachineId({ machine_id: "m-abc" }), "m-abc");
+  });
+
+  check("G7 issueMachineId: falls back to legacy _machine_id", () => {
+    assert.equal(app.issueMachineId({ _machine_id: "m-legacy" }), "m-legacy");
+  });
+
+  check("G7 issueMachineId: prefers machine_id over _machine_id", () => {
+    assert.equal(
+      app.issueMachineId({ machine_id: "canonical", _machine_id: "legacy" }),
+      "canonical",
+    );
+  });
+
+  check("G7 issueMachineId: returns empty for null/missing", () => {
+    assert.equal(app.issueMachineId(null), "");
+    assert.equal(app.issueMachineId({}), "");
+    assert.equal(app.issueMachineId({ machine_id: "" }), "");
+  });
+
+  // ---- (i) buildIssueCreateBody ---------------------------------------------
+
+  check("G7 buildIssueCreateBody: always carries machine_id and project_root", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj");
+    assert.equal(body.description, "desc");
+    assert.equal(body.machine_id, "m1");
+    assert.equal(body.project_root, "/proj");
+    assert.equal(body.title, undefined);
+  });
+
+  check("G7 buildIssueCreateBody: includes optional fields when truthy", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "My Title", "bug", "high");
+    assert.equal(body.title, "My Title");
+    assert.equal(body.type, "bug");
+    assert.equal(body.priority, "high");
+  });
+
+  check("G7 buildIssueCreateBody: omits falsy optional fields", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "");
+    assert.equal("title" in body, false);
+    assert.equal("type" in body, false);
+    assert.equal("priority" in body, false);
+    assert.equal("tags" in body, false);
+  });
+
+  check("G7 buildIssueCreateBody: includes scope when truthy", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "out_of_scope");
+    assert.equal(body.scope, "out_of_scope");
+  });
+
+  check("G7 buildIssueCreateBody: omits scope when falsy", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "");
+    assert.equal("scope" in body, false);
+  });
+
+  check("G7 buildIssueCreateBody: includes tags when non-empty", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "", ["ui", "perf"]);
+    assert.deepEqual(body.tags, ["ui", "perf"]);
+  });
+
+  check("G7 buildIssueCreateBody: omits tags when empty", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "", []);
+    assert.equal("tags" in body, false);
+  });
+
+  // ---- (j) buildIssueEditBody -----------------------------------------------
+
+  check("G7 buildIssueEditBody: includes only dirty fields plus routing keys", () => {
+    const dirty = new Set(["issue-title"]);
+    const body = app.buildIssueEditBody("new desc", "m1", "/proj", dirty, {
+      title: "Updated",
+      type: "bug",
+      priority: "low",
+    });
+    assert.equal(body.description, "new desc");
+    assert.equal(body.machine_id, "m1");
+    assert.equal(body.project_root, "/proj");
+    assert.equal(body.title, "Updated");
+    // type and priority were NOT dirty — must not appear
+    assert.equal("type" in body, false);
+    assert.equal("priority" in body, false);
+    assert.equal("tags" in body, false);
+  });
+
+  check("G7 buildIssueEditBody: omits machine_id/project_root when empty", () => {
+    const body = app.buildIssueEditBody("desc", "", "", new Set(), {});
+    assert.equal("machine_id" in body, false);
+    assert.equal("project_root" in body, false);
+  });
+
+  check("G7 buildIssueEditBody: empty string for dirty field clears value", () => {
+    const dirty = new Set(["issue-title", "issue-priority"]);
+    const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
+      title: "",
+      priority: "",
+    });
+    assert.equal(body.title, "");
+    assert.equal(body.priority, "");
+  });
+
+  check("G7 buildIssueEditBody: includes scope when dirty", () => {
+    const dirty = new Set(["issue-scope"]);
+    const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
+      scope: "out_of_scope",
+    });
+    assert.equal(body.scope, "out_of_scope");
+  });
+
+  check("G7 buildIssueEditBody: omits scope when not dirty", () => {
+    const dirty = new Set(["issue-title"]);
+    const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
+      title: "Updated",
+      scope: "out_of_scope",
+    });
+    assert.equal("scope" in body, false);
+  });
+
+  check("G7 buildIssueEditBody: includes tags when dirty", () => {
+    const dirty = new Set(["issue-tags"]);
+    const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
+      tags: ["ui", "docs"],
+    });
+    assert.deepEqual(body.tags, ["ui", "docs"]);
+  });
+
+  check("G7 buildIssueEditBody: sends empty array when tags dirty but empty", () => {
+    const dirty = new Set(["issue-tags"]);
+    const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
+      tags: [],
+    });
+    assert.deepEqual(body.tags, []);
+  });
+
+  // ---- (k) buildIssueActionBody ---------------------------------------------
+
+  check("G7 buildIssueActionBody: includes routing keys when present", () => {
+    const body = app.buildIssueActionBody("m1", "/proj");
+    assert.equal(body.machine_id, "m1");
+    assert.equal(body.project_root, "/proj");
+    assert.equal("reason" in body, false);
+  });
+
+  check("G7 buildIssueActionBody: includes reason when truthy", () => {
+    const body = app.buildIssueActionBody("m1", "/proj", "duplicate");
+    assert.equal(body.reason, "duplicate");
+  });
+
+  check("G7 buildIssueActionBody: omits empty routing keys", () => {
+    const body = app.buildIssueActionBody("", "");
+    assert.equal("machine_id" in body, false);
+    assert.equal("project_root" in body, false);
+  });
+
+  // ---- (l) parseTagsFromString / formatTagsForInput --------------------------
+
+  check("G7 parseTagsFromString: splits comma-separated tags", () => {
+    assert.deepEqual(app.parseTagsFromString("ui, perf, docs"), ["ui", "perf", "docs"]);
+  });
+
+  check("G7 parseTagsFromString: trims whitespace", () => {
+    assert.deepEqual(app.parseTagsFromString("  ui ,  perf  , docs "), ["ui", "perf", "docs"]);
+  });
+
+  check("G7 parseTagsFromString: filters empty entries", () => {
+    assert.deepEqual(app.parseTagsFromString("ui,,perf,"), ["ui", "perf"]);
+  });
+
+  check("G7 parseTagsFromString: returns empty array for falsy input", () => {
+    assert.deepEqual(app.parseTagsFromString(""), []);
+    assert.deepEqual(app.parseTagsFromString(null), []);
+    assert.deepEqual(app.parseTagsFromString(undefined), []);
+  });
+
+  check("G7 formatTagsForInput: joins tags with comma-space", () => {
+    assert.equal(app.formatTagsForInput(["ui", "perf", "docs"]), "ui, perf, docs");
+  });
+
+  check("G7 formatTagsForInput: returns empty string for empty/invalid input", () => {
+    assert.equal(app.formatTagsForInput([]), "");
+    assert.equal(app.formatTagsForInput(null), "");
+    assert.equal(app.formatTagsForInput(undefined), "");
+  });
+
+  // ---- (m) issueCompositeKey -------------------------------------------------
+  // Pins the composite-key contract that prevents cross-project id collisions
+  // in the issues panel selection/detail lookup.
+
+  check("G7 issueCompositeKey: combines machine_id, project_root, and id", () => {
+    const key = app.issueCompositeKey({
+      machine_id: "m1",
+      project_root: "/proj",
+      id: "001",
+    });
+    assert.equal(key, "m1::/proj::001");
+  });
+
+  check("G7 issueCompositeKey: different projects produce different keys", () => {
+    const keyA = app.issueCompositeKey({
+      machine_id: "m1",
+      project_root: "/projA",
+      id: "001",
+    });
+    const keyB = app.issueCompositeKey({
+      machine_id: "m1",
+      project_root: "/projB",
+      id: "001",
+    });
+    assert.notEqual(keyA, keyB);
+  });
+
+  check("G7 issueCompositeKey: falls back to _machine_id", () => {
+    const key = app.issueCompositeKey({
+      _machine_id: "legacy",
+      project_root: "/proj",
+      id: "002",
+    });
+    assert.equal(key, "legacy::/proj::002");
+  });
+
+  check("G7 issueCompositeKey: handles null/missing gracefully", () => {
+    assert.equal(app.issueCompositeKey(null), "");
+    assert.equal(app.issueCompositeKey({}), "::::");
+    assert.equal(app.issueCompositeKey({ id: "001" }), "::::001");
+  });
+
+  // ---- (m) selectTypeDropdownOptions ----------------------------------------
+  // Locks in that the dropdown options come from the unfiltered type universe
+  // (allIssueTypes) when available, rather than from the already-narrowed
+  // filtered list (state.issues).  Without this preference, selecting a type
+  // filter removes all other types from the dropdown — the exact regression
+  // the fetchAllIssueTypes + refreshIssueTypeFilter fix prevents.
+
+  check("G7 selectTypeDropdownOptions: prefers allIssueTypes over issues", () => {
+    // Simulates: user has type filter active, state.issues contains only
+    // "bug" entries, but allIssueTypes has the full universe.
+    const allIssueTypes = ["bug", "feature", "task"];
+    const filteredIssues = [{ type: "bug" }, { type: "bug" }];
+    const result = app.selectTypeDropdownOptions(allIssueTypes, filteredIssues);
+    assert.deepEqual(result, ["bug", "feature", "task"]);
+  });
+
+  check("G7 selectTypeDropdownOptions: falls back to issueTypes(issues) when allIssueTypes is empty", () => {
+    const result = app.selectTypeDropdownOptions([], [{ type: "bug" }, { type: "feature" }]);
+    assert.deepEqual(result, ["bug", "feature"]);
+  });
+
+  check("G7 selectTypeDropdownOptions: falls back when allIssueTypes is null", () => {
+    const result = app.selectTypeDropdownOptions(null, [{ type: "enhancement" }]);
+    assert.deepEqual(result, ["enhancement"]);
+  });
+
+  check("G7 selectTypeDropdownOptions: falls back when allIssueTypes is undefined", () => {
+    const result = app.selectTypeDropdownOptions(undefined, [{ type: "idea" }]);
+    assert.deepEqual(result, ["idea"]);
+  });
+
+  check("G7 selectTypeDropdownOptions: returns empty when both are empty", () => {
+    assert.deepEqual(app.selectTypeDropdownOptions([], []), []);
+    assert.deepEqual(app.selectTypeDropdownOptions(null, null), []);
+  });
+
+  // ---- (n) fetchIssuesCoalesceDecision ----------------------------------------
+  // Regression tests for the request-coalescing state machine that previously
+  // caused the issues list to never receive data under fast STATUS_UPDATEs
+  // (every in-flight response was discarded as "stale" because the old code
+  // bumped _issuesFetchSeq on every call instead of deferring when in-flight).
+
+  check("G7 fetchIssuesCoalesceDecision: defers when in-flight", () => {
+    const result = app.fetchIssuesCoalesceDecision({ inFlight: true, seq: 3 });
+    assert.equal(result.action, "defer");
+    assert.equal(result.refreshPending, true);
+    // seq must NOT be bumped on defer — that was the root cause of the
+    // starvation bug (bumping seq discarded every in-flight response).
+    assert.equal("seq" in result, false);
+  });
+
+  check("G7 fetchIssuesCoalesceDecision: proceeds when idle", () => {
+    const result = app.fetchIssuesCoalesceDecision({ inFlight: false, seq: 3 });
+    assert.equal(result.action, "proceed");
+    assert.equal(result.seq, 4);
+  });
+
+  check("G7 fetchIssuesCoalesceDecision: proceeds from seq 0", () => {
+    const result = app.fetchIssuesCoalesceDecision({ inFlight: false, seq: 0 });
+    assert.equal(result.action, "proceed");
+    assert.equal(result.seq, 1);
+  });
+
+  // ---- (o) fetchIssuesFinallyDecision -----------------------------------------
+  // Regression tests for the finally-block ordering: render first, then
+  // re-dispatch.  The old code that reversed this order (or used per-call
+  // seq bumping) caused perpetual loading.
+
+  check("G7 fetchIssuesFinallyDecision: applies when seq matches", () => {
+    const result = app.fetchIssuesFinallyDecision(5, { fetchSeq: 5, refreshPending: false });
+    assert.equal(result.applyResponse, true);
+    assert.equal(result.reDispatch, false);
+  });
+
+  check("G7 fetchIssuesFinallyDecision: discards stale response", () => {
+    const result = app.fetchIssuesFinallyDecision(3, { fetchSeq: 5, refreshPending: false });
+    assert.equal(result.applyResponse, false);
+    assert.equal(result.reDispatch, false);
+  });
+
+  check("G7 fetchIssuesFinallyDecision: re-dispatches when refresh pending", () => {
+    const result = app.fetchIssuesFinallyDecision(5, { fetchSeq: 5, refreshPending: true });
+    assert.equal(result.applyResponse, true);
+    assert.equal(result.reDispatch, true);
+  });
+
+  check("G7 fetchIssuesFinallyDecision: re-dispatches even for stale response", () => {
+    // A stale response still triggers re-dispatch if refresh was pending —
+    // the re-dispatch will pick up the newer data.
+    const result = app.fetchIssuesFinallyDecision(3, { fetchSeq: 5, refreshPending: true });
+    assert.equal(result.applyResponse, false);
+    assert.equal(result.reDispatch, true);
+  });
+
+  check("G7 fetchIssuesFinallyDecision: no re-dispatch when no refresh pending", () => {
+    const result = app.fetchIssuesFinallyDecision(5, { fetchSeq: 5, refreshPending: false });
+    assert.equal(result.reDispatch, false);
+  });
+
+  // ---- (p) fetchIssues starvation regression scenario -------------------------
+  // Simulates the exact scenario that caused the prior bug: multiple rapid
+  // calls while one request is in-flight.  Under the old code, every call
+  // bumped seq, so the in-flight response always saw seq !== _issuesFetchSeq
+  // and was discarded.  Under the new coalescing logic, the second call
+  // defers (sets refreshPending), the first call's response is applied (seq
+  // matches), and then a re-dispatch happens.
+
+  check("G7 fetchIssues coalesce: rapid calls do not starve the list", () => {
+    // First call — idle, proceeds with seq 1.
+    const call1 = app.fetchIssuesCoalesceDecision({ inFlight: false, seq: 0 });
+    assert.equal(call1.action, "proceed");
+    assert.equal(call1.seq, 1);
+
+    // Second call while first is in-flight — defers.
+    const call2 = app.fetchIssuesCoalesceDecision({ inFlight: true, seq: 1 });
+    assert.equal(call2.action, "defer");
+    assert.equal(call2.refreshPending, true);
+
+    // First call completes — seq matches, apply + re-dispatch.
+    const fin1 = app.fetchIssuesFinallyDecision(1, { fetchSeq: 1, refreshPending: true });
+    assert.equal(fin1.applyResponse, true);
+    assert.equal(fin1.reDispatch, true);
+
+    // Re-dispatch — idle now, proceeds with seq 2.
+    const call3 = app.fetchIssuesCoalesceDecision({ inFlight: false, seq: 1 });
+    assert.equal(call3.action, "proceed");
+    assert.equal(call3.seq, 2);
+
+    // Re-dispatch completes — seq matches, no more refresh pending.
+    const fin2 = app.fetchIssuesFinallyDecision(2, { fetchSeq: 2, refreshPending: false });
+    assert.equal(fin2.applyResponse, true);
+    assert.equal(fin2.reDispatch, false);
   });
 }

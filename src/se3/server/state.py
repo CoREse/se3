@@ -596,7 +596,9 @@ class ServerState:
                         # Type gate
                         if type_filter and str(iss.get("type") or "") != type_filter:
                             continue
-                        result.append(dict(iss))
+                        entry = dict(iss)
+                        entry.setdefault("machine_id", mid)
+                        result.append(entry)
             return result
 
     async def get_issue_by_id(

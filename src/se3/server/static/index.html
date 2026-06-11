@@ -177,6 +177,19 @@
         <button id="issue-modal-close" type="button" class="icon-btn">&times;</button>
       </div>
       <form id="issue-form" class="modal-body">
+        <div id="issue-machine-row" class="form-row">
+          <div class="form-col">
+            <label for="issue-machine">机器</label>
+            <select id="issue-machine"></select>
+          </div>
+          <div class="form-col">
+            <label for="issue-project">项目</label>
+            <select id="issue-project"></select>
+          </div>
+        </div>
+        <input type="text" id="issue-project-manual" class="hidden"
+               placeholder="/absolute/path/to/project" autocomplete="off" />
+
         <label for="issue-description">描述 <span class="required">*</span></label>
         <textarea id="issue-description" rows="5" required
                   placeholder="描述这个问题或建议&hellip;"></textarea>
@@ -208,6 +221,16 @@
             </select>
           </div>
         </div>
+
+        <label for="issue-tags">标签（可选，逗号分隔）</label>
+        <input type="text" id="issue-tags" placeholder="例如: ui, performance, docs"
+               autocomplete="off" spellcheck="false" />
+
+        <label for="issue-scope">范围（可选）</label>
+        <select id="issue-scope">
+          <option value="in_scope">in_scope</option>
+          <option value="out_of_scope">out_of_scope</option>
+        </select>
 
         <p id="issue-form-error" class="form-error hidden"></p>
         <div class="modal-actions">

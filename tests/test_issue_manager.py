@@ -49,15 +49,31 @@ class TestIssueModel:
         assert restored.updated_at == now
 
     def test_from_dict_defaults(self):
-        data = {"id": "002", "title": "Minimal"}
+        data = {"id": "002", "title": "Minimal", "description": "Some desc"}
         issue = Issue.from_dict(data)
         assert issue.id == "002"
-        assert issue.description == ""
+        assert issue.description == "Some desc"
         assert issue.status == IssueStatus.OPEN
         assert issue.priority is None
         assert issue.type is None
         assert issue.source == "system"
         assert issue.tags == []
+
+    def test_from_dict_missing_description_degrades(self):
+        """YAML without a description loads with description="" (legacy compat)."""
+        issue = Issue.from_dict({"id": "001", "title": "No desc"})
+        assert issue.description == ""
+        assert issue.display_title == "No desc"
+
+    def test_from_dict_empty_description_degrades(self):
+        """Empty description loads as "" — write paths enforce non-empty."""
+        issue = Issue.from_dict({"id": "001", "description": ""})
+        assert issue.description == ""
+
+    def test_from_dict_whitespace_description_degrades(self):
+        """Whitespace-only description loads as "" — write paths enforce non-empty."""
+        issue = Issue.from_dict({"id": "001", "description": "   \n  "})
+        assert issue.description == ""
 
     def test_from_dict_datetime_objects(self):
         """PyYAML may parse datetimes as datetime objects."""
@@ -65,6 +81,7 @@ class TestIssueModel:
         data = {
             "id": "003",
             "title": "Test",
+            "description": "A description",
             "created_at": now,
             "updated_at": now,
         }
@@ -73,12 +90,12 @@ class TestIssueModel:
 
     def test_from_dict_missing_source_defaults_system(self):
         """Pre-source YAML files (no 'source' field) load as system."""
-        data = {"id": "004", "title": "Legacy", "status": "open"}
+        data = {"id": "004", "title": "Legacy", "description": "A desc", "status": "open"}
         issue = Issue.from_dict(data)
         assert issue.source == "system"
 
     def test_from_dict_explicit_source(self):
-        data = {"id": "005", "title": "Manual", "source": "human"}
+        data = {"id": "005", "title": "Manual", "description": "A desc", "source": "human"}
         issue = Issue.from_dict(data)
         assert issue.source == "human"
 
@@ -120,6 +137,7 @@ class TestIssueModel:
         data = {
             "id": "009",
             "title": "Bad date",
+            "description": "A desc",
             "created_at": "not-a-date",
             "updated_at": "also-bad",
         }
@@ -366,7 +384,7 @@ class TestIssueManagerLoad:
         mgr._ensure_dirs()
         legacy_file = mgr.open_dir / "001_legacy.yaml"
         legacy_file.write_text(
-            yaml.dump({"id": "001", "title": "Legacy", "status": "open"}),
+            yaml.dump({"id": "001", "title": "Legacy", "description": "A desc", "status": "open"}),
             encoding="utf-8",
         )
         loaded = mgr.load("001")
@@ -386,6 +404,36 @@ class TestIssueManagerLoad:
         assert loaded is not None
         assert loaded.priority is None
         assert loaded.type is None
+
+    def test_load_legacy_yaml_without_description(self, tmp_path):
+        """Legacy YAML with missing/empty description remains loadable and listable."""
+        mgr = IssueManager(tmp_path)
+        mgr._ensure_dirs()
+
+        # Missing description key entirely
+        legacy1 = mgr.open_dir / "050_no_desc.yaml"
+        legacy1.write_text(
+            yaml.dump({"id": "050", "title": "No Desc", "status": "open"}),
+            encoding="utf-8",
+        )
+        loaded = mgr.load("050")
+        assert loaded is not None
+        assert loaded.description == ""
+        assert loaded.display_title == "No Desc"
+
+        # Empty description value
+        legacy2 = mgr.open_dir / "051_empty_desc.yaml"
+        legacy2.write_text(
+            yaml.dump({"id": "051", "title": "Empty Desc", "description": "", "status": "open"}),
+            encoding="utf-8",
+        )
+        loaded = mgr.load("051")
+        assert loaded is not None
+        assert loaded.description == ""
+
+        # Both issues should appear in list
+        issues = mgr.list_issues()
+        assert len(issues) == 2
 
 
 class TestIssueManagerList:
@@ -587,7 +635,7 @@ class TestIssueType:
         mgr._ensure_dirs()
         legacy_file = mgr.open_dir / "001_legacy.yaml"
         legacy_file.write_text(
-            yaml.dump({"id": "001", "title": "Legacy", "status": "open"}),
+            yaml.dump({"id": "001", "title": "Legacy", "description": "A desc", "status": "open"}),
             encoding="utf-8",
         )
         loaded = mgr.load("001")
@@ -641,7 +689,7 @@ class TestIssueType:
         assert "type" not in d
 
     def test_from_dict_missing_type_defaults_none(self):
-        data = {"id": "001", "title": "Test"}
+        data = {"id": "001", "title": "Test", "description": "A desc"}
         issue = Issue.from_dict(data)
         assert issue.type is None
 

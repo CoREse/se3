@@ -257,6 +257,7 @@ def test_make_issue_command_omits_empty_optional_fields():
     assert "title" not in p
     assert "priority" not in p
     assert "type" not in p
+    assert "scope" not in p
     assert "tags" not in p
     assert "reason" not in p
 # -- make_spawn_flow resume_flow_id field ---------------------------------

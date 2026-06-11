@@ -14,6 +14,13 @@ The system SHALL support two classes of issue discovery:
 - **A-class (System-level trigger):** Deterministic, triggered by the flow engine when specific conditions are met (e.g., fix loop exhaustion).
 - **B-class (Prompt injection + collection):** Probabilistic, achieved by injecting issue discovery instructions into LLM prompts for whitelisted steps and extracting reported issues from LLM responses.
 
+**Issue `source` is always `system` for programmatic discovery.** Every issue created by an automatic discovery or other programmatic path — A-class `create_from_fix_loop_exhaustion` / `create_from_pre_existing_failures`, B-class `collect_issues_from_output`, and any other engine-internal `IssueManager.create()` call site — SHALL be created with `source="system"`. This is consistent with `IssueManager.create()` defaulting `source` to `"system"` (see the issue-management *Issue Creation* and *Issue Data Model* requirements): only the human-facing entry points (`se3 issue create` and the webui create form) pass `source="human"`. Issues whose persisted YAML predates the `source` field also read back as `system`, so the human/system distinction is unambiguous for filtering.
+
+#### Scenario: Programmatically discovered issues are tagged source=system
+- **WHEN** any A-class or B-class discovery path creates an issue via `IssueManager.create()`
+- **THEN** the created issue's `source` is `"system"`
+- **AND** no programmatic discovery path sets `source="human"`
+
 #### Scenario: A-class trigger on fix loop exhaustion
 - **WHEN** the validate→implement fix loop reaches `max_fix_iterations` (default 100). The fix loop is entered when any of the validation step types — `TEST`, `SELF_CHECK`, or `VERIFY_SPEC` — completes with `REVISION_NEEDED` status, so exhaustion can be triggered by repeated revision-needed outcomes from any of these three step types (not only `TEST` and `VERIFY_SPEC`).
 - **THEN** `IssueDiscovery.create_from_fix_loop_exhaustion()` creates a `high` priority issue

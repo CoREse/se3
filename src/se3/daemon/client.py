@@ -602,7 +602,7 @@ class DaemonClient:
         elif message.type == protocol.MSG_INTERJECT_FLOW:
             await self._handle_interject(message.payload)
         elif message.type == protocol.MSG_ISSUE_COMMAND:
-            await self._handle_issue_command(message.payload)
+            await self._handle_issue_command(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
@@ -781,25 +781,47 @@ class DaemonClient:
                 return str(flow.get("project_root") or "").strip()
         return ""
 
-    async def _handle_issue_command(self, payload: Dict[str, Any]) -> None:
+    async def _handle_issue_command(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Execute an issue write command via :class:`IssueManager`.
 
         Validates ``project_root`` (must be a registered, absolute path) and
         delegates to the appropriate ``IssueManager`` method.  Web-initiated
-        creates are forced to ``source=human``.  Errors are logged and
-        swallowed — the connection survives a bad command.
+        creates are forced to ``source=human``.  On completion (success or
+        failure) a :data:`protocol.MSG_ISSUE_RESULT` is sent back to the
+        server so the REST caller receives actionable feedback.
         """
         operation = str(payload.get("operation") or "").strip()
         project_root = str(payload.get("project_root") or "").strip()
+        request_id = str(payload.get("request_id") or "").strip()
+
+        async def _reply(
+            *, ok: bool, error: str = "", issue_id: str = "",
+        ) -> None:
+            """Send a result back if we have a request_id and a live ws."""
+            if not request_id:
+                return
+            try:
+                result_msg = protocol.make_issue_result(
+                    request_id, ok=ok, error=error, issue_id=issue_id,
+                )
+                await self._send(ws, result_msg)
+            except Exception:
+                logger.debug(
+                    "Failed to send ISSUE_RESULT for request %s",
+                    request_id,
+                    exc_info=True,
+                )
 
         if not operation:
             logger.warning("Ignoring ISSUE_COMMAND with empty operation")
+            await _reply(ok=False, error="empty operation")
             return
         if not project_root or not Path(project_root).is_absolute():
             logger.warning(
                 "ISSUE_COMMAND: project_root must be an absolute path, got %r",
                 project_root,
             )
+            await _reply(ok=False, error="project_root must be an absolute path")
             return
 
         # The project must be registered with the aggregator (live or
@@ -810,6 +832,7 @@ class DaemonClient:
             logger.debug(
                 "ISSUE_COMMAND: snapshot lookup failed", exc_info=True
             )
+            await _reply(ok=False, error="snapshot lookup failed")
             return
         known_roots = set(snapshot.get("project_roots") or [])
         resolved = str(Path(project_root).resolve())
@@ -820,17 +843,19 @@ class DaemonClient:
                 project_root,
                 sorted(known_roots)[:5],
             )
+            await _reply(ok=False, error="project_root is not a registered project")
             return
 
         # All IssueManager operations are disk I/O — run in a thread.
         try:
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._execute_issue_operation, operation, resolved, payload
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "ISSUE_COMMAND %s failed for project %s", operation, project_root
             )
+            await _reply(ok=False, error=str(exc) or type(exc).__name__)
             return
 
         # The issue file changed on disk — trigger a fast push so the web
@@ -839,13 +864,15 @@ class DaemonClient:
         logger.info(
             "ISSUE_COMMAND %s handled for project %s", operation, project_root
         )
+        await _reply(ok=True, issue_id=str(result or ""))
 
     def _execute_issue_operation(
         self, operation: str, project_root: str, payload: Dict[str, Any]
-    ) -> None:
+    ) -> str:
         """Dispatch an issue operation to :class:`IssueManager`.
 
         Runs synchronously (called from a thread via ``asyncio.to_thread``).
+        Returns the issue ID of the affected issue.
         """
         from pathlib import Path as _Path
 
@@ -860,11 +887,12 @@ class DaemonClient:
             title = str(payload.get("title") or "").strip() or None
             priority = str(payload.get("priority") or "").strip() or None
             issue_type = str(payload.get("type") or "").strip() or None
+            scope = str(payload.get("scope") or "").strip() or None
             tags = payload.get("tags")
             if not isinstance(tags, list):
                 tags = None
             # Web-initiated creates are always source=human
-            mgr.create(
+            create_kwargs: Dict[str, Any] = dict(
                 description=description,
                 title=title,
                 priority=priority,
@@ -872,38 +900,45 @@ class DaemonClient:
                 tags=tags,
                 source="human",
             )
+            if scope:
+                create_kwargs["scope"] = scope
+            created = mgr.create(**create_kwargs)
+            return created.id
 
         elif operation == "edit":
             issue_id = str(payload.get("issue_id") or "").strip()
             if not issue_id:
                 raise ValueError("ISSUE_COMMAND edit: issue_id is required")
             kwargs: Dict[str, Any] = {}
-            for field in ("title", "description", "priority", "type"):
+            for field in ("title", "description", "priority", "type", "scope"):
                 val = payload.get(field)
-                if isinstance(val, str) and val:
+                if val is not None and isinstance(val, str):
                     kwargs[field] = val
             tags = payload.get("tags")
             if isinstance(tags, list):
                 kwargs["tags"] = tags
             if not kwargs:
                 raise ValueError("ISSUE_COMMAND edit: no fields to update")
-            mgr.update_fields(issue_id, **kwargs)
+            updated = mgr.update_fields(issue_id, **kwargs)
+            return updated.id
 
         elif operation == "close":
             issue_id = str(payload.get("issue_id") or "").strip()
             if not issue_id:
                 raise ValueError("ISSUE_COMMAND close: issue_id is required")
             reason = str(payload.get("reason") or "").strip()
-            mgr.close_issue(issue_id, reason=reason)
+            closed = mgr.close_issue(issue_id, reason=reason)
+            return closed.id
 
         elif operation == "reopen":
             issue_id = str(payload.get("issue_id") or "").strip()
             if not issue_id:
                 raise ValueError("ISSUE_COMMAND reopen: issue_id is required")
-            mgr.reopen_issue(issue_id)
+            reopened = mgr.reopen_issue(issue_id)
+            return reopened.id
 
         else:
-            logger.warning("ISSUE_COMMAND: unknown operation %r", operation)
+            raise ValueError(f"unknown issue operation: {operation!r}")
 
     async def _handle_history_request(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Answer a server HISTORY_REQUEST with a HISTORY_DATA reply.

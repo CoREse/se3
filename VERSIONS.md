@@ -34,6 +34,17 @@
 
 
 
+
+## 8.13.0 - 2026-06-11
+
+- Add Resume button in webui for FAILED/PAUSED flows, allowing direct flow resumption from history and live views
+- Add full issue management panel in webui with list, detail, create, edit, close, and reopen capabilities
+- Refactor `se3 issue create` to single-step input (positional/stdin/multiline) with optional `--editor` flag for external editor mode
+- Add `se3 issue edit <id>` to open an issue in the external editor ($EDITOR, falling back to vi)
+- Add `se3 issue close <id> [--reason <text>]` to close issues from the CLI
+- Add `--source human|system` filter to `se3 issue list`
+- Make issue title, priority, and type optional; only description is required; derive display title from description when title is empty
+- Add source field (human/system) to issues to distinguish user-created from programmatically-discovered issues
 ## 8.12.5 - 2026-06-11
 
 - Fix discovery step cumulative token usage not displaying in CLI after programmatic confirmation

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
@@ -924,12 +925,29 @@ def test_issue_endpoints_are_owner_isolated(authz_app):
             assert cb.get("/api/issues/001").status_code == 404
 
             # A can create on its own machine
-            resp = ca.post("/api/issues", json={
-                "machine_id": "mA",
-                "project_root": "/pa",
-                "description": "New issue",
-            })
-            assert resp.status_code == 202
+            create_result: dict = {}
+
+            def do_create():
+                create_result["resp"] = ca.post("/api/issues", json={
+                    "machine_id": "mA",
+                    "project_root": "/pa",
+                    "description": "New issue",
+                })
+
+            worker = threading.Thread(target=do_create)
+            worker.start()
+            try:
+                msg = protocol.decode(da.receive_text())
+                assert msg.type == protocol.MSG_ISSUE_COMMAND
+                da.send_text(protocol.make_issue_result(
+                    msg.payload.get("request_id", ""),
+                    ok=True,
+                    issue_id="003",
+                ).to_json())
+            finally:
+                worker.join(timeout=5)
+            resp = create_result["resp"]
+            assert resp.status_code == 201
 
             # A cannot create on B's machine (404)
             cross = ca.post("/api/issues", json={
