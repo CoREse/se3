@@ -99,9 +99,17 @@ def render_step_usage(step: Step) -> None:
     """Render the per-step token-usage block when the step consumed tokens.
 
     G2's ``state_machine.run_step`` writes a non-empty ``token_usage`` dict into
-    ``step.outputs`` whenever the step made at least one LLM call. Absent or
-    empty usage renders nothing (``render_usage_block`` also guards is_empty),
-    keeping non-LLM steps byte-identical.
+    ``step.outputs`` whenever the step made at least one LLM call — **for both
+    terminal and non-terminal runs** (COMPLETED/PARTIAL/FAILED as well as
+    PAUSED/REVISION_NEEDED/RETRYING). Absent or empty usage renders nothing
+    (``render_usage_block`` also guards is_empty), keeping non-LLM steps
+    byte-identical.
+
+    This function reads **only** ``outputs.token_usage``, never the internal
+    ``carried_token_usage`` field, so both CLI and WebUI report cards share a
+    single, consistent display source. The engine ensures that
+    ``carried_token_usage`` is never needed for rendering: non-terminal runs
+    publish the combined (carried + current) total as ``token_usage`` as well.
 
     Exposed publicly so ``CliSink`` can render the usage block for the
     interactive/special step types (confirm/discovery/plan) whose full report

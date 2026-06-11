@@ -6820,15 +6820,21 @@ function formatTokenUsage(usage) {
 // step_id — so the badge equals the engine's authoritative session total, which
 // folds EVERY run_step's usage into `flow.state.session_token_usage`.
 //
-// The match relies on the engine surfacing every token-consuming run in exactly
-// one emitted terminal record. A run that returns a non-terminal status (a
-// DISCOVERY clarification round returning PAUSED, a CONFIRM LLM review returning
-// REVISION_NEEDED) emits no terminal `step_completed`/`step_failed` record, so
-// state_machine.run_step carries that run's usage forward (`carried_token_usage`)
-// and rolls it into the next emitted record's `token_usage`. The single terminal
-// record for a multi-round step therefore reflects the SUM of all its rounds —
-// the same amount the engine folded into the session total — so this client-side
-// re-derivation no longer undercounts paused/revision rounds.
+// The match relies on the engine surfacing every token-consuming run in an
+// emitted record. Both terminal (COMPLETED/PARTIAL/FAILED) and non-terminal
+// (PAUSED/REVISION_NEEDED) runs now publish `token_usage` in `step.outputs`
+// (G2: the data-layer fix that makes render_step_usage / buildStepUsageFootnote
+// able to display usage regardless of the step's status). A non-terminal run
+// also carries its combined (carried + current) total forward in
+// `carried_token_usage` so the next run's `token_usage` includes all prior
+// rounds. The single terminal record for a multi-round step therefore reflects
+// the SUM of all its rounds — the same amount the engine folded into the
+// session total — so this client-side re-derivation no longer undercounts
+// paused/revision rounds.
+//
+// `carried_token_usage` is an engine-internal carry field, not a display
+// source: renderers read ONLY `outputs.token_usage`, never
+// `carried_token_usage`.
 //
 // A step_id is reused across fix-loop re-runs (test / self_check / verify_spec
 // re-execute on the same Step object), each emitting a distinct terminal record
@@ -6879,6 +6885,9 @@ function accumulateSessionUsage(records) {
 
 // Build the per-step report-card token-usage footnote, or null when the step
 // consumed no tokens (so the card structure is unchanged for usage-less steps).
+// Reads ONLY `outputs.token_usage`, never the internal `carried_token_usage`
+// field — per the G2 convention that both CLI (render_step_usage) and WebUI
+// (this function) share a single, consistent display source.
 function buildStepUsageFootnote(usage) {
   if (isTokenUsageEmpty(usage)) return null;
   const foot = el("div", "step-report__usage");

@@ -487,41 +487,50 @@ class StateMachine:
             #    summing token_usage off the *emitted* terminal step_completed
             #    records (one per COMPLETED/PARTIAL/FAILED run; see run.py).
             #
-            # A run that consumes tokens but returns a non-terminal status
-            # (PAUSED for a DISCOVERY clarification round, REVISION_NEEDED for a
-            # CONFIRM LLM review) emits NO terminal record, and the next run of
-            # the same Step object would overwrite step.outputs['token_usage'].
-            # That run's tokens would then be folded into the engine session
-            # total but never appear in any emitted record, so the web badge
-            # would undercount them. To keep the two ends in agreement we carry
-            # a non-emitting run's usage forward in `carried_token_usage` and
-            # roll it into the next emitted record's token_usage, so the single
-            # terminal record for a multi-round step reflects the sum of all its
-            # rounds — exactly what the engine folds into the session total.
+            # Both terminal and non-terminal runs publish `token_usage` so that
+            # CLI renderers (`render_step_usage`) and WebUI report cards
+            # (`buildStepUsageFootnote`) can display per-step usage regardless
+            # of the step's current status. Previously only terminal runs
+            # surfaced `token_usage`; non-terminal runs (PAUSED / REVISION_NEEDED)
+            # wrote only `carried_token_usage`, so self_check / verify_spec /
+            # confirm steps returning REVISION_NEEDED left no usage visible to
+            # any consumer reading `outputs.token_usage`.
+            #
+            # To keep the web session badge (which re-derives the total by
+            # summing token_usage off emitted terminal records) in agreement
+            # with the CLI authoritative total (session_token_usage, which
+            # folds EVERY run_step's step_usage), a non-terminal run also
+            # carries the combined total forward in `carried_token_usage` so
+            # the next emitted terminal record's token_usage includes all prior
+            # non-emitting rounds. The session total still adds only the
+            # current run's step_usage — not the combined total — so there is
+            # no double-counting.
             try:
                 if step_usage is not None and not step_usage.is_empty():
                     flow.state.session_token_usage.add(step_usage)
                 # Combine this run's usage with usage carried from prior
-                # non-emitting (PAUSED / REVISION_NEEDED) runs of this step.
+                # non-terminal (PAUSED / REVISION_NEEDED) runs of this step.
                 combined = UsageTotals.from_dict(
                     step.outputs.get("carried_token_usage")
                 )
                 if step_usage is not None:
                     combined.add(step_usage)
+                # Publish `token_usage` for both terminal and non-terminal
+                # runs so step-level renderers can display it.
+                if not combined.is_empty():
+                    step.outputs["token_usage"] = combined.to_dict()
                 if step.status in (
                     StepStatus.COMPLETED,
                     StepStatus.PARTIAL,
                     StepStatus.FAILED,
                 ):
-                    # A terminal step_completed/step_failed record WILL be
-                    # emitted for this run (see run.py gating). Surface the full
-                    # (carried + this run) total on it and clear the carry.
-                    if not combined.is_empty():
-                        step.outputs["token_usage"] = combined.to_dict()
+                    # Terminal: the step_completed/step_failed record will be
+                    # emitted. Clear the carry — the published token_usage
+                    # already reflects the full combined total.
                     step.outputs.pop("carried_token_usage", None)
                 else:
-                    # No terminal record will be emitted for this run; carry the
-                    # running total forward to the next run of this step.
+                    # Non-terminal: also carry the combined total forward so
+                    # the next run of this step can accumulate into it.
                     if not combined.is_empty():
                         step.outputs["carried_token_usage"] = combined.to_dict()
             except Exception:

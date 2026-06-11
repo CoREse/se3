@@ -922,15 +922,15 @@ class TestRunStepTokenAggregation:
 
     def test_paused_run_usage_carried_into_next_emitted_record(self):
         """A token-consuming run that returns a non-terminal status (PAUSED /
-        REVISION_NEEDED) emits no terminal step_completed record, so its usage is
-        carried forward and rolled into the next emitted record's token_usage.
+        REVISION_NEEDED) now publishes both `token_usage` (for display) and
+        `carried_token_usage` (for cross-round accumulation), so step-level
+        renderers can display usage even before the step reaches a terminal
+        status. On the final terminal round, `token_usage` reflects the sum of
+        all rounds and `carried_token_usage` is cleared.
 
         This keeps the web session badge (which re-derives the total by summing
-        the emitted records' token_usage) in agreement with the CLI authoritative
-        total (flow.state.session_token_usage, which folds EVERY run). Without the
-        carry, the paused round's tokens would be folded into the session total
-        but never surface in any emitted record, so the web badge would
-        undercount a multi-round discovery flow.
+        token_usage off emitted records) in agreement with the CLI authoritative
+        total (session_token_usage, which folds every run's step_usage).
         """
         from .token_usage import add_call_usage
 
@@ -949,7 +949,7 @@ class TestRunStepTokenAggregation:
                     # Round 2: another clarification round, still paused.
                     add_call_usage(self._make_usage(input_tokens=50, output_tokens=5, total_cost_usd=0.02))
                     return StepStatus.PAUSED
-                # Final round: completes, emitting the only terminal record.
+                # Final round: completes, emitting the terminal record.
                 add_call_usage(self._make_usage(input_tokens=30, output_tokens=3, total_cost_usd=0.03))
                 return StepStatus.COMPLETED
 
@@ -957,21 +957,21 @@ class TestRunStepTokenAggregation:
             flow = sm.create_flow("multi-round discovery", task_type="discovery")
             step = flow.state.get_current_step()
 
-            # Round 1 — PAUSED: no token_usage surfaced, carried instead.
+            # Round 1 — PAUSED: token_usage is now published alongside carry.
             sm.run_step(flow, step)
             assert step.status == StepStatus.PAUSED
-            assert "token_usage" not in step.outputs
+            assert step.outputs["token_usage"]["input_tokens"] == 100
             assert step.outputs["carried_token_usage"]["input_tokens"] == 100
 
-            # Round 2 — PAUSED: carry accumulates (round1 + round2).
+            # Round 2 — PAUSED: both token_usage and carry accumulate.
             step.status = StepStatus.PENDING
             sm.run_step(flow, step)
             assert step.status == StepStatus.PAUSED
-            assert "token_usage" not in step.outputs
+            assert step.outputs["token_usage"]["input_tokens"] == 150
             assert step.outputs["carried_token_usage"]["input_tokens"] == 150
 
-            # Final round — COMPLETED: the single emitted record's token_usage is
-            # the sum of all three rounds, and the carry is cleared.
+            # Final round — COMPLETED: token_usage is the sum of all three
+            # rounds, and the carry is cleared.
             step.status = StepStatus.PENDING
             sm.run_step(flow, step)
             assert step.status == StepStatus.COMPLETED
@@ -981,8 +981,8 @@ class TestRunStepTokenAggregation:
             assert tu["output_tokens"] == 18  # 10 + 5 + 3
             assert tu["total_cost_usd"] == pytest.approx(0.06)  # 0.01 + 0.02 + 0.03
 
-            # CLI authoritative session total folds every run independently and
-            # must equal the single emitted record's rolled-up total.
+            # CLI authoritative session total folds every run independently
+            # (each run's step_usage only, not the combined total).
             su = flow.state.session_token_usage
             assert su.input_tokens == 180
             assert su.total_cost_usd == pytest.approx(0.06)
@@ -1011,6 +1011,137 @@ class TestRunStepTokenAggregation:
             assert loaded.state.steps[step_id].outputs["token_usage"]["input_tokens"] == 12
             assert loaded.state.session_token_usage.input_tokens == 12
             assert loaded.state.session_token_usage.total_cost_usd == pytest.approx(0.02)
+
+    def test_revision_needed_step_publishes_visible_token_usage(self):
+        """A step returning REVISION_NEEDED publishes token_usage so renderers
+        can display it — the root cause of the G2 fix. Previously, only
+        carried_token_usage was written for non-terminal statuses, leaving
+        render_step_usage / buildStepUsageFootnote unable to show this step's
+        usage.
+
+        The step_type doesn't matter for this test (ANALYZE is used because
+        create_flow always starts there); the key assertion is about the
+        non-terminal REVISION_NEEDED status.
+        """
+        from .token_usage import add_call_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                # Step finds issues, requests revision
+                add_call_usage(self._make_usage(input_tokens=200, output_tokens=40, total_cost_usd=0.04))
+                return StepStatus.REVISION_NEEDED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("revision_needed step")
+            step = flow.state.get_current_step()
+
+            sm.run_step(flow, step)
+
+            assert step.status == StepStatus.REVISION_NEEDED
+            # The key assertion: token_usage is now visible for renderers.
+            tu = step.outputs["token_usage"]
+            assert tu["input_tokens"] == 200
+            assert tu["output_tokens"] == 40
+            assert tu["total_cost_usd"] == pytest.approx(0.04)
+            # carried_token_usage is also preserved for the next round.
+            assert step.outputs["carried_token_usage"]["input_tokens"] == 200
+
+    def test_non_terminal_then_terminal_usage_equals_sum_of_rounds(self):
+        """After a non-terminal round followed by a terminal round, the
+        terminal step's token_usage equals the sum of all rounds, and
+        session_token_usage equals the sum of each round's increment (not the
+        combined totals, which would double-count).
+        """
+        from .token_usage import add_call_usage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            calls = {"n": 0}
+
+            def handler(step, flow):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # Round 1: REVISION_NEEDED — consume tokens but not done.
+                    add_call_usage(self._make_usage(input_tokens=300, output_tokens=60, total_cost_usd=0.05))
+                    return StepStatus.REVISION_NEEDED
+                # Round 2: COMPLETED — fixes applied, step now done.
+                add_call_usage(self._make_usage(input_tokens=150, output_tokens=30, total_cost_usd=0.03))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("non-terminal then terminal")
+            step = flow.state.get_current_step()
+
+            # Round 1: REVISION_NEEDED
+            sm.run_step(flow, step)
+            assert step.status == StepStatus.REVISION_NEEDED
+            assert step.outputs["token_usage"]["input_tokens"] == 300
+            assert step.outputs["carried_token_usage"]["input_tokens"] == 300
+
+            # Round 2: COMPLETED
+            step.status = StepStatus.PENDING
+            sm.run_step(flow, step)
+            assert step.status == StepStatus.COMPLETED
+            # Terminal token_usage = carried (300) + this round (150) = 450.
+            tu = step.outputs["token_usage"]
+            assert tu["input_tokens"] == 450  # 300 + 150
+            assert tu["output_tokens"] == 90   # 60 + 30
+            assert tu["total_cost_usd"] == pytest.approx(0.08)  # 0.05 + 0.03
+            # Carry cleared.
+            assert "carried_token_usage" not in step.outputs
+
+            # Session total = sum of round increments only (not combined).
+            su = flow.state.session_token_usage
+            assert su.input_tokens == 450  # 300 + 150 (each round's step_usage)
+            assert su.output_tokens == 90
+            assert su.total_cost_usd == pytest.approx(0.08)
+
+    def test_session_usage_not_duplicated_by_combined_totals(self):
+        """session_token_usage is the sum of each round's step_usage, not the
+        sum of each round's combined (carried + step_usage). If the combined
+        total were added instead, the prior round's contribution would be
+        double-counted every time the step re-enters.
+        """
+        from .token_usage import add_call_usage, UsageTotals
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            calls = {"n": 0}
+
+            def handler(step, flow):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    add_call_usage(self._make_usage(input_tokens=100, output_tokens=10))
+                    return StepStatus.PAUSED
+                if calls["n"] == 2:
+                    add_call_usage(self._make_usage(input_tokens=50, output_tokens=5))
+                    return StepStatus.PAUSED
+                add_call_usage(self._make_usage(input_tokens=30, output_tokens=3))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.DISCOVERY, handler)
+            flow = sm.create_flow("no double count", task_type="discovery")
+            step = flow.state.get_current_step()
+
+            sm.run_step(flow, step)  # round 1: 100 in, 10 out
+            step.status = StepStatus.PENDING
+            sm.run_step(flow, step)  # round 2: 50 in, 5 out
+            step.status = StepStatus.PENDING
+            sm.run_step(flow, step)  # round 3: 30 in, 3 out
+
+            # Session total = 100 + 50 + 30 = 180 in, NOT combined totals
+            # (which would be 100 + 150 + 180 = 430 in if wrongly accumulated).
+            su = flow.state.session_token_usage
+            assert su.input_tokens == 180  # 100+50+30, not 100+150+180
+            assert su.output_tokens == 18   # 10+5+3, not 10+15+18
+            # The UsageTotals accumulation is strictly additive per-round.
+            expected = UsageTotals(input_tokens=180, output_tokens=18)
+            assert su.input_tokens == expected.input_tokens
+            assert su.output_tokens == expected.output_tokens
 
 
 if __name__ == "__main__":
