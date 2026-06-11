@@ -16,6 +16,12 @@
  *       the step has usage, absent otherwise; the rest of the card is intact.
  *   (e) flow-view session badge (`#flow-usage-badge`) — hidden with no usage,
  *       shown + populated once usage exists.
+ *   (f) discovery step cumulative usage footnote — present with all fields
+ *       (in/out/cache r/w/cost) on the discovery report card when the step
+ *       has multi-round cumulative usage, absent when usage is missing or
+ *       all-zero; card body (refined_description) coexists with footnote.
+ *   (g) session badge includes discovery steps — the badge sums discovery
+ *       cumulative usage alongside other steps, including cache and cost.
  */
 import assert from "node:assert/strict";
 
@@ -235,5 +241,110 @@ export function registerTokenUsageTests(ctx) {
     // 1000 + 500 input tokens summed across the two steps.
     assert.ok(value && value.textContent.startsWith("in 1,500"),
       `badge should show the session total, got ${value && value.textContent}`);
+  });
+
+  // ---- (f) discovery step cumulative usage footnote -------------------------
+  check("G4 discovery report card shows a cumulative usage footnote with all fields", () => {
+    const usage = USAGE({
+      input_tokens: 5000,
+      output_tokens: 1200,
+      cache_read_input_tokens: 800,
+      cache_creation_input_tokens: 300,
+      total_cost_usd: 0.035,
+    });
+    const card = app.renderStepReport({
+      step_type: "discovery",
+      step_id: "01_discovery_a",
+      status: "completed",
+      outputs: {
+        refined_description: "Build a user feature",
+        token_usage: usage,
+      },
+    });
+    assert.ok(card, "expected a discovery report card");
+    const foot = findOne(card, "step-report__usage");
+    assert.ok(foot, "expected a .step-report__usage footnote on the discovery card");
+    const val = findOne(foot, "step-report__usage-value");
+    assert.ok(val, "expected a usage value span");
+    const text = val.textContent;
+    assert.ok(text.includes("in 5,000"), `expected input tokens, got ${text}`);
+    assert.ok(text.includes("out 1,200"), `expected output tokens, got ${text}`);
+    assert.ok(text.includes("cache r/w 800/300"), `expected cache tokens, got ${text}`);
+    assert.ok(text.includes("$0.0350"), `expected cost, got ${text}`);
+  });
+
+  check("G4 discovery report card has NO footnote when usage is absent", () => {
+    const card = app.renderStepReport({
+      step_type: "discovery",
+      step_id: "01_discovery_a",
+      status: "completed",
+      outputs: { refined_description: "Build a user feature" },
+    });
+    assert.equal(findAll(card, "step-report__usage").length, 0,
+      "discovery step with no token_usage must not render the footnote");
+  });
+
+  check("G4 discovery report card has NO footnote when usage is all-zero", () => {
+    const card = app.renderStepReport({
+      step_type: "discovery",
+      step_id: "01_discovery_a",
+      status: "completed",
+      outputs: {
+        refined_description: "Build a user feature",
+        token_usage: { input_tokens: 0, output_tokens: 0, total_cost_usd: 0 },
+      },
+    });
+    assert.equal(findAll(card, "step-report__usage").length, 0,
+      "all-zero token_usage must not render the footnote");
+  });
+
+  check("G4 discovery card body (refined_description) still renders alongside the footnote", () => {
+    const card = app.renderStepReport({
+      step_type: "discovery",
+      step_id: "01_discovery_a",
+      status: "completed",
+      outputs: {
+        refined_description: "Build a user feature for admins",
+        token_usage: USAGE(),
+      },
+    });
+    assert.ok(card.textContent.includes("Build a user feature for admins"),
+      "the refined_description must still render on the card");
+    assert.ok(findOne(card, "step-report__usage"),
+      "the footnote must coexist with the card body");
+  });
+
+  // ---- (g) session badge includes discovery steps ---------------------------
+  check("G4 session badge includes discovery step cumulative in the total", () => {
+    const badge = document.getElementById("flow-usage-badge");
+    app.updateFlowUsageBadge([
+      stepEvent("01_discovery_a", USAGE({ input_tokens: 3000, output_tokens: 800 }), "discovery"),
+      stepEvent("02_analyze_b", USAGE({ input_tokens: 1000, output_tokens: 200 }), "analyze"),
+    ]);
+    assert.equal(badge.classList.contains("hidden"), false,
+      "badge must be visible with discovery + analyze usage");
+    const value = findOne(badge, "flow-usage-badge__value");
+    // 3000 + 1000 = 4000 input tokens.
+    assert.ok(value && value.textContent.includes("in 4,000"),
+      `badge must sum discovery + analyze, got ${value && value.textContent}`);
+    // 800 + 200 = 1000 output tokens.
+    assert.ok(value && value.textContent.includes("out 1,000"),
+      `badge must sum output tokens, got ${value && value.textContent}`);
+  });
+
+  check("G4 session badge includes discovery cache and cost fields", () => {
+    const badge = document.getElementById("flow-usage-badge");
+    app.updateFlowUsageBadge([
+      stepEvent("01_discovery_a", USAGE({
+        cache_read_input_tokens: 500,
+        cache_creation_input_tokens: 100,
+        total_cost_usd: 0.025,
+      }), "discovery"),
+    ]);
+    const value = findOne(badge, "flow-usage-badge__value");
+    assert.ok(value && value.textContent.includes("cache r/w 500/100"),
+      `badge must show cache tokens, got ${value && value.textContent}`);
+    assert.ok(value && value.textContent.includes("$0.0250"),
+      `badge must show cost, got ${value && value.textContent}`);
   });
 }
