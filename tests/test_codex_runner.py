@@ -1591,3 +1591,504 @@ class TestCodexRealCliSmoke:
             f"got none. NDJSON output ({len(ndjson_lines)} lines): "
             + "; ".join(ndjson_lines[:5])
         )
+
+
+# =============================================================================
+# Task 1 — Hardened usage/cost extraction: multi-form turn.completed
+# =============================================================================
+
+class TestTurnCompletedUsageMultiForm:
+    """turn.completed usage may live at data.usage, data.message.usage,
+    or data.turn.usage — the converter must find it at any level."""
+
+    def test_usage_at_data_level(self):
+        """Standard path: data.usage carries the tokens."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 20,
+                },
+                "total_cost_usd": 0.002,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 100
+        assert parsed["usage"]["output_tokens"] == 50
+        assert parsed["usage"]["cache_creation_input_tokens"] == 5
+        assert parsed["usage"]["cache_read_input_tokens"] == 20
+        assert parsed["total_cost_usd"] == 0.002
+
+    def test_usage_at_message_level(self):
+        """data.message.usage carries the tokens (data.usage absent)."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "message": {
+                    "usage": {
+                        "input_tokens": 200,
+                        "output_tokens": 80,
+                        "cache_creation_input_tokens": 10,
+                        "cache_read_input_tokens": 40,
+                    },
+                },
+                "total_cost_usd": 0.005,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 200
+        assert parsed["usage"]["output_tokens"] == 80
+        assert parsed["usage"]["cache_creation_input_tokens"] == 10
+        assert parsed["usage"]["cache_read_input_tokens"] == 40
+        assert parsed["total_cost_usd"] == 0.005
+
+    def test_usage_at_turn_level(self):
+        """data.turn.usage carries the tokens (data.usage and
+        data.message.usage both absent)."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "turn": {
+                    "usage": {
+                        "input_tokens": 300,
+                        "output_tokens": 120,
+                        "cache_creation_input_tokens": 15,
+                        "cache_read_input_tokens": 60,
+                    },
+                    "total_cost_usd": 0.008,
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 300
+        assert parsed["usage"]["output_tokens"] == 120
+        assert parsed["usage"]["cache_creation_input_tokens"] == 15
+        assert parsed["usage"]["cache_read_input_tokens"] == 60
+        # total_cost_usd from turn-level nesting
+        assert parsed["total_cost_usd"] == 0.008
+
+    def test_data_usage_takes_priority_over_message_and_turn(self):
+        """When data.usage exists, data.message.usage and data.turn.usage
+        are ignored."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "message": {"usage": {"input_tokens": 999, "output_tokens": 888}},
+                "turn": {"usage": {"input_tokens": 777, "output_tokens": 666}},
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 10
+        assert parsed["usage"]["output_tokens"] == 5
+
+
+class TestTurnCompletedCostMissing:
+    """When total_cost_usd is absent, cost stays 0 and tokens are preserved."""
+
+    def test_no_cost_field_cost_is_zero(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {
+                    "input_tokens": 500,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 10,
+                    "cache_read_input_tokens": 50,
+                },
+                # No total_cost_usd key at all
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["total_cost_usd"] == 0
+        # Tokens are still fully preserved
+        assert parsed["usage"]["input_tokens"] == 500
+        assert parsed["usage"]["output_tokens"] == 200
+        assert parsed["usage"]["cache_creation_input_tokens"] == 10
+        assert parsed["usage"]["cache_read_input_tokens"] == 50
+
+    def test_cost_none_defaults_to_zero(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "total_cost_usd": None,
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["total_cost_usd"] == 0
+
+    def test_cost_missing_at_all_levels(self):
+        """total_cost_usd absent at data, turn, and message levels → 0."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "turn": {
+                    "usage": {"input_tokens": 100, "output_tokens": 50},
+                    # no total_cost_usd in turn either
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["total_cost_usd"] == 0
+        assert parsed["usage"]["input_tokens"] == 100
+
+
+class TestTurnCompletedCachedInputTokensMapping:
+    """cached_input_tokens (Codex field name) must be mapped to
+    cache_read_input_tokens (Claude-compatible field name)."""
+
+    def test_cached_input_tokens_mapped(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 30,
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["cache_read_input_tokens"] == 30
+        # The raw Codex key must not leak through
+        assert "cached_input_tokens" not in parsed["usage"]
+
+    def test_cache_read_input_tokens_takes_priority(self):
+        """When both cached_input_tokens and cache_read_input_tokens are
+        present, cached_input_tokens takes priority (existing behavior)."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 30,
+                    "cache_read_input_tokens": 999,
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        # cached_input_tokens wins (it's checked first in the fallback)
+        assert parsed["usage"]["cache_read_input_tokens"] == 30
+
+    def test_cache_creation_input_tokens_preserved(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.completed",
+            "data": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 15,
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["cache_creation_input_tokens"] == 15
+
+
+# =============================================================================
+# Task 1 — Hardened turn.failed: usage preserved when present
+# =============================================================================
+
+class TestTurnFailedUsagePreserved:
+    """turn.failed events that carry usage must preserve the token counts
+    instead of hardcoding zeros."""
+
+    def test_turn_failed_with_usage_preserves_tokens(self):
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.failed",
+            "data": {
+                "error": {"message": "partial failure"},
+                "usage": {
+                    "input_tokens": 400,
+                    "output_tokens": 150,
+                    "cache_creation_input_tokens": 8,
+                    "cache_read_input_tokens": 30,
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["is_error"] is True
+        assert "partial failure" in parsed["result"]
+        assert parsed["usage"]["input_tokens"] == 400
+        assert parsed["usage"]["output_tokens"] == 150
+        assert parsed["usage"]["cache_creation_input_tokens"] == 8
+        assert parsed["usage"]["cache_read_input_tokens"] == 30
+
+    def test_turn_failed_without_usage_uses_zeros(self):
+        """When turn.failed has no usage, all fields default to zero."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.failed",
+            "data": {"error": "something broke"},
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["is_error"] is True
+        assert parsed["usage"]["input_tokens"] == 0
+        assert parsed["usage"]["output_tokens"] == 0
+        assert parsed["usage"]["cache_creation_input_tokens"] == 0
+        assert parsed["usage"]["cache_read_input_tokens"] == 0
+
+    def test_turn_failed_with_usage_at_message_level(self):
+        """turn.failed usage at data.message.usage is also extracted."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.failed",
+            "data": {
+                "error": {"message": "rate limited"},
+                "message": {
+                    "usage": {
+                        "input_tokens": 250,
+                        "output_tokens": 100,
+                    },
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 250
+        assert parsed["usage"]["output_tokens"] == 100
+
+    def test_turn_failed_with_usage_at_turn_level(self):
+        """turn.failed usage at data.turn.usage is also extracted."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.failed",
+            "data": {
+                "error": "quota exceeded",
+                "turn": {
+                    "usage": {
+                        "input_tokens": 350,
+                        "output_tokens": 130,
+                    },
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["input_tokens"] == 350
+        assert parsed["usage"]["output_tokens"] == 130
+
+    def test_turn_failed_cached_input_tokens_mapped(self):
+        """cached_input_tokens in turn.failed usage is mapped to
+        cache_read_input_tokens."""
+        conv = CodexEventConverter()
+        event = {
+            "type": "turn.failed",
+            "data": {
+                "error": "overloaded",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cached_input_tokens": 20,
+                },
+            },
+        }
+        result = conv.convert_line(json.dumps(event))
+        parsed = json.loads(result[0])
+        assert parsed["usage"]["cache_read_input_tokens"] == 20
+        assert "cached_input_tokens" not in parsed["usage"]
+
+
+# =============================================================================
+# Task 2 — End-to-end: converter → parse_usage_from_ndjson (cost=0, tokens kept)
+# =============================================================================
+
+class TestCostMissingEndToEnd:
+    """End-to-end: converter output → parse_usage_from_ndjson → tokens are
+    preserved even when total_cost_usd is absent (cost=0 must NOT cause the
+    entire usage record to be discarded as empty)."""
+
+    def test_cost_zero_tokens_nonzero_parse_usage_returns_nonempty(self):
+        """When total_cost_usd is missing (0) but tokens are nonzero,
+        parse_usage_from_ndjson must return a non-empty dict."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Done."},
+            }),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {
+                    "usage": {
+                        "input_tokens": 500,
+                        "output_tokens": 200,
+                        "cache_creation_input_tokens": 10,
+                        "cache_read_input_tokens": 50,
+                    },
+                    # No total_cost_usd
+                },
+            }),
+        ]
+        ndjson = _run_full_codex_session(events)
+        usage = parse_usage_from_ndjson(ndjson)
+        # Must NOT be empty — tokens are nonzero
+        assert usage, "parse_usage_from_ndjson returned empty dict despite nonzero tokens"
+        assert usage["input_tokens"] == 500
+        assert usage["output_tokens"] == 200
+        assert usage["cache_creation_input_tokens"] == 10
+        assert usage["cache_read_input_tokens"] == 50
+        assert usage["total_cost_usd"] == 0
+
+    def test_cost_zero_tokens_nonzero_usage_totals_not_empty(self):
+        """UsageTotals.from_dict on the same data must report is_empty() == False."""
+        from se3.engine.token_usage import UsageTotals
+        raw = {
+            "input_tokens": 500,
+            "output_tokens": 200,
+            "cache_creation_input_tokens": 10,
+            "cache_read_input_tokens": 50,
+            "total_cost_usd": 0,
+        }
+        totals = UsageTotals.from_dict(raw)
+        assert not totals.is_empty()
+        assert totals.input_tokens == 500
+        assert totals.output_tokens == 200
+
+    def test_turn_level_usage_end_to_end(self):
+        """Usage at data.turn.usage must survive the full chain."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Result."},
+            }),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {
+                    "turn": {
+                        "usage": {
+                            "input_tokens": 300,
+                            "output_tokens": 100,
+                        },
+                        "total_cost_usd": 0.003,
+                    },
+                },
+            }),
+        ]
+        ndjson = _run_full_codex_session(events)
+        usage = parse_usage_from_ndjson(ndjson)
+        assert usage["input_tokens"] == 300
+        assert usage["output_tokens"] == 100
+        assert usage["total_cost_usd"] == 0.003
+
+    def test_turn_failed_with_usage_end_to_end(self):
+        """turn.failed carrying usage must produce a non-empty usage dict
+        in parse_usage_from_ndjson."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "turn.failed",
+                "data": {
+                    "error": {"message": "rate limited"},
+                    "usage": {
+                        "input_tokens": 200,
+                        "output_tokens": 80,
+                        "cache_creation_input_tokens": 5,
+                        "cache_read_input_tokens": 15,
+                    },
+                },
+            }),
+        ]
+        ndjson = _run_full_codex_session(events)
+        usage = parse_usage_from_ndjson(ndjson)
+        assert usage, "parse_usage_from_ndjson returned empty dict for turn.failed with usage"
+        assert usage["input_tokens"] == 200
+        assert usage["output_tokens"] == 80
+        assert usage["cache_creation_input_tokens"] == 5
+        assert usage["cache_read_input_tokens"] == 15
+
+    def test_add_call_usage_folds_cost_zero_tokens(self):
+        """add_call_usage must fold token data into the step accumulator
+        even when total_cost_usd is 0."""
+        from se3.engine.token_usage import (
+            UsageTotals, add_call_usage, accumulate_step_usage,
+        )
+        raw_usage = {
+            "input_tokens": 600,
+            "output_tokens": 250,
+            "cache_creation_input_tokens": 12,
+            "cache_read_input_tokens": 45,
+            "total_cost_usd": 0,
+        }
+        with accumulate_step_usage() as step_total:
+            add_call_usage(raw_usage)
+        assert step_total.input_tokens == 600
+        assert step_total.output_tokens == 250
+        assert step_total.cache_creation_input_tokens == 12
+        assert step_total.cache_read_input_tokens == 45
+        assert step_total.total_cost_usd == 0
+        assert not step_total.is_empty()
+
+    def test_cached_input_tokens_end_to_end(self):
+        """cached_input_tokens in codex output must map to
+        cache_read_input_tokens through the full chain."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Done."},
+            }),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cached_input_tokens": 25,
+                    },
+                },
+            }),
+        ]
+        ndjson = _run_full_codex_session(events)
+        usage = parse_usage_from_ndjson(ndjson)
+        assert usage["cache_read_input_tokens"] == 25
+        assert "cached_input_tokens" not in usage
+
+    def test_all_zero_usage_returns_empty_from_parse(self):
+        """When all tokens and cost are zero, parse_usage_from_ndjson
+        returns an empty dict (existing behavior preserved)."""
+        from se3.engine.chat_history import parse_usage_from_ndjson
+        events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {"usage": {}},
+            }),
+        ]
+        ndjson = _run_full_codex_session(events)
+        usage = parse_usage_from_ndjson(ndjson)
+        # All zeros → empty dict
+        assert usage == {}

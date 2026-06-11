@@ -334,10 +334,13 @@ class CodexEventConverter:
         # Collect accumulated agent messages as the result text
         result_text = "\n".join(self._agent_messages) if self._agent_messages else ""
 
-        # Parse usage — codex may carry it at data.usage or data.message.usage
+        # Parse usage — codex may carry it at multiple nesting levels.
+        # Priority: data.usage → data.message.usage → data.turn.usage
         usage_raw = data.get("usage", {})
         if not usage_raw and isinstance(data.get("message"), dict):
             usage_raw = data["message"].get("usage", {})
+        if not usage_raw and isinstance(data.get("turn"), dict):
+            usage_raw = data["turn"].get("usage", {})
 
         usage = {
             "input_tokens": usage_raw.get("input_tokens", 0),
@@ -347,11 +350,19 @@ class CodexEventConverter:
                                                        usage_raw.get("cache_read_input_tokens", 0)),
         }
 
+        # total_cost_usd — check top-level first, then nested turn/message.
+        # Treat None as 0 so explicit null doesn't propagate.
+        cost = data.get("total_cost_usd") or 0
+        if not cost and isinstance(data.get("turn"), dict):
+            cost = data["turn"].get("total_cost_usd") or 0
+        if not cost and isinstance(data.get("message"), dict):
+            cost = data["message"].get("total_cost_usd") or 0
+
         result_event = {
             "type": "result",
             "result": result_text,
             "usage": usage,
-            "total_cost_usd": data.get("total_cost_usd", 0),
+            "total_cost_usd": cost,
         }
         return [json.dumps(result_event, ensure_ascii=False)]
 
@@ -367,17 +378,32 @@ class CodexEventConverter:
         if isinstance(error_msg, dict):
             error_msg = error_msg.get("message", str(error_msg))
 
+        # Extract usage if the failure event carries it (same multi-form
+        # extraction as _handle_turn_completed); default to zeros.
+        usage_raw: Dict[str, Any] = {}
+        for candidate in (
+            data.get("usage"),
+            data.get("message", {}).get("usage") if isinstance(data.get("message"), dict) else None,
+            data.get("turn", {}).get("usage") if isinstance(data.get("turn"), dict) else None,
+        ):
+            if isinstance(candidate, dict) and candidate:
+                usage_raw = candidate
+                break
+
+        usage = {
+            "input_tokens": usage_raw.get("input_tokens", 0),
+            "output_tokens": usage_raw.get("output_tokens", 0),
+            "cache_creation_input_tokens": usage_raw.get("cache_creation_input_tokens", 0),
+            "cache_read_input_tokens": usage_raw.get("cached_input_tokens",
+                                                       usage_raw.get("cache_read_input_tokens", 0)),
+        }
+
         result_event = {
             "type": "result",
             "subtype": "error",
             "is_error": True,
             "result": str(error_msg),
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-            },
+            "usage": usage,
             "total_cost_usd": 0,
         }
         return [json.dumps(result_event, ensure_ascii=False)]
