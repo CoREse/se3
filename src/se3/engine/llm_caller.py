@@ -1511,8 +1511,12 @@ class LLMCaller:
                 # --- Failure path: always attempt agent rotation ---
                 # detect_infra_error is retained for diagnostic labeling only;
                 # USAGE_LIMIT / TIMEOUT / OTHER all trigger rotation identically.
+                # Pass stderr_tail when available (CodexRunner populates it;
+                # ClaudeCodeRunner has no such field so getattr defaults to "").
                 infra_error = current_runner.detect_infra_error(
-                    result.returncode, result.output or "", ""
+                    result.returncode,
+                    result.output or "",
+                    getattr(result, "stderr_tail", "") or "",
                 )
                 error_label = (
                     "other" if infra_error == InfraErrorType.NONE else infra_error.value

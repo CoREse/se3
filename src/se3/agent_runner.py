@@ -22,6 +22,7 @@ class InfraErrorType(Enum):
     USAGE_LIMIT = "usage_limit"
     TIMEOUT = "timeout"
     HANG = "hang"
+    STARTUP_FAILURE = "startup_failure"
 
 
 @dataclass

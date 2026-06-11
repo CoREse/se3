@@ -21,9 +21,10 @@ class TestInfraErrorType:
         assert InfraErrorType.USAGE_LIMIT.value == "usage_limit"
         assert InfraErrorType.TIMEOUT.value == "timeout"
         assert InfraErrorType.HANG.value == "hang"
+        assert InfraErrorType.STARTUP_FAILURE.value == "startup_failure"
 
-    def test_enum_has_four_members(self):
-        assert len(InfraErrorType) == 4
+    def test_enum_has_five_members(self):
+        assert len(InfraErrorType) == 5
 
 
 class TestRunResult:

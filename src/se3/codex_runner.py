@@ -17,6 +17,7 @@ history, retry/continue context, web console, ``last_raw_result``,
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from .agent_runner import AgentRunner, InfraErrorType
 
@@ -62,6 +63,36 @@ _AUTH_FAILURE_KEYWORDS = [
     "unauthorized",
     "authentication failed",
 ]
+
+# Patterns indicating shell snapshot validation failure in Codex stderr.
+# Matched case-insensitively against the tail of stderr output.
+_SHELL_SNAPSHOT_PATTERNS = [
+    "shell snapshot validation failed",
+    "codex_core::shell_snapshot",
+    "syntax error near unexpected token",
+]
+
+# Maximum number of stderr lines to retain in the bounded buffer.
+_STDERR_BUFFER_MAXLEN = 100
+
+
+def _detect_shell_snapshot_failure(stderr_text: str) -> bool:
+    """Check if stderr contains a shell snapshot validation failure.
+
+    Matches against patterns like:
+        codex_core::shell_snapshot: Shell snapshot validation failed ...
+        syntax error near unexpected token '('
+
+    Args:
+        stderr_text: The captured stderr content (may be empty).
+
+    Returns:
+        True if a shell snapshot failure pattern is detected.
+    """
+    if not stderr_text:
+        return False
+    lower = stderr_text.lower()
+    return any(pattern in lower for pattern in _SHELL_SNAPSHOT_PATTERNS)
 
 
 class CodexEventConverter:
@@ -483,8 +514,16 @@ def _spawn_stdin_writer(proc: subprocess.Popen, payload: str) -> threading.Threa
 def _spawn_stderr_reader(
     proc: subprocess.Popen,
     log_file: Optional[Path] = None,
+    stderr_buffer: Optional[Deque[str]] = None,
 ) -> threading.Thread:
-    """Drain ``proc.stderr`` in a daemon thread so the pipe never fills."""
+    """Drain ``proc.stderr`` in a daemon thread so the pipe never fills.
+
+    Args:
+        proc: The subprocess whose stderr to drain.
+        log_file: Optional path to a sidecar stderr log file.
+        stderr_buffer: Optional bounded deque (e.g. ``collections.deque(maxlen=100)``)
+            to capture the tail of stderr lines for post-mortem analysis.
+    """
 
     def _reader() -> None:
         log_fh = None
@@ -497,6 +536,9 @@ def _spawn_stderr_reader(
         try:
             assert proc.stderr is not None
             for line in proc.stderr:
+                # Capture into bounded buffer before any other processing
+                if stderr_buffer is not None:
+                    stderr_buffer.append(line)
                 if log_fh is not None:
                     try:
                         log_fh.write(line)
@@ -756,6 +798,7 @@ class CodexRunner(AgentRunner):
                     cmd_index=0,
                     was_retry=False,
                     interrupted=True,
+                    stderr_tail=getattr(result, "stderr_tail", "") or "",
                 )
 
             if result.success:
@@ -770,6 +813,7 @@ class CodexRunner(AgentRunner):
                 cmd_used=cmd_name,
                 cmd_index=0,
                 was_retry=False,
+                stderr_tail=getattr(result, "stderr_tail", "") or "",
             )
 
         except Exception as e:
@@ -833,11 +877,13 @@ class CodexRunner(AgentRunner):
         if stdin_prompt is not None:
             _spawn_stdin_writer(proc, stdin_prompt)
 
-        # Drain stderr in background
+        # Drain stderr in background, capturing tail into a bounded buffer
+        # for post-mortem analysis (e.g. shell snapshot validation failures).
         _stderr_log = None
         if log_file is not None:
             _stderr_log = log_file.parent / f"{log_file.name}.stderr"
-        _spawn_stderr_reader(proc, log_file=_stderr_log)
+        _stderr_buffer: Deque[str] = collections.deque(maxlen=_STDERR_BUFFER_MAXLEN)
+        _spawn_stderr_reader(proc, log_file=_stderr_log, stderr_buffer=_stderr_buffer)
 
         output_buffer: List[str] = []
         last_activity = time.time()
@@ -965,15 +1011,70 @@ class CodexRunner(AgentRunner):
                             log_fh.write(ndjson_line + "\n")
                             log_fh.flush()
 
-            # Finalize converter (synthesize result if missing)
-            for ndjson_line in converter.finalize():
-                output_buffer.append(ndjson_line + "\n")
+            # Collect stderr tail from the bounded buffer for post-mortem
+            stderr_tail = "".join(_stderr_buffer) if _stderr_buffer else ""
+
+            # Finalize converter (synthesize result if missing).
+            # If the converter has no agent messages AND no turn terminal
+            # event AND stderr contains a shell snapshot validation failure
+            # pattern, we override finalize's default behavior and synthesize
+            # an error result that carries the original stderr context,
+            # forcing success=False even if returncode==0.
+            _has_agent_output = bool(converter._agent_messages)
+            _has_turn_terminal = converter._seen_turn_terminal
+            _is_shell_snapshot_failure = (
+                not _has_agent_output
+                and not _has_turn_terminal
+                and _detect_shell_snapshot_failure(stderr_tail)
+            )
+
+            if _is_shell_snapshot_failure:
+                # Mark terminal so finalize() becomes a no-op
+                converter._seen_turn_terminal = True
+                # Synthesize error result with stderr context
+                stderr_excerpt = stderr_tail[-2000:] if len(stderr_tail) > 2000 else stderr_tail
+                error_text = (
+                    "[codex-runner] Shell snapshot validation failed — "
+                    "the Codex CLI reported a shell snapshot error during "
+                    "startup/environment initialization. Original stderr:\n"
+                    + stderr_excerpt
+                )
+                error_result = {
+                    "type": "result",
+                    "subtype": "error",
+                    "is_error": True,
+                    "result": error_text,
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                    "total_cost_usd": 0,
+                }
+                output_buffer.append(json.dumps(error_result, ensure_ascii=False) + "\n")
                 if log_fh:
-                    log_fh.write(ndjson_line + "\n")
+                    log_fh.write(json.dumps(error_result, ensure_ascii=False) + "\n")
                     log_fh.flush()
+            else:
+                for ndjson_line in converter.finalize():
+                    output_buffer.append(ndjson_line + "\n")
+                    if log_fh:
+                        log_fh.write(ndjson_line + "\n")
+                        log_fh.flush()
 
             returncode = proc.returncode
             output = "".join(output_buffer)
+
+            # Shell snapshot failure forces failure even with returncode==0
+            if _is_shell_snapshot_failure:
+                return _SingleRunResult(
+                    returncode=returncode if returncode != 0 else 1,
+                    output=output,
+                    success=False,
+                    should_retry=False,
+                    stderr_tail=stderr_tail,
+                )
 
             # Unusual exit codes with hang context
             if returncode in (1, 137, 143):
@@ -983,6 +1084,7 @@ class CodexRunner(AgentRunner):
                         output=output,
                         success=False,
                         should_retry=True,
+                        stderr_tail=stderr_tail,
                     )
 
             return _SingleRunResult(
@@ -990,6 +1092,7 @@ class CodexRunner(AgentRunner):
                 output=output,
                 success=returncode == 0,
                 should_retry=False,
+                stderr_tail=stderr_tail,
             )
 
         except KeyboardInterrupt:
@@ -1010,12 +1113,14 @@ class CodexRunner(AgentRunner):
             # Finalize even on interrupt
             for ndjson_line in converter.finalize():
                 output_buffer.append(ndjson_line + "\n")
+            stderr_tail = "".join(_stderr_buffer) if _stderr_buffer else ""
             return _SingleRunResult(
                 returncode=-2,
                 output="".join(output_buffer),
                 success=False,
                 should_retry=False,
                 interrupted=True,
+                stderr_tail=stderr_tail,
             )
 
         finally:
@@ -1043,7 +1148,7 @@ class CodexRunner(AgentRunner):
     ) -> InfraErrorType:
         """Detect infrastructure errors from codex execution results.
 
-        Classification:
+        Classification (in priority order):
         * ``returncode == 0`` → ``NONE`` (success, even if output contains
           keywords — those are likely prompt echo)
         * ``returncode == 124`` → ``TIMEOUT``
@@ -1052,6 +1157,10 @@ class CodexRunner(AgentRunner):
         * Output tail contains authentication failure keywords →
           ``USAGE_LIMIT`` (auth failures are credential-level rotation
           errors, mapped to the same rotation trigger)
+        * stderr tail matches shell snapshot validation failure patterns →
+          ``STARTUP_FAILURE`` (runner infrastructure / environment snapshot
+          failure; checked AFTER USAGE_LIMIT/TIMEOUT to avoid preempting
+          those existing classifications)
         * Otherwise → ``NONE``
         """
         if returncode == 0:
@@ -1075,6 +1184,12 @@ class CodexRunner(AgentRunner):
             if keyword in tail or keyword in last_lines:
                 return InfraErrorType.USAGE_LIMIT
 
+        # Shell snapshot validation failure → startup/infra failure.
+        # Checked after USAGE_LIMIT/TIMEOUT so those existing classifications
+        # are never preempted.
+        if _detect_shell_snapshot_failure(stderr or ""):
+            return InfraErrorType.STARTUP_FAILURE
+
         return InfraErrorType.NONE
 
 
@@ -1093,6 +1208,7 @@ class MonitoredResult:
     cmd_index: int
     was_retry: bool
     interrupted: bool = False
+    stderr_tail: str = ""
 
     @property
     def success(self) -> bool:
@@ -1108,3 +1224,4 @@ class _SingleRunResult:
     success: bool
     should_retry: bool
     interrupted: bool = False
+    stderr_tail: str = ""

@@ -10,9 +10,11 @@ Tests cover:
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -2092,3 +2094,355 @@ class TestCostMissingEndToEnd:
         usage = parse_usage_from_ndjson(ndjson)
         # All zeros → empty dict
         assert usage == {}
+
+
+# =============================================================================
+# Task 3 — Shell snapshot failure detection
+# =============================================================================
+
+class TestShellSnapshotDetection:
+    """Test _detect_shell_snapshot_failure pattern matching."""
+
+    def test_real_sample_stderr_returns_true(self):
+        """The actual stderr pattern from Codex CLI must be detected."""
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = (
+            "codex_core::shell_snapshot: Shell snapshot validation failed "
+            "at line 42: syntax error near unexpected token '('"
+        )
+        assert _detect_shell_snapshot_failure(stderr) is True
+
+    def test_partial_pattern_shell_snapshot_validation_failed(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = "Error: Shell snapshot validation failed in environment setup"
+        assert _detect_shell_snapshot_failure(stderr) is True
+
+    def test_partial_pattern_codex_core_shell_snapshot(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = "codex_core::shell_snapshot: something went wrong"
+        assert _detect_shell_snapshot_failure(stderr) is True
+
+    def test_partial_pattern_syntax_error_unexpected_token(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = "/bin/bash: line 5: syntax error near unexpected token '('"
+        assert _detect_shell_snapshot_failure(stderr) is True
+
+    def test_case_insensitive(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = "CODEX_CORE::SHELL_SNAPSHOT: SHELL SNAPSHOT VALIDATION FAILED"
+        assert _detect_shell_snapshot_failure(stderr) is True
+
+    def test_empty_stderr_returns_false(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        assert _detect_shell_snapshot_failure("") is False
+
+    def test_none_stderr_returns_false(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        assert _detect_shell_snapshot_failure(None) is False
+
+    def test_normal_stderr_returns_false(self):
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = "Warning: some deprecation warning\nLoading config...\n"
+        assert _detect_shell_snapshot_failure(stderr) is False
+
+    def test_stderr_with_unrelated_syntax_error_returns_false(self):
+        """'syntax error' alone (without 'near unexpected token') should not match."""
+        from se3.codex_runner import _detect_shell_snapshot_failure
+        stderr = "python: SyntaxError: invalid syntax"
+        assert _detect_shell_snapshot_failure(stderr) is False
+
+
+# =============================================================================
+# Task 3 — Shell snapshot failure forces non-success result
+# =============================================================================
+
+class TestShellSnapshotForcedFailure:
+    """When stderr contains shell snapshot failure and no valid agent output
+    was produced, _run_single_with_monitor must return success=False and
+    an error result carrying the original stderr context, even when
+    returncode==0."""
+
+    @staticmethod
+    def _run_monitor_with_mocked_subprocess(
+        runner, returncode, stdout_text, stderr_text,
+    ):
+        """Run _run_single_with_monitor with a fully mocked subprocess.
+
+        Patches subprocess.Popen, shutil.which, and select.select so no
+        real process is spawned.  Returns the _SingleRunResult.
+        """
+
+        class _FakeStream(io.StringIO):
+            """StringIO with a fileno() so select.select can reference it."""
+
+            def fileno(self):
+                return 99  # arbitrary fake fd
+
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.pid = 12345
+
+        # poll() is called at the top of each while iteration.  Use a
+        # callable side_effect so we don't have to predict the exact count
+        # of loop iterations.  First call returns None (process running);
+        # after the first select round, return the returncode so the loop
+        # exits cleanly.
+        _poll_returns_none = True
+
+        def _poll_side_effect():
+            nonlocal _poll_returns_none
+            if _poll_returns_none:
+                _poll_returns_none = False
+                return None
+            return returncode
+
+        proc.poll = MagicMock(side_effect=_poll_side_effect)
+
+        # stdout: StringIO with fileno() for select; universal_newlines=True
+        proc.stdout = _FakeStream(stdout_text)
+
+        # stderr: line-iterable for the background reader thread
+        proc.stderr = io.StringIO(stderr_text)
+
+        proc.kill = MagicMock()
+        proc.wait = MagicMock(return_value=returncode)
+
+        # select.select returns stdout as "ready" on first call (so
+        # readline() is tried — it returns "" for empty StringIO), then
+        # "not ready" on subsequent calls so the else-branch inactivity
+        # check runs (but time elapsed ≈ 0 < 1800s, so no hang).  The
+        # third not-ready iteration allows poll() to return returncode.
+        select_side_effects = [
+            ([proc.stdout], [], []),   # stdout "ready" → readline returns ""
+            ([], [], []),              # not ready → inactivity check (no hang)
+            ([], [], []),              # not ready → inactivity check → poll exits
+        ]
+
+        with patch("subprocess.Popen", return_value=proc), \
+             patch("shutil.which", return_value="/usr/bin/codex"), \
+             patch("select.select", side_effect=select_side_effects):
+            return runner._run_single_with_monitor(
+                full_cmd=["codex", "exec", "--json", "hi"],
+                cmd_name="codex",
+                log_file=None,
+                wall_timeout=None,
+                inactivity_timeout=1800,
+                cwd=None,
+                env={},
+                on_output=None,
+                on_activity=None,
+                start_time=time.time(),
+            )
+
+    def test_shell_snapshot_failure_with_zero_returncode_forces_failure(self):
+        """When returncode==0 but stderr has shell snapshot failure and no
+        agent output was produced, success must be False."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr_text = (
+            "codex_core::shell_snapshot: Shell snapshot validation failed "
+            "at line 5: syntax error near unexpected token '('\n"
+        )
+
+        result = self._run_monitor_with_mocked_subprocess(
+            runner, returncode=0, stdout_text="", stderr_text=stderr_text,
+        )
+
+        assert result.success is False
+        # returncode==0 should be remapped to 1
+        assert result.returncode == 1
+        # stderr_tail must be populated
+        assert "shell snapshot" in result.stderr_tail.lower()
+
+    def test_shell_snapshot_failure_error_result_contains_original_stderr(self):
+        """The synthesized error result event must contain the original
+        stderr text so users can see the actual failure reason."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr_text = (
+            "codex_core::shell_snapshot: Shell snapshot validation failed "
+            "at line 5: syntax error near unexpected token '('\n"
+            "Some additional context about the environment\n"
+        )
+
+        result = self._run_monitor_with_mocked_subprocess(
+            runner, returncode=0, stdout_text="", stderr_text=stderr_text,
+        )
+
+        # Parse the NDJSON output to find the error result event
+        result_events = []
+        for line in result.output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+                if parsed.get("type") == "result":
+                    result_events.append(parsed)
+            except json.JSONDecodeError:
+                continue
+
+        assert len(result_events) >= 1
+        error_result = result_events[-1]
+        assert error_result["is_error"] is True
+        # Must contain the original stderr context
+        assert "syntax error near unexpected token" in error_result["result"]
+        assert "codex_core::shell_snapshot" in error_result["result"]
+        # Must contain the codex-runner prefix
+        assert "[codex-runner] Shell snapshot validation failed" in error_result["result"]
+
+    def test_shell_snapshot_failure_with_nonzero_returncode_preserves_returncode(self):
+        """When returncode!=0 and shell snapshot failure is detected,
+        the original returncode must be preserved (not remapped to 1)."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr_text = (
+            "codex_core::shell_snapshot: Shell snapshot validation failed\n"
+        )
+
+        result = self._run_monitor_with_mocked_subprocess(
+            runner, returncode=2, stdout_text="", stderr_text=stderr_text,
+        )
+
+        assert result.success is False
+        assert result.returncode == 2  # preserved, not remapped
+
+    def test_normal_completion_unaffected_by_stderr_warning(self):
+        """When the converter produced valid agent output and/or a turn
+        terminal, stderr containing shell snapshot warnings must NOT
+        trigger the forced failure path."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+
+        # Stdout has a valid turn.completed event (agent produced output)
+        stdout_events = [
+            json.dumps({"type": "turn.started", "data": {}}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Done."},
+            }),
+            json.dumps({
+                "type": "turn.completed",
+                "data": {"usage": {"input_tokens": 10, "output_tokens": 5}},
+            }),
+        ]
+        stdout_text = "\n".join(stdout_events) + "\n"
+
+        # Stderr has a shell snapshot warning (but it's just a warning,
+        # not a failure — the agent completed successfully)
+        stderr_text = "Warning: codex_core::shell_snapshot: minor issue noted\n"
+
+        result = self._run_monitor_with_mocked_subprocess(
+            runner, returncode=0, stdout_text=stdout_text, stderr_text=stderr_text,
+        )
+
+        # Must succeed — agent produced valid output
+        assert result.success is True
+        assert result.returncode == 0
+        # stderr_tail is still populated for diagnostics
+        assert "shell_snapshot" in result.stderr_tail.lower()
+
+
+# =============================================================================
+# Task 3 — detect_infra_error STARTUP_FAILURE classification
+# =============================================================================
+
+class TestDetectInfraErrorStartupFailure:
+    """Test that detect_infra_error correctly classifies shell snapshot
+    failures as STARTUP_FAILURE, without preempting existing classifications."""
+
+    def test_shell_snapshot_returns_startup_failure(self):
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr = (
+            "codex_core::shell_snapshot: Shell snapshot validation failed "
+            "at line 5: syntax error near unexpected token '('\n"
+        )
+        assert runner.detect_infra_error(1, "", stderr) == InfraErrorType.STARTUP_FAILURE
+
+    def test_shell_snapshot_with_zero_exit_returns_none(self):
+        """rc==0 must return NONE regardless of stderr content
+        (the forced-failure path in _run_single_with_monitor already
+        remaps rc to 1 before detect_infra_error is called)."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr = "codex_core::shell_snapshot: Shell snapshot validation failed"
+        assert runner.detect_infra_error(0, "", stderr) == InfraErrorType.NONE
+
+    def test_timeout_takes_priority_over_shell_snapshot(self):
+        """rc==124 must return TIMEOUT even if stderr has shell snapshot."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr = "codex_core::shell_snapshot: Shell snapshot validation failed"
+        assert runner.detect_infra_error(124, "", stderr) == InfraErrorType.TIMEOUT
+
+    def test_usage_limit_takes_priority_over_shell_snapshot(self):
+        """Usage limit keywords must return USAGE_LIMIT even if stderr
+        also has shell snapshot patterns."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stdout = "Error: usage limit exceeded"
+        stderr = "codex_core::shell_snapshot: Shell snapshot validation failed"
+        assert runner.detect_infra_error(1, stdout, stderr) == InfraErrorType.USAGE_LIMIT
+
+    def test_auth_failure_takes_priority_over_shell_snapshot(self):
+        """Auth failure must return USAGE_LIMIT even if stderr also has
+        shell snapshot patterns."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stderr = (
+            "401 Unauthorized\n"
+            "codex_core::shell_snapshot: Shell snapshot validation failed"
+        )
+        assert runner.detect_infra_error(1, "", stderr) == InfraErrorType.USAGE_LIMIT
+
+    def test_task_failure_without_shell_snapshot_returns_none(self):
+        """A normal task failure with no shell snapshot must return NONE."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        assert runner.detect_infra_error(1, "file not found", "") == InfraErrorType.NONE
+
+    def test_shell_snapshot_in_stderr_only_not_stdout(self):
+        """Shell snapshot patterns in stdout should not trigger
+        STARTUP_FAILURE (only stderr is checked)."""
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        stdout = "codex_core::shell_snapshot: Shell snapshot validation failed"
+        assert runner.detect_infra_error(1, stdout, "") == InfraErrorType.NONE
+
+    def test_monitored_result_stderr_tail_populated(self):
+        """MonitoredResult.stderr_tail must be populated from the
+        _SingleRunResult."""
+        from se3.codex_runner import _SingleRunResult
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        def fake_monitor(self_runner, *, full_cmd, **kw):
+            return _SingleRunResult(
+                returncode=0, output="ok", success=True,
+                should_retry=False, stderr_tail="some stderr content",
+            )
+        with patch.object(CodexRunner, "_run_single_with_monitor", autospec=True, side_effect=fake_monitor):
+            result = runner.run_with_monitor(["exec", "--json", "hi"])
+        assert result.stderr_tail == "some stderr content"
+
+    def test_monitored_result_stderr_tail_default_empty(self):
+        """MonitoredResult.stderr_tail defaults to empty string when
+        _SingleRunResult has no stderr_tail."""
+        from se3.codex_runner import _SingleRunResult
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        def fake_monitor(self_runner, *, full_cmd, **kw):
+            return _SingleRunResult(
+                returncode=0, output="ok", success=True, should_retry=False,
+            )
+        with patch.object(CodexRunner, "_run_single_with_monitor", autospec=True, side_effect=fake_monitor):
+            result = runner.run_with_monitor(["exec", "--json", "hi"])
+        assert result.stderr_tail == ""
+
+
+# =============================================================================
+# Task 3 — InfraErrorType.STARTUP_FAILURE enum value
+# =============================================================================
+
+class TestInfraErrorTypeStartupFailure:
+    """Verify STARTUP_FAILURE exists with the correct value."""
+
+    def test_startup_failure_member_exists(self):
+        assert hasattr(InfraErrorType, "STARTUP_FAILURE")
+
+    def test_startup_failure_value(self):
+        assert InfraErrorType.STARTUP_FAILURE.value == "startup_failure"
+
+    def test_existing_members_unchanged(self):
+        """Existing InfraErrorType members must not regress."""
+        assert InfraErrorType.NONE.value == "none"
+        assert InfraErrorType.USAGE_LIMIT.value == "usage_limit"
+        assert InfraErrorType.TIMEOUT.value == "timeout"
+        assert InfraErrorType.HANG.value == "hang"
