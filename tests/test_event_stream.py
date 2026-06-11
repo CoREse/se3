@@ -513,9 +513,10 @@ def test_cli_sink_confirm_renders_compact_footer(captured_console):
     assert "Step Token Usage" not in out
 
 
-def test_cli_sink_discovery_renders_no_usage(captured_console):
+def test_cli_sink_discovery_renders_cumulative_usage(captured_console):
     """discovery's per-round footer is rendered inline by the discovery handler,
-    so CliSink renders nothing for a discovery terminal event (no duplication)."""
+    but the terminal cumulative usage (the whole-discovery total across all
+    rounds) is rendered by CliSink via format_usage_line."""
     step = _usage_step("discovery")
     CliSink().consume(new_event(
         EventType.STEP_COMPLETED,
@@ -523,7 +524,10 @@ def test_cli_sink_discovery_renders_no_usage(captured_console):
         step_type="discovery",
         step=step,
     ))
-    assert captured_console.export_text() == ""
+    out = captured_console.export_text()
+    assert "Discovery cumulative:" in out
+    assert "100" in out  # input_tokens
+    assert "50" in out   # output_tokens
 
 
 @pytest.mark.parametrize("step_type_value", ["confirm", "discovery", "plan"])
