@@ -541,6 +541,54 @@ def create_app(
             )
         return {"status": "dispatched", "machine_id": machine_id, "flow_id": flow_id}
 
+    @app.post("/api/flows/{flow_id}/resume")
+    async def resume_flow(
+        flow_id: str,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        """Resume a paused or failed flow.
+
+        The flow must be in a directly-resumable status (FAILED or PAUSED),
+        must not be archived/history-only, and must belong to the requesting
+        owner. The owning daemon receives a ``MSG_SPAWN_FLOW`` carrying the
+        ``resume_flow_id`` field; the daemon validates the local
+        ``engine.json`` and spawns ``se3 run --resume --flow-id <id>``.
+        """
+        scope = _scope_for(identity_)
+        result = await state.is_flow_resumable(flow_id, owner=scope)
+        if result is None:
+            # Covers: unknown flow, cross-owner, non-resumable status, or
+            # archived/history-only (not in the live flow set at all).
+            raise HTTPException(
+                status_code=404,
+                detail=f"flow '{flow_id}' not found or not resumable",
+            )
+        machine_id, flow = result
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"machine '{machine_id}' owning flow '{flow_id}' is not connected",
+            )
+        message = protocol.make_spawn_flow(
+            "",  # task_description is unused for resume
+            project_root=flow.get("project_root", ""),
+            resume_flow_id=flow_id,
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver resume SPAWN_FLOW to '{machine_id}'",
+            )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "resume_dispatched",
+                "machine_id": machine_id,
+                "flow_id": flow_id,
+            },
+        )
+
     # -- daemon-key self-management ----------------------------------------
     # An owner mints / lists / revokes its OWN daemon keys (the credential a
     # daemon presents in its HELLO). The plaintext key is shown exactly once,

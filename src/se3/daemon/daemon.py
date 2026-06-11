@@ -208,6 +208,66 @@ class Daemon:
         self.aggregator.add_project_root(spawned.project_root)
         return spawned
 
+    def request_resume(
+        self,
+        flow_id: str,
+        *,
+        project_root: Optional[str] = None,
+    ) -> SpawnedProcess:
+        """Resume a paused/interrupted flow (entry point for remote requests).
+
+        The daemon validates that the local ``engine.json`` describes the
+        requested *flow_id* and that the flow is in a directly-resumable
+        status (FAILED or PAUSED). A live ``se3 run`` process for the same
+        project root blocks the resume to avoid double-spawn.
+
+        Raises :class:`ValueError` when the resume is not permitted (the
+        caller surfaces the message as a protocol error).
+        """
+        root = Path(project_root).resolve() if project_root else Path.cwd()
+        engine_json = root / "se3" / "state" / "engine.json"
+        try:
+            data = json.loads(engine_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"Cannot read engine.json under {root}: {exc}"
+            ) from exc
+
+        local_flow_id = str(data.get("flow_id") or "")
+        if not local_flow_id:
+            raise ValueError(f"No flow_id in engine.json under {root}")
+        if local_flow_id != flow_id:
+            raise ValueError(
+                f"Flow ID mismatch: requested {flow_id!r} but engine.json "
+                f"describes {local_flow_id!r}"
+            )
+
+        status = str(data.get("status") or "").upper()
+        # Only FAILED and PAUSED flows are directly resumable.  RUNNING
+        # flows already have a live process; COMPLETED flows are done;
+        # INIT/RECOVERING are transient and not meaningful to resume remotely.
+        _DIRECTLY_RESUMABLE = {"FAILED", "PAUSED"}
+        if status not in _DIRECTLY_RESUMABLE:
+            raise ValueError(
+                f"Flow {flow_id} is {status}; only "
+                f"{sorted(_DIRECTLY_RESUMABLE)} flows can be resumed"
+            )
+
+        # Guard against double-spawn.
+        for record in self.supervisor.flows:
+            if record.project_root == str(root) and DaemonSupervisor.is_alive(
+                record.pid
+            ):
+                raise ValueError(
+                    f"Flow {flow_id} already has a live process "
+                    f"(pid={record.pid}); cannot resume"
+                )
+
+        spawned = self.spawner.resume(str(flow_id), project_root=str(root))
+        self.aggregator.add_project_root(str(root))
+        logger.info("Resumed flow %s in %s", flow_id, root)
+        return spawned
+
     def snapshot(self) -> MachineStatus:
         """Return a fresh :class:`MachineStatus` aggregation snapshot."""
         return self.aggregator.get_snapshot()
@@ -272,6 +332,7 @@ class Daemon:
             snapshot_provider=lambda: self.aggregator.get_snapshot().to_dict(),
             spawn_handler=self._handle_spawn_request,
             ensure_handler=self._handle_ensure_request,
+            resume_handler=self._handle_resume_request,
             respond_handler=self._handle_respond_request,
             history_provider=self.history_reader,
             calls_signature_provider=self.aggregator.pending_calls_signature,
@@ -294,6 +355,17 @@ class Daemon:
             project_root=project_root or None,
             task_type=task_type or "feature",
             discover=discover,
+        )
+
+    def _handle_resume_request(
+        self,
+        flow_id: str,
+        project_root: str,
+    ) -> SpawnedProcess:
+        """Adapt a server SPAWN_FLOW with resume_flow_id into a resume call."""
+        return self.request_resume(
+            flow_id,
+            project_root=project_root or None,
         )
 
     def _handle_ensure_request(self, project_root: str) -> Any:

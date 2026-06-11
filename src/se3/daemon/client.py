@@ -62,6 +62,9 @@ SpawnHandler = Callable[[str, str, str, bool], Any]
 #: truthy ``.error`` attribute aborts the spawn; ``None`` means "skip the
 #: pre-spawn check".
 EnsureHandler = Callable[[str], Any]
+#: Type of the resume handler — called with (flow_id, project_root) when a
+#: SPAWN_FLOW carries a ``resume_flow_id``.
+ResumeHandler = Callable[[str, str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
 #: Type of the history provider — a :class:`~se3.daemon.history.DaemonHistoryReader`
@@ -163,6 +166,7 @@ class DaemonClient:
         daemon_key: str = "",
         spawn_handler: Optional[SpawnHandler] = None,
         ensure_handler: Optional[EnsureHandler] = None,
+        resume_handler: Optional[ResumeHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         calls_signature_provider: Optional[CallsSignatureProvider] = None,
@@ -222,6 +226,7 @@ class DaemonClient:
         self._snapshot_provider = snapshot_provider
         self._spawn_handler = spawn_handler
         self._ensure_handler = ensure_handler
+        self._resume_handler = resume_handler
         self._respond_handler = respond_handler or _default_respond_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
@@ -629,18 +634,51 @@ class DaemonClient:
     def _handle_spawn(self, payload: Dict[str, Any]) -> None:
         """Route a SPAWN_FLOW instruction to the daemon's spawner.
 
-        When an ``ensure_handler`` is configured, it runs first against the
-        target ``project_root`` — that is what lets the web *New Task* form
-        send a brand-new empty directory: the daemon auto-runs ``se3 init``
-        there and registers it before the spawn proceeds. A truthy
-        ``.error`` on the returned object aborts the spawn and is logged;
-        nothing half-initialized leaks downstream.
+        When a ``resume_flow_id`` is present in the payload, the message is
+        treated as a **resume** request rather than a fresh spawn.  The
+        ``task_description`` is ignored — the flow's own persisted state
+        supplies the task.  The resume path skips the ``ensure_handler``
+        (the project must already be initialised for a flow to exist there).
+
+        When an ``ensure_handler`` is configured (fresh-spawn path only), it
+        runs first against the target ``project_root`` — that is what lets
+        the web *New Task* form send a brand-new empty directory: the daemon
+        auto-runs ``se3 init`` there and registers it before the spawn
+        proceeds. A truthy ``.error`` on the returned object aborts the spawn
+        and is logged; nothing half-initialized leaks downstream.
         """
+        project_root = str(payload.get("project_root") or "")
+
+        # -- resume path (resume_flow_id present) --------------------------
+        resume_flow_id = str(payload.get("resume_flow_id") or "").strip()
+        if resume_flow_id:
+            if self._resume_handler is None:
+                logger.warning(
+                    "Received SPAWN_FLOW with resume_flow_id=%s "
+                    "but no resume handler is configured",
+                    resume_flow_id,
+                )
+                return
+            try:
+                self._resume_handler(resume_flow_id, project_root)
+                logger.info(
+                    "SPAWN_FLOW resume handled: flow %s", resume_flow_id
+                )
+            except Exception:
+                logger.exception("SPAWN_FLOW resume handler failed")
+                return
+            invalidate = getattr(
+                self._history_provider, "invalidate_index_cache", None
+            )
+            if invalidate is not None:
+                invalidate()
+            return
+
+        # -- fresh-spawn path (no resume_flow_id) --------------------------
         task = str(payload.get("task_description") or "").strip()
         if not task:
             logger.warning("Ignoring SPAWN_FLOW with empty task_description")
             return
-        project_root = str(payload.get("project_root") or "")
         task_type = str(payload.get("task_type") or "feature")
         discover = bool(payload.get("discover", False))
         if self._spawn_handler is None:

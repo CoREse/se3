@@ -323,21 +323,27 @@ def make_spawn_flow(
     project_root: str = "",
     task_type: str = "feature",
     discover: bool = False,
+    resume_flow_id: str = "",
 ) -> Message:
     """server → daemon: instruct a daemon to spawn a new ``se3 run`` flow.
 
     When *discover* is true the daemon's spawner appends ``--discover`` so the
     flow starts from the discovery step (see the spawner command assembly).
+
+    When *resume_flow_id* is non-empty, the daemon resumes the named flow
+    (``se3 run --resume --flow-id <id>``) instead of starting a fresh one.
+    The ``task_description`` is ignored in this case — the flow's own
+    persisted state supplies the task.
     """
-    return Message(
-        type=MSG_SPAWN_FLOW,
-        payload={
-            "task_description": task_description,
-            "project_root": project_root,
-            "task_type": task_type,
-            "discover": bool(discover),
-        },
-    )
+    payload: Dict[str, Any] = {
+        "task_description": task_description,
+        "project_root": project_root,
+        "task_type": task_type,
+        "discover": bool(discover),
+    }
+    if resume_flow_id:
+        payload["resume_flow_id"] = resume_flow_id
+    return Message(type=MSG_SPAWN_FLOW, payload=payload)
 
 
 def make_respond_call(

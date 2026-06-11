@@ -549,6 +549,77 @@ class TestDaemonLifecycle:
             sleeper.terminate()
             sleeper.wait(timeout=10)
 
+    # -- request_resume (explicit protocol-driven resume) ------------------
+
+    def test_request_resume_paused_flow(self, fake_se3, tmp_path):
+        """request_resume resumes a PAUSED flow and registers the project root."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-r1", status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        spawned = daemon.request_resume("flow-r1", project_root=str(proj))
+        assert "--resume" in spawned.args
+        assert "flow-r1" in spawned.args
+        assert proj.resolve() in daemon.aggregator.project_roots
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_request_resume_failed_flow(self, fake_se3, tmp_path):
+        """request_resume resumes a FAILED flow."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-f1", status="failed")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        spawned = daemon.request_resume("flow-f1", project_root=str(proj))
+        assert "--resume" in spawned.args
+        assert "flow-f1" in spawned.args
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_request_resume_rejects_completed_flow(self, fake_se3, tmp_path):
+        """request_resume raises ValueError for COMPLETED flows."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-done", status="completed")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        with pytest.raises(ValueError, match="COMPLETED"):
+            daemon.request_resume("flow-done", project_root=str(proj))
+
+    def test_request_resume_rejects_running_flow(self, fake_se3, tmp_path):
+        """request_resume raises ValueError for RUNNING flows."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-run", status="running")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        with pytest.raises(ValueError, match="RUNNING"):
+            daemon.request_resume("flow-run", project_root=str(proj))
+
+    def test_request_resume_rejects_flow_id_mismatch(self, fake_se3, tmp_path):
+        """request_resume raises ValueError when flow_id doesn't match engine.json."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-real", status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        with pytest.raises(ValueError, match="mismatch"):
+            daemon.request_resume("flow-wrong", project_root=str(proj))
+
+    def test_request_resume_rejects_missing_engine_json(self, fake_se3, tmp_path):
+        """request_resume raises ValueError when engine.json is absent."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        with pytest.raises(ValueError, match="Cannot read engine.json"):
+            daemon.request_resume("flow-x", project_root=str(proj))
+
+    def test_request_resume_rejects_live_process(self, fake_se3, tmp_path):
+        """request_resume raises ValueError when a live process exists."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-live", status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        sleeper = _spawn_sleeper(30)
+        try:
+            daemon.supervisor.register(sleeper.pid, str(proj))
+            with pytest.raises(ValueError, match="live process"):
+                daemon.request_resume("flow-live", project_root=str(proj))
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=10)
+
     def test_handle_respond_writes_response_and_resumes(self, fake_se3, tmp_path):
         proj = tmp_path / "proj"
         _make_engine_json(proj, flow_id="flow-disc", status="paused")
