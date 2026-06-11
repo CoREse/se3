@@ -600,4 +600,123 @@ export function registerIssueManagementTests(ctx) {
     assert.equal(fin2.applyResponse, true);
     assert.equal(fin2.reDispatch, false);
   });
+
+  // ---- (q) issueProjectRoots ---------------------------------------------------
+  // Derives the project-root dropdown options from an unfiltered issue set.
+  // Mirrors the pattern of issueTypes (dedup + sort) but for project_root
+  // strings. The dropdown options come from an unfiltered universe so that
+  // selecting a project does not collapse the dropdown.
+
+  check("G3 issueProjectRoots: deduplicates project_root from issues", () => {
+    const issues = [
+      { project_root: "/projA" },
+      { project_root: "/projB" },
+      { project_root: "/projA" }, // duplicate
+    ];
+    const result = app.issueProjectRoots(issues);
+    assert.deepEqual(result, ["/projA", "/projB"]);
+  });
+
+  check("G3 issueProjectRoots: preserves first-seen order (stable dedup)", () => {
+    const issues = [
+      { project_root: "/projB" },
+      { project_root: "/projA" },
+      { project_root: "/projB" },
+    ];
+    const result = app.issueProjectRoots(issues);
+    assert.deepEqual(result, ["/projB", "/projA"]);
+  });
+
+  check("G3 issueProjectRoots: skips issues with missing project_root", () => {
+    const issues = [
+      { project_root: "/projA" },
+      { project_root: null },
+      { project_root: undefined },
+      { project_root: "" },
+      { project_root: "   " },
+      {}, // no project_root key at all
+      { project_root: "/projB" },
+    ];
+    const result = app.issueProjectRoots(issues);
+    assert.deepEqual(result, ["/projA", "/projB"]);
+  });
+
+  check("G3 issueProjectRoots: returns empty for non-array input", () => {
+    assert.deepEqual(app.issueProjectRoots(null), []);
+    assert.deepEqual(app.issueProjectRoots(undefined), []);
+    assert.deepEqual(app.issueProjectRoots("nope"), []);
+    assert.deepEqual(app.issueProjectRoots(42), []);
+  });
+
+  check("G3 issueProjectRoots: returns empty for empty array", () => {
+    assert.deepEqual(app.issueProjectRoots([]), []);
+  });
+
+  check("G3 issueProjectRoots: skips null/invalid entries in the array", () => {
+    const issues = [
+      null,
+      undefined,
+      "nope",
+      42,
+      { project_root: "/projA" },
+    ];
+    const result = app.issueProjectRoots(issues);
+    assert.deepEqual(result, ["/projA"]);
+  });
+
+  check("G3 issueProjectRoots: trims whitespace from project_root", () => {
+    const issues = [
+      { project_root: "  /projA  " },
+    ];
+    const result = app.issueProjectRoots(issues);
+    assert.deepEqual(result, ["/projA"]);
+  });
+
+  check("G3 issueProjectRoots: treats trimmed duplicates as same", () => {
+    const issues = [
+      { project_root: "/projA" },
+      { project_root: "  /projA  " },
+    ];
+    const result = app.issueProjectRoots(issues);
+    assert.deepEqual(result, ["/projA"]);
+  });
+
+  // ---- (r) pickDefaultIssueProjectRoot -----------------------------------------
+  // Determines which project_root the dropdown should select. Defaults to
+  // "" (全部项目) on first load or when the current selection vanished.
+
+  check("G3 pickDefaultIssueProjectRoot: returns empty string for null/undefined/empty allProjectRoots", () => {
+    assert.equal(app.pickDefaultIssueProjectRoot(null, "/projA"), "");
+    assert.equal(app.pickDefaultIssueProjectRoot(undefined, "/projA"), "");
+    assert.equal(app.pickDefaultIssueProjectRoot([], "/projA"), "");
+  });
+
+  check("G3 pickDefaultIssueProjectRoot: preserves currentSelected when still present", () => {
+    const roots = ["/projA", "/projB"];
+    assert.equal(app.pickDefaultIssueProjectRoot(roots, "/projB"), "/projB");
+  });
+
+  check("G3 pickDefaultIssueProjectRoot: falls back to empty string when currentSelected vanished", () => {
+    const roots = ["/projA", "/projB"];
+    assert.equal(app.pickDefaultIssueProjectRoot(roots, "/projC"), "");
+  });
+
+  check("G3 pickDefaultIssueProjectRoot: defaults to empty string when currentSelected is null/undefined", () => {
+    const roots = ["/projA", "/projB"];
+    assert.equal(app.pickDefaultIssueProjectRoot(roots, null), "");
+    assert.equal(app.pickDefaultIssueProjectRoot(roots, undefined), "");
+  });
+
+  check("G3 pickDefaultIssueProjectRoot: defaults to empty string when currentSelected is empty string", () => {
+    const roots = ["/projA", "/projB"];
+    assert.equal(app.pickDefaultIssueProjectRoot(roots, ""), "");
+  });
+
+  check("G3 pickDefaultIssueProjectRoot: single project still defaults to empty string", () => {
+    // Unlike the history view which auto-selects the only bucket, the
+    // issue project dropdown defaults to "全部项目" because the user
+    // most commonly wants to see all issues regardless of project.
+    const roots = ["/projA"];
+    assert.equal(app.pickDefaultIssueProjectRoot(roots, null), "");
+  });
 }

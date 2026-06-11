@@ -122,6 +122,8 @@ const state = {
   issuesSourceFilter: "",      // filter: "human" | "system" | ""
   issuesTypeFilter: "",        // filter: issue type or ""
   allIssueTypes: [],           // unfiltered type universe for the dropdown
+  allIssueProjectRoots: [],    // unfiltered project_root universe for the dropdown
+  issuesProjectFilter: "",     // filter: project_root or "" (全部项目)
   _issuesFetchSeq: 0,          // monotonic counter to discard stale fetchIssues responses
   _issuesFetchInFlight: false, // true while a fetchIssues request is in-flight (coalescing guard)
   _issuesRefreshPending: false,// true when a refresh was requested while in-flight
@@ -863,6 +865,57 @@ function issueTypes(issues) {
     if (iss && typeof iss.type === "string" && iss.type.trim()) s.add(iss.type.trim());
   }
   return [...s].sort();
+}
+
+// Collect unique, non-empty project_root strings from an issue list. Returns a
+// stably-sorted array of distinct project_root values. Issues with missing or
+// falsy project_root are skipped. Pure: no DOM, no state.
+// This is the project-options derivation for the issue project dropdown, parallel
+// to issueTypes for the type dropdown and groupHistorySessionsByProjectRoot for
+// the history project dropdown.
+function issueProjectRoots(issues) {
+  if (!Array.isArray(issues)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const iss of issues) {
+    if (!iss || typeof iss !== "object") continue;
+    const pr = iss.project_root;
+    if (typeof pr === "string" && pr.trim()) {
+      const trimmed = pr.trim();
+      if (!seen.has(trimmed)) {
+        seen.add(trimmed);
+        result.push(trimmed);
+      }
+    }
+  }
+  // Stable sort: preserve insertion order (first-seen order) since the
+  // input already comes from deduplicated sources; alphabetical sort
+  // is unnecessary and would break the "most recently seen first"
+  // natural ordering from STATUS_UPDATE.
+  return result;
+}
+
+// Pick the default project_root the Issues view should select in the project
+// dropdown. Pure: no DOM, no state.
+//
+// * If currentSelected is still present in allProjectRoots, keep it (preserves
+//   the user's in-session selection across refreshes).
+// * If currentSelected has disappeared (e.g. the project's last issue was
+//   closed and no longer appears), fall back to "" (全部项目).
+// * If currentSelected is null/undefined/empty (first load or reset), default
+//   to "" (全部项目).
+//
+// This mirrors pickDefaultHistoryProjectRoot but defaults to the "全部项目"
+// sentinel (empty string) rather than buckets[0], because "全部项目" is the
+// most common desired starting state for issue browsing.
+function pickDefaultIssueProjectRoot(allProjectRoots, currentSelected) {
+  if (!Array.isArray(allProjectRoots)) return "";
+  // Preserve the current selection if it still exists in the options.
+  if (currentSelected && allProjectRoots.includes(currentSelected)) {
+    return currentSelected;
+  }
+  // Default: "全部项目" (empty string sentinel).
+  return "";
 }
 
 // Issues panel state helper (mirrors historyPanelState): manages the
@@ -2695,6 +2748,9 @@ function closeIssues() {
   $("issues-view").classList.add("hidden");
   applyIssuesPanelAction("reset");
   state.selectedIssueId = null;
+  // Reset the project filter so the next open recomputes the default
+  // (mirrors closeHistory resetting historySelectedProjectRoot).
+  state.issuesProjectFilter = "";
 }
 
 // Collect all issues from the machine snapshot. Issues are already in-memory
@@ -2774,6 +2830,7 @@ async function fetchIssues() {
     if (state.issuesShowClosed) params.set("include_closed", "true");
     if (state.issuesSourceFilter) params.set("source", state.issuesSourceFilter);
     if (state.issuesTypeFilter) params.set("type", state.issuesTypeFilter);
+    if (state.issuesProjectFilter) params.set("project_root", state.issuesProjectFilter);
     const qs = params.toString();
     const resp = await authedFetch("/api/issues" + (qs ? "?" + qs : ""));
     if (!resp.ok) return;
@@ -2829,24 +2886,28 @@ async function fetchIssues() {
 }
 
 // Fetch all issue types once (unfiltered) so the dropdown stays complete even
-// when a type filter is active.  Populates state.allIssueTypes.
+// when a type filter is active.  Populates state.allIssueTypes and
+// state.allIssueProjectRoots (both come from the same unfiltered response).
 async function fetchAllIssueTypes() {
   try {
     const params = new URLSearchParams();
     if (state.issuesShowClosed) params.set("include_closed", "true");
     if (state.issuesSourceFilter) params.set("source", state.issuesSourceFilter);
-    // Deliberately omit 'type' param to get the full type universe.
+    // Deliberately omit 'type' and 'project_root' params to get the full
+    // universe for both dropdowns.
     const qs = params.toString();
     const resp = await authedFetch("/api/issues" + (qs ? "?" + qs : ""));
     if (!resp.ok) return;
     const data = await resp.json().catch(() => ({ issues: [] }));
     if (Array.isArray(data.issues)) {
       state.allIssueTypes = issueTypes(data.issues);
+      state.allIssueProjectRoots = issueProjectRoots(data.issues);
     }
   } catch (_) {
     /* best-effort */
   }
   refreshIssueTypeFilter();
+  refreshIssueProjectFilter();
 }
 
 // selectTypeDropdownOptions is the pure selection logic for the type-filter
@@ -2875,6 +2936,35 @@ function refreshIssueTypeFilter() {
     sel.appendChild(opt);
   }
   sel.value = types.includes(current) ? current : "";
+}
+
+// Rebuild the project-root filter dropdown from the unfiltered project universe
+// (state.allIssueProjectRoots). Mirrors refreshIssueTypeFilter's pattern: the
+// dropdown stays complete even when a project filter is active, because the
+// options come from the separate unfiltered universe rather than from the
+// already-narrowed state.issues list.
+function refreshIssueProjectFilter() {
+  const sel = $("issues-project-filter");
+  if (!sel) return;
+  const current = sel.value;
+  const roots = state.allIssueProjectRoots;
+  sel.innerHTML = '<option value="">全部项目</option>';
+  for (const pr of roots) {
+    const opt = document.createElement("option");
+    opt.value = pr;
+    // Show the project_root as-is (it's already an absolute path); truncate
+    // very long paths for readability using the shared truncate helper.
+    opt.textContent = pr.length > 60 ? truncate(pr, 60) : pr;
+    opt.title = pr; // full path on hover
+    sel.appendChild(opt);
+  }
+  // Resolve the default: keep the current selection if it still exists,
+  // otherwise fall back to "全部项目" (empty string).
+  const resolved = pickDefaultIssueProjectRoot(roots, current);
+  sel.value = resolved;
+  // Sync the state with the resolved selection so fetchIssues sends the
+  // correct parameter on the next request.
+  state.issuesProjectFilter = resolved;
 }
 
 function renderIssuesList() {
@@ -8306,6 +8396,8 @@ async function handleLogout() {
   state.selectedMachineId = null;
   state.issues = [];
   state.selectedIssueId = null;
+  state.allIssueProjectRoots = [];
+  state.issuesProjectFilter = "";
   // Reset the mobile panel switch so a fresh login lands on the machine list.
   applyListPanelAction("reset");
   state.authState = nextAuthState(state.authState, "logout");
@@ -8680,6 +8772,10 @@ function init() {
     state.issuesTypeFilter = e.target.value;
     fetchIssues();
   });
+  $("issues-project-filter").addEventListener("change", (e) => {
+    state.issuesProjectFilter = e.target.value;
+    fetchIssues();
+  });
   $("issues-create-btn").addEventListener("click", openIssueCreateModal);
 
   // Narrow-screen issues panel switch: return from detail to list.
@@ -8956,6 +9052,10 @@ if (typeof module !== "undefined" && module.exports) {
     parseTagsFromString,
     formatTagsForInput,
     selectTypeDropdownOptions,
+    // Issue project-filter pure helpers (G3) — exposed for the DOM-free tests in
+    // tests/frontend/issue_management.test.mjs.
+    issueProjectRoots,
+    pickDefaultIssueProjectRoot,
     // fetchIssues request-coalescing pure helpers (G7) — exposed for the
     // DOM-free regression tests in tests/frontend/issue_management.test.mjs.
     fetchIssuesCoalesceDecision,
