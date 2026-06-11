@@ -41,7 +41,13 @@ The subsystem MUST define an `InfraErrorType` enum that classifies failures into
 
 #### Scenario: enum members
 - **WHEN** `InfraErrorType` is referenced
-- **THEN** it MUST define exactly four members: `NONE` (value `"none"`), `USAGE_LIMIT` (`"usage_limit"`), `TIMEOUT` (`"timeout"`), and `HANG` (`"hang"`)
+- **THEN** it MUST define exactly five members: `NONE` (value `"none"`), `USAGE_LIMIT` (`"usage_limit"`), `TIMEOUT` (`"timeout"`), `HANG` (`"hang"`), and `STARTUP_FAILURE` (`"startup_failure"`)
+
+#### Scenario: shell-snapshot startup-failure classification
+- **GIVEN** a Codex run that exits with no effective output and whose stderr tail contains a shell-snapshot validation failure pattern (e.g. `codex_core::shell_snapshot: Shell snapshot validation failed ... syntax error near unexpected token '('`)
+- **WHEN** `detect_infra_error(returncode, stdout, stderr)` is called
+- **THEN** the result is classified as `InfraErrorType.STARTUP_FAILURE` rather than `NONE` or `TIMEOUT`
+- **AND** the synthesized error result carries the original stderr context so users can diagnose the shell snapshot generation or validation failure
 
 ### Requirement: RunResult Dataclass
 
@@ -108,6 +114,14 @@ The subsystem MUST define a `RunResult` dataclass that bundles the outcome of an
 - **AND** a `turn.failed` / `error` event becomes an error `type: "result"` event
 - **AND** the output is Claude-compatible stream-json NDJSON, so `StreamJSONTracker`, chat-history persistence, retry/continue context reconstruction, web-console rendering, `last_raw_result`, and `_last_touched_files` all consume it with zero changes
 
+#### Scenario: Codex usage tokens extracted independently of cost
+- **GIVEN** a `turn.completed` (or `turn.failed`) event whose usage payload — located defensively across `event.usage` / `data.usage` / `turn.usage` / `message.usage` — carries `input_tokens` / `output_tokens` and Codex's `cached_input_tokens`, but whose `total_cost_usd` is absent or `null` (the Codex CLI does not always report a USD cost)
+- **WHEN** `CodexEventConverter` builds the terminal `type: "result"` event
+- **THEN** `input_tokens`, `output_tokens`, and the cache token fields are extracted into the result's usage, with `cached_input_tokens` mapped onto `cache_read_input_tokens`
+- **AND** `total_cost_usd` defaults to `0` (a missing / `null` cost is treated as `0`) rather than dropping the usage record
+- **AND** the usage record is always emitted, so its tokens flow intact through `StreamJSONTracker._capture_usage` → `add_call_usage` → `parse_usage_from_ndjson` into SE3's per-call, per-step, and per-session usage totals even when the cost is `0`
+- **AND** a `turn.failed` event that carries usage preserves that usage rather than zeroing it
+
 #### Scenario: Unknown Codex event types tolerated
 - **GIVEN** the Codex `--json` schema is historically unversioned and has changed over time
 - **WHEN** the converter encounters an event type it does not recognize, or a non-JSON line
@@ -118,6 +132,7 @@ The subsystem MUST define a `RunResult` dataclass that bundles the outcome of an
 - **WHEN** `detect_infra_error(returncode, stdout, stderr)` is called for a Codex run
 - **THEN** a usage-limit signal (an `error` / `turn.failed` message containing a "usage limit"-class substring, matched defensively) or an authentication failure (e.g. `401 Unauthorized`) is classified as `USAGE_LIMIT`
 - **AND** `returncode == 124` (the shared inactivity/timeout signal) is classified as `TIMEOUT`
+- **AND** a shell-snapshot validation failure (stderr containing `shell_snapshot` with a syntax/validation error, with no effective stdout output) is classified as `STARTUP_FAILURE`
 - **AND** a successful run is classified as `NONE`
 - **AND** this lets a Codex agent participate correctly in `LLMCaller`'s rotation mechanism
 
@@ -413,11 +428,17 @@ Unexpected exceptions raised while preparing or running the monitored command MU
 
 ### Requirement: MonitoredResult Dataclass
 
-`run_with_monitor` MUST return a `MonitoredResult` dataclass that records the exit code, captured output (prefixed with `"=== Command: <cmd> ==="`), which command was used, the command index (always 0 for the single-command runner), a `was_retry` flag (always `False` for the single-command runner), and an `interrupted` flag.
+`run_with_monitor` MUST return a `MonitoredResult` dataclass that records the exit code, captured output (prefixed with `"=== Command: <cmd> ==="`), which command was used, the command index (always 0 for the single-command runner), a `was_retry` flag (always `False` for the single-command runner), an `interrupted` flag, and an optional `stderr_tail` field.
 
 #### Scenario: success property
 - **WHEN** a caller reads `result.success`
 - **THEN** it returns `True` iff `returncode == 0`
+
+#### Scenario: stderr_tail field
+- **WHEN** a `MonitoredResult` is constructed
+- **THEN** it carries an optional `stderr_tail: str` field (default `""`)
+- **AND** `CodexRunner` populates this field with the bounded tail of the child's stderr output for use by `detect_infra_error` in classifying startup failures (e.g. shell-snapshot validation errors)
+- **AND** `LLMCaller` passes this field to `detect_infra_error` on the failure path so infrastructure errors in stderr are not lost
 
 #### Scenario: output prefixing
 - **WHEN** a non-interrupted monitored run completes

@@ -367,11 +367,17 @@ class CodexEventConverter:
 
         # Parse usage — codex may carry it at multiple nesting levels.
         # Priority: data.usage → data.message.usage → data.turn.usage
-        usage_raw = data.get("usage", {})
-        if not usage_raw and isinstance(data.get("message"), dict):
-            usage_raw = data["message"].get("usage", {})
-        if not usage_raw and isinstance(data.get("turn"), dict):
-            usage_raw = data["turn"].get("usage", {})
+        # Defensive: a key present with null value must not crash .get();
+        # mirror _handle_turn_failed's isinstance(candidate, dict) guard.
+        usage_raw: Dict[str, Any] = {}
+        for candidate in (
+            data.get("usage"),
+            data.get("message", {}).get("usage") if isinstance(data.get("message"), dict) else None,
+            data.get("turn", {}).get("usage") if isinstance(data.get("turn"), dict) else None,
+        ):
+            if isinstance(candidate, dict) and candidate:
+                usage_raw = candidate
+                break
 
         usage = {
             "input_tokens": usage_raw.get("input_tokens", 0),
@@ -883,7 +889,7 @@ class CodexRunner(AgentRunner):
         if log_file is not None:
             _stderr_log = log_file.parent / f"{log_file.name}.stderr"
         _stderr_buffer: Deque[str] = collections.deque(maxlen=_STDERR_BUFFER_MAXLEN)
-        _spawn_stderr_reader(proc, log_file=_stderr_log, stderr_buffer=_stderr_buffer)
+        _stderr_thread = _spawn_stderr_reader(proc, log_file=_stderr_log, stderr_buffer=_stderr_buffer)
 
         output_buffer: List[str] = []
         last_activity = time.time()
@@ -1011,7 +1017,10 @@ class CodexRunner(AgentRunner):
                             log_fh.write(ndjson_line + "\n")
                             log_fh.flush()
 
-            # Collect stderr tail from the bounded buffer for post-mortem
+            # Collect stderr tail from the bounded buffer for post-mortem.
+            # Join the stderr reader thread first so the buffer is fully
+            # populated and not being mutated during iteration.
+            _stderr_thread.join(timeout=5)
             stderr_tail = "".join(_stderr_buffer) if _stderr_buffer else ""
 
             # Finalize converter (synthesize result if missing).
@@ -1113,6 +1122,8 @@ class CodexRunner(AgentRunner):
             # Finalize even on interrupt
             for ndjson_line in converter.finalize():
                 output_buffer.append(ndjson_line + "\n")
+            # Join stderr reader before reading the buffer
+            _stderr_thread.join(timeout=5)
             stderr_tail = "".join(_stderr_buffer) if _stderr_buffer else ""
             return _SingleRunResult(
                 returncode=-2,

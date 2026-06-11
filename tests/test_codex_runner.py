@@ -309,6 +309,36 @@ class TestCodexEventConverterMapping:
         assert parsed["usage"]["cache_creation_input_tokens"] == 0
         assert parsed["usage"]["cache_read_input_tokens"] == 0
 
+    def test_turn_completed_null_usage_does_not_crash(self):
+        """Explicit ``"usage": null`` must not raise AttributeError and must
+        still emit a ``type: result`` event with zeroed usage fields."""
+        conv = CodexEventConverter()
+        # The key is present with a null value — data.get("usage", {}) returns
+        # None (not the default), which previously crashed on .get().
+        event = {"type": "turn.completed", "data": {"usage": None}}
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 1
+        parsed = json.loads(result[0])
+        assert parsed["type"] == "result"
+        assert parsed["usage"]["input_tokens"] == 0
+        assert parsed["usage"]["output_tokens"] == 0
+        assert parsed["usage"]["cache_creation_input_tokens"] == 0
+        assert parsed["usage"]["cache_read_input_tokens"] == 0
+
+    def test_turn_completed_null_usage_with_result_text_preserved(self):
+        """When usage is null, the result text from accumulated agent messages
+        must still be present in the emitted result event."""
+        conv = CodexEventConverter()
+        # Simulate prior agent_message accumulation
+        conv._agent_messages = ["Hello from the agent"]
+        event = {"type": "turn.completed", "data": {"usage": None}}
+        result = conv.convert_line(json.dumps(event))
+        assert len(result) == 1
+        parsed = json.loads(result[0])
+        assert parsed["type"] == "result"
+        assert "Hello from the agent" in parsed["result"]
+        assert parsed["usage"]["input_tokens"] == 0
+
     def test_turn_failed_produces_error_result(self):
         conv = CodexEventConverter()
         event = {

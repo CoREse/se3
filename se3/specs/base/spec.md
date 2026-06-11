@@ -117,7 +117,7 @@ Each module under `src/se3/commands/` corresponds to one or a group of `se3` sub
 
 ### Requirement: Agent Runner Abstraction
 - Agent execution is unified through the `AgentRunner` abstract base class interface (`src/se3/agent_runner.py`); every concrete runner must implement this interface
-- The `InfraErrorType` enum defines the infrastructure error types that require agent rotation: `NONE`, `USAGE_LIMIT`, `TIMEOUT`, `HANG`
+- The `InfraErrorType` enum defines the infrastructure error types that require agent rotation: `NONE`, `USAGE_LIMIT`, `TIMEOUT`, `HANG`, `STARTUP_FAILURE`
 - The `RunResult` dataclass represents a runner's execution result, used by the upper-layer flow engine to judge success/failure and rotation decisions
 - There are two concrete implementations: `ClaudeCodeRunner` (`src/se3/claude_runner.py`), wrapping a single Claude Code CLI command invocation, and `CodexRunner` (`src/se3/codex_runner.py`), wrapping a single OpenAI Codex CLI (`codex exec --json`) invocation and normalizing Codex's JSONL events into Claude-compatible stream-json NDJSON. `LLMCaller._create_runner` dispatches on the agent's `type` (`claude-code` / `codex`); the logic for iterating/rotating the agent command list lives in `LLMCaller`. The `AgentRunner` ABC contract is `run` / `run_with_monitor` / `detect_infra_error` / `build_call_args`, the last of which lets `LLMCaller` pass call intent (effective prompt, read-only flag, context files) and have each runner translate it into its own CLI flags
 - On the Linux platform, `psutil` is used for subprocess resource monitoring to detect abnormal states such as hangs

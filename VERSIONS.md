@@ -33,6 +33,15 @@
 
 
 
+
+## 8.12.5 - 2026-06-11
+
+- Fix discovery step cumulative token usage not displaying in CLI after programmatic confirmation
+- Fix Codex runner silently dropping usage records when total_cost_usd is missing or null
+- Add Codex shell snapshot validation failure detection and clear error reporting instead of misclassifying as success
+- Preserve original Codex stderr context for shell snapshot and infrastructure startup failures
+- Extend InfraErrorType enum with STARTUP_FAILURE for shell snapshot and environment validation errors
+- Pass stderr_tail through LLMCaller to agent runner error classification for richer diagnostics
 ## 8.12.4 - 2026-06-11
 
 - Fix History view list and detail panes producing horizontal page overflow on phone-portrait screens

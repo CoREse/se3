@@ -2393,7 +2393,12 @@ later re-run reaches a terminal status. To keep CLI output byte-identical
 despite these new events, `CliSink` skips rendering the terminal events of the
 interactive/special step types (CONFIRM, DISCOVERY, PLAN) — their CLI output
 is already presented by the orchestrator's interactive paths, so re-rendering
-them through `render_step_output` would double the CLI output. `HistorySink`
+them through `render_step_output` would double the CLI output. The one
+exception is discovery's cumulative usage: when the discovery step reaches a
+terminal status with non-empty `token_usage`, `CliSink` renders a dim
+whole-discovery cumulative usage line (`format_usage_line`) so the user sees
+the total across all rounds including the confirmation round (which issues no
+LLM call and would otherwise leave the cumulative undisplayed). `HistorySink`
 and `JsonSink` still receive every terminal event, so the web report card
 (and the daemon NDJSON stream) appear for these steps even though the CLI does
 not re-render them.
