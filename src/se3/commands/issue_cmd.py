@@ -1,23 +1,33 @@
 """SE3 Issue command — Manage project issues.
 
-Provides commands to list, show, create, and reset issues.
+Provides commands to list, show, create, edit, close, and reset issues.
 
 Usage:
-    se3 issue                        # List open issues
-    se3 issue list                   # List open issues
-    se3 issue list --all             # List all issues (including closed)
-    se3 issue show <id>              # Show issue details
-    se3 issue create                 # Create a new issue interactively
-    se3 issue reset <id>             # Reset in-progress issue to open
+    se3 issue                              # List open issues
+    se3 issue list                         # List open issues
+    se3 issue list --all                   # List all issues (including closed)
+    se3 issue list --source human          # Filter by source
+    se3 issue list --type bug              # Filter by type
+    se3 issue show <id>                    # Show issue details
+    se3 issue create "description"         # Create with positional description
+    se3 issue create                       # Create interactively (single prompt)
+    se3 issue create --editor              # Create via external editor
+    se3 issue edit <id>                    # Edit issue in external editor
+    se3 issue close <id> [--reason TEXT]   # Close an issue
+    se3 issue reset <id>                   # Reset in-progress issue to open
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -85,23 +95,108 @@ def _format_datetime(dt) -> str:
         return str(dt)
 
 
+def _get_editor() -> str:
+    """Return the editor command from $EDITOR or fall back to 'vi'."""
+    return os.environ.get("EDITOR", "vi")
+
+
+def _open_editor_with_content(content: str) -> Optional[str]:
+    """Open an external editor with the given content and return the edited text.
+
+    Returns None if the editor exits with a non-zero code or the content is
+    unchanged (treated as a no-op cancellation).
+    """
+    editor = _get_editor()
+    with tempfile.NamedTemporaryFile(
+        suffix=".yaml", mode="w", encoding="utf-8", delete=False
+    ) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run([editor, tmp_path])
+        if result.returncode != 0:
+            return None
+        edited = Path(tmp_path).read_text(encoding="utf-8")
+        return edited
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# YAML template helpers for editor workflows
+# ---------------------------------------------------------------------------
+
+def _issue_to_editor_yaml(issue) -> str:
+    """Render an Issue as a human-editable YAML template (for edit)."""
+    data = issue.to_dict()
+    # Ensure a deterministic field order for readability
+    ordered = {}
+    for key in ["id", "title", "description", "status", "priority", "type", "scope", "tags", "source"]:
+        if key in data:
+            ordered[key] = data[key]
+    # Append remaining keys (timestamps)
+    for key, val in data.items():
+        if key not in ordered:
+            ordered[key] = val
+    return yaml.dump(ordered, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+def _new_issue_editor_yaml() -> str:
+    """Generate a blank YAML template for creating a new issue via editor."""
+    template = {
+        "title": "",
+        "description": "",
+        "type": "bug",
+        "priority": "",
+        "tags": [],
+    }
+    return yaml.dump(template, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+def _parse_edited_issue_yaml(text: str) -> dict:
+    """Parse edited YAML and validate required fields.
+
+    Returns the parsed dict. Raises ValueError on invalid YAML or missing
+    description.
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML: {e}") from e
+    if not data or not isinstance(data, dict):
+        raise ValueError("Invalid YAML: content is empty or not a mapping")
+    desc = data.get("description", "")
+    if not desc or not str(desc).strip():
+        raise ValueError("Issue description must not be empty")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
 @app.callback(invoke_without_command=True)
 def default_cmd(ctx: typer.Context):
     """List open issues (default command)."""
     if ctx.invoked_subcommand is not None:
         return
-    list_cmd(show_all=False, type_filter=None)
+    list_cmd(show_all=False, type_filter=None, source_filter=None)
 
 
 @app.command(name="list")
 def list_cmd(
     show_all: bool = typer.Option(False, "--all", "-a", help="Show all issues including closed"),
     type_filter: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by issue type"),
+    source_filter: Optional[str] = typer.Option(None, "--source", help="Filter by source (human/system)"),
 ):
     """List issues."""
     project_root = get_project_root()
     mgr = IssueManager(project_root)
-    issues = mgr.list_issues(include_closed=show_all, type_filter=type_filter)
+    issues = mgr.list_issues(include_closed=show_all, type_filter=type_filter, source_filter=source_filter)
 
     if not issues:
         label = "open " if not show_all else ""
@@ -115,6 +210,7 @@ def list_cmd(
     table.add_column("Type")
     table.add_column("Status")
     table.add_column("Priority")
+    table.add_column("Source", style="dim")
     table.add_column("Tags", style="dim")
     table.add_column("Created", style="dim")
 
@@ -135,6 +231,7 @@ def list_cmd(
             f"[{tc}]{type_str}[/{tc}]",
             f"[{sc}]{issue.status.value}[/{sc}]",
             f"[{pc}]{priority_str}[/{pc}]",
+            issue.source,
             tags_str,
             _format_datetime(issue.created_at),
         )
@@ -167,6 +264,7 @@ def show_cmd(
         f"[bold]Type:[/bold] [{tc}]{type_str}[/{tc}]\n"
         f"[bold]Status:[/bold] [{sc}]{issue.status.value}[/{sc}]\n"
         f"[bold]Priority:[/bold] [{pc}]{priority_str}[/{pc}]\n"
+        f"[bold]Source:[/bold] {issue.source}\n"
         f"[bold]Tags:[/bold] {tags_str}\n"
         f"[bold]Created:[/bold] {_format_datetime(issue.created_at)}\n"
         f"[bold]Updated:[/bold] {_format_datetime(issue.updated_at)}\n"
@@ -179,91 +277,185 @@ def show_cmd(
     render_block_footer("cyan")
 
 
-def _prompt_field(title: str, message: str, default: str = "") -> Optional[str]:
-    """Prompt for a single field with TTY/non-TTY dual-mode support.
-
-    TTY mode: delegates to ``_read_multiline_input`` from ``cli`` — users
-    submit with Ctrl+D and cancel with Ctrl+C; Description naturally accepts
-    multiple lines.
-    Non-TTY mode: reads a single line from ``sys.stdin`` so that piped input
-    (e.g. ``CliRunner(input=...)`` in tests) maps one field per line without
-    consuming the rest of stdin.
-    Empty input falls back to ``default``. Returns ``None`` only when the user
-    cancels (Ctrl+C in TTY mode).
-    """
-    if sys.stdin.isatty():
-        # Delayed import to avoid circular import with cli.py
-        from ..cli import _read_multiline_input
-
-        result = _read_multiline_input(prompt_title=title, prompt_message=message)
-        if result is None:
-            return None
-        return result if result else default
-
-    line = sys.stdin.readline()
-    if not line:
-        return default
-    line = line.rstrip("\n").strip()
-    return line if line else default
-
-
 @app.command(name="create")
-def create_cmd():
-    """Create a new issue interactively."""
+def create_cmd(
+    description_arg: Optional[str] = typer.Argument(None, help="Issue description (positional)"),
+    title: Optional[str] = typer.Option(None, "--title", help="Issue title (optional)"),
+    issue_type: Optional[str] = typer.Option(None, "--type", help="Issue type (optional)"),
+    priority: Optional[str] = typer.Option(None, "--priority", help="Issue priority (optional)"),
+    scope: str = typer.Option("in_scope", "--scope", help="Issue scope"),
+    tags: Optional[str] = typer.Option(None, "--tags", help="Comma-separated tags"),
+    use_editor: bool = typer.Option(False, "--editor", help="Open external editor for full editing"),
+):
+    """Create a new issue.
+
+    Three input modes:
+      1. Positional:  se3 issue create "my description"
+      2. Piped stdin: echo "desc" | se3 issue create
+      3. Interactive: se3 issue create  (single description prompt via _read_multiline_input)
+
+    Use --editor to open $EDITOR with a full YAML template.
+    """
     project_root = get_project_root()
     mgr = IssueManager(project_root)
 
-    title = _prompt_field("Title", "Enter title (Ctrl+D to submit, Ctrl+C to cancel):")
-    if title is None:
-        typer.echo("Cancelled.")
-        raise typer.Exit(1)
+    # --- Editor mode ---
+    if use_editor:
+        template = _new_issue_editor_yaml()
+        edited = _open_editor_with_content(template)
+        if edited is None:
+            typer.echo("Cancelled.", err=True)
+            raise typer.Exit(1)
+        try:
+            data = _parse_edited_issue_yaml(edited)
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
 
-    description = _prompt_field(
-        "Description",
-        "Enter description (Ctrl+D to submit, Ctrl+C to cancel):",
-    )
+        desc = str(data.get("description", "")).strip()
+        iss_title = data.get("title") or None
+        iss_type = data.get("type") or None
+        iss_priority = data.get("priority") or None
+        iss_tags = data.get("tags", [])
+        if isinstance(iss_tags, str):
+            iss_tags = [t.strip() for t in iss_tags.split(",") if t.strip()]
+        elif not isinstance(iss_tags, list):
+            iss_tags = []
+
+        issue = mgr.create(
+            description=desc,
+            title=str(iss_title).strip() if iss_title else None,
+            priority=str(iss_priority).strip() if iss_priority else None,
+            scope=str(data.get("scope", "in_scope")),
+            tags=iss_tags,
+            type=str(iss_type).strip() if iss_type else None,
+            source="human",
+        )
+        typer.echo(f"Created issue {issue.id}: {issue.display_title}")
+        return
+
+    # --- Resolve description from arg, stdin pipe, or interactive prompt ---
+    description = _resolve_description(description_arg)
+
     if description is None:
-        typer.echo("Cancelled.")
+        typer.echo("Cancelled.", err=True)
         raise typer.Exit(1)
 
-    issue_type = _prompt_field(
-        "Type",
-        f"Enter type ({'/'.join(KNOWN_TYPES)}) (Ctrl+D to submit, Ctrl+C to cancel):",
-        default="bug",
-    )
-    if issue_type is None:
-        typer.echo("Cancelled.")
-        raise typer.Exit(1)
-
-    priority = _prompt_field(
-        "Priority",
-        "Enter priority (low/medium/high/critical) (Ctrl+D to submit, Ctrl+C to cancel):",
-        default="medium",
-    )
-    if priority is None:
-        typer.echo("Cancelled.")
-        raise typer.Exit(1)
-
-    tags_input = _prompt_field(
-        "Tags",
-        "Enter tags (comma-separated, or empty) (Ctrl+D to submit, Ctrl+C to cancel):",
-        default="",
-    )
-    if tags_input is None:
-        typer.echo("Cancelled.")
-        raise typer.Exit(1)
-
-    tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
+    # Parse tags
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
     issue = mgr.create(
         description=description,
         title=title,
         priority=priority,
-        tags=tags,
+        scope=scope,
+        tags=tag_list,
         type=issue_type,
         source="human",
     )
     typer.echo(f"Created issue {issue.id}: {issue.display_title}")
+
+
+def _resolve_description(positional: Optional[str]) -> Optional[str]:
+    """Resolve the description from positional arg, piped stdin, or interactive prompt.
+
+    Returns None if the user cancels (Ctrl+C).
+    """
+    # 1. Positional argument takes priority
+    if positional:
+        return positional
+
+    # 2. Piped stdin (non-TTY): read all of stdin
+    if not sys.stdin.isatty():
+        try:
+            content = sys.stdin.read()
+            if content:
+                return content.strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        # Empty pipe — fall through to prompt
+        return None
+
+    # 3. Interactive TTY: single description prompt
+    from ..cli import _read_multiline_input
+
+    description = _read_multiline_input(
+        prompt_title="Description",
+        prompt_message="Enter issue description (Ctrl+D to submit, Ctrl+C to cancel):",
+    )
+    if description is None:
+        return None  # user cancelled
+    if not description:
+        return None  # empty input
+    return description
+
+
+@app.command(name="edit")
+def edit_cmd(
+    issue_id: str = typer.Argument(..., help="Issue ID to edit"),
+):
+    """Edit an issue in an external editor ($EDITOR, fallback vi)."""
+    project_root = get_project_root()
+    mgr = IssueManager(project_root)
+    issue = mgr.load(issue_id)
+
+    if not issue:
+        typer.echo(f"Issue '{issue_id}' not found.", err=True)
+        raise typer.Exit(1)
+
+    template = _issue_to_editor_yaml(issue)
+    edited = _open_editor_with_content(template)
+    if edited is None:
+        typer.echo("Cancelled (editor exited with non-zero or unchanged).", err=True)
+        raise typer.Exit(1)
+
+    try:
+        data = _parse_edited_issue_yaml(edited)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    # Apply changes via update_fields
+    try:
+        iss_title = data.get("title")
+        iss_desc = str(data.get("description", "")).strip()
+        iss_priority = data.get("priority")
+        iss_type = data.get("type")
+        iss_tags = data.get("tags")
+        if isinstance(iss_tags, str):
+            iss_tags = [t.strip() for t in iss_tags.split(",") if t.strip()]
+        elif not isinstance(iss_tags, list):
+            iss_tags = None
+
+        updated = mgr.update_fields(
+            issue_id=issue.id,
+            title=str(iss_title) if iss_title is not None else "",
+            description=iss_desc,
+            priority=str(iss_priority) if iss_priority is not None else "",
+            type=str(iss_type) if iss_type is not None else "",
+            tags=iss_tags,
+        )
+        typer.echo(f"Updated issue {updated.id}: {updated.display_title}")
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command(name="close")
+def close_cmd(
+    issue_id: str = typer.Argument(..., help="Issue ID to close"),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Reason for closing"),
+):
+    """Close an issue."""
+    project_root = get_project_root()
+    mgr = IssueManager(project_root)
+
+    try:
+        issue = mgr.close_issue(issue_id, reason=reason or "")
+        typer.echo(f"Closed issue {issue.id}: {issue.display_title}")
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command(name="reset")
