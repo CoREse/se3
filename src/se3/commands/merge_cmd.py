@@ -639,6 +639,7 @@ def _fast_stash_pop(
             priority="medium",
             type="task",
             tags=["merge-fallback", "stash-pop-fallback"],
+            source="system",
         )
     except Exception as exc:
         logger.warning(
