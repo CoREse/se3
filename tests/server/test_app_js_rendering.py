@@ -662,3 +662,95 @@ def test_running_flow_console_spec_passes_structural_validation():
         assert required_heading in content, (
             f"running-flow-console spec is missing heading: {required_heading!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. Issues view structural guardrails (G7)
+# ---------------------------------------------------------------------------
+
+
+def _read_index_html() -> str:
+    assert (STATIC_DIR / "index.html").is_file(), "missing index.html"
+    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+def _read_style_css() -> str:
+    assert (STATIC_DIR / "style.css").is_file(), "missing style.css"
+    return (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+
+def test_issues_view_html_structure():
+    """The issues view must have the expected structural elements."""
+    html = _read_index_html()
+    # Top-level issues view overlay
+    assert 'id="issues-view"' in html, "missing #issues-view"
+    # Navigation entry
+    assert 'id="issues-btn"' in html, "missing #issues-btn"
+    # List and detail panes
+    assert 'id="issues-list"' in html, "missing #issues-list"
+    assert 'id="issues-detail"' in html, "missing #issues-detail"
+    # Filter controls
+    assert 'id="issues-show-closed"' in html, "missing #issues-show-closed"
+    assert 'id="issues-source-filter"' in html, "missing #issues-source-filter"
+    assert 'id="issues-type-filter"' in html, "missing #issues-type-filter"
+    # Create button
+    assert 'id="issues-create-btn"' in html, "missing #issues-create-btn"
+    # Issue modal (create/edit)
+    assert 'id="issue-modal"' in html, "missing #issue-modal"
+    assert 'id="issue-form"' in html, "missing #issue-form"
+    assert 'id="issue-description"' in html, "missing #issue-description"
+    # Action modal (close/reopen)
+    assert 'id="issue-action-modal"' in html, "missing #issue-action-modal"
+
+
+def test_issues_view_css_exists():
+    """The issues view CSS classes must be defined."""
+    css = _read_style_css()
+    for cls in [
+        ".issues-view",
+        ".issues-head",
+        ".issues-body",
+        ".issues-list-pane",
+        ".issues-detail-pane",
+        ".issues-list",
+        ".issues-toolbar",
+        ".issue-item",
+        ".issue-detail-header",
+        ".issue-detail-desc",
+        ".badge-open",
+        ".badge-in-progress",
+        ".badge-resolved",
+        ".badge-closed",
+    ]:
+        assert cls in css, f"missing CSS class {cls}"
+
+
+def test_issues_view_mobile_responsive_css():
+    """The issues view must have mobile-portrait overflow containment rules."""
+    css = _read_style_css()
+    # The mobile breakpoint must scope issues-view rules under #issues-view
+    assert "#issues-view .issues-body" in css, (
+        "missing mobile #issues-view .issues-body max-width rule"
+    )
+    assert "#issues-view .issues-list-pane" in css, (
+        "missing mobile #issues-view .issues-list-pane containment"
+    )
+
+
+def test_issues_panel_state_helper_exists_in_js():
+    """The issuesPanelState pure helper must be defined in app.js."""
+    src = _read_app_js()
+    assert "function issuesPanelState(" in src, (
+        "issuesPanelState function not found in app.js"
+    )
+
+
+def test_issue_display_title_helper_exists_in_js():
+    """The issueDisplayTitle pure helper must be defined in app.js."""
+    src = _read_app_js()
+    assert "function issueDisplayTitle(" in src, (
+        "issueDisplayTitle function not found in app.js"
+    )
+    assert "function filterIssues(" in src, (
+        "filterIssues function not found in app.js"
+    )

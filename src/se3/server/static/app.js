@@ -115,6 +115,14 @@ const state = {
   // doCloseFlowView so switching or closing a flow returns to the default
   // collapsed state.
   flowReplyPromptExpanded: {},
+
+  // ---- Issue management ----
+  issues: [],                  // [{id, title, description, status, priority, type, tags, source, ...}]
+  issuesShowClosed: false,     // include closed/resolved/won't-fix issues
+  issuesSourceFilter: "",      // filter: "human" | "system" | ""
+  issuesTypeFilter: "",        // filter: issue type or ""
+  selectedIssueId: null,       // issue id shown in detail pane
+  issuesLoading: false,        // true while fetching issues
 };
 
 // Lifetime of a consumed-state afterimage chip in milliseconds.
@@ -375,7 +383,7 @@ function setConnStatus(kind, label) {
 // running-flow view while the WebSocket connection is down.
 function setStale(stale) {
   state.connStale = !!stale;
-  for (const id of ["history-stale", "flow-view-stale"]) {
+  for (const id of ["history-stale", "flow-view-stale", "issues-stale"]) {
     const node = $(id);
     if (node) node.classList.toggle("hidden", !stale);
   }
@@ -445,6 +453,9 @@ function connect() {
       if (isHistoryOpen()) {
         fetchHistoryIndex();
         if (state.selectedHistoryId) openHistorySession(state.selectedHistoryId);
+      }
+      if (isIssuesOpen()) {
+        fetchIssues();
       }
     }
   };
@@ -676,6 +687,21 @@ function applyMachines(machines) {
   renderMachines();
   renderFlows();
 
+  // Refresh the issues list if the issues view is open — issues ride the
+  // STATUS_UPDATE snapshot, so each push carries fresh data.
+  if (isIssuesOpen()) {
+    // Merge snapshot issues into state.issues so the list stays current even
+    // without a separate /api/issues round-trip.
+    const snapshotIssues = collectAllIssues();
+    if (snapshotIssues.length) {
+      state.issues = snapshotIssues;
+      renderIssuesList();
+      refreshIssueTypeFilter();
+      // Refresh the detail pane if an issue is selected.
+      if (state.selectedIssueId) renderIssueDetail(state.selectedIssueId);
+    }
+  }
+
   // Refresh the open flow view if its flow is still around.
   if (state.selectedFlowId) {
     if (findFlow(state.selectedFlowId)) {
@@ -762,6 +788,114 @@ function setHistoryPanel(panel) {
 function applyHistoryPanelAction(action) {
   setHistoryPanel(historyPanelState(currentHistoryPanel(), action));
 }
+
+// ---------------------------------------------------------------------------
+// Issue management — pure helpers
+// ---------------------------------------------------------------------------
+
+// Derive a display title from an issue object. Prefers the explicit `title`
+// field; falls back to the first non-empty line of `description`; final
+// fallback is "untitled". Pure — no DOM, no state.
+function issueDisplayTitle(issue) {
+  if (!issue || typeof issue !== "object") return "untitled";
+  if (issue.title && typeof issue.title === "string" && issue.title.trim()) {
+    return issue.title.trim();
+  }
+  if (issue.description && typeof issue.description === "string") {
+    const first = issue.description.split(/\r?\n/).find((l) => l.trim());
+    if (first) return first.trim().slice(0, 80);
+  }
+  return "untitled";
+}
+
+// Derive a filesystem-style slug from an issue's display title. Lowercased,
+// non-alphanumeric runs collapsed to hyphens, leading/trailing hyphens
+// stripped. Returns "untitled" when the input produces an empty slug.
+// Pure — no DOM, no state.
+function issueSlug(title) {
+  if (!title || typeof title !== "string") return "untitled";
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return slug || "untitled";
+}
+
+// Filter an issue list by the current UI filters (showClosed, source, type).
+// Pure — no DOM, no state.
+function filterIssues(issues, { showClosed, sourceFilter, typeFilter }) {
+  if (!Array.isArray(issues)) return [];
+  const closedStatuses = new Set(["resolved", "won't-fix", "closed"]);
+  return issues.filter((iss) => {
+    if (!iss || typeof iss !== "object") return false;
+    if (!showClosed && closedStatuses.has(iss.status)) return false;
+    if (sourceFilter && iss.source !== sourceFilter) return false;
+    if (typeFilter && iss.type !== typeFilter) return false;
+    return true;
+  });
+}
+
+// Collect unique types from an issue list for the filter dropdown. Returns a
+// sorted array of non-empty type strings. Pure.
+function issueTypes(issues) {
+  if (!Array.isArray(issues)) return [];
+  const s = new Set();
+  for (const iss of issues) {
+    if (iss && typeof iss.type === "string" && iss.type.trim()) s.add(iss.type.trim());
+  }
+  return [...s].sort();
+}
+
+// Issues panel state helper (mirrors historyPanelState): manages the
+// single-view panel switch on narrow screens (list ↔ detail).
+function issuesPanelState(current, action) {
+  switch (action) {
+    case "select-issue":
+      return "detail";
+    case "back":
+    case "reset":
+      return "list";
+    default:
+      return current === "detail" ? "detail" : "list";
+  }
+}
+
+function currentIssuesPanel() {
+  const view = $("issues-view");
+  return view && view.classList.contains("active-detail") ? "detail" : "list";
+}
+
+function setIssuesPanel(panel) {
+  const view = $("issues-view");
+  if (view) view.classList.toggle("active-detail", panel === "detail");
+}
+
+function applyIssuesPanelAction(action) {
+  setIssuesPanel(issuesPanelState(currentIssuesPanel(), action));
+}
+
+// CSS class for issue status badges. Pure.
+function issueStatusClass(status) {
+  switch (status) {
+    case "open":         return "badge-open";
+    case "in-progress":  return "badge-in-progress";
+    case "resolved":     return "badge-resolved";
+    case "won't-fix":    return "badge-wontfix";
+    case "closed":       return "badge-closed";
+    default:             return "badge-open";
+  }
+}
+
+// CSS class for issue priority badges. Pure.
+function issuePriorityClass(priority) {
+  switch (priority) {
+    case "critical": return "priority-critical";
+    case "high":     return "priority-high";
+    case "medium":   return "priority-medium";
+    case "low":      return "priority-low";
+    default:         return "priority-none";
+  }
+}
+
+// Known issue types for the create/edit form dropdown.
+const KNOWN_ISSUE_TYPES = ["bug", "feature", "enhancement", "idea", "task"];
 
 // ---------------------------------------------------------------------------
 // Render: machine list
@@ -2360,6 +2494,439 @@ async function openHistorySession(flowId) {
     if (state.selectedHistoryId !== flowId) return;
     detail.innerHTML = "";
     detail.appendChild(el("p", "empty", "Network error loading session history."));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Issue management view
+// ---------------------------------------------------------------------------
+//
+// The issues view mirrors the history view layout: a full-screen overlay with
+// a list pane (filters + cards) and a detail pane. Issues are fetched from
+// the REST API (`/api/issues`) and write operations dispatch MSG_ISSUE_COMMAND
+// to the daemon. The list refreshes on every STATUS_UPDATE (via applyMachines).
+
+function isIssuesOpen() {
+  return !$("issues-view").classList.contains("hidden");
+}
+
+function openIssues() {
+  $("issues-view").classList.remove("hidden");
+  applyIssuesPanelAction("reset");
+  renderIssuesList();
+  fetchIssues();
+}
+
+function closeIssues() {
+  $("issues-view").classList.add("hidden");
+  applyIssuesPanelAction("reset");
+  state.selectedIssueId = null;
+}
+
+// Collect all issues from the machine snapshot. Issues are already in-memory
+// from the latest STATUS_UPDATE; this just flattens them.
+function collectAllIssues() {
+  const all = [];
+  for (const m of (state.machines || [])) {
+    if (!m || !Array.isArray(m.issues)) continue;
+    for (const iss of m.issues) {
+      if (iss && typeof iss === "object") {
+        all.push({ ...iss, _machine_id: m.machine_id });
+      }
+    }
+  }
+  return all;
+}
+
+async function fetchIssues() {
+  state.issuesLoading = true;
+  renderIssuesList();
+  try {
+    const params = new URLSearchParams();
+    if (state.issuesShowClosed) params.set("include_closed", "true");
+    if (state.issuesSourceFilter) params.set("source", state.issuesSourceFilter);
+    if (state.issuesTypeFilter) params.set("type", state.issuesTypeFilter);
+    const qs = params.toString();
+    const resp = await authedFetch("/api/issues" + (qs ? "?" + qs : ""));
+    if (!resp.ok) return;
+    const data = await resp.json().catch(() => ({ issues: [] }));
+    if (Array.isArray(data.issues)) {
+      state.issues = data.issues;
+    }
+  } catch (_) {
+    /* transient — next STATUS_UPDATE will refresh */
+  } finally {
+    state.issuesLoading = false;
+    renderIssuesList();
+    refreshIssueTypeFilter();
+  }
+}
+
+function refreshIssueTypeFilter() {
+  const sel = $("issues-type-filter");
+  if (!sel) return;
+  const current = sel.value;
+  const types = issueTypes(state.issues);
+  sel.innerHTML = '<option value="">全部类型</option>';
+  for (const t of types) {
+    const opt = document.createElement("option");
+    opt.value = t;
+    opt.textContent = t;
+    sel.appendChild(opt);
+  }
+  sel.value = types.includes(current) ? current : "";
+}
+
+function renderIssuesList() {
+  const list = $("issues-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const filtered = filterIssues(state.issues, {
+    showClosed: state.issuesShowClosed,
+    sourceFilter: state.issuesSourceFilter,
+    typeFilter: state.issuesTypeFilter,
+  });
+
+  if (state.issuesLoading && !filtered.length) {
+    list.appendChild(el("p", "empty", "Loading issues…"));
+    return;
+  }
+  if (!filtered.length) {
+    list.appendChild(el("p", "empty", "暂无 issue。"));
+    return;
+  }
+
+  // Sort by id descending (newest first).
+  filtered.sort((a, b) => String(b.id || "").localeCompare(String(a.id || "")));
+
+  for (const iss of filtered) {
+    const card = el("div", "issue-item");
+    if (iss.id === state.selectedIssueId) card.classList.add("selected");
+    card.classList.add("issue-source-" + (iss.source || "system"));
+
+    const head = el("div", "issue-item-head");
+    const title = el("span", "issue-title-text", issueDisplayTitle(iss));
+    title.title = issueDisplayTitle(iss);
+    const idLabel = el("span", "issue-id-label", "#" + (iss.id || "?"));
+    head.append(title, idLabel);
+
+    const sc = issueStatusClass(iss.status);
+    head.appendChild(el("span", "badge " + sc, iss.status || "open"));
+    card.appendChild(head);
+
+    const meta = el("div", "issue-item-meta");
+    if (iss.type) meta.appendChild(el("span", null, iss.type));
+    if (iss.priority) {
+      meta.appendChild(el("span", issuePriorityClass(iss.priority), iss.priority));
+    }
+    meta.appendChild(el("span", null, iss.source || "system"));
+    if (iss.created_at) {
+      meta.appendChild(el("span", null, formatTime(iss.created_at)));
+    }
+    card.appendChild(meta);
+
+    card.addEventListener("click", () => openIssueDetail(iss.id));
+    list.appendChild(card);
+  }
+}
+
+function openIssueDetail(issueId) {
+  state.selectedIssueId = issueId;
+  applyIssuesPanelAction("select-issue");
+  renderIssueDetail(issueId);
+  // Re-render list to update selection highlight.
+  renderIssuesList();
+}
+
+function renderIssueDetail(issueId) {
+  const detail = $("issues-detail");
+  const titleNode = $("issues-detail-title");
+  if (!detail) return;
+  detail.innerHTML = "";
+
+  const iss = (state.issues || []).find((i) => i && i.id === issueId);
+  if (!iss) {
+    detail.appendChild(el("p", "empty", "Issue 未找到。"));
+    if (titleNode) titleNode.textContent = "Issue";
+    return;
+  }
+
+  const displayTitle = issueDisplayTitle(iss);
+  if (titleNode) titleNode.textContent = displayTitle;
+
+  // Header: title + badges
+  const header = el("div", "issue-detail-header");
+  const titleEl = el("div", "issue-detail-title", displayTitle);
+  const badges = el("div", "issue-detail-badges");
+  badges.appendChild(el("span", "badge " + issueStatusClass(iss.status), iss.status || "open"));
+  if (iss.source) {
+    badges.appendChild(el("span", "badge issue-source-" + iss.source, iss.source));
+  }
+  header.append(titleEl, badges);
+  detail.appendChild(header);
+
+  // Fields
+  const fields = [
+    ["ID", "#" + (iss.id || "?")],
+    ["类型", iss.type || "-"],
+    ["优先级", iss.priority || "-"],
+    ["来源", iss.source || "system"],
+    ["创建时间", formatTime(iss.created_at)],
+    ["更新时间", formatTime(iss.updated_at)],
+  ];
+  if (iss.tags && iss.tags.length) {
+    fields.push(["标签", iss.tags.join(", ")]);
+  }
+  if (iss.project_root) {
+    fields.push(["项目", iss.project_root]);
+  }
+
+  for (const [label, value] of fields) {
+    const row = el("div", "issue-detail-field");
+    row.append(
+      el("span", "issue-detail-label", label),
+      el("span", "issue-detail-value", String(value)),
+    );
+    detail.appendChild(row);
+  }
+
+  // Description
+  if (iss.description) {
+    detail.appendChild(el("div", "issue-detail-desc", iss.description));
+  }
+
+  // Action buttons
+  const actions = el("div", "issue-detail-actions");
+  const editBtn = el("button", "ghost-btn", "编辑");
+  editBtn.type = "button";
+  editBtn.addEventListener("click", () => openIssueEditModal(iss));
+  actions.appendChild(editBtn);
+
+  const closedStatuses = new Set(["resolved", "won't-fix", "closed"]);
+  if (closedStatuses.has(iss.status)) {
+    const reopenBtn = el("button", "ghost-btn", "重开");
+    reopenBtn.type = "button";
+    reopenBtn.addEventListener("click", () => openIssueActionModal("reopen", iss));
+    actions.appendChild(reopenBtn);
+  } else {
+    const closeBtn = el("button", "ghost-btn", "关闭");
+    closeBtn.type = "button";
+    closeBtn.addEventListener("click", () => openIssueActionModal("close", iss));
+    actions.appendChild(closeBtn);
+  }
+  detail.appendChild(actions);
+}
+
+// ---------------------------------------------------------------------------
+// Issue create / edit modal
+// ---------------------------------------------------------------------------
+
+function openIssueCreateModal() {
+  $("issue-modal-title").textContent = "新建 Issue";
+  $("issue-description").value = "";
+  $("issue-title").value = "";
+  $("issue-type").value = "";
+  $("issue-priority").value = "";
+  $("issue-form-submit").textContent = "创建";
+  $("issue-form-error").classList.add("hidden");
+  // Store the editing context: null means create mode.
+  $("issue-form").dataset.mode = "create";
+  $("issue-form").dataset.issueId = "";
+  $("issue-form").dataset.machineId = "";
+  $("issue-form").dataset.projectRoot = "";
+  $("issue-modal").classList.remove("hidden");
+  $("issue-description").focus();
+}
+
+function openIssueEditModal(iss) {
+  if (!iss) return;
+  $("issue-modal-title").textContent = "编辑 Issue #" + (iss.id || "?");
+  $("issue-description").value = iss.description || "";
+  $("issue-title").value = iss.title || "";
+  $("issue-type").value = iss.type || "";
+  $("issue-priority").value = iss.priority || "";
+  $("issue-form-submit").textContent = "保存";
+  $("issue-form-error").classList.add("hidden");
+  $("issue-form").dataset.mode = "edit";
+  $("issue-form").dataset.issueId = iss.id || "";
+  $("issue-form").dataset.machineId = iss._machine_id || "";
+  $("issue-form").dataset.projectRoot = iss.project_root || "";
+  $("issue-modal").classList.remove("hidden");
+  $("issue-description").focus();
+}
+
+function closeIssueModal() {
+  $("issue-modal").classList.add("hidden");
+}
+
+async function submitIssueForm(event) {
+  event.preventDefault();
+  const errBox = $("issue-form-error");
+  errBox.classList.add("hidden");
+  const form = $("issue-form");
+  const mode = form.dataset.mode || "create";
+  const description = $("issue-description").value.trim();
+  if (!description) {
+    showFormError(errBox, "描述不能为空。");
+    return;
+  }
+
+  const submit = $("issue-form-submit");
+  submit.disabled = true;
+
+  try {
+    let resp;
+    if (mode === "create") {
+      const body = {
+        description,
+        machine_id: form.dataset.machineId || undefined,
+        project_root: form.dataset.projectRoot || undefined,
+      };
+      const title = $("issue-title").value.trim();
+      const type = $("issue-type").value;
+      const priority = $("issue-priority").value;
+      if (title) body.title = title;
+      if (type) body.type = type;
+      if (priority) body.priority = priority;
+      resp = await authedFetch("/api/issues", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } else {
+      const issueId = form.dataset.issueId;
+      const body = { description };
+      const title = $("issue-title").value.trim();
+      const type = $("issue-type").value;
+      const priority = $("issue-priority").value;
+      if (title) body.title = title;
+      if (type) body.type = type;
+      if (priority) body.priority = priority;
+      resp = await authedFetch("/api/issues/" + encodeURIComponent(issueId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    if (resp.ok || resp.status === 202) {
+      closeIssueModal();
+      showToast("success", mode === "create" ? "Issue 已创建。" : "Issue 已更新。");
+      fetchIssues();
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not reach the server.");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Issue close / reopen action modal
+// ---------------------------------------------------------------------------
+
+let _issueActionPending = false;
+
+function openIssueActionModal(action, iss) {
+  if (!iss) return;
+  const titleNode = $("issue-action-title");
+  const msgNode = $("issue-action-message");
+  const reasonLabel = $("issue-action-reason-label");
+  const reasonInput = $("issue-action-reason");
+  const errBox = $("issue-action-error");
+  errBox.classList.add("hidden");
+  reasonInput.value = "";
+
+  if (action === "close") {
+    titleNode.textContent = "关闭 Issue";
+    msgNode.textContent = "确认关闭 Issue #" + iss.id + "？";
+    reasonLabel.classList.remove("hidden");
+    reasonInput.classList.remove("hidden");
+  } else {
+    titleNode.textContent = "重开 Issue";
+    msgNode.textContent = "确认重开 Issue #" + iss.id + "？";
+    reasonLabel.classList.add("hidden");
+    reasonInput.classList.add("hidden");
+  }
+
+  const modal = $("issue-action-modal");
+  modal.dataset.action = action;
+  modal.dataset.issueId = iss.id || "";
+  modal.dataset.machineId = iss._machine_id || "";
+  modal.dataset.projectRoot = iss.project_root || "";
+  modal.classList.remove("hidden");
+}
+
+function closeIssueActionModal() {
+  $("issue-action-modal").classList.add("hidden");
+  _issueActionPending = false;
+}
+
+async function confirmIssueAction() {
+  if (_issueActionPending) return;
+  _issueActionPending = true;
+  const modal = $("issue-action-modal");
+  const action = modal.dataset.action;
+  const issueId = modal.dataset.issueId;
+  const errBox = $("issue-action-error");
+  errBox.classList.add("hidden");
+
+  const confirmBtn = $("issue-action-confirm");
+  confirmBtn.disabled = true;
+
+  try {
+    let resp;
+    if (action === "close") {
+      const reason = $("issue-action-reason").value.trim();
+      const body = {
+        machine_id: modal.dataset.machineId || undefined,
+        project_root: modal.dataset.projectRoot || undefined,
+      };
+      if (reason) body.reason = reason;
+      resp = await authedFetch(
+        "/api/issues/" + encodeURIComponent(issueId) + "/close",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+    } else {
+      const body = {
+        machine_id: modal.dataset.machineId || undefined,
+        project_root: modal.dataset.projectRoot || undefined,
+      };
+      resp = await authedFetch(
+        "/api/issues/" + encodeURIComponent(issueId) + "/reopen",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+    }
+
+    if (resp.ok || resp.status === 202) {
+      closeIssueActionModal();
+      showToast("success", action === "close" ? "Issue 已关闭。" : "Issue 已重开。");
+      fetchIssues();
+      // If the detail pane is showing this issue, refresh it.
+      if (state.selectedIssueId === issueId) {
+        // Detail will refresh via fetchIssues → renderIssuesList.
+      }
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+    }
+  } catch (_) {
+    showFormError(errBox, "Network error — could not reach the server.");
+  } finally {
+    confirmBtn.disabled = false;
+    _issueActionPending = false;
   }
 }
 
@@ -7324,6 +7891,8 @@ async function handleLogout() {
   state.identity = null;
   state.machines = [];
   state.selectedMachineId = null;
+  state.issues = [];
+  state.selectedIssueId = null;
   // Reset the mobile panel switch so a fresh login lands on the machine list.
   applyListPanelAction("reset");
   state.authState = nextAuthState(state.authState, "logout");
@@ -7681,6 +8250,44 @@ function init() {
   $("history-btn").addEventListener("click", openHistory);
   $("history-close").addEventListener("click", closeHistory);
 
+  // Issues view.
+  $("issues-btn").addEventListener("click", openIssues);
+  $("issues-close").addEventListener("click", closeIssues);
+  $("issues-show-closed").addEventListener("change", (e) => {
+    state.issuesShowClosed = e.target.checked;
+    fetchIssues();
+  });
+  $("issues-source-filter").addEventListener("change", (e) => {
+    state.issuesSourceFilter = e.target.value;
+    fetchIssues();
+  });
+  $("issues-type-filter").addEventListener("change", (e) => {
+    state.issuesTypeFilter = e.target.value;
+    renderIssuesList();
+  });
+  $("issues-create-btn").addEventListener("click", openIssueCreateModal);
+
+  // Narrow-screen issues panel switch: return from detail to list.
+  const issuesBack = $("issues-back-btn");
+  if (issuesBack) {
+    issuesBack.addEventListener("click", () => applyIssuesPanelAction("back"));
+  }
+
+  // Issue create/edit modal.
+  $("issue-form").addEventListener("submit", submitIssueForm);
+  $("issue-modal-close").addEventListener("click", closeIssueModal);
+  $("issue-modal").addEventListener("click", (e) => {
+    if (e.target.id === "issue-modal") closeIssueModal();
+  });
+
+  // Issue action (close/reopen) modal.
+  $("issue-action-confirm").addEventListener("click", confirmIssueAction);
+  $("issue-action-cancel").addEventListener("click", closeIssueActionModal);
+  $("issue-action-close").addEventListener("click", closeIssueActionModal);
+  $("issue-action-modal").addEventListener("click", (e) => {
+    if (e.target.id === "issue-action-modal") closeIssueActionModal();
+  });
+
   // Narrow-screen History panel switch: return from the session detail to the
   // session list. Inert on desktop (the back button is hidden and both panes
   // render).
@@ -7902,6 +8509,16 @@ if (typeof module !== "undefined" && module.exports) {
     // User-management row model (G3) — exposed for the DOM-free tests in
     // tests/frontend/user_mgmt.test.mjs.
     userRowModel,
+    // Issue management pure helpers (G7) — exposed for the DOM-free tests in
+    // tests/frontend/issue_management.test.mjs.
+    issueDisplayTitle,
+    issueSlug,
+    filterIssues,
+    issueTypes,
+    issuesPanelState,
+    issueStatusClass,
+    issuePriorityClass,
+    KNOWN_ISSUE_TYPES,
     // Topbar overflow-menu state helper (G2) — exposed for the DOM-free tests
     // in tests/frontend/mobile_responsive.test.mjs.
     navMenuNextState,
