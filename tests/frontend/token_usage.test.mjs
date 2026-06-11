@@ -182,6 +182,88 @@ export function registerTokenUsageTests(ctx) {
     assert.deepEqual(app.accumulateSessionUsage(undefined), zeros);
   });
 
+  // ---- (c+) accumulateSessionUsage with step_output records ------------------
+  // step_output records (from STEP_OUTPUT events) carry non-terminal step
+  // usage. They must be included in the session total, but when a
+  // step_completed/step_failed record also exists for the same step_id,
+  // only the terminal record is counted (it already includes all prior
+  // rounds via carried_token_usage). A step_id with only step_output
+  // records (e.g. self_check REVISION_NEEDED abandoned in a fix loop)
+  // is counted from the LAST step_output record whose token_usage carries
+  // the combined total including all prior rounds.
+
+  const stepOutputEvent = (stepId, usage, stepType = "self_check", status = "revision_needed") => ({
+    step_id: stepId,
+    step_type: stepType,
+    message: {
+      type: "step_output",
+      step_id: stepId,
+      timestamp: Date.now(),
+      data: {
+        step: {
+          step_type: stepType,
+          step_id: stepId,
+          status: status,
+          outputs: usage === undefined ? {} : { token_usage: usage },
+        },
+      },
+    },
+  });
+
+  check("G4 accumulateSessionUsage includes step_output records for abandoned steps", () => {
+    // A self_check step that returned REVISION_NEEDED is abandoned in the
+    // fix loop. Its step_output record carries the step's usage.
+    const totals = app.accumulateSessionUsage([
+      stepEvent("01_analyze_a", USAGE()),
+      stepOutputEvent("07_self_check_x", USAGE({ input_tokens: 300 }), "self_check"),
+    ]);
+    assert.equal(totals.input_tokens, 1300);  // 1000 + 300
+    assert.equal(totals.output_tokens, 400);   // 200 + 200
+  });
+
+  check("G4 accumulateSessionUsage prefers step_completed over step_output for same step_id", () => {
+    // When a step_id has both step_output (intermediate) and step_completed
+    // (terminal) records, only step_completed is counted. The terminal
+    // record's token_usage includes all prior rounds via carried_token_usage.
+    const totals = app.accumulateSessionUsage([
+      // Discovery PAUSED round (intermediate) — combined total so far = 100
+      stepOutputEvent("01_discovery_a", USAGE({ input_tokens: 100 }), "discovery", "paused"),
+      // Discovery COMPLETED (terminal) — combined total = 150 (carried 100 + round 50)
+      stepEvent("01_discovery_a", USAGE({ input_tokens: 150 }), "discovery"),
+    ]);
+    // Only step_completed is counted: 150, NOT 100 + 150 = 250
+    assert.equal(totals.input_tokens, 150);
+    assert.equal(totals.output_tokens, 200);
+  });
+
+  check("G4 accumulateSessionUsage with step_output only: uses last record per step_id", () => {
+    // A step that went PAUSED → REVISION_NEEDED (same step_id, same step
+    // object). Each round emits a step_output record. Only the LAST one
+    // should be counted, as its token_usage includes all prior rounds.
+    const totals = app.accumulateSessionUsage([
+      // Round 1 (PAUSED): usage = 100
+      stepOutputEvent("07_self_check_x", USAGE({ input_tokens: 100 }), "self_check", "paused"),
+      // Round 2 (REVISION_NEEDED): combined = 150 (carried 100 + round 50)
+      stepOutputEvent("07_self_check_x", USAGE({ input_tokens: 150 }), "self_check", "revision_needed"),
+    ]);
+    // Only the LAST step_output (combined 150) is counted, NOT 100 + 150 = 250
+    assert.equal(totals.input_tokens, 150);
+    assert.equal(totals.output_tokens, 200);
+  });
+
+  check("G4 accumulateSessionUsage mixes step_output and step_completed across different step_ids", () => {
+    // Fix-loop scenario: self_check_1 returns REVISION_NEEDED (abandoned,
+    // step_output only), then a new self_check_2 completes (step_completed).
+    // These have different step_ids, so both are counted.
+    const totals = app.accumulateSessionUsage([
+      stepOutputEvent("07_self_check_abc", USAGE({ input_tokens: 100 }), "self_check"),
+      stepEvent("07_self_check_def", USAGE({ input_tokens: 50 }), "self_check"),
+    ]);
+    // Both counted: 100 (abandoned) + 50 (new step) = 150
+    assert.equal(totals.input_tokens, 150);
+    assert.equal(totals.output_tokens, 400);   // 200 + 200
+  });
+
   // ---- (d) per-step report card footnote ----------------------------------
   check("G4 report card shows a usage footnote when the step has usage", () => {
     const card = app.renderStepReport({

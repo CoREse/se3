@@ -2573,6 +2573,53 @@ not re-render them.
 - **AND** the per-round usage data rides the existing conversation record stream
   (no new daemon↔server protocol field is introduced)
 
+#### Scenario: Assistant bubble shows an agent/model badge when metadata is present
+- **GIVEN** an `assistant` conversation record whose normalized fields include
+  `agentName` (the configured agent name, e.g. `dclaude`) and optionally
+  `modelName` (the actual model identifier, e.g. `claude-opus-4-8`)
+- **WHEN** the assistant bubble is rendered in `#flow-view` or the history view
+- **THEN** a compact badge is rendered at the top of the bubble (or at the header
+  of the step report card for a `step_completed` event) showing the agent name,
+  and, when `modelName` is also present, both separated by a middle-dot (e.g.
+  `dclaude · claude-opus-4-8`)
+- **AND** the badge is styled as an unobtrusive small-print label (not a
+  full-width block or a prominent heading), so it does not compete with the
+  conversation content
+
+#### Scenario: No badge placeholder when agent/model metadata is absent
+- **GIVEN** an `assistant` conversation record whose normalized fields carry no
+  `agentName` and no `modelName` (e.g. a legacy record written before these
+  fields existed)
+- **WHEN** the bubble is rendered
+- **THEN** no badge, label, or placeholder text of any kind is rendered — the
+  bubble's content starts directly at the assistant text, exactly as before the
+  metadata fields were introduced
+- **AND** the absence of metadata does not shift or reflow the bubble layout
+
+#### Scenario: normalizeRecord exposes agent/model metadata
+- **GIVEN** a conversation record whose `message` envelope carries optional
+  `agent_name` and/or `model_name` fields (as written by `record_prompt` /
+  `record_response` per the `llm-caller` *Subprocess Invocation and History
+  Recording* requirement)
+- **WHEN** `normalizeRecord` processes the record
+- **THEN** it exposes `agentName` and `modelName` on the normalized record object
+  (defaulting to `null` / `undefined` when the fields are absent), so badge
+  rendering logic can conditionally show or hide the badge without special
+  envelope-unwrapping code
+
+#### Scenario: Non-terminal round step data is compatible with the report card's token_usage source
+- **GIVEN** a step (e.g. `self_check`) whose handler returned `REVISION_NEEDED` and
+  whose `step.outputs["token_usage"]` was written by `state_machine.run_step`
+  per the `flow-engine` *Step-Scoped Token Usage Aggregation* non-terminal-round
+  behavior
+- **WHEN** a `step_completed` or intermediate event referencing this step is
+  rendered as a report card
+- **THEN** the report card reads `token_usage` from `step.outputs` the same way it
+  would for a terminal step — the data source is identical, and no special
+  handling for `carried_token_usage` is needed on the frontend
+- **AND** the usage footnote shows the round's actual token totals (not zero or
+  empty, as was the case before the non-terminal-round visibility fix)
+
 ### Requirement: Live Per-Group DAG Status Markers
 
 During a DAG-parallel `implement` step, each task group runs in an isolated

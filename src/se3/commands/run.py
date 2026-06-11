@@ -2032,6 +2032,37 @@ def _run_flow_impl(
                 f"Step {current_step.step_type.value} already {current_step.status.value}, "
                 "advancing to next step without re-running"
             )
+            # Emit the persisted terminal event before transitioning. When the
+            # process crashed after run_step saved the terminal status but
+            # before lines 2165-2177 emitted the event, the CLI and web history
+            # would never see that step's usage or report card. Emit it here so
+            # sinks can surface it.
+            # Mapping: COMPLETED/PARTIAL → STEP_COMPLETED, FAILED → STEP_FAILED
+            # (same as the normal flow at lines 2185-2197).
+            #
+            # Guard: only emit when the event was NOT already persisted by the
+            # original process.  If the process crashed *after* HistorySink
+            # appended the terminal event but *before* transition_to_next was
+            # saved, re-emitting here would create a duplicate jsonl record,
+            # causing the web session badge to double-count token usage and
+            # producing duplicate report cards.
+            from ..engine.chat_history import has_step_terminal_event
+            if not has_step_terminal_event(
+                flow.project_root, flow.flow_id, current_step.step_id
+            ):
+                emitter.emit(new_event(
+                    EventType.STEP_COMPLETED,
+                    flow_id=flow.flow_id,
+                    step_id=current_step.step_id,
+                    step_type=current_step.step_type.value,
+                    step=current_step,
+                ))
+            else:
+                logger.info(
+                    "Terminal event already persisted for %s, skipping "
+                    "re-emission on resume",
+                    current_step.step_id,
+                )
             state_machine.transition_to_next(flow)
             persistence.save_flow(flow)
             continue
@@ -2048,6 +2079,33 @@ def _run_flow_impl(
                 f"[yellow]Resuming: revision was already requested from "
                 f"{current_step.step_type.value}[/yellow]"
             )
+            # Emit the persisted token_usage before transitioning. When the
+            # process crashed after run_step saved REVISION_NEEDED + token_usage
+            # but before STEP_OUTPUT was emitted, the CLI and web history would
+            # never see that round's usage. Emit it here so sinks can surface it.
+            #
+            # Guard: only emit when the step_output was NOT already persisted
+            # by the original process, to avoid duplicate records that would
+            # double-count token usage in the web session badge.
+            step_usage = (current_step.outputs or {}).get("token_usage")
+            if step_usage:
+                from ..engine.chat_history import has_step_output_event
+                if not has_step_output_event(
+                    flow.project_root, flow.flow_id, current_step.step_id
+                ):
+                    emitter.emit(new_event(
+                        EventType.STEP_OUTPUT,
+                        flow_id=flow.flow_id,
+                        step_id=current_step.step_id,
+                        step_type=current_step.step_type.value,
+                        step=current_step,
+                    ))
+                else:
+                    logger.info(
+                        "step_output event already persisted for %s, "
+                        "skipping re-emission on resume",
+                        current_step.step_id,
+                    )
             state_machine.transition_to_next(flow)
             persistence.save_flow(flow)
             continue
@@ -2069,6 +2127,15 @@ def _run_flow_impl(
 
         step_start_time = datetime.now()
 
+        # Track whether state_machine.run_step was actually invoked this
+        # iteration.  When a PAUSED discovery step is resumed, run_step is
+        # skipped and the previous round's stale token_usage stays in
+        # step.outputs — emitting STEP_OUTPUT for that stale data would
+        # duplicate the CLI usage block and append a zombie usage chip to
+        # the web history.  Only emit STEP_OUTPUT when run_step was called
+        # (meaning a fresh token-consuming LLM round actually happened).
+        step_ran_llm = True
+
         # Emit STEP_STARTED — no-op in CliSink (the per-step renderer presents
         # output only on completion), forwarded by JsonSink.
         emitter.emit(new_event(
@@ -2084,6 +2151,8 @@ def _run_flow_impl(
             if existing_result:
                 get_console().print(f"[dim]Found existing confirmation response: {existing_result.value}[/dim]")
                 result = existing_result
+                # No LLM call — the user response was already on disk.
+                step_ran_llm = False
             else:
                 try:
                     result = state_machine.run_step(flow, current_step)
@@ -2105,6 +2174,8 @@ def _run_flow_impl(
             if output_format != "json":
                 _restore_discovery_display(current_step)
             result = StepStatus.PAUSED
+            # No LLM call on resume — just re-displays the prior question.
+            step_ran_llm = False
 
         else:
             try:
@@ -2149,6 +2220,42 @@ def _run_flow_impl(
                 step_type=step_type_value,
                 step=current_step,
             ))
+
+        # Non-terminal steps (PAUSED / REVISION_NEEDED / RETRYING) that
+        # consumed tokens need their usage surfaced, but no terminal event
+        # will ever be emitted for them — in the fix loop a REVISION_NEEDED
+        # self_check/verify_spec/test is abandoned and a new step is created,
+        # so its carried usage never reaches a terminal event. Emit a
+        # STEP_OUTPUT event that carries the step's current token_usage so
+        # CliSink can render the usage block and HistorySink can persist it
+        # for the web console's session badge / per-step footnote.
+        # Steps that will later reach a terminal status (e.g. discovery
+        # PAUSED → re-run → COMPLETED) also emit STEP_OUTPUT here; the web
+        # console's accumulateSessionUsage de-duplicates by preferring the
+        # terminal record when both exist for the same step_id.
+        #
+        # ONLY emit STEP_OUTPUT when run_step was actually called this
+        # iteration (step_ran_llm). When a PAUSED discovery step is resumed
+        # without calling run_step, the prior round's stale token_usage is
+        # still sitting in step.outputs — emitting STEP_OUTPUT for that stale
+        # data would duplicate the CLI usage block and append a zombie usage
+        # chip to the web history.
+        elif result not in (StepStatus.COMPLETED, StepStatus.PARTIAL, StepStatus.FAILED) and step_ran_llm:
+            # Discovery PAUSED is excluded: the discovery handler already renders
+            # the per-round inline usage footer, and emitting STEP_OUTPUT here
+            # would duplicate the cumulative usage on the CLI and persist a
+            # redundant web usage chip.  The terminal COMPLETED event (emitted
+            # when discovery finishes) carries the whole-discovery cumulative.
+            if not (step_type_value == "discovery" and result == StepStatus.PAUSED):
+                step_usage = (current_step.outputs or {}).get("token_usage")
+                if step_usage:
+                    emitter.emit(new_event(
+                        EventType.STEP_OUTPUT,
+                        flow_id=flow.flow_id,
+                        step_id=current_step.step_id,
+                        step_type=step_type_value,
+                        step=current_step,
+                    ))
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:

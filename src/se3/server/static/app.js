@@ -126,6 +126,7 @@ const state = {
   issuesProjectFilter: "",     // filter: project_root or "" (全部项目)
   _issuesFetchSeq: 0,          // monotonic counter to discard stale fetchIssues responses
   _issuesFetchInFlight: false, // true while a fetchIssues request is in-flight (coalescing guard)
+  _allIssueTypesFetchSeq: 0,   // monotonic counter to discard stale fetchAllIssueTypes responses
   _issuesRefreshPending: false,// true when a refresh was requested while in-flight
   selectedIssueId: null,       // composite key (machine_id::project_root::id) shown in detail pane
   issuesLoading: false,        // true while fetching issues
@@ -488,6 +489,7 @@ function connect() {
       }
       if (isIssuesOpen()) {
         fetchIssues();
+        fetchAllIssueTypes();
       }
     }
   };
@@ -722,8 +724,12 @@ function applyMachines(machines) {
   // Refresh the issues list if the issues view is open — re-fetch from the
   // REST API so that daemon-side changes (new/closed/reopened issues) are
   // reflected promptly without waiting for a manual filter toggle.
+  // Also refresh the type and project dropdown universes so that newly
+  // appearing issue types/projects are reflected in the filter dropdowns
+  // without requiring the user to close and reopen the panel.
   if (isIssuesOpen()) {
     fetchIssues();
+    fetchAllIssueTypes();
   }
 
   // Refresh the open flow view if its flow is still around.
@@ -2885,10 +2891,30 @@ async function fetchIssues() {
   }
 }
 
+// allIssueTypesApplyDecision — pure helper deciding whether a completed
+// fetchAllIssueTypes response is still the latest in-flight request and may
+// update the dropdown universes.  Extracted for DOM-free regression testing of
+// the stale-response guard: frequent STATUS_UPDATEs start overlapping requests,
+// and without this sequence check a slower older response could complete last
+// and overwrite a newer project-root universe (removing a just-added project and
+// resetting the user's selected project to "全部项目").  Returns true only when
+// completedSeq matches the latest seq.
+function allIssueTypesApplyDecision(completedSeq, currentSeq) {
+  return completedSeq === currentSeq;
+}
+
 // Fetch all issue types once (unfiltered) so the dropdown stays complete even
 // when a type filter is active.  Populates state.allIssueTypes and
 // state.allIssueProjectRoots (both come from the same unfiltered response).
 async function fetchAllIssueTypes() {
+  // Sequence guard: bump a monotonic counter per request so that when several
+  // requests overlap (STATUS_UPDATE arrives faster than /api/issues responds),
+  // only the most recently started one is allowed to update the dropdown
+  // universes.  An older response completing after a newer one must NOT
+  // overwrite the project-root universe (which would drop a just-added project
+  // and reset the selected project).
+  const seq = state._allIssueTypesFetchSeq + 1;
+  state._allIssueTypesFetchSeq = seq;
   try {
     const params = new URLSearchParams();
     if (state.issuesShowClosed) params.set("include_closed", "true");
@@ -2899,6 +2925,10 @@ async function fetchAllIssueTypes() {
     const resp = await authedFetch("/api/issues" + (qs ? "?" + qs : ""));
     if (!resp.ok) return;
     const data = await resp.json().catch(() => ({ issues: [] }));
+    // Discard a stale response: a newer fetchAllIssueTypes has started since
+    // this one began, so applying these (older) results would clobber the
+    // newer universe and selection.
+    if (!allIssueTypesApplyDecision(seq, state._allIssueTypesFetchSeq)) return;
     if (Array.isArray(data.issues)) {
       state.allIssueTypes = issueTypes(data.issues);
       state.allIssueProjectRoots = issueProjectRoots(data.issues);
@@ -2906,6 +2936,9 @@ async function fetchAllIssueTypes() {
   } catch (_) {
     /* best-effort */
   }
+  // Only the latest request re-renders the dropdowns; a stale response must not
+  // re-derive (and reset) the selection from an outdated universe.
+  if (!allIssueTypesApplyDecision(seq, state._allIssueTypesFetchSeq)) return;
   refreshIssueTypeFilter();
   refreshIssueProjectFilter();
 }
@@ -2946,7 +2979,12 @@ function refreshIssueTypeFilter() {
 function refreshIssueProjectFilter() {
   const sel = $("issues-project-filter");
   if (!sel) return;
-  const current = sel.value;
+  // Resolve "current" from state, NOT from the DOM <select>. The DOM value can
+  // be stale after closeIssues() resets state.issuesProjectFilter to "" without
+  // touching the (now-hidden) <select>; reading sel.value here would re-select
+  // the previous project and silently re-narrow the list on the next fetch.
+  // State is the single source of truth, so close-reset mirrors closeHistory.
+  const current = state.issuesProjectFilter;
   const roots = state.allIssueProjectRoots;
   sel.innerHTML = '<option value="">全部项目</option>';
   for (const pr of roots) {
@@ -3589,8 +3627,18 @@ function normalizeRecord(rec) {
   // structured outputs rather than turn text. We surface them as a non-chat
   // record so renderConversationRecord can produce the raw event chip plus a
   // default-expanded report card driven from `stepReport`.
+  //
+  // `step_output` events are emitted for non-terminal steps (PAUSED /
+  // REVISION_NEEDED / RETRYING) that consumed tokens but have not reached a
+  // terminal status. They carry the step data including `token_usage` so the
+  // web console can show a per-step usage footnote and include their usage in
+  // the session-total badge. Their `kind` is `"step_output"` and they render
+  // as a usage-only chip (no full report card, since the step hasn't
+  // completed). `accumulateSessionUsage` de-duplicates: when a
+  // `step_completed`/`step_failed` record also exists for the same `step_id`,
+  // the terminal record is preferred so there is no double-counting.
   const eventType = String(pick("type") || "").toLowerCase();
-  if (eventType === "step_completed" || eventType === "step_failed") {
+  if (eventType === "step_completed" || eventType === "step_failed" || eventType === "step_output") {
     const data = pick("data") && typeof pick("data") === "object" ? pick("data") : {};
     const innerStep = (data.step && typeof data.step === "object")
       ? data.step
@@ -3601,7 +3649,7 @@ function normalizeRecord(rec) {
       status: (innerStep && innerStep.status)
         || data.status
         || pick("status")
-        || (eventType === "step_failed" ? "failed" : "completed"),
+        || (eventType === "step_failed" ? "failed" : eventType === "step_output" ? "non_terminal" : "completed"),
       outputs: (innerStep && innerStep.outputs)
         || data.outputs
         || pick("outputs")
@@ -6526,6 +6574,15 @@ function renderConversationRecord(norm) {
     return renderStepEventRecord(norm);
   }
 
+  // Non-terminal step usage events — render a lightweight usage-only chip
+  // (not a full report card, since the step hasn't completed). Shows the
+  // step's token usage so the user sees self_check / verify_spec / test
+  // usage even when they return REVISION_NEEDED and are abandoned in the
+  // fix loop. The chip is collapsed by default; expand to see usage detail.
+  if (norm.kind === "step_output") {
+    return renderStepOutputUsageRecord(norm);
+  }
+
   // Per-group DAG status — a lightweight, self-contained marker (not a chat
   // turn, no fold/raw affordances) inserted into the implement step's time
   // line so the user watches G1–G5 progress while the parallel step runs.
@@ -6731,6 +6788,92 @@ function renderStepEventRecord(norm) {
 }
 
 // ---------------------------------------------------------------------------
+// Non-terminal step usage (step_output)
+// ---------------------------------------------------------------------------
+//
+// A `step_output` event is emitted for steps that consumed tokens but have
+// not reached a terminal status (PAUSED / REVISION_NEEDED / RETRYING).
+// Unlike `step_completed` / `step_failed`, these render a lightweight usage-
+// only chip — no full report card (the step hasn't completed). The chip shows
+// the step type label and its `token_usage` as a compact footnote; expand to
+// inspect the raw JSON payload.
+
+function renderStepOutputUsageRecord(norm) {
+  const row = el(
+    "div",
+    "history-record conv-record role-step-event kind-step_output",
+  );
+
+  const stepLabel = norm.stepType
+    ? (STEP_REPORT_TITLES[String(norm.stepType).toLowerCase()] || norm.stepType)
+    : "step";
+
+  // Usage footnote — the primary visible content. Only rendered when the
+  // step actually consumed tokens; an empty/absent usage produces no row.
+  const usage = norm.stepReport && norm.stepReport.outputs
+    && norm.stepReport.outputs.token_usage;
+  if (isTokenUsageEmpty(usage)) {
+    // No tokens consumed — still return the row with a collapsed chip only,
+    // so the record's existence is preserved for the session badge logic.
+    const chipWrap = el("div", "msg-chip-wrap collapsed step-event-chip kind-step_output");
+    const chip = el("button", "msg-chip step-event-chip-button",
+      "▸ " + stepLabel + " (in progress)");
+    chip.type = "button";
+    const detail = el("div", "msg-chip-detail");
+    let chipBuilt = false;
+    chip.addEventListener("click", () => {
+      if (!chipBuilt) {
+        detail.appendChild(
+          el("pre", "raw-json", formatRaw(norm.raw && norm.raw.raw_json)),
+        );
+        chipBuilt = true;
+      }
+      chipWrap.classList.toggle("collapsed");
+      chip.textContent = chipWrap.classList.contains("collapsed")
+        ? "▸ " + stepLabel + " (in progress)"
+        : "▾ " + stepLabel + " (in progress)";
+      if (!chipWrap.classList.contains("collapsed")) {
+        requestAnimationFrame(() => detail.scrollIntoView({ block: "nearest" }));
+      }
+    });
+    chipWrap.append(chip, detail);
+    row.appendChild(chipWrap);
+    return row;
+  }
+
+  // With usage: render the usage footnote as the primary display.
+  const label = stepLabel + " · " + formatTokenUsage(usage);
+  const chipWrap = el("div", "msg-chip-wrap collapsed step-event-chip kind-step_output");
+  const chip = el("button", "msg-chip step-event-chip-button", "▸ " + label);
+  chip.type = "button";
+  const detail = el("div", "msg-chip-detail");
+  let chipBuilt = false;
+  chip.addEventListener("click", () => {
+    if (!chipBuilt) {
+      detail.appendChild(
+        el("pre", "raw-json", formatRaw(norm.raw && norm.raw.raw_json)),
+      );
+      chipBuilt = true;
+    }
+    chipWrap.classList.toggle("collapsed");
+    chip.textContent = chipWrap.classList.contains("collapsed")
+      ? "▸ " + label
+      : "▾ " + label;
+    if (!chipWrap.classList.contains("collapsed")) {
+      requestAnimationFrame(() => detail.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  chipWrap.append(chip, detail);
+  row.appendChild(chipWrap);
+
+  // Usage footnote in expanded form (always visible alongside the chip).
+  const footnote = buildStepUsageFootnote(usage);
+  if (footnote) row.appendChild(footnote);
+
+  return row;
+}
+
+// ---------------------------------------------------------------------------
 // User-prompt marker record (template prefix chip + actual content bubble)
 // ---------------------------------------------------------------------------
 
@@ -6922,6 +7065,18 @@ function formatTokenUsage(usage) {
 // session total — so this client-side re-derivation no longer undercounts
 // paused/revision rounds.
 //
+// **De-duplication across `step_output` and `step_completed`**: When both a
+// `step_output` (non-terminal intermediate) and a `step_completed` /
+// `step_failed` (terminal) record exist for the SAME `step_id`, the terminal
+// record's `token_usage` already includes all prior rounds (via
+// `carried_token_usage`), so only the terminal record is counted. A `step_id`
+// that has only `step_output` records (e.g. self_check REVISION_NEEDED in a
+// fix loop where the step is abandoned) is counted from the LAST `step_output`
+// record, whose `token_usage` carries the combined total including all prior
+// non-terminal rounds of that step. This prevents double-counting for steps
+// like discovery (PAUSED → COMPLETED) while still surfacing abandoned steps'
+// usage.
+//
 // `carried_token_usage` is an engine-internal carry field, not a display
 // source: renderers read ONLY `outputs.token_usage`, never
 // `carried_token_usage`.
@@ -6945,7 +7100,38 @@ function accumulateSessionUsage(records) {
     total_cost_usd: 0,
   };
   if (!Array.isArray(records)) return totals;
-  const seen = new Set();
+
+  // Phase 1: Identify step_ids that have terminal records (step_completed /
+  // step_failed). For these step_ids, step_output records are NOT counted —
+  // the terminal record's token_usage already includes all prior rounds via
+  // carried_token_usage. For step_ids with only step_output records (e.g.
+  // self_check REVISION_NEEDED abandoned in a fix loop), only the LAST
+  // step_output record is counted, whose token_usage carries the combined
+  // total including all prior rounds.
+  const terminalStepIds = new Set();
+  const stepOutputByStepId = new Map();  // step_id → last step_output record
+  const seen = new Set();  // recordKey → boolean (dedup across both phases)
+
+  for (const rec of records) {
+    let norm;
+    try {
+      norm = normalizeRecord(rec);
+    } catch (_) {
+      continue;
+    }
+    if (!norm || norm.role !== "step-event" || !norm.stepReport) continue;
+    const sid = norm.stepId;
+    if (norm.kind === "step_completed" || norm.kind === "step_failed") {
+      terminalStepIds.add(sid);
+    } else if (norm.kind === "step_output") {
+      // Track the LAST step_output record per step_id (overwrites earlier).
+      stepOutputByStepId.set(sid, rec);
+    }
+  }
+
+  // Phase 2a: Accumulate all terminal records, de-duped by recordKey.
+  // Multiple terminal records for the same step_id (fix-loop re-runs) are
+  // counted separately because they carry distinct per-run usage.
   for (const rec of records) {
     let norm;
     let key;
@@ -6953,14 +7139,12 @@ function accumulateSessionUsage(records) {
       norm = normalizeRecord(rec);
       key = recordKey(rec);
     } catch (_) {
-      continue;  // A malformed record must never break the badge total.
+      continue;
     }
     if (!norm || norm.role !== "step-event" || !norm.stepReport) continue;
     const usage = norm.stepReport.outputs && norm.stepReport.outputs.token_usage;
     if (isTokenUsageEmpty(usage)) continue;
-    // De-dup by per-record identity so each distinct step execution counts once
-    // (including fix-loop re-runs sharing a step_id) while a re-delivered
-    // identical record is not double-counted.
+    if (norm.kind !== "step_completed" && norm.kind !== "step_failed") continue;
     if (seen.has(key)) continue;
     seen.add(key);
     totals.input_tokens += usageNum(usage.input_tokens);
@@ -6970,6 +7154,30 @@ function accumulateSessionUsage(records) {
     totals.cache_read_input_tokens += usageNum(usage.cache_read_input_tokens);
     totals.total_cost_usd += usageNum(usage.total_cost_usd);
   }
+
+  // Phase 2b: Accumulate step_output records for step_ids that have NO
+  // terminal record. Only the LAST step_output is used, whose token_usage
+  // carries the combined total (carried + current round) so there is no
+  // undercount for multi-round non-terminal steps.
+  for (const [sid, rec] of stepOutputByStepId) {
+    // Skip step_output records for step_ids that already have terminal records
+    // — the terminal record's token_usage includes all prior rounds.
+    if (terminalStepIds.has(sid)) continue;
+    const key = recordKey(rec);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let norm;
+    try { norm = normalizeRecord(rec); } catch (_) { continue; }
+    const usage = norm.stepReport.outputs && norm.stepReport.outputs.token_usage;
+    if (isTokenUsageEmpty(usage)) continue;
+    totals.input_tokens += usageNum(usage.input_tokens);
+    totals.output_tokens += usageNum(usage.output_tokens);
+    totals.cache_creation_input_tokens +=
+      usageNum(usage.cache_creation_input_tokens);
+    totals.cache_read_input_tokens += usageNum(usage.cache_read_input_tokens);
+    totals.total_cost_usd += usageNum(usage.total_cost_usd);
+  }
+
   return totals;
 }
 
@@ -9004,6 +9212,7 @@ if (typeof module !== "undefined" && module.exports) {
     renderDesignFields,
     renderPlanReport,
     renderStepReport,
+    renderStepOutputUsageRecord,
     STEP_ASSISTANT_RENDERERS,
     registerAssistantRenderer,
     renderDiscoveryAssistant,
@@ -9113,6 +9322,9 @@ if (typeof module !== "undefined" && module.exports) {
     // DOM-free regression tests in tests/frontend/issue_management.test.mjs.
     fetchIssuesCoalesceDecision,
     fetchIssuesFinallyDecision,
+    // fetchAllIssueTypes stale-response guard (G1) — exposed for the DOM-free
+    // regression tests in tests/frontend/issue_management.test.mjs.
+    allIssueTypesApplyDecision,
     // Topbar overflow-menu state helper (G2) — exposed for the DOM-free tests
     // in tests/frontend/mobile_responsive.test.mjs.
     navMenuNextState,

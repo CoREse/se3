@@ -610,3 +610,121 @@ class TestHandlerRegistration:
         from se3.engine.steps.self_check import self_check_handler
 
         assert STEP_HANDLERS[StepType.SELF_CHECK] is self_check_handler
+
+
+# ---------------------------------------------------------------------------
+# Non-terminal step token-usage visibility
+# ---------------------------------------------------------------------------
+#
+# When a step (self_check / verify_spec / test) returns REVISION_NEEDED,
+# run_step writes token_usage to step.outputs (the combined total of
+# carried + current round). These tests invoke StateMachine.run_step with
+# a fake usage-producing handler to verify the accounting:
+# (1) A step returning REVISION_NEEDED has a visible token_usage in outputs
+# (2) carried_token_usage is preserved across non-terminal rounds
+# (3) carried_token_usage is cleared on terminal rounds
+# (4) The session total does NOT double-count (session_token_usage only
+#     adds the current round's step_usage, not the combined total)
+
+
+def _make_handler(status, usage_input=100, usage_output=50):
+    """Create a fake handler that injects token usage and returns *status*."""
+    from se3.engine.token_usage import add_call_usage, UsageTotals
+
+    def handler(step, flow):
+        add_call_usage(UsageTotals(
+            input_tokens=usage_input,
+            output_tokens=usage_output,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            total_cost_usd=0.01,
+        ))
+        step.status = status
+        return status
+
+    return handler
+
+
+class TestNonTerminalStepUsageVisibility:
+    """Verify that non-terminal steps (REVISION_NEEDED) have visible
+    step-level token_usage, and that session totals don't double-count."""
+
+    @pytest.fixture
+    def sm(self, tmp_path):
+        return _make_state_machine(tmp_path)
+
+    def test_revision_needed_step_publishes_token_usage(self, sm, tmp_path):
+        """When self_check returns REVISION_NEEDED via run_step,
+        step.outputs.token_usage is published so renderers can display it."""
+        flow = _make_flow(tmp_path)
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs={})
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+
+        sm.register_handler(StepType.SELF_CHECK,
+                            _make_handler(StepStatus.REVISION_NEEDED, usage_input=100, usage_output=50))
+        result = sm.run_step(flow, step)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert "token_usage" in step.outputs
+        assert step.outputs["token_usage"]["input_tokens"] == 100
+        assert step.outputs["token_usage"]["output_tokens"] == 50
+        # carried_token_usage is preserved for the next round.
+        assert "carried_token_usage" in step.outputs
+        assert step.outputs["carried_token_usage"]["input_tokens"] == 100
+
+    def test_terminal_round_clears_carried_token_usage(self, sm, tmp_path):
+        """When a step reaches COMPLETED, carried_token_usage is cleared —
+        the published token_usage already reflects the full combined total."""
+        flow = _make_flow(tmp_path)
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs={})
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+
+        # Round 1: REVISION_NEEDED (non-terminal) with 100 in / 50 out
+        sm.register_handler(StepType.SELF_CHECK,
+                            _make_handler(StepStatus.REVISION_NEEDED, usage_input=100, usage_output=50))
+        sm.run_step(flow, step)
+        assert "carried_token_usage" in step.outputs
+
+        # Simulate the state machine resetting the step to PENDING for re-run.
+        step.status = StepStatus.PENDING
+
+        # Round 2: COMPLETED (terminal) with 60 in / 30 out
+        sm.register_handler(StepType.SELF_CHECK,
+                            _make_handler(StepStatus.COMPLETED, usage_input=60, usage_output=30))
+        result = sm.run_step(flow, step)
+
+        assert result == StepStatus.COMPLETED
+        # token_usage = carried (100+50) + round2 (60+30) = 160 in / 80 out
+        assert step.outputs["token_usage"]["input_tokens"] == 160
+        assert step.outputs["token_usage"]["output_tokens"] == 80
+        # carried_token_usage is cleared on terminal.
+        assert "carried_token_usage" not in step.outputs
+
+    def test_session_total_no_double_count(self, sm, tmp_path):
+        """session_token_usage only adds each round's step_usage — NOT the
+        combined (carried + step_usage) total.  This prevents double-counting
+        when a step is re-run across non-terminal and terminal rounds."""
+        flow = _make_flow(tmp_path)
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs={})
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+
+        # Round 1: REVISION_NEEDED, step_usage = 100 in / 50 out
+        sm.register_handler(StepType.SELF_CHECK,
+                            _make_handler(StepStatus.REVISION_NEEDED, usage_input=100, usage_output=50))
+        sm.run_step(flow, step)
+        assert flow.state.session_token_usage.input_tokens == 100
+        assert flow.state.session_token_usage.output_tokens == 50
+
+        # Simulate re-run.
+        step.status = StepStatus.PENDING
+
+        # Round 2: COMPLETED, step_usage = 60 in / 30 out
+        # Session total should be 100 + 60 = 160 (NOT 100 + 160).
+        sm.register_handler(StepType.SELF_CHECK,
+                            _make_handler(StepStatus.COMPLETED, usage_input=60, usage_output=30))
+        sm.run_step(flow, step)
+        assert flow.state.session_token_usage.input_tokens == 160
+        assert flow.state.session_token_usage.output_tokens == 80

@@ -329,6 +329,88 @@ def record_step_event(
         logger.warning("Failed to record step event for %s: %s", step_id, exc)
 
 
+def has_step_terminal_event(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+) -> bool:
+    """Check if a terminal step event already exists in the step's jsonl.
+
+    Reads the per-step history file and looks for a ``step_completed`` or
+    ``step_failed`` record.  Used by the resume path in ``run.py`` to avoid
+    emitting a duplicate terminal event when the original process already
+    persisted one via ``HistorySink`` before crashing.
+
+    Returns ``True`` when such a record is found, ``False`` otherwise (file
+    missing, unreadable, or contains no terminal event).
+    """
+    path = _history_file(project_root, flow_id, step_id)
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") in ("step_completed", "step_failed")
+                        and "role" not in data
+                    ):
+                        return True
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError as exc:
+        logger.debug(
+            "Could not read history file for terminal-event check %s: %s",
+            step_id, exc,
+        )
+    return False
+
+
+def has_step_output_event(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+) -> bool:
+    """Check if a ``step_output`` event already exists in the step's jsonl.
+
+    Like :func:`has_step_terminal_event` but looks for the non-terminal
+    ``step_output`` record emitted for steps like self_check that return
+    REVISION_NEEDED.  Used by the resume path in ``run.py`` to avoid
+    emitting a duplicate ``step_output`` when the original process already
+    persisted one before crashing.
+    """
+    path = _history_file(project_root, flow_id, step_id)
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") == "step_output"
+                        and "role" not in data
+                    ):
+                        return True
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError as exc:
+        logger.debug(
+            "Could not read history file for step-output check %s: %s",
+            step_id, exc,
+        )
+    return False
+
+
 def record_stream_progress(
     project_root: Path,
     flow_id: str,
@@ -482,10 +564,14 @@ def get_step_history(
             data = json.loads(line)
             # Step-lifecycle event records (written by HistorySink) live in the
             # same jsonl but are not ChatMessages — skip them here so CLI
-            # history rendering only sees the user/assistant turns.
+            # history rendering only sees the user/assistant turns.  This
+            # includes ``step_output`` records (non-terminal usage snapshots
+            # for steps like self_check REVISION_NEEDED) so they do not
+            # produce warnings or inflate retry context.
             if isinstance(data, dict) and data.get("type") in (
                 "step_completed",
                 "step_failed",
+                "step_output",
             ) and "role" not in data:
                 continue
             # Stream-progress records (written by record_stream_progress) carry

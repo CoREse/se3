@@ -52,6 +52,16 @@ class CliSink(Sink):
     object are routed to ``step_renderers.render_step_output(step)`` — the same
     single entry point the current CLI uses.
 
+    ``STEP_OUTPUT`` events (emitted for non-terminal steps that consumed tokens
+    but haven't reached COMPLETED / PARTIAL / FAILED) are routed to
+    ``step_renderers.render_step_usage(step)`` — the same usage-only renderer
+    that the terminal path calls as part of ``render_step_output``. This ensures
+    non-terminal steps (self_check REVISION_NEEDED, discovery PAUSED, etc.)
+    show their token usage on the CLI even though no terminal event is emitted
+    for them. In the fix loop, a REVISION_NEEDED self_check is abandoned and
+    never reaches a terminal event, so this intermediate render is the sole
+    CLI surface for its usage.
+
     Flow-level lifecycle events (``FLOW_STARTED`` / ``FLOW_COMPLETED`` /
     ``FLOW_FAILED`` / ``FLOW_PAUSED`` / ``INTERJECTION_NEEDED`` /
     ``CALL_NEEDED``) are intentionally a **no-op** here: in CLI mode the
@@ -62,8 +72,19 @@ class CliSink(Sink):
     sole visible responsibility is step-output rendering; flow-level events
     exist on the stream purely for the structured (``JsonSink``) consumer.
 
-    Raw ``STEP_OUTPUT`` and ``STEP_STARTED`` events are likewise a no-op — the
-    per-step renderer already presents the full output once the step finishes.
+    ``STEP_STARTED`` events are a no-op — the per-step renderer presents
+    the full output once the step finishes.
+
+    ``STEP_OUTPUT`` events are emitted for non-terminal steps (PAUSED /
+    REVISION_NEEDED / RETRYING) that consumed tokens but haven't reached
+    COMPLETED / PARTIAL / FAILED. They carry the step data so
+    ``CliSink`` can render the usage block via ``render_step_usage(step)``.
+    This is the sole CLI surface for usage of steps that are abandoned in
+    the fix loop (e.g. self_check returning REVISION_NEEDED that will
+    never be re-run). Steps that later reach a terminal status also
+    receive a ``STEP_COMPLETED`` / ``STEP_FAILED`` event, so their final
+    usage block appears twice — but that is acceptable because the
+    intermediate usage is a live update, not a duplicate of the final one.
 
     Finally, ``STEP_COMPLETED`` / ``STEP_FAILED`` events for the interactive
     CONFIRM and DISCOVERY steps and for PLAN are handled with per-type rules:
@@ -104,9 +125,11 @@ class CliSink(Sink):
     def consume(self, event: Event) -> None:
         if event.type in (EventType.STEP_COMPLETED, EventType.STEP_FAILED):
             self._render_step(event)
-        # All other event types — flow-level lifecycle, STEP_STARTED,
-        # STEP_OUTPUT — are deliberately a no-op (see the class docstring):
-        # the CLI orchestrator owns that rendering directly.
+        elif event.type == EventType.STEP_OUTPUT:
+            self._render_step_usage(event)
+        # All other event types — flow-level lifecycle, STEP_STARTED —
+        # are deliberately a no-op (see the class docstring): the CLI
+        # orchestrator owns that rendering directly.
 
     # -- internals ---------------------------------------------------------
 
@@ -159,6 +182,41 @@ class CliSink(Sink):
         from .step_renderers import render_step_output
 
         render_step_output(step)
+
+    def _render_step_usage(self, event: Event) -> None:
+        """Render per-step token usage for a STEP_OUTPUT event.
+
+        STEP_OUTPUT events are emitted by ``run.py`` for non-terminal steps
+        (PAUSED / REVISION_NEEDED / RETRYING) that consumed tokens. Their
+        purpose is to surface the step's ``token_usage`` before the flow
+        transitions away — in the fix loop a REVISION_NEEDED self_check is
+        abandoned and never reaches a terminal event, so its usage would be
+        invisible without this intermediate render.
+
+        The same per-type rules that ``_render_step`` applies to terminal
+        events are applied here: discovery and confirm get their compact
+        renderers rather than the big ``Step Token Usage`` block, so a
+        non-terminal STEP_OUTPUT for discovery or confirm does not produce
+        a second big usage block.
+        """
+        step = event.data.get("step")
+        if step is None:
+            return
+        # Resolve step_type from the event or the step object.
+        step_type = event.step_type
+        if step_type is None:
+            st = getattr(step, "step_type", None)
+            step_type = getattr(st, "value", st)
+        # Apply the same per-type rules as _render_step for terminal events.
+        if step_type == "discovery":
+            self._render_discovery_cumulative_usage(step)
+            return
+        if step_type == "confirm":
+            self._render_confirm_usage_footer(step)
+            return
+        from .step_renderers import render_step_usage
+
+        render_step_usage(step)
 
     @staticmethod
     def _render_confirm_usage_footer(step: object) -> None:
@@ -269,6 +327,17 @@ class HistorySink(Sink):
     "step_completed" / "step_failed"`` records and render them as default-
     expanded report cards.
 
+    ``STEP_OUTPUT`` events are emitted by ``run.py`` for non-terminal steps
+    (PAUSED / REVISION_NEEDED / RETRYING) that consumed tokens but have not
+    reached a terminal status. Persisting them ensures the web console can
+    include their ``token_usage`` in the session-total badge and render a
+    per-step usage footnote even for steps that are abandoned in the fix loop
+    (e.g. self_check returning REVISION_NEEDED that will never be re-run).
+    The web console's ``accumulateSessionUsage`` de-duplicates: when a
+    ``step_completed`` / ``step_failed`` record also exists for the same
+    ``step_id``, it is preferred over the ``step_output`` record, so there
+    is no double-counting.
+
     All other event types are a no-op here. The sink is safe to subscribe
     alongside :class:`CliSink` and :class:`JsonSink`; failures are swallowed
     so a flaky filesystem cannot break the running flow.
@@ -278,7 +347,11 @@ class HistorySink(Sink):
         self.project_root = Path(project_root)
 
     def consume(self, event: Event) -> None:
-        if event.type not in (EventType.STEP_COMPLETED, EventType.STEP_FAILED):
+        if event.type not in (
+            EventType.STEP_COMPLETED,
+            EventType.STEP_FAILED,
+            EventType.STEP_OUTPUT,
+        ):
             return
         step = event.data.get("step")
         if step is None:

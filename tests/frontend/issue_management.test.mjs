@@ -601,6 +601,34 @@ export function registerIssueManagementTests(ctx) {
     assert.equal(fin2.reDispatch, false);
   });
 
+  // ---- (p2) allIssueTypesApplyDecision stale-response guard -------------------
+  // Frequent STATUS_UPDATEs start overlapping fetchAllIssueTypes requests. Without
+  // a sequence guard, a slower older response can complete last and overwrite a
+  // newer project-root universe (dropping a just-added project and resetting the
+  // selected project). The guard applies a response only when its seq is still the
+  // latest.
+
+  check("G1 allIssueTypesApplyDecision: applies the latest response", () => {
+    assert.equal(app.allIssueTypesApplyDecision(5, 5), true);
+  });
+
+  check("G1 allIssueTypesApplyDecision: discards a stale (older) response", () => {
+    // An older request (seq 3) completes after a newer one (seq 5) started.
+    assert.equal(app.allIssueTypesApplyDecision(3, 5), false);
+  });
+
+  check("G1 allIssueTypesApplyDecision: overlapping requests keep only newest", () => {
+    // Two requests start: request A gets seq 1, request B gets seq 2 (latest).
+    const seqA = 1;
+    const seqB = 2;
+    const currentSeq = seqB;
+    // B (newest) completes first and is applied.
+    assert.equal(app.allIssueTypesApplyDecision(seqB, currentSeq), true);
+    // A (older) completes later and is discarded, so it cannot clobber B's
+    // newer universe / selection.
+    assert.equal(app.allIssueTypesApplyDecision(seqA, currentSeq), false);
+  });
+
   // ---- (q) issueProjectRoots ---------------------------------------------------
   // Derives the project-root dropdown options from an unfiltered issue set.
   // Mirrors the pattern of issueTypes (dedup + sort) but for project_root

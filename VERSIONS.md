@@ -35,6 +35,15 @@
 
 
 
+
+## 8.14.0 - 2026-06-12
+
+- Display agent name and model name badges on assistant message bubbles in WebUI when metadata is available
+- Record agent_name and model_name per LLM call attempt in chat history JSONL for observability
+- Fix token usage not appearing in CLI step renderers and WebUI report cards for non-terminal rounds (e.g., self_check REVISION_NEEDED)
+- Add project dropdown filter to WebUI issue management panel alongside existing source/type filters
+- Ensure backward compatibility for new ChatMessage optional fields — old JSONL records without agent/model metadata load and display without errors
+- Ensure non-terminal round token usage is visible without special-case logic for individual step types
 ## 8.13.0 - 2026-06-11
 
 - Add Resume button in webui for FAILED/PAUSED flows, allowing direct flow resumption from history and live views

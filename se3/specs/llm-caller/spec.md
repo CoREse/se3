@@ -440,7 +440,7 @@ Because a single step may issue several subprocess calls (retry, agent rotation,
 
 ### Requirement: Subprocess Invocation and History Recording
 
-Each call invokes the current agent's `Runner.run_with_monitor` with stream-json output, no wall-time limit, and a 1800-second (30-minute) inactivity timeout. Prompts and responses are recorded to chat history (whether the call succeeded, failed, or was interrupted) if `flow_id` and `step_id` are set.
+Each call invokes the current agent's `Runner.run_with_monitor` with stream-json output, no wall-time limit, and a 1800-second (30-minute) inactivity timeout. Prompts and responses are recorded to chat history (whether the call succeeded, failed, or was interrupted) if `flow_id` and `step_id` are set. Each attempt's prompt and response records SHALL carry the **configured agent name** (e.g. `dclaude`, `claude`, `kclaude`) of the agent that actually ran that attempt, so that agent rotation assigns each attempt independently — the name is fixed at the point where the caller selects the current agent for that attempt and does not change even if the internal `_current_agent_index` later advances. When the response's NDJSON stream contains an `init` or `system` message whose metadata reveals the **actual model name** (e.g. `claude-opus-4-8`), the caller SHALL best-effort parse that model name and record it alongside the agent name; when no model name can be extracted from the stream, only the agent name is recorded (parsing failure never blocks the call).
 
 #### Scenario: Args composed for subprocess
 - **WHEN** the call is dispatched
@@ -458,12 +458,26 @@ Each call invokes the current agent's `Runner.run_with_monitor` with stream-json
 #### Scenario: Prompt recorded before each attempt
 - **WHEN** an internal attempt begins (after retry-context injection but before dispatch)
 - **THEN** `_record_prompt(original_prompt, external_attempt)` is called
+- **AND** the current agent's configured name (e.g. `dclaude`, `claude`, `kclaude`) is passed to `_record_prompt` as `agent_name` so the prompt record carries the identity of the agent that will run this attempt
 - **AND** failures inside `record_prompt` are caught and debug-logged (do not fail the call)
 
 #### Scenario: Response always recorded
 - **WHEN** `run_with_monitor` returns (success, failure, or interrupted)
 - **THEN** `_record_response(result.output or "", external_attempt)` is called
+- **AND** the same agent name fixed for this attempt is passed to `_record_response` as `agent_name`
+- **AND** if the response's NDJSON stream contains an `init` or `system` message whose metadata reveals the actual model name (e.g. `claude-opus-4-8`), that model name is best-effort extracted (via the shared `chat_history.extract_model_name_from_ndjson` helper) and passed as `model_name`; extraction failure is swallowed — only the agent name is recorded, the call is never blocked
 - **AND** failures inside `record_response` are caught and debug-logged
+
+#### Scenario: Agent rotation assigns each attempt its own agent name
+- **GIVEN** a step whose first internal attempt runs on agent `dclaude` and fails, causing rotation to agent `claude`
+- **WHEN** the second internal attempt begins
+- **THEN** its prompt and response records carry `agent_name="claude"` while the first attempt's records carry `agent_name="dclaude"`
+- **AND** each attempt's records independently identify the agent that actually ran it, regardless of the caller's current `_current_agent_index` at any later point
+
+#### Scenario: JSON retry inherits the same agent name as the parent attempt
+- **GIVEN** a strict-mode call whose first attempt ran on agent `dclaude` and produced non-parseable output, triggering a JSON retry on the same agent
+- **WHEN** the JSON retry's prompt and response are recorded
+- **THEN** they carry the same `agent_name="dclaude"` as the parent attempt (no rotation occurs between JSON retries)
 
 #### Scenario: Per-call token usage parsed into the assistant record
 - **GIVEN** `record_response` is writing an `assistant` chat-history record whose

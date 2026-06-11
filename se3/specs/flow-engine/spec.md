@@ -968,13 +968,15 @@ The flow engine SHALL record the prompt and response of every LLM call, support 
 - The parsed text content is used when retrying with the LLM (reducing token waste)
 
 **Data structures:**
-- `ChatMessage`: role, content, raw_json, timestamp, step_type, attempt
+- `ChatMessage`: role, content, raw_json, timestamp, step_type, attempt, agent_name, model_name
   - `raw_json`: `list[dict]` - array of JSON objects parsed from the NDJSON stream, each element being one line of NDJSON
+  - `agent_name`: `Optional[str]` — the configured name (e.g. `dclaude`, `claude`, `kclaude`) of the agent that ran the attempt producing this record; `None` for records where the caller did not supply an agent name (backward-compatible: legacy jsonl records lacking this field load with `None`)
+  - `model_name`: `Optional[str]` — the actual model identifier (e.g. `claude-opus-4-8`) best-effort extracted from the response's NDJSON `init`/`system` metadata; `None` when no model metadata was available or parsing failed (backward-compatible: legacy records lacking this field load with `None`). When serializing, both fields are omitted from the JSON output when their value is `None`, so existing records' line format stays byte-identical
 - `ChatSession`: flow_id, step_id, step_type, messages
 
 **Core features:**
-- `record_prompt()` — records the prompt that was sent
-- `record_response()` — records the raw LLM response
+- `record_prompt()` — records the prompt that was sent, with an optional `agent_name` identifying the configured agent for this attempt
+- `record_response()` — records the raw LLM response, with optional `agent_name` and `model_name`; `model_name` is best-effort extracted from the response's NDJSON `init`/`system` metadata via `extract_model_name_from_ndjson(raw_ndjson)` (a pure helper that tolerates missing or malformed metadata, defaulting to `None` rather than raising)
 - `record_stream_progress()` — **before** the LLM produces the final result, appends the in-progress content of the current step as partial records, one whole line at a time, to the per-step jsonl, for the daemon to read incrementally and for WS push to render line-by-line in real time. Each partial record looks like `{type: 'stream_progress', role: 'assistant', step_type, content, raw_json: [<obj>], timestamp, attempt, partial: true}` (`raw_json` is a single-element array), using the same "write one whole line at a time" atomic append semantics as `record_step_event`, so that each line can be fully read by the incremental reader once flushed to disk. Grouped with the final result by `(step_id, attempt)`: once the terminal (non-partial) assistant record arrives, the frontend collapses and removes the progress bubble for that turn (see running-flow-console *Three-Tier Progressive Disclosure*)
 - `format_history_for_retry()` — formats the previous conversation context for retry (skips `stream_progress` records to avoid the retry prompt being bloated by progress lines, following the same pattern as the existing skipping of `step_completed` / `step_failed` events)
 - `extract_assistant_text()` — extracts the assistant text content from NDJSON
@@ -1017,6 +1019,18 @@ The flow engine SHALL record the prompt and response of every LLM call, support 
 - **WHEN** LLMCaller sends a prompt to the LLM
 - **THEN** automatically record the prompt to `se3/history/{flow_id}/{step_id}.jsonl`
 - **AND** after the LLM responds, record the array of parsed JSON objects (`raw_json: list[dict]`)
+
+#### Scenario: Agent and model name recorded per attempt
+- **WHEN** `record_prompt` or `record_response` is called with non-`None` `agent_name` (and optionally `model_name`)
+- **THEN** those values are stored on the `ChatMessage` instance and included in its serialization (when non-`None`; `None` values are omitted from the JSON output so existing records' line format stays byte-identical)
+- **AND** the daemon→server history push passes the full `ChatMessage` envelope through verbatim — no field whitelist or裁剪 logic strips these new keys
+- **AND** a legacy jsonl record written before these fields existed (no `agent_name` or `model_name` key in the line) still deserializes without error via `ChatMessage.from_dict`, which treats missing keys as `None` defaults, so the change is backward compatible
+
+#### Scenario: Agent name fixed per attempt, independent of rotation
+- **GIVEN** a step where the first internal attempt uses agent `dclaude` and a rotation switches the second attempt to agent `claude`
+- **WHEN** the two attempts' prompt and response records are inspected
+- **THEN** the first attempt's records carry `agent_name="dclaude"` and the second's carry `agent_name="claude"`
+- **AND** each attempt's `agent_name` is the name of the agent actually selected at the start of that attempt, not the caller's `_current_agent_index` at any later point
 
 #### Scenario: raw_json format storage
 - **WHEN** the LLM returns an NDJSON stream (multiple lines of JSON)
@@ -3334,6 +3348,8 @@ The flow engine SHALL aggregate LLM token usage and cost at two granularities �
 
 - Before dispatching a step's handler, `run_step` SHALL open a step-scoped token-usage accumulator via the `token_usage` context manager; the `llm-caller` `_call_with_retry` folds each subprocess call's usage into whatever accumulator is currently in scope.
 - When the handler returns — including the `finally` path on handler exception — `run_step` SHALL write the accumulated step total into `step.outputs["token_usage"]` as a plain JSON-primitive dict (via `UsageTotals.to_dict()`), and only when the total is non-empty, and SHALL add that step total into `flow.state.session_token_usage`.
+- **Non-terminal round visibility:** When the handler returns a non-terminal status (e.g. `REVISION_NEEDED` from `self_check`, `PAUSED` from `discovery`, or any other non-terminal return from `verify_spec` / `test` / `confirm`), `run_step` SHALL simultaneously write the accumulated step total into `step.outputs["token_usage"]` (so the CLI step renderer and the webui report card can display it) **and** into `step.outputs["carried_token_usage"]` (so the next round can merge the carry into its own cumulative). The `session_token_usage` SHALL add only this round's increment (the same amount it would add for a terminal round), not the carried total — this prevents double-counting across non-terminal→terminal transitions.
+- **Terminal round merge:** When the handler returns a terminal status and `step.outputs` already contains a `carried_token_usage` from prior non-terminal rounds, `run_step` SHALL merge the carried total with this round's accumulated increment to produce the final `step.outputs["token_usage"]`, and SHALL clear `carried_token_usage` from `step.outputs`. The `session_token_usage` SHALL add only this terminal round's increment (not the carried portion), because the prior non-terminal rounds already added their own increments individually. This ensures the terminal round's `token_usage` reflects the whole-step cumulative while `session_token_usage` never double-counts.
 - `UsageTotals` defines `add()` (component-wise merge of the four token counts plus `total_cost_usd`), `to_dict()` / `from_dict()`, and `is_empty()`, so per-step and per-session totals share one merge and serialization contract.
 
 **DAG-parallel implement re-binding:** When the `implement` step runs groups in parallel worker threads (see *Implement Step DAG Execution Strategy*), each worker SHALL re-bind the step accumulator into its own thread so concurrent groups' usage still folds into the same step total under a lock, rather than being lost because the contextvar default is per-thread.
@@ -3351,6 +3367,24 @@ The flow engine SHALL aggregate LLM token usage and cost at two granularities �
 - **WHEN** `run_step` finishes the handler
 - **THEN** `step.outputs` carries no `token_usage` key (the empty total is not persisted)
 - **AND** `flow.state.session_token_usage` is left unchanged
+
+#### Scenario: Non-terminal round publishes visible token_usage and carried_token_usage
+- **GIVEN** a step whose handler returns a non-terminal status (e.g. `self_check` returning `REVISION_NEEDED`)
+- **WHEN** `run_step` finishes the handler for that round
+- **THEN** the round's accumulated step total is written into both `step.outputs["token_usage"]` (so CLI `render_step_usage` and the webui report card can display it) and `step.outputs["carried_token_usage"]` (so the next round's handler can merge it into its own cumulative)
+- **AND** the round's step total is added into `flow.state.session_token_usage` — only the increment from this round, not a carried total, so no double-counting
+
+#### Scenario: Terminal round merges carried and clears carry
+- **GIVEN** a step whose prior round wrote `carried_token_usage` into `step.outputs` and whose current round returns a terminal status
+- **WHEN** `run_step` finishes the handler for the terminal round
+- **THEN** the final `step.outputs["token_usage"]` equals the sum of the prior carried total and this round's accumulated increment (the whole-step cumulative)
+- **AND** `step.outputs["carried_token_usage"]` is cleared (removed from `step.outputs`)
+- **AND** `session_token_usage` adds only this terminal round's increment — the prior rounds already added their own increments individually, so the cumulative is never double-counted
+
+#### Scenario: Non-terminal usage visible in CLI and webui without special-case logic
+- **GIVEN** a step whose handler returns `REVISION_NEEDED` with a non-empty accumulated token total
+- **WHEN** the CLI sink and the webui report card both read `step.outputs["token_usage"]`
+- **THEN** both surfaces display that round's usage without needing to understand `carried_token_usage` — the shared `render_step_usage` / `buildStepUsageFootnote` logic reads only the standard `token_usage` field, which now contains the round's total for non-terminal rounds as well as terminal ones
 
 #### Scenario: Parallel implement groups fold usage into the same step total
 - **GIVEN** an `implement` step running multiple task groups concurrently in worker threads
