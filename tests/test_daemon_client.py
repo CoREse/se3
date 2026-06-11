@@ -354,6 +354,182 @@ def test_dispatch_respond_call_routes_to_handler(tmp_path):
     assert target.is_file()
 
 
+# --------------------------------------------------------------------------
+# MSG_ISSUE_COMMAND dispatch
+# --------------------------------------------------------------------------
+
+
+def _make_issue_client(tmp_path, *, project_roots=None):
+    """Build a DaemonClient wired with a project root for issue command tests."""
+    roots = project_roots or [str(tmp_path)]
+    return _make_client(
+        snapshot_provider=lambda: {
+            "machine_id": "m1",
+            "flows": [],
+            "project_roots": roots,
+        }
+    )
+
+
+def test_dispatch_issue_command_create(tmp_path):
+    """ISSUE_COMMAND create creates an issue via IssueManager."""
+    import yaml
+
+    client = _make_issue_client(tmp_path)
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(tmp_path),
+            description="Something is broken",
+            title="Fix it",
+            priority="high",
+            type="bug",
+            tags=["auto"],
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    issues_dir = tmp_path / "se3" / "issues" / "open"
+    assert issues_dir.is_dir()
+    files = list(issues_dir.glob("*.yaml"))
+    assert len(files) == 1
+    data = yaml.safe_load(files[0].read_text(encoding="utf-8"))
+    assert data["description"] == "Something is broken"
+    assert data["title"] == "Fix it"
+    assert data["priority"] == "high"
+    assert data["type"] == "bug"
+    assert data["source"] == "human"  # web-initiated
+
+
+def test_dispatch_issue_command_edit(tmp_path):
+    """ISSUE_COMMAND edit updates an existing issue."""
+    import yaml
+
+    from se3.engine.issue_manager import IssueManager
+
+    mgr = IssueManager(tmp_path)
+    issue = mgr.create(description="Old description", title="Old title")
+
+    client = _make_issue_client(tmp_path)
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "edit",
+            project_root=str(tmp_path),
+            issue_id=issue.id,
+            description="New description",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    loaded = mgr.load(issue.id)
+    assert loaded is not None
+    assert loaded.description == "New description"
+
+
+def test_dispatch_issue_command_close(tmp_path):
+    """ISSUE_COMMAND close closes an issue."""
+    from se3.engine.issue_manager import IssueManager
+
+    mgr = IssueManager(tmp_path)
+    issue = mgr.create(description="To be closed")
+
+    client = _make_issue_client(tmp_path)
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "close",
+            project_root=str(tmp_path),
+            issue_id=issue.id,
+            reason="Fixed",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    loaded = mgr.load(issue.id)
+    assert loaded is not None
+    assert loaded.status.value in ("closed", "resolved")
+
+
+def test_dispatch_issue_command_reopen(tmp_path):
+    """ISSUE_COMMAND reopen reopens a closed issue."""
+    from se3.engine.issue_manager import IssueManager
+
+    mgr = IssueManager(tmp_path)
+    issue = mgr.create(description="To reopen")
+    mgr.close_issue(issue.id)
+
+    client = _make_issue_client(tmp_path)
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "reopen",
+            project_root=str(tmp_path),
+            issue_id=issue.id,
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    loaded = mgr.load(issue.id)
+    assert loaded is not None
+    assert loaded.status.value == "open"
+
+
+def test_dispatch_issue_command_rejects_unregistered_root(tmp_path):
+    """ISSUE_COMMAND rejects project_root not in known roots."""
+    from se3.engine.issue_manager import IssueManager
+
+    other = tmp_path / "other"
+    other.mkdir()
+    client = _make_issue_client(tmp_path, project_roots=["/some/other/path"])
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(other),
+            description="Should fail",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+    # No issue should have been created
+    assert not (other / "se3" / "issues").exists()
+
+
+def test_dispatch_issue_command_rejects_relative_path():
+    """ISSUE_COMMAND rejects non-absolute project_root."""
+    client = _make_client()
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root="relative/path",
+            description="Should fail",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_issue_command_ignores_empty_operation():
+    """ISSUE_COMMAND with empty operation is a no-op."""
+    client = _make_client()
+
+    async def scenario():
+        msg = protocol.Message(
+            type=protocol.MSG_ISSUE_COMMAND,
+            payload={"operation": "", "project_root": "/p"},
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())  # must not raise
+
+
 def test_push_status_sends_status_update():
     client = _make_client(snapshot_provider=lambda: {"machine_id": "m1", "flows": []})
     ws = _FakeWS()

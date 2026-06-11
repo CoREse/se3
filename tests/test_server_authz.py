@@ -813,3 +813,85 @@ def test_revoked_daemon_key_blocks_daemon_hello(authz_app):
         assert await state.get_machine("mRevoked") is None
 
     asyncio.run(hello_is_rejected())
+
+
+# --------------------------------------------------------------------------
+# Issue REST endpoints — owner isolation
+# --------------------------------------------------------------------------
+
+
+def test_issue_endpoints_are_owner_isolated(authz_app):
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
+            da.send_text(_owner_hello(app, "A", "mA"))
+            protocol.decode(da.receive_text())
+            db.send_text(_owner_hello(app, "B", "mB"))
+            protocol.decode(db.receive_text())
+            da.send_text(
+                protocol.make_status_update({
+                    "machine_id": "mA",
+                    "flows": [],
+                    "issues": [
+                        {"id": "001", "project_root": "/pa", "status": "open", "source": "human"},
+                    ],
+                }).to_json()
+            )
+            db.send_text(
+                protocol.make_status_update({
+                    "machine_id": "mB",
+                    "flows": [],
+                    "issues": [
+                        {"id": "002", "project_root": "/pb", "status": "open", "source": "system"},
+                    ],
+                }).to_json()
+            )
+            _await_visible(ca, "mA")
+            _await_visible(cb, "mB")
+
+            # A sees only its own issues
+            a_issues = ca.get("/api/issues").json()["issues"]
+            assert len(a_issues) == 1 and a_issues[0]["id"] == "001"
+
+            # B sees only its own issues
+            b_issues = cb.get("/api/issues").json()["issues"]
+            assert len(b_issues) == 1 and b_issues[0]["id"] == "002"
+
+            # Cross-owner issue read is 404
+            assert ca.get("/api/issues/002").status_code == 404
+            assert cb.get("/api/issues/001").status_code == 404
+
+            # A can create on its own machine
+            resp = ca.post("/api/issues", json={
+                "machine_id": "mA",
+                "project_root": "/pa",
+                "description": "New issue",
+            })
+            assert resp.status_code == 202
+
+            # A cannot create on B's machine (404)
+            cross = ca.post("/api/issues", json={
+                "machine_id": "mB",
+                "project_root": "/pb",
+                "description": "Sneaky",
+            })
+            assert cross.status_code == 404
+
+
+def test_issue_endpoints_require_auth(authz_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(authz_app) as anon:
+        assert anon.get("/api/issues").status_code == 401
+        assert anon.get("/api/issues/001").status_code == 401
+        assert anon.post(
+            "/api/issues",
+            json={"machine_id": "m", "project_root": "/p", "description": "d"},
+        ).status_code == 401
+        assert anon.patch("/api/issues/001", json={"title": "x"}).status_code == 401
+        assert anon.post("/api/issues/001/close", json={}).status_code == 401
+        assert anon.post("/api/issues/001/reopen", json={}).status_code == 401

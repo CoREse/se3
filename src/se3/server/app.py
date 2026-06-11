@@ -28,7 +28,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import JSONResponse
@@ -157,6 +157,45 @@ class SetAdminRequest(BaseModel):
     """Body of ``POST /api/users/{owner_id}/admin`` — admin toggles the admin flag."""
 
     is_admin: bool
+
+
+class CreateIssueRequest(BaseModel):
+    """Body of ``POST /api/issues`` — create a new issue on a daemon."""
+
+    machine_id: str
+    project_root: str
+    description: str
+    title: str = ""
+    priority: str = ""
+    type: str = ""
+    tags: list = []
+
+
+class EditIssueRequest(BaseModel):
+    """Body of ``PATCH /api/issues/{id}`` — edit an existing issue."""
+
+    machine_id: str = ""
+    project_root: str = ""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    type: Optional[str] = None
+    tags: Optional[list] = None
+
+
+class CloseIssueRequest(BaseModel):
+    """Body of ``POST /api/issues/{id}/close`` — close an issue."""
+
+    machine_id: str = ""
+    project_root: str = ""
+    reason: str = ""
+
+
+class ReopenIssueRequest(BaseModel):
+    """Body of ``POST /api/issues/{id}/reopen`` — reopen a closed issue."""
+
+    machine_id: str = ""
+    project_root: str = ""
 
 
 def _scope_for(identity: OwnerIdentity) -> Optional[str]:
@@ -540,6 +579,259 @@ def create_app(
                 detail=f"failed to deliver INTERJECT_FLOW to '{machine_id}'",
             )
         return {"status": "dispatched", "machine_id": machine_id, "flow_id": flow_id}
+
+    # -- issue management API -----------------------------------------------
+    # Issues are an in-memory mirror of each daemon's on-disk YAML files,
+    # refreshed on every STATUS_UPDATE.  Write operations (create/edit/close/
+    # reopen) are dispatched as MSG_ISSUE_COMMAND to the owning daemon which
+    # applies them via IssueManager; the next STATUS_UPDATE reflects the change.
+
+    @app.get("/api/issues")
+    async def list_issues(
+        machine_id: str = "",
+        project_root: str = "",
+        include_closed: bool = False,
+        source: str = "",
+        type: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """List issues across all machines (or filtered by machine/root).
+
+        Defaults to open issues only; pass ``include_closed=True`` to include
+        resolved/closed/won't-fix.
+        """
+        issues = await state.get_issues(
+            owner=_scope_for(identity_),
+            machine_id=machine_id or None,
+            project_root=project_root or None,
+            include_closed=include_closed,
+            source=source or None,
+            type_filter=type or None,
+        )
+        return {"issues": issues, "count": len(issues)}
+
+    @app.get("/api/issues/{issue_id}")
+    async def get_issue(
+        issue_id: str,
+        machine_id: str = "",
+        project_root: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Get a single issue by ID."""
+        result = await state.get_issue_by_id(
+            issue_id,
+            owner=_scope_for(identity_),
+            machine_id=machine_id or None,
+            project_root=project_root or None,
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404, detail=f"issue '{issue_id}' not found"
+            )
+        mid, root, issue = result
+        return {"machine_id": mid, "project_root": root, "issue": issue}
+
+    @app.post("/api/issues")
+    async def create_issue(
+        req: CreateIssueRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        """Create a new issue on a daemon."""
+        description = req.description.strip()
+        if not description:
+            raise HTTPException(
+                status_code=422, detail="'description' must not be empty"
+            )
+        machine_id = req.machine_id.strip()
+        if not machine_id:
+            raise HTTPException(
+                status_code=422, detail="'machine_id' must not be empty"
+            )
+        project_root = req.project_root.strip()
+        if not project_root:
+            raise HTTPException(
+                status_code=422, detail="'project_root' must not be empty"
+            )
+        if not os.path.isabs(project_root):
+            raise HTTPException(
+                status_code=422,
+                detail=f"'project_root' must be an absolute path, got {project_root!r}",
+            )
+        # Ownership gate
+        owned = await state.get_machine(machine_id, owner=_scope_for(identity_))
+        if owned is None:
+            raise HTTPException(
+                status_code=404, detail=f"machine '{machine_id}' not found"
+            )
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"machine '{machine_id}' is not connected",
+            )
+        message = protocol.make_issue_command(
+            "create",
+            project_root=project_root,
+            description=description,
+            title=req.title,
+            priority=req.priority,
+            type=req.type,
+            tags=req.tags if req.tags else None,
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+            )
+        return JSONResponse(
+            status_code=202,
+            content={"status": "dispatched", "machine_id": machine_id},
+        )
+
+    @app.patch("/api/issues/{issue_id}")
+    async def edit_issue(
+        issue_id: str,
+        req: EditIssueRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Edit an existing issue (title, description, priority, type, tags).
+
+        If ``machine_id`` and ``project_root`` are not supplied, the server
+        resolves them from the issue mirror.
+        """
+        machine_id = req.machine_id.strip()
+        project_root = req.project_root.strip()
+        if not machine_id or not project_root:
+            result = await state.get_issue_by_id(
+                issue_id, owner=_scope_for(identity_)
+            )
+            if result is None:
+                raise HTTPException(
+                    status_code=404, detail=f"issue '{issue_id}' not found"
+                )
+            machine_id, project_root, _ = result
+        # Ownership gate
+        owned = await state.get_machine(machine_id, owner=_scope_for(identity_))
+        if owned is None:
+            raise HTTPException(
+                status_code=404, detail=f"machine '{machine_id}' not found"
+            )
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' is not connected",
+            )
+        kwargs: Dict[str, Any] = {}
+        if req.title is not None:
+            kwargs["title"] = req.title
+        if req.description is not None:
+            kwargs["description"] = req.description
+        if req.priority is not None:
+            kwargs["priority"] = req.priority
+        if req.type is not None:
+            kwargs["type"] = req.type
+        if req.tags is not None:
+            kwargs["tags"] = req.tags
+        if not kwargs:
+            raise HTTPException(
+                status_code=422, detail="no fields to update"
+            )
+        message = protocol.make_issue_command(
+            "edit",
+            project_root=project_root,
+            issue_id=issue_id,
+            **kwargs,
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+            )
+        return {"status": "dispatched", "machine_id": machine_id, "issue_id": issue_id}
+
+    @app.post("/api/issues/{issue_id}/close")
+    async def close_issue(
+        issue_id: str,
+        req: CloseIssueRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Close an issue."""
+        machine_id = req.machine_id.strip()
+        project_root = req.project_root.strip()
+        if not machine_id or not project_root:
+            result = await state.get_issue_by_id(
+                issue_id, owner=_scope_for(identity_)
+            )
+            if result is None:
+                raise HTTPException(
+                    status_code=404, detail=f"issue '{issue_id}' not found"
+                )
+            machine_id, project_root, _ = result
+        owned = await state.get_machine(machine_id, owner=_scope_for(identity_))
+        if owned is None:
+            raise HTTPException(
+                status_code=404, detail=f"machine '{machine_id}' not found"
+            )
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' is not connected",
+            )
+        message = protocol.make_issue_command(
+            "close",
+            project_root=project_root,
+            issue_id=issue_id,
+            reason=req.reason,
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+            )
+        return {"status": "dispatched", "machine_id": machine_id, "issue_id": issue_id}
+
+    @app.post("/api/issues/{issue_id}/reopen")
+    async def reopen_issue(
+        issue_id: str,
+        req: ReopenIssueRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Reopen a closed issue."""
+        machine_id = req.machine_id.strip()
+        project_root = req.project_root.strip()
+        if not machine_id or not project_root:
+            result = await state.get_issue_by_id(
+                issue_id, owner=_scope_for(identity_)
+            )
+            if result is None:
+                raise HTTPException(
+                    status_code=404, detail=f"issue '{issue_id}' not found"
+                )
+            machine_id, project_root, _ = result
+        owned = await state.get_machine(machine_id, owner=_scope_for(identity_))
+        if owned is None:
+            raise HTTPException(
+                status_code=404, detail=f"machine '{machine_id}' not found"
+            )
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' is not connected",
+            )
+        message = protocol.make_issue_command(
+            "reopen",
+            project_root=project_root,
+            issue_id=issue_id,
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver ISSUE_COMMAND to '{machine_id}'",
+            )
+        return {"status": "dispatched", "machine_id": machine_id, "issue_id": issue_id}
 
     # -- daemon-key self-management ----------------------------------------
     # An owner mints / lists / revokes its OWN daemon keys (the credential a

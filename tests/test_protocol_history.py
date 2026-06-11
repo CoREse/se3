@@ -166,3 +166,96 @@ def test_make_spawn_flow_discover_true():
     decoded = decode(msg.to_json())
     assert decoded.payload["discover"] is True
     assert decoded.payload["task_description"] == "Explore Y"
+
+
+# -- MSG_ISSUE_COMMAND -----------------------------------------------------
+
+
+def test_issue_command_type_registered():
+    from se3.daemon.protocol import MSG_ISSUE_COMMAND
+
+    assert MSG_ISSUE_COMMAND in protocol.SERVER_TO_DAEMON
+    assert MSG_ISSUE_COMMAND in protocol.ALL_MESSAGE_TYPES
+    assert MSG_ISSUE_COMMAND not in protocol.DAEMON_TO_SERVER
+
+
+def test_make_issue_command_create_round_trip():
+    msg = protocol.make_issue_command(
+        "create",
+        project_root="/proj",
+        description="Something is broken",
+        title="Fix it",
+        priority="high",
+        type="bug",
+        tags=["auto"],
+    )
+    from se3.daemon.protocol import MSG_ISSUE_COMMAND
+
+    assert msg.type == MSG_ISSUE_COMMAND
+    decoded = decode(msg.to_json())
+    p = decoded.payload
+    assert p["operation"] == "create"
+    assert p["project_root"] == "/proj"
+    assert p["description"] == "Something is broken"
+    assert p["title"] == "Fix it"
+    assert p["priority"] == "high"
+    assert p["type"] == "bug"
+    assert p["tags"] == ["auto"]
+
+
+def test_make_issue_command_edit_round_trip():
+    msg = protocol.make_issue_command(
+        "edit",
+        project_root="/proj",
+        issue_id="042",
+        description="Updated description",
+    )
+    decoded = decode(msg.to_json())
+    p = decoded.payload
+    assert p["operation"] == "edit"
+    assert p["issue_id"] == "042"
+    assert p["description"] == "Updated description"
+    assert "title" not in p  # omitted when empty
+
+
+def test_make_issue_command_close_with_reason():
+    msg = protocol.make_issue_command(
+        "close",
+        project_root="/proj",
+        issue_id="042",
+        reason="Fixed in #123",
+    )
+    decoded = decode(msg.to_json())
+    p = decoded.payload
+    assert p["operation"] == "close"
+    assert p["reason"] == "Fixed in #123"
+
+
+def test_make_issue_command_reopen():
+    msg = protocol.make_issue_command(
+        "reopen",
+        project_root="/proj",
+        issue_id="042",
+    )
+    decoded = decode(msg.to_json())
+    p = decoded.payload
+    assert p["operation"] == "reopen"
+    assert p["issue_id"] == "042"
+
+
+def test_make_issue_command_omits_empty_optional_fields():
+    msg = protocol.make_issue_command(
+        "create",
+        project_root="/proj",
+        description="minimal",
+    )
+    p = msg.payload
+    assert p["operation"] == "create"
+    assert p["description"] == "minimal"
+    # No extra keys for empty optionals
+    assert "issue_id" not in p
+    assert "title" not in p
+    assert "priority" not in p
+    assert "type" not in p
+    assert "tags" not in p
+    assert "reason" not in p

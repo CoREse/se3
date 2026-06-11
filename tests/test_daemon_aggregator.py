@@ -700,3 +700,168 @@ def test_all_project_roots_reenumerates_on_base_change(monkeypatch) -> None:
     aggregator.all_project_roots()
     assert len(calls) == 2
     assert os.path.realpath("/p/two") in calls[1]
+
+
+# ---- issue snapshot -------------------------------------------------------
+
+
+def _write_issue(
+    tmp_path: Path,
+    issue_id: str,
+    *,
+    subdir: str = "open",
+    title: str | None = "Test Issue",
+    description: str = "A problem",
+    status: str = "open",
+    priority: str | None = "medium",
+    issue_type: str | None = "bug",
+    tags: list | None = None,
+    source: str = "system",
+) -> Path:
+    """Write an issue YAML file for aggregator tests."""
+    import yaml
+
+    data = {
+        "id": issue_id,
+        "description": description,
+        "status": status,
+        "scope": "in_scope",
+        "tags": tags or [],
+        "source": source,
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+    }
+    if title is not None:
+        data["title"] = title
+    if priority is not None:
+        data["priority"] = priority
+    if issue_type is not None:
+        data["type"] = issue_type
+
+    slug = title.lower().replace(" ", "-")[:30] if title else "untitled"
+    filename = f"{issue_id}_{slug}.yaml"
+    target = tmp_path / "se3" / "issues" / subdir / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.dump(data, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    return target
+
+
+def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:
+    """_collect_issues reads both open/ and closed/ directories."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    _write_issue(tmp_path, "001", subdir="open", title="First")
+    _write_issue(tmp_path, "002", subdir="closed", title="Second", status="closed")
+    _write_issue(tmp_path, "003", subdir="open", title="Third")
+
+    issues = DaemonAggregator._collect_issues(tmp_path)
+    assert len(issues) == 3
+    ids = {i.id for i in issues}
+    assert ids == {"001", "002", "003"}
+
+
+def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
+    """Each IssueSnapshot carries all webui-relevant fields."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    _write_issue(
+        tmp_path,
+        "007",
+        title="Fix login",
+        description="Login fails on mobile",
+        status="open",
+        priority="high",
+        issue_type="bug",
+        tags=["auth", "mobile"],
+        source="human",
+    )
+
+    issues = DaemonAggregator._collect_issues(tmp_path)
+    assert len(issues) == 1
+    iss = issues[0]
+    assert iss.id == "007"
+    assert iss.project_root == str(tmp_path)
+    assert iss.title == "Fix login"
+    assert iss.description == "Login fails on mobile"
+    assert iss.status == "open"
+    assert iss.priority == "high"
+    assert iss.type == "bug"
+    assert iss.tags == ["auth", "mobile"]
+    assert iss.source == "human"
+
+
+def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
+    """Malformed YAML files are silently skipped."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    issues_dir = tmp_path / "se3" / "issues" / "open"
+    issues_dir.mkdir(parents=True, exist_ok=True)
+    # Write garbage
+    (issues_dir / "bad.yaml").write_text("not: [valid: yaml: {", encoding="utf-8")
+    # Write a valid issue alongside
+    _write_issue(tmp_path, "001", subdir="open", title="Good")
+
+    issues = DaemonAggregator._collect_issues(tmp_path)
+    assert len(issues) == 1
+    assert issues[0].id == "001"
+
+
+def test_collect_issues_returns_empty_when_no_dir(tmp_path: Path) -> None:
+    from se3.daemon.aggregator import DaemonAggregator
+
+    assert DaemonAggregator._collect_issues(tmp_path) == []
+
+
+def test_machine_status_includes_issues(tmp_path: Path) -> None:
+    """MachineStatus.issues is populated by get_snapshot."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    _write(tmp_path / "se3" / "state" / "engine.json", {
+        "flow_id": "f1",
+        "task_description": "t",
+        "task_type": "feature",
+        "status": "RUNNING",
+        "state": {
+            "current_step_id": "s1",
+            "selected_steps": ["analyze"],
+            "current_step_index": 0,
+            "steps": {"s1": {"step_type": "analyze"}},
+        },
+    })
+    _write_issue(tmp_path, "001", title="An issue")
+    _write_issue(tmp_path, "002", title="Another issue")
+
+    agg = DaemonAggregator()
+    agg.add_project_root(tmp_path)
+    status = agg.get_snapshot()
+
+    assert len(status.issues) == 2
+    ids = {i.id for i in status.issues}
+    assert ids == {"001", "002"}
+
+    # Serialized too
+    payload = status.to_dict()
+    assert len(payload["issues"]) == 2
+    assert payload["issues"][0]["id"] == "001"
+
+
+def test_issue_snapshot_to_dict_omits_none_optional_fields(tmp_path: Path) -> None:
+    """to_dict omits title/priority/type when they are None."""
+    from se3.daemon.aggregator import IssueSnapshot
+
+    snap = IssueSnapshot(
+        id="001",
+        project_root="/p",
+        description="desc",
+        status="open",
+        source="system",
+    )
+    d = snap.to_dict()
+    assert "title" not in d
+    assert "priority" not in d
+    assert "type" not in d
+    assert d["id"] == "001"
+    assert d["description"] == "desc"

@@ -551,3 +551,403 @@ def test_run_passes_ws_max_size_to_uvicorn(monkeypatch):
     assert captured["kwargs"]["ws_max_size"] == protocol.MAX_WS_MESSAGE_BYTES
     assert captured["kwargs"]["host"] == "0.0.0.0"
     assert captured["kwargs"]["port"] == 12345
+
+
+# --------------------------------------------------------------------------
+# ServerState issue mirror
+# --------------------------------------------------------------------------
+
+
+def _snapshot_with_issues(machine_id="m1", issues=None, **kw):
+    """Build a snapshot dict that includes issues."""
+    snap = _snapshot(machine_id, **kw)
+    snap["issues"] = issues or []
+    return snap
+
+
+def test_state_update_status_ingests_issues():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1", "h", "v")
+        snap = _snapshot_with_issues(issues=[
+            {
+                "id": "001",
+                "project_root": "/proj",
+                "title": "Bug",
+                "description": "desc",
+                "status": "open",
+                "source": "human",
+            },
+            {
+                "id": "002",
+                "project_root": "/proj",
+                "title": "Bug2",
+                "description": "desc2",
+                "status": "closed",
+                "source": "system",
+            },
+        ])
+        await state.update_status("m1", snap)
+
+        # Default: open only
+        issues = await state.get_issues()
+        assert len(issues) == 1
+        assert issues[0]["id"] == "001"
+
+        # Include closed
+        all_issues = await state.get_issues(include_closed=True)
+        assert len(all_issues) == 2
+
+    asyncio.run(scenario())
+
+
+def test_state_issues_filtered_by_source():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1")
+        snap = _snapshot_with_issues(issues=[
+            {"id": "001", "project_root": "/p", "status": "open", "source": "human"},
+            {"id": "002", "project_root": "/p", "status": "open", "source": "system"},
+        ])
+        await state.update_status("m1", snap)
+
+        human = await state.get_issues(source="human")
+        assert len(human) == 1 and human[0]["id"] == "001"
+
+        system = await state.get_issues(source="system")
+        assert len(system) == 1 and system[0]["id"] == "002"
+
+    asyncio.run(scenario())
+
+
+def test_state_issues_filtered_by_type():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1")
+        snap = _snapshot_with_issues(issues=[
+            {"id": "001", "project_root": "/p", "status": "open", "type": "bug"},
+            {"id": "002", "project_root": "/p", "status": "open", "type": "feature"},
+        ])
+        await state.update_status("m1", snap)
+
+        bugs = await state.get_issues(type_filter="bug")
+        assert len(bugs) == 1 and bugs[0]["id"] == "001"
+
+    asyncio.run(scenario())
+
+
+def test_state_get_issue_by_id():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1")
+        snap = _snapshot_with_issues(issues=[
+            {"id": "042", "project_root": "/proj", "status": "open", "source": "human"},
+        ])
+        await state.update_status("m1", snap)
+
+        result = await state.get_issue_by_id("042")
+        assert result is not None
+        mid, root, iss = result
+        assert mid == "m1"
+        assert root == "/proj"
+        assert iss["id"] == "042"
+
+        assert await state.get_issue_by_id("999") is None
+
+    asyncio.run(scenario())
+
+
+def test_state_find_machine_for_project():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1")
+        snap = _snapshot_with_issues(
+            issues=[{"id": "001", "project_root": "/proj", "status": "open"}],
+        )
+        snap["project_roots"] = ["/proj"]
+        await state.update_status("m1", snap)
+
+        assert await state.find_machine_for_project("/proj") == "m1"
+        assert await state.find_machine_for_project("/other") is None
+
+    asyncio.run(scenario())
+
+
+def test_state_issues_owner_scoped():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1", owner_id="owner-a")
+        await state.register_machine("m2", owner_id="owner-b")
+        await state.update_status("m1", _snapshot_with_issues(issues=[
+            {"id": "001", "project_root": "/p", "status": "open"},
+        ]))
+        await state.update_status("m2", _snapshot_with_issues(issues=[
+            {"id": "002", "project_root": "/q", "status": "open"},
+        ]))
+
+        # Owner A sees only their issues
+        a_issues = await state.get_issues(owner="owner-a")
+        assert len(a_issues) == 1 and a_issues[0]["id"] == "001"
+
+        # Owner B sees only their issues
+        b_issues = await state.get_issues(owner="owner-b")
+        assert len(b_issues) == 1 and b_issues[0]["id"] == "002"
+
+        # Admin (unscoped) sees all
+        all_issues = await state.get_issues()
+        assert len(all_issues) == 2
+
+    asyncio.run(scenario())
+
+
+def test_state_discard_machine_state_clears_issues():
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1", owner_id="old-owner")
+        await state.update_status("m1", _snapshot_with_issues(issues=[
+            {"id": "001", "project_root": "/p", "status": "open"},
+        ]))
+        # Owner takeover: issues from old owner must be cleared
+        await state.register_machine("m1", owner_id="new-owner")
+        issues = await state.get_issues(owner="new-owner")
+        assert issues == []
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# Issue REST API endpoints
+# --------------------------------------------------------------------------
+
+
+def test_list_issues_endpoint(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "001", "project_root": "/p", "status": "open", "source": "human"},
+                {"id": "002", "project_root": "/p", "status": "closed", "source": "system"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues")
+            if resp.json()["count"] > 0:
+                break
+
+    resp = client.get("/api/issues")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 1  # open only
+    assert data["issues"][0]["id"] == "001"
+
+
+def test_list_issues_include_closed(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "001", "project_root": "/p", "status": "open"},
+                {"id": "002", "project_root": "/p", "status": "closed"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues?include_closed=true")
+            if resp.json()["count"] > 1:
+                break
+
+    resp = client.get("/api/issues?include_closed=true")
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 2
+
+
+def test_list_issues_filter_by_source(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "001", "project_root": "/p", "status": "open", "source": "human"},
+                {"id": "002", "project_root": "/p", "status": "open", "source": "system"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues?source=human")
+            if resp.json()["count"] > 0:
+                break
+
+    resp = client.get("/api/issues?source=human")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 1
+    assert data["issues"][0]["source"] == "human"
+
+
+def test_get_issue_by_id_endpoint(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "open", "title": "Test"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues/042")
+            if resp.status_code == 200:
+                break
+
+    resp = client.get("/api/issues/042")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["machine_id"] == "m1"
+    assert data["project_root"] == "/proj"
+    assert data["issue"]["id"] == "042"
+
+
+def test_get_issue_not_found(client_and_app):
+    client, app = client_and_app
+    resp = client.get("/api/issues/999")
+    assert resp.status_code == 404
+
+
+def test_create_issue_dispatches_command(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+
+        resp = client.post("/api/issues", json={
+            "machine_id": "m1",
+            "project_root": "/proj",
+            "description": "Something is broken",
+            "title": "Fix it",
+            "priority": "high",
+            "type": "bug",
+        })
+        assert resp.status_code == 202
+        msg = protocol.decode(ws.receive_text())
+        assert msg.type == protocol.MSG_ISSUE_COMMAND
+        assert msg.payload["operation"] == "create"
+        assert msg.payload["description"] == "Something is broken"
+        assert msg.payload["project_root"] == "/proj"
+
+
+def test_create_issue_rejects_empty_description(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        resp = client.post("/api/issues", json={
+            "machine_id": "m1",
+            "project_root": "/proj",
+            "description": "  ",
+        })
+        assert resp.status_code == 422
+
+
+def test_create_issue_rejects_non_absolute_root(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        resp = client.post("/api/issues", json={
+            "machine_id": "m1",
+            "project_root": "relative",
+            "description": "desc",
+        })
+        assert resp.status_code == 422
+
+
+def test_create_issue_unknown_machine_404(client_and_app):
+    client, app = client_and_app
+    resp = client.post("/api/issues", json={
+        "machine_id": "ghost",
+        "project_root": "/proj",
+        "description": "desc",
+    })
+    assert resp.status_code == 404
+
+
+def test_edit_issue_dispatches_command(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "open"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues/042")
+            if resp.status_code == 200:
+                break
+
+        resp = client.patch("/api/issues/042", json={
+            "description": "Updated",
+        })
+        assert resp.status_code == 200
+        msg = protocol.decode(ws.receive_text())
+        assert msg.type == protocol.MSG_ISSUE_COMMAND
+        assert msg.payload["operation"] == "edit"
+        assert msg.payload["issue_id"] == "042"
+        assert msg.payload["description"] == "Updated"
+
+
+def test_close_issue_dispatches_command(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "open"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues/042")
+            if resp.status_code == 200:
+                break
+
+        resp = client.post("/api/issues/042/close", json={"reason": "Fixed"})
+        assert resp.status_code == 200
+        msg = protocol.decode(ws.receive_text())
+        assert msg.type == protocol.MSG_ISSUE_COMMAND
+        assert msg.payload["operation"] == "close"
+        assert msg.payload["reason"] == "Fixed"
+
+
+def test_reopen_issue_dispatches_command(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "closed"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            resp = client.get("/api/issues/042?include_closed=true")
+            if resp.status_code == 200:
+                break
+
+        resp = client.post("/api/issues/042/reopen", json={})
+        assert resp.status_code == 200
+        msg = protocol.decode(ws.receive_text())
+        assert msg.type == protocol.MSG_ISSUE_COMMAND
+        assert msg.payload["operation"] == "reopen"
+        assert msg.payload["issue_id"] == "042"
