@@ -693,6 +693,63 @@ def test_rest_writes_are_owner_isolated(authz_app):
             assert respond.payload["call_id"] == "cA"
 
 
+def test_rest_resume_is_owner_isolated(authz_app):
+    """POST /api/flows/{id}/resume is owner-gated: cross-owner returns 404."""
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
+            da.send_text(_owner_hello(app, "A", "mA"))
+            protocol.decode(da.receive_text())
+            db.send_text(_owner_hello(app, "B", "mB"))
+            protocol.decode(db.receive_text())
+            # A has a paused flow, B has a paused flow.
+            da.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mA",
+                        "flows": [
+                            {
+                                "flow_id": "fA",
+                                "project_root": "/pa",
+                                "status": "paused",
+                            }
+                        ],
+                    }
+                ).to_json()
+            )
+            db.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mB",
+                        "flows": [
+                            {
+                                "flow_id": "fB",
+                                "project_root": "/pb",
+                                "status": "paused",
+                            }
+                        ],
+                    }
+                ).to_json()
+            )
+            _await_visible(ca, "mA")
+            _await_visible(cb, "mB")
+
+            # A can resume its own flow.
+            ok = ca.post("/api/flows/fA/resume")
+            assert ok.status_code == 202
+            spawn = protocol.decode(da.receive_text())
+            assert spawn.type == protocol.MSG_SPAWN_FLOW
+            assert spawn.payload["resume_flow_id"] == "fA"
+
+            # A cannot resume B's flow — cross-owner reads as absent (404).
+            cross = ca.post("/api/flows/fB/resume")
+            assert cross.status_code == 404
+
+
 def test_rest_unauthenticated_writes_are_401(authz_app):
     from fastapi.testclient import TestClient
 
@@ -710,6 +767,7 @@ def test_rest_unauthenticated_writes_are_401(authz_app):
         assert (
             anon.post("/api/flows/fA/interject", json={"text": "x"}).status_code == 401
         )
+        assert anon.post("/api/flows/fA/resume").status_code == 401
 
 
 # --------------------------------------------------------------------------

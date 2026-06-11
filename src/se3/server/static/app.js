@@ -115,6 +115,12 @@ const state = {
   // doCloseFlowView so switching or closing a flow returns to the default
   // collapsed state.
   flowReplyPromptExpanded: {},
+
+  // ---- Resume flow tracking ----
+  // Set of flow_ids for which a resume request is currently in-flight.
+  // Prevents duplicate POST /api/flows/{id}/resume calls and disables the
+  // Resume button until the server responds (success or error).
+  resumeFlowRequests: new Set(),
 };
 
 // Lifetime of a consumed-state afterimage chip in milliseconds.
@@ -299,6 +305,23 @@ function statusClass(status) {
 function isActiveFlow(flow) {
   const s = String((flow && flow.status) || "").toLowerCase();
   return ["running", "paused", "init", "recovering"].includes(s);
+}
+
+// A flow is "resumable" when it is in a non-terminal state that the daemon can
+// pick back up via `se3 run --resume --flow-id <id>`.  Only FAILED and PAUSED
+// qualify: RUNNING/INIT/RECOVERING are already in-progress (no resume needed),
+// COMPLETED is terminal (nothing to resume), and archived/history-only flows
+// are excluded (they lack a live engine.json).  The backend
+// `POST /api/flows/{id}/resume` performs the authoritative check; this pure
+// function is a UI gate that hides the button when it would certainly fail.
+const RESUMABLE_STATUSES = ["failed", "paused"];
+
+function isFlowResumable(flow) {
+  if (!flow || typeof flow !== "object") return false;
+  if (!flow.flow_id) return false;
+  return RESUMABLE_STATUSES.includes(
+    String(flow.status || "").toLowerCase()
+  );
 }
 
 function findFlow(flowId) {
@@ -843,6 +866,9 @@ function renderFlowCard(flow) {
     head.appendChild(el("span", "badge badge-call", "⚠ needs response"));
   }
 
+  const resumeBtn = makeResumeButton(flow);
+  if (resumeBtn) head.appendChild(resumeBtn);
+
   const bar = el("div", "progress");
   const inner = el("div", "progress-bar");
   inner.style.width = Math.round((flow.progress || 0) * 100) + "%";
@@ -1271,6 +1297,81 @@ function renderFlowSidebar(flow, machineId) {
   machineSec.appendChild(kv("Machine", machineId || "-"));
   if (flow.flow_id) machineSec.appendChild(kv("Flow id", flow.flow_id));
   body.appendChild(machineSec);
+
+  // -- resume --
+  const resumeBtn = makeResumeButton(flow);
+  if (resumeBtn) {
+    const resumeSec = el("div", "detail-section");
+    resumeSec.appendChild(resumeBtn);
+    body.appendChild(resumeSec);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resume flow
+// ---------------------------------------------------------------------------
+//
+// Dispatches a resume request to the backend for a FAILED or PAUSED flow.
+// The backend validates the flow's engine state and spawns `se3 run --resume`.
+// The button is disabled while the request is in-flight (tracked via
+// `state.resumeFlowRequests`) to prevent duplicate dispatches.
+
+// Pure helper: is a resume request currently in-flight for *flowId*?
+function isResumeInProgress(flowId) {
+  return state.resumeFlowRequests.has(flowId);
+}
+
+async function resumeFlow(flowId) {
+  if (!flowId) return;
+  if (state.resumeFlowRequests.has(flowId)) return; // debounce
+  state.resumeFlowRequests.add(flowId);
+  // Re-render affected surfaces so the button shows a disabled/pending state.
+  renderFlows();
+  renderHistoryList();
+  if (state.flowDetail && state.flowDetail.flow_id === flowId) {
+    renderFlowSidebar(state.flowDetail, state.flowMachineId);
+  }
+  try {
+    const resp = await authedFetch(
+      `/api/flows/${encodeURIComponent(flowId)}/resume`,
+      { method: "POST" },
+    );
+    if (resp.ok) {
+      showToast("success", `Resume dispatched for ${flowId.slice(0, 8)}…`);
+    } else if (resp.status === 404) {
+      showToast("error", "Flow not found or not resumable.");
+    } else {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch (_) {}
+      showToast("error", detail || `Resume failed (${resp.status}).`);
+    }
+  } catch (_) {
+    showToast("error", "Network error — could not dispatch resume.");
+  } finally {
+    state.resumeFlowRequests.delete(flowId);
+    renderFlows();
+    renderHistoryList();
+    if (state.flowDetail && state.flowDetail.flow_id === flowId) {
+      renderFlowSidebar(state.flowDetail, state.flowMachineId);
+    }
+  }
+}
+
+// Create a Resume button for a resumable flow.  Returns null when the flow
+// is not resumable, so callers can unconditionally append the result.
+function makeResumeButton(flow) {
+  if (!isFlowResumable(flow)) return null;
+  const flowId = flow.flow_id;
+  const pending = isResumeInProgress(flowId);
+  const btn = el("button", "btn-resume", pending ? "Resuming…" : "Resume");
+  btn.type = "button";
+  btn.disabled = pending;
+  btn.title = "Resume this flow";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation(); // don't bubble to the card's click handler
+    resumeFlow(flowId);
+  });
+  return btn;
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,6 +2404,8 @@ function renderHistoryList() {
     const sc = statusClass(s.status);
     head.append(task, el("span", "badge badge-" + sc, s.status || "unknown"));
     if (s.active) head.appendChild(el("span", "badge badge-live", "● live"));
+    const resumeBtn = makeResumeButton(s);
+    if (resumeBtn) head.appendChild(resumeBtn);
     card.appendChild(head);
 
     const meta = el("div", "history-item-meta");
@@ -2329,6 +2432,20 @@ async function openHistorySession(flowId) {
   applyHistoryPanelAction("select-session");
   renderHistoryList();
   $("history-detail-title").textContent = historyTitle(flowId);
+
+  // Inject a Resume button into the detail header when the session is resumable.
+  const titleEl = $("history-detail-title");
+  let resumeBar = titleEl.nextElementSibling;
+  if (resumeBar && resumeBar.classList.contains("history-resume-bar")) {
+    resumeBar.remove(); // clean up previous
+  }
+  const session = (state.historySessions || []).find((x) => x.flow_id === flowId);
+  const resumeBtn = makeResumeButton(session);
+  if (resumeBtn) {
+    resumeBar = el("div", "history-resume-bar");
+    resumeBar.appendChild(resumeBtn);
+    titleEl.after(resumeBar);
+  }
 
   const detail = $("history-detail");
   detail.innerHTML = "";
@@ -7885,6 +8002,11 @@ if (typeof module !== "undefined" && module.exports) {
     UNKNOWN_PROJECT_ROOT_LABEL,
     groupHistorySessionsByProjectRoot,
     pickDefaultHistoryProjectRoot,
+    // Resume-flow pure helpers (G6) — exposed for the DOM-free tests in
+    // tests/frontend/flow_resume.test.mjs.
+    isFlowResumable,
+    RESUMABLE_STATUSES,
+    isResumeInProgress,
     // Local interjection lifecycle helpers (G4) — exposed for the DOM-free
     // tests in tests/frontend/test_app_pure.mjs.
     bindLocalInterjectionToCallId,

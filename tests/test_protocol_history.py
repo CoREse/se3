@@ -166,3 +166,37 @@ def test_make_spawn_flow_discover_true():
     decoded = decode(msg.to_json())
     assert decoded.payload["discover"] is True
     assert decoded.payload["task_description"] == "Explore Y"
+
+
+# -- make_spawn_flow resume_flow_id field ---------------------------------
+
+
+def test_make_spawn_flow_resume_flow_id_omitted_by_default():
+    """Normal spawn does not include resume_flow_id in the wire payload."""
+    msg = protocol.make_spawn_flow("Build X", project_root="/p")
+    assert "resume_flow_id" not in msg.payload
+    decoded = decode(msg.to_json())
+    assert "resume_flow_id" not in decoded.payload
+
+
+def test_make_spawn_flow_resume_flow_id_round_trip():
+    """A resume payload carries resume_flow_id and preserves all fields."""
+    msg = protocol.make_spawn_flow(
+        "",  # task_description is unused for resume
+        project_root="/proj",
+        resume_flow_id="abc-123",
+    )
+    assert msg.payload["resume_flow_id"] == "abc-123"
+    assert msg.payload["project_root"] == "/proj"
+    # task_description is still present (empty string) for schema stability.
+    assert msg.payload["task_description"] == ""
+
+    decoded = decode(msg.to_json())
+    assert decoded.payload["resume_flow_id"] == "abc-123"
+    assert decoded.payload["project_root"] == "/proj"
+
+
+def test_make_spawn_flow_resume_flow_id_falsey_values_not_included():
+    """Empty string resume_flow_id is not added to the payload."""
+    msg = protocol.make_spawn_flow("task", resume_flow_id="")
+    assert "resume_flow_id" not in msg.payload

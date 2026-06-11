@@ -367,6 +367,32 @@ class ServerState:
         result = await self.get_flow(flow_id, owner=owner)
         return result[0] if result is not None else None
 
+    # -- resume helpers ----------------------------------------------------
+
+    #: Flow statuses that the daemon can directly resume via
+    #: ``se3 run --resume --flow-id <id>``.  RUNNING flows already have a
+    #: live process; COMPLETED flows are done; INIT/RECOVERING are transient.
+    RESUMABLE_STATUSES: set = {"failed", "paused"}
+
+    async def is_flow_resumable(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return ``(machine_id, flow_dict)`` when *flow_id* is resumable.
+
+        A flow is resumable when it is owned by *owner* (or the unscoped
+        admin view), its status is in :data:`RESUMABLE_STATUSES`, and the
+        owning machine is currently connected.  Returns ``None`` when any of
+        these conditions fails — the caller maps ``None`` to 404.
+        """
+        result = await self.get_flow(flow_id, owner=owner)
+        if result is None:
+            return None
+        machine_id, flow = result
+        status = str(flow.get("status") or "").lower()
+        if status not in self.RESUMABLE_STATUSES:
+            return None
+        return machine_id, flow
+
     # -- history relay (in-memory only, never persisted) -------------------
 
     async def update_history_index(

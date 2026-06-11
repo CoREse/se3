@@ -339,6 +339,76 @@ def test_dispatch_spawn_flow_ignores_empty_task():
     assert received == []
 
 
+# --------------------------------------------------------------------------
+# dispatch: SPAWN_FLOW with resume_flow_id routes to resume_handler
+# --------------------------------------------------------------------------
+
+
+def test_dispatch_spawn_flow_with_resume_flow_id_routes_to_resume_handler():
+    """When resume_flow_id is present, _handle_spawn calls resume_handler."""
+    resume_calls = []
+    spawn_calls = []
+    client = _make_client(
+        resume_handler=lambda fid, root: resume_calls.append((fid, root)),
+        spawn_handler=lambda t, p, ty, d: spawn_calls.append((t, p, ty, d)),
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow(
+                "",  # task_description unused for resume
+                project_root="/proj",
+                resume_flow_id="flow-abc",
+            ),
+        )
+
+    asyncio.run(scenario())
+    assert resume_calls == [("flow-abc", "/proj")]
+    assert spawn_calls == []  # spawn handler must NOT be called
+
+
+def test_dispatch_spawn_flow_without_resume_flow_id_routes_to_spawn_handler():
+    """Normal spawn (no resume_flow_id) still goes to spawn_handler."""
+    resume_calls = []
+    spawn_calls = []
+    client = _make_client(
+        resume_handler=lambda fid, root: resume_calls.append((fid, root)),
+        spawn_handler=lambda t, p, ty, d: spawn_calls.append((t, p, ty, d)),
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("Build X", project_root="/proj"),
+        )
+
+    asyncio.run(scenario())
+    assert resume_calls == []
+    assert spawn_calls == [("Build X", "/proj", "feature", False)]
+
+
+def test_dispatch_spawn_flow_resume_without_handler_logs_warning():
+    """resume_flow_id present but no resume_handler -> warning, no crash."""
+    spawn_calls = []
+    client = _make_client(
+        resume_handler=None,
+        spawn_handler=lambda t, p, ty, d: spawn_calls.append((t, p, ty, d)),
+    )
+
+    async def scenario():
+        # Must not raise.
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow(
+                "", project_root="/proj", resume_flow_id="flow-x"
+            ),
+        )
+
+    asyncio.run(scenario())
+    assert spawn_calls == []  # neither handler was called
+
+
 def test_dispatch_respond_call_routes_to_handler(tmp_path):
     client = _make_client()
     ws = _FakeWS()
