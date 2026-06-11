@@ -66,13 +66,19 @@ class CliSink(Sink):
     per-step renderer already presents the full output once the step finishes.
 
     Finally, ``STEP_COMPLETED`` / ``STEP_FAILED`` events for the interactive
-    CONFIRM and DISCOVERY steps and for PLAN are a **no-op** here: their CLI
-    output is owned by the ``se3 run`` orchestrator's interactive/special paths
-    (the discovery message panel, the confirm approval prompt, …), so routing
-    them through ``render_step_output`` too would double-render the CLI. These
-    steps now *do* emit terminal events (so HistorySink can persist them for
-    the web report cards and JsonSink can forward them to the daemon); CliSink
-    is the layer that keeps the CLI output unchanged by skipping them.
+    CONFIRM and DISCOVERY steps and for PLAN are handled with per-type rules:
+    their full report is skipped (owned by the orchestrator's interactive/
+    special paths), but token usage is surfaced where appropriate:
+
+    * ``discovery`` — renders a cumulative usage line (``format_usage_line``)
+      from ``step.outputs['token_usage']`` when non-empty. The per-round
+      inline ``本轮 … · 累计 …`` footer is rendered by the discovery handler
+      during each round, but the terminal cumulative showing the
+      whole-discovery total (across all rounds including the programmatic
+      confirmation round that issues no LLM call) is rendered here.
+    * ``confirm`` — renders a compact dim single-line footer (NOT the big
+      ``Step Token Usage`` block) from ``step.outputs['token_usage']``.
+    * ``plan`` — keeps the full ``render_step_usage`` block unchanged.
     """
 
     #: Step types whose terminal events CliSink must NOT render — their CLI
@@ -118,10 +124,12 @@ class CliSink(Sink):
         with a per-type rule, because the interactive multi-round steps want a
         compact inline footer rather than the big reverse-color block:
 
-        * ``discovery`` — skip usage entirely. Discovery shows a compact
-          ``本轮 … · 累计 …`` footer inline at the tail of each round's message
-          block (``steps/discovery.py``); rendering a usage block here too
-          would duplicate it.
+        * ``discovery`` — render a cumulative usage line via
+          ``format_usage_line`` from ``step.outputs['token_usage']`` when
+          non-empty. The per-round inline footer is rendered by the discovery
+          handler during each round; this terminal line shows the
+          whole-discovery cumulative (including the confirmation round that
+          issues no LLM call). Empty / absent usage renders nothing.
         * ``confirm`` — render a compact dim single-line footer (NOT the big
           ``Step Token Usage`` block) from ``step.outputs['token_usage']``. The
           confirm LLM review runs once per confirm step, so this step's total
@@ -138,8 +146,7 @@ class CliSink(Sink):
             step_type = getattr(st, "value", st)
         if step_type in self._CLI_SKIP_STEP_TYPES:
             if step_type == "discovery":
-                # Per-round footer is rendered inline by the discovery handler;
-                # do not render any usage block here (would duplicate it).
+                self._render_discovery_cumulative_usage(step)
                 return
             if step_type == "confirm":
                 self._render_confirm_usage_footer(step)
@@ -179,6 +186,32 @@ class CliSink(Sink):
 
         footer = format_round_usage_footer(totals, totals)
         get_console().print(Text(footer, style="dim"))
+
+    @staticmethod
+    def _render_discovery_cumulative_usage(step: object) -> None:
+        """Render the whole-discovery cumulative usage as a dim single-line.
+
+        When the discovery step completes (after multi-round dialogue and the
+        programmatic confirmation gate), ``run_step``'s ``finally`` block
+        writes the cumulative ``token_usage`` into ``step.outputs``. This
+        method reads that value and renders it via ``format_usage_line``
+        (covering input/output/cache(r/w)/cost fields). Nothing is rendered
+        when the discovery had no LLM calls at all (empty / absent usage).
+        """
+        usage = (getattr(step, "outputs", None) or {}).get("token_usage")
+        if not usage:
+            return
+        from .token_usage import UsageTotals, format_usage_line
+
+        totals = UsageTotals.from_dict(usage)
+        if totals.is_empty():
+            return
+        from rich.text import Text
+
+        from .display import get_console
+
+        line = f"Discovery cumulative: {format_usage_line(totals)}"
+        get_console().print(Text(line, style="dim"))
 
 
 class JsonSink(Sink):

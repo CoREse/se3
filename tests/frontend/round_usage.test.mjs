@@ -14,6 +14,11 @@
  *   (c) normalizeRecord exposes norm.tokenUsage from a record's token_usage.
  *   (d) discovery / confirm / no-result assistant render paths append the
  *       footnote when (and only when) the round carried usage.
+ *   (e) confirmation round (no LLM call) — assistant record with no token_usage
+ *       renders no per-round footnote; step-level cumulative on the discovery
+ *       report card still renders with all fields (in/out/cache/cost).
+ *   (f) multi-round cumulative with cache and cost — accumulateRoundUsageByStep
+ *       includes cache_read/cache_creation/cost in its running sum.
  */
 import assert from "node:assert/strict";
 
@@ -227,5 +232,111 @@ export function registerRoundUsageTests(ctx) {
     const wrap = document.createElement("div");
     wrap.appendChild(frag);
     assert.equal(findAll(wrap, "round-usage").length, 0);
+  });
+
+  // ---- (e) confirmation round: no LLM call → no per-round footnote ---------
+  //
+  // The programmatic confirmation round does not call the LLM, so the assistant
+  // record for that round carries no `token_usage`.  The per-round footnote
+  // must be absent, but the step-level cumulative (from prior discovery rounds)
+  // is still present on the step_completed report card.
+  check("G5 confirmation-round assistant record with no token_usage renders no footnote", () => {
+    // The confirmation round's assistant record has no LLM usage.
+    const norm = {
+      stepType: "discovery",
+      raw: { raw_json: null, raw_ndjson: null },
+      // tokenUsage is null/absent — the confirmation round made no LLM call.
+      tokenUsage: null,
+      cumulativeUsage: USAGE({ input_tokens: 3000, output_tokens: 800 }),
+    };
+    const frag = app.renderDiscoveryAssistant(discoveryResult, norm);
+    const wrap = document.createElement("div");
+    wrap.appendChild(frag);
+    assert.equal(findAll(wrap, "round-usage").length, 0,
+      "a confirmation round with no LLM call must not render a per-round footnote");
+  });
+
+  check("G5 step-level cumulative usage still renders on discovery report card after confirmation", () => {
+    // After confirmation, the step_completed event carries the cumulative
+    // token_usage across all discovery rounds. The report card footnote must
+    // still render even though the confirmation round itself had no LLM call.
+    const cumulativeUsage = USAGE({
+      input_tokens: 3000,
+      output_tokens: 800,
+      cache_read_input_tokens: 500,
+      cache_creation_input_tokens: 100,
+      total_cost_usd: 0.025,
+    });
+    const card = app.renderStepReport({
+      step_type: "discovery",
+      step_id: "01_discovery_a",
+      status: "completed",
+      outputs: {
+        refined_description: "Build a user feature",
+        token_usage: cumulativeUsage,
+      },
+    });
+    assert.ok(card, "expected a discovery report card");
+    const foot = findOne(card, "step-report__usage");
+    assert.ok(foot, "step-level cumulative footnote must render after confirmation");
+    const val = findOne(foot, "step-report__usage-value");
+    assert.ok(val, "expected a usage value span");
+    const text = val.textContent;
+    assert.ok(text.includes("in 3,000"), `expected cumulative input, got ${text}`);
+    assert.ok(text.includes("out 800"), `expected cumulative output, got ${text}`);
+    assert.ok(text.includes("cache r/w 500/100"), `expected cumulative cache, got ${text}`);
+    assert.ok(text.includes("$0.0250"), `expected cumulative cost, got ${text}`);
+  });
+
+  // ---- (f) multi-round cumulative: accumulateRoundUsageByStep ---------------
+  check("G5 accumulateRoundUsageByStep cumulative matches multi-round discovery total", () => {
+    // Three discovery rounds: round 1 and 2 carry usage (LLM calls),
+    // round 3 is the confirmation round with no LLM call (no token_usage).
+    // accumulateRoundUsageByStep returns null for usage-less records, so
+    // the confirmation round's position is null — the step-level cumulative
+    // (from step.outputs.token_usage) is the authoritative total, not the
+    // per-position running sum for usage-less rounds.
+    const records = [
+      asstUsage("01_discovery_a", USAGE({ input_tokens: 1000, output_tokens: 200 }),
+        "discovery", 1),
+      asstUsage("01_discovery_a", USAGE({ input_tokens: 2000, output_tokens: 600 }),
+        "discovery", 2),
+      // Round 3 (confirmation): no token_usage on the assistant record.
+      {
+        step_id: "01_discovery_a", step_type: "discovery",
+        message: { role: "assistant", content: "confirmed", timestamp: 3 },
+      },
+    ];
+    const cum = app.accumulateRoundUsageByStep(records);
+    assert.equal(cum.length, 3);
+    // Round 1 cumulative: 1000 in, 200 out.
+    assert.equal(cum[0].input_tokens, 1000);
+    assert.equal(cum[0].output_tokens, 200);
+    // Round 2 cumulative: 1000+2000=3000 in, 200+600=800 out.
+    assert.equal(cum[1].input_tokens, 3000);
+    assert.equal(cum[1].output_tokens, 800);
+    // Round 3 (confirmation, no LLM call): null — the per-round running sum
+    // is undefined for usage-less rounds. The step-level cumulative is on
+    // step.outputs.token_usage, tested separately in token_usage.test.mjs.
+    assert.equal(cum[2], null);
+  });
+
+  check("G5 accumulateRoundUsageByStep includes cache and cost in running sum", () => {
+    const records = [
+      asstUsage("01_discovery_a", USAGE({
+        input_tokens: 1000, output_tokens: 200,
+        cache_read_input_tokens: 300, cache_creation_input_tokens: 50,
+        total_cost_usd: 0.01,
+      }), "discovery", 1),
+      asstUsage("01_discovery_a", USAGE({
+        input_tokens: 2000, output_tokens: 600,
+        cache_read_input_tokens: 200, cache_creation_input_tokens: 100,
+        total_cost_usd: 0.02,
+      }), "discovery", 2),
+    ];
+    const cum = app.accumulateRoundUsageByStep(records);
+    assert.equal(cum[1].cache_read_input_tokens, 500);
+    assert.equal(cum[1].cache_creation_input_tokens, 150);
+    assert.ok(Math.abs(cum[1].total_cost_usd - 0.03) < 1e-9);
   });
 }
