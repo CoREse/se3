@@ -4520,4 +4520,97 @@ check("spec_gate has a header title", () => {
   assert.equal(app.stepHeaderLabel("spec_gate", "01_spec_gate_x"), "SPEC GATE");
 });
 
+// -- Agent/model badge (G1) ---------------------------------------------------
+
+check("formatAgentBadgeText with both agent and model", () => {
+  assert.equal(app.formatAgentBadgeText("dclaude", "claude-opus-4-8"), "dclaude · claude-opus-4-8");
+});
+
+check("formatAgentBadgeText with agent only", () => {
+  assert.equal(app.formatAgentBadgeText("dclaude", null), "dclaude");
+  assert.equal(app.formatAgentBadgeText("dclaude", undefined), "dclaude");
+  assert.equal(app.formatAgentBadgeText("dclaude", ""), "dclaude");
+});
+
+check("formatAgentBadgeText with no agent returns null", () => {
+  assert.equal(app.formatAgentBadgeText(null, "claude-opus-4-8"), null);
+  assert.equal(app.formatAgentBadgeText(undefined, "claude-opus-4-8"), null);
+  assert.equal(app.formatAgentBadgeText("", "claude-opus-4-8"), null);
+  assert.equal(app.formatAgentBadgeText(null, null), null);
+});
+
+check("normalizeRecord exposes agentName and modelName from message", () => {
+  const norm = app.normalizeRecord({
+    message: {
+      role: "assistant",
+      content: "response",
+      agent_name: "dclaude",
+      model_name: "claude-opus-4-8",
+    },
+  });
+  assert.equal(norm.agentName, "dclaude");
+  assert.equal(norm.modelName, "claude-opus-4-8");
+});
+
+check("normalizeRecord exposes agentName from envelope when message lacks it", () => {
+  const norm = app.normalizeRecord({
+    agent_name: "kclaude",
+    message: {
+      role: "assistant",
+      content: "response",
+    },
+  });
+  assert.equal(norm.agentName, "kclaude");
+});
+
+check("normalizeRecord returns null agentName/modelName when absent", () => {
+  const norm = app.normalizeRecord({
+    message: {
+      role: "assistant",
+      content: "response",
+    },
+  });
+  assert.equal(norm.agentName, null);
+  assert.equal(norm.modelName, null);
+});
+
+check("normalizeRecord ignores non-string agentName", () => {
+  const norm = app.normalizeRecord({
+    message: {
+      role: "assistant",
+      content: "response",
+      agent_name: 42,
+    },
+  });
+  assert.equal(norm.agentName, null);
+});
+
+check("renderAgentBadge returns null when agentName is absent", () => {
+  const norm = { role: "assistant", content: "hi", agentName: null, modelName: null };
+  const badge = app.renderAgentBadge(norm);
+  assert.equal(badge, null);
+});
+
+check("renderAgentBadge returns null for empty norm", () => {
+  const badge = app.renderAgentBadge(null);
+  assert.equal(badge, null);
+  const badge2 = app.renderAgentBadge(undefined);
+  assert.equal(badge2, null);
+});
+
+check("old jsonl without agent fields backward compatible", () => {
+  // Simulating an old record that predates agent_name/model_name fields.
+  // normalizeRecord should handle it without errors and not display a badge.
+  const norm = app.normalizeRecord({
+    message: {
+      role: "assistant",
+      content: "some old response",
+    },
+  });
+  assert.equal(norm.agentName, null);
+  assert.equal(norm.modelName, null);
+  // Badge rendering should be null (no placeholder).
+  assert.equal(app.renderAgentBadge(norm), null);
+});
+
 console.log(`\n${passed} checks passed.`);

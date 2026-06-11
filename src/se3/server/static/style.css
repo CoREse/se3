@@ -360,6 +360,27 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   word-break: break-word;
 }
 
+/* -- agent/model badge --------------------------------------------- */
+/*
+ * A small, unobtrusive badge at the top of assistant conversation bubbles
+ * showing which agent produced the response. Displays "agentName · modelName"
+ * when both are present, or just "agentName" when only the agent is known.
+ * Shown ONLY when the record carries an agent_name field — old records
+ * without this field render nothing, no placeholder.
+ */
+.agent-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--bg-alt, #f0f0f0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.4;
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
 @media (max-width: 720px) {
   .flow-view-body {
     grid-template-columns: 1fr;

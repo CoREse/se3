@@ -1652,7 +1652,7 @@ class TestCallWithRetryDedup:
         call_count = [0]
         recorded_prompts = []
 
-        def fake_record_prompt(prompt_text, attempt):
+        def fake_record_prompt(prompt_text, attempt, **kwargs):
             recorded_prompts.append(prompt_text)
 
         def fake_get_retry_context():

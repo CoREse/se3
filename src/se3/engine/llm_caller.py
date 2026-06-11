@@ -1255,8 +1255,14 @@ class LLMCaller:
         }
         return json.dumps(message, ensure_ascii=False)
 
-    def _record_prompt(self, prompt: str, attempt: int) -> None:
-        """Record a prompt to chat history if flow context is available."""
+    def _record_prompt(self, prompt: str, attempt: int, agent_name: Optional[str] = None) -> None:
+        """Record a prompt to chat history if flow context is available.
+
+        ``agent_name`` (default None) records the configuration name of the
+        agent that will handle this prompt. Failures inside record_prompt are
+        caught and debug-logged so metadata recording never disrupts the LLM
+        call.
+        """
         if not self.flow_id or not self.step_id:
             return
         try:
@@ -1265,12 +1271,19 @@ class LLMCaller:
                 self.project_root, self.flow_id, self.step_id,
                 self.step_type, prompt, attempt,
                 fix_iteration=self.fix_iteration,
+                agent_name=agent_name,
             )
         except Exception as e:
             logger.debug(f"Failed to record prompt to history: {e}")
 
-    def _record_response(self, raw_ndjson: str, attempt: int) -> None:
-        """Record an LLM response to chat history if flow context is available."""
+    def _record_response(self, raw_ndjson: str, attempt: int, agent_name: Optional[str] = None) -> None:
+        """Record an LLM response to chat history if flow context is available.
+
+        ``agent_name`` (default None) records the configuration name of the
+        agent that produced this response. Best-effort model extraction is
+        handled inside ``record_response`` itself. Failures are caught and
+        debug-logged so metadata recording never disrupts the LLM call.
+        """
         if not self.flow_id or not self.step_id:
             return
         try:
@@ -1279,6 +1292,7 @@ class LLMCaller:
                 self.project_root, self.flow_id, self.step_id,
                 self.step_type, raw_ndjson, attempt,
                 fix_iteration=self.fix_iteration,
+                agent_name=agent_name,
             )
         except Exception as e:
             logger.debug(f"Failed to record response to history: {e}")
@@ -1328,6 +1342,12 @@ class LLMCaller:
         for internal_attempt in range(self.max_retries):
             is_retry = self.external_attempt > 0 or internal_attempt > 0
 
+            # Snapshot the current agent name at the start of this attempt.
+            # This captures the agent BEFORE any rotation that might occur
+            # during this attempt's failure path, so both prompt and response
+            # records for this attempt carry the same agent attribution.
+            attempt_agent_name = self._agents[self._current_agent_index].get("name", "?")
+
             # On retry (either external or internal), inject previous conversation context
             if is_retry:
                 retry_context = self._get_retry_context()
@@ -1372,7 +1392,7 @@ class LLMCaller:
             # as a user message and re-embed it inside a fresh retry-context, producing
             # second-order recursive bloat across attempts. Recording original_prompt keeps
             # the persistent record clean — the retry-context is rebuilt from history each call.
-            self._record_prompt(original_prompt, self.external_attempt)
+            self._record_prompt(original_prompt, self.external_attempt, agent_name=attempt_agent_name)
 
             try:
                 current_runner = self._get_current_runner()
@@ -1463,7 +1483,7 @@ class LLMCaller:
                     add_call_usage(stream_tracker.usage)
 
                 # Record the response (whether success, failure, or interrupted)
-                self._record_response(result.output or "", self.external_attempt)
+                self._record_response(result.output or "", self.external_attempt, agent_name=attempt_agent_name)
 
                 # Extract the type: "result" message's text for callers that
                 # need the full LLM output (e.g. discovery multi-turn context)
@@ -1489,7 +1509,7 @@ class LLMCaller:
                             json_prompt = self._create_json_retry_prompt(prompt, result.output)
                             # Record the JSON retry prompt too (use a distinct attempt number for JSON retries)
                             json_attempt = self.external_attempt * 100 + json_retry_count  # Distinguish JSON retries
-                            self._record_prompt(json_prompt, json_attempt)
+                            self._record_prompt(json_prompt, json_attempt, agent_name=attempt_agent_name)
                             # Increment external_attempt to ensure retry context is injected
                             # This is crucial because JSON retry needs the previous conversation context
                             # (including tool calls/results) to avoid re-reading files

@@ -10,6 +10,7 @@ import pytest
 from se3.engine.chat_history import (
     ChatMessage,
     ChatSession,
+    _extract_model_from_ndjson,
     _fold_base_spec,
     _fold_raw_spec,
     _fold_spec_subsections,
@@ -97,6 +98,155 @@ class TestChatMessage:
         assert d["raw_json"] == raw_dict
         msg2 = ChatMessage.from_dict(d)
         assert msg2.raw_json == raw_dict
+
+    def test_agent_name_roundtrip(self):
+        """agent_name should serialize and deserialize correctly."""
+        msg = ChatMessage(
+            role="assistant",
+            content="Response",
+            raw_json=[],
+            timestamp="2026-01-01T00:00:00",
+            step_type="analyze",
+            attempt=0,
+            agent_name="dclaude",
+        )
+        d = msg.to_dict()
+        assert d["agent_name"] == "dclaude"
+        msg2 = ChatMessage.from_dict(d)
+        assert msg2.agent_name == "dclaude"
+
+    def test_model_name_roundtrip(self):
+        """model_name should serialize and deserialize correctly."""
+        msg = ChatMessage(
+            role="assistant",
+            content="Response",
+            raw_json=[],
+            timestamp="2026-01-01T00:00:00",
+            step_type="analyze",
+            attempt=0,
+            model_name="claude-opus-4-8",
+        )
+        d = msg.to_dict()
+        assert d["model_name"] == "claude-opus-4-8"
+        msg2 = ChatMessage.from_dict(d)
+        assert msg2.model_name == "claude-opus-4-8"
+
+    def test_agent_and_model_both_present(self):
+        """Both fields together should serialize and roundtrip."""
+        msg = ChatMessage(
+            role="assistant",
+            content="Response",
+            raw_json=[],
+            timestamp="2026-01-01T00:00:00",
+            step_type="analyze",
+            attempt=0,
+            agent_name="dclaude",
+            model_name="claude-opus-4-8",
+        )
+        d = msg.to_dict()
+        assert d["agent_name"] == "dclaude"
+        assert d["model_name"] == "claude-opus-4-8"
+        msg2 = ChatMessage.from_dict(d)
+        assert msg2.agent_name == "dclaude"
+        assert msg2.model_name == "claude-opus-4-8"
+
+    def test_none_fields_omitted_from_dict(self):
+        """None agent_name/model_name should NOT appear in to_dict."""
+        msg = ChatMessage(
+            role="assistant",
+            content="Response",
+            raw_json=[],
+            timestamp="2026-01-01T00:00:00",
+            step_type="analyze",
+            attempt=0,
+        )
+        d = msg.to_dict()
+        assert "agent_name" not in d
+        assert "model_name" not in d
+
+    def test_old_jsonl_without_new_fields(self):
+        """from_dict should accept dicts missing agent_name/model_name."""
+        d = {
+            "role": "assistant",
+            "content": "Response text",
+            "raw_json": [],
+            "timestamp": "2026-01-01T00:00:00",
+            "step_type": "plan",
+            "attempt": 1,
+        }
+        msg = ChatMessage.from_dict(d)
+        assert msg.role == "assistant"
+        assert msg.agent_name is None
+        assert msg.model_name is None
+
+
+# --- NDJSON model extraction ---
+
+
+class TestExtractModelFromNdjson:
+    """Tests for _extract_model_from_ndjson (best-effort model parsing)."""
+
+    def test_init_with_top_level_model(self):
+        """type='init' with top-level 'model' key should extract model."""
+        ndjson = json.dumps({"type": "init", "model": "claude-opus-4-8"})
+        assert _extract_model_from_ndjson(ndjson) == "claude-opus-4-8"
+
+    def test_system_with_top_level_model(self):
+        """type='system' with top-level 'model' key should extract model."""
+        ndjson = json.dumps({"type": "system", "model": "claude-sonnet-4-6"})
+        assert _extract_model_from_ndjson(ndjson) == "claude-sonnet-4-6"
+
+    def test_init_with_nested_session_model(self):
+        """type='init' with session.model should extract model."""
+        ndjson = json.dumps({
+            "type": "init",
+            "session": {"model": "claude-opus-4-8"},
+        })
+        assert _extract_model_from_ndjson(ndjson) == "claude-opus-4-8"
+
+    def test_init_with_empty_model_returns_none(self):
+        """Empty string model should return None."""
+        ndjson = json.dumps({"type": "init", "model": ""})
+        assert _extract_model_from_ndjson(ndjson) is None
+
+    def test_init_with_missing_model_returns_none(self):
+        """init without model field should return None."""
+        ndjson = json.dumps({"type": "init", "session_id": "abc"})
+        assert _extract_model_from_ndjson(ndjson) is None
+
+    def test_no_init_or_system_returns_none(self):
+        """Stream with no init/system messages should return None."""
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hello"}]},
+        })
+        assert _extract_model_from_ndjson(ndjson) is None
+
+    def test_empty_input_returns_none(self):
+        assert _extract_model_from_ndjson("") is None
+        assert _extract_model_from_ndjson("  ") is None
+
+    def test_list_input(self):
+        """Pre-parsed list[dict] input should work."""
+        items = [{"type": "init", "model": "claude-opus-4-8"}]
+        assert _extract_model_from_ndjson(items) == "claude-opus-4-8"
+
+    def test_malformed_json_ignored(self):
+        """Malformed lines should be silently skipped."""
+        ndjson = "not json\n" + json.dumps({"type": "init", "model": "claude-opus-4-8"})
+        assert _extract_model_from_ndjson(ndjson) == "claude-opus-4-8"
+
+    def test_non_dict_items_skipped(self):
+        """Non-dict JSON items should be skipped."""
+        ndjson = json.dumps([1, 2, 3]) + "\n" + json.dumps({"type": "init", "model": "gpt-4"})
+        assert _extract_model_from_ndjson(ndjson) == "gpt-4"
+
+    def test_first_init_wins(self):
+        """First init/system with a model should be returned."""
+        line1 = json.dumps({"type": "init", "model": "claude-opus-4-8"})
+        line2 = json.dumps({"type": "init", "model": "claude-sonnet-4-6"})
+        ndjson = line1 + "\n" + line2
+        assert _extract_model_from_ndjson(ndjson) == "claude-opus-4-8"
 
 
 # --- NDJSON parsing ---
@@ -381,8 +531,49 @@ class TestRecordAndRetrieve:
         # raw_json should still contain the valid parsed dict
         assert session.messages[0].raw_json == [ndjson_dict]
 
+    def test_record_prompt_with_agent_name(self, tmp_project):
+        """record_prompt should persist agent_name on the user message."""
+        record_prompt(tmp_project, "flow1", "step1", "analyze", "What is this?", 0, agent_name="dclaude")
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].agent_name == "dclaude"
+
+    def test_record_prompt_without_agent_name(self, tmp_project):
+        """record_prompt without agent_name should leave it None."""
+        record_prompt(tmp_project, "flow1", "step1", "analyze", "What is this?", 0)
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].agent_name is None
+
+    def test_record_response_with_agent_name_and_model(self, tmp_project):
+        """record_response should persist agent_name and model_name."""
+        init_line = json.dumps({"type": "init", "model": "claude-opus-4-8"})
+        assistant_line = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Response"}]},
+        })
+        ndjson = init_line + "\n" + assistant_line
+        record_response(tmp_project, "flow1", "step1", "analyze", ndjson, 0, agent_name="dclaude")
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].agent_name == "dclaude"
+        assert session.messages[0].model_name == "claude-opus-4-8"
+
+    def test_record_response_without_agent_name(self, tmp_project):
+        """record_response without agent_name should leave it None."""
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Response"}]},
+        })
+        record_response(tmp_project, "flow1", "step1", "analyze", ndjson, 0)
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].agent_name is None
+        assert session.messages[0].model_name is None
+
 
 # --- Per-call token usage capture ---
+
 
 class TestParseUsageFromNdjson:
     def test_nested_message_usage(self):

@@ -76,6 +76,19 @@ class ChatMessage:
     # :meth:`to_dict`) so legacy jsonl readers and user records stay
     # byte-identical to the pre-extension schema.
     token_usage: Optional[dict] = None
+    # Optional agent name that produced this message. Set by
+    # :func:`record_prompt` / :func:`record_response` from
+    # ``LLMCaller._call_with_retry``'s current agent snapshot (e.g.
+    # "dclaude", "claude", "kclaude"). ``None`` for records predating this
+    # field (backward-compatible: ``from_dict`` silently ignores the missing
+    # key, and ``to_dict`` omits it so on-disk jsonl stays unchanged).
+    agent_name: Optional[str] = None
+    # Optional actual model name (e.g. "claude-opus-4-8") extracted
+    # best-effort from the response NDJSON's init/system message metadata.
+    # ``None`` when no model info can be parsed (unknown stream format,
+    # damaged NDJSON, or user prompts). Omitted from serialization when
+    # ``None``.
+    model_name: Optional[str] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -84,6 +97,12 @@ class ChatMessage:
         # field existed (backward-compatible on-disk schema).
         if data.get("token_usage") is None:
             data.pop("token_usage", None)
+        # Drop the optional agent/model metadata fields when absent so
+        # legacy records serialize identically to before these fields existed.
+        if data.get("agent_name") is None:
+            data.pop("agent_name", None)
+        if data.get("model_name") is None:
+            data.pop("model_name", None)
         return data
 
     @classmethod
@@ -119,6 +138,7 @@ def record_prompt(
     prompt: str,
     attempt: int,
     fix_iteration: int = 0,
+    agent_name: Optional[str] = None,
 ) -> None:
     """Record a user prompt sent to the LLM.
 
@@ -126,6 +146,10 @@ def record_prompt(
     fix-loop iteration so retry-context construction can filter messages
     by iteration boundary. Default 0 keeps the API backward-compatible
     for non-fix-loop callers.
+
+    ``agent_name`` (default None) records the configuration name of the
+    agent that will handle this prompt (e.g. "dclaude", "claude"). Omitted
+    from serialization when None so legacy records stay unchanged.
     """
     msg = ChatMessage(
         role="user",
@@ -135,6 +159,7 @@ def record_prompt(
         step_type=step_type,
         attempt=attempt,
         fix_iteration=fix_iteration,
+        agent_name=agent_name,
     )
     _append_message(project_root, flow_id, step_id, msg)
 
@@ -147,10 +172,17 @@ def record_response(
     raw_ndjson: str,
     attempt: int,
     fix_iteration: int = 0,
+    agent_name: Optional[str] = None,
 ) -> None:
     """Record an LLM response (raw NDJSON output).
 
     See :func:`record_prompt` for the ``fix_iteration`` semantics.
+
+    ``agent_name`` (default None) records the configuration name of the
+    agent that produced this response. Best-effort model extraction from
+    the NDJSON's init/system metadata is also applied; if no model name
+    can be parsed, ``model_name`` stays ``None`` and is omitted from
+    serialization.
     """
     text = extract_assistant_text(raw_ndjson)
     # Parse NDJSON string into list of dicts for storage
@@ -171,6 +203,11 @@ def record_response(
     # cumulative sum. Empty (no result line / no usage) → leave the field unset
     # so the on-disk record stays backward-compatible.
     usage = parse_usage_from_ndjson(raw_ndjson)
+    # Best-effort model name extraction from init/system metadata in the
+    # NDJSON stream. Failures are swallowed — the model field stays None and
+    # is omitted from serialization, so a stream with no model info does not
+    # break anything.
+    model_name = _extract_model_from_ndjson(raw_ndjson if raw_ndjson else "")
     msg = ChatMessage(
         role="assistant",
         content=text,
@@ -180,6 +217,8 @@ def record_response(
         attempt=attempt,
         fix_iteration=fix_iteration,
         token_usage=usage or None,
+        agent_name=agent_name,
+        model_name=model_name or None,
     )
     _append_message(project_root, flow_id, step_id, msg)
 
@@ -1084,6 +1123,62 @@ def parse_usage_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> dict:
         return {}
 
     return {}
+
+
+def _extract_model_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> Optional[str]:
+    """Best-effort extraction of the actual model name from a stream-json NDJSON.
+
+    Scans for the ``type == "init"`` / ``type == "system"`` metadata lines
+    that some agent runners emit at the start of the stream. Known shapes:
+
+    - ``{"type": "init", "model": "<model-name>"}`` (Claude Code CLI)
+    - ``{"type": "system", "model": "<model-name>"}`` (alternate header)
+    - ``{"type": "init", "session": {"model": "<model-name>"}}``
+
+    Returns the extracted model string (e.g. "claude-opus-4-8") on the first
+    match, ``None`` when no known shape is found or parsing fails. Pure
+    function — no side effects, no exceptions raised on malformed input.
+    """
+    if not raw_ndjson:
+        return None
+
+    try:
+        # Normalize to an iterable of parsed dicts.
+        if isinstance(raw_ndjson, list):
+            items = raw_ndjson
+        else:
+            items = []
+            for line in raw_ndjson.strip().split("\n"):
+                line = line.strip()
+                if not line or line.startswith("==="):
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(parsed, dict):
+                    items.append(parsed)
+
+        for data in items:
+            if not isinstance(data, dict):
+                continue
+            msg_type = data.get("type", "")
+            if msg_type not in ("init", "system"):
+                continue
+            # Shape 1: top-level "model" key
+            model = data.get("model")
+            if isinstance(model, str) and model:
+                return model
+            # Shape 2: nested "session.model"
+            session = data.get("session")
+            if isinstance(session, dict):
+                model = session.get("model")
+                if isinstance(model, str) and model:
+                    return model
+        return None
+    except Exception:  # pragma: no cover — defensive; never raise
+        logger.debug("Failed to extract model from ndjson", exc_info=True)
+        return None
 
 
 def extract_assistant_text(raw_ndjson: str) -> str:

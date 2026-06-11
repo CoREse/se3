@@ -352,3 +352,122 @@ class TestSingleAgentScenario:
         assert result == "ok"
         # Single agent can't rotate; fallthrough retries on same agent.
         assert caller._current_agent_index == 0
+
+
+class TestAgentAttributionInHistory:
+    """Test that LLMCaller records the agent name in chat history.
+
+    Verifies that _record_prompt and _record_response receive the agent name
+    of the current attempt's agent, and that rotation assigns distinct names
+    to different attempts.
+    """
+
+    def test_record_prompt_gets_agent_name(self, tmp_path):
+        """_record_prompt should receive the first agent's name."""
+        caller = LLMCaller(
+            project_root=tmp_path,
+            agents=TWO_AGENTS,
+            flow_id="flow1",
+            step_id="step1",
+            step_type="analyze",
+        )
+        caller._record_prompt("test prompt", 0, agent_name="agent-a")
+        from se3.engine.chat_history import get_step_history
+        session = get_step_history(tmp_path, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].agent_name == "agent-a"
+
+    def test_record_response_gets_agent_name(self, tmp_path):
+        """_record_response should receive the agent name."""
+        caller = LLMCaller(
+            project_root=tmp_path,
+            agents=TWO_AGENTS,
+            flow_id="flow1",
+            step_id="step1",
+            step_type="analyze",
+        )
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "response"}]},
+        })
+        caller._record_response(ndjson, 0, agent_name="agent-a")
+        from se3.engine.chat_history import get_step_history
+        session = get_step_history(tmp_path, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].agent_name == "agent-a"
+
+    def test_rotation_records_different_agent_names(self, tmp_path):
+        """After rotation, the new attempt should record the new agent name."""
+        caller = LLMCaller(
+            project_root=tmp_path,
+            agents=TWO_AGENTS,
+            flow_id="flow1",
+            step_id="step1",
+            step_type="analyze",
+        )
+        # First attempt: agent-a
+        caller._record_prompt("prompt 1", 0, agent_name="agent-a")
+        caller._record_response("", 0, agent_name="agent-a")
+        # Rotate to agent-b
+        caller._rotate_agent()
+        # Second attempt: agent-b
+        caller._record_prompt("prompt 2", 1, agent_name="agent-b")
+        caller._record_response("", 1, agent_name="agent-b")
+        from se3.engine.chat_history import get_step_history
+        session = get_step_history(tmp_path, "flow1", "step1")
+        assert session is not None
+        # Check that the first attempt's prompt has agent-a
+        assert session.messages[0].agent_name == "agent-a"
+        # The second attempt's prompt has agent-b
+        assert session.messages[2].agent_name == "agent-b"
+
+    def test_record_failure_does_not_block_call(self, tmp_path):
+        """If recording fails, the LLM call should still proceed."""
+        caller = LLMCaller(
+            project_root=tmp_path,
+            agents=TWO_AGENTS,
+            flow_id="flow1",
+            step_id="step1",
+            step_type="analyze",
+        )
+        # Recording with an invalid path would fail internally, but it's
+        # caught and debug-logged — call should not raise.
+        caller._record_prompt("prompt", 0, agent_name="agent-a")
+        # No assertion on the history content, just that the call didn't raise
+
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    def test_call_with_retry_passes_agent_name(self, MockRunner, tmp_path):
+        """_call_with_retry should snapshot agent name and pass it to
+        _record_prompt and _record_response."""
+        mock_runner = MagicMock()
+        mock_runner.run_with_monitor.return_value = _make_success_result(
+            output=json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "result"}]},
+            })
+        )
+        mock_runner.detect_infra_error.return_value = InfraErrorType.NONE
+        MockRunner.return_value = mock_runner
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            agents=TWO_AGENTS,
+            flow_id="flow1",
+            step_id="step1",
+            step_type="analyze",
+            retry_delay=0.01,
+        )
+        result = caller.call(prompt="test", on_output=lambda x: None)
+
+        # Verify the history contains the agent name
+        from se3.engine.chat_history import get_step_history
+        session = get_step_history(tmp_path, "flow1", "step1")
+        assert session is not None
+        # The prompt should carry the first agent's name
+        user_msgs = [m for m in session.messages if m.role == "user"]
+        assert len(user_msgs) >= 1
+        assert user_msgs[0].agent_name == "agent-a"
+        # The response should also carry the first agent's name
+        assistant_msgs = [m for m in session.messages if m.role == "assistant"]
+        assert len(assistant_msgs) >= 1
+        assert assistant_msgs[0].agent_name == "agent-a"

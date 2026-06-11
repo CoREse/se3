@@ -3473,6 +3473,7 @@ function normalizeRecord(rec) {
     return {
       role: "log", content: rec == null ? "" : String(rec),
       timestamp: null, stepType: "", stepId: "", raw: null, attempt: null,
+      agentName: null, modelName: null,
     };
   }
   const msg = (rec.message && typeof rec.message === "object") ? rec.message : rec;
@@ -3530,6 +3531,7 @@ function normalizeRecord(rec) {
       stepReport: stepReport,
       raw: { raw_json: [msg], raw_ndjson: null },
       attempt: null,
+      agentName: null, modelName: null,
     };
   }
 
@@ -3557,6 +3559,7 @@ function normalizeRecord(rec) {
       stepId: pick("step_id") || "",
       raw: { raw_json: [msg], raw_ndjson: pick("raw_ndjson") },
       attempt: null,
+      agentName: null, modelName: null,
     };
   }
 
@@ -3618,6 +3621,15 @@ function normalizeRecord(rec) {
   const tokenUsage =
     tokenUsageRaw && typeof tokenUsageRaw === "object" ? tokenUsageRaw : null;
 
+  // Agent/model metadata: record_prompt / record_response attach optional
+  // `agent_name` (the configured runner name, e.g. "dclaude") and
+  // `model_name` (the actual model parsed from NDJSON init/system metadata,
+  // e.g. "claude-opus-4-8"). The daemon forwards them inside the `message`
+  // envelope verbatim. Null for records predating these fields (backward-
+  // compatible). Only displayed when present — no placeholder for missing data.
+  const agentName = typeof pick("agent_name") === "string" && pick("agent_name") ? pick("agent_name") : null;
+  const modelName = typeof pick("model_name") === "string" && pick("model_name") ? pick("model_name") : null;
+
   return {
     role: role,
     content: content,
@@ -3625,6 +3637,8 @@ function normalizeRecord(rec) {
     stepType: pickStepType(),
     stepId: pick("step_id") || "",
     tokenUsage: tokenUsage,
+    agentName: agentName,
+    modelName: modelName,
     // `envelope` carries the record's original .jsonl envelope ({step_id,
     // step_type, message} — the JSON envelope of the standardized persistence
     // layer). It is the stable data source for the user side's Layer-3 "查看原始"
@@ -6299,6 +6313,29 @@ function isPlainOutputsDict(value) {
   return false;
 }
 
+// --- Agent/model badge --------------------------------------------------------
+//
+// Renders a small badge at the top of an assistant bubble (or step report card)
+// showing the agent name and, when available, the model name. The badge is
+// shown ONLY when `norm.agentName` is a non-empty string — old records or
+// records without the field render nothing, no placeholder. When both
+// `agentName` and `modelName` are present, the badge shows
+// "agentName · modelName"; otherwise just "agentName".
+function renderAgentBadge(norm) {
+  if (!norm || !norm.agentName) return null;
+  const badge = el("span", "agent-badge");
+  badge.textContent = norm.modelName
+    ? `${norm.agentName} · ${norm.modelName}`
+    : norm.agentName;
+  return badge;
+}
+
+// Pure helper to compute the badge text — exported for testing.
+function formatAgentBadgeText(agentName, modelName) {
+  if (!agentName) return null;
+  return modelName ? `${agentName} · ${modelName}` : agentName;
+}
+
 function renderAssistantBubble(content, norm) {
   const frag = document.createDocumentFragment();
   const stepType = String(norm.stepType || "").toLowerCase();
@@ -6425,6 +6462,13 @@ function renderConversationRecord(norm) {
   // reader expands it.
   const buildBubble = () => {
     const bubble = el("div", "conv-bubble");
+    // Agent/model badge: shown only on assistant bubbles when agentName is
+    // present. Prepend it at the top so it appears above the bubble content.
+    // No placeholder when the field is absent (backward-compatible).
+    if (role === "assistant") {
+      const badge = renderAgentBadge(norm);
+      if (badge) bubble.appendChild(badge);
+    }
     if (!content) {
       bubble.appendChild(
         el("p", "md-p conv-empty", "(no readable content for this record)"));
@@ -8975,6 +9019,10 @@ if (typeof module !== "undefined" && module.exports) {
     // WeChat-style auto-grow reply textarea clamp — exposed for the DOM-free
     // tests in tests/frontend/mobile_responsive.test.mjs.
     replyTextareaHeight,
+    // Agent/model badge (G1) — exposed for the DOM-free tests in
+    // tests/frontend/test_app_pure.mjs.
+    formatAgentBadgeText,
+    renderAgentBadge,
     state,
   };
 }
