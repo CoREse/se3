@@ -52,8 +52,10 @@ def _status_color(status: IssueStatus) -> str:
     }.get(status, "white")
 
 
-def _priority_color(priority: str) -> str:
+def _priority_color(priority: Optional[str]) -> str:
     """Get color for priority."""
+    if not priority:
+        return "white"
     return {
         "critical": "red bold",
         "high": "red",
@@ -62,8 +64,10 @@ def _priority_color(priority: str) -> str:
     }.get(priority.lower(), "white")
 
 
-def _type_color(issue_type: str) -> str:
+def _type_color(issue_type: Optional[str]) -> str:
     """Get color for issue type."""
+    if not issue_type:
+        return "white"
     return {
         "bug": "red",
         "feature": "green",
@@ -119,16 +123,18 @@ def list_cmd(
         pc = _priority_color(issue.priority)
         tc = _type_color(issue.type)
         tags_str = ", ".join(issue.tags) if issue.tags else ""
-        title_str = issue.title
+        title_str = issue.display_title
         if len(title_str) > 50:
             title_str = title_str[:50] + "..."
+        priority_str = issue.priority or "-"
+        type_str = issue.type or "-"
 
         table.add_row(
             issue.id,
             title_str,
-            f"[{tc}]{issue.type}[/{tc}]",
+            f"[{tc}]{type_str}[/{tc}]",
             f"[{sc}]{issue.status.value}[/{sc}]",
-            f"[{pc}]{issue.priority}[/{pc}]",
+            f"[{pc}]{priority_str}[/{pc}]",
             tags_str,
             _format_datetime(issue.created_at),
         )
@@ -153,12 +159,14 @@ def show_cmd(
     pc = _priority_color(issue.priority)
     tc = _type_color(issue.type)
     tags_str = ", ".join(issue.tags) if issue.tags else "none"
+    priority_str = issue.priority or "-"
+    type_str = issue.type or "-"
 
     content = (
-        f"[bold]Title:[/bold] {issue.title}\n"
-        f"[bold]Type:[/bold] [{tc}]{issue.type}[/{tc}]\n"
+        f"[bold]Title:[/bold] {issue.display_title}\n"
+        f"[bold]Type:[/bold] [{tc}]{type_str}[/{tc}]\n"
         f"[bold]Status:[/bold] [{sc}]{issue.status.value}[/{sc}]\n"
-        f"[bold]Priority:[/bold] [{pc}]{issue.priority}[/{pc}]\n"
+        f"[bold]Priority:[/bold] [{pc}]{priority_str}[/{pc}]\n"
         f"[bold]Tags:[/bold] {tags_str}\n"
         f"[bold]Created:[/bold] {_format_datetime(issue.created_at)}\n"
         f"[bold]Updated:[/bold] {_format_datetime(issue.updated_at)}\n"
@@ -248,9 +256,14 @@ def create_cmd():
     tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
 
     issue = mgr.create(
-        title=title, description=description, priority=priority, tags=tags, type=issue_type
+        description=description,
+        title=title,
+        priority=priority,
+        tags=tags,
+        type=issue_type,
+        source="human",
     )
-    typer.echo(f"Created issue {issue.id}: {issue.title}")
+    typer.echo(f"Created issue {issue.id}: {issue.display_title}")
 
 
 @app.command(name="reset")

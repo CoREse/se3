@@ -43,8 +43,8 @@ class TestListCommand:
         assert "No" in result.output and "issues" in result.output
 
     def test_list_with_issues(self, project_dir, issue_mgr):
-        issue_mgr.create("Bug A", "desc A")
-        issue_mgr.create("Bug B", "desc B")
+        issue_mgr.create("desc A", title="Bug A")
+        issue_mgr.create("desc B", title="Bug B")
 
         result = _run_cmd(["list"], project_dir)
         assert result.exit_code == 0
@@ -52,8 +52,8 @@ class TestListCommand:
         assert "Bug B" in result.output
 
     def test_list_excludes_closed_by_default(self, project_dir, issue_mgr):
-        issue_mgr.create("Open one", "d")
-        issue_mgr.create("Closed one", "d")
+        issue_mgr.create("d", title="Open one")
+        issue_mgr.create("d", title="Closed one")
         issue_mgr.update_status("002", IssueStatus.WONT_FIX)
 
         result = _run_cmd(["list"], project_dir)
@@ -62,8 +62,8 @@ class TestListCommand:
         assert "Closed one" not in result.output
 
     def test_list_all_includes_closed(self, project_dir, issue_mgr):
-        issue_mgr.create("Open one", "d")
-        issue_mgr.create("Closed one", "d")
+        issue_mgr.create("d", title="Open one")
+        issue_mgr.create("d", title="Closed one")
         issue_mgr.update_status("002", IssueStatus.WONT_FIX)
 
         result = _run_cmd(["list", "--all"], project_dir)
@@ -74,7 +74,7 @@ class TestListCommand:
 
 class TestShowCommand:
     def test_show_existing(self, project_dir, issue_mgr):
-        issue_mgr.create("Show me", "Detailed description here")
+        issue_mgr.create("Detailed description here", title="Show me")
 
         result = _run_cmd(["show", "001"], project_dir)
         assert result.exit_code == 0
@@ -212,7 +212,7 @@ class TestPromptField:
 
 class TestResetCommand:
     def test_reset_in_progress(self, project_dir, issue_mgr):
-        issue_mgr.create("Stuck issue", "d")
+        issue_mgr.create("d", title="Stuck issue")
         issue_mgr.update_status("001", IssueStatus.IN_PROGRESS)
 
         result = _run_cmd(["reset", "001"], project_dir)
@@ -220,7 +220,7 @@ class TestResetCommand:
         assert "reset to open" in result.output
 
     def test_reset_non_in_progress(self, project_dir, issue_mgr):
-        issue_mgr.create("Open issue", "d")
+        issue_mgr.create("d", title="Open issue")
 
         result = _run_cmd(["reset", "001"], project_dir)
         assert result.exit_code == 1
@@ -234,7 +234,7 @@ class TestResetCommand:
 
 class TestDefaultCommand:
     def test_no_subcommand_lists_issues(self, project_dir, issue_mgr):
-        issue_mgr.create("Default list", "d")
+        issue_mgr.create("d", title="Default list")
 
         result = _run_cmd([], project_dir)
         assert result.exit_code == 0

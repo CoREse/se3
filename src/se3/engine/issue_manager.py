@@ -38,37 +38,68 @@ class Issue:
     """A single issue record."""
 
     id: str
-    title: str
-    description: str
+    title: Optional[str] = None
+    description: str = ""
     status: IssueStatus = IssueStatus.OPEN
-    priority: str = "medium"
+    priority: Optional[str] = None
     scope: str = "in_scope"
-    type: str = "bug"
+    type: Optional[str] = None
     tags: List[str] = field(default_factory=list)
+    source: str = "system"
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
+    @property
+    def display_title(self) -> str:
+        """Derive a human-readable title from title or description.
+
+        Priority: explicit title -> first non-empty line of description -> "untitled".
+        """
+        if self.title:
+            return self.title
+        if self.description:
+            for line in self.description.splitlines():
+                stripped = line.strip()
+                if stripped:
+                    return stripped
+        return "untitled"
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize issue to dictionary for YAML output."""
-        return {
+        data: Dict[str, Any] = {
             "id": self.id,
-            "title": self.title,
             "description": self.description,
             "status": self.status.value,
-            "priority": self.priority,
             "scope": self.scope,
-            "type": self.type,
             "tags": self.tags,
+            "source": self.source,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+        # Include optional fields only when set (preserves round-trip fidelity)
+        if self.title is not None:
+            data["title"] = self.title
+        if self.priority is not None:
+            data["priority"] = self.priority
+        if self.type is not None:
+            data["type"] = self.type
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Issue:
-        """Deserialize issue from dictionary."""
+        """Deserialize issue from dictionary.
+
+        Missing ``source`` defaults to ``"system"`` (backward compat with
+        pre-source YAML files).  ``title``, ``priority`` and ``type`` are
+        optional — absent means the user/programmer intentionally left them
+        blank.
+        """
         created_at = data.get("created_at")
         if isinstance(created_at, str):
-            created_at = datetime.fromisoformat(created_at)
+            try:
+                created_at = datetime.fromisoformat(created_at)
+            except ValueError:
+                created_at = datetime.now()
         elif isinstance(created_at, datetime):
             pass
         else:
@@ -76,21 +107,35 @@ class Issue:
 
         updated_at = data.get("updated_at")
         if isinstance(updated_at, str):
-            updated_at = datetime.fromisoformat(updated_at)
+            try:
+                updated_at = datetime.fromisoformat(updated_at)
+            except ValueError:
+                updated_at = datetime.now()
         elif isinstance(updated_at, datetime):
             pass
         else:
             updated_at = datetime.now()
 
+        # title, priority, type are optional — None means "not specified"
+        raw_title = data.get("title")
+        title = str(raw_title) if raw_title is not None else None
+
+        raw_priority = data.get("priority")
+        priority = str(raw_priority) if raw_priority is not None else None
+
+        raw_type = data.get("type")
+        issue_type = str(raw_type) if raw_type is not None else None
+
         return cls(
             id=str(data["id"]),
-            title=data["title"],
+            title=title,
             description=data.get("description", ""),
             status=IssueStatus(data.get("status", "open")),
-            priority=data.get("priority", "medium"),
+            priority=priority,
             scope=data.get("scope", "in_scope"),
-            type=data.get("type", "bug"),
+            type=issue_type,
             tags=data.get("tags", []),
+            source=data.get("source", "system"),
             created_at=created_at,
             updated_at=updated_at,
         )
@@ -100,11 +145,22 @@ def _make_slug(title: str) -> str:
     """Generate a URL-friendly slug from a title.
 
     Takes first 30 chars, replaces spaces/non-alphanum with hyphens, lowercases.
+    Returns ``"untitled"`` when the resulting slug is empty.
     """
     slug = title[:30].strip().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = slug.strip("-")
     return slug or "untitled"
+
+
+def _derive_slug_for_issue(issue: Issue) -> str:
+    """Derive a filesystem slug for an issue from its effective title source.
+
+    Uses the same priority as ``Issue.display_title``: explicit ``title``
+    first, then the first non-empty line of ``description``, then
+    ``"untitled"``.
+    """
+    return _make_slug(issue.display_title)
 
 
 # Valid state transitions
@@ -189,38 +245,61 @@ class IssueManager:
 
     def create(
         self,
-        title: str,
         description: str,
-        priority: str = "medium",
+        title: Optional[str] = None,
+        priority: Optional[str] = None,
         scope: str = "in_scope",
         tags: Optional[List[str]] = None,
-        type: str = "bug",
+        type: Optional[str] = None,
+        source: str = "system",
     ) -> Issue:
-        """Create a new issue, write YAML to open/ directory."""
+        """Create a new issue, write YAML to open/ directory.
+
+        Only *description* is required.  ``title``, ``priority`` and ``type``
+        are optional — when omitted the display title is derived from the
+        description's first non-empty line.
+
+        Args:
+            description: The issue body (**required**, must be non-empty).
+            title: Optional explicit title.
+            priority: Optional priority (e.g. ``"high"``).
+            scope: Scope classification (default ``"in_scope"``).
+            tags: Tag list.
+            type: Optional issue type (e.g. ``"bug"``).
+            source: Origin of the issue — ``"human"`` for CLI/webui,
+                ``"system"`` for programmatic discovery (default).
+
+        Raises:
+            ValueError: If *description* is empty or whitespace-only.
+        """
+        if not description or not description.strip():
+            raise ValueError("Issue description must not be empty")
+
         self._ensure_dirs()
 
         issue_id = self._next_id()
-        slug = _make_slug(title)
         now = datetime.now()
 
         issue = Issue(
             id=issue_id,
-            title=title,
+            title=title if title and title.strip() else None,
             description=description,
             status=IssueStatus.OPEN,
             priority=priority,
             scope=scope,
             type=type,
             tags=tags or [],
+            source=source,
             created_at=now,
             updated_at=now,
         )
 
+        slug = _derive_slug_for_issue(issue)
         filename = f"{issue_id}_{slug}.yaml"
         filepath = self.open_dir / filename
         self._write_issue(filepath, issue)
 
-        logger.info(f"Created issue {issue_id}: {title}")
+        logger.info("Created issue %s: %s", issue_id, issue.display_title)
         return issue
 
     def load(self, issue_id: str) -> Optional[Issue]:
@@ -231,13 +310,18 @@ class IssueManager:
         return self._read_issue(filepath)
 
     def list_issues(
-        self, include_closed: bool = False, type_filter: Optional[str] = None
+        self,
+        include_closed: bool = False,
+        type_filter: Optional[str] = None,
+        source_filter: Optional[str] = None,
     ) -> List[Issue]:
         """List issues. By default only open/, with include_closed=True also closed/.
 
         Args:
             include_closed: Include closed/resolved/won't-fix issues.
             type_filter: If provided, only return issues matching this type.
+            source_filter: If provided (``"human"`` or ``"system"``), only
+                return issues whose ``source`` field matches.
         """
         issues = []
         dirs = [self.open_dir]
@@ -251,6 +335,8 @@ class IssueManager:
                 issue = self._read_issue(f)
                 if issue:
                     if type_filter and issue.type != type_filter:
+                        continue
+                    if source_filter and issue.source != source_filter:
                         continue
                     issues.append(issue)
 
@@ -324,6 +410,8 @@ class IssueManager:
     def find_open_by_title(self, title: str) -> Optional[Issue]:
         """Find an open issue whose title exactly matches (case-insensitive).
 
+        Issues with ``title=None`` are compared against ``display_title``.
+
         Args:
             title: Exact title to match against open issue titles.
         """
@@ -332,7 +420,7 @@ class IssueManager:
             return None
         for f in sorted(self.open_dir.glob("*.yaml")):
             issue = self._read_issue(f)
-            if issue and title_lower == issue.title.lower():
+            if issue and title_lower == issue.display_title.lower():
                 return issue
         return None
 
@@ -412,6 +500,114 @@ class IssueManager:
 
         result.sort(key=lambda i: i.id)
         return result
+
+    def update_fields(
+        self,
+        issue_id: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        priority: Optional[str] = None,
+        type: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Issue:
+        """Update editable fields on an issue, renaming the YAML file when the
+        derived slug changes.
+
+        Only the fields that are explicitly passed (non-``None``) are updated;
+        omitted fields retain their current value.  Pass an empty string to
+        *clear* a field back to its default (``None`` for title/priority/type).
+
+        Args:
+            issue_id: Target issue ID.
+            title: New title (empty string clears to ``None``).
+            description: New description body.
+            priority: New priority (empty string clears to ``None``).
+            type: New issue type (empty string clears to ``None``).
+            tags: New tag list.
+
+        Returns:
+            The updated :class:`Issue`.
+
+        Raises:
+            ValueError: If the issue is not found.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            raise ValueError(f"Issue '{issue_id}' not found")
+
+        issue = self._read_issue(filepath)
+        if not issue:
+            raise ValueError(f"Issue '{issue_id}' could not be read")
+
+        old_slug = _derive_slug_for_issue(issue)
+
+        # Apply field changes — empty string means "clear to None"
+        if title is not None:
+            issue.title = title.strip() or None
+        if description is not None:
+            if not description.strip():
+                raise ValueError("Issue description must not be empty")
+            issue.description = description
+        if priority is not None:
+            issue.priority = priority.strip() or None
+        if type is not None:
+            issue.type = type.strip() or None
+        if tags is not None:
+            issue.tags = tags
+
+        issue.updated_at = datetime.now()
+
+        new_slug = _derive_slug_for_issue(issue)
+        new_filename = f"{issue_id}_{new_slug}.yaml"
+
+        # Write to the canonical path (may be the same file or a rename)
+        if new_slug != old_slug:
+            target_path = filepath.parent / new_filename
+            # Remove any stale file with the new slug that might linger
+            if target_path != filepath and target_path.exists():
+                target_path.unlink()
+                logger.debug("Removed stale issue file %s before rename", target_path)
+            self._write_issue(target_path, issue)
+            if target_path != filepath:
+                filepath.unlink()
+                logger.info(
+                    "Renamed issue %s file: %s -> %s",
+                    issue_id,
+                    filepath.name,
+                    new_filename,
+                )
+        else:
+            self._write_issue(filepath, issue)
+
+        return issue
+
+    def reopen_issue(self, issue_id: str) -> Issue:
+        """Reopen a closed issue back to OPEN, moving it to the open/ directory.
+
+        This is a convenience wrapper that transitions from RESOLVED, WONT_FIX
+        or CLOSED back to OPEN.
+
+        Raises:
+            ValueError: If the issue is not found or cannot be reopened.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            raise ValueError(f"Issue '{issue_id}' not found")
+
+        issue = self._read_issue(filepath)
+        if not issue:
+            raise ValueError(f"Issue '{issue_id}' could not be read")
+
+        if issue.status == IssueStatus.OPEN:
+            return issue  # already open, idempotent
+
+        if issue.status not in _CLOSED_DIR_STATUSES:
+            raise ValueError(
+                f"Cannot reopen issue '{issue_id}' with status '{issue.status.value}'. "
+                f"Only resolved, won't-fix, or closed issues can be reopened."
+            )
+
+        return self.update_status(issue_id, IssueStatus.OPEN)
 
     def _read_issue(self, filepath: Path) -> Optional[Issue]:
         """Read and parse an issue YAML file."""
