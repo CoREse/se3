@@ -47,7 +47,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet
+from typing import Any, Dict, FrozenSet, List, Optional
 
 # Protocol revision. Bumped only on a breaking wire change; both daemon and
 # server advertise it in HELLO / WELCOME so a mismatch can be surfaced.
@@ -114,6 +114,11 @@ MSG_HISTORY_INDEX_REQUEST = "history_index_request"
 #: ``se3/calls/`` which ``se3 run`` drains at the next step boundary.
 MSG_INTERJECT_FLOW = "interject_flow"
 
+#: server → daemon: instruct the daemon to execute an issue write operation
+#: (create / edit / close / reopen). The daemon resolves the project root,
+#: validates the operation and delegates to :class:`IssueManager`.
+MSG_ISSUE_COMMAND = "issue_command"
+
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
 HISTORY_MODE_APPEND = "append"
@@ -169,6 +174,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_HISTORY_REQUEST,
         MSG_HISTORY_INDEX_REQUEST,
         MSG_INTERJECT_FLOW,
+        MSG_ISSUE_COMMAND,
     }
 )
 #: Every known message type.
@@ -385,6 +391,52 @@ def make_interject_flow(
             "project_root": project_root,
         },
     )
+
+
+def make_issue_command(
+    operation: str,
+    project_root: str,
+    *,
+    issue_id: str = "",
+    description: str = "",
+    title: str = "",
+    priority: str = "",
+    type: str = "",
+    tags: Optional[List[str]] = None,
+    reason: str = "",
+) -> Message:
+    """server → daemon: execute an issue write operation.
+
+    *operation* is one of ``"create"``, ``"edit"``, ``"close"``, ``"reopen"``.
+    ``project_root`` is required and must be an absolute path to a registered
+    SE3 project.  The remaining fields are operation-specific:
+
+    * ``create``: *description* is required; *title*, *priority*, *type*,
+      *tags* are optional.
+    * ``edit``: *issue_id* is required; *title*, *description*, *priority*,
+      *type*, *tags* are optional (non-empty values overwrite the field).
+    * ``close``: *issue_id* is required; *reason* is optional.
+    * ``reopen``: *issue_id* is required.
+    """
+    payload: Dict[str, Any] = {
+        "operation": operation,
+        "project_root": project_root,
+    }
+    if issue_id:
+        payload["issue_id"] = issue_id
+    if description:
+        payload["description"] = description
+    if title:
+        payload["title"] = title
+    if priority:
+        payload["priority"] = priority
+    if type:
+        payload["type"] = type
+    if tags is not None:
+        payload["tags"] = list(tags)
+    if reason:
+        payload["reason"] = reason
+    return Message(type=MSG_ISSUE_COMMAND, payload=payload)
 
 
 def make_ping(*, seq: int = 0) -> Message:

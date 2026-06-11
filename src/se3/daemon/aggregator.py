@@ -141,6 +141,46 @@ class FlowSnapshot:
 
 
 @dataclass
+class IssueSnapshot:
+    """A single issue record for inclusion in :class:`MachineStatus`.
+
+    Carries every webui-relevant field so the frontend can render, filter and
+    operate on issues without a second round-trip to the daemon.
+    """
+
+    id: str
+    project_root: str
+    title: Optional[str] = None
+    description: str = ""
+    status: str = "open"
+    priority: Optional[str] = None
+    type: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    source: str = "system"
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        data: Dict[str, object] = {
+            "id": self.id,
+            "project_root": self.project_root,
+            "description": self.description,
+            "status": self.status,
+            "tags": list(self.tags),
+            "source": self.source,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if self.title is not None:
+            data["title"] = self.title
+        if self.priority is not None:
+            data["priority"] = self.priority
+        if self.type is not None:
+            data["type"] = self.type
+        return data
+
+
+@dataclass
 class MachineStatus:
     """A full status snapshot of one SE3 machine."""
 
@@ -149,6 +189,7 @@ class MachineStatus:
     flows: List[FlowSnapshot] = field(default_factory=list)
     pending_calls: List[PendingCall] = field(default_factory=list)
     project_roots: List[str] = field(default_factory=list)
+    issues: List[IssueSnapshot] = field(default_factory=list)
     generated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, object]:
@@ -158,6 +199,7 @@ class MachineStatus:
             "flows": [f.to_dict() for f in self.flows],
             "pending_calls": [c.to_dict() for c in self.pending_calls],
             "project_roots": list(self.project_roots),
+            "issues": [i.to_dict() for i in self.issues],
             "generated_at": self.generated_at,
         }
 
@@ -304,6 +346,7 @@ class DaemonAggregator:
         """
         flows: List[FlowSnapshot] = []
         all_calls: List[PendingCall] = []
+        all_issues: List[IssueSnapshot] = []
         # Snapshot the live set into a local list before iterating: this build
         # runs in a worker thread (offloaded from ``_push_status`` /
         # ``_resolve_interject_root`` / the poll loop), while the event loop may
@@ -317,12 +360,14 @@ class DaemonAggregator:
                 continue
             flows.append(snapshot)
             all_calls.extend(self._enumerate_calls(root))
+            all_issues.extend(self._collect_issues(root))
         return MachineStatus(
             machine_id=self.machine_id,
             hostname=self.hostname,
             flows=flows,
             pending_calls=all_calls,
             project_roots=self._merge_project_roots(),
+            issues=all_issues,
         )
 
     def all_project_roots(self) -> List[str]:
@@ -801,6 +846,56 @@ class DaemonAggregator:
             if summary:
                 return str(summary)
         return None
+
+    @staticmethod
+    def _collect_issues(root: Path) -> List[IssueSnapshot]:
+        """Read issue YAML files from ``se3/issues/`` and return snapshots.
+
+        Scans both ``open/`` and ``closed/`` subdirectories.  Malformed or
+        unreadable files are silently skipped so a corrupt issue never breaks
+        the status snapshot.
+        """
+        import yaml  # deferred — the core CLI path never calls this
+
+        issues_dir = root / "se3" / "issues"
+        if not issues_dir.is_dir():
+            return []
+
+        result: List[IssueSnapshot] = []
+        for subdir in ("open", "closed"):
+            target = issues_dir / subdir
+            if not target.is_dir():
+                continue
+            for f in sorted(target.glob("*.yaml")):
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    data = yaml.safe_load(content)
+                    if not data or not isinstance(data, dict):
+                        continue
+                    raw_id = data.get("id")
+                    if raw_id is None:
+                        continue
+                    result.append(
+                        IssueSnapshot(
+                            id=str(raw_id),
+                            project_root=str(root),
+                            title=data.get("title"),
+                            description=str(data.get("description") or ""),
+                            status=str(data.get("status") or "open"),
+                            priority=data.get("priority"),
+                            type=data.get("type"),
+                            tags=list(data.get("tags") or []),
+                            source=str(data.get("source") or "system"),
+                            created_at=str(data.get("created_at") or ""),
+                            updated_at=str(data.get("updated_at") or ""),
+                        )
+                    )
+                except Exception:  # pragma: no cover — defensive
+                    logger.debug(
+                        "aggregator: skipping unreadable issue file %s", f,
+                        exc_info=True,
+                    )
+        return result
 
 
 # -- module-level file helpers --------------------------------------------

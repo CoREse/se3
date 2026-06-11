@@ -824,6 +824,224 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 .ghost-btn:hover:not(:disabled) { border-color: var(--accent); filter: none; }
 
+/* -- issues view ----------------------------------------------------- */
+
+.issues-view {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+}
+.issues-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+.issues-head h3 { margin: 0; font-size: 14px; }
+
+.issues-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(260px, 380px) 1fr;
+  gap: 1px;
+  background: var(--border);
+  overflow: hidden;
+}
+.issues-list-pane, .issues-detail-pane {
+  background: var(--bg);
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+.issues-list-pane h4, .issues-detail-pane h4 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  margin: 0 0 10px;
+}
+.issues-detail-pane h4 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .issues-body { grid-template-columns: 1fr; grid-auto-rows: min-content 1fr; }
+}
+
+.issues-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* Issues toolbar: filters + create button */
+.issues-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.issues-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.issues-toggle-label input { margin: 0; }
+.issues-filter-select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+.issues-toolbar .ghost-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Issue cards */
+.issue-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 11px;
+  cursor: pointer;
+  border-left: 3px solid var(--border);
+}
+.issue-item:hover { border-color: var(--accent); }
+.issue-item.selected { border-color: var(--accent); background: var(--bg-raised); }
+.issue-item.issue-source-human { border-left-color: var(--cyan); }
+.issue-item.issue-source-system { border-left-color: var(--grey); }
+
+.issue-item-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+}
+.issue-title-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.issue-id-label {
+  color: var(--fg-dim);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.issue-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* Issue badges */
+.badge-open         { background: rgba(214,162,58,.2); color: var(--yellow); }
+.badge-in-progress  { background: rgba(76,141,255,.2); color: var(--accent); }
+.badge-resolved     { background: rgba(76,175,106,.2); color: var(--green); }
+.badge-wontfix      { background: rgba(106,107,112,.2); color: var(--grey); }
+.badge-closed       { background: rgba(106,107,112,.15); color: var(--fg-dim); }
+
+/* Priority badges */
+.priority-critical { color: var(--red); font-weight: 600; }
+.priority-high     { color: var(--red); }
+.priority-medium   { color: var(--yellow); }
+.priority-low      { color: var(--fg-dim); }
+.priority-none     { color: var(--fg-dim); }
+
+/* Issue detail pane */
+.issues-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.issue-detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.issue-detail-title {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  word-break: break-word;
+}
+.issue-detail-badges {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.issue-detail-field {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+}
+.issue-detail-label {
+  color: var(--fg-dim);
+  flex: 0 0 70px;
+}
+.issue-detail-value {
+  flex: 1;
+  word-break: break-word;
+}
+.issue-detail-desc {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.issue-detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.issue-detail-actions .ghost-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* Form row for side-by-side fields */
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+.form-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.form-col label { margin-bottom: 4px; }
+.required { color: var(--red); }
+
+/* Small modal variant */
+.modal-card-sm { max-width: 420px; }
+
+/* Desktop: hide the issues back button */
+@media (min-width: 601px) {
+  .issues-back-btn { display: none; }
+}
+
 .history-view {
   position: fixed;
   inset: 0;
@@ -2840,6 +3058,57 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     min-height: 40px;
     font-size: 13px;
     padding: 8px 12px;
+  }
+
+  /* -- Issues view: single-view panel switch (List <-> Detail) ----------- *
+   * Isomorphic to the History view switch. On a phone we show exactly one
+   * pane at a time; the list is the default, and selecting an issue reveals
+   * the detail pane (with a back button to return). */
+  .issues-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  .issues-list-pane,
+  .issues-detail-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .issues-detail-pane { display: none; }
+  .issues-view.active-detail .issues-list-pane { display: none; }
+  .issues-view.active-detail .issues-detail-pane { display: block; }
+
+  .issues-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 10px;
+    padding: 6px 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+    font-size: 14px;
+  }
+
+  /* Issues container shrink */
+  #issues-view .issues-body { max-width: 100%; }
+  #issues-view .issues-list-pane,
+  #issues-view .issues-detail-pane {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  #issues-view .issues-detail { min-width: 0; max-width: 100%; }
+
+  /* Issues long-content wrapping */
+  #issues-view .issues-toolbar { flex-wrap: wrap; min-width: 0; }
+  #issues-view .issues-filter-select { flex: 1 1 0; min-width: 0; max-width: 100%; }
+  #issues-view .issue-item-meta { flex-wrap: wrap; }
+  #issues-view .issue-item-meta > span,
+  #issues-view .issue-title-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   /* -- login gate + break-glass: narrow-screen margins/sizing (G6) ------- *

@@ -601,6 +601,8 @@ class DaemonClient:
             self._handle_respond(message.payload)
         elif message.type == protocol.MSG_INTERJECT_FLOW:
             await self._handle_interject(message.payload)
+        elif message.type == protocol.MSG_ISSUE_COMMAND:
+            await self._handle_issue_command(message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
@@ -778,6 +780,130 @@ class DaemonClient:
             if isinstance(flow, dict) and str(flow.get("flow_id") or "") == flow_id:
                 return str(flow.get("project_root") or "").strip()
         return ""
+
+    async def _handle_issue_command(self, payload: Dict[str, Any]) -> None:
+        """Execute an issue write command via :class:`IssueManager`.
+
+        Validates ``project_root`` (must be a registered, absolute path) and
+        delegates to the appropriate ``IssueManager`` method.  Web-initiated
+        creates are forced to ``source=human``.  Errors are logged and
+        swallowed — the connection survives a bad command.
+        """
+        operation = str(payload.get("operation") or "").strip()
+        project_root = str(payload.get("project_root") or "").strip()
+
+        if not operation:
+            logger.warning("Ignoring ISSUE_COMMAND with empty operation")
+            return
+        if not project_root or not Path(project_root).is_absolute():
+            logger.warning(
+                "ISSUE_COMMAND: project_root must be an absolute path, got %r",
+                project_root,
+            )
+            return
+
+        # The project must be registered with the aggregator (live or
+        # persistent) so it is an actual SE3 project on this machine.
+        try:
+            snapshot = await asyncio.to_thread(self._snapshot_provider)
+        except Exception:
+            logger.debug(
+                "ISSUE_COMMAND: snapshot lookup failed", exc_info=True
+            )
+            return
+        known_roots = set(snapshot.get("project_roots") or [])
+        resolved = str(Path(project_root).resolve())
+        if resolved not in known_roots:
+            logger.warning(
+                "ISSUE_COMMAND: project_root %r is not a registered project; "
+                "known roots: %s",
+                project_root,
+                sorted(known_roots)[:5],
+            )
+            return
+
+        # All IssueManager operations are disk I/O — run in a thread.
+        try:
+            await asyncio.to_thread(
+                self._execute_issue_operation, operation, resolved, payload
+            )
+        except Exception:
+            logger.exception(
+                "ISSUE_COMMAND %s failed for project %s", operation, project_root
+            )
+            return
+
+        # The issue file changed on disk — trigger a fast push so the web
+        # sees the update on the next tick.
+        self._trigger_fast_push()
+        logger.info(
+            "ISSUE_COMMAND %s handled for project %s", operation, project_root
+        )
+
+    def _execute_issue_operation(
+        self, operation: str, project_root: str, payload: Dict[str, Any]
+    ) -> None:
+        """Dispatch an issue operation to :class:`IssueManager`.
+
+        Runs synchronously (called from a thread via ``asyncio.to_thread``).
+        """
+        from pathlib import Path as _Path
+
+        from ..engine.issue_manager import IssueManager
+
+        mgr = IssueManager(_Path(project_root))
+
+        if operation == "create":
+            description = str(payload.get("description") or "").strip()
+            if not description:
+                raise ValueError("ISSUE_COMMAND create: description is required")
+            title = str(payload.get("title") or "").strip() or None
+            priority = str(payload.get("priority") or "").strip() or None
+            issue_type = str(payload.get("type") or "").strip() or None
+            tags = payload.get("tags")
+            if not isinstance(tags, list):
+                tags = None
+            # Web-initiated creates are always source=human
+            mgr.create(
+                description=description,
+                title=title,
+                priority=priority,
+                type=issue_type,
+                tags=tags,
+                source="human",
+            )
+
+        elif operation == "edit":
+            issue_id = str(payload.get("issue_id") or "").strip()
+            if not issue_id:
+                raise ValueError("ISSUE_COMMAND edit: issue_id is required")
+            kwargs: Dict[str, Any] = {}
+            for field in ("title", "description", "priority", "type"):
+                val = payload.get(field)
+                if isinstance(val, str) and val:
+                    kwargs[field] = val
+            tags = payload.get("tags")
+            if isinstance(tags, list):
+                kwargs["tags"] = tags
+            if not kwargs:
+                raise ValueError("ISSUE_COMMAND edit: no fields to update")
+            mgr.update_fields(issue_id, **kwargs)
+
+        elif operation == "close":
+            issue_id = str(payload.get("issue_id") or "").strip()
+            if not issue_id:
+                raise ValueError("ISSUE_COMMAND close: issue_id is required")
+            reason = str(payload.get("reason") or "").strip()
+            mgr.close_issue(issue_id, reason=reason)
+
+        elif operation == "reopen":
+            issue_id = str(payload.get("issue_id") or "").strip()
+            if not issue_id:
+                raise ValueError("ISSUE_COMMAND reopen: issue_id is required")
+            mgr.reopen_issue(issue_id)
+
+        else:
+            logger.warning("ISSUE_COMMAND: unknown operation %r", operation)
 
     async def _handle_history_request(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Answer a server HISTORY_REQUEST with a HISTORY_DATA reply.

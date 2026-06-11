@@ -148,6 +148,11 @@ class ServerState:
         self._history_index: Dict[str, List[Dict[str, Any]]] = {}
         #: flow_id -> cached history bundle (records + cursor + owner).
         self._history_data: Dict[str, Dict[str, Any]] = {}
+        #: Issue mirror: machine_id -> project_root -> list of issue dicts.
+        #: Updated from daemon STATUS_UPDATE snapshots; the server never writes
+        #: issues to disk — writes are dispatched as MSG_ISSUE_COMMAND to the
+        #: owning daemon which applies them via IssueManager.
+        self._issues: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
 
     # -- machine lifecycle -------------------------------------------------
@@ -208,11 +213,12 @@ class ServerState:
             return record
 
     def _discard_machine_state(self, machine_id: str) -> None:
-        """Drop the cached history index/bundles owned by *machine_id*.
+        """Drop the cached history index/bundles/issues owned by *machine_id*.
 
         Caller must hold ``self._lock``. Used on an owner change so a
-        machine_id collision/takeover cannot expose the prior owner's history.
-        ``record.flows`` is cleared by the caller (it owns the record).
+        machine_id collision/takeover cannot expose the prior owner's history
+        or issues. ``record.flows`` is cleared by the caller (it owns the
+        record).
         """
         self._history_index.pop(machine_id, None)
         self._history_data = {
@@ -220,6 +226,7 @@ class ServerState:
             for flow_id, bundle in self._history_data.items()
             if str(bundle.get("machine_id") or "") != machine_id
         }
+        self._issues.pop(machine_id, None)
 
     async def mark_offline(self, machine_id: str) -> None:
         """Mark a machine offline (its daemon disconnected)."""
@@ -244,7 +251,9 @@ class ServerState:
         """Apply a daemon STATUS_UPDATE snapshot to the machine record.
 
         *snapshot* is the dict form of the daemon's ``MachineStatus`` — its
-        ``flows`` list fully replaces the machine's known flows.
+        ``flows`` list fully replaces the machine's known flows.  The
+        ``issues`` list (when present) replaces the machine's issue mirror
+        keyed by ``project_root``.
         """
         async with self._lock:
             record = self._machines.get(machine_id)
@@ -269,6 +278,17 @@ class ServerState:
                 flow = FlowSnapshot.from_payload(raw)
                 flows[flow.flow_id] = flow
             record.flows = flows
+
+            # Ingest issues from the snapshot, keyed by project_root.
+            issues_by_root: Dict[str, List[Dict[str, Any]]] = {}
+            for raw_issue in snapshot.get("issues") or []:
+                if not isinstance(raw_issue, dict):
+                    continue
+                root = str(raw_issue.get("project_root") or "")
+                if not root:
+                    continue
+                issues_by_root.setdefault(root, []).append(dict(raw_issue))
+            self._issues[machine_id] = issues_by_root
 
     # -- queries -----------------------------------------------------------
 
@@ -522,4 +542,119 @@ class ServerState:
                     continue
                 if flow_id in record.flows:
                     return machine_id
+        return None
+
+    # -- issue mirror (from daemon STATUS_UPDATE snapshots) -----------------
+
+    async def get_issues(
+        self,
+        *,
+        owner: Optional[str] = None,
+        machine_id: Optional[str] = None,
+        project_root: Optional[str] = None,
+        include_closed: bool = False,
+        source: Optional[str] = None,
+        type_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return issues matching the given filters.
+
+        Issues are an in-memory mirror of the daemon's on-disk YAML files,
+        refreshed on every STATUS_UPDATE.  The server never reads issue YAML
+        directly — the daemon is the sole persistence boundary.
+
+        With *owner* set, only issues on machines belonging to that owner are
+        included.  *machine_id* and *project_root* further narrow the scope.
+        *include_closed* controls whether closed/resolved/won't-fix issues
+        are included (default: open only).  *source* and *type_filter* are
+        exact-match filters on the respective issue fields.
+        """
+        async with self._lock:
+            result: List[Dict[str, Any]] = []
+            for mid, by_root in self._issues.items():
+                # Owner gate
+                if owner is not None:
+                    record = self._machines.get(mid)
+                    if record is None or not _owned(record, owner):
+                        continue
+                # Machine gate
+                if machine_id and mid != machine_id:
+                    continue
+                for root, issues in by_root.items():
+                    # Project root gate
+                    if project_root and root != project_root:
+                        continue
+                    for iss in issues:
+                        # Status gate: open-only by default
+                        status = str(iss.get("status") or "open")
+                        if not include_closed and status not in (
+                            "open", "in-progress"
+                        ):
+                            continue
+                        # Source gate
+                        if source and str(iss.get("source") or "") != source:
+                            continue
+                        # Type gate
+                        if type_filter and str(iss.get("type") or "") != type_filter:
+                            continue
+                        result.append(dict(iss))
+            return result
+
+    async def get_issue_by_id(
+        self,
+        issue_id: str,
+        *,
+        owner: Optional[str] = None,
+        machine_id: Optional[str] = None,
+        project_root: Optional[str] = None,
+    ) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+        """Find an issue by ID, returning ``(machine_id, project_root, issue)``.
+
+        With *owner* set, only machines belonging to that owner are searched.
+        *machine_id* and *project_root* narrow the scope.  Returns ``None``
+        when the issue cannot be found within the scoped machines/roots.
+        """
+        async with self._lock:
+            for mid, by_root in self._issues.items():
+                if owner is not None:
+                    record = self._machines.get(mid)
+                    if record is None or not _owned(record, owner):
+                        continue
+                if machine_id and mid != machine_id:
+                    continue
+                for root, issues in by_root.items():
+                    if project_root and root != project_root:
+                        continue
+                    for iss in issues:
+                        if str(iss.get("id") or "") == str(issue_id):
+                            return mid, root, dict(iss)
+            return None
+
+    async def find_machine_for_project(
+        self,
+        project_root: str,
+        *,
+        owner: Optional[str] = None,
+    ) -> Optional[str]:
+        """Return the machine id that owns *project_root*, or ``None``.
+
+        Searches the issue mirror for a machine that has reported issues
+        for this root.  Falls back to checking ``MachineRecord.project_roots``
+        for machines that have no issues but do have the root registered.
+        With *owner* set, only machines bound to that owner are candidates.
+        """
+        async with self._lock:
+            # First: check the issue mirror for a direct hit.
+            for mid, by_root in self._issues.items():
+                if project_root in by_root:
+                    if owner is not None:
+                        record = self._machines.get(mid)
+                        if record is None or not _owned(record, owner):
+                            continue
+                    return mid
+            # Second: check MachineRecord.project_roots.
+            for mid, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
+                if project_root in record.project_roots:
+                    return mid
         return None

@@ -3248,6 +3248,11 @@ roundUsageMod.registerRoundUsageTests({ app, check, findOne, findAll });
 const userMgmtMod = await import("./user_mgmt.test.mjs");
 userMgmtMod.registerUserMgmtTests({ app, check, findOne, findAll });
 
+// Register the G7 issue-management pure-helper tests (separate module — same
+// `check` reporter, same `app` module, same shared DOM stub).
+const issueMgmtMod = await import("./issue_management.test.mjs");
+issueMgmtMod.registerIssueManagementTests({ app, check, findOne, findAll });
+
 // Register the G7 mobile-responsive pure-helper tests (separate module — same
 // `check` reporter, same `app` module, same shared DOM stub already installed
 // above). These exercise the DOM-free state-transition helpers the mobile pass

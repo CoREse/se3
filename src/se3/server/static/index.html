@@ -28,6 +28,7 @@
       <div id="nav-menu" class="nav-menu">
         <!-- Auth-only controls: hidden until an owner is resolved. -->
         <button id="history-btn" type="button" class="ghost-btn auth-only hidden">History</button>
+        <button id="issues-btn" type="button" class="ghost-btn auth-only hidden">Issues</button>
         <button id="keys-btn" type="button" class="ghost-btn auth-only hidden">Daemon&nbsp;Keys</button>
         <!-- Admin-only control: hidden for non-admin owners even once authenticated
              (the .admin-only class is toggled by applyAuthState off is_admin). The
@@ -124,6 +125,117 @@
           <p class="empty">Select a session to view its step records.</p>
         </div>
       </section>
+    </div>
+  </div>
+
+  <!-- Issues view (list + detail) — mirrors the history view layout. -->
+  <div id="issues-view" class="issues-view hidden">
+    <div class="issues-head">
+      <h3>Issues</h3>
+      <button id="issues-close" type="button" class="icon-btn">&times;</button>
+    </div>
+    <div id="issues-stale" class="stale-banner hidden">
+      &#9888; 连接断开，数据可能陈旧
+    </div>
+    <div class="issues-body">
+      <aside class="issues-list-pane">
+        <div class="issues-toolbar">
+          <label class="issues-toggle-label">
+            <input type="checkbox" id="issues-show-closed" />
+            <span>显示已关闭</span>
+          </label>
+          <select id="issues-source-filter" class="issues-filter-select">
+            <option value="">全部来源</option>
+            <option value="human">人工</option>
+            <option value="system">系统</option>
+          </select>
+          <select id="issues-type-filter" class="issues-filter-select">
+            <option value="">全部类型</option>
+          </select>
+          <button id="issues-create-btn" type="button" class="ghost-btn">+ 新建</button>
+        </div>
+        <div id="issues-list" class="issues-list">
+          <p class="empty">Loading issues&hellip;</p>
+        </div>
+      </aside>
+      <section class="issues-detail-pane">
+        <button id="issues-back-btn" type="button" class="issues-back-btn"
+                aria-label="返回 issue 列表">&larr; Issue 列表</button>
+        <h4 id="issues-detail-title">Issue</h4>
+        <div id="issues-detail" class="issues-detail">
+          <p class="empty">选择一个 issue 查看详情。</p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Issue create/edit modal -->
+  <div id="issue-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="issue-modal-title">新建 Issue</h3>
+        <button id="issue-modal-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <form id="issue-form" class="modal-body">
+        <label for="issue-description">描述 <span class="required">*</span></label>
+        <textarea id="issue-description" rows="5" required
+                  placeholder="描述这个问题或建议&hellip;"></textarea>
+
+        <label for="issue-title">标题（可选）</label>
+        <input type="text" id="issue-title" placeholder="留空则自动从描述派生"
+               autocomplete="off" spellcheck="false" />
+
+        <div class="form-row">
+          <div class="form-col">
+            <label for="issue-type">类型（可选）</label>
+            <select id="issue-type">
+              <option value="">-</option>
+              <option value="bug">bug</option>
+              <option value="feature">feature</option>
+              <option value="enhancement">enhancement</option>
+              <option value="idea">idea</option>
+              <option value="task">task</option>
+            </select>
+          </div>
+          <div class="form-col">
+            <label for="issue-priority">优先级（可选）</label>
+            <select id="issue-priority">
+              <option value="">-</option>
+              <option value="critical">critical</option>
+              <option value="high">high</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+            </select>
+          </div>
+        </div>
+
+        <p id="issue-form-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="submit" id="issue-form-submit">创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Issue close/reopen confirmation modal -->
+  <div id="issue-action-modal" class="modal hidden">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-head">
+        <h3 id="issue-action-title">确认操作</h3>
+        <button id="issue-action-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="issue-action-message"></p>
+        <label for="issue-action-reason" id="issue-action-reason-label"
+               class="hidden">关闭原因（可选）</label>
+        <input type="text" id="issue-action-reason" class="hidden"
+               placeholder="关闭原因&hellip;" autocomplete="off" spellcheck="false" />
+        <p id="issue-action-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="issue-action-confirm">确认</button>
+          <button type="button" id="issue-action-cancel" class="ghost-btn">取消</button>
+        </div>
+      </div>
     </div>
   </div>
 
