@@ -747,3 +747,38 @@ class TestStepUsageBlock:
         render_step_output(step)
 
         mock_usage.assert_called_once()
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    def test_usage_block_rendered_for_non_terminal_step(self, mock_usage):
+        """A REVISION_NEEDED step (e.g. self_check) that now has token_usage
+        in outputs (written by G2's run_step fix) renders the usage block —
+        both CLI and WebUI read the same `outputs.token_usage` field."""
+        from se3.engine.step_renderers import render_step_output
+
+        step = _make_step(
+            StepType.SELF_CHECK,
+            {"result": "revision_needed", "token_usage": self._USAGE},
+            status=StepStatus.REVISION_NEEDED,
+        )
+        render_step_output(step)
+
+        mock_usage.assert_called_once()
+        assert mock_usage.call_args[0][0] == self._USAGE
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    def test_usage_block_not_read_from_carried_token_usage(self, mock_usage):
+        """render_step_usage reads ONLY outputs.token_usage, never the
+        internal carried_token_usage — confirming the G2 convention that
+        carried_token_usage is an engine-internal carry field, not a display
+        source."""
+        from se3.engine.step_renderers import render_step_usage
+
+        # A step with carried_token_usage but no token_usage renders nothing.
+        step = _make_step(
+            StepType.SELF_CHECK,
+            {"result": "revision_needed", "carried_token_usage": self._USAGE},
+            status=StepStatus.REVISION_NEEDED,
+        )
+        render_step_usage(step)
+
+        mock_usage.assert_not_called()
