@@ -1702,6 +1702,7 @@ def _record_take_theirs_event(
             priority="medium",
             type="task",
             tags=["merge-fallback", "audit"],
+            source="system",
         )
     except Exception as e:
         logger.warning("Failed to record take-theirs audit issue: %s", e)
@@ -1737,6 +1738,7 @@ def _record_stashpop_takeours_event(
             priority="medium",
             type="task",
             tags=["merge-fallback", "audit", "stash-pop"],
+            source="system",
         )
     except Exception as e:
         logger.warning(

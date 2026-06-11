@@ -301,6 +301,7 @@ def _create_salvage_issues(
             description="\n".join(desc_parts),
             priority="medium",
             tags=["auto-discovered", "source:salvage"],
+            source="system",
         )
         issues.append(issue)
 
@@ -320,6 +321,7 @@ def _create_salvage_issues(
             description="\n".join(desc_parts),
             priority="medium",
             tags=["auto-discovered", "source:salvage"],
+            source="system",
         )
         issues.append(issue)
 

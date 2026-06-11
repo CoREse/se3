@@ -87,6 +87,7 @@ class TestCreateFromFixLoopExhaustion:
         assert issue.scope == "in_scope"  # A-class issues are always in_scope
         assert "auto-discovered" in issue.tags
         assert "source:fix-loop" in issue.tags
+        assert issue.source == "system"
 
     def test_title_contains_task_description(self, discovery, basic_flow):
         trigger = Step(step_type=StepType.TEST, status=StepStatus.COMPLETED)
@@ -314,6 +315,7 @@ class TestCollectIssuesFromOutput:
         assert "auto-discovered" in issues[0].tags
         assert "source:summarize" in issues[0].tags
         assert issues[0].scope == "in_scope"  # B-class issues default to in_scope
+        assert issues[0].source == "system"
 
     def test_multiple_issues(self, discovery, basic_flow):
         outputs = {
@@ -590,3 +592,112 @@ class TestStateMachineIntegration:
         mgr = IssueManager(project_root)
         issues = mgr.list_issues()
         assert len(issues) == 0
+
+
+class TestSourceSemantics:
+    """Tests verifying that all programmatic discovery paths write source='system'."""
+
+    def test_fix_loop_exhaustion_source_is_system(self, discovery, basic_flow):
+        """A-class fix-loop issues have source='system'."""
+        trigger = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.COMPLETED)
+        trigger.outputs = {"fix_context": {}}
+
+        issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
+
+        assert issue is not None
+        assert issue.source == "system"
+
+    def test_pre_existing_failures_source_is_system(self, discovery, basic_flow):
+        """A-class pre-existing-failure issues have source='system'."""
+        failures = [
+            {"test_id": "test_auth", "reason": "assertion error"},
+            {"test_id": "test_login", "reason": "timeout"},
+        ]
+
+        issue = discovery.create_from_pre_existing_failures(basic_flow, failures)
+
+        assert issue is not None
+        assert issue.source == "system"
+
+    def test_b_class_discovered_issues_source_is_system(self, discovery, basic_flow):
+        """B-class collected issues have source='system'."""
+        outputs = {
+            "discovered_issues": [
+                {"title": "Missing caching", "description": "No cache layer", "priority_hint": "low"},
+            ]
+        }
+
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
+
+        assert len(issues) == 1
+        assert issues[0].source == "system"
+
+    def test_multiple_b_class_all_system(self, discovery, basic_flow):
+        """Multiple B-class issues all have source='system'."""
+        outputs = {
+            "discovered_issues": [
+                {"title": "Issue A", "description": "desc A", "priority_hint": "medium"},
+                {"title": "Issue B", "description": "desc B", "priority_hint": "high"},
+            ]
+        }
+
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
+
+        assert len(issues) == 2
+        for issue in issues:
+            assert issue.source == "system"
+
+    def test_issue_manager_default_source_is_system(self, issue_manager):
+        """IssueManager.create() defaults source to 'system' when omitted."""
+        issue = issue_manager.create(description="Test default source")
+
+        assert issue.source == "system"
+
+    def test_issue_manager_explicit_source_preserved(self, issue_manager):
+        """IssueManager.create() respects explicit source parameter."""
+        issue = issue_manager.create(description="Test explicit source", source="human")
+
+        assert issue.source == "human"
+
+    def test_source_round_trips_via_yaml(self, issue_manager, project_root):
+        """Source field survives YAML serialization and deserialization."""
+        issue = issue_manager.create(description="Round-trip test", source="system")
+        loaded = issue_manager.load(issue.id)
+
+        assert loaded is not None
+        assert loaded.source == "system"
+
+    def test_missing_source_defaults_to_system_on_load(self, project_root):
+        """Pre-source YAML files (missing source field) load as source='system'."""
+        import yaml
+        from se3.engine.issue_manager import Issue
+
+        data = {
+            "id": "999",
+            "title": "Legacy issue",
+            "description": "No source field",
+            "status": "open",
+            "tags": [],
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        # Deliberately omit 'source' to simulate a pre-source YAML file
+        assert "source" not in data
+
+        issue = Issue.from_dict(data)
+        assert issue.source == "system"
+
+    def test_source_filter_list_issues(self, issue_manager):
+        """list_issues(source_filter=...) correctly filters by source."""
+        issue_manager.create(description="System issue", source="system")
+        issue_manager.create(description="Human issue", source="human")
+
+        system_only = issue_manager.list_issues(source_filter="system")
+        human_only = issue_manager.list_issues(source_filter="human")
+        all_issues = issue_manager.list_issues()
+
+        assert len(system_only) == 1
+        assert system_only[0].source == "system"
+        assert len(human_only) == 1
+        assert human_only[0].source == "human"
+        assert len(all_issues) == 2
