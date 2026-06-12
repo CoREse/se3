@@ -526,7 +526,7 @@ def test_real_specs_index_file_is_valid_json() -> None:
     with open(index_file, encoding="utf-8") as f:
         data = json.load(f)
 
-    assert data["version"] == 1
+    assert data["version"] == 2
     assert isinstance(data["items"], dict)
 
     for key, item_data in data["items"].items():

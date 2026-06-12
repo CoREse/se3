@@ -2,7 +2,16 @@
 
 Builds and maintains an item-level index keyed by ``<spec>::<requirement>``.
 Each entry tracks metadata (mtime, size, sha256 prefix) for incremental
-cache invalidation, plus tags/keywords/refs for selector and loader use.
+cache invalidation, plus tags/keywords/refs for selector and loader use, and
+the item's physical line interval (``line_start`` / ``line_end``) so the
+``se3 spec show`` navigation command can read a single Requirement's body by
+logical address without re-parsing the whole file.
+
+The index also records, per spec, a small ``SpecMeta`` block (``domain`` parsed
+from the ``<!-- domain: <path> -->`` header marker, a one-sentence ``locator``
+parsed from the ``## Purpose`` first paragraph, and the ``item_count``). These
+are program-derived navigation aids; they hold no authoritative content (the
+spec file remains the storage layer).
 
 Index file: ``se3/cache/spec-index.json`` (gitignored derived data).
 """
@@ -27,6 +36,26 @@ from .spec_format import parse_spec
 
 logger = logging.getLogger(__name__)
 
+# Index schema version. Bumped from 1 -> 2 when ItemMeta gained physical line
+# numbers (line_start / line_end) and a per-spec ``specs`` metadata section
+# (domain / locator / item_count). A cached index whose ``version`` is not the
+# current value is treated as a load miss and rebuilt from scratch, so an old
+# v1 cache is never mis-read against the v2 schema.
+INDEX_VERSION = 2
+
+# Domain header marker: ``<!-- domain: <layered/path> -->`` placed alongside the
+# ``<!-- spec-format: v1 -->`` marker at the top of a spec file. Parsed
+# mechanically at index time (no LLM). See spec_governance.DOMAIN_MARKER_PREFIX.
+_DOMAIN_MARKER_RE = re.compile(r"<!--\s*domain:\s*(.*?)\s*-->", re.IGNORECASE)
+
+# ``## Purpose`` heading (locator source).
+_PURPOSE_HEADING_RE = re.compile(r"^##\s+Purpose\s*$", re.IGNORECASE | re.MULTILINE)
+_H2_ANY_RE = re.compile(r"^##\s+", re.MULTILINE)
+
+# Sentinel requirement name used for specs that have zero Requirements, so the
+# index can still record file metadata for incremental rebuild detection.
+_NO_REQUIREMENTS_SENTINEL = "__no_requirements__"
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -45,6 +74,14 @@ class ItemMeta:
     keywords: List[str] = field(default_factory=list)
     refs: List[str] = field(default_factory=list)
     summary: str = ""
+    # Physical line interval of this Requirement within its spec file, 1-based
+    # and inclusive. ``line_start`` is the ``### Requirement:`` heading line;
+    # ``line_end`` is the line just before the next Requirement boundary (or the
+    # last line of the file for the final Requirement). Used by
+    # ``resolve_item_location`` / ``se3 spec show`` to read a single item's body
+    # without re-parsing the whole spec. ``0`` means "unknown" (legacy / sentinel).
+    line_start: int = 0
+    line_end: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -62,12 +99,52 @@ class ItemMeta:
             keywords=list(data.get("keywords", [])),
             refs=list(data.get("refs", [])),
             summary=data.get("summary", ""),
+            line_start=int(data.get("line_start", 0) or 0),
+            line_end=int(data.get("line_end", 0) or 0),
         )
 
     @property
     def item_id(self) -> str:
         """Stable compound key: ``<spec>::<requirement>``."""
         return f"{self.spec_name}::{self.requirement_name}"
+
+
+@dataclass
+class SpecMeta:
+    """Spec-level navigation metadata, program-derived at index time.
+
+    Holds no authoritative content — only navigation aids the renderer reads:
+
+    - ``domain``: layered classification path parsed from the spec's
+      ``<!-- domain: <path> -->`` header marker, or ``None`` when the marker is
+      absent (the renderer groups such specs under ``(未分类)``).
+    - ``locator``: one-sentence positioning parsed from the ``## Purpose`` first
+      paragraph (truncated), shown beside the spec name in the root index view.
+    - ``item_count``: number of indexed Requirements in the spec.
+    """
+
+    spec_name: str
+    domain: Optional[str] = None
+    locator: str = ""
+    item_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        # Persisted under the ``specs`` section keyed by spec name, so the
+        # name itself is the key and is not duplicated in the value.
+        return {
+            "domain": self.domain,
+            "locator": self.locator,
+            "item_count": self.item_count,
+        }
+
+    @classmethod
+    def from_dict(cls, spec_name: str, data: Dict[str, Any]) -> "SpecMeta":
+        return cls(
+            spec_name=spec_name,
+            domain=data.get("domain"),
+            locator=data.get("locator", "") or "",
+            item_count=int(data.get("item_count", 0) or 0),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +177,9 @@ class SpecIndex:
         self.project_root = project_root
         self.specs_dir = self._resolve_specs_dir(project_root)
         self.items: Dict[str, ItemMeta] = {}
+        # Spec-level navigation metadata (domain / locator / item_count),
+        # keyed by spec name. Program-derived; rebuilt alongside items.
+        self.spec_metas: Dict[str, SpecMeta] = {}
         # Backwards-compat: derived on demand from items
         self._specs: Optional[Dict[str, _SimpleSpecInfo]] = None
         # O(1) lookup from spec_name -> any cached ItemMeta for that spec,
@@ -167,6 +247,42 @@ class SpecIndex:
             para = para[: max_chars - 3] + "..."
         return para.strip()
 
+    @staticmethod
+    def _extract_domain(text: str) -> Optional[str]:
+        """Parse the ``<!-- domain: <path> -->`` header marker from *text*.
+
+        Returns the layered path string, or ``None`` when the marker is absent
+        or empty. Mechanical extraction (no LLM); the marker is expected near
+        the top of the spec alongside the ``<!-- spec-format: v1 -->`` marker.
+        """
+        m = _DOMAIN_MARKER_RE.search(text)
+        if not m:
+            return None
+        value = m.group(1).strip()
+        return value or None
+
+    @classmethod
+    def _extract_locator(cls, header_text: str, max_chars: int = 200) -> str:
+        """Extract a one-sentence locator from the ``## Purpose`` first paragraph.
+
+        Reads the first paragraph beneath the ``## Purpose`` heading in the
+        spec's shared header, collapses wrapped lines, and truncates to
+        *max_chars*. Returns the empty string when no Purpose section exists.
+        """
+        m = _PURPOSE_HEADING_RE.search(header_text)
+        if not m:
+            return ""
+        after = header_text[m.end():]
+        # Cut at the next H2 heading so we stay within the Purpose section.
+        nxt = _H2_ANY_RE.search(after)
+        if nxt:
+            after = after[: nxt.start()]
+        para = after.strip().split("\n\n", 1)[0]
+        para = para.replace("\n", " ").strip()
+        if len(para) > max_chars:
+            para = para[: max_chars - 3] + "..."
+        return para
+
     # -- backwards-compat property -----------------------------------------
 
     @property
@@ -189,6 +305,7 @@ class SpecIndex:
     def build(self) -> "SpecIndex":
         """Full scan of *specs_dir* and rebuild of the entire index."""
         self.items.clear()
+        self.spec_metas.clear()
         self._specs = None
         self._first_item_per_spec.clear()
 
@@ -213,6 +330,7 @@ class SpecIndex:
         ]
         for k in keys_to_remove:
             del self.items[k]
+        self.spec_metas.pop(spec_name, None)
         self._specs = None
         self._first_item_per_spec.pop(spec_name, None)
 
@@ -240,8 +358,31 @@ class SpecIndex:
         size = stat.st_size
         sha256_prefix = self._compute_sha256_prefix(spec_file)
 
+        # Total line count of the file, used to bound the last Requirement's
+        # physical interval at EOF. ``splitlines()`` matches how
+        # ``resolve_item_location`` slices the body (a trailing newline does
+        # not create a phantom final line), so the stored interval stays
+        # consistent with the readable body.
+        total_lines = len(text.splitlines())
+
+        # Spec-level navigation metadata (program-derived, no LLM).
+        self.spec_metas[spec_name] = SpecMeta(
+            spec_name=spec_name,
+            domain=self._extract_domain(text),
+            locator=self._extract_locator(parsed.header_text),
+            item_count=len(parsed.requirements),
+        )
+
         first_item: Optional[ItemMeta] = None
-        for req in parsed.requirements:
+        reqs = parsed.requirements
+        for i, req in enumerate(reqs):
+            # line_end is the line just before the next Requirement's heading,
+            # or the last line of the file for the final Requirement (the
+            # interval is 1-based and inclusive).
+            if i + 1 < len(reqs):
+                line_end = max(req.line_start, reqs[i + 1].line_start - 1)
+            else:
+                line_end = max(req.line_start, total_lines)
             item = ItemMeta(
                 spec_name=spec_name,
                 requirement_name=req.name,
@@ -253,6 +394,8 @@ class SpecIndex:
                 keywords=req.keywords,
                 refs=req.refs,
                 summary=self._make_summary(req.body),
+                line_start=req.line_start,
+                line_end=line_end,
             )
             self.items[item.item_id] = item
             if first_item is None:
@@ -263,7 +406,7 @@ class SpecIndex:
             # needs_rebuild() can detect changes.
             item = ItemMeta(
                 spec_name=spec_name,
-                requirement_name="__no_requirements__",
+                requirement_name=_NO_REQUIREMENTS_SENTINEL,
                 spec_path=str(spec_file),
                 mtime=mtime,
                 size=size,
@@ -287,8 +430,11 @@ class SpecIndex:
         """
         self._index_file.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "version": 1,
+            "version": INDEX_VERSION,
             "items": {k: v.to_dict() for k, v in self.items.items()},
+            "specs": {
+                name: meta.to_dict() for name, meta in self.spec_metas.items()
+            },
         }
         tmp = self._index_file.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
@@ -305,15 +451,20 @@ class SpecIndex:
             # Version check: if future versions add incompatible schema
             # changes, force a rebuild rather than silently misparse.
             version = data.get("version")
-            if version is None or version != 1:
+            if version is None or version != INDEX_VERSION:
                 logger.info(
-                    "Spec index version %s is incompatible (expected 1); rebuilding.",
+                    "Spec index version %s is incompatible (expected %s); rebuilding.",
                     version,
+                    INDEX_VERSION,
                 )
                 return False
             self.items = {
                 k: ItemMeta.from_dict(v)
                 for k, v in data.get("items", {}).items()
+            }
+            self.spec_metas = {
+                name: SpecMeta.from_dict(name, meta)
+                for name, meta in data.get("specs", {}).items()
             }
             self._specs = None
             # Rebuild _first_item_per_spec from loaded items
@@ -364,6 +515,61 @@ class SpecIndex:
         """Look up a single item by its compound key."""
         return self.items.get(f"{spec_name}::{requirement_name}")
 
+    def get_spec_meta(self, spec_name: str) -> Optional[SpecMeta]:
+        """Return the spec-level navigation metadata for *spec_name*, if any."""
+        return self.spec_metas.get(spec_name)
+
+    def resolve_item_location(
+        self,
+        spec_name: str,
+        requirement_name: str,
+    ) -> Optional[tuple[str, int, int, str]]:
+        """Resolve a logical item address to its physical location and body.
+
+        Looks up ``<spec>::<requirement>`` in the index, reads the recorded
+        physical line interval from the spec file, and returns
+        ``(spec_path, line_start, line_end, body)`` where ``body`` is exactly
+        the text of lines ``[line_start, line_end]`` (1-based, inclusive) — so
+        the returned body and the physical interval are consistent by
+        construction.
+
+        Returns ``None`` for a non-item address (the no-requirements sentinel),
+        an unknown address, an item lacking a recorded ``line_start``, or when
+        the spec file cannot be read.
+        """
+        if requirement_name == _NO_REQUIREMENTS_SENTINEL:
+            return None
+        item = self.get_item(spec_name, requirement_name)
+        if item is None:
+            return None
+        if item.line_start < 1:
+            return None
+
+        spec_path = Path(item.spec_path)
+        try:
+            text = spec_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "resolve_item_location: failed to read %s: %s", spec_path, exc
+            )
+            return None
+
+        lines = text.splitlines()
+        total = len(lines)
+        if total == 0:
+            return None
+
+        start = item.line_start
+        # Clamp the end to the file's actual length (the file may have shrunk
+        # since indexing; a stale cache would otherwise over-read).
+        end = item.line_end if item.line_end >= start else start
+        end = min(end, total)
+        if start > total:
+            return None
+
+        body = "\n".join(lines[start - 1 : end])
+        return (str(spec_path), start, end, body)
+
     def list_all(self) -> List[ItemMeta]:
         """Return all indexed items, sorted by compound key."""
         return [self.items[k] for k in sorted(self.items)]
@@ -377,7 +583,7 @@ class SpecIndex:
         for key in sorted(self.items):
             item = self.items[key]
             # Skip the sentinel for no-requirement specs
-            if item.requirement_name == "__no_requirements__":
+            if item.requirement_name == _NO_REQUIREMENTS_SENTINEL:
                 continue
             result.append(
                 {
