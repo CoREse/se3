@@ -2887,6 +2887,132 @@ def load_spec_loading_config(project_root: Optional[Path] = None) -> SpecLoading
     return SpecLoadingConfig.load(project_root)
 
 
+# Default thresholds for the spec volume-governance config section. Kept as
+# module constants so other modules / tests can reference the canonical
+# defaults instead of hard-coding the numbers.
+DEFAULT_BASE_MAX_BYTES = 32768
+DEFAULT_INDEX_RENDER_THRESHOLD = 16384
+DEFAULT_SPEC_FILE_WARN_BYTES = 65536
+DEFAULT_REQUIREMENT_WARN_BYTES = 8192
+DEFAULT_GUARDRAILS_SIZE_TIER = "warn"
+_GUARDRAILS_SIZE_TIERS = ("warn", "enforce")
+
+
+@dataclass
+class SpecGovernanceConfig:
+    """Spec volume-governance thresholds and guardrails enforcement tier.
+
+    Loaded from the ``spec_governance:`` section of ``se3.yaml`` (sibling to
+    ``spec_loading:``). Every field has a sensible default and loading is
+    fault-tolerant: an illegal value falls back to the default and logs a
+    warning rather than raising, so a malformed config never breaks a run.
+
+    Fields:
+        base_max_bytes: Upper bound on the ``base`` spec size (the spec injected
+            in full into every step). Default 32768 (32 KiB).
+        index_render_threshold: Size threshold above which ``se3 spec index``
+            output is greedily folded into group handles. Default 16384 (16 KiB).
+        spec_file_warn_bytes: Per-spec-file size at/above which guardrails warns
+            (a refactor-evaluation signal). Default 65536 (64 KiB).
+        requirement_warn_bytes: Single-Requirement size at/above which guardrails
+            warns (split-the-requirement signal). Default 8192 (8 KiB).
+        guardrails_size_tier: Guardrails size-check tier, ``"warn"`` (default) or
+            ``"enforce"``.
+    """
+
+    base_max_bytes: int = DEFAULT_BASE_MAX_BYTES
+    index_render_threshold: int = DEFAULT_INDEX_RENDER_THRESHOLD
+    spec_file_warn_bytes: int = DEFAULT_SPEC_FILE_WARN_BYTES
+    requirement_warn_bytes: int = DEFAULT_REQUIREMENT_WARN_BYTES
+    guardrails_size_tier: str = DEFAULT_GUARDRAILS_SIZE_TIER
+
+    @staticmethod
+    def _coerce_positive_int(data: dict, key: str, default: int) -> int:
+        """Return a positive int from ``data[key]`` or fall back to *default*.
+
+        Bool, float, non-integer, and non-positive values warn and fall back —
+        sizes must be literal positive integers.
+        """
+        if key not in data:
+            return default
+        raw = data[key]
+        # bool is a subclass of int; reject it explicitly.
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            logger.warning(
+                "spec_governance.%s has invalid value %r (expected a positive "
+                "integer); falling back to default %d.",
+                key, raw, default,
+            )
+            return default
+        return raw
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SpecGovernanceConfig":
+        """Create from the ``spec_governance`` YAML section (fault-tolerant)."""
+        if not data or not isinstance(data, dict):
+            return cls()
+
+        base_max_bytes = cls._coerce_positive_int(
+            data, "base_max_bytes", DEFAULT_BASE_MAX_BYTES
+        )
+        index_render_threshold = cls._coerce_positive_int(
+            data, "index_render_threshold", DEFAULT_INDEX_RENDER_THRESHOLD
+        )
+        spec_file_warn_bytes = cls._coerce_positive_int(
+            data, "spec_file_warn_bytes", DEFAULT_SPEC_FILE_WARN_BYTES
+        )
+        requirement_warn_bytes = cls._coerce_positive_int(
+            data, "requirement_warn_bytes", DEFAULT_REQUIREMENT_WARN_BYTES
+        )
+
+        tier_raw = data.get("guardrails_size_tier", DEFAULT_GUARDRAILS_SIZE_TIER)
+        if isinstance(tier_raw, str) and tier_raw.strip().lower() in _GUARDRAILS_SIZE_TIERS:
+            guardrails_size_tier = tier_raw.strip().lower()
+        else:
+            logger.warning(
+                "spec_governance.guardrails_size_tier has invalid value %r "
+                "(expected 'warn' or 'enforce'); falling back to default %r.",
+                tier_raw, DEFAULT_GUARDRAILS_SIZE_TIER,
+            )
+            guardrails_size_tier = DEFAULT_GUARDRAILS_SIZE_TIER
+
+        return cls(
+            base_max_bytes=base_max_bytes,
+            index_render_threshold=index_render_threshold,
+            spec_file_warn_bytes=spec_file_warn_bytes,
+            requirement_warn_bytes=requirement_warn_bytes,
+            guardrails_size_tier=guardrails_size_tier,
+        )
+
+    @classmethod
+    def load(cls, project_root: Path) -> "SpecGovernanceConfig":
+        """Load spec-governance configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        sg_data = data.get("spec_governance", {})
+        if not sg_data or not isinstance(sg_data, dict):
+            return cls()
+        return cls.from_dict(sg_data)
+
+
+def load_spec_governance_config(
+    project_root: Optional[Path] = None,
+) -> SpecGovernanceConfig:
+    """Load spec volume-governance configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working
+            directory.
+
+    Returns:
+        SpecGovernanceConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return SpecGovernanceConfig.load(project_root)
+
+
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     f"""Get the maximum number of fix iterations for the test-verify-fix loop.
 
