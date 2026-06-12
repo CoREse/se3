@@ -411,6 +411,9 @@ from .commands.history_cmd import app as history_app
 # Import issue command
 from .commands.issue_cmd import app as issue_app
 
+# Import spec command (read-only spec index navigation)
+from .commands.spec_cmd import app as spec_app
+
 
 @app.command(name="init")
 def init_cmd(
@@ -497,6 +500,9 @@ app.add_typer(history_app, name="history", help="View and manage session history
 
 # Register issue command
 app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
+
+# Register spec command (read-only spec index navigation: index / show)
+app.add_typer(spec_app, name="spec", help="Navigate the spec index (read-only)")
 
 
 # ---------------------------------------------------------------------------
