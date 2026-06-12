@@ -336,6 +336,7 @@ def make_spawn_flow(
     task_type: str = "feature",
     discover: bool = False,
     resume_flow_id: str = "",
+    from_issue_id: str = "",
 ) -> Message:
     """server → daemon: instruct a daemon to spawn a new ``se3 run`` flow.
 
@@ -346,6 +347,14 @@ def make_spawn_flow(
     (``se3 run --resume --flow-id <id>``) instead of starting a fresh one.
     The ``task_description`` is ignored in this case — the flow's own
     persisted state supplies the task.
+
+    When *from_issue_id* is non-empty, the daemon spawns the flow from an
+    existing issue (``se3 run --from-issue <id>``); the issue's description
+    becomes the task and the request's ``task_description`` is ignored. It may
+    be combined with *discover* (the daemon then also appends ``--discover``).
+    Like *resume_flow_id*, the field is omitted from the wire when empty, so a
+    plain fresh-spawn payload stays byte-for-byte backward compatible and the
+    ``PROTOCOL_VERSION`` is not bumped.
     """
     payload: Dict[str, Any] = {
         "task_description": task_description,
@@ -355,6 +364,8 @@ def make_spawn_flow(
     }
     if resume_flow_id:
         payload["resume_flow_id"] = resume_flow_id
+    if from_issue_id:
+        payload["from_issue_id"] = from_issue_id
     return Message(type=MSG_SPAWN_FLOW, payload=payload)
 
 

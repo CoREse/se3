@@ -179,7 +179,7 @@ def run_cmd(
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Disable branch isolation in loop mode"),
     merge: Optional[str] = typer.Option(None, "--merge", help="Merge an existing loop branch (e.g. se3-loop/20260324-120000)"),
     list_loops: bool = typer.Option(False, "--list-loops", help="List existing unmerged loop branches"),
-    from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection)"),
+    from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection). Combine with --discover to start the issue-sourced flow from the discovery step."),
     output_format: str = typer.Option("cli", "--output-format", help="Output sink: 'cli' (Rich rendering, default) or 'json' (structured NDJSON event stream)"),
     preset: Optional[str] = typer.Option(None, "--preset", help="Run a preset prompt task by name (mutually exclusive with --type; the preset carries its own type). Use '--preset list' to list available presets."),
 ):
