@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 
 import pytest
 
@@ -748,6 +749,166 @@ def test_snapshot_machine_change_on_append_invalidates_cache():
         restored = await state.get_history_snapshot("f1")
         assert [r["line"] for r in restored["records"]] == [10, 11]
         assert restored["machine_id"] == "m2"
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# ServerState — old-format (generation-less) bundle backward compatibility
+#
+# Regression guard for the 872399c history-load regression: a bundle that
+# predates the ``generation`` field (or that was only ever extended through the
+# ``append`` branch, which historically never initialised it) read ``0`` every
+# snapshot via the old ``int(cached.get("generation") or 0)`` idiom and was
+# perpetually pinned to the full fallback instead of serving a delta.
+# ``_ensure_generation`` back-fills a stable generation on first contact in both
+# the snapshot-read and append-extend paths, so an old session walks the delta
+# path just like a new one — with no record loss.
+# --------------------------------------------------------------------------
+
+
+def _old_bundle(records, *, machine_id="m1"):
+    """An in-memory history bundle with NO ``generation`` key (old format)."""
+    return {
+        "flow_id": "f1",
+        "machine_id": machine_id,
+        "mode": protocol.HISTORY_MODE_FULL,
+        "records": [dict(r) for r in records],
+        "cursor": {},
+        "updated_at": time.time(),
+        # NOTE: deliberately no "generation" key — the regression scenario.
+    }
+
+
+def test_old_bundle_snapshot_backfills_stable_generation():
+    state = ServerState()
+
+    async def scenario():
+        # Inject an old-format bundle directly (simulating one that survived a
+        # code upgrade with no generation field).
+        state._history_data["f1"] = _old_bundle([{"line": 1}])
+        snap = await state.get_history_snapshot("f1")
+        # First contact is a full delivery with a fresh, positive generation.
+        assert snap["delivery"] == "full"
+        gen = state._history_data["f1"].get("generation")
+        assert isinstance(gen, int) and gen > 0
+        # The token minted against the back-filled generation now validates, so
+        # a reconnecting client gets a DELTA (here: an empty tail) rather than
+        # being pinned to the full fallback forever.
+        again = await state.get_history_snapshot("f1", after=snap["progress"])
+        assert again["delivery"] == "delta"
+        assert again["records"] == []
+        # The generation is stable across reads (not rolled each time).
+        assert state._history_data["f1"]["generation"] == gen
+
+    asyncio.run(scenario())
+
+
+def test_old_bundle_append_backfills_generation_and_keeps_delta():
+    state = ServerState()
+
+    async def scenario():
+        state._history_data["f1"] = _old_bundle([{"line": 1}])
+        # The append-extend path is the other historical offender: extend an
+        # old bundle and it must gain a stable generation.
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 2}], machine_id="m1"
+        )
+        assert applied is True
+        gen = state._history_data["f1"].get("generation")
+        assert isinstance(gen, int) and gen > 0
+        # Snapshot now carries the complete 2-record bundle.
+        snap = await state.get_history_snapshot("f1")
+        assert [r["line"] for r in snap["records"]] == [1, 2]
+        assert decode_progress(snap["progress"])["generation"] == gen
+        # A further append + a reconnect with the prior token yields only the
+        # new tail (delta) — and the generation has NOT changed.
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 3}], machine_id="m1"
+        )
+        delta = await state.get_history_snapshot("f1", after=snap["progress"])
+        assert delta["delivery"] == "delta"
+        assert [r["line"] for r in delta["records"]] == [3]
+        assert state._history_data["f1"]["generation"] == gen
+
+    asyncio.run(scenario())
+
+
+def test_old_bundle_delta_chain_reconstructs_complete_record_set():
+    """Across a full→append→delta chain the client's reconstructed records
+    equal the complete on-disk record set — no mid-stream truncation.
+
+    Covered for BOTH an old-format (generation-less) bundle and a new one, so
+    the completeness contract holds regardless of bundle provenance.
+    """
+
+    async def _run(seed_old: bool):
+        state = ServerState()
+        disk = [{"line": i} for i in range(1, 6)]  # the full on-disk jsonl
+        if seed_old:
+            state._history_data["f1"] = _old_bundle(disk[:2])
+        else:
+            await state.append_history(
+                "f1", protocol.HISTORY_MODE_FULL, disk[:2], machine_id="m1"
+            )
+        # Client's first full load: it holds records[0:2] and a token.
+        snap = await state.get_history_snapshot("f1")
+        assert snap["delivery"] == "full"
+        held = list(snap["records"])
+        token = snap["progress"]
+        # The flow keeps producing records (appends) while the client is away.
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, disk[2:4], machine_id="m1"
+        )
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, disk[4:], machine_id="m1"
+        )
+        # Reconnect: echo the held token, get only the gap, append it.
+        delta = await state.get_history_snapshot("f1", after=token)
+        assert delta["delivery"] == "delta"
+        held.extend(delta["records"])
+        # The reconstructed set equals the full on-disk jsonl — nothing dropped,
+        # nothing duplicated.
+        assert held == disk
+
+    async def scenario():
+        await _run(seed_old=True)
+        await _run(seed_old=False)
+
+    asyncio.run(scenario())
+
+
+def test_stale_token_against_old_bundle_returns_complete_full():
+    """A stale/mismatched token must yield the COMPLETE bundle (delivery full),
+    never a truncated slice — for an old-format bundle too."""
+    state = ServerState()
+
+    async def scenario():
+        state._history_data["f1"] = _old_bundle(
+            [{"line": 1}, {"line": 2}, {"line": 3}]
+        )
+        snap = await state.get_history_snapshot("f1")  # back-fills generation
+        gen = decode_progress(snap["progress"])["generation"]
+        # A token from a since-replaced generation (gen + 99) must fall back to
+        # the full record list, not slice anything off.
+        stale = encode_progress(gen + 99, 2, "m1")
+        again = await state.get_history_snapshot("f1", after=stale)
+        assert again["delivery"] == "full"
+        assert [r["line"] for r in again["records"]] == [1, 2, 3]
+
+    asyncio.run(scenario())
+
+
+def test_get_history_backfills_generation_for_old_bundle():
+    """The internal ``get_history`` copy (used by the on-demand pull resolve)
+    also reports a stable positive generation for an old-format bundle."""
+    state = ServerState()
+
+    async def scenario():
+        state._history_data["f1"] = _old_bundle([{"line": 1}])
+        copy = await state.get_history("f1")
+        assert copy["generation"] > 0
+        assert state._history_data["f1"]["generation"] == copy["generation"]
 
     asyncio.run(scenario())
 

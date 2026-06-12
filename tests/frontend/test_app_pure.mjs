@@ -5494,4 +5494,102 @@ await checkAsync("history: failed reconnect request keeps the existing detail", 
   assert.equal(bubbleNodes(d).length, countBefore);
 });
 
+// -- G3 regression: stale-offset guard + exit/re-enter delta completeness ----
+//
+// Guards the 872399c history-load regression from the frontend side: a held
+// progress token must never be echoed when its backing records were dropped
+// (which would render the server's delta tail as the whole conversation = a
+// truncated view), and an old session that the user exits and re-enters must
+// still walk the delta path on a reconnect — with the rendered records equal to
+// the complete on-disk set.
+
+await checkAsync("flow: reconnect with empty held records forces a full load (no stale offset)", async () => {
+  app.state.selectedFlowId = "F1";
+  // Pathological invariant violation: a token is held but no records back it.
+  // The echo-guard must refuse to apply that offset across the cleared bundle.
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = "stale-token";
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "fresh", delivery: "full",
+  });
+  await app.loadFlowConversation("F1", { incremental: true });
+  // The stale token was NOT echoed — a full reload was requested instead.
+  assert.ok(!String(__lastFetchUrl).includes("after="), __lastFetchUrl);
+  // The complete record set is shown (never truncated to a delta tail).
+  assert.equal(app.state.flowConversationRecords.length, 2);
+  assert.equal(app.state.flowConversationProgress, "fresh");
+});
+
+await checkAsync("history: reconnect with empty held records forces a full load (no stale offset)", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [];
+  app.state.historyProgress = "stale-token";
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "fresh", delivery: "full",
+  });
+  await app.openHistorySession("H1", { incremental: true });
+  assert.ok(!String(__lastFetchUrl).includes("after="), __lastFetchUrl);
+  assert.equal(app.state.historyRecords.length, 2);
+  assert.equal(app.state.historyProgress, "fresh");
+});
+
+await checkAsync("history: exit then re-enter still walks delta on reconnect with complete records", async () => {
+  app.state.selectedHistoryId = null;
+  app.state.historyRecords = [];
+  app.state.historyProgress = null;
+  app.state.historySessions = [{ flow_id: "OLD", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+
+  // Enter the session: full load of the complete record set.
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "g1", delivery: "full",
+  });
+  await app.openHistorySession("OLD");
+  assert.equal(app.state.historyRecords.length, 2);
+  assert.equal(app.state.historyProgress, "g1");
+
+  // Exit the history view (mirror closeHistory's reset of records + progress).
+  app.state.selectedHistoryId = null;
+  app.state.historyRecords = [];
+  app.state.historyProgress = null;
+
+  // Re-enter the SAME old session: a fresh click is a full load (complete),
+  // never a stale delta against the previous bundle.
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "g2", delivery: "full",
+  });
+  await app.openHistorySession("OLD");
+  assert.ok(!String(__lastFetchUrl).includes("after="), "fresh re-entry is a full load");
+  assert.equal(app.state.historyRecords.length, 2);
+  assert.equal(app.state.historyProgress, "g2");
+
+  // A WS-reconnect refresh of the re-entered session DOES walk the delta path
+  // (the regression was that old sessions stayed pinned to a full reload): it
+  // echoes the held token and appends only the gap, ending with the complete
+  // record set — no full reload, no truncation, no duplication.
+  setFetch({
+    records: [asstRecord("C", 3, "s1", "discovery")],
+    progress: "g3", delivery: "delta",
+  });
+  await app.openHistorySession("OLD", { incremental: true });
+  assert.ok(String(__lastFetchUrl).includes("after=g2"), "reconnect echoes the held token (delta)");
+  assert.equal(app.state.historyProgress, "g3");
+  assert.equal(app.state.historyRecords.length, 3);
+  assert.deepEqual(
+    app.state.historyRecords.map((r) => r.message.content), ["A", "B", "C"]);
+  assert.ok(uniqueKeys(app.state.historyRecords));
+});
+
 console.log(`\n${passed} checks passed.`);
