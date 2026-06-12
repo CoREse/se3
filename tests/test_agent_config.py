@@ -22,12 +22,14 @@ def _reset_module_caches():
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
     yield
     _cfg._warned_unknown_step_keys_for.clear()
     _cfg._warned_non_dict_llm_caller_for.clear()
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
 
 
 class TestLoadAgents:
@@ -135,8 +137,9 @@ llm_caller:
 
         assert agents[0]["name"] == "global-agent"
 
-    def test_priority_sorting(self, tmp_path):
-        """Agents should be sorted by priority descending."""
+    def test_defaults_preserve_written_order(self, tmp_path):
+        """Agents follow the written order of llm_caller.defaults; the
+        deprecated priority field is ignored for ordering."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
   low: {cmd: low-claude, priority: 1}
@@ -148,7 +151,29 @@ llm_caller:
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
-        assert [a["name"] for a in agents] == ["high", "mid", "low"]
+        # Order is the written defaults order, NOT priority descending.
+        assert [a["name"] for a in agents] == ["low", "high", "mid"]
+
+    def test_priority_field_emits_deprecation_warning_once(self, tmp_path, caplog):
+        """A source carrying agents.<name>.priority warns once (deprecated)."""
+        import logging
+        config = tmp_path / "se3.yaml"
+        config.write_text("""agents:
+  a: {cmd: claude, priority: 1}
+  b: {cmd: kclaude, priority: 2}
+llm_caller:
+  defaults: [a, b]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with caplog.at_level(logging.WARNING, logger="se3.config"):
+                load_agents(tmp_path)
+
+        priority_warnings = [
+            rec for rec in caplog.records
+            if "priority" in rec.message and "deprecated" in rec.message
+        ]
+        # Two priority fields in one source → at most one warning.
+        assert len(priority_warnings) == 1
 
     def test_string_entries_normalized(self, tmp_path):
         """Bare string entries in agents dict should be normalized to cmd."""

@@ -1069,6 +1069,12 @@ def _load_agent_configs(
 _warned_list_agents_for: set[str] = set()
 _warned_claude_commands_ignored_for: set[str] = set()
 _warned_claude_commands_deprecated_for: set[str] = set()
+# One-shot (per source) warning that ``agents.<name>.priority`` is deprecated.
+# Agent rotation order now follows the written list order in
+# ``llm_caller.defaults`` / ``llm_caller.steps.<step>``; priority is accepted
+# but ignored. Keyed by the deduped source token so a config carrying several
+# priority fields warns at most once per source.
+_warned_agent_priority_deprecated_for: set[str] = set()
 
 
 def _slugify_cmd(cmd: str) -> str:
@@ -1180,6 +1186,7 @@ def _agents_dict_from_source(
         return None
 
     registry: dict[str, AgentDef] = {}
+    saw_priority = False
     for name, entry in raw.items():
         if not isinstance(name, str) or not name.strip():
             logger.warning(
@@ -1206,12 +1213,26 @@ def _agents_dict_from_source(
                 source_label, name,
             )
             continue
+        if "priority" in entry:
+            saw_priority = True
         registry[name] = AgentDef(
             name=name,
             type=entry.get("type", "claude-code"),
             cmd=cmd,
             priority=entry.get("priority", 0),
         )
+
+    if saw_priority:
+        dedup_key = _dedup_source_key(source_label)
+        if dedup_key not in _warned_agent_priority_deprecated_for:
+            _warned_agent_priority_deprecated_for.add(dedup_key)
+            logger.warning(
+                "%s: 'agents.<name>.priority' is deprecated and ignored. "
+                "Agent rotation order now follows the written order of "
+                "'llm_caller.defaults' / 'llm_caller.steps.<step>'. Remove "
+                "the priority field(s) and order the name lists explicitly.",
+                source_label,
+            )
     return registry
 
 
@@ -1275,16 +1296,25 @@ def _agent_registry_from_data(
     return merged, legacy_defaults
 
 
-def _registry_to_sorted_list(
+def _registry_to_list(
     registry: dict[str, AgentDef], names: list[str],
 ) -> list[dict]:
-    """Resolve a name list against the registry and sort by priority.
+    """Resolve a name list against the registry, preserving written order.
+
+    The ``priority`` field is intentionally NOT used for ordering: the
+    written order of ``names`` (the order they appear in
+    ``llm_caller.defaults`` / ``llm_caller.steps.<step>``) is the
+    rotation order. ``priority`` is retained on each agent dict as
+    deprecated compatibility data only.
 
     Caller is responsible for validating that all names are registered.
     """
-    resolved = [registry[n].to_agent_dict() for n in names]
-    resolved.sort(key=lambda x: x.get("priority", 0), reverse=True)
-    return resolved
+    return [registry[n].to_agent_dict() for n in names]
+
+
+# Back-compat alias: the old name advertised priority sorting, which is
+# now removed. Kept so any external importer keeps working.
+_registry_to_sorted_list = _registry_to_list
 
 
 def load_agent_registry(
@@ -1321,7 +1351,7 @@ def _resolve_name_list(
             f"{reference_location}: unknown agent name(s) {missing!r}; "
             f"registered agents: {available}"
         )
-    return _registry_to_sorted_list(registry, names)
+    return _registry_to_list(registry, names)
 
 
 def _read_llm_caller_section(
@@ -1460,56 +1490,28 @@ def _warn_on_unknown_step_keys(
     )
 
 
-def _step_override_from_data(
-    global_data: dict, project_data: dict, step_type: str,
-    project_source_label: str = PROJECT_CONFIG_FILENAME,
-) -> Optional[list[dict]]:
-    """Extract and validate a per-step override from already-parsed YAML.
+def _llm_caller_steps_section(data: dict, source_label: str) -> dict:
+    """Return the ``llm_caller.steps`` mapping for a source (or ``{}``)."""
+    llm_caller = _read_llm_caller_section(data, source_label)
+    if llm_caller is None:
+        return {}
+    section = llm_caller.get("steps", {})
+    return section if isinstance(section, dict) else {}
 
-    New schema: ``llm_caller.steps.<step>`` is a list of name strings
-    that refer to entries in the top-level ``agents`` registry. Legacy
-    inline-dict entries (``- cmd: claude-opus``) are rejected with a
-    warning and treated as "no override"; an unknown agent name raises
-    ``ValueError`` at startup so typos fail loudly.
 
-    Returns normalized+sorted agent dicts, or ``None`` if no valid
-    override is declared for ``step_type``.
+def _extract_step_names(
+    raw_list: list, source_label: str, step_type: str,
+) -> tuple[list[str], bool]:
+    """Extract agent name references from a flat ``llm_caller.steps.<step>`` list.
+
+    Returns ``(names, per_entry_warned)``. Inline dict entries
+    (``- cmd: claude-opus``) and other non-string entries are skipped
+    with a warning — the new schema requires name references into the
+    top-level ``agents`` registry.
     """
-    def _section(data: dict, source_label: str) -> dict:
-        llm_caller = _read_llm_caller_section(data, source_label)
-        if llm_caller is None:
-            return {}
-        section = llm_caller.get("steps", {})
-        return section if isinstance(section, dict) else {}
-
-    global_steps = _section(global_data, "~/.se3/config.yaml")
-    project_steps = _section(project_data, project_source_label)
-
-    _warn_on_unknown_step_keys("~/.se3/config.yaml", global_steps)
-    _warn_on_unknown_step_keys(project_source_label, project_steps)
-
-    # Source label is tracked so ValueError messages point the user to
-    # the exact YAML file where the typo lives.
-    if step_type in project_steps:
-        raw = project_steps[step_type]
-        source_label = project_source_label
-    elif step_type in global_steps:
-        raw = global_steps[step_type]
-        source_label = "~/.se3/config.yaml"
-    else:
-        return None
-
-    if not isinstance(raw, list):
-        logger.warning(
-            "%s: llm_caller.steps.%s is not a list (got %s); ignoring "
-            "override",
-            source_label, step_type, type(raw).__name__,
-        )
-        return None
-
     per_entry_warned = False
     names: list[str] = []
-    for entry in raw:
+    for entry in raw_list:
         if isinstance(entry, str):
             if entry.strip():
                 names.append(entry)
@@ -1538,6 +1540,56 @@ def _step_override_from_data(
                 source_label, step_type, entry,
             )
             per_entry_warned = True
+    return names, per_entry_warned
+
+
+def _step_override_from_data(
+    global_data: dict, project_data: dict, step_type: str,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
+) -> Optional[list[dict]]:
+    """Extract and validate a per-step override from already-parsed YAML.
+
+    New schema: ``llm_caller.steps.<step>`` is a list of name strings
+    that refer to entries in the top-level ``agents`` registry. Legacy
+    inline-dict entries (``- cmd: claude-opus``) are rejected with a
+    warning and treated as "no override"; an unknown agent name raises
+    ``ValueError`` at startup so typos fail loudly.
+
+    Nested-list values (``[[a], [b, c]]``) are only meaningful for
+    ``self_check`` (see :func:`_self_check_resolution_from_data`); for
+    every other step a nested form is an illegal flat override — its
+    sub-list entries are non-strings and are skipped with a warning,
+    yielding "no override".
+
+    Returns the agent dicts in written order, or ``None`` if no valid
+    override is declared for ``step_type``.
+    """
+    global_steps = _llm_caller_steps_section(global_data, "~/.se3/config.yaml")
+    project_steps = _llm_caller_steps_section(project_data, project_source_label)
+
+    _warn_on_unknown_step_keys("~/.se3/config.yaml", global_steps)
+    _warn_on_unknown_step_keys(project_source_label, project_steps)
+
+    # Source label is tracked so ValueError messages point the user to
+    # the exact YAML file where the typo lives.
+    if step_type in project_steps:
+        raw = project_steps[step_type]
+        source_label = project_source_label
+    elif step_type in global_steps:
+        raw = global_steps[step_type]
+        source_label = "~/.se3/config.yaml"
+    else:
+        return None
+
+    if not isinstance(raw, list):
+        logger.warning(
+            "%s: llm_caller.steps.%s is not a list (got %s); ignoring "
+            "override",
+            source_label, step_type, type(raw).__name__,
+        )
+        return None
+
+    names, per_entry_warned = _extract_step_names(raw, source_label, step_type)
 
     if not names:
         if not per_entry_warned:
@@ -1558,6 +1610,174 @@ def _step_override_from_data(
     )
 
 
+_SELF_CHECK_STEP_NAME = "self_check"
+
+
+@dataclass
+class SelfCheckResolution:
+    """Resolved ``llm_caller.steps.self_check`` agent-chain configuration.
+
+    ``form`` is one of:
+
+    - ``"flat"``    — a flat list of agent names. A single chain is reused
+      for every self_check pass (fully back-compatible). ``chains`` has
+      length 1.
+    - ``"nested"``  — a list of sub-lists, one agent chain per self_check
+      pass. ``chains`` has length == number of declared sub-lists.
+    - ``"default"`` — no usable self_check override: the key is absent, or
+      the declaration is mixed (strings AND sub-lists) / otherwise
+      malformed and falls back to ``llm_caller.defaults``. ``chains`` is
+      empty.
+    """
+
+    form: str
+    chains: list[list[dict]] = field(default_factory=list)
+    source_label: Optional[str] = None
+
+    @property
+    def chain_count(self) -> int:
+        return len(self.chains)
+
+    @property
+    def is_override(self) -> bool:
+        return self.form in ("flat", "nested")
+
+    def chain_for_pass(self, pass_index: int) -> Optional[list[dict]]:
+        """Return the agent chain for a 1-based ``pass_index``.
+
+        Passes beyond the number of declared chains reuse the LAST chain.
+        Returns ``None`` for the ``default`` form (caller uses the default
+        chain).
+        """
+        if not self.chains:
+            return None
+        idx = max(1, int(pass_index or 1)) - 1
+        if idx >= len(self.chains):
+            idx = len(self.chains) - 1
+        return self.chains[idx]
+
+
+def _self_check_resolution_from_data(
+    global_data: dict, project_data: dict,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
+) -> SelfCheckResolution:
+    """Parse ``llm_caller.steps.self_check`` into a :class:`SelfCheckResolution`.
+
+    Supports both the flat list form (one chain reused for every pass) and
+    the nested list form (``[[a], [b, c]]`` — one chain per pass). A mixed
+    form (strings AND sub-lists in the same list) is a configuration error:
+    it logs a WARNING and falls back to the default chain (``default``
+    form). Unknown agent names still fail fast via :func:`_resolve_name_list`.
+    """
+    global_steps = _llm_caller_steps_section(global_data, "~/.se3/config.yaml")
+    project_steps = _llm_caller_steps_section(project_data, project_source_label)
+
+    _warn_on_unknown_step_keys("~/.se3/config.yaml", global_steps)
+    _warn_on_unknown_step_keys(project_source_label, project_steps)
+
+    if _SELF_CHECK_STEP_NAME in project_steps:
+        raw = project_steps[_SELF_CHECK_STEP_NAME]
+        source_label = project_source_label
+    elif _SELF_CHECK_STEP_NAME in global_steps:
+        raw = global_steps[_SELF_CHECK_STEP_NAME]
+        source_label = "~/.se3/config.yaml"
+    else:
+        return SelfCheckResolution(form="default")
+
+    if not isinstance(raw, list):
+        logger.warning(
+            "%s: llm_caller.steps.self_check is not a list (got %s); "
+            "ignoring override",
+            source_label, type(raw).__name__,
+        )
+        return SelfCheckResolution(form="default", source_label=source_label)
+
+    has_sublist = any(isinstance(e, list) for e in raw)
+    has_string = any(isinstance(e, str) for e in raw)
+
+    registry, _ = _agent_registry_from_data(
+        global_data, project_data, project_source_label,
+    )
+
+    # Mixed form: both bare strings and sub-lists. Treat as a config error
+    # and fall back to llm_caller.defaults.
+    if has_sublist and has_string:
+        logger.warning(
+            "%s: llm_caller.steps.self_check mixes bare agent names with "
+            "sub-lists ([[a], [b, c]]) — this is invalid. Use either a "
+            "flat list (one chain for all passes) or a fully nested list "
+            "(one chain per pass). Falling back to llm_caller.defaults.",
+            source_label,
+        )
+        return SelfCheckResolution(form="default", source_label=source_label)
+
+    if has_sublist:
+        chains: list[list[dict]] = []
+        for sub in raw:
+            if not isinstance(sub, list):
+                logger.warning(
+                    "%s: llm_caller.steps.self_check nested entry %r is "
+                    "not a list; skipping this pass chain",
+                    source_label, sub,
+                )
+                continue
+            names, _warned = _extract_step_names(
+                sub, source_label, _SELF_CHECK_STEP_NAME,
+            )
+            if not names:
+                logger.warning(
+                    "%s: llm_caller.steps.self_check nested entry %r has "
+                    "no valid agent names; skipping this pass chain",
+                    source_label, sub,
+                )
+                continue
+            chains.append(
+                _resolve_name_list(
+                    f"{source_label}: llm_caller.steps.self_check",
+                    names, registry,
+                )
+            )
+        if not chains:
+            return SelfCheckResolution(form="default", source_label=source_label)
+        return SelfCheckResolution(
+            form="nested", chains=chains, source_label=source_label,
+        )
+
+    # Flat form (back-compatible): one chain reused for every pass.
+    names, per_entry_warned = _extract_step_names(
+        raw, source_label, _SELF_CHECK_STEP_NAME,
+    )
+    if not names:
+        if not per_entry_warned:
+            logger.warning(
+                "%s: llm_caller.steps.self_check is empty or has no valid "
+                "entries; ignoring override",
+                source_label,
+            )
+        return SelfCheckResolution(form="default", source_label=source_label)
+    chain = _resolve_name_list(
+        f"{source_label}: llm_caller.steps.self_check", names, registry,
+    )
+    return SelfCheckResolution(
+        form="flat", chains=[chain], source_label=source_label,
+    )
+
+
+def load_self_check_resolution(
+    project_root: Optional[Path] = None,
+) -> SelfCheckResolution:
+    """Load the resolved ``llm_caller.steps.self_check`` configuration.
+
+    See :class:`SelfCheckResolution`. Reads global + project YAML in one
+    pass; project declaration of ``self_check`` fully replaces the global
+    one (no merge), mirroring the other per-step overrides.
+    """
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    return _self_check_resolution_from_data(
+        global_data, project_data, project_source_label,
+    )
+
+
 def load_agents(project_root: Optional[Path] = None) -> list[dict]:
     """Load agent configurations from project and global configuration.
 
@@ -1571,8 +1791,9 @@ def load_agents(project_root: Optional[Path] = None) -> list[dict]:
         project_root: Project root directory. If None, uses global config only.
 
     Returns:
-        List of agent config dicts ``{name, type, cmd, priority}`` sorted by
-        priority descending.
+        List of agent config dicts ``{name, type, cmd, priority}`` in the
+        configured chain order (``priority`` is deprecated and not used for
+        ordering).
     """
     global_data, project_data, project_source_label = _load_agent_configs(project_root)
     return _default_chain_from_data(global_data, project_data, project_source_label)
@@ -1603,8 +1824,9 @@ def load_step_agents(
             None or empty string short-circuits to None.
 
     Returns:
-        Normalized agent dicts sorted by ``priority`` descending, or None
-        when no override is declared for this step.
+        Normalized agent dicts in the written list order (``priority`` is
+        deprecated and ignored for ordering), or None when no override is
+        declared for this step.
     """
     if not step_type:
         return None
@@ -1692,6 +1914,8 @@ def resolve_confirm_inputs(
 def resolve_agents(
     project_root: Optional[Path],
     step_type: Optional[str],
+    *,
+    self_check_pass_index: Optional[int] = None,
 ) -> tuple[list[dict], bool]:
     """Resolve the effective agent chain for a step in a single YAML read.
 
@@ -1702,10 +1926,30 @@ def resolve_agents(
     ``claude_commands`` (or built-in default) is returned and the flag is
     False.
 
+    ``self_check`` additionally supports a nested per-pass schema
+    (``[[a], [b, c]]``). When ``step_type == "self_check"`` the chain is
+    selected by ``self_check_pass_index`` (1-based; passes beyond the
+    declared chain count reuse the last chain). A flat self_check list
+    behaves as a single chain for every pass; a mixed / malformed
+    declaration falls back to the default chain.
+
     Used by :class:`LLMCaller` to avoid the cost of reading the same YAML
     files twice (once via ``load_step_agents``, once via ``load_agents``).
     """
     global_data, project_data, project_source_label = _load_agent_configs(project_root)
+
+    if step_type == _SELF_CHECK_STEP_NAME:
+        resolution = _self_check_resolution_from_data(
+            global_data, project_data, project_source_label,
+        )
+        if resolution.is_override:
+            chain = resolution.chain_for_pass(self_check_pass_index or 1)
+            if chain:
+                return chain, True
+        return _default_chain_from_data(
+            global_data, project_data, project_source_label,
+        ), False
+
     if step_type:
         override = _step_override_from_data(
             global_data, project_data, step_type, project_source_label,
@@ -1729,7 +1973,9 @@ def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
         project_root: Project root directory. If None, uses global config only.
 
     Returns:
-        List of command dictionaries with 'cmd' and 'priority' keys, sorted by priority.
+        List of command dictionaries with 'cmd' and 'priority' keys, in the
+        configured chain order ('priority' is deprecated and not used for
+        ordering).
     """
     agents = load_agents(project_root)
     return _agents_to_commands(agents)
@@ -1981,6 +2227,11 @@ class WorkflowConfig:
     self_check_passes_required: int = DEFAULT_SELF_CHECK_PASSES_REQUIRED
     self_check_convergence_enabled: bool = DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
     baseline_fix_max_attempts: int = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+    # Whether ``workflow.self_check_passes_required`` was set explicitly in
+    # the YAML. When False and ``llm_caller.steps.self_check`` is a nested
+    # per-pass chain, the effective pass count is derived from the number
+    # of declared chains (see state_machine effective-pass resolution).
+    self_check_passes_required_explicit: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkflowConfig":
@@ -2050,6 +2301,7 @@ class WorkflowConfig:
                 f"(use 0 or null for unlimited)"
             )
 
+        passes_explicit = "self_check_passes_required" in workflow_data
         raw_passes = workflow_data.get(
             "self_check_passes_required", DEFAULT_SELF_CHECK_PASSES_REQUIRED
         )
@@ -2132,6 +2384,7 @@ class WorkflowConfig:
             self_check_passes_required=passes,
             self_check_convergence_enabled=convergence,
             baseline_fix_max_attempts=baseline_attempts,
+            self_check_passes_required_explicit=passes_explicit,
         )
 
     @classmethod

@@ -24,12 +24,14 @@ def _reset_module_caches():
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
     yield
     _cfg._warned_unknown_step_keys_for.clear()
     _cfg._warned_non_dict_llm_caller_for.clear()
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
 
 
 def _write_global(tmp_path, yaml_text):
@@ -110,9 +112,10 @@ llm_caller:
         with patch("se3.config.Path.home", return_value=tmp_path):
             chain = load_agents(tmp_path)
 
-        # Global defaults resolved against merged registry. Sorted by
-        # priority descending.
-        assert [a["name"] for a in chain] == ["g2", "g1"]
+        # Global defaults resolved against merged registry, preserving the
+        # written order of llm_caller.defaults (priority is ignored for
+        # ordering — deprecated).
+        assert [a["name"] for a in chain] == ["g1", "g2"]
 
 
 class TestStepOverrideWholesaleReplace:

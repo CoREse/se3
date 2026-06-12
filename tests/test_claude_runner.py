@@ -73,7 +73,9 @@ class TestLoadClaudeCommands:
             commands = load_claude_commands(tmp_path)
         assert commands[0]["cmd"] == "global-claude"
 
-    def test_priority_sorting(self, tmp_path):
+    def test_legacy_commands_preserve_written_order(self, tmp_path):
+        # Legacy claude_commands migration preserves entry order; the
+        # deprecated priority field is ignored for ordering.
         (tmp_path / "se3.yaml").write_text("""claude_commands:
   - cmd: low
     priority: 1
@@ -84,7 +86,7 @@ class TestLoadClaudeCommands:
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
-        assert [c["cmd"] for c in commands] == ["high", "mid", "low"]
+        assert [c["cmd"] for c in commands] == ["low", "high", "mid"]
 
     def test_string_entries_normalized(self, tmp_path):
         (tmp_path / "se3.yaml").write_text("claude_commands:\n  - claude\n  - kclaude\n")

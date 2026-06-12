@@ -568,6 +568,9 @@ class StateMachine:
         # Invalidate workflow config cache so each transition sees fresh config,
         # but within a single transition _get_workflow_config is memoized.
         self._workflow_config_cache = None
+        # Same per-transition memoization for the self_check chain resolution
+        # (needed to derive the effective pass count from a nested chain).
+        self._self_check_resolution_cache = None
 
         # Resume-with-invalid-yaml safety net: when this StateMachine instance
         # has no ``_workflow_config_last_good`` (e.g. first transition after
@@ -687,8 +690,7 @@ class StateMachine:
             current_step.step_type == StepType.SELF_CHECK
             and current_step.status == StepStatus.COMPLETED
         ):
-            workflow_cfg = self._get_workflow_config()
-            passes_required = workflow_cfg.self_check_passes_required
+            passes_required = self._get_self_check_passes_required()
             consecutive_passes = self._count_consecutive_self_check_completed(flow)
 
             if consecutive_passes < passes_required:
@@ -1178,6 +1180,81 @@ class StateMachine:
         self._workflow_config_last_good = cfg
         return cfg
 
+    def _get_self_check_resolution(self):
+        """Load and cache the resolved ``llm_caller.steps.self_check`` config.
+
+        Memoized per transition (invalidated at the top of
+        ``transition_to_next``) so the nested-chain count is read at most
+        once per cycle. Degrades to the ``default`` form on any loader
+        error so a malformed YAML never crashes a transition.
+        """
+        cached = getattr(self, "_self_check_resolution_cache", None)
+        if cached is not None:
+            return cached
+        from ..config import SelfCheckResolution, load_self_check_resolution
+        try:
+            resolution = load_self_check_resolution(self.project_root)
+        except ValueError:
+            # Unknown agent name in the chain is a genuine config error and
+            # must fail fast at the construction path (LLMCaller). Here, in
+            # the pass-count derivation path, degrade to the default form so
+            # the count still resolves; the real fail-fast surfaces when the
+            # self_check LLMCaller is built.
+            resolution = SelfCheckResolution(form="default")
+        except (IOError, OSError, ImportError):
+            resolution = SelfCheckResolution(form="default")
+        self._self_check_resolution_cache = resolution
+        return resolution
+
+    def _get_self_check_passes_required(self) -> int:
+        """Return the effective self_check pass count for the current config.
+
+        Derivation:
+        - When ``llm_caller.steps.self_check`` is a nested per-pass chain
+          AND ``workflow.self_check_passes_required`` was NOT set
+          explicitly, the effective count is the number of declared chains
+          (the nested chain alone fully expresses the intent).
+        - When both are set explicitly, ``self_check_passes_required``
+          wins. If it is smaller than the chain count, a one-shot WARNING
+          notes that the extra chains will not run.
+        - Otherwise (flat / no self_check override), the configured
+          ``self_check_passes_required`` (explicit or default 1) is used.
+        """
+        cfg = self._get_workflow_config()
+        resolution = self._get_self_check_resolution()
+        if resolution.form != "nested":
+            return cfg.self_check_passes_required
+
+        chain_count = resolution.chain_count
+        if not cfg.self_check_passes_required_explicit:
+            return chain_count
+
+        passes = cfg.self_check_passes_required
+        if passes < chain_count:
+            self._warn_self_check_passes_below_chains(
+                resolution.source_label, passes, chain_count,
+            )
+        return passes
+
+    def _warn_self_check_passes_below_chains(
+        self, source_label, passes: int, chain_count: int,
+    ) -> None:
+        """One-shot WARNING when explicit pass count < declared chain count."""
+        warned = getattr(self, "_warned_self_check_passes_below_chains", None)
+        if warned is None:
+            warned = set()
+            self._warned_self_check_passes_below_chains = warned
+        key = (source_label, passes, chain_count)
+        if key in warned:
+            return
+        warned.add(key)
+        logger.warning(
+            "workflow.self_check_passes_required=%d is smaller than the "
+            "%d self_check chains declared in llm_caller.steps.self_check "
+            "(%s); the last %d chain(s) will not be used.",
+            passes, chain_count, source_label, chain_count - passes,
+        )
+
     def _count_consecutive_self_check_completed(self, flow: FlowInstance) -> int:
         """Count consecutive COMPLETED self_check steps from the end of step_history.
 
@@ -1530,7 +1607,7 @@ class StateMachine:
             pass_index = self._count_consecutive_self_check_completed(flow) + 1
             workflow_cfg = self._get_workflow_config()
             inputs["self_check_pass_index"] = pass_index
-            inputs["self_check_passes_required"] = workflow_cfg.self_check_passes_required
+            inputs["self_check_passes_required"] = self._get_self_check_passes_required()
             inputs["self_check_convergence_enabled"] = workflow_cfg.self_check_convergence_enabled
 
             # Always populate max_fix_iterations so the handler never has to

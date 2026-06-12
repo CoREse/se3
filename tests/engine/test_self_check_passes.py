@@ -1154,3 +1154,156 @@ class TestResumeMidNPass:
         next_step = sm.transition_to_next(loaded_flow)
         assert next_step is not None
         assert next_step.step_type == StepType.VERIFY_SPEC
+
+
+# ---------------------------------------------------------------------------
+# 12. Effective pass count derived from nested self_check chains
+# ---------------------------------------------------------------------------
+
+
+_AGENTS_YAML = """agents:
+  a: {cmd: claude-a}
+  b: {cmd: claude-b}
+  c: {cmd: claude-c}
+"""
+
+
+def _real_state_machine(tmp_path):
+    """A StateMachine reading real config from tmp_path (no _get_workflow_config
+    override). Global ~/.se3/config.yaml is isolated via Path.home patching by
+    the caller."""
+    with patch("se3.engine.state_machine.PersistenceManager"):
+        return StateMachine(project_root=tmp_path)
+
+
+class TestEffectivePassCountFromNestedChains:
+    def test_nested_without_explicit_passes_uses_chain_count(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [a]
+      - [b, c]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            sm = _real_state_machine(tmp_path)
+            # Two declared chains, no explicit self_check_passes_required.
+            assert sm._get_self_check_passes_required() == 2
+
+    def test_explicit_greater_than_chains_keeps_explicit(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """workflow:
+  self_check_passes_required: 4
+llm_caller:
+  steps:
+    self_check:
+      - [a]
+      - [b]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            sm = _real_state_machine(tmp_path)
+            assert sm._get_self_check_passes_required() == 4
+
+    def test_explicit_less_than_chains_warns_and_uses_explicit(self, tmp_path, caplog):
+        import logging
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """workflow:
+  self_check_passes_required: 1
+llm_caller:
+  steps:
+    self_check:
+      - [a]
+      - [b]
+      - [c]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            sm = _real_state_machine(tmp_path)
+            with caplog.at_level(logging.WARNING, logger="se3.engine.state_machine"):
+                passes = sm._get_self_check_passes_required()
+
+        assert passes == 1
+        assert any(
+            "smaller than" in rec.message and "self_check chains" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_flat_self_check_uses_explicit_or_default(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+  steps:
+    self_check: [a, b]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            sm = _real_state_machine(tmp_path)
+            # Flat list → not nested → default 1.
+            assert sm._get_self_check_passes_required() == 1
+
+    def test_no_self_check_override_uses_default(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML)
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            sm = _real_state_machine(tmp_path)
+            assert sm._get_self_check_passes_required() == 1
+
+    def test_build_inputs_reports_derived_passes_required(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [a]
+      - [b]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            sm = _real_state_machine(tmp_path)
+            flow = _make_flow(tmp_path)
+            _add_step(
+                flow, StepType.IMPLEMENT, StepStatus.COMPLETED,
+                outputs={"files_changed": ["a.py"]},
+            )
+            _add_step(
+                flow, StepType.TEST, StepStatus.COMPLETED,
+                outputs={"test_results": {"passed": True}},
+            )
+            inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert inputs["self_check_pass_index"] == 1
+        assert inputs["self_check_passes_required"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 13. LLMCaller selects the per-pass chain via self_check_pass_index
+# ---------------------------------------------------------------------------
+
+
+class TestLLMCallerSelectsPassChain:
+    def test_pass_index_selects_nested_chain(self, tmp_path):
+        from se3.engine.llm_caller import LLMCaller
+
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [a]
+      - [b, c]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            caller1 = LLMCaller(
+                project_root=tmp_path, step_type="self_check",
+                self_check_pass_index=1,
+            )
+            caller2 = LLMCaller(
+                project_root=tmp_path, step_type="self_check",
+                self_check_pass_index=2,
+            )
+
+        assert [a["name"] for a in caller1._agents] == ["a"]
+        assert [a["name"] for a in caller2._agents] == ["b", "c"]
+
+    def test_explicit_agents_argument_wins(self, tmp_path):
+        from se3.engine.llm_caller import LLMCaller
+
+        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [a]
+      - [b]
+""")
+        explicit = [{"name": "x", "type": "claude-code", "cmd": "cx", "priority": 0}]
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            caller = LLMCaller(
+                project_root=tmp_path, step_type="self_check",
+                self_check_pass_index=2, agents=explicit,
+            )
+        assert [a["name"] for a in caller._agents] == ["x"]
