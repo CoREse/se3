@@ -409,53 +409,6 @@ class TestAnalyzeHandlerItemLevel:
         assert len(base_items) > 0
 
 
-class TestFormatSelectorItems:
-    """Tests for _format_selector_items helper in analyze step."""
-
-    def test_format_selector_skips_empty_spec(self):
-        """Items with empty/missing spec name should not emit broken headings."""
-        from se3.engine.steps.analyze import _format_selector_items
-
-        items = [
-            {"spec": "alpha", "requirement_name": "R1", "tags": [], "summary": ""},
-            {"spec": "", "requirement_name": "Bad", "tags": [], "summary": ""},
-            {"spec": "beta", "requirement_name": "R2", "tags": [], "summary": ""},
-        ]
-        result = _format_selector_items(items)
-        # Should not contain "### " (empty heading from missing spec)
-        assert "### \n" not in result
-        assert "### alpha" in result
-        assert "### beta" in result
-        assert "alpha::R1" in result
-        assert "beta::R2" in result
-        # The bad item should be skipped entirely
-        assert "Bad" not in result
-
-    def test_format_selector_groups_by_spec(self):
-        """Requirements from the same spec should be grouped under one heading."""
-        from se3.engine.steps.analyze import _format_selector_items
-
-        items = [
-            {"spec": "alpha", "requirement_name": "R1", "tags": ["a"], "summary": "s1"},
-            {"spec": "alpha", "requirement_name": "R2", "tags": [], "summary": "s2"},
-            {"spec": "beta", "requirement_name": "R3", "tags": [], "summary": ""},
-        ]
-        result = _format_selector_items(items)
-        # alpha heading should appear once
-        assert result.count("### alpha") == 1
-        assert result.count("### beta") == 1
-        assert "alpha::R1 [tags: a] — s1" in result
-        assert "alpha::R2" in result
-        assert "beta::R3" in result
-
-    def test_format_selector_empty_list(self):
-        """Empty items list should return the fallback message."""
-        from se3.engine.steps.analyze import _format_selector_items
-
-        result = _format_selector_items([])
-        assert result == "(no items available)"
-
-
 class TestUpdateSpecSpecDecisions:
     """Verify update_spec handler outputs spec_decisions field."""
 

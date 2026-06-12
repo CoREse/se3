@@ -653,9 +653,10 @@ class TestHandlerIntegrationNegative:
         # The new-injection marker/heading must not appear in analyze's prompt.
         assert INJECTION_MARKER not in prompt
         assert INJECTION_HEADING not in prompt
-        # analyze's own template heading is a distinct string ("Available
-        # Items", no "ifications") — ensure it survived.
-        assert "## Available Items" in prompt
+        # analyze's own template heading is a distinct string ("Spec Index —
+        # Root View", no "ifications") — ensure it survived. (G6 replaced the
+        # former "## Available Items" full-item injection with the root view.)
+        assert "## Spec Index — Root View" in prompt
 
     def test_discovery_handler_prompt_lacks_injection(self, tmp_path):
         """discovery is NOT in the injection whitelist. Invoke the real
