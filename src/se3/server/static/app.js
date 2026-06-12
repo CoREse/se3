@@ -41,6 +41,18 @@ const state = {
   flowDetail: null,       // last fetched flow object (for the open flow view)
   flowMachineId: null,    // machine id owning the open flow
   flowConversationRecords: [],   // conversation records shown in the flow view
+  // Opaque progress token from the running-flow view's last REST snapshot
+  // (`GET /api/history/{flow_id}`). Echoed as `?after=` on a WS-reconnect
+  // re-fetch so the server can serve only the delta that accrued during the
+  // outage instead of the whole bundle. null = no held progress → the next
+  // fetch sends no incremental param and gets a full snapshot. Reset when a
+  // different flow opens, the view closes, or an incompatible `mode: full`
+  // WS push replaces the cached bundle (the old token no longer pins it).
+  // Kept independent from `historyProgress` so the two views never cross-feed.
+  flowConversationProgress: null,
+  // Monotonic view-local epoch used to invalidate an in-flight REST snapshot
+  // when a WS `mode: full` push replaces the authoritative bundle.
+  flowConversationEpoch: 0,
   flowInterventions: [],  // intervention entries derived from pending_calls
   flowReplyTargetId: null,// id of the intervention the reply box targets
   flowInterjectRequested: false, // user clicked Interject — synth chip on
@@ -54,6 +66,15 @@ const state = {
                                 // before any daemon pushed its index.
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
+  // Opaque progress token for the history-detail view's last REST snapshot —
+  // the history-view counterpart of `flowConversationProgress`. Echoed as
+  // `?after=` on a WS-reconnect re-fetch and reset on session switch, history
+  // close, or an incompatible `mode: full` push. Maintained separately so the
+  // history detail and the running-flow view keep independent progress even
+  // when both have the same flow open.
+  historyProgress: null,
+  // History-detail counterpart of `flowConversationEpoch`.
+  historyEpoch: 0,
   // project_root key of the currently-selected History tab; null lets
   // pickDefaultHistoryProjectRoot pick the most-recently-active project. Reset
   // by closeHistory() so the next openHistory() recomputes the default.
@@ -482,14 +503,18 @@ function connect() {
     if (wasReconnect) {
       if (state.selectedFlowId) {
         refreshFlowDetail();
-        // Re-pull the conversation snapshot so records emitted during the
-        // outage (whose `history_data` append deltas were never delivered)
-        // are backfilled — mirroring the history view's re-fetch below.
-        loadFlowConversation(state.selectedFlowId);
+        // Re-pull the conversation incrementally so records emitted during the
+        // outage (whose `history_data` append deltas were never delivered) are
+        // backfilled without wiping and re-rendering the whole conversation —
+        // the held progress token is echoed so the server returns only the
+        // delta. Mirrors the history view's incremental re-fetch below.
+        loadFlowConversation(state.selectedFlowId, { incremental: true });
       }
       if (isHistoryOpen()) {
         fetchHistoryIndex();
-        if (state.selectedHistoryId) openHistorySession(state.selectedHistoryId);
+        if (state.selectedHistoryId) {
+          openHistorySession(state.selectedHistoryId, { incremental: true });
+        }
       }
       if (isIssuesOpen()) {
         fetchIssues();
@@ -1206,6 +1231,9 @@ function openFlowView(flowId) {
   state.flowDetail = null;
   state.flowMachineId = null;
   state.flowConversationRecords = [];
+  // A different flow is opening: drop any progress token held for the prior
+  // flow so its delta cursor can never be echoed against this flow's bundle.
+  state.flowConversationProgress = null;
   state.flowInterventions = [];
   state.flowReplyTargetId = null;
   state.flowInterjectRequested = false;
@@ -1261,10 +1289,12 @@ function openFlowView(flowId) {
 // popstate handler — both the ✕ button and the browser back button funnel
 // through it, so there is no risk of push-back loops or double-pop drift.
 function doCloseFlowView() {
+  state.flowConversationEpoch += 1;
   state.selectedFlowId = null;
   state.flowDetail = null;
   state.flowMachineId = null;
   state.flowConversationRecords = [];
+  state.flowConversationProgress = null;
   state.flowInterventions = [];
   state.flowReplyTargetId = null;
   state.flowInterjectRequested = false;
@@ -1433,39 +1463,107 @@ function autoGrowReplyTextarea() {
 // Fetch the initial conversation snapshot for the open flow. Mirrors the
 // history view: a one-shot `/api/history/{flow_id}` pull, after which the WS
 // `history_data` push keeps an active flow's conversation up to date.
-async function loadFlowConversation(flowId) {
+// Load (or incrementally refresh) the running-flow conversation.
+//
+//   opts.incremental === false (default): the FIRST open of a flow. Show the
+//     loading placeholder, clear the container and its reconciliation state,
+//     send no `after` token (so the server replies `delivery: "full"`), and
+//     paint the result with a full rebuild. First-open behaviour is unchanged.
+//
+//   opts.incremental === true: a WS-reconnect refresh of the already-open flow
+//     (`ws.onopen`). The container is NOT cleared and `__convState` is NOT
+//     reset, so existing bubbles, their fold/raw state, and the reader's scroll
+//     position survive. The held progress token is echoed via `?after=`; the
+//     server returns only the delta records emitted during the outage, which
+//     are deduped and appended through the same merge/reconcile path the live
+//     `history_data` push uses. The server may still answer `delivery: "full"`
+//     (token stale / cache replaced / cache miss) — that falls back to a full
+//     authoritative rebuild. A failed request leaves the existing conversation
+//     untouched (no error placeholder, no clear).
+async function loadFlowConversation(flowId, opts) {
+  const incremental = !!(opts && opts.incremental);
   const container = $("flow-conversation");
-  container.innerHTML = "";
-  // Drop any reconciliation state left by a previously-open flow so a stray
-  // append for this flow can't merge into the prior flow's detached sections.
-  container.__convState = null;
-  container.appendChild(el("p", "empty", "Loading conversation…"));
+  // Every new request supersedes every older request for this view. This is
+  // required on reconnect too: unstable connectivity can start overlapping
+  // refreshes, and a late full fallback from an older cache generation must
+  // not overwrite the newer result or regress its progress token.
+  state.flowConversationEpoch += 1;
+  if (!incremental) {
+    container.innerHTML = "";
+    // Drop any reconciliation state left by a previously-open flow so a stray
+    // append for this flow can't merge into the prior flow's detached sections.
+    container.__convState = null;
+    container.appendChild(el("p", "empty", "Loading conversation…"));
+  }
+  const requestEpoch = state.flowConversationEpoch;
+  // Capture the records that belong to the snapshot generation represented by
+  // the outgoing progress token. If the server falls back to a full response,
+  // only records added after this point are proven live appends worth carrying
+  // across the authoritative replacement.
+  const requestRecords = state.flowConversationRecords;
   try {
-    const resp = await authedFetch(`/api/history/${encodeURIComponent(flowId)}`);
+    const url = incremental
+      ? historySnapshotUrl(flowId, state.flowConversationProgress)
+      : `/api/history/${encodeURIComponent(flowId)}`;
+    const resp = await authedFetch(url);
     // The user may have opened another flow while this was in flight.
-    if (state.selectedFlowId !== flowId) return;
+    if (
+      state.selectedFlowId !== flowId ||
+      state.flowConversationEpoch !== requestEpoch
+    ) return;
     if (!resp.ok) {
+      // On a reconnect refresh keep the existing conversation rather than
+      // wiping it for a transient failure; first-open still surfaces the error.
+      if (incremental) return;
       container.innerHTML = "";
       container.appendChild(el("p", "empty",
         `Could not load conversation for this flow (${resp.status}).`));
       return;
     }
     const data = await resp.json();
-    if (state.selectedFlowId !== flowId) return;
-    // Merge the snapshot with whatever is already in the array: `history_data`
-    // appends that arrived during the await, plus any locally-spliced replies.
-    const snapshot = Array.isArray(data.records) ? data.records : [];
-    // Reconcile after the merge: if the freshly-fetched snapshot already holds
-    // the daemon's authoritative copy of a reply, the still-pending local echo
-    // (a live append with a different recordKey) would otherwise survive the
-    // merge and duplicate it.
-    state.flowConversationRecords = reconcileLocalEchoes(
-      mergeSnapshotWithLiveAppends(snapshot, state.flowConversationRecords));
-    renderConversation(container, state.flowConversationRecords);
+    if (
+      state.selectedFlowId !== flowId ||
+      state.flowConversationEpoch !== requestEpoch
+    ) return;
+    // Measure stickiness BEFORE the render mutates scrollHeight. A first-open
+    // always scrolls to bottom; a reconnect only follows if already near it,
+    // preserving the reader's position.
+    const stick = incremental ? isNearBottom(container) : true;
+    // Fold the response in through the shared decision helper, which picks
+    // delta-append vs full-replace from the server's `delivery` tag and keeps
+    // live appends that arrived during the await. Record the fresh progress
+    // token for the next reconnect.
+    const result = mergeHistoryResponse(
+      data,
+      state.flowConversationRecords,
+      requestRecords,
+    );
+    state.flowConversationProgress = result.progress;
+    if (result.render === "noop") {
+      // Incremental delivery that, after dedup, added nothing new (e.g. the WS
+      // append for the same batch beat this fetch in). Nothing to repaint.
+      return;
+    }
+    // Reconcile after the merge: if the response already holds the daemon's
+    // authoritative copy of a reply, the still-pending local echo (a live
+    // append with a different recordKey) would otherwise survive and duplicate
+    // it. A mid-list removal shifts indices, so the cheap incremental-append
+    // render can no longer be trusted — force a full rebuild in that case.
+    const reconciled = reconcileLocalEchoes(result.records);
+    const echoRemoved = reconciled !== result.records;
+    state.flowConversationRecords = reconciled;
+    // Delta delivery → incremental append render (preserves DOM/fold state);
+    // full fallback, or any echo removal, → authoritative full rebuild.
+    const appendRender = result.render === "delta" && !echoRemoved;
+    renderConversation(container, state.flowConversationRecords, appendRender);
     updateFlowUsageBadge(state.flowConversationRecords);
-    scrollFlowConversationToBottom();
+    if (stick) scrollFlowConversationToBottom();
   } catch (_) {
-    if (state.selectedFlowId !== flowId) return;
+    if (
+      state.selectedFlowId !== flowId ||
+      state.flowConversationEpoch !== requestEpoch
+    ) return;
+    if (incremental) return;            // keep the existing conversation
     container.innerHTML = "";
     container.appendChild(el("p", "empty", "Network error loading conversation."));
   }
@@ -2401,11 +2499,13 @@ function openHistory() {
 }
 
 function closeHistory() {
+  state.historyEpoch += 1;
   $("history-view").classList.add("hidden");
   // Reset the narrow-screen panel back to the session list (inert on desktop).
   applyHistoryPanelAction("reset");
   state.selectedHistoryId = null;
   state.historyRecords = [];
+  state.historyProgress = null;
   state.historySelectedProjectRoot = null;
 }
 
@@ -2471,7 +2571,13 @@ function applyHistoryData(msg) {
       }
       // else: all duplicates — skip state update and render entirely
     } else {
+      state.historyEpoch += 1;
       state.historyRecords = records;
+      // A full push replaces the cached bundle server-side (a new generation),
+      // so any progress token we held no longer pins it — drop it so the next
+      // reconnect re-fetch falls back to a full load rather than echoing a
+      // stale delta cursor.
+      state.historyProgress = null;
       renderHistoryRecords(msg.flow_id, state.historyRecords, append);
       if (stick) scrollHistoryToBottom();
     }
@@ -2486,7 +2592,11 @@ function applyHistoryData(msg) {
       if (!fresh.length) return;            // all duplicates — skip entirely
       merged = state.flowConversationRecords.concat(fresh);
     } else {
+      state.flowConversationEpoch += 1;
       merged = records;
+      // Full push = new server bundle generation; the held delta cursor is now
+      // stale, so invalidate it (mirrors the history-view branch above).
+      state.flowConversationProgress = null;
     }
     // When the daemon's authoritative user record lands, drop the matching
     // optimistic local echo so the reply is shown once. A mid-list removal
@@ -2721,10 +2831,37 @@ function historyTitle(flowId) {
   return (s && s.task_description) || flowId || "Session";
 }
 
-async function openHistorySession(flowId) {
+// Open (or incrementally refresh) a history-detail session.
+//
+//   opts.incremental === false (default): the user picked a (possibly new)
+//     session. Reset the held records/progress, clear the detail DOM and its
+//     reconciliation state, send no `after` token (full load), and full-rebuild
+//     the result — first-selection behaviour is unchanged.
+//
+//   opts.incremental === true: a WS-reconnect refresh of the SAME open session
+//     (`ws.onopen`). Records, progress, the detail DOM and `__convState` are
+//     all preserved; the held progress token is echoed via `?after=` so the
+//     server returns only the delta emitted during the outage, which is deduped
+//     and appended through the shared merge path. A `delivery: "full"` answer
+//     (stale token / cache miss / replacement) falls back to an authoritative
+//     full rebuild matching the current full-load result. A failed request
+//     leaves the existing detail untouched.
+async function openHistorySession(flowId, opts) {
+  const incremental = !!(opts && opts.incremental);
   state.selectedHistoryId = flowId;
-  state.historyRecords = [];
-  // Narrow screens switch to the detail panel; inert on desktop.
+  // As in loadFlowConversation, starting any request invalidates older
+  // reconnect refreshes so only the newest response may update records and
+  // progress.
+  state.historyEpoch += 1;
+  if (!incremental) {
+    state.historyRecords = [];
+    // Selecting a (possibly different) session resets the held progress so this
+    // session's first fetch is a full load, never a delta against another's
+    // bundle. A reconnect re-fetch of the *same* session repopulates it.
+    state.historyProgress = null;
+  }
+  // Narrow screens switch to the detail panel; inert on desktop. Idempotent on
+  // a reconnect refresh where the detail panel is already shown.
   applyHistoryPanelAction("select-session");
   renderHistoryList();
   $("history-detail-title").textContent = historyTitle(flowId);
@@ -2744,33 +2881,66 @@ async function openHistorySession(flowId) {
   }
 
   const detail = $("history-detail");
-  detail.innerHTML = "";
-  // Drop reconciliation state from the previously-selected session.
-  detail.__convState = null;
-  detail.appendChild(el("p", "empty", "Loading records…"));
+  if (!incremental) {
+    detail.innerHTML = "";
+    // Drop reconciliation state from the previously-selected session.
+    detail.__convState = null;
+    detail.appendChild(el("p", "empty", "Loading records…"));
+  }
+  const requestEpoch = state.historyEpoch;
 
+  // See loadFlowConversation: this baseline separates records from the
+  // generation being refreshed from live appends that arrive during the await.
+  const requestRecords = state.historyRecords;
   try {
-    const resp = await authedFetch(`/api/history/${encodeURIComponent(flowId)}`);
+    const url = incremental
+      ? historySnapshotUrl(flowId, state.historyProgress)
+      : `/api/history/${encodeURIComponent(flowId)}`;
+    const resp = await authedFetch(url);
     // The user may have clicked another session while this was in flight.
-    if (state.selectedHistoryId !== flowId) return;
+    if (
+      state.selectedHistoryId !== flowId ||
+      state.historyEpoch !== requestEpoch
+    ) return;
     if (!resp.ok) {
+      // Keep the existing detail on a reconnect refresh failure.
+      if (incremental) return;
       detail.innerHTML = "";
       detail.appendChild(el("p", "empty",
         `Could not load history for this session (${resp.status}).`));
       return;
     }
     const data = await resp.json();
-    if (state.selectedHistoryId !== flowId) return;
-    // Preserve any `history_data` appends that arrived during the await (the
-    // array was reset to [] beforehand, so its current contents are exactly
-    // those appends) instead of discarding them with the snapshot assignment.
-    const snapshot = Array.isArray(data.records) ? data.records : [];
-    state.historyRecords = mergeSnapshotWithLiveAppends(
-      snapshot, state.historyRecords);
-    renderHistoryRecords(flowId, state.historyRecords);
-    scrollHistoryToBottom();
+    if (
+      state.selectedHistoryId !== flowId ||
+      state.historyEpoch !== requestEpoch
+    ) return;
+    // Measure stickiness before the render mutates layout.
+    const stick = incremental ? isNearBottom(historyScrollContainer()) : true;
+    // Same shared full/delta decision as the running-flow loader. On first open
+    // no `after` is sent so the server replies `delivery: "full"` and the live
+    // appends that arrived during the await are preserved; on reconnect the
+    // progress token is echoed for a delta.
+    const result = mergeHistoryResponse(
+      data,
+      state.historyRecords,
+      requestRecords,
+    );
+    state.historyProgress = result.progress;
+    if (result.render === "noop") {
+      // Delta added nothing new after dedup — keep the existing detail as-is.
+      return;
+    }
+    state.historyRecords = result.records;
+    // Delta delivery → incremental append render; full fallback → full rebuild.
+    renderHistoryRecords(flowId, state.historyRecords, result.render === "delta");
+    if (stick) scrollHistoryToBottom();
   } catch (_) {
-    if (state.selectedHistoryId !== flowId) return;
+    if (
+      state.selectedHistoryId !== flowId ||
+      state.historyEpoch !== requestEpoch
+    ) return;
+    if (incremental) return;            // keep the existing detail
     detail.innerHTML = "";
     detail.appendChild(el("p", "empty", "Network error loading session history."));
   }
@@ -4003,6 +4173,188 @@ function dedupeAppendRecords(existing, incoming) {
   if (!incoming.length || !existing.length) return incoming;
   const seen = new Set(existing.map(recordKey));
   return incoming.filter((r) => !seen.has(recordKey(r)));
+}
+
+// Build the `GET /api/history/{flow_id}` URL, appending the opaque progress
+// token as the `after` query parameter when one is held so the server can
+// serve an incremental delta. With no progress (first open / after an
+// invalidation) the bare URL is returned, so the request is an unconditional
+// full snapshot — the first-open behaviour is unchanged. The token is encoded
+// via URLSearchParams so a base64url token (`-` / `_` / `=`) is transmitted
+// safely. Shared by both the running-flow and history-detail reconnect loaders.
+function historySnapshotUrl(flowId, progress) {
+  const base = `/api/history/${encodeURIComponent(flowId)}`;
+  if (!progress) return base;
+  const params = new URLSearchParams();
+  params.set("after", progress);
+  return `${base}?${params.toString()}`;
+}
+
+// The sortable epoch-ms timestamp of a record, mirroring the `__convTs` key the
+// conversation renderer assigns (`tsValue(normalizeRecord(rec).timestamp)`).
+// Used by the delta merge to detect when freshly-arrived gap records are older
+// than records already held in the array's tail. DOM-free; null/unparseable
+// timestamps degrade to 0 (the same floor `tsValue` uses).
+function recordSortTs(rec) {
+  let norm = null;
+  try { norm = normalizeRecord(rec); } catch (_) { norm = null; }
+  return tsValue(norm && norm.timestamp);
+}
+
+// Stable merge of two record arrays into one ordered by `(timestamp, source,
+// index)`. The timestamp is the primary key the conversation renderer orders
+// bubbles by. The equal-timestamp tie-break splits the `held` records into two
+// classes using `requestBaseline` (the array held when the request started):
+//
+//   * src=0 — held records ALREADY in `requestBaseline`. These were delivered
+//     before the request's progress offset, so the server bundle places them
+//     authoritatively BEFORE any `fresh` delta record (the delta is exactly the
+//     records after that offset). They MUST keep their earlier position on a
+//     tie — e.g. a baseline record A at ts=3 stays before a later delta record
+//     B at ts=3, matching the server order A then B.
+//   * src=1 — the REST delta (`fresh`) records: the authoritative outage-window
+//     gap, after the baseline but before any record that arrived during the
+//     request.
+//   * src=2 — held records that arrived DURING the request (a WS append not in
+//     `requestBaseline`). On a tie these sort AFTER the delta, so a turn's
+//     earlier REST partial precedes its final pushed over WS at the same
+//     timestamp, and the position-based partial-segment grouping pairs them in
+//     one segment instead of stranding a stale streaming bubble.
+//
+// When `requestBaseline` is omitted every held record is treated as a live
+// append (src=2), so the delta still wins ties against held records — the
+// pre-baseline-aware behaviour. Each class keeps its own internal order via its
+// own index tiebreak. DOM-free; used when delta gap records must be interleaved
+// with held tail records rather than appended after them.
+function stableMergeByTimestamp(held, fresh, requestBaseline) {
+  const baselineSet = new Set(
+    Array.isArray(requestBaseline) ? requestBaseline : [],
+  );
+  const tagged = held
+    .map((rec, idx) => ({
+      rec,
+      src: baselineSet.has(rec) ? 0 : 2,
+      idx,
+      ts: recordSortTs(rec),
+    }))
+    .concat(
+      fresh.map((rec, idx) => ({ rec, src: 1, idx, ts: recordSortTs(rec) })),
+    );
+  return tagged
+    .sort((a, b) => (a.ts - b.ts) || (a.src - b.src) || (a.idx - b.idx))
+    .map((d) => d.rec);
+}
+
+// Fold a `GET /api/history/{flow_id}` response into the records a view already
+// holds, picking the merge strategy from the server's `delivery` tag. This is
+// the single shared decision point for both the running-flow view and the
+// history-detail view; it is DOM-free and side-effect-free so it can be unit
+// tested directly.
+//
+// `existing` is the array currently held by the view after the fetch await.
+// `requestBaseline` is the array held when the request started. The difference
+// between them is the only client-side data proven to have arrived during the
+// request, and therefore the only data safe to preserve across a full fallback
+// that invalidates the previous cache generation.
+//
+// Returns `{ records, progress, render }` where:
+//   * `records`  — the merged array the caller should adopt.
+//   * `progress` — the response's fresh progress token (a string, or null when
+//                  the response carried none) for the caller to store and echo
+//                  on its next reconnect.
+//   * `render`   — how the caller should paint the result:
+//       - "delta": an incremental delivery whose new records were appended
+//         (after `dedupeAppendRecords` filtered out anything already held);
+//         the caller MAY render incrementally (append-only).
+//       - "noop":  an incremental delivery that, after dedup, added nothing —
+//         the held array is returned unchanged (same reference) so the caller
+//         can skip both the state swap and the render.
+//       - "full":  a full delivery (or any non-"delta" tag — the safe default);
+//         the server records are the new authority, with only live appends that
+//         arrived during the fetch preserved, and the caller MUST rebuild the
+//         conversation.
+function mergeHistoryResponse(response, existing, requestBaseline) {
+  const base = Array.isArray(existing) ? existing : [];
+  const baseline = Array.isArray(requestBaseline) ? requestBaseline : base;
+  const records = (response && Array.isArray(response.records))
+    ? response.records : [];
+  const progress = (response && typeof response.progress === "string")
+    ? response.progress : null;
+  if (response && response.delivery === "delta") {
+    const fresh = dedupeAppendRecords(base, records);
+    if (!fresh.length) {
+      // Every delta record is already held (e.g. the WS append for the same
+      // batch beat the snapshot in). Nothing to render.
+      return { records: base, progress, render: "noop" };
+    }
+    // The delta carries the outage-window gap records. While this fetch was in
+    // flight a live WS `history_data` append (which does NOT bump the fetch
+    // epoch) can have landed newer records into the held array's tail — e.g. a
+    // still-streaming turn's final result. Blindly tail-appending these older
+    // gap records would put them AFTER those newer records, inverting array
+    // order. insertBubbleSorted tolerates that (it is timestamp-keyed), but the
+    // strictly position-based partial-segment grouping (partialSegments) and
+    // supersede logic (markSupersededProgress) do not: a partial fragment that
+    // sits after its turn's final in the array is grouped into a phantom later
+    // segment and never superseded, leaving a stale accumulating streaming
+    // bubble next to the turn's already-rendered final result (the turn shown
+    // twice), and accumulateRoundUsageByStep's positional cumulative usage is
+    // computed against the inverted order. So when any fresh record is older
+    // than the held tail, merge by (timestamp, index) and force a full rebuild
+    // instead of a tail append, so the records array preserves stream order and
+    // the position-based grouping agrees with the real turn structure.
+    //
+    // The tail comparison is STRICT (`>`): a fresh record whose timestamp
+    // merely *equals* the held tail is NOT append-safe. The held tail can be a
+    // WS final that arrived later during this request, while the equal-timestamp
+    // fresh record is its earlier REST partial; tail-appending it would place
+    // the partial after the final (the same inversion as a strictly-older
+    // record). Only records strictly newer than the held tail can be safely
+    // appended; an equal-timestamp record falls through to the stable merge,
+    // which orders the REST delta before the held WS record on a tie.
+    const tailTs = base.length
+      ? recordSortTs(base[base.length - 1]) : -Infinity;
+    const inOrder = fresh.every((r) => recordSortTs(r) > tailTs);
+    if (inOrder) {
+      return { records: base.concat(fresh), progress, render: "delta" };
+    }
+    return {
+      // Pass the RAW `requestBaseline` (not the `base`-defaulted `baseline`) so
+      // the merge can keep equal-timestamp records that predate the request in
+      // their authoritative early position, while ordering only records that
+      // arrived during the request after the REST delta. When the caller omits
+      // it, every held record is treated as a live append (delta wins ties).
+      records: stableMergeByTimestamp(base, fresh, requestBaseline),
+      progress,
+      render: "full",
+    };
+  }
+  // Full (or unrecognised) delivery invalidates the previous generation.
+  // Discard every baseline record, preserving only records that appeared while
+  // this request was in flight and are not already in the new snapshot.
+  const liveAppends = dedupeAppendRecords(baseline, base);
+  // Pending optimistic local echoes (`__localEcho`) are client-only UI state,
+  // NOT part of any server cache generation, so they must survive a full
+  // (generation-replacing) fallback. They were spliced into the array before
+  // this request started, so they live in the baseline and are therefore
+  // filtered out of `liveAppends` above; without re-adding them a user's
+  // just-sent reply would visibly disappear until the daemon writes its
+  // authoritative record at the next step boundary. Re-include any echo still
+  // held in the current array that isn't already among the live appends. The
+  // caller's downstream `reconcileLocalEchoes` then removes each echo once the
+  // new snapshot carries its own authoritative copy — exactly matching the
+  // old full-reload behaviour.
+  const pendingEchoes = base.filter(
+    (r) => r && r.__localEcho && liveAppends.indexOf(r) === -1,
+  );
+  const preserved = pendingEchoes.length
+    ? liveAppends.concat(pendingEchoes)
+    : liveAppends;
+  return {
+    records: mergeSnapshotWithLiveAppends(records, preserved),
+    progress,
+    render: "full",
+  };
 }
 
 // Reduce a user record's text to its literal, marker-stripped, trimmed form so
@@ -9457,8 +9809,17 @@ if (typeof module !== "undefined" && module.exports) {
     recordKey,
     mergeSnapshotWithLiveAppends,
     dedupeAppendRecords,
+    recordSortTs,
+    stableMergeByTimestamp,
+    historySnapshotUrl,
+    mergeHistoryResponse,
     reconcileLocalEchoes,
     comparableUserText,
+    // Reconnect incremental load paths (G4) — exposed for the DOM-stub load
+    // path tests in tests/frontend/test_app_pure.mjs.
+    loadFlowConversation,
+    openHistorySession,
+    applyHistoryData,
     // History list rendering + shared mutable state (exposed for the DOM-stub
     // tests in tests/frontend/test_app_pure.mjs).
     renderHistoryList,

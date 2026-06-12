@@ -490,6 +490,96 @@ dedup — it replaces the held array wholesale and is left exactly as-is.
   record (its `recordKey` differs from the prior fragment) and does NOT suppress
   it
 
+### Requirement: Reconnect Incremental History Refresh
+
+When the `/ws/ui` channel drops and reconnects while a running flow is open in
+`#flow-view` — the common case being a mobile browser backgrounded and then
+brought back to the foreground — the view MUST refresh the conversation
+**incrementally** instead of clearing the container and reloading the entire
+bundle. The old behavior (`ws.onopen` with `wasReconnect` true calling
+`loadFlowConversation`, which did `container.innerHTML = ""` → full re-fetch →
+full re-render) is replaced for the reconnect path: for a large session the full
+path's network transfer, JSON parse, and DOM rebuild are all expensive, and the
+daemon→server history push and the server→frontend `history_data` append are
+already incremental, leaving only the REST snapshot re-fetch as the full-reload
+offender.
+
+The running-flow reconnect loader MUST:
+
+1. **Distinguish first-open from reconnect refresh explicitly.** First-open (a
+   user opening the flow) remains a **full** load — it sends no `after` token,
+   resets the held records, and renders from scratch. Only the `ws.onopen`
+   reconnect path runs the incremental refresh; the load type MUST be carried
+   explicitly (e.g. an `incremental` option), never inferred from whether the
+   held record array happens to be empty.
+2. **Hold and echo a progress token.** The view keeps the opaque progress token
+   returned by the last `GET /api/history/{flow_id}` snapshot in
+   `state.flowConversationProgress` (kept independent from the history view's
+   `state.historyProgress` so the two views never cross-feed). On a reconnect
+   refresh it echoes that token via `GET /api/history/{flow_id}?after=…` and does
+   NOT clear `#flow-conversation` or discard `state.flowConversationRecords`.
+3. **Branch on the server's `delivery` tag.** On a `delivery: "delta"` answer the
+   loader appends only the returned delta records through the existing merge
+   pipeline — `dedupeAppendRecords` for identity dedup,
+   `mergeSnapshotWithLiveAppends` for the in-flight live-append race, and
+   `reconcileLocalEchoes` for optimistic reply echoes — and uses the incremental
+   tail-append render so the DOM, fold state, raw toggles, and scroll position
+   are preserved. On a `delivery: "full"` answer (or any case the server could
+   not safely serve a delta) the loader falls back to the current authoritative
+   full-snapshot merge and full re-render.
+4. **Keep the held token coherent.** The fresh `progress` token from each
+   response replaces `state.flowConversationProgress`. When a live `history_data`
+   push replaces the bundle wholesale (`mode: full`), the held token no longer
+   pins the server bundle and MUST be dropped so the next reconnect re-fetch
+   falls back to a full load rather than echoing a stale delta cursor. Opening a
+   different flow MUST also drop the held token so a prior flow's cursor can
+   never be echoed against this flow's bundle.
+
+This path preserves the no-loss / no-reorder guarantees of *Conversation Strict
+Chronological Order* and produces no duplicate records when the incremental
+re-fetch overlaps with live `history_data` appends, because it routes the delta
+through the same dedupe / merge / reconcile functions the live-append path uses.
+
+#### Scenario: Reconnect re-fetch appends only the delta and preserves the DOM
+- **GIVEN** a running flow is open in `#flow-view` with a held
+  `state.flowConversationProgress` token and a rendered conversation
+- **WHEN** the `/ws/ui` channel reconnects (`ws.onopen`, `wasReconnect` true) and
+  the loader re-fetches `GET /api/history/{flow_id}?after=<token>` and the server
+  answers `delivery: "delta"`
+- **THEN** the view does NOT clear `#flow-conversation` or discard
+  `state.flowConversationRecords`
+- **AND** only the returned delta records are appended through
+  `dedupeAppendRecords` / `mergeSnapshotWithLiveAppends` / `reconcileLocalEchoes`
+  and rendered via the incremental tail-append path
+- **AND** the conversation contains no duplicate `recordKey`, records stay in
+  strict chronological order, and existing fold state / scroll position survive
+
+#### Scenario: First open stays a full load
+- **WHEN** a user opens a running flow (not a reconnect refresh)
+- **THEN** the loader sends no `after` token, the server answers
+  `delivery: "full"`, and the conversation is loaded and rendered from scratch
+- **AND** the load type is decided explicitly by the caller, not inferred from an
+  empty record array
+
+#### Scenario: Full fallback re-renders authoritatively
+- **GIVEN** a reconnect re-fetch echoes a held progress token
+- **WHEN** the server cannot safely serve a delta (stale / mismatched token,
+  cache replaced or missed, machine / owner change) and answers
+  `delivery: "full"`
+- **THEN** the loader falls back to the authoritative full-snapshot merge and a
+  full re-render, with the final rendered result equivalent to the pre-change
+  full-reload behavior
+- **AND** the held progress token is replaced with the fresh token from the
+  response
+
+#### Scenario: Held token is dropped when the bundle is replaced
+- **GIVEN** a held `state.flowConversationProgress` token for the open flow
+- **WHEN** a live `history_data` push replaces the bundle wholesale
+  (`mode: full`), or a different flow is opened
+- **THEN** the held token is dropped so the next reconnect re-fetch falls back to
+  a full load rather than echoing a stale delta cursor against a bundle it no
+  longer pins
+
 ### Requirement: Unified Intervention Items
 
 All human-in-the-loop interactions inside a running flow MUST be presented as

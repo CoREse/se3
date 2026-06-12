@@ -1,0 +1,9 @@
+id: '187'
+description: from issue的session还没有跑完的时候那个issue就被标注resolved了。现在是在什么时候关闭的？考虑把它移到commit步骤程序性地关闭（如果这个session是从issue启动的话）。你觉得这样是不是更合理？
+status: open
+scope: in_scope
+tags: []
+source: human
+created_at: '2026-06-12T12:37:04.026973'
+updated_at: '2026-06-12T12:37:04.026973'
+type: bug

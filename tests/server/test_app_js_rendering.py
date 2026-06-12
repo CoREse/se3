@@ -861,3 +861,59 @@ def test_issue_launch_modal_present_in_index_html():
     assert 'id="issue-launch-modal"' in html
     assert 'id="issue-launch-discover"' in html
     assert 'id="issue-launch-confirm"' in html
+
+
+# ---------------------------------------------------------------------------
+# 5. Static guardrail: reconnect incremental history re-pull wiring (G4)
+# ---------------------------------------------------------------------------
+#
+# The behavioural assertions live in the Node suite (loadFlowConversation /
+# openHistorySession against a DOM stub). These guardrails codify the wiring
+# contract directly against the JS bytes so a refactor cannot silently drop the
+# incremental path back to the old unconditional full re-pull.
+
+
+def test_reconnect_passes_incremental_to_both_loaders():
+    """The WS ``onopen`` reconnect path must re-pull both the running-flow and
+    the history-detail views incrementally — i.e. pass ``{ incremental: true }``
+    — rather than triggering an unconditional full reload."""
+    src = _read_app_js()
+    assert re.search(
+        r"loadFlowConversation\(\s*state\.selectedFlowId\s*,\s*\{\s*incremental:\s*true\s*\}\s*\)",
+        src,
+    ), "ws.onopen must call loadFlowConversation(..., { incremental: true })"
+    assert re.search(
+        r"openHistorySession\(\s*state\.selectedHistoryId\s*,\s*\{\s*incremental:\s*true\s*\}\s*\)",
+        src,
+    ), "ws.onopen must call openHistorySession(..., { incremental: true })"
+
+
+def test_incremental_loaders_guard_container_clear_behind_first_open():
+    """On the incremental (reconnect) path the loaders MUST NOT clear the
+    container or reset ``__convState`` — those resets belong only to the first
+    open. The guard is encoded as ``if (!incremental) { … innerHTML = "" … }``
+    in both loaders, and each echoes the held progress token via
+    ``historySnapshotUrl`` when refreshing incrementally."""
+    src = _read_app_js()
+    for fn, progress_state in (
+        ("loadFlowConversation", "flowConversationProgress"),
+        ("openHistorySession", "historyProgress"),
+    ):
+        body = _extract_js_function_body(src, fn)
+        assert "incremental" in body, f"{fn} must accept an incremental option"
+        # The destructive resets are gated behind the first-open branch.
+        assert "if (!incremental)" in body, (
+            f"{fn} must guard its container reset behind `if (!incremental)`"
+        )
+        assert 'innerHTML = ""' in body, f"{fn} should still clear on first open"
+        # The reconnect path echoes the held progress token to request a delta.
+        assert "historySnapshotUrl" in body, (
+            f"{fn} must request the delta via historySnapshotUrl on reconnect"
+        )
+        assert f"state.{progress_state}" in body, (
+            f"{fn} must echo its held progress token (state.{progress_state})"
+        )
+        # The shared merge decision helper drives delta-vs-full rendering.
+        assert "mergeHistoryResponse" in body, (
+            f"{fn} must fold the response through mergeHistoryResponse"
+        )

@@ -68,6 +68,76 @@ live flow, never overwrites an active flow by restoring an archived snapshot.
   suppressed until the request settles
 - **AND** the user is shown the dispatched / not-resumable / error outcome
 
+### Requirement: Reconnect Incremental History Refresh
+
+When the `/ws/ui` channel drops and reconnects while a history session is open in
+the History detail pane (`openHistorySession`), the detail view MUST refresh its
+conversation **incrementally** over the same `GET /api/history/{flow_id}`
+progress channel the running-flow view uses (see the `running-flow-console`
+*Reconnect Incremental History Refresh* requirement and the `base` spec's
+*Server Modules* requirement), instead of clearing the detail DOM and re-fetching
+and re-rendering the whole session. This matters because a backgrounded mobile
+browser brought back to the foreground triggers exactly this WS reconnect, and a
+large archived session is expensive to transfer, parse, and rebuild in full.
+
+The history-detail reconnect loader MUST:
+
+1. **Reset only on a real session switch.** Selecting / opening a session is a
+   **full** load: it resets the held records (`state.historyRecords`), clears the
+   detail DOM and its `__convState`, sends no `after` token, and renders from
+   scratch. Only the `ws.onopen` reconnect refresh of the **same** open session
+   runs the incremental path; first-selection MUST NOT be confused with a
+   reconnect refresh.
+2. **Hold and echo a progress token.** The view keeps the opaque progress token
+   from the last snapshot in `state.historyProgress`, kept independent from the
+   running-flow view's `state.flowConversationProgress` so the two views never
+   cross-feed. On a reconnect refresh of the open session it echoes that token
+   via `GET /api/history/{flow_id}?after=…` and preserves `state.historyRecords`,
+   the detail DOM, `__convState`, and scroll position.
+3. **Branch on the server's `delivery` tag.** A `delivery: "delta"` answer
+   appends only the returned delta records through the shared dedupe / snapshot
+   merge path (`dedupeAppendRecords` / `mergeSnapshotWithLiveAppends`) and renders
+   incrementally; a `delivery: "full"` answer — emitted by the server on any
+   unsafe case (stale / mismatched token, cache replaced or missed, machine /
+   owner change) — falls back to the full snapshot merge and full re-render, with
+   the final rendered result equivalent to the pre-change full reload.
+4. **Keep the held token coherent.** The fresh `progress` token from each
+   response replaces `state.historyProgress`; the held token is dropped when it
+   no longer pins the server bundle (e.g. a `mode: full` replacement) or when a
+   different session is opened, so the next reconnect re-fetch falls back to a
+   full load rather than echoing a stale delta cursor.
+
+The incremental path preserves the conversation's no-loss / no-reorder guarantee
+and produces no duplicate records when it overlaps live `history_data` appends,
+because it routes the delta through the same dedupe / merge functions the
+live-append path uses.
+
+#### Scenario: Reconnect re-fetch of the open session appends only the delta
+- **GIVEN** a history session is open in the detail pane with a held
+  `state.historyProgress` token and a rendered conversation
+- **WHEN** the `/ws/ui` channel reconnects and the loader re-fetches
+  `GET /api/history/{flow_id}?after=<token>` for the **same** session and the
+  server answers `delivery: "delta"`
+- **THEN** the view does NOT reset `state.historyRecords` or clear the detail DOM
+- **AND** only the returned delta records are appended through the shared
+  dedupe / snapshot-merge path and rendered incrementally, with no duplicate
+  `recordKey`, correct chronological order, and the scroll position preserved
+
+#### Scenario: Opening a session is a full load and resets progress
+- **WHEN** the user selects or opens a history session (not a reconnect refresh)
+- **THEN** the loader resets `state.historyRecords`, clears the detail DOM and
+  `__convState`, sends no `after` token, and renders the session from scratch
+- **AND** the held `state.historyProgress` is established fresh from the
+  response's `progress` token
+
+#### Scenario: Full fallback on an unsafe delta re-renders authoritatively
+- **GIVEN** a reconnect re-fetch of the open session echoes a held progress token
+- **WHEN** the server cannot safely serve a delta and answers `delivery: "full"`
+- **THEN** the loader falls back to the full snapshot merge and full re-render,
+  with the final rendered result equivalent to the pre-change full reload
+- **AND** the held progress token is replaced with the fresh token from the
+  response
+
 ### Requirement: History View Mobile Horizontal-Overflow Containment
 
 On the narrow-screen (phone-portrait) breakpoint — `@media (max-width: 600px)`

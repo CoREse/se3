@@ -61,6 +61,7 @@ from .ws import (
     InterjectionEventTracker,
     IssueCommandRegistry,
     UiHub,
+    _PullAbandoned,
     broadcast_index_refresh,
     handle_daemon_connection,
     handle_ui_connection,
@@ -1365,7 +1366,9 @@ def create_app(
 
     @app.get("/api/history/{flow_id}")
     async def history_detail(
-        flow_id: str, identity_: OwnerIdentity = Depends(require_owner)
+        flow_id: str,
+        identity_: OwnerIdentity = Depends(require_owner),
+        after: Optional[str] = None,
     ) -> dict:
         # Ownership gate first: a flow whose owning machine belongs to another
         # owner (or is unknown) reads as absent — even if its records happen to
@@ -1377,27 +1380,140 @@ def create_app(
                 status_code=404,
                 detail=f"no history for flow '{flow_id}'",
             )
-        cached = await state.get_history(flow_id)
-        if cached is not None:
-            return {"flow_id": flow_id, "cached": True, **cached}
-        # Cache miss: pull on demand from the daemon owning this flow.
-        fut = history_registry.register(flow_id)
-        sent = await request_history(manager, state, flow_id)
-        if not sent:
-            history_registry.discard(flow_id, fut)
+        target_owner = await state.get_machine_owner(owner_machine)
+        if target_owner is None or (scope is not None and target_owner != scope):
+            raise HTTPException(
+                status_code=404,
+                detail=f"no history for flow '{flow_id}'",
+            )
+        # Cache hit: serve a full or incremental snapshot atomically. ``after``
+        # is the opaque progress token the client echoes on a WS reconnect; the
+        # snapshot returns only the tail after it when it still pins the current
+        # bundle (``delivery: "delta"``), and the full records on every fallback
+        # (``delivery: "full"``). Binding ``expected_machine_id`` to the owning
+        # machine makes a bundle that has since moved daemons read as a miss, so
+        # we re-pull the authoritative records below rather than serve a stale
+        # snapshot.
+        snapshot = await state.get_history_snapshot(
+            flow_id,
+            after=after,
+            expected_machine_id=owner_machine,
+            expected_owner=target_owner,
+        )
+        if snapshot is not None:
+            return {"flow_id": flow_id, "cached": True, **snapshot}
+        # Cache miss (no bundle, or the bundle's machine no longer matches the
+        # owning daemon): pull on demand from the daemon owning this flow. Any
+        # ``after`` token is ignored — the freshly pulled records are always
+        # returned as a full snapshot with a new progress token.
+        owner_connection = await manager.get_connection(owner_machine)
+        if owner_connection is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"no connected daemon owns history for flow '{flow_id}'",
             )
-        try:
-            data = await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
-        except asyncio.TimeoutError:
-            history_registry.discard(flow_id, fut)
-            raise HTTPException(
-                status_code=504,
-                detail=f"timed out pulling history for flow '{flow_id}'",
-            )
-        return {"flow_id": flow_id, "cached": False, **(data or {})}
+        # Concurrent cache-miss requests for the same flow/machine (e.g. the
+        # running-flow view and the history-detail view reconnecting at once)
+        # share ONE in-flight daemon pull: only the leader sends the
+        # ``MSG_HISTORY_REQUEST``, the followers park on the same reply. This
+        # prevents a second daemon reply from arriving after both waiters were
+        # already resolved by the first — which, finding no waiter, would
+        # replace the cache generation and broadcast ``mode: full`` to every UI
+        # consumer, clearing the progress tokens REST just handed back.
+        #
+        # The loop lets a follower whose leader failed *before* dispatching a
+        # daemon request (``_PullAbandoned``) retry as a fresh leader instead of
+        # waiting out ``HISTORY_PULL_TIMEOUT`` behind a pull that will never be
+        # answered.
+        while True:
+            fut, is_leader = history_registry.begin_pull(flow_id, owner_machine)
+            pull_dispatched = False
+            try:
+                if is_leader:
+                    # The leader's daemon send is INSIDE this try so the
+                    # ``finally`` also covers a cancellation that fires while
+                    # ``send_text`` is blocked: without it, a client
+                    # disconnecting mid-send would leave the leader's waiter
+                    # parked and the key marked in-flight forever, turning every
+                    # later request into a follower that sends no new
+                    # ``MSG_HISTORY_REQUEST`` and merely times out.
+                    sent = await request_history(
+                        manager,
+                        state,
+                        flow_id,
+                        machine_id=owner_machine,
+                        connection=owner_connection,
+                    )
+                    if not sent:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=(
+                                "no connected daemon owns history for flow "
+                                f"'{flow_id}'"
+                            ),
+                        )
+                    pull_dispatched = True
+                await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
+                break
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"timed out pulling history for flow '{flow_id}'",
+                )
+            except _PullAbandoned:
+                # Our leader failed before dispatching a daemon request and
+                # released us (the in-flight marker is already cleared). Loop
+                # back to try to become the new leader ourselves rather than
+                # parking behind an abandoned pull until the timeout.
+                continue
+            finally:
+                if is_leader and not pull_dispatched:
+                    # The leader failed or was cancelled BEFORE a successful
+                    # daemon dispatch (its send returned ``False`` or it was
+                    # cancelled before / while sending). Release every follower
+                    # parked behind it and clear the in-flight marker so the
+                    # next request leads a fresh pull immediately — otherwise
+                    # ``discard`` would leave the marker set (followers remain)
+                    # and strand them until ``HISTORY_PULL_TIMEOUT`` waiting on
+                    # a ``MSG_HISTORY_REQUEST`` that was never sent.
+                    history_registry.fail_pull(
+                        flow_id, owner_machine, exclude=fut
+                    )
+                else:
+                    # Drop our waiter on every other exit path — timeout,
+                    # cancellation after a successful dispatch, a follower
+                    # leaving, or success. On success ``resolve`` has already
+                    # popped this waiter and cleared the in-flight marker, so
+                    # the call is a no-op; otherwise it removes the now-dead
+                    # waiter and, when it was the last one for the key, clears
+                    # the marker. Because the leader keeps the pull genuinely in
+                    # flight here, followers correctly stay parked on the
+                    # already-dispatched request.
+                    history_registry.discard(flow_id, fut, owner_machine)
+        # Re-read the just-populated cache as a full snapshot so the response
+        # carries ``delivery: "full"`` plus a fresh ``progress`` token the
+        # client can use for its next reconnect. ``get_history_snapshot`` with
+        # ``expected_machine_id`` / ``expected_owner`` is the authoritative
+        # validation: it only returns records when the bundle still belongs to
+        # the owning machine and owner, so a same-machine, same-owner daemon
+        # reconnect during the pull window (which resolves the waiter with
+        # authoritative records from the new connection, but swaps the socket
+        # object) is correctly served the full snapshot rather than discarded.
+        # The 409 is reserved for the case the bundle's machine/owner actually
+        # changed (validation fails), so we never return records from a
+        # different machine that reused the same flow id.
+        full = await state.get_history_snapshot(
+            flow_id,
+            after=None,
+            expected_machine_id=owner_machine,
+            expected_owner=target_owner,
+        )
+        if full is not None:
+            return {"flow_id": flow_id, "cached": False, **full}
+        raise HTTPException(
+            status_code=409,
+            detail=f"history ownership changed while pulling flow '{flow_id}'",
+        )
 
     # -- frontend (static files) -------------------------------------------
     # Mounted last so the API routes and WebSocket endpoints above take

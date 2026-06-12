@@ -37,6 +37,15 @@
 
 
 
+
+## 9.1.0 - 2026-06-12
+
+- Add incremental delta loading to GET /api/history/{flow_id} via optional after progress-token parameter
+- Return delivery (delta|full) and progress fields in history API response to indicate incremental vs full payload
+- Switch WS-reconnect path to incremental delta append for running-flow view, preserving existing records, DOM, and scroll position
+- Switch WS-reconnect path to incremental delta append for history-detail view using shared progress token mechanism
+- Fall back to full reload on progress token mismatch, cache miss, generation change, or any unsafe condition
+- Preserve existing ownership verification and on-demand daemon-pull semantics for cache-miss cases
 ## 9.0.0 - 2026-06-12
 
 - Add summarize as the default final step in all task-type sequences (feature, bugfix, review, small, directive, discovery); existing `steps.append: [summarize]` configs become silent no-ops

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from se3.daemon import protocol
 
@@ -114,6 +114,53 @@ class ConnectionManager:
             logger.warning("Failed to send %s to %s", message.type, machine_id)
             return False
 
+    async def get_connection(self, machine_id: str) -> Any:
+        """Return the currently registered socket for *machine_id*, if any."""
+        async with self._lock:
+            return self._connections.get(machine_id)
+
+    async def is_current_connection(self, machine_id: str, websocket: Any) -> bool:
+        """Whether *websocket* is still registered for *machine_id*."""
+        async with self._lock:
+            return self._connections.get(machine_id) is websocket
+
+    async def send_to_connection(
+        self,
+        machine_id: str,
+        websocket: Any,
+        message: protocol.Message,
+    ) -> bool:
+        """Send only through the exact connection previously validated.
+
+        The identity check is performed under the registry lock, but the lock
+        is released **before** awaiting ``send_text`` — mirroring the lock-free
+        send discipline of :meth:`send_to`. A send that blocks on a
+        backpressured / stalled daemon socket must not hold the manager-wide
+        lock, which would otherwise stall ``connect`` / ``disconnect`` /
+        ``get_connection`` / ``is_current_connection`` for **every** machine
+        until the socket unblocks or the connection dies.
+        """
+        async with self._lock:
+            if self._connections.get(machine_id) is not websocket:
+                return False
+        try:
+            await websocket.send_text(message.to_json())
+            return True
+        except Exception:
+            logger.warning("Failed to send %s to %s", message.type, machine_id)
+            return False
+
+
+class _PullAbandoned(Exception):
+    """Internal signal: a shared-pull leader failed before dispatching.
+
+    Raised into every follower parked behind a leader whose daemon send
+    returned ``False`` or was cancelled *before* a ``MSG_HISTORY_REQUEST`` was
+    successfully dispatched. The follower catches it and retries as a fresh
+    leader instead of waiting out ``HISTORY_PULL_TIMEOUT`` behind a pull that
+    will never be answered. It never escapes the REST handler.
+    """
+
 
 class HistoryRequestRegistry:
     """Tracks in-flight on-demand history pulls awaiting a daemon reply.
@@ -122,33 +169,126 @@ class HistoryRequestRegistry:
     sends a ``MSG_HISTORY_REQUEST`` to the owning daemon and parks an
     :class:`asyncio.Future` here keyed by ``flow_id``. When the matching
     ``MSG_HISTORY_DATA`` arrives on the daemon receive loop it resolves every
-    waiter for that flow. Lives entirely in process memory.
+    waiter for that flow and machine. Lives entirely in process memory.
     """
 
     def __init__(self) -> None:
-        self._waiters: Dict[str, list] = {}
+        self._waiters: Dict[Tuple[str, Optional[str]], list] = {}
+        # Keys with a daemon ``MSG_HISTORY_REQUEST`` already in flight. Lets
+        # concurrent cache-miss REST handlers for the same (flow, machine)
+        # share ONE daemon pull instead of each sending its own: only the
+        # first (the leader) sends, the rest park and await the same reply.
+        self._inflight: set = set()
 
-    def register(self, flow_id: str) -> "asyncio.Future":
-        """Park and return a future that resolves when *flow_id* data lands."""
+    def register(
+        self, flow_id: str, machine_id: Optional[str] = None
+    ) -> "asyncio.Future":
+        """Park a future for *flow_id*, optionally pinned to *machine_id*."""
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._waiters.setdefault(flow_id, []).append(fut)
+        self._waiters.setdefault((flow_id, machine_id), []).append(fut)
         return fut
 
-    def resolve(self, flow_id: str, data: Any) -> None:
-        """Resolve every waiter parked for *flow_id* with *data*."""
-        for fut in self._waiters.pop(flow_id, []):
-            if not fut.done():
-                fut.set_result(data)
+    def begin_pull(
+        self, flow_id: str, machine_id: Optional[str] = None
+    ) -> Tuple["asyncio.Future", bool]:
+        """Register a waiter and report whether the caller must send the pull.
 
-    def discard(self, flow_id: str, fut: "asyncio.Future") -> None:
+        Returns ``(future, is_leader)``. ``is_leader`` is ``True`` only for the
+        first caller to park a waiter for ``(flow_id, machine_id)`` while no
+        pull is in flight — that caller sends the daemon ``MSG_HISTORY_REQUEST``
+        and marks the key in flight. Concurrent callers (followers) get
+        ``is_leader=False`` and simply await the same reply, so a single daemon
+        pull serves them all. Without this, every concurrent cache-miss request
+        sent its own request; the first reply resolved all waiters and was
+        suppressed, but each later reply found no waiter, replaced the cache
+        generation, and was broadcast as ``mode: full`` — clearing the progress
+        tokens REST had just returned and forcing the next reconnect back into a
+        full fetch + DOM rebuild.
+        """
+        fut = self.register(flow_id, machine_id)
+        key = (flow_id, machine_id)
+        is_leader = key not in self._inflight
+        if is_leader:
+            self._inflight.add(key)
+        return fut, is_leader
+
+    def resolve(
+        self, flow_id: str, data: Any, machine_id: Optional[str] = None
+    ) -> bool:
+        """Resolve waiters for *flow_id* from the reporting *machine_id*.
+
+        Returns ``True`` when at least one parked waiter existed for this flow
+        (i.e. the frame answered an on-demand pull), so the caller can tell an
+        on-demand pull reply apart from an unsolicited live push.
+        """
+        keys = [(flow_id, machine_id)]
+        if machine_id is not None:
+            # Preserve compatibility for callers that intentionally registered
+            # an unpinned waiter.
+            keys.append((flow_id, None))
+        resolved = False
+        for key in keys:
+            for fut in self._waiters.pop(key, []):
+                resolved = True
+                if not fut.done():
+                    fut.set_result(data)
+            # The pull for this key is complete — let a later cache miss start
+            # a fresh one.
+            self._inflight.discard(key)
+        return resolved
+
+    def discard(
+        self,
+        flow_id: str,
+        fut: "asyncio.Future",
+        machine_id: Optional[str] = None,
+    ) -> None:
         """Drop a single waiter (e.g. after a timeout) without resolving it."""
-        waiters = self._waiters.get(flow_id)
+        key = (flow_id, machine_id)
+        waiters = self._waiters.get(key)
         if not waiters:
+            # No waiters tracked (already resolved / never parked); make sure a
+            # stale in-flight marker cannot wedge future pulls.
+            self._inflight.discard(key)
             return
         if fut in waiters:
             waiters.remove(fut)
         if not waiters:
-            self._waiters.pop(flow_id, None)
+            self._waiters.pop(key, None)
+            # The last waiter for this key is gone (all timed out / failed to
+            # send): clear the in-flight marker so the next request re-pulls.
+            self._inflight.discard(key)
+
+    def fail_pull(
+        self,
+        flow_id: str,
+        machine_id: Optional[str] = None,
+        *,
+        exclude: "Optional[asyncio.Future]" = None,
+    ) -> None:
+        """Release every waiter for a key and clear its in-flight marker.
+
+        Called when the *leader* of a shared pull fails BEFORE a successful
+        daemon dispatch — its ``MSG_HISTORY_REQUEST`` send returned ``False``,
+        or it was cancelled before / while sending. Unlike :meth:`discard`,
+        which only clears the in-flight marker once the *last* waiter is gone,
+        this wakes every parked follower at once and clears the marker
+        unconditionally, so no follower is stranded until
+        ``HISTORY_PULL_TIMEOUT`` behind a pull that will never be answered, and
+        the next request leads a fresh pull instead of joining the abandoned
+        one. Followers are failed with :class:`_PullAbandoned` so they can
+        retry as a new leader; the leader's own future (``exclude``) is dropped
+        without being failed, since the leader is already unwinding on this
+        path and never awaits it.
+        """
+        key = (flow_id, machine_id)
+        waiters = self._waiters.pop(key, [])
+        for fut in waiters:
+            if fut is exclude:
+                continue
+            if not fut.done():
+                fut.set_exception(_PullAbandoned())
+        self._inflight.discard(key)
 
 
 class IndexRefreshRegistry:
@@ -254,22 +394,32 @@ async def request_history(
     state: ServerState,
     flow_id: str,
     *,
+    machine_id: Optional[str] = None,
+    connection: Any = None,
     cursor: Optional[Dict[str, Any]] = None,
     project_root: str = "",
 ) -> bool:
     """Send a ``MSG_HISTORY_REQUEST`` to the daemon owning *flow_id*.
 
-    Resolves the owning machine via the history index / live flow set and
-    routes the request down its WebSocket. Returns ``False`` when no
-    connected daemon owns the flow.
+    When *machine_id* is supplied, routes directly to that already-validated
+    machine without resolving ownership again. When *connection* is supplied,
+    the request is sent only if that exact socket is still current, preventing
+    a same-machine-id reconnect from receiving a request validated against the
+    previous daemon connection.
     """
-    machine_id = await state.find_machine_for_history_flow(flow_id)
-    if machine_id is None or not manager.is_connected(machine_id):
+    target_machine = machine_id
+    if target_machine is None:
+        target_machine = await state.find_machine_for_history_flow(flow_id)
+    if target_machine is None or not manager.is_connected(target_machine):
         return False
     message = protocol.make_history_request(
         flow_id, project_root=project_root, cursor=cursor
     )
-    return await manager.send_to(machine_id, message)
+    if connection is not None:
+        return await manager.send_to_connection(
+            target_machine, connection, message
+        )
+    return await manager.send_to(target_machine, message)
 
 
 class InterjectionEventTracker:
@@ -873,16 +1023,43 @@ async def _handle_message(
         records = message.payload.get("records") or []
         cursor = message.payload.get("cursor") or {}
         if flow_id and isinstance(records, list):
-            await state.append_history(
+            applied = await state.append_history(
                 flow_id,
                 mode,
                 records,
                 cursor=cursor if isinstance(cursor, dict) else {},
                 machine_id=machine_id,
             )
-            if registry is not None:
-                registry.resolve(flow_id, await state.get_history(flow_id))
-            await _push_history_data(hub, state, machine_id, flow_id, mode, records)
+            # Resolve an on-demand pull waiter ONLY when this frame actually
+            # populated the cache. A periodic push-loop ``append`` that
+            # ``append_history`` discarded (a first-sighting append after a
+            # server restart, or a flow still flagged ``_history_requires_full``)
+            # must not wake the REST handler: it would re-read the still-empty
+            # cache and raise a spurious 409 while the daemon's authoritative
+            # full reply to our ``MSG_HISTORY_REQUEST`` is still in flight. The
+            # waiter keeps parking until the applied full reply lands (or the
+            # pull times out).
+            resolved_pull = False
+            if registry is not None and applied:
+                resolved_pull = registry.resolve(
+                    flow_id,
+                    await state.get_history(flow_id),
+                    machine_id=machine_id,
+                )
+            # Suppress the UI broadcast for a frame that answered an on-demand
+            # cache-miss pull. The parked REST handler(s) re-read the populated
+            # cache and return the full records plus a fresh ``progress`` token
+            # to exactly the clients that requested them; re-broadcasting the
+            # same ``mode: full`` frame over ``/ws/ui`` would make every history
+            # consumer reset its progress to null (the WS full-frame path clears
+            # it), discarding the token the REST response just delivered and
+            # forcing the next reconnect into another full fetch + full DOM
+            # rebuild despite an unchanged cache generation. Live active-flow
+            # appends never resolve a waiter, so they still stream normally.
+            if not resolved_pull:
+                await _push_history_data(
+                    hub, state, machine_id, flow_id, mode, records
+                )
     elif message.type == protocol.MSG_ISSUE_RESULT:
         # Daemon acknowledges an issue write command. Resolve the parked
         # future so the originating REST endpoint can return the outcome.

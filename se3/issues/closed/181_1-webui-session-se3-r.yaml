@@ -1,11 +1,11 @@
 id: '181'
 description: 1. webui加载一个正在运行的session比se3 run --resume慢得多，是因为--resume没有完整加载历史纪录的缘故吗？2.
   希望webui对聊天记录的加载能有增量加载的功能，每次切出浏览器（手机）再切回来，都要重新全量加载（从时间上判断是全量的），体验很不友好，也没有必要
-status: open
+status: resolved
 scope: in_scope
 tags: []
 source: human
 created_at: '2026-06-12T00:35:02.673336'
-updated_at: '2026-06-12T00:35:02.673336'
+updated_at: '2026-06-12T11:20:28.871925'
 priority: medium
 type: enhancement

@@ -15,11 +15,134 @@ on the same event loop) never observe a half-applied update.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from se3.daemon import protocol
+
+
+# -- history progress token --------------------------------------------------
+#
+# The REST snapshot endpoint (``GET /api/history/{flow_id}``) can serve an
+# incremental *delta* to a reconnecting client instead of the full record list.
+# To do so safely the client echoes back an **opaque progress token** describing
+# how far it had already consumed the server's in-memory history bundle. The
+# token binds three facts:
+#
+#   * ``generation`` — the cache bundle's lifecycle id. It changes whenever the
+#     bundle is replaced (a ``full`` push, a first sighting, or a machine
+#     change) and stays stable across ordinary ``append`` pushes, so a token
+#     issued before an append still validates while a token issued against a
+#     since-replaced bundle is rejected.
+#   * ``offset`` — how many records the client already holds (the index into
+#     the bundle's flat ``records`` array).
+#   * ``machine_id`` — the machine whose daemon produced the bundle, so a
+#     bundle that has been re-pulled from a different daemon invalidates the
+#     token.
+#
+# The token is deliberately content-free: it carries no record bodies and no
+# owner credentials, only these three scalars. It is signed with a process-local
+# secret so a client cannot advance the offset and cause records to be skipped.
+# Any malformed, unsigned, or tampered token falls back to a full snapshot.
+
+_PROGRESS_VERSION = 1
+
+
+def _progress_payload(generation: int, offset: int, machine_id: str) -> bytes:
+    return json.dumps(
+        {
+            "v": _PROGRESS_VERSION,
+            "g": int(generation),
+            "o": int(offset),
+            "m": str(machine_id),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def encode_progress(
+    generation: int,
+    offset: int,
+    machine_id: str,
+    *,
+    secret: Optional[bytes] = None,
+) -> str:
+    """Encode a history progress token (opaque base64url string).
+
+    Carries only ``(generation, offset, machine_id)`` — never record content
+    or owner credentials.
+    """
+    payload = _progress_payload(generation, offset, machine_id)
+    signature = hmac.new(secret, payload, hashlib.sha256).hexdigest() if secret else ""
+    envelope = json.dumps(
+        {
+            "p": base64.urlsafe_b64encode(payload).decode("ascii"),
+            "s": signature,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(envelope).decode("ascii")
+
+
+def decode_progress(
+    token: Optional[str],
+    *,
+    secret: Optional[bytes] = None,
+) -> Optional[Dict[str, Any]]:
+    """Decode a progress token, returning ``None`` on invalid input.
+
+    A ``None`` result means "no usable progress" and the caller MUST fall back
+    to a full snapshot. Returns ``{"generation", "offset", "machine_id"}`` on
+    success. When *secret* is supplied, the token must also carry a valid HMAC;
+    decoding without a secret is inspection-only and does not establish that
+    the server issued the token.
+    """
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        envelope_raw = base64.urlsafe_b64decode(token.encode("ascii"))
+        envelope = json.loads(envelope_raw.decode("utf-8"))
+        if not isinstance(envelope, dict):
+            return None
+        payload_raw = base64.urlsafe_b64decode(envelope["p"].encode("ascii"))
+        data = json.loads(payload_raw.decode("utf-8"))
+    except Exception:
+        return None
+    if secret is not None:
+        signature = envelope.get("s")
+        if not isinstance(signature, str) or not hmac.compare_digest(
+            signature,
+            hmac.new(secret, payload_raw, hashlib.sha256).hexdigest(),
+        ):
+            return None
+    if not isinstance(data, dict) or data.get("v") != _PROGRESS_VERSION:
+        return None
+    generation = data.get("g")
+    offset = data.get("o")
+    machine_id = data.get("m")
+    # Booleans are ints in Python; reject them explicitly so a tampered token
+    # cannot smuggle a ``True``/``False`` past the type check.
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or not isinstance(machine_id, str)
+        or offset < 0
+    ):
+        return None
+    return {
+        "generation": generation,
+        "offset": offset,
+        "machine_id": machine_id,
+    }
 
 
 @dataclass
@@ -146,8 +269,20 @@ class ServerState:
         #: machine_id -> list of history session-meta dicts (the daemon's
         #: ``se3 history`` index).
         self._history_index: Dict[str, List[Dict[str, Any]]] = {}
-        #: flow_id -> cached history bundle (records + cursor + owner).
+        #: flow_id -> cached history bundle (records + cursor + owner + the
+        #: ``generation`` lifecycle id backing the incremental progress token).
         self._history_data: Dict[str, Dict[str, Any]] = {}
+        #: Flows whose cache was invalidated by a cross-machine append. Further
+        #: appends stay ignored until an authoritative full bundle arrives.
+        self._history_requires_full: set[str] = set()
+        #: Monotonic counter handing out a fresh ``generation`` to every newly
+        #: created / replaced history bundle, so a progress token is bound to
+        #: exactly one bundle lifecycle (see ``encode_progress``).
+        self._history_generation: int = 0
+        #: Process-local signing key for opaque history progress tokens. Tokens
+        #: naturally become invalid after a server restart, which correctly
+        #: degrades reconnects to a full snapshot.
+        self._history_progress_secret = secrets.token_bytes(32)
         #: Issue mirror: machine_id -> project_root -> list of issue dicts.
         #: Updated from daemon STATUS_UPDATE snapshots; the server never writes
         #: issues to disk — writes are dispatched as MSG_ISSUE_COMMAND to the
@@ -463,18 +598,53 @@ class ServerState:
         *,
         cursor: Optional[Dict[str, Any]] = None,
         machine_id: str = "",
-    ) -> None:
+    ) -> bool:
         """Cache history *records* for *flow_id*.
 
-        ``mode == "full"`` (or a first sighting) replaces any cached records;
-        ``mode == "append"`` extends them, so an active flow's incremental
-        jsonl deltas accumulate into one growing list. *cursor* is stored
-        verbatim for the next incremental pull. Purely in-memory.
+        ``mode == "full"`` replaces any cached records; ``mode == "append"``
+        extends an existing authoritative bundle. A first-sighting append is
+        ignored and marks the flow as requiring a full pull, because it may be
+        only the tail after a server restart. *cursor* is stored verbatim for
+        the next incremental pull. Purely in-memory.
+
+        Returns ``True`` when this call actually populated / extended the cached
+        bundle, and ``False`` when the records were discarded (a first-sighting
+        or otherwise unanchored append, or a cross-machine delta). An on-demand
+        pull waiter must be resolved only on a ``True`` result so a racing
+        ignored append cannot prematurely wake the REST handler before the
+        daemon's authoritative full reply lands.
         """
         new_records = list(records or [])
         async with self._lock:
             existing = self._history_data.get(flow_id)
-            if mode == protocol.HISTORY_MODE_APPEND and existing is not None:
+            if mode == protocol.HISTORY_MODE_APPEND and existing is None:
+                # An append is only meaningful relative to an authoritative
+                # full bundle. After a server restart the daemon may retain its
+                # cursor and send only a new tail; caching that tail as a full
+                # snapshot would permanently omit all older records.
+                self._history_requires_full.add(flow_id)
+                return False
+            if (
+                mode == protocol.HISTORY_MODE_APPEND
+                and flow_id in self._history_requires_full
+            ):
+                return False
+            if mode == protocol.HISTORY_MODE_APPEND:
+                # An ordinary append keeps the bundle ``generation`` stable so a
+                # progress token issued before the append still validates. A
+                # machine change mid-bundle, however, makes prior progress
+                # unsafe (a different daemon's records), so it rolls a fresh
+                # generation that invalidates any outstanding token.
+                if machine_id and machine_id != str(
+                    existing.get("machine_id") or ""
+                ):
+                    # A delta from another daemon is not an authoritative
+                    # replacement. Discard both the stale bundle and this
+                    # unanchored delta so the next REST read is a cache miss and
+                    # pulls the new machine's complete history.
+                    del self._history_data[flow_id]
+                    self._history_requires_full.add(flow_id)
+                    return False
                 existing["records"].extend(new_records)
                 existing["mode"] = mode
                 if cursor:
@@ -482,15 +652,33 @@ class ServerState:
                 if machine_id:
                     existing["machine_id"] = machine_id
                 existing["updated_at"] = time.time()
+                return True
             else:
+                # Any branch that replaces the cached bundle wholesale (a true
+                # ``full`` snapshot, or any other non-append / unrecognized mode
+                # from a version-skewed or malformed daemon) establishes a fresh
+                # authoritative bundle and generation, so the requires-full flag
+                # MUST be cleared here too. Otherwise the flow stays flagged
+                # requires-full while the new bundle is cache-hit by REST, and
+                # every subsequent append delta is silently discarded — clients
+                # echo a valid token and get an empty delta forever until the
+                # daemon restarts and pushes a real full snapshot.
+                self._history_requires_full.discard(flow_id)
                 self._history_data[flow_id] = {
                     "flow_id": flow_id,
                     "machine_id": machine_id,
                     "mode": mode,
                     "records": new_records,
                     "cursor": dict(cursor) if cursor else {},
+                    "generation": self._next_generation(),
                     "updated_at": time.time(),
                 }
+                return True
+
+    def _next_generation(self) -> int:
+        """Hand out a fresh bundle generation. Caller must hold ``self._lock``."""
+        self._history_generation += 1
+        return self._history_generation
 
     async def get_history(self, flow_id: str) -> Optional[Dict[str, Any]]:
         """Return a copy of cached history for *flow_id*, or ``None`` on miss."""
@@ -503,6 +691,97 @@ class ServerState:
                 "machine_id": cached.get("machine_id", ""),
                 "mode": cached.get("mode", ""),
                 "records": list(cached["records"]),
+                "cursor": dict(cached.get("cursor") or {}),
+                "generation": int(cached.get("generation") or 0),
+                "updated_at": cached.get("updated_at"),
+            }
+
+    async def get_history_snapshot(
+        self,
+        flow_id: str,
+        *,
+        after: Optional[str] = None,
+        expected_machine_id: Optional[str] = None,
+        expected_owner: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically read a full or incremental history snapshot for *flow_id*.
+
+        Validation, record slicing and the new progress token are produced
+        under a single hold of ``self._lock`` so the returned ``records`` and
+        ``progress`` describe the **same** bundle snapshot — a concurrent
+        append / replacement cannot interleave between them.
+
+        Returns ``None`` (a cache miss the caller resolves by pulling from the
+        daemon) when no bundle is cached, when *expected_machine_id* is given
+        and the cached bundle belongs to a different machine, or when
+        *expected_owner* is given and owner-scoped flow resolution no longer
+        points at that machine. The ownership check and snapshot read happen
+        under the same lock.
+
+        Otherwise returns a dict with:
+
+        * ``delivery`` — ``"delta"`` when *after* is a valid progress token for
+          the current bundle (matching generation + machine + an in-range
+          offset), in which case ``records`` holds only the tail after that
+          offset; ``"full"`` for every fallback (no / malformed / stale token,
+          out-of-range offset, generation or machine mismatch), in which case
+          ``records`` holds the complete bundle.
+        * ``progress`` — a fresh opaque token pinned to this snapshot's
+          generation, machine and record count, for the client to echo on its
+          next reconnect.
+        """
+        async with self._lock:
+            cached = self._history_data.get(flow_id)
+            if cached is None:
+                return None
+            bundle_machine = str(cached.get("machine_id") or "")
+            if (
+                expected_machine_id is not None
+                and bundle_machine != expected_machine_id
+            ):
+                # The cached bundle was produced by a different daemon than the
+                # one that currently owns the flow; treat it as a miss so the
+                # route re-pulls the authoritative records and returns full.
+                return None
+            if expected_owner is not None:
+                resolved_machine = self._find_machine_for_history_flow_locked(
+                    flow_id, owner=expected_owner
+                )
+                if (
+                    resolved_machine is None
+                    or resolved_machine != expected_machine_id
+                ):
+                    return None
+            records = cached["records"]
+            generation = int(cached.get("generation") or 0)
+            total = len(records)
+
+            token = decode_progress(after, secret=self._history_progress_secret)
+            is_delta = (
+                token is not None
+                and token["generation"] == generation
+                and token["machine_id"] == bundle_machine
+                and 0 <= token["offset"] <= total
+            )
+            if is_delta:
+                out_records = list(records[token["offset"]:])
+                delivery = "delta"
+            else:
+                out_records = list(records)
+                delivery = "full"
+
+            return {
+                "flow_id": cached["flow_id"],
+                "machine_id": bundle_machine,
+                "mode": cached.get("mode", ""),
+                "delivery": delivery,
+                "records": out_records,
+                "progress": encode_progress(
+                    generation,
+                    total,
+                    bundle_machine,
+                    secret=self._history_progress_secret,
+                ),
                 "cursor": dict(cached.get("cursor") or {}),
                 "updated_at": cached.get("updated_at"),
             }
@@ -519,29 +798,35 @@ class ServerState:
         cannot pull another owner's history.
         """
         async with self._lock:
+            return self._find_machine_for_history_flow_locked(flow_id, owner=owner)
 
-            def _accept(machine_id: str) -> bool:
-                if owner is None:
-                    return True
-                record = self._machines.get(machine_id)
-                return record is not None and _owned(record, owner)
+    def _find_machine_for_history_flow_locked(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[str]:
+        """Locked implementation of :meth:`find_machine_for_history_flow`."""
 
-            for machine_id, sessions in self._history_index.items():
-                if not _accept(machine_id):
-                    continue
-                for session in sessions:
-                    if str(session.get("flow_id") or "") == flow_id:
-                        return machine_id
-            cached = self._history_data.get(flow_id)
-            if cached is not None and cached.get("machine_id"):
-                cached_mid = str(cached["machine_id"])
-                if _accept(cached_mid):
-                    return cached_mid
-            for machine_id, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
-                if flow_id in record.flows:
+        def _accept(machine_id: str) -> bool:
+            if owner is None:
+                return True
+            record = self._machines.get(machine_id)
+            return record is not None and _owned(record, owner)
+
+        for machine_id, sessions in self._history_index.items():
+            if not _accept(machine_id):
+                continue
+            for session in sessions:
+                if str(session.get("flow_id") or "") == flow_id:
                     return machine_id
+        cached = self._history_data.get(flow_id)
+        if cached is not None and cached.get("machine_id"):
+            cached_mid = str(cached["machine_id"])
+            if _accept(cached_mid):
+                return cached_mid
+        for machine_id, record in self._machines.items():
+            if not _owned(record, owner):
+                continue
+            if flow_id in record.flows:
+                return machine_id
         return None
 
     # -- issue mirror (from daemon STATUS_UPDATE snapshots) -----------------

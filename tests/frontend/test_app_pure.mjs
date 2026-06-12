@@ -929,6 +929,21 @@ class FakeNode {
   closest() { return null; }
   focus() {}
   scrollIntoView() {}
+  // Sibling helpers used by openHistorySession's Resume-bar bookkeeping.
+  get nextElementSibling() {
+    if (!this.parentNode) return null;
+    const sibs = this.parentNode.children;
+    const i = sibs.indexOf(this);
+    return i >= 0 ? (sibs[i + 1] || null) : null;
+  }
+  after(node) {
+    if (!this.parentNode) return;
+    const i = this.parentNode.childNodes.indexOf(this);
+    if (i < 0) { this.parentNode.appendChild(node); return; }
+    if (node.parentNode) node.parentNode._detach(node);
+    this.parentNode.childNodes.splice(i + 1, 0, node);
+    node.parentNode = this.parentNode;
+  }
 }
 
 function makeText(text) {
@@ -1780,6 +1795,354 @@ check("dedupeAppendRecords race regression: partial new records after snapshot",
   assert.equal(final.length, 4);
   const keys = final.map(app.recordKey);
   assert.equal(keys.length, new Set(keys).size);
+});
+
+// -- historySnapshotUrl: incremental fetch URL construction ------------------
+//
+// The reconnect loaders echo the held opaque progress token as `?after=` so
+// the server can serve a delta; the first open (no token) sends a bare URL.
+
+check("historySnapshotUrl omits the after param when no progress is held", () => {
+  assert.equal(app.historySnapshotUrl("F1", null), "/api/history/F1");
+  assert.equal(app.historySnapshotUrl("F1", ""), "/api/history/F1");
+  assert.equal(app.historySnapshotUrl("F1", undefined), "/api/history/F1");
+});
+
+check("historySnapshotUrl appends a held progress token as after", () => {
+  const url = app.historySnapshotUrl("F1", "tok-123");
+  assert.equal(url, "/api/history/F1?after=tok-123");
+});
+
+check("historySnapshotUrl encodes the flow id and the progress token safely", () => {
+  // A base64url progress token can contain '-', '_', '=' which URLSearchParams
+  // percent-encodes where required; the flow id is encodeURIComponent'd.
+  const token = "Zm9v+bar/=baz_-";
+  const url = app.historySnapshotUrl("a b/c", token);
+  // Flow id space + slash are percent-encoded.
+  assert.ok(url.startsWith("/api/history/a%20b%2Fc?after="));
+  // The token round-trips out of the query string unchanged.
+  const qs = url.slice(url.indexOf("?") + 1);
+  const params = new URLSearchParams(qs);
+  assert.equal(params.get("after"), token);
+});
+
+// -- mergeHistoryResponse: shared full/delta merge decision ------------------
+//
+// Folds a GET /api/history response into the records a view already holds,
+// choosing append (delta) vs rebuild (full) from the server `delivery` tag and
+// reporting the render mode + fresh progress token back to the caller.
+
+check("mergeHistoryResponse full delivery replaces records and reports render=full", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const resp = { delivery: "full", records: [r1, r2], progress: "tok-full" };
+  const out = app.mergeHistoryResponse(resp, []);
+  assert.equal(out.render, "full");
+  assert.equal(out.progress, "tok-full");
+  assert.equal(out.records.length, 2);
+  assert.equal(app.recordKey(out.records[0]), app.recordKey(r1));
+  assert.equal(app.recordKey(out.records[1]), app.recordKey(r2));
+});
+
+check("mergeHistoryResponse full fallback preserves live appends arrived during fetch", () => {
+  // Snapshot has R1, R2; a live append R3 landed in the held array during the
+  // await. A full delivery must not drop R3.
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  const resp = { delivery: "full", records: [r1, r2], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, [r3], []);
+  assert.equal(out.render, "full");
+  assert.equal(out.records.length, 3);
+  // R3 (the live append not in the snapshot) is appended after the snapshot.
+  assert.equal(app.recordKey(out.records[2]), app.recordKey(r3));
+});
+
+check("mergeHistoryResponse full fallback discards records from the invalidated generation", () => {
+  const oldA = asstRecord("old-A", 1, "s1", "discovery");
+  const oldB = asstRecord("old-B", 2, "s1", "discovery");
+  const newX = asstRecord("new-X", 10, "s2", "analyze");
+  const newY = asstRecord("new-Y", 11, "s2", "analyze");
+  const baseline = [oldA, oldB];
+  const resp = {
+    delivery: "full",
+    records: [newX, newY],
+    progress: "new-generation",
+  };
+  const out = app.mergeHistoryResponse(resp, baseline, baseline);
+  assert.equal(out.render, "full");
+  assert.deepEqual(
+    out.records.map((record) => record.message.content),
+    ["new-X", "new-Y"],
+  );
+});
+
+check("mergeHistoryResponse full fallback preserves a pending local echo from the baseline", () => {
+  // A user reply was optimistically echoed (appendLocalReply) BEFORE the
+  // reconnect refetch started, so the echo is in the request baseline. The
+  // daemon has not yet persisted its authoritative copy, so the new snapshot
+  // does NOT contain it. A full fallback must keep the echo (client-only UI
+  // state) rather than dropping it with the invalidated generation.
+  const oldA = asstRecord("old-A", 1, "s1", "discovery");
+  const echo = {
+    __localEcho: true, __localEchoText: "yes", __localEchoPriorAuth: 0,
+    message: { role: "user", content: "yes", timestamp: 5 },
+  };
+  const baseline = [oldA, echo];
+  const newX = asstRecord("new-X", 10, "s2", "analyze");
+  const resp = { delivery: "full", records: [newX], progress: "gen2" };
+  const out = app.mergeHistoryResponse(resp, baseline, baseline);
+  assert.equal(out.render, "full");
+  // The snapshot record plus the surviving echo; the stale oldA is dropped.
+  assert.ok(out.records.some((r) => r.__localEcho), "pending echo must survive full fallback");
+  assert.ok(
+    out.records.some((r) => app.normalizeRecord(r).content === "new-X"),
+    "new snapshot record is present",
+  );
+  assert.ok(
+    !out.records.some((r) => app.normalizeRecord(r).content === "old-A"),
+    "stale generation record is discarded",
+  );
+});
+
+check("mergeHistoryResponse full fallback drops an echo already authoritative in the snapshot", () => {
+  // The new snapshot already carries the daemon's authoritative copy of the
+  // reply, so the echo is redundant. mergeHistoryResponse still appends it (it
+  // has a different recordKey); the caller's reconcileLocalEchoes removes it.
+  // Here we only assert the echo is preserved through the merge so reconcile
+  // can act on it (matching the old full-reload + reconcile behaviour).
+  const echo = {
+    __localEcho: true, __localEchoText: "yes", __localEchoPriorAuth: 0,
+    message: { role: "user", content: "yes", timestamp: 5 },
+  };
+  const baseline = [echo];
+  const authUser = {
+    step_id: "s1c", step_type: "discovery",
+    message: { role: "user", content: "yes", timestamp: 11 },
+  };
+  const resp = { delivery: "full", records: [authUser], progress: "gen2" };
+  const merged = app.mergeHistoryResponse(resp, baseline, baseline);
+  assert.ok(merged.records.some((r) => r.__localEcho), "echo carried into merge");
+  // reconcileLocalEchoes then collapses the pair to a single user record.
+  const reconciled = app.reconcileLocalEchoes(merged.records);
+  const yes = reconciled.filter(
+    (r) => app.normalizeRecord(r).role === "user"
+      && app.comparableUserText(app.normalizeRecord(r).content) === "yes");
+  assert.equal(yes.length, 1, "reply shown exactly once after reconcile");
+  assert.ok(!reconciled.some((r) => r.__localEcho), "echo reconciled away");
+});
+
+check("mergeHistoryResponse unrecognised delivery defaults to full", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const resp = { records: [r1], progress: "p" };   // no delivery field
+  const out = app.mergeHistoryResponse(resp, []);
+  assert.equal(out.render, "full");
+  assert.equal(out.records.length, 1);
+});
+
+check("mergeHistoryResponse delta with all-new records appends and reports render=delta", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  // Held: R1, R2. Delta tail: R3 only (the server already knew R1, R2).
+  const resp = { delivery: "delta", records: [r3], progress: "tok-d" };
+  const out = app.mergeHistoryResponse(resp, [r1, r2]);
+  assert.equal(out.render, "delta");
+  assert.equal(out.progress, "tok-d");
+  assert.equal(out.records.length, 3);
+  assert.equal(app.recordKey(out.records[2]), app.recordKey(r3));
+  // Held-record order is preserved.
+  assert.equal(app.recordKey(out.records[0]), app.recordKey(r1));
+});
+
+check("mergeHistoryResponse delta filters records already held (WS append race)", () => {
+  // During the outage some delta records also arrived as a live WS append, so
+  // they are already in the held array; the delta must not re-add them.
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  const r4 = asstRecord("A4", 4, "s1", "discovery");
+  // Held R1, R2, R3 (R3 came via a live append). Delta returns R3, R4.
+  const resp = { delivery: "delta", records: [r3, r4], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, [r1, r2, r3]);
+  assert.equal(out.render, "delta");
+  assert.equal(out.records.length, 4, "only the genuinely new R4 is appended");
+  assert.equal(app.recordKey(out.records[3]), app.recordKey(r4));
+  // No duplicate recordKeys in the merged array.
+  const keys = out.records.map(app.recordKey);
+  assert.equal(keys.length, new Set(keys).size);
+});
+
+check("mergeHistoryResponse delta older than held tail merges in order and rebuilds (full)", () => {
+  // Reconnect-while-streaming race: during the incremental fetch's await a live
+  // WS append delivered the current turn's FINAL result (ts=5) into the held
+  // tail. The delta then returns the outage-window gap records, including that
+  // turn's earlier PARTIAL fragment (ts=3). Appending the partial after the
+  // final would invert array order and leave a stale streaming bubble; instead
+  // it must be merged before the final and the caller must do a full rebuild.
+  const a1 = asstRecord("A1", 1, "s0", "analyze");
+  const finalB = asstRecord("Bfinal", 5, "s1", "discovery");
+  const partialB = {
+    step_id: "s1", step_type: "discovery",
+    message: { role: "assistant", content: "B…", timestamp: 3, partial: true },
+  };
+  // Held tail already has the newer final (WS append won the race).
+  const resp = { delivery: "delta", records: [partialB], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, [a1, finalB]);
+  assert.equal(out.render, "full", "out-of-order delta forces a full rebuild");
+  // Records are ordered by timestamp: A1(1) → partialB(3) → finalB(5).
+  const tss = out.records.map((r) => app.recordSortTs(r));
+  assert.deepEqual(tss, [1000, 3000, 5000]);
+  // The partial now precedes its final, so partialSegments groups them together
+  // (#seg0) and markSupersededProgress supersedes the partial.
+  const segs = app.partialSegments(out.records);
+  assert.ok(segs[1] && segs[1].endsWith("#seg0"), "partial lands in seg0, not a phantom later segment");
+  const superseded = app.markSupersededProgress(out.records);
+  assert.ok(superseded.has(1), "the partial is superseded by its turn's final");
+});
+
+check("mergeHistoryResponse delta newer than held tail still appends (delta)", () => {
+  // The common case: gap records are all newer than the held tail, so a plain
+  // tail append (incremental render) is still correct.
+  const a1 = asstRecord("A1", 1, "s1", "discovery");
+  const a2 = asstRecord("A2", 2, "s1", "discovery");
+  const a3 = asstRecord("A3", 3, "s1", "discovery");
+  const resp = { delivery: "delta", records: [a3], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, [a1, a2]);
+  assert.equal(out.render, "delta");
+  assert.equal(out.records.length, 3);
+  assert.equal(app.recordKey(out.records[2]), app.recordKey(a3));
+});
+
+check("stableMergeByTimestamp interleaves by (timestamp, index) and is stable", () => {
+  const a = asstRecord("A", 1, "s1", "discovery");
+  const b = asstRecord("B", 5, "s1", "discovery");
+  const c = asstRecord("C", 3, "s1", "discovery");
+  // held=[A(1), B(5)] (B is the newer WS append), fresh=[C(3)] (the gap record).
+  const merged = app.stableMergeByTimestamp([a, b], [c]);
+  assert.deepEqual(merged.map((r) => r.message.content), ["A", "C", "B"]);
+});
+
+check("stableMergeByTimestamp orders the REST delta before a held WS record on an equal-timestamp tie", () => {
+  // The held tail is a WS final (ts=3) that arrived later during the request;
+  // the REST delta carries that turn's earlier partial at the SAME timestamp.
+  // On the tie the REST delta (fresh) must precede the held WS record so the
+  // partial lands before its final rather than after it.
+  const finalWs = asstRecord("final", 3, "s1", "discovery");
+  const partialRest = {
+    step_id: "s1", step_type: "discovery",
+    message: { role: "assistant", content: "partial", timestamp: 3, partial: true },
+  };
+  const merged = app.stableMergeByTimestamp([finalWs], [partialRest]);
+  assert.deepEqual(merged.map((r) => r.message.content), ["partial", "final"]);
+});
+
+check("stableMergeByTimestamp keeps a baseline-held record before an equal-timestamp delta record", () => {
+  // Record A was already held before the reconnect (it lives in requestBaseline)
+  // and the server delta carries a LATER record B sharing A's timestamp. The
+  // server bundle order is A then B (B comes after A's progress offset), so the
+  // baseline record A must retain its authoritative earlier position rather than
+  // being shoved behind the fresh delta.
+  const a = asstRecord("A", 3, "s1", "discovery");
+  const b = asstRecord("B", 3, "s1", "discovery");
+  const merged = app.stableMergeByTimestamp([a], [b], [a]);
+  assert.deepEqual(merged.map((r) => r.message.content), ["A", "B"]);
+});
+
+check("stableMergeByTimestamp orders a live append after an equal-timestamp delta but keeps the baseline first", () => {
+  // base = [baselineA(ts=3), wsFinal(ts=3)] where baselineA predates the request
+  // and wsFinal arrived during it; the REST delta returns restPartial(ts=3). The
+  // baseline record must stay first, the delta partial precedes its WS final.
+  const baselineA = asstRecord("A", 3, "s0", "analyze");
+  const wsFinal = asstRecord("final", 3, "s1", "discovery");
+  const restPartial = {
+    step_id: "s1", step_type: "discovery",
+    message: { role: "assistant", content: "partial", timestamp: 3, partial: true },
+  };
+  const merged = app.stableMergeByTimestamp(
+    [baselineA, wsFinal], [restPartial], [baselineA],
+  );
+  assert.deepEqual(
+    merged.map((r) => r.message.content), ["A", "partial", "final"],
+  );
+});
+
+check("mergeHistoryResponse delta at the held tail's timestamp is not append-safe and orders the partial first", () => {
+  // Reconnect-while-streaming race with EQUAL timestamps: the WS final (ts=3)
+  // won the race into the held tail, and the REST delta returns that turn's
+  // earlier partial, also stamped ts=3. The equal timestamp must NOT be treated
+  // as append-safe (which would invert the partial after the final and strand a
+  // stale streaming bubble); instead the merge orders the partial before the
+  // final and forces a full rebuild.
+  const a1 = asstRecord("A1", 1, "s0", "analyze");
+  const finalB = asstRecord("Bfinal", 3, "s1", "discovery");
+  const partialB = {
+    step_id: "s1", step_type: "discovery",
+    message: { role: "assistant", content: "B…", timestamp: 3, partial: true },
+  };
+  const resp = { delivery: "delta", records: [partialB], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, [a1, finalB]);
+  assert.equal(out.render, "full", "equal-timestamp delta forces a full rebuild");
+  // The partial precedes its final despite the equal timestamp.
+  assert.deepEqual(
+    out.records.map((r) => r.message.content), ["A1", "B…", "Bfinal"],
+  );
+  // partialSegments pairs the partial with its final (#seg0), not a phantom
+  // later segment, and markSupersededProgress supersedes it.
+  const segs = app.partialSegments(out.records);
+  assert.ok(segs[1] && segs[1].endsWith("#seg0"), "partial lands in seg0");
+  const superseded = app.markSupersededProgress(out.records);
+  assert.ok(superseded.has(1), "the partial is superseded by its turn's final");
+});
+
+check("mergeHistoryResponse delta with all-duplicate records is a noop (same reference)", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const held = [r1, r2];
+  // Delta returns records already entirely held (the WS append won the race).
+  const resp = { delivery: "delta", records: [r1, r2], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, held);
+  assert.equal(out.render, "noop");
+  assert.equal(out.records, held, "held array returned unchanged by reference");
+  assert.equal(out.progress, "p", "fresh progress token still reported on a noop");
+});
+
+check("mergeHistoryResponse empty delta is a noop and keeps the held array", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const held = [r1];
+  const resp = { delivery: "delta", records: [], progress: "p2" };
+  const out = app.mergeHistoryResponse(resp, held);
+  assert.equal(out.render, "noop");
+  assert.equal(out.records, held);
+  assert.equal(out.progress, "p2");
+});
+
+check("mergeHistoryResponse reports null progress when the response carries none", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const resp = { delivery: "full", records: [r1] };   // no progress field
+  const out = app.mergeHistoryResponse(resp, []);
+  assert.equal(out.progress, null);
+  // A non-string progress is also normalised to null.
+  const out2 = app.mergeHistoryResponse(
+    { delivery: "full", records: [r1], progress: 42 }, []);
+  assert.equal(out2.progress, null);
+});
+
+check("mergeHistoryResponse delta from an empty held array appends everything", () => {
+  // A delta delivered while the view holds nothing (e.g. progress survived a
+  // record reset): every delta record is new, so all are appended.
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const resp = { delivery: "delta", records: [r1, r2], progress: "p" };
+  const out = app.mergeHistoryResponse(resp, []);
+  assert.equal(out.render, "delta");
+  assert.equal(out.records.length, 2);
+});
+
+check("mergeHistoryResponse tolerates a missing records array", () => {
+  const out = app.mergeHistoryResponse({ delivery: "full", progress: "p" }, []);
+  assert.equal(out.render, "full");
+  assert.deepEqual(out.records, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -4611,6 +4974,524 @@ check("old jsonl without agent fields backward compatible", () => {
   assert.equal(norm.modelName, null);
   // Badge rendering should be null (no placeholder).
   assert.equal(app.renderAgentBadge(norm), null);
+});
+
+// ---------------------------------------------------------------------------
+// Reconnect incremental load paths (G4)
+// ---------------------------------------------------------------------------
+//
+// These exercise the actual async load functions (loadFlowConversation /
+// openHistorySession) against the DOM stub above plus a canned `fetch`, to
+// lock the reconnect-incremental contract end to end:
+//   * the FIRST open is a full load (no `after`, full rebuild);
+//   * a reconnect refresh ({ incremental: true }) echoes the held progress
+//     token via `?after=`, does NOT clear the container / __convState, and
+//     appends the server delta through the same dedupe path the live WS push
+//     uses (incremental render);
+//   * an all-duplicate delta is a render noop (progress still advances);
+//   * a `delivery: "full"` answer on a reconnect forces an authoritative full
+//     rebuild;
+//   * a failed reconnect request keeps the existing conversation untouched;
+//   * a WS append racing a REST delta never yields a duplicate record;
+//   * a running-flow local echo collapses to a single user record once the
+//     daemon's authoritative copy arrives.
+
+async function checkAsync(name, fn) {
+  await fn();
+  passed += 1;
+  console.log("  ok -", name);
+}
+
+let __lastFetchUrl = null;
+function setFetch(payload, ok = true, status = 200) {
+  globalThis.fetch = (url) => {
+    __lastFetchUrl = url;
+    return Promise.resolve({
+      ok,
+      status,
+      json: () => Promise.resolve(payload),
+    });
+  };
+}
+function setDeferredFetch() {
+  let resolveResponse;
+  globalThis.fetch = (url) => {
+    __lastFetchUrl = url;
+    return new Promise((resolve) => {
+      resolveResponse = (payload, ok = true, status = 200) => resolve({
+        ok,
+        status,
+        json: () => Promise.resolve(payload),
+      });
+    });
+  };
+  return (payload, ok = true, status = 200) => {
+    assert.ok(resolveResponse, "the deferred fetch must have started");
+    resolveResponse(payload, ok, status);
+  };
+}
+function setQueuedDeferredFetch() {
+  const requests = [];
+  globalThis.fetch = (url) => new Promise((resolve) => {
+    requests.push({
+      url,
+      resolve(payload, ok = true, status = 200) {
+        resolve({
+          ok,
+          status,
+          json: () => Promise.resolve(payload),
+        });
+      },
+    });
+  });
+  return requests;
+}
+// The bubble (record) nodes in a container, excluding step-header separators.
+function bubbleNodes(c) {
+  return c.children.filter((x) => x.__convIdx !== undefined);
+}
+function uniqueKeys(records) {
+  const keys = records.map(app.recordKey);
+  return new Set(keys).size === keys.length;
+}
+
+// -- running-flow view -------------------------------------------------------
+
+await checkAsync("flow: reconnect delta appends without clearing DOM, sends after token", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "tokA", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");           // first open → full
+  assert.equal(app.state.flowConversationProgress, "tokA");
+  assert.equal(app.state.flowConversationRecords.length, 2);
+  const stAfterFull = c.__convState;
+  const firstBubble = bubbleNodes(c)[0];
+  assert.ok(firstBubble, "first open should render a bubble");
+
+  setFetch({
+    records: [asstRecord("C", 3, "s1", "discovery")],
+    progress: "tokB", delivery: "delta",
+  });
+  await app.loadFlowConversation("F1", { incremental: true });
+  // echoed the held progress token
+  assert.ok(String(__lastFetchUrl).includes("after=tokA"), __lastFetchUrl);
+  assert.equal(app.state.flowConversationProgress, "tokB");
+  // incremental render: same __convState object, original bubble still attached
+  assert.equal(c.__convState, stAfterFull);
+  assert.ok(bubbleNodes(c).includes(firstBubble), "DOM must not be cleared on a delta");
+  assert.equal(app.state.flowConversationRecords.length, 3);
+  assert.ok(uniqueKeys(app.state.flowConversationRecords));
+});
+
+await checkAsync("flow: WS append + REST delta dedupe to unique records", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "t0", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+  // a live WS append delivers C during the outage window
+  app.applyHistoryData({ flow_id: "F1", mode: "append", records: [asstRecord("C", 3, "s1", "discovery")] });
+  assert.equal(app.state.flowConversationRecords.length, 3);
+  // reconnect delta re-sends C (already held via WS) plus a genuinely new D
+  setFetch({
+    records: [asstRecord("C", 3, "s1", "discovery"), asstRecord("D", 4, "s1", "discovery")],
+    progress: "t1", delivery: "delta",
+  });
+  await app.loadFlowConversation("F1", { incremental: true });
+  assert.equal(app.state.flowConversationRecords.length, 4, "C must not be appended twice");
+  assert.ok(uniqueKeys(app.state.flowConversationRecords));
+});
+
+await checkAsync("flow: all-duplicate delta is a render noop", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "p0", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+  const recsBefore = app.state.flowConversationRecords;
+  const stBefore = c.__convState;
+  const countBefore = bubbleNodes(c).length;
+
+  setFetch({ records: [asstRecord("B", 2, "s1", "discovery")], progress: "p1", delivery: "delta" });
+  await app.loadFlowConversation("F1", { incremental: true });
+  // progress still advances on a noop, but records / DOM are untouched
+  assert.equal(app.state.flowConversationProgress, "p1");
+  assert.equal(app.state.flowConversationRecords, recsBefore);
+  assert.equal(c.__convState, stBefore);
+  assert.equal(bubbleNodes(c).length, countBefore);
+});
+
+await checkAsync("flow: reconnect full fallback replaces the old generation", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery"), asstRecord("C", 3, "s1", "discovery")],
+    progress: "g1", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+  const firstBubble = bubbleNodes(c)[0];
+  const stBefore = c.__convState;
+  // A stale token makes the server answer `full` from a replacement cache
+  // generation whose records are not a superset of the old generation.
+  setFetch({
+    records: ["X", "Y"].map((x, i) => asstRecord(x, i + 10, "s2", "analyze")),
+    progress: "g2", delivery: "full",
+  });
+  await app.loadFlowConversation("F1", { incremental: true });
+  assert.equal(app.state.flowConversationProgress, "g2");
+  assert.equal(app.state.flowConversationRecords.length, 2);
+  // full rebuild: fresh __convState, original bubble detached
+  assert.notEqual(c.__convState, stBefore);
+  assert.ok(!bubbleNodes(c).includes(firstBubble), "full fallback must rebuild the DOM");
+  assert.deepEqual(
+    app.state.flowConversationRecords.map((r) => r.message.content),
+    ["X", "Y"],
+  );
+});
+
+await checkAsync("flow: newest overlapping reconnect refresh wins", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [asstRecord("A", 1, "s1", "discovery")];
+  app.state.flowConversationProgress = "g1";
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  app.renderConversation(c, app.state.flowConversationRecords, false);
+
+  const requests = setQueuedDeferredFetch();
+  const older = app.loadFlowConversation("F1", { incremental: true });
+  const newer = app.loadFlowConversation("F1", { incremental: true });
+  assert.equal(requests.length, 2);
+
+  requests[1].resolve({
+    records: [asstRecord("Y", 20, "s3", "implement")],
+    progress: "g3",
+    delivery: "full",
+  });
+  await newer;
+  requests[0].resolve({
+    records: [asstRecord("X", 10, "s2", "analyze")],
+    progress: "g2",
+    delivery: "full",
+  });
+  await older;
+
+  assert.deepEqual(
+    app.state.flowConversationRecords.map((r) => r.message.content),
+    ["Y"],
+  );
+  assert.equal(app.state.flowConversationProgress, "g3");
+});
+
+await checkAsync("flow: WS full replacement invalidates an older REST refresh", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [
+    asstRecord("A", 1, "s1", "discovery"),
+    asstRecord("B", 2, "s1", "discovery"),
+  ];
+  app.state.flowConversationProgress = "old-progress";
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  app.renderConversation(c, app.state.flowConversationRecords, false);
+
+  const resolveFetch = setDeferredFetch();
+  const refresh = app.loadFlowConversation("F1", { incremental: true });
+  app.applyHistoryData({
+    flow_id: "F1",
+    mode: "full",
+    records: [
+      asstRecord("X", 10, "s2", "analyze"),
+      asstRecord("Y", 11, "s2", "analyze"),
+    ],
+  });
+  const epochAfterFull = app.state.flowConversationEpoch;
+  const wsState = c.__convState;
+  resolveFetch({
+    records: [asstRecord("C", 3, "s1", "discovery")],
+    progress: "stale-progress",
+    delivery: "delta",
+  });
+  await refresh;
+
+  assert.deepEqual(
+    app.state.flowConversationRecords.map((r) => r.message.content),
+    ["X", "Y"],
+  );
+  assert.equal(app.state.flowConversationProgress, null);
+  assert.equal(app.state.flowConversationEpoch, epochAfterFull);
+  assert.equal(c.__convState, wsState, "stale REST response must not repaint");
+});
+
+await checkAsync("flow: failed reconnect request keeps the existing conversation", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({ records: [asstRecord("A", 1, "s1", "discovery")], progress: "f0", delivery: "full" });
+  await app.loadFlowConversation("F1");
+  const recsBefore = app.state.flowConversationRecords;
+  const countBefore = bubbleNodes(c).length;
+
+  setFetch({}, false, 503);                        // transient failure on refresh
+  await app.loadFlowConversation("F1", { incremental: true });
+  assert.equal(app.state.flowConversationRecords, recsBefore);
+  assert.equal(bubbleNodes(c).length, countBefore);
+});
+
+await checkAsync("flow: local echo collapses to a single user record on reconnect delta", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  const echo = {
+    __localEcho: true, __localEchoText: "yes", __localEchoPriorAuth: 0,
+    message: { role: "user", content: "yes", timestamp: 10 },
+  };
+  app.state.flowConversationRecords = [asstRecord("A", 1, "s1", "discovery"), echo];
+  app.renderConversation(c, app.state.flowConversationRecords, false);
+
+  // the daemon's authoritative copy of the same reply arrives via reconnect delta
+  const authUser = { step_id: "s1c", step_type: "discovery", message: { role: "user", content: "yes", timestamp: 11 } };
+  setFetch({ records: [authUser], progress: "e1", delivery: "delta" });
+  await app.loadFlowConversation("F1", { incremental: true });
+
+  assert.equal(app.state.flowConversationRecords.length, 2, "echo must be reconciled away");
+  assert.ok(!app.state.flowConversationRecords.some((r) => r.__localEcho), "no echo should survive");
+  const yes = app.state.flowConversationRecords.filter(
+    (r) => app.normalizeRecord(r).role === "user" && app.comparableUserText(app.normalizeRecord(r).content) === "yes");
+  assert.equal(yes.length, 1, "the reply is shown exactly once");
+});
+
+await checkAsync("flow: pending local echo survives a reconnect full fallback", async () => {
+  // The user replied (optimistic echo spliced in), then the connection dropped
+  // and the server's cache generation was replaced, so the reconnect refetch
+  // answers `delivery: "full"` from a fresh generation that does NOT yet carry
+  // the authoritative user record (the daemon only writes it at the next step
+  // boundary). The echo must remain visible — the pre-change full-reload kept
+  // it, so the full fallback must too.
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationProgress = "g1";
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  const echo = {
+    __localEcho: true, __localEchoText: "yes", __localEchoPriorAuth: 0,
+    message: { role: "user", content: "yes", timestamp: 10 },
+  };
+  app.state.flowConversationRecords = [asstRecord("A", 1, "s1", "discovery"), echo];
+  app.renderConversation(c, app.state.flowConversationRecords, false);
+
+  // Replacement generation: new records, no authoritative copy of "yes" yet.
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "g2", delivery: "full",
+  });
+  await app.loadFlowConversation("F1", { incremental: true });
+
+  assert.equal(app.state.flowConversationProgress, "g2");
+  assert.ok(
+    app.state.flowConversationRecords.some((r) => r.__localEcho),
+    "pending echo must survive the full fallback",
+  );
+  const yes = app.state.flowConversationRecords.filter(
+    (r) => app.normalizeRecord(r).role === "user"
+      && app.comparableUserText(app.normalizeRecord(r).content) === "yes");
+  assert.equal(yes.length, 1, "the just-sent reply is still shown once");
+});
+
+// -- history detail view -----------------------------------------------------
+
+await checkAsync("history: reconnect delta appends without clearing detail DOM", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [];
+  app.state.historyProgress = null;
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "hA", delivery: "full",
+  });
+  await app.openHistorySession("H1");             // first selection → full
+  assert.equal(app.state.historyProgress, "hA");
+  assert.equal(app.state.historyRecords.length, 2);
+  const stAfter = d.__convState;
+  const firstBubble = bubbleNodes(d)[0];
+
+  setFetch({ records: [asstRecord("C", 3, "s1", "discovery")], progress: "hB", delivery: "delta" });
+  await app.openHistorySession("H1", { incremental: true });
+  assert.ok(String(__lastFetchUrl).includes("after=hA"), __lastFetchUrl);
+  assert.equal(app.state.historyProgress, "hB");
+  assert.equal(d.__convState, stAfter);
+  assert.ok(bubbleNodes(d).includes(firstBubble), "history detail DOM must not be cleared on a delta");
+  assert.equal(app.state.historyRecords.length, 3);
+  assert.ok(uniqueKeys(app.state.historyRecords));
+});
+
+await checkAsync("history: all-duplicate delta is a render noop", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [];
+  app.state.historyProgress = null;
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "r0", delivery: "full",
+  });
+  await app.openHistorySession("H1");
+  const recsBefore = app.state.historyRecords;
+  const stBefore = d.__convState;
+  const countBefore = bubbleNodes(d).length;
+
+  setFetch({ records: [asstRecord("B", 2, "s1", "discovery")], progress: "r1", delivery: "delta" });
+  await app.openHistorySession("H1", { incremental: true });
+  assert.equal(app.state.historyProgress, "r1");
+  assert.equal(app.state.historyRecords, recsBefore);
+  assert.equal(d.__convState, stBefore);
+  assert.equal(bubbleNodes(d).length, countBefore);
+});
+
+await checkAsync("history: reconnect full fallback replaces the old generation", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [];
+  app.state.historyProgress = null;
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "q1", delivery: "full",
+  });
+  await app.openHistorySession("H1");
+  const firstBubble = bubbleNodes(d)[0];
+  const stBefore = d.__convState;
+
+  setFetch({
+    records: ["X", "Y"].map((x, i) => asstRecord(x, i + 10, "s2", "analyze")),
+    progress: "q2", delivery: "full",
+  });
+  await app.openHistorySession("H1", { incremental: true });
+  assert.equal(app.state.historyRecords.length, 2);
+  assert.notEqual(d.__convState, stBefore);
+  assert.ok(!bubbleNodes(d).includes(firstBubble), "history full fallback must rebuild the DOM");
+  assert.deepEqual(app.state.historyRecords.map((r) => r.message.content), ["X", "Y"]);
+});
+
+await checkAsync("history: newest overlapping reconnect refresh wins", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [asstRecord("A", 1, "s1", "discovery")];
+  app.state.historyProgress = "q1";
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+  app.renderConversation(d, app.state.historyRecords, false);
+
+  const requests = setQueuedDeferredFetch();
+  const older = app.openHistorySession("H1", { incremental: true });
+  const newer = app.openHistorySession("H1", { incremental: true });
+  assert.equal(requests.length, 2);
+
+  requests[1].resolve({
+    records: [asstRecord("Y", 20, "s3", "implement")],
+    progress: "q3",
+    delivery: "full",
+  });
+  await newer;
+  requests[0].resolve({
+    records: [asstRecord("X", 10, "s2", "analyze")],
+    progress: "q2",
+    delivery: "full",
+  });
+  await older;
+
+  assert.deepEqual(app.state.historyRecords.map((r) => r.message.content), ["Y"]);
+  assert.equal(app.state.historyProgress, "q3");
+});
+
+await checkAsync("history: WS full replacement invalidates an older REST refresh", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [
+    asstRecord("A", 1, "s1", "discovery"),
+    asstRecord("B", 2, "s1", "discovery"),
+  ];
+  app.state.historyProgress = "old-progress";
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+  app.renderConversation(d, app.state.historyRecords, false);
+
+  const resolveFetch = setDeferredFetch();
+  const refresh = app.openHistorySession("H1", { incremental: true });
+  app.applyHistoryData({
+    flow_id: "H1",
+    mode: "full",
+    records: [
+      asstRecord("X", 10, "s2", "analyze"),
+      asstRecord("Y", 11, "s2", "analyze"),
+    ],
+  });
+  const epochAfterFull = app.state.historyEpoch;
+  const wsState = d.__convState;
+  resolveFetch({
+    records: [
+      asstRecord("A", 1, "s1", "discovery"),
+      asstRecord("B", 2, "s1", "discovery"),
+    ],
+    progress: "stale-progress",
+    delivery: "full",
+  });
+  await refresh;
+
+  assert.deepEqual(app.state.historyRecords.map((r) => r.message.content), ["X", "Y"]);
+  assert.equal(app.state.historyProgress, null);
+  assert.equal(app.state.historyEpoch, epochAfterFull);
+  assert.equal(d.__convState, wsState, "stale REST response must not repaint");
+});
+
+await checkAsync("history: failed reconnect request keeps the existing detail", async () => {
+  app.state.selectedHistoryId = "H1";
+  app.state.historyRecords = [];
+  app.state.historyProgress = null;
+  app.state.historySessions = [{ flow_id: "H1", status: "completed" }];
+  const d = document.getElementById("history-detail");
+  d.innerHTML = ""; d.__convState = null;
+
+  setFetch({ records: [asstRecord("A", 1, "s1", "discovery")], progress: "z0", delivery: "full" });
+  await app.openHistorySession("H1");
+  const recsBefore = app.state.historyRecords;
+  const countBefore = bubbleNodes(d).length;
+
+  setFetch({}, false, 504);
+  await app.openHistorySession("H1", { incremental: true });
+  assert.equal(app.state.historyRecords, recsBefore);
+  assert.equal(bubbleNodes(d).length, countBefore);
 });
 
 console.log(`\n${passed} checks passed.`);
