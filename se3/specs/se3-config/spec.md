@@ -889,6 +889,7 @@ The system SHALL support workflow-level configuration for the fix loop mechanism
     - If the count is **smaller than** the number of chains, the surplus chains are simply not executed, and a single WARNING is logged noting that one or more configured chains will not be used.
   - **Flat form:** the flat `list[str]` form (and the no-override case) leaves the pass count governed entirely by `self_check_passes_required` (default 1), fully back-compatible.
   - The per-pass index resets at the start of each fix-loop round (consistent with the per-round semantics of `self_check_passes_required`).
+- `workflow.self_check_defer_fix_threshold`: Threshold that lets a self_check pass with only a small number of findings **defer** the fix loop and keep running the remaining passes in the nested chain instead of returning `REVISION_NEEDED` immediately (default: `3`). The semantics (see the se3-workflows *N-Pass Self-Check* requirement for the full mechanism): when a single self_check pass reports a number of effective issues **strictly below** this threshold, there is still an un-run later pass in the nested chain, and none of this pass's findings carry `critical`/`high` severity, the pass does NOT fix immediately — its issues are stashed and the next self_check pass is created. The stash is flushed into a single combined fix loop (its `fix_instructions` carrying **all** accumulated findings) when (a) the chain has no further pass, (b) a pass reaches the threshold, or (c) a pass surfaces a `critical`/`high` finding; if the whole chain produced no findings the flow completes as usual. The combined list is de-duplicated by reusing the existing `_issue_signature` (the `(location, normalized_description)` mechanical signature) as a set key — a later pass's issue whose signature already exists in the stash is dropped, with no extra LLM call (residual near-duplicates are merged naturally when the implement step consumes the combined list). **Sentinel:** a value of exactly `0` (or `null`, which is normalized to `0` at load time) **disables** the defer behavior entirely, preserving the historical immediate-fix-on-any-finding semantics. **Negative values are rejected fail-fast** at config load (mirrors `self_check_passes_required`'s `< 1` rejection and `baseline_fix_max_attempts`'s `< 0` rejection). Non-integer types — YAML booleans (`true`/`false`/`yes`/`no`/`on`/`off`) and floats — log a WARNING and fall back to the default `3`, symmetric with `self_check_passes_required` / `max_fix_iterations` / `baseline_fix_max_attempts` handling of the same types. `critical`/`high` findings are **never** subject to deferral regardless of the threshold value (other than `0`/`null`, which disables the feature outright).
 - `workflow.baseline_fix_max_attempts`: Independent per-flow bound on how many fix-loop attempts may target inherited (baseline) test failures under mechanism B (default: `3`). MUST be an integer `>= 0`. This budget is **deliberately not shared** with `workflow.max_fix_iterations`: the global cap may be the "unlimited" sentinel (`0`), but baseline failures — which are not this flow's regression and may be fundamentally un-fixable (a missing system library, a flaky test, one needing a human decision) — must always be bounded. A value of `0` disables baseline looping entirely (inherited failures are surfaced but never looped, the historical behavior). **Negative values are rejected fail-fast** at config load (mirrors `self_check_passes_required`'s `< 1` rejection). Non-integer types — YAML booleans (`true`/`false`/`yes`/`no`/`on`/`off`) and floats — log a WARNING and fall back to the default `3`, symmetric with `self_check_passes_required` / `max_fix_iterations` handling of the same types. The per-flow attempt counter lives in the flow state (`flow.state.context["baseline_fix_attempts"]`) and is incremented by the state machine whenever a fix transition targeted baseline failures; once it reaches this cap, the active baseline failures are recorded as given-up in `se3/state/baseline_fix_attempts.json` (a cross-flow persistent memory) and surfaced without further looping (see the flow-engine *Test Step Configuration and Multi-Phase Execution* mechanism B and base *Engine Module Extensions*).
 - `workflow.self_check_convergence_enabled`: Toggle for the cross-fix-loop self_check convergence shortcut (default: `false`). When `false`, the state machine never compares the current round's issues against the previous round's issues, and `_issues_converged` is not invoked. When `true`, only the first self_check instance of a new fix-loop round (pass_index=1) receives `prev_self_check_issues` and participates in the comparison; instances #2..#N within the same round never participate. **NOTE:** the default flipped from on to off in this revision; this flip is intentionally not announced via changelog or startup log because the project requires every issue to be resolved, making convergence-based early exit a no-op on the happy path.
 
@@ -905,6 +906,7 @@ When the fix loop branches in `verify_spec` or `self_check`, the step writes `ma
 workflow:
   max_fix_iterations: 100               # Allow up to 100 fix loop iterations (default; use 0 or null for unlimited)
   self_check_passes_required: 3         # Require 3 consecutive clean self_check passes per round
+  self_check_defer_fix_threshold: 3     # Defer fix when a pass has <3 findings and a later pass remains (default; 0/null disables)
   baseline_fix_max_attempts: 3          # Per-flow cap on looping inherited baseline failures (default; 0 disables)
   self_check_convergence_enabled: false # Disable cross-round convergence shortcut (default)
 ```
@@ -917,7 +919,7 @@ workflow:
 
 #### Scenario: Default workflow configuration
 - **WHEN** no `workflow` section exists in se3.yaml
-- **THEN** the framework uses `max_fix_iterations=100`, `self_check_passes_required=1`, `baseline_fix_max_attempts=3`, and `self_check_convergence_enabled=false`
+- **THEN** the framework uses `max_fix_iterations=100`, `self_check_passes_required=1`, `self_check_defer_fix_threshold=3`, `baseline_fix_max_attempts=3`, and `self_check_convergence_enabled=false`
 - **AND** self_check executes once per fix-loop round (legacy behavior, single pass)
 - **AND** convergence detection is OFF — even when current and previous round issues are identical, the flow still enters fix-loop
 
@@ -993,6 +995,28 @@ workflow:
 - **WHEN** the framework loads `WorkflowConfig` at startup
 - **THEN** a WARNING is logged identifying the offending value
 - **AND** `baseline_fix_max_attempts` falls back to the default (3) — symmetric with `self_check_passes_required` / `max_fix_iterations` handling of the same types
+
+#### Scenario: Default self_check_defer_fix_threshold
+- **WHEN** no `workflow.self_check_defer_fix_threshold` is set in se3.yaml
+- **THEN** the resolved `self_check_defer_fix_threshold` is `3`
+- **AND** a self_check pass with fewer than 3 non-critical/high findings and an un-run later pass in the nested chain defers the fix loop instead of returning `REVISION_NEEDED` immediately
+
+#### Scenario: self_check_defer_fix_threshold=0/null disables deferral
+- **GIVEN** `workflow.self_check_defer_fix_threshold: 0` (or `null`, normalized to `0` at load time) in se3.yaml
+- **WHEN** a self_check pass reports any findings
+- **THEN** deferral is disabled — the pass returns `REVISION_NEEDED` and enters the fix loop immediately on the first finding, preserving the historical behavior
+
+#### Scenario: Negative self_check_defer_fix_threshold fail-fast
+- **GIVEN** `workflow.self_check_defer_fix_threshold: -1` (or any negative integer) in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a `ConfigError` is raised before any flow runs
+- **AND** the error message identifies the offending key and value (e.g., "self_check_defer_fix_threshold=-1 must be >= 0 (use 0 or null to disable deferral)")
+
+#### Scenario: Boolean / float self_check_defer_fix_threshold warns and falls back
+- **GIVEN** `workflow.self_check_defer_fix_threshold: true` (a YAML boolean) or any float like `2.5` in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a WARNING is logged identifying the offending value
+- **AND** `self_check_defer_fix_threshold` falls back to the default (3) — symmetric with `self_check_passes_required` / `max_fix_iterations` / `baseline_fix_max_attempts` handling of the same types
 
 #### Scenario: Custom N-pass self_check
 - **GIVEN** `workflow.self_check_passes_required: 3` in se3.yaml

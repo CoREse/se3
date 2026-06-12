@@ -337,6 +337,112 @@ class TestThresholdZeroDisabled:
         assert result == StepStatus.COMPLETED
 
 
+class TestConvergenceSubordinateToDefer:
+    """The convergence shortcut MUST NOT bypass the defer/fix arbitration when
+    deferral is enabled (threshold > 0). With deferral on, every non-empty
+    finding is accumulated (defer) or merged + fixed — never discarded by a
+    COMPLETED convergence shortcut. Regression for the bug where three repeated
+    medium issues at threshold 3 returned COMPLETED and lost the findings.
+    """
+
+    def _convergence_step(self, *, pass_index, passes_required, threshold,
+                          prev_issues, deferred=None):
+        step = _make_step(
+            pass_index=pass_index,
+            passes_required=passes_required,
+            threshold=threshold,
+            deferred=deferred,
+        )
+        step.inputs["self_check_convergence_enabled"] = True
+        step.inputs["prev_self_check_issues"] = prev_issues
+        return step
+
+    def test_threshold_reached_converged_enters_fix_not_completed(self, tmp_path):
+        """threshold=3, three converged medium issues → REVISION_NEEDED, not
+        COMPLETED; the findings reach the fix list rather than being swallowed
+        by the convergence shortcut."""
+        flow = _make_flow(tmp_path)
+        issues = [
+            _valid_issue(severity="medium", actual="bug one", path="a.py", line=1),
+            _valid_issue(severity="medium", actual="bug two", path="a.py", line=2),
+            _valid_issue(severity="medium", actual="bug three", path="a.py", line=3),
+        ]
+        step = self._convergence_step(
+            pass_index=1, passes_required=3, threshold=3, prev_issues=list(issues),
+        )
+        result = _run_handler(step, flow, issues)
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        fixed = step.outputs["fix_context"]["issues"]
+        assert len(fixed) == 3
+        assert "bug one" in step.outputs["fix_instructions"]
+        assert "bug three" in step.outputs["fix_instructions"]
+
+    def test_accumulated_stash_not_discarded_by_convergence(self, tmp_path):
+        """An accumulated deferred stash blocks the convergence shortcut: a
+        below-threshold, non-last pass whose findings converge is still
+        DEFERRED (stash preserved + grown) rather than COMPLETED-and-dropped,
+        so the earlier deferred issues survive to a later flush/fix."""
+        flow = _make_flow(tmp_path)
+        prior = _valid_issue(severity="medium", actual="earlier stashed bug",
+                             path="a.py", line=1)
+        issues = [_valid_issue(severity="low", actual="recurring bug",
+                               path="a.py", line=2)]
+        step = self._convergence_step(
+            pass_index=2, passes_required=3, threshold=3,
+            prev_issues=list(issues), deferred=[prior],
+        )
+        result = _run_handler(step, flow, issues)
+        assert result == StepStatus.COMPLETED
+        # Deferred (stash preserved+grown), NOT converged-and-discarded.
+        assert step.outputs.get("converged") is not True
+        assert step.outputs.get("self_check_deferred") is True
+        assert len(step.outputs["self_check_deferred_issues"]) == 2
+
+    def test_below_threshold_no_stash_tail_pass_enters_fix_not_converged(self, tmp_path):
+        """With deferral enabled, a below-threshold converged pass with NO
+        pending stash is NOT exempt from the defer/fix arbitration: at the chain
+        tail (last pass) it MUST enter the fix loop rather than be dropped by the
+        convergence shortcut. Regression for the bug where pass 1/1 returned a
+        converged COMPLETED and lost the lone recurring finding."""
+        flow = _make_flow(tmp_path)
+        issues = [_valid_issue(severity="low", actual="lone recurring bug", path="a.py")]
+        step = self._convergence_step(
+            pass_index=1, passes_required=1, threshold=3, prev_issues=list(issues),
+        )
+        result = _run_handler(step, flow, issues)
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert "lone recurring bug" in step.outputs["fix_instructions"]
+
+    def test_below_threshold_no_stash_nonlast_pass_defers_not_converged(self, tmp_path):
+        """With deferral enabled, a below-threshold converged pass with NO
+        pending stash on a NON-last pass MUST be deferred (stashed for a later
+        consolidated fix) rather than dropped by the convergence shortcut."""
+        flow = _make_flow(tmp_path)
+        issues = [_valid_issue(severity="low", actual="lone recurring bug", path="a.py")]
+        step = self._convergence_step(
+            pass_index=1, passes_required=3, threshold=3, prev_issues=list(issues),
+        )
+        result = _run_handler(step, flow, issues)
+        assert result == StepStatus.COMPLETED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs.get("self_check_deferred") is True
+        assert len(step.outputs["self_check_deferred_issues"]) == 1
+
+    def test_convergence_still_applies_when_deferral_disabled(self, tmp_path):
+        """threshold=0 (deferral off): the legacy convergence shortcut is
+        preserved — converged non-critical issues return COMPLETED."""
+        flow = _make_flow(tmp_path)
+        issues = [_valid_issue(severity="medium", actual="recurring bug", path="a.py")]
+        step = self._convergence_step(
+            pass_index=1, passes_required=1, threshold=0, prev_issues=list(issues),
+        )
+        result = _run_handler(step, flow, issues)
+        assert result == StepStatus.COMPLETED
+        assert step.outputs.get("converged") is True
+
+
 # ---------------------------------------------------------------------------
 # Task 3: state-machine stash lifecycle
 # ---------------------------------------------------------------------------

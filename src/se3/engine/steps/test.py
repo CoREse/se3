@@ -156,26 +156,98 @@ def _extract_failures_section(stdout: str, max_chars: int = FAILURES_SECTION_MAX
     return result[:max_chars]
 
 
+def _parse_test_summary_counts(stdout: str) -> tuple[int, int] | None:
+    """Best-effort parse of aggregate pass/fail counts from a runner summary.
+
+    Fallback for when per-test lines (:func:`_parse_test_ids`) are absent —
+    quiet pytest (no ``-v``), cargo test, jest summary, etc. Recognizes the
+    aggregate summary line emitted by common runners:
+
+    - pytest:  ``=== 5 passed, 2 failed, 1 skipped in 1.2s ===``
+    - cargo:   ``test result: ok. 5 passed; 0 failed; 0 ignored; ...``
+    - jest:    ``Tests: 2 failed, 5 passed, 7 total``
+
+    The generic ``\\d+ passed`` / ``\\d+ failed`` token search covers all three
+    (cargo and jest both use the lowercase ``passed`` / ``failed`` wording, as
+    does pytest's final summary line — distinct from the per-test ``PASSED`` /
+    ``FAILED`` upper-case lines handled by :func:`_parse_test_ids`).
+
+    Counts are summed across *every* summary line rather than across every
+    token occurrence: a cargo workspace run emits one ``test result:`` line per
+    test binary (e.g. ``7 passed`` then ``5 passed`` then ``3 passed``), so
+    totalling each binary's numbers gives the phase-wide count instead of
+    understating it with just the first binary's numbers. Identical summary
+    lines are NOT de-duplicated — two test binaries that each independently
+    report the same numbers (e.g. a workspace where two crates each run
+    ``5 passed; 0 failed``) are genuinely separate results that must total to
+    ``10 passed``, not be collapsed to ``5``. Single-run output (pytest / jest,
+    one summary line) is unaffected — one line yields exactly its own counts.
+
+    Returns ``(passed, failed)``, or ``None`` when no recognizable count is
+    found (so the caller can fall back to a truthful phase-level statement).
+    """
+    if not stdout:
+        return None
+    passed = 0
+    failed = 0
+    found = False
+    for line in stdout.splitlines():
+        passed_tokens = re.findall(r'(\d+)\s+passed', line)
+        failed_tokens = re.findall(r'(\d+)\s+failed', line)
+        if not passed_tokens and not failed_tokens:
+            continue
+        passed += sum(int(n) for n in passed_tokens)
+        failed += sum(int(n) for n in failed_tokens)
+        found = True
+    if found:
+        return passed, failed
+    return None
+
+
 def _summarize_passed_phase_output(stdout: str, stderr: str) -> tuple[str, str]:
     """Build the slimmed archive summary for a PASSED test phase.
 
     A passed phase's full ``pytest -v`` stdout is pure noise in the archived
     history (every line is a ``... PASSED`` line). Replace it with a compact
-    summary: a passed/failed count line derived from the parseable per-test
-    results, plus the tail of the output (which keeps the final
-    ``=== N passed in Ts ===`` summary line). Both stdout and stderr tails are
-    bounded by the centralized ``TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS`` limit.
+    summary: a passed/failed count line plus the tail of the output (which keeps
+    the final ``=== N passed in Ts ===`` summary line). Both stdout and stderr
+    tails are bounded by the centralized ``TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS``
+    limit.
+
+    The count line is derived with a three-tier fallback so a passing custom /
+    quiet-pytest / cargo phase is NOT archived with a false ``0 passed,
+    0 failed`` header:
+
+    1. per-test lines parsed by :func:`_parse_test_ids` (verbose pytest / jest /
+       go), counted directly;
+    2. failing that, the aggregate runner summary parsed by
+       :func:`_parse_test_summary_counts` (quiet pytest / cargo / jest summary);
+    3. failing that, a truthful phase-level statement — this function is only
+       called for a PASSED phase, so we can honestly report that it passed even
+       when per-test counts cannot be parsed, rather than fabricating zeros.
 
     Returns ``(slimmed_stdout, slimmed_stderr)``.
     """
     stdout = stdout or ""
     stderr = stderr or ""
     ids = _parse_test_ids(stdout)
-    passed = sum(1 for _tid, ok in ids if ok)
-    failed = sum(1 for _tid, ok in ids if not ok)
+    if ids:
+        passed = sum(1 for _tid, ok in ids if ok)
+        failed = sum(1 for _tid, ok in ids if not ok)
+        count_line = f"{passed} passed, {failed} failed"
+    else:
+        counts = _parse_test_summary_counts(stdout)
+        if counts is not None:
+            passed, failed = counts
+            count_line = f"{passed} passed, {failed} failed"
+        else:
+            # Truthful fallback: the phase passed (this helper is only called
+            # for passed phases) but no per-test or aggregate count could be
+            # parsed from the runner output.
+            count_line = "passed (per-test counts unavailable)"
     tail = stdout[-TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS:]
     slimmed_stdout = (
-        f"[archived summary — passed phase: {passed} passed, {failed} failed; "
+        f"[archived summary — passed phase: {count_line}; "
         f"full stdout omitted to keep history compact, output tail follows]\n"
         f"{tail}"
     )
@@ -376,38 +448,20 @@ def run_and_classify_tests(
     primary_command = _ensure_verbose_pytest(
         primary_command, bool(config.critical_tests),
     )
-    primary_result = _run_command(
-        primary_command, project_root, primary_timeout,
-    )
-
     # 1b. Timeout retry: a timeout is NOT an assertion/test failure — it can be
     #     a transient slowdown (machine load, cold caches, a one-off hang). Before
-    #     treating it as a real failure, retry the primary command ONCE in place
-    #     with the same command and timeout. Because this retry happens entirely
-    #     within a single test-step execution, it does NOT increment the
-    #     fix_iteration counter (the state machine bumps that only on a
-    #     REVISION_NEEDED transition back to implement). Only if the retry ALSO
-    #     times out do we fall through to the existing timeout→fix_context path
-    #     (which now explicitly labels the failure as a timeout, not an
-    #     assertion failure).
-    primary_retried_after_timeout = False
-    if primary_result.get("timed_out"):
-        logger.warning(
-            "Primary test command timed out after %ds; retrying once in place "
-            "before treating it as a failure (this retry does not count as a "
-            "fix iteration).",
-            primary_timeout,
-        )
-        primary_retried_after_timeout = True
-        primary_result = _run_command(
-            primary_command, project_root, primary_timeout,
-        )
-        if primary_result.get("timed_out"):
-            logger.warning(
-                "In-place retry of the primary test command also timed out "
-                "after %ds; entering the timeout-aware fix loop.",
-                primary_timeout,
-            )
+    #     treating it as a real failure, retry the command ONCE in place with the
+    #     same command and timeout (see _run_command_with_timeout_retry). The
+    #     retry recognizes the full set of timeout-class signals (structured
+    #     timed_out flag, the 'Timeout after' marker, or the returncode==-1
+    #     timeout sentinel) rather than only the structured flag, and does NOT
+    #     increment the fix_iteration
+    #     counter. Only if the retry ALSO times out do we fall through to the
+    #     existing timeout→fix_context path (which explicitly labels the failure
+    #     as a timeout, not an assertion failure).
+    primary_result, primary_retried_after_timeout = _run_command_with_timeout_retry(
+        primary_command, project_root, primary_timeout, "primary test command",
+    )
 
     # 2. Classify primary results
     new_tests, regression = _classify_results(
@@ -419,13 +473,30 @@ def run_and_classify_tests(
     phase_results = [
         {"name": "default", **primary_result},
     ]
+    # Track phases that persistently timed out (their one-shot in-place retry
+    # also timed out). Used below to attach timeout-not-assertion metadata to
+    # fix_context for a hung *required* phase, mirroring the primary path.
+    phase_timeout_info: List[Dict[str, Any]] = []
     for phase in phases_to_run:
         phase_cmd = shlex.split(phase["command"])
         phase_cwd = _resolve_cwd(project_root, phase.get("cwd"))
         phase_timeout = phase.get("timeout", config.timeout)
 
-        result = _run_command(phase_cmd, phase_cwd, phase_timeout)
+        # Phases get the same one-shot in-place timeout retry as the primary
+        # command: a timed-out (required) phase is retried once before being
+        # treated as a failure, so a transient slowdown does not push the flow
+        # into the fix loop.
+        result, _phase_retried = _run_command_with_timeout_retry(
+            phase_cmd, phase_cwd, phase_timeout, f"test phase '{phase['name']}'",
+        )
         phase_results.append({"name": phase["name"], **result})
+        if _is_timeout_result(result):
+            phase_timeout_info.append({
+                "name": phase["name"],
+                "timeout": phase_timeout,
+                "retried": _phase_retried,
+                "required": phase.get("required", True),
+            })
 
     # 4. Compute overall_passed (reflects actual pytest exit status)
     overall_passed = primary_result["passed"]
@@ -495,11 +566,12 @@ def run_and_classify_tests(
         tid for tid in regression["failed"] if tid not in baseline_failures_set
     ]
 
-    # Detect timeout in primary test result via the structured flag set by
-    # _run_command. Previously this matched a stderr substring, which would
-    # misclassify the exception-fallback path if its error message ever
-    # happened to contain the same text.
-    primary_timed_out = bool(primary_result.get("timed_out"))
+    # Detect timeout in the primary test result via the shared timeout-class
+    # classifier: the structured ``timed_out`` flag, the ``Timeout after``
+    # marker, OR the ``returncode == -1`` timeout sentinel. The generic
+    # exception-fallback path uses a distinct ``-2`` sentinel, so it is never
+    # misclassified as a timeout here.
+    primary_timed_out = _is_timeout_result(primary_result)
 
     # The "introduced or critical" group is the always-blocking category: a new
     # test failure, an introduced regression, an unparseable failure, or a
@@ -789,22 +861,61 @@ Error output:
                 primary_timeout, sanitized_estimated_duration, primary_timeout_at_cap,
             )
 
-        # Phase-level timeout hint: dynamic timeout applies only to the
-        # primary command, but a hung required phase should still be flagged
-        # to the LLM so it can diagnose the hang (even though the fix is not
-        # to raise estimated_test_duration).
-        phase_timeouts = [
-            pr["name"] for pr in phase_results[1:]
-            if pr.get("timed_out")
-        ]
-        if phase_timeouts:
-            phase_list = ", ".join(phase_timeouts)
+        # Phase-level timeout handling. The dynamic timeout applies only to the
+        # primary command, but a hung phase should still be flagged to the LLM
+        # so it can diagnose the hang (even though the fix is not to raise
+        # estimated_test_duration).
+        if phase_timeout_info:
+            phase_list = ", ".join(p["name"] for p in phase_timeout_info)
             fix_instructions += (
                 f"\nNote: the following test phase(s) timed out: {phase_list}. "
                 "Dynamic timeout applies only to the primary test command; "
                 "investigate whether these phases are hanging or need their "
                 "phase-level `timeout` raised in se3.yaml.\n"
             )
+
+            # When a *required* phase persistently timed out and the run is NOT
+            # also failing on a genuine assertion failure (no new-test failure,
+            # no regression failure, no critical-gate failure) and the primary
+            # command did not itself time out, the failure is purely a TIMEOUT.
+            # Surface the same machine-readable timeout-not-assertion signal the
+            # primary path emits, so the implement step does not receive generic
+            # test_failure context for a hung phase. The dynamic-estimate fields
+            # are deliberately NOT set: phases use their own fixed `timeout`, not
+            # implement's estimated_test_duration.
+            required_phase_timeouts = [
+                p for p in phase_timeout_info if p["required"]
+            ]
+            no_assertion_failures = (
+                not new_tests["failed"]
+                and not regression["failed"]
+                and not critical_failed
+            )
+            if (
+                required_phase_timeouts
+                and not primary_timed_out
+                and no_assertion_failures
+            ):
+                any_retried = any(p["retried"] for p in required_phase_timeouts)
+                names = ", ".join(p["name"] for p in required_phase_timeouts)
+                retried_note = (
+                    " An automatic in-place retry of the phase also timed out, "
+                    "so this is a persistent timeout rather than a one-off "
+                    "slowdown."
+                    if any_retried else ""
+                )
+                fix_context["timed_out_not_assertion"] = True
+                fix_context["timeout_retried"] = any_retried
+                fix_context.setdefault(
+                    "timeout_reason",
+                    f"Required test phase(s) timed out: {names}. This was a "
+                    f"TIMEOUT, NOT an assertion / test-logic failure — the "
+                    f"phase did not finish within its configured time budget."
+                    f"{retried_note} Dynamic timeout applies only to the primary "
+                    f"test command, so raising estimated_test_duration will not "
+                    f"help; raise the phase-level `timeout` in se3.yaml or "
+                    f"investigate whether the phase is hanging.",
+                )
 
     # 9. Archive slimming of the STORED test_results copy.
     #
@@ -908,6 +1019,92 @@ def _report_pre_existing_issues(
         logger.debug(f"Failed to report pre-existing failures as issue: {e}")
 
 
+def _is_timeout_result(result: dict[str, Any]) -> bool:
+    """Return True if a command result represents a timeout-class failure.
+
+    A timeout is fundamentally different from an assertion / test-logic failure:
+    the suite never finished within its time budget, so it deserves a one-off
+    in-place retry before being treated as a real failure. This recognizes the
+    signals documented by the flow-engine *Test Dynamic Timeout* requirement:
+
+    - the structured ``timed_out`` flag set by :func:`_run_command` on the
+      timeout path (the authoritative, unambiguous signal);
+    - the ``Timeout after <N>s`` stderr marker appended on that same path;
+    - a ``returncode == -1``: the timeout path's sentinel exit code. The generic
+      subprocess-spawn exception path deliberately uses a *distinct* sentinel
+      (``-2``), so a bare ``-1`` (e.g. a legacy or mocked result that has lost
+      its ``timed_out`` flag and ``Timeout after`` marker) is still recognized
+      as a timeout and retried, while a genuine spawn error is not.
+
+    Recognizing any of these (not just the structured flag) lets a
+    timeout-shaped result that is missing ``timed_out=true`` still be retried.
+
+    A PASSING result is never a timeout-class failure, regardless of the
+    substring/returncode signals: a green suite that exercises timeout handling
+    (or a non-pytest runner passing stderr through) can legitimately emit a
+    ``Timeout after`` marker while still passing. The authoritative pass/fail
+    verdict therefore short-circuits the heuristics, so a passing primary run,
+    a passing configured phase, or a passing in-place retry is never recorded
+    as a (persistent) timeout failure.
+    """
+    if result.get("passed"):
+        return False
+    if result.get("timed_out"):
+        return True
+    stderr = result.get("stderr") or ""
+    if "Timeout after" in stderr:
+        return True
+    if result.get("returncode") == -1:
+        return True
+    return False
+
+
+def _run_command_with_timeout_retry(
+    command: list[str], cwd: Path, timeout: int, label: str,
+) -> tuple[dict[str, Any], bool]:
+    """Run a command and retry ONCE in place on a timeout-class failure.
+
+    A timeout can be a transient slowdown (machine load, cold caches, a one-off
+    hang) rather than a genuine failure, so before treating it as one we re-run
+    the exact same command with the same timeout a single time. Because this
+    retry happens entirely within one test-step execution, it does NOT increment
+    the fix_iteration counter (the state machine bumps that only on a
+    REVISION_NEEDED transition back to implement).
+
+    Applies uniformly to the primary command and to every configured phase, so a
+    timed-out required phase gets the same one-shot retry the primary command
+    does instead of dropping straight into the failure path.
+
+    Returns ``(result, retried)`` where ``retried`` is True iff a timeout was
+    detected and the in-place retry was performed.
+    """
+    result = _run_command(command, cwd, timeout)
+    # A passing result is never a timeout-class failure, no matter what its
+    # stderr contains. _is_timeout_result keys off substrings like
+    # "Timeout after" / returncode==-1, which a green suite that exercises
+    # timeout handling (or a non-pytest runner with stderr passthrough) can
+    # legitimately emit. Short-circuit on the authoritative pass/fail verdict
+    # so we never discard a passing run and re-run it as if it had timed out.
+    if result.get("passed"):
+        return result, False
+    if not _is_timeout_result(result):
+        return result, False
+
+    logger.warning(
+        "%s timed out after %ds; retrying once in place before treating it as a "
+        "failure (this retry does not count as a fix iteration).",
+        label, timeout,
+    )
+    result = _run_command(command, cwd, timeout)
+    if _is_timeout_result(result):
+        logger.warning(
+            "In-place retry of %s also timed out after %ds; treating it as a "
+            "persistent timeout failure.",
+            label, timeout,
+        )
+    return result, True
+
+
 def _run_command(
     command: list[str], cwd: Path, timeout: int,
 ) -> dict[str, Any]:
@@ -1004,9 +1201,15 @@ def _run_command(
     except Exception as e:
         logger.exception(f"Test execution failed: {command}")
         print(f"\n[error: {e}]", flush=True)
+        # Use a DISTINCT sentinel returncode (-2) for the generic
+        # subprocess-spawn failure path (e.g. command not found / OSError). The
+        # timeout path uses -1, and ``_is_timeout_result`` recognizes -1 as a
+        # timeout signal; keeping the exception path on -2 prevents a genuine
+        # spawn error from being misclassified as a timeout (and given timeout
+        # guidance / retried as if it were one).
         return {
             "command": cmd_str,
-            "returncode": -1,
+            "returncode": -2,
             "stdout": "",
             "stderr": str(e),
             "passed": False,

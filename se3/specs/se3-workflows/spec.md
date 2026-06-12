@@ -489,6 +489,19 @@ The system SHALL support repeating the `self_check` step multiple consecutive ti
 - If any `self_check` pass reports critical/high issues, the fix-loop transitions back to `implement`, resetting the consecutive-pass counter for the next round
 - All N consecutive passes must be clean within the same fix-loop round to satisfy the gate
 
+**Deferred-fix on a small number of findings (controlled by `workflow.self_check_defer_fix_threshold`, default 3; see se3-config *Workflow Configuration*):**
+
+Rather than entering the fix loop the moment a single self_check pass surfaces any finding, a pass with only a *small* number of findings defers the fix loop and lets the remaining passes in the nested chain run first, so the whole chain's findings are collected and fixed together. The decision is made inside the self_check handler (it holds the issues, severities, `pass_index`, `passes_required`, the threshold, and the previous round's stash injected by the state machine); the state machine only shuttles the stash between `step.outputs` and `flow.state.context["self_check_deferred_issues"]` and clears it at `pass_index == 1`.
+
+- **Defer:** when a pass's effective issue count is **strictly below** `self_check_defer_fix_threshold`, the nested chain still has an un-run later pass, and none of this pass's findings is `critical`/`high`, the pass stashes its issues and returns `COMPLETED` so the state machine creates the next self_check pass (reusing the existing "return COMPLETED → create the next pass" path), instead of returning `REVISION_NEEDED`.
+- **Flush into the fix loop:** when (a) the chain has no further pass, (b) a pass reaches the threshold, or (c) a pass surfaces a `critical`/`high` finding, and the accumulated stash (plus the current pass's findings) is non-empty, the handler merges the stashed and current findings, de-duplicates them by reusing `_issue_signature` (the `(location, normalized_description)` mechanical signature) as a set key (a later issue whose signature already exists in the stash is dropped; no extra LLM call — residual near-duplicates are merged when the implement step consumes the combined list), and returns `REVISION_NEEDED` with `fix_instructions` containing **all** accumulated findings.
+- **Clean chain completes:** if no pass in the whole chain produced any finding, the gate is satisfied exactly as today.
+- **critical/high are never deferred:** a `critical`/`high` finding always flushes immediately regardless of count.
+- After the fix loop returns and self_check re-enters, the stash is cleared and pass counting restarts from `pass_index == 1`.
+- Setting `self_check_defer_fix_threshold` to `0`/`null` disables deferral and restores immediate-fix-on-any-finding.
+
+**Effective passes_required recording.** The `self_check_passes_required` value recorded in `step.outputs` (and injected into the step inputs) SHALL be the **effective** value — when the per-round pass count is derived from the length of a nested `llm_caller.steps.self_check` chain (see se3-config *Workflow Configuration*), the recorded value is that derived chain length, NOT the default `1`. This makes `se3 history show` render the pass position correctly (e.g. `#2/2` for the second pass of a two-chain configuration) instead of `#2/1`.
+
 #### Scenario: Single-pass self_check (default)
 - **GIVEN** `workflow.self_check_passes_required` is 1 (default)
 - **WHEN** a `self_check` step completes cleanly
@@ -504,6 +517,33 @@ The system SHALL support repeating the `self_check` step multiple consecutive ti
 - **GIVEN** `workflow.self_check_passes_required` is N (N > 1) and one or more clean passes have already occurred in the current round
 - **WHEN** a subsequent `self_check` pass reports critical/high issues and triggers a fix-loop back to `implement`
 - **THEN** the consecutive-pass counter resets, and the next round must again accumulate N consecutive clean passes before progressing
+
+#### Scenario: Few findings defer the fix loop to a later pass
+- **GIVEN** `workflow.self_check_defer_fix_threshold` is 3 and the nested `self_check` chain has at least one un-run later pass
+- **WHEN** a `self_check` pass reports fewer than 3 findings, none of `critical`/`high` severity
+- **THEN** the pass does NOT return `REVISION_NEEDED`; its issues are stashed and the state machine creates the next `self_check` pass
+
+#### Scenario: critical/high finding fixes immediately
+- **GIVEN** `workflow.self_check_defer_fix_threshold` is 3 and a later pass remains in the chain
+- **WHEN** a `self_check` pass reports a `critical` or `high` severity finding (even if the total count is below the threshold)
+- **THEN** the deferral is bypassed and the pass returns `REVISION_NEEDED` immediately, flushing any stash plus the current findings into the fix loop
+
+#### Scenario: Chain-tail flush merges accumulated findings into the fix loop
+- **GIVEN** earlier passes deferred a non-empty stash of findings under the threshold
+- **WHEN** the final pass of the nested chain runs (no further pass remains) and the accumulated stash plus current findings is non-empty
+- **THEN** the handler returns `REVISION_NEEDED` and `fix_instructions` contains **all** accumulated findings
+- **AND** the combined list is de-duplicated by `_issue_signature` so a later pass's finding whose `(location, normalized_description)` signature already exists in the stash is dropped, with no extra LLM call
+
+#### Scenario: Deferral disabled by threshold 0/null
+- **GIVEN** `workflow.self_check_defer_fix_threshold` is `0` (or `null`)
+- **WHEN** a `self_check` pass reports any finding
+- **THEN** the pass returns `REVISION_NEEDED` immediately on the first finding (no deferral), preserving the historical behavior
+
+#### Scenario: Nested chain records the effective passes_required
+- **GIVEN** `llm_caller.steps.self_check` is configured as a nested chain of length 2 and `workflow.self_check_passes_required` is not explicitly set
+- **WHEN** a `self_check` pass executes and writes its outputs
+- **THEN** `step.outputs["self_check_passes_required"]` equals 2 (the nested chain length), not the default 1
+- **AND** `se3 history show` renders the pass position as `#i/2`
 
 ### Requirement: Step Retry and Recovery
 

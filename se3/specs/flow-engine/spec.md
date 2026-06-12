@@ -1175,6 +1175,7 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 | JSON retry prompt (LLM caller) | previous response | 1500 | head |
 | Test history record | stderr per phase | 2000 | tail |
 | Test history record | stdout per phase | 2000 | tail |
+| Test history record (passed phase) | result summary tail | `TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS` | tail |
 | Loop iteration summaries | accumulated total | 8000 | FIFO eviction |
 | Context.json step output values | string values | 1000 | head |
 | Iteration summary diff (run.py) | git diff | 5000 | head |
@@ -1183,7 +1184,7 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 
 **Shared Truncation Constants Module:**
 
-Truncation limits consumed by step handlers (test, self_check, verify_spec) SHALL be defined as named constants in a shared `truncation.py` module (`se3/engine/truncation.py`), rather than hardcoded in each handler. This ensures consistency across handlers and provides a single location to adjust limits. Constants include `PHASE_STDOUT_TAIL_CHARS`, `PHASE_STDERR_TAIL_CHARS`, `TEST_HISTORY_STDOUT_TAIL_CHARS`, `TEST_HISTORY_STDERR_TAIL_CHARS`, `FIX_STDERR_TAIL_CHARS`, `FAILURES_SECTION_MAX_CHARS`, and `SELF_CHECK_TASK_GROUPS_MAX_CHARS`.
+Truncation limits consumed by step handlers (test, self_check, verify_spec) SHALL be defined as named constants in a shared `truncation.py` module (`se3/engine/truncation.py`), rather than hardcoded in each handler. This ensures consistency across handlers and provides a single location to adjust limits. Constants include `PHASE_STDOUT_TAIL_CHARS`, `PHASE_STDERR_TAIL_CHARS`, `TEST_HISTORY_STDOUT_TAIL_CHARS`, `TEST_HISTORY_STDERR_TAIL_CHARS`, `TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS` (the tail limit for the slimmed result summary archived for a `passed: true` test phase; see *Test Step Configuration and Multi-Phase Execution*), `FIX_STDERR_TAIL_CHARS`, `FAILURES_SECTION_MAX_CHARS`, and `SELF_CHECK_TASK_GROUPS_MAX_CHARS`.
 
 **Design rationale:** Stderr is the primary source of traceback and error diagnostics for LLM-driven fix loops. Previous limits (300-500 chars) were insufficient for a single Python traceback. The limits above ensure at least one complete error chain is preserved in all diagnostic contexts.
 
@@ -2773,6 +2774,10 @@ False-positive prevention and verbose prerequisite for missing detection:
 
 `critical_skipped` / `critical_missing` are also written to `step.outputs["test_results"]`, to be explicitly consumed by downstream verify_spec as an honest signal for the authoritative `verified` computation (see *verify_spec Unified Priority and Scope Mechanism*).
 
+**Passed-phase chat-history archive slimming:**
+
+When the test step's `test_results` is archived into the chat-history jsonl (via the `HistorySink` `step_completed` event, which persists the full `step.outputs["test_results"]`), a `passed: true` phase no longer stores its full verbose `pytest -v` stdout. After all *live* uses of the verbose output have completed (`_classify_results`, the critical-acceptance gate, and `_extract_failures_section` for fix instructions — these read the local `primary_result['stdout']`, decoupled from the stored copy), the step slims the stored `stdout`/`stderr` of each passed phase (both the top-level and the per-`phases[]` copies) down to a **result summary** — a passed/failed count plus a bounded truncated tail of the output — using the centralized `TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS` constant in `se3/engine/truncation.py`. **Failed phases retain their existing truncated-tail behavior unchanged.** Independent verdict fields (`critical_skipped`, `critical_missing`, etc.) are preserved and do not depend on the slimmed stdout. This bounds `engine.json` / history-jsonl growth without losing the diagnostic detail of failures.
+
 **verify_spec consumes test_mapping:**
 - compares `test_mapping` values against the list of scenarios in the spec
 - uncovered scenarios are recorded as warning-level issues
@@ -2925,6 +2930,13 @@ The `State.fix_history` list SHALL be capped at `FIX_HISTORY_MAX_ENTRIES` (defin
 - **AND** this render-time cap is independent of the state-machine input-plumbing cap (also 20): both defaults are deliberately set to the same value so the two layers stay aligned, while the render-time cap acts as the last line of defense if any upstream caller bypasses the input-plumbing cap
 - **AND** `PREV_ISSUES_RENDER_TAIL` is exposed at module level in `_fix_context.py` so tests and other consumers can reference it by name rather than relying on positional substring matches
 
+#### Scenario: Passed phase archive is slimmed to a summary
+- **GIVEN** a test phase whose `passed` is `true` produced verbose `pytest -v` stdout
+- **WHEN** the test step archives `test_results` into the chat-history jsonl
+- **THEN** the stored `stdout`/`stderr` for that passed phase (top-level and the per-`phases[]` copy) is replaced with a result summary — a passed/failed count plus a bounded truncated tail using `TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS` — rather than the full verbose stdout
+- **AND** the slimming runs only after all live consumers (`_classify_results`, the critical-acceptance gate, `_extract_failures_section`) have read the output
+- **AND** a `passed: false` phase keeps its existing truncated-tail behavior unchanged
+
 #### Scenario: Code self-check after tests pass
 - **WHEN** the test step finishes executing and `overall_passed` is true
 - **THEN** the test step returns `COMPLETED` status
@@ -3040,9 +3052,13 @@ effective_timeout = clamp(
 - The dynamic timeout **applies only** to the main test command executed by the test step
 - Phases explicitly configured in `phases` are **unaffected** and continue to use the `timeout` value in each phase's own configuration
 
+**Timeout in-place retry (distinguishing a timeout from a real assertion failure):**
+
+A dynamic timeout can be a transient symptom (a momentarily loaded machine, a slow cold cache) rather than a genuine slow/looping test, and is categorically different from an assertion failure. So before the timeout is allowed to enter the fix loop, the test step SHALL first **retry the command in place once** with the same parameters when it detects a timeout-class failure — recognized via the full timeout-signal set: the `timed_out` flag, a `Timeout after` marker in the output, or `returncode == -1`. This in-place retry happens within a single test step execution and is therefore **not** counted as a fix iteration (the fix-loop counter is only incremented by the state machine on a `REVISION_NEEDED` transition). If the in-place retry passes, the step proceeds normally. Only if the retry **still** times out does the step fall through to the timeout-aware fix loop below, and the failure context SHALL explicitly label the failure as a **timeout, NOT an assertion failure** (e.g. via `timed_out_not_assertion` / `timeout_retried` flags), so the implement step does not misread it as a broken assertion. The default `120`s (and other configured) timeout values are not changed by this mechanism.
+
 **Timeout detection and fix loop:**
 
-When the main command is terminated due to the dynamic timeout (for example, the Python subprocess returns returncode == -1, or stderr contains the `Timeout after` marker), the test step SHALL:
+When the main command is **still** terminated due to the dynamic timeout after the in-place retry (for example, the Python subprocess returns returncode == -1, or stderr contains the `Timeout after` marker), the test step SHALL:
 
 1. Treat the failure as an ordinary test failure, returning `REVISION_NEEDED` to trigger the fix loop
 2. Attach the following timeout metadata to `fix_context`:
@@ -3082,6 +3098,18 @@ The FIX_PROMPT of the implement step SHALL recognize the timeout metadata in `fi
 - **AND** a phase in `se3.yaml` explicitly configures `timeout: 600`
 - **WHEN** the test step executes that phase
 - **THEN** that phase still uses its own configured 600-second timeout, and the dynamic computation is not applied
+
+#### Scenario: First timeout retries in place without counting a fix iteration
+- **GIVEN** the main command is terminated due to a timeout-class failure (the `timed_out` flag, a `Timeout after` marker, or `returncode == -1`)
+- **WHEN** the test step detects the timeout for the first time within a single execution
+- **THEN** the step re-runs the same command in place exactly once and does NOT increment the fix-loop counter (no `REVISION_NEEDED` transition is made for the in-place retry)
+- **AND** if the in-place retry passes, the step proceeds normally without entering the fix loop
+
+#### Scenario: Persistent timeout enters the fix loop labeled as a timeout
+- **GIVEN** the in-place retry of the main command **still** times out
+- **WHEN** the test step finishes
+- **THEN** the test step returns `REVISION_NEEDED`
+- **AND** the failure context explicitly labels the failure as a timeout rather than an assertion failure (e.g. `timed_out_not_assertion` / `timeout_retried` flags)
 
 #### Scenario: Main command timeout triggers timeout-aware fix loop
 - **WHEN** the main command is terminated due to the dynamic timeout

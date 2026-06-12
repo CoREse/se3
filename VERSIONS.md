@@ -38,6 +38,15 @@
 
 
 
+
+## 9.2.0 - 2026-06-12
+
+- Add self_check_defer_fix_threshold workflow config to defer fix when self-check finds few non-critical issues, merging findings across passes
+- Retry test step timeouts once in-place before entering the fix loop, distinguishing timeouts from assertion failures
+- Fix self_check_passes_required output to record the effective value from nested chain length instead of defaulting to 1
+- Slim passed-test archive in chat history to count summary plus bounded tail, reducing storage for verbose pytest output
+- Fix history loading regression where old bundles without generation field always fell back to full load instead of delta
+- Ensure full record completeness across both delta and full delivery modes in the history view
 ## 9.1.0 - 2026-06-12
 
 - Add incremental delta loading to GET /api/history/{flow_id} via optional after progress-token parameter

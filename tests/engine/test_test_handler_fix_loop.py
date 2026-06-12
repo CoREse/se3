@@ -635,9 +635,13 @@ class TestDynamicTimeout:
             ]),
         )
 
-        # Primary: a new test failure (so fix loop triggers). Phase: timeout.
+        # Primary: a new test failure (so fix loop triggers). Phase: timeout,
+        # then its one-shot in-place retry ALSO times out (so the phase-timeout
+        # hint is still surfaced). The primary failure is an assertion failure,
+        # so it is NOT retried.
         mock_run.side_effect = [
             _primary_result(False, STDOUT_NEW_FAIL),
+            _timeout_result(30),
             _timeout_result(30),
         ]
 
@@ -648,6 +652,8 @@ class TestDynamicTimeout:
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
+        # 3 calls: primary (no retry, assertion failure) + phase + phase retry.
+        assert mock_run.call_count == 3
         fix_instructions = step.outputs["fix_instructions"]
         assert "lint" in fix_instructions
         assert "timed out" in fix_instructions.lower()

@@ -1416,10 +1416,16 @@ class TestUnlimitedAndConvergenceInteraction:
     """
 
     def _write_yaml(self, project_root: Path) -> None:
+        # Deferral (default threshold 3) takes precedence over convergence: when
+        # enabled, every non-empty finding is deferred or fixed, never dropped by
+        # the convergence shortcut (see self_check.py ``convergence_blocked_by_defer``).
+        # To exercise convergence-as-loop-break in isolation, deferral must be
+        # turned off (threshold 0), so this safety-contract test sets it explicitly.
         (project_root / "se3.yaml").write_text(
             "workflow:\n"
             "  max_fix_iterations: 0\n"
             "  self_check_convergence_enabled: true\n"
+            "  self_check_defer_fix_threshold: 0\n"
         )
 
     def _flow_in_fix_loop_with_prev_self_check(
@@ -1477,8 +1483,12 @@ class TestUnlimitedAndConvergenceInteraction:
         from se3.engine.steps.self_check import self_check_handler
         import json
 
+        # Non-critical/high severities: the convergence shortcut may only fire
+        # when no critical/high finding is present (a critical/high finding
+        # always re-enters the fix loop). Using low/medium keeps this test's
+        # focus on the unlimited-mode loop-break contract.
         prev_issues = [
-            self._new_schema_issue("high", "a.py", 1,
+            self._new_schema_issue("low", "a.py", 1,
                                    actual="x", divergence="x crashes"),
             self._new_schema_issue("medium", "b.py", 2,
                                    actual="y", divergence="y leaks"),

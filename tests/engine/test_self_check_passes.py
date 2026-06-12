@@ -608,8 +608,12 @@ class TestConvergenceGateEnabled:
     def test_convergence_enabled_same_issues_returns_completed(self, sm, tmp_path):
         from se3.engine.steps.self_check import self_check_handler
 
+        # Non-critical/high severity: the convergence shortcut is allowed to
+        # short-circuit only when no critical/high finding is present (a
+        # critical/high finding always enters the fix loop — see the dedicated
+        # test below).
         valid_issue = {
-            "severity": "high",
+            "severity": "medium",
             "actual_behavior": "missing null check",
             "expected_behavior": "validates input",
             "divergence": "crashes on None input",
@@ -650,6 +654,59 @@ class TestConvergenceGateEnabled:
 
         assert result == StepStatus.COMPLETED
         assert step.outputs.get("converged") is True
+
+    def test_convergence_does_not_swallow_critical_high(self, sm, tmp_path):
+        """A converged pass that contains a critical/high finding MUST enter the
+        fix loop (REVISION_NEEDED) instead of taking the convergence shortcut,
+        even when convergence is enabled and the signature matches the prior
+        round."""
+        from se3.engine.steps.self_check import self_check_handler
+
+        critical_issue = {
+            "severity": "high",
+            "actual_behavior": "missing null check",
+            "expected_behavior": "validates input",
+            "divergence": "crashes on None input",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "convergence gate test",
+            },
+            "evidence_lines": ["a.py:1"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
+
+        flow = _make_flow(tmp_path)
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "convergence gate test",
+                "changes_made": {"files_changed": [{"path": "a.py", "action": "modify"}]},
+                "test_results": {},
+                "spec_content": {},
+                "self_check_convergence_enabled": True,
+                "self_check_pass_index": 1,
+                "self_check_passes_required": 1,
+                # Same signature as the finding below → would "converge".
+                "prev_self_check_issues": [critical_issue],
+            },
+        )
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = json.dumps({
+                "issues": [critical_issue],
+                "summary": "same critical issue",
+            })
+            mock_caller_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        # Critical/high bypasses the convergence shortcut → fix loop.
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs.get("fix_needed") is True
 
 
 # ---------------------------------------------------------------------------

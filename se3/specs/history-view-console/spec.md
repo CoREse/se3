@@ -138,6 +138,26 @@ live-append path uses.
 - **AND** the held progress token is replaced with the fresh token from the
   response
 
+#### Scenario: Old-format (generation-less) bundle still serves an incremental delta
+- **GIVEN** a history session whose cached bundle predates the `generation` field
+  (an old session produced before the incremental-refresh change)
+- **WHEN** the user opens that session, then the `/ws/ui` channel reconnects and
+  the loader re-fetches `GET /api/history/{flow_id}?after=<token>` for the same
+  session
+- **THEN** the server back-fills a stable `generation` for the old bundle so the
+  echoed token still pins it, and answers `delivery: "delta"` — the old session
+  takes the incremental path rather than being forced into a permanent full reload
+- **AND** the appended delta plus the previously held records equal the on-disk
+  jsonl in full, with no truncation and no duplicate `recordKey`
+
+#### Scenario: Delivered records are complete in both full and delta modes
+- **GIVEN** either a new-format or an old-format (generation-less) bundle
+- **WHEN** the session is loaded — whether the server answers `delivery: "full"`
+  on first open / unsafe fallback or `delivery: "delta"` on a safe reconnect
+  re-fetch
+- **THEN** the final rendered conversation equals the complete on-disk jsonl
+  record set, with no mid-session truncation
+
 ### Requirement: History View Mobile Horizontal-Overflow Containment
 
 On the narrow-screen (phone-portrait) breakpoint — `@media (max-width: 600px)`

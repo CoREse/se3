@@ -676,7 +676,38 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # finds the same issues it returns REVISION_NEEDED, triggering another
         # fix loop. This is intentional: convergence breaks stalled fix loops
         # across rounds, not within a single N-pass round.
-        if convergence_enabled and _issues_converged(issues, prev_issues):
+        #
+        # Severity guard (item 1): the convergence shortcut MUST NOT swallow a
+        # pass that contains critical/high findings, even when the signatures
+        # match the previous round. A critical/high issue is never "safe to stop
+        # on" — it must merge the accumulated findings and enter the fix loop
+        # immediately. So a converged-but-critical/high pass falls through to the
+        # defer-fix decision below, which (because critical/high is present) does
+        # NOT defer and instead merges + returns REVISION_NEEDED.
+        #
+        # Defer subordination (item 1): the convergence shortcut MUST NOT discard
+        # findings that the defer/fix arbitration is obligated to accumulate or
+        # fix. When deferral is enabled (``self_check_defer_fix_threshold > 0``),
+        # EVERY issue this pass found is mandatorily handled by the arbitration
+        # below — it is either deferred (a non-terminal below-threshold
+        # non-critical pass stashes its issues for a later consolidated fix) or
+        # it enters the fix loop now (threshold reached, critical/high present,
+        # the last pass, or an existing stash to flush/merge). A convergence
+        # early-exit returns COMPLETED and would silently drop those issues,
+        # violating the defer contract — so convergence is blocked outright
+        # whenever deferral is enabled and any issue is present (and ``issues``
+        # is guaranteed non-empty here, past the ``if not kept_issues`` guard).
+        # In particular a simple below-threshold pass with no pending stash is
+        # NOT exempt: with later passes it must be deferred, and at the chain
+        # tail it must be fixed. Convergence is preserved unchanged only when
+        # deferral is disabled (threshold 0/null, the default).
+        convergence_blocked_by_defer = defer_enabled
+        if (
+            convergence_enabled
+            and not convergence_blocked_by_defer
+            and not _has_critical_or_high(issues)
+            and _issues_converged(issues, prev_issues)
+        ):
             logger.warning(
                 f"Self-check #{pass_index}/{passes_required} converged: "
                 f"{len(issues)} issue(s) match previous iteration's signatures "
