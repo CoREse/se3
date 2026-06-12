@@ -35,7 +35,7 @@ class TestAnalyzeStep:
             "complexity": "medium",
             "reasoning": "New user login feature",
             "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "13 步流程池"},
+                {"spec": "flow-engine", "requirement_name": "16-Step Flow Pool"},
             ],
         })
         MockLLMCaller.return_value = mock_caller
@@ -131,7 +131,7 @@ class TestAnalyzeStep:
             "selected_items": [
                 {"spec": "nonexistent-spec", "requirement_name": "X"},
                 {"spec": "also-fake", "requirement_name": "Y"},
-                {"spec": "flow-engine", "requirement_name": "13 步流程池"},
+                {"spec": "flow-engine", "requirement_name": "16-Step Flow Pool"},
             ],
         })
         MockLLMCaller.return_value = mock_caller
@@ -181,7 +181,7 @@ class TestAnalyzeStep:
             "complexity": "medium",
             "reasoning": "test",
             "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "13 步流程池"},
+                {"spec": "flow-engine", "requirement_name": "16-Step Flow Pool"},
             ],
             "selected_specs": ["flow-engine"],
         })

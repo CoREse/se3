@@ -24,13 +24,25 @@ from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_sequence
 from ..project_context import ProjectContextCollector, list_spec_names
 from ..prompt_markers import inject_boundary
-from ..spec_index import load_or_build
+from ..spec_index import _NO_REQUIREMENTS_SENTINEL, load_or_build
+from ..spec_index_render import render_index
 from ..spec_role import SPEC_ROLE_DEFINITION
 from ..spec_loader import load_for_step
 from ..utils.json_parser import parse_json_response
-from ...config import apply_step_config, insert_confirmation_steps
+from ...config import (
+    apply_step_config,
+    insert_confirmation_steps,
+    load_spec_governance_config,
+)
 
 logger = logging.getLogger(__name__)
+
+# Bounded number of out-port re-prompts when ``selected_items`` contains an
+# address that is not a real flat item (a group/page handle or an intermediate
+# navigation node). The agent is fed the offending addresses and asked to
+# re-drill; if it still fails after these retries the invalid entries are
+# dropped and the flow proceeds (with a base::* fallback when nothing survives).
+_MAX_SELECTION_VALIDATION_RETRIES = 2
 
 
 ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze the following task description and determine:
@@ -50,14 +62,21 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 4. **reasoning**: Brief explanation of your classification
 
-5. **selected_items**: Based on the task scope and the available spec items listed below, select which individual Requirements are relevant to this task. Be selective — only include items that are genuinely relevant. The base spec is always loaded automatically, so you do NOT need to select items from it.
+5. **selected_items**: Select the individual Requirements (spec items) relevant to this task. The full item list is NOT injected — only the ROOT VIEW of the spec index is shown below (every spec + a one-sentence locator + item count). You MUST drill down on demand to discover the individual items, then select the relevant *leaf* items. Be selective — only include items genuinely relevant. The base spec is always loaded automatically, so you do NOT need to select items from it.
 
-   **Wildcard**: Use ``"*"`` as the ``requirement_name`` to select ALL items from a spec. For example, ``{{"spec": "issue-management", "requirement_name": "*"}}`` selects every requirement in the issue-management spec.
+   **Drill-down protocol** — run these read-only commands yourself (Bash is available in this step; their stdout is your navigation surface):
+   - ``se3 spec index`` — the root view (also shown below): all specs + locators + item counts.
+   - ``se3 spec index <spec>`` — the item index of one spec. Lines shaped ``- <spec>::<requirement>`` are the selectable leaf items.
+   - ``se3 spec index <spec> <group>...`` — drill into a ``[group]`` / ``[page]`` navigation handle that a larger view collapsed; each handle prints the exact command to drill it.
+   - ``se3 spec show <spec>::<requirement>`` — read one item's full body if you need its detail before deciding.
 
-   **No relevant items?** If no non-base spec items are relevant, output exactly: ``{{"spec": "base", "requirement_name": "*"}}``. This explicitly signals "no additional specs needed". Never return an empty ``selected_items`` list.
+   **Selection rules:**
+   - Each entry in ``selected_items`` MUST be a real flat leaf address — ``{{"spec": "<spec>", "requirement_name": "<requirement>"}}`` exactly as it appears in a ``- <spec>::<requirement>`` line. A domain group name, a ``pN`` page handle, or any intermediate navigation node is NOT a selectable item and will be rejected.
+   - **Wildcard**: Use ``"*"`` as the ``requirement_name`` to select ALL items from a spec, e.g. ``{{"spec": "issue-management", "requirement_name": "*"}}``.
+   - **No relevant items?** If no non-base spec items are relevant, output exactly: ``{{"spec": "base", "requirement_name": "*"}}``. This explicitly signals "no additional specs needed". Never return an empty ``selected_items`` list.
 
-## Available Items
-{available_items}
+## Spec Index — Root View
+{root_view}
 
 Respond in JSON format:
 {{
@@ -121,20 +140,23 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # (1) Collect structured project context
     project_summary = _collect_project_summary(project_root)
 
-    # (2) Build item-level index and list available items for selector
+    # (2) Build the item-level index and render the ROOT VIEW only. The full
+    # item list is no longer injected; the agent drills down on demand via
+    # `se3 spec index <spec> [<group>...]` (same renderer as the CLI, so the
+    # injected root view is byte-identical to `se3 spec index`).
     builder = ContextBuilder(project_root)
     index = load_or_build(project_root)
-    selector_items = index.list_for_selector()
-    available_items = _format_selector_items(selector_items)
+    threshold = load_spec_governance_config(project_root).index_render_threshold
+    root_view = render_index(index, spec=None, threshold=threshold)
 
     # (3) List spec names for validating LLM-returned selected_items
     spec_names = list_spec_names(builder.specs_dir)
 
-    # Build prompt with project context and available items
+    # Build prompt with project context and the spec-index root view
     prompt = ANALYZE_PROMPT.format(
         task_description=task_description,
         project_context=project_summary,
-        available_items=available_items,
+        root_view=root_view,
     )
 
     # Append issue discovery injection if applicable
@@ -157,6 +179,13 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     try:
         # --- LLM call: task classification + spec selection ---
+        # The call is a single `caller.call()` whose underlying CLI subprocess
+        # carries its own tool loop, so the agent drills the spec index down to
+        # leaf items WITHIN one call. The bounded loop here is the OUT-PORT
+        # validation channel of the item-identity invariant (machine guarantee
+        # c): after parsing the JSON we check every selected_items entry against
+        # the flat item full set; if any is a group/page handle or intermediate
+        # navigation node we feed the offending addresses back and re-prompt.
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count, fix_iteration=step.inputs.get("fix_iteration", 0))
 
@@ -170,19 +199,52 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             '"reasoning": "explanation", '
             '"selected_items": [{"spec": "spec-name", "requirement_name": "Requirement Name or * for all items in spec"}]}'
         )
-        response = caller.call(
-            prompt=prompt,
-            json_mode="two_phase",
-            json_schema_hint=ANALYZE_SCHEMA_HINT,
-            required_keys=["task_type"],
-        )
 
-        # Parse JSON response
-        result = parse_json_response(response, required_keys=["task_type"])
+        result: dict = {}
+        selected_items: list = []
+        feedback = ""
+        for attempt in range(_MAX_SELECTION_VALIDATION_RETRIES + 1):
+            response = caller.call(
+                prompt=prompt + feedback,
+                json_mode="two_phase",
+                json_schema_hint=ANALYZE_SCHEMA_HINT,
+                required_keys=["task_type"],
+            )
 
-        if not result:
-            step.error_message = "Failed to parse LLM response"
-            return StepStatus.FAILED
+            # Parse JSON response
+            result = parse_json_response(response, required_keys=["task_type"])
+
+            if not result:
+                step.error_message = "Failed to parse LLM response"
+                return StepStatus.FAILED
+
+            # Normalize selected_items (legacy fallback + list coercion), then
+            # run the out-port validation against the flat item full set.
+            selected_items = _normalize_selected_items(result, index, spec_names)
+            invalid = _validate_selected_items_against_flat_set(selected_items, index)
+
+            if not invalid:
+                break
+
+            if attempt < _MAX_SELECTION_VALIDATION_RETRIES:
+                logger.warning(
+                    "selected_items contained %d non-item address(es) "
+                    "(group/page handle or intermediate node); re-prompting "
+                    "(attempt %d/%d): %r",
+                    len(invalid), attempt + 1,
+                    _MAX_SELECTION_VALIDATION_RETRIES, invalid,
+                )
+                feedback = _build_validation_feedback(invalid)
+                continue
+
+            # Retries exhausted: drop the invalid entries (keep the valid ones)
+            # so the flow still proceeds rather than failing outright.
+            logger.warning(
+                "selected_items still invalid after %d retries; dropping "
+                "non-item address(es): %r",
+                _MAX_SELECTION_VALIDATION_RETRIES, invalid,
+            )
+            selected_items = _keep_valid_items(selected_items, index)
 
         # Validate task_type
         valid_types = ["feature", "bugfix", "review", "small", "directive"]
@@ -202,57 +264,12 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         flow.task_type = resolved_task_type
 
         # --- Post-processing: load spec content programmatically ---
-        # Parse selected_items (new primary format) with fallback to selected_specs
-        selected_items = result.get("selected_items", [])
-
-        # Fallback: if LLM returned old-format selected_specs but no selected_items,
-        # map spec names to all their requirements
-        if not selected_items and result.get("selected_specs"):
-            logger.warning(
-                "LLM returned legacy selected_specs instead of selected_items; "
-                "falling back to full-spec loading for each selected spec. "
-                "This defeats item-level loading — consider re-prompting for selected_items."
-            )
-            raw_specs = result.get("selected_specs", [])
-            # Validate spec names before fallback so unknown specs are logged
-            # rather than silently producing an empty item list.
-            if spec_names:
-                unknown = [s for s in raw_specs if s not in spec_names]
-                if unknown:
-                    logger.warning(
-                        "Filtering out unknown specs from selected_specs: %r",
-                        unknown,
-                    )
-                raw_specs = [s for s in raw_specs if s in spec_names]
-            selected_items = _fallback_items_from_specs(index, raw_specs)
-
-        # Validate selected_items
-        if not isinstance(selected_items, list):
-            logger.warning(
-                "selected_items is not a list (%s), using empty list",
-                type(selected_items).__name__,
-            )
-            selected_items = []
-
-        # Filter out items with hallucinated spec names (spec doesn't exist)
-        if spec_names:
-            valid_items = []
-            for item in selected_items:
-                if isinstance(item, dict) and item.get("spec") in spec_names:
-                    valid_items.append(item)
-                elif isinstance(item, dict):
-                    logger.warning(
-                        "Filtering out selected_items entry with unknown spec: %r",
-                        item.get("spec"),
-                    )
-            selected_items = valid_items
-
         # Guarantee non-empty selected_items (LLM is instructed to output
-        # base::* when no items are relevant).  If all items were filtered
-        # out (hallucinated spec names), insert base::* as a safe fallback.
+        # base::* when no items are relevant). If all items were dropped by
+        # validation, insert base::* as a safe fallback.
         if not selected_items:
             logger.warning(
-                "selected_items is empty after filtering; falling back to base::*"
+                "selected_items is empty after validation; falling back to base::*"
             )
             selected_items = [
                 {"spec": "base", "requirement_name": "*"}
@@ -435,40 +452,146 @@ def _collect_project_summary(project_root: Path) -> str:
     return "\n".join(parts) if parts else "No additional context available"
 
 
-def _format_selector_items(items: list[dict[str, Any]]) -> str:
-    """Format the item list for injection into the analyze prompt.
+def _flat_item_ids(index: Any) -> set[str]:
+    """Return the flat item full set: every real ``<spec>::<requirement>``.
 
-    Each line shows: ``- spec::Requirement Name [tags: foo, bar] — summary``
+    The ``__no_requirements__`` sentinel rows (specs with no Requirement) are
+    excluded — they are not selectable items.
+    """
+    return {
+        key
+        for key, meta in getattr(index, "items", {}).items()
+        if getattr(meta, "requirement_name", "") != _NO_REQUIREMENTS_SENTINEL
+    }
+
+
+def _item_is_valid(item: Any, flat_ids: set[str], known_specs: set[str]) -> bool:
+    """Decide whether a single ``selected_items`` entry is a valid flat item.
+
+    Valid iff it is a dict carrying a non-empty ``spec`` and ``requirement_name``
+    AND either:
+    - ``requirement_name == "*"`` (whole-spec select) and the spec exists, OR
+    - ``<spec>::<requirement_name>`` is a real flat item in the index.
+
+    A domain group name, a ``pN`` page handle, or any intermediate navigation
+    node carries no flat ``<spec>::<requirement>`` address, so it fails here.
+    """
+    if not isinstance(item, dict):
+        return False
+    spec = item.get("spec")
+    req = item.get("requirement_name")
+    if not spec or not req:
+        return False
+    if req == "*":
+        return spec in known_specs
+    return f"{spec}::{req}" in flat_ids
+
+
+def _validate_selected_items_against_flat_set(
+    selected_items: list,
+    index: Any,
+) -> list[str]:
+    """Out-port validation: check selected_items against the flat item full set.
+
+    Implements machine guarantee (c) of the item-identity invariant: each
+    selection result is checked by its full ``<spec>::<requirement>`` logical
+    address against the flat item full set; a group name / page handle /
+    intermediate node (or unknown spec / unknown requirement) is a validation
+    failure.
 
     Args:
-        items: Output of ``SpecIndex.list_for_selector()``.
+        selected_items: The (already list-normalized) selection from the LLM.
+        index: A ``SpecIndex`` exposing ``.items`` and ``.spec_metas``.
 
     Returns:
-        Formatted multi-line string.
+        A list of human-readable invalid-address strings (empty ⇒ all valid).
+        ``requirement_name == "*"`` (whole-spec select) is preserved as valid
+        when the spec exists.
     """
-    if not items:
-        return "(no items available)"
+    flat_ids = _flat_item_ids(index)
+    known_specs = set(getattr(index, "spec_metas", {}))
+    invalid: list[str] = []
+    for item in selected_items:
+        if _item_is_valid(item, flat_ids, known_specs):
+            continue
+        if isinstance(item, dict):
+            invalid.append(f"{item.get('spec')}::{item.get('requirement_name')}")
+        else:
+            invalid.append(repr(item))
+    return invalid
 
-    lines: list[str] = []
-    current_spec: str = ""
-    for item in items:
-        spec = item.get("spec", "")
-        if not spec:
-            continue  # Defensive: skip items with missing spec name
-        if spec != current_spec:
-            heading = f"### {spec}"
-            if lines:
-                heading = f"\n{heading}"
-            lines.append(heading)
-            current_spec = spec
-        name = item.get("requirement_name", "")
-        tags = item.get("tags", [])
-        summary = item.get("summary", "")
-        tag_str = f" [tags: {', '.join(tags)}]" if tags else ""
-        summary_str = f" — {summary}" if summary else ""
-        lines.append(f"- {spec}::{name}{tag_str}{summary_str}")
 
-    return "\n".join(lines)
+def _keep_valid_items(selected_items: list, index: Any) -> list:
+    """Drop every entry that fails the flat-set validation, keeping the rest."""
+    flat_ids = _flat_item_ids(index)
+    known_specs = set(getattr(index, "spec_metas", {}))
+    return [
+        item
+        for item in selected_items
+        if _item_is_valid(item, flat_ids, known_specs)
+    ]
+
+
+def _build_validation_feedback(invalid: list[str]) -> str:
+    """Build the re-prompt suffix listing the rejected non-item addresses."""
+    bullets = "\n".join(f"  - {addr}" for addr in invalid)
+    return (
+        "\n\n## Selection Validation Error\n"
+        "Your previous `selected_items` contained entries that are NOT valid "
+        "flat item addresses. Each selected item MUST be a real "
+        "`<spec>::<requirement>` leaf exactly as it appears in a "
+        "`- <spec>::<requirement>` line of `se3 spec index <spec>` output "
+        "(or `<spec>` with `requirement_name` set to `\"*\"` to select the whole "
+        "spec). A domain group name, a `pN` page handle, or any intermediate "
+        "navigation node is NOT a selectable item.\n"
+        f"Rejected entries:\n{bullets}\n"
+        "Re-run `se3 spec index <spec> [<group>...]` to drill down to the leaf "
+        "items, then output `selected_items` using only full "
+        "`<spec>::<requirement>` addresses.\n"
+    )
+
+
+def _normalize_selected_items(
+    result: dict,
+    index: Any,
+    spec_names: list[str],
+) -> list:
+    """Extract and list-normalize ``selected_items`` from the LLM result.
+
+    Handles the legacy ``selected_specs`` fallback (mapping spec names to all
+    their Requirements) and coerces a non-list value to an empty list. No
+    flat-set validation is performed here — that is the out-port validation's
+    job (see ``_validate_selected_items_against_flat_set``).
+    """
+    selected_items = result.get("selected_items", [])
+
+    # Fallback: if LLM returned old-format selected_specs but no selected_items,
+    # map spec names to all their requirements.
+    if not selected_items and result.get("selected_specs"):
+        logger.warning(
+            "LLM returned legacy selected_specs instead of selected_items; "
+            "falling back to full-spec loading for each selected spec. "
+            "This defeats item-level loading — consider re-prompting for selected_items."
+        )
+        raw_specs = result.get("selected_specs", [])
+        if spec_names:
+            unknown = [s for s in raw_specs if s not in spec_names]
+            if unknown:
+                logger.warning(
+                    "Filtering out unknown specs from selected_specs: %r",
+                    unknown,
+                )
+            raw_specs = [s for s in raw_specs if s in spec_names]
+        selected_items = _fallback_items_from_specs(index, raw_specs)
+
+    if not isinstance(selected_items, list):
+        logger.warning(
+            "selected_items is not a list (%s), using empty list",
+            type(selected_items).__name__,
+        )
+        selected_items = []
+
+    return selected_items
 
 
 def _fallback_items_from_specs(
