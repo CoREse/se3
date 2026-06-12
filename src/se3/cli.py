@@ -428,12 +428,73 @@ def init_cmd(
     init_command(project_root=project_root, name=name, force=force)
 
 
+def _run_spec_size_guardrails(project_root: Optional[Path]) -> None:
+    """Run the spec volume-governance size checks and emit the report.
+
+    Reads ``SpecGovernanceConfig.guardrails_size_tier`` to decide behaviour:
+    ``warn`` (default) prints any violations and exits ``0`` (non-blocking),
+    while ``enforce`` prints them and exits ``1`` (intercept). When no
+    violations are found the command always exits ``0``.
+    """
+    root = Path(project_root).resolve() if project_root else Path.cwd()
+
+    from .config import load_spec_governance_config
+    from .engine.merge.guardrails import check_spec_sizes
+
+    config = load_spec_governance_config(root)
+    violations = check_spec_sizes(root, config)
+    tier = config.guardrails_size_tier
+
+    lines = [
+        "",
+        "=" * 60,
+        "SE 3.0 Spec Size Guardrails Check",
+        "=" * 60,
+        "",
+        f"Project: {root}",
+        f"Tier: {tier}",
+    ]
+
+    if violations:
+        lines.append(f"\n⚠️  {len(violations)} size violation(s) found:")
+        for v in violations:
+            ev = v.evidence or {}
+            size_b = ev.get("size_bytes")
+            limit_b = ev.get("limit_bytes")
+            detail = f" ({size_b} > {limit_b} bytes)" if size_b is not None and limit_b is not None else ""
+            lines.append(f"\n  [{v.violation_type}] {v.file_path}{detail}")
+            lines.append(f"  {v.message}")
+        lines.append(f"\n{'=' * 60}")
+        if tier == "enforce":
+            lines.append("Tier is 'enforce' — failing the check.")
+            render_full("\n".join(lines), title="Spec Size Guardrails")
+            raise typer.Exit(code=1)
+        lines.append("Tier is 'warn' — reporting only, not blocking.")
+        render_full("\n".join(lines), title="Spec Size Guardrails")
+        raise typer.Exit(code=0)
+
+    lines.append("\n✓ All spec size guardrails passed - no violations found")
+    lines.append(f"\n{'=' * 60}")
+    render_full("\n".join(lines), title="Spec Size Guardrails")
+    raise typer.Exit(code=0)
+
+
 @app.command(name="guardrails")
 def guardrails_cmd(
-    spec_file: Path = typer.Argument(..., help="Path to spec file to check"),
+    spec_file: Optional[Path] = typer.Argument(None, help="Path to spec file to check"),
     original: Optional[Path] = typer.Option(None, "--original", "-o", help="Path to original spec file for comparison"),
+    sizes: bool = typer.Option(False, "--sizes", help="Run spec volume-governance size checks over the whole project (base/spec-file/Requirement byte limits) instead of a per-file diff check"),
+    project_root: Optional[Path] = typer.Option(None, "--project-root", "-p", help="Project root for --sizes (default: current directory)"),
 ):
     """Check spec file against SE3 Spec Guardrails."""
+    if sizes:
+        _run_spec_size_guardrails(project_root)
+        return
+
+    if spec_file is None:
+        typer.echo("Error: a spec file is required (or pass --sizes for project-wide size checks)", err=True)
+        raise typer.Exit(code=1)
+
     if not spec_file.exists():
         typer.echo(f"Error: Spec file not found: {spec_file}", err=True)
         raise typer.Exit(code=1)
