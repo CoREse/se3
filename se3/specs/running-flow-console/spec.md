@@ -3161,3 +3161,73 @@ viewport is a no-op, guaranteeing zero desktop regression.
 - **AND** all of these rules are scoped to `kind-discovery_confirm` inside the
   breakpoint, so other intervention kinds and the desktop `discovery_confirm`
   panel are unchanged
+
+### Requirement: Start Flow From Open Issue
+
+The web console's issue surface SHALL expose a "start a flow from this
+issue" control on each issue (in the issue list row and/or the issue
+detail view), so an owner can launch a new `se3 run` flow seeded by an
+existing issue directly from the console. The control reuses the
+existing spawn path (`POST /api/flows` with `from_issue_id`; see the
+`base` spec's *Server Modules* requirement) and the existing
+start-from-discovery interaction pattern already used by the spawn
+form.
+
+**Availability gating:**
+
+- The launch control SHALL be enabled **only** for issues in `open`
+  status. Issues in `in-progress` or any closed status
+  (`resolved` / `wont_fix` / `closed`) SHALL render the control as
+  disabled (greyed out), because a non-open issue cannot be started as
+  a fresh flow (an in-progress issue must be reset first).
+
+**Discovery option:**
+
+- When launching, the user SHALL be offered a discovery option that
+  mirrors the spawn form's start-from-discovery toggle. When selected,
+  the request carries `discover: true` alongside `from_issue_id` so the
+  daemon appends `--discover` to the `se3 run --from-issue` command and
+  the flow runs the discovery workflow seeded by the issue.
+
+**Dispatch and feedback:**
+
+- Clicking the enabled control SHALL POST to `/api/flows` with the
+  issue's `from_issue_id` (and the chosen `discover` flag), and SHALL
+  surface a "dispatched" acknowledgement to the user on success. The
+  request body construction and the enabled/disabled decision SHALL be
+  factored into testable **pure functions** (following the web
+  console's existing pure-function pattern), so the open-status gate,
+  the request payload shape, and any pending/dispatched UI state are
+  unit-testable without a live backend.
+
+#### Scenario: Launch control enabled only for open issues
+- **GIVEN** an issue rendered in the console issue surface
+- **WHEN** the issue's status is `open`
+- **THEN** the "start a flow from this issue" control is enabled
+- **WHEN** the issue's status is `in-progress` or any closed status
+- **THEN** the control is rendered disabled (greyed out) and cannot be
+  clicked
+
+#### Scenario: Launch from an open issue dispatches a spawn
+- **GIVEN** an `open` issue
+- **WHEN** the user activates the launch control without selecting the
+  discovery option
+- **THEN** the console POSTs to `/api/flows` with `from_issue_id` set to
+  the issue's id and `discover` false (or omitted)
+- **AND** a dispatched acknowledgement is shown on success
+
+#### Scenario: Launch from an open issue with discovery
+- **GIVEN** an `open` issue
+- **WHEN** the user selects the discovery option and activates the
+  launch control
+- **THEN** the POST to `/api/flows` carries `from_issue_id` together
+  with `discover: true`
+- **AND** the resulting flow runs the discovery workflow seeded by the
+  issue
+
+#### Scenario: Pure functions back the launch model
+- **GIVEN** the issue-launch availability and request-body logic
+- **THEN** the enabled/disabled decision and the `/api/flows` request
+  body are produced by pure functions that can be unit-tested in
+  isolation (open-status gate, payload shape, pending/dispatched state)
+  without a running server

@@ -326,6 +326,9 @@ The system SHALL support starting a flow from an existing issue via the `--from-
 - On successful flow completion (exit code 0), the issue status is updated to `resolved`.
 - On failed flow completion (non-zero exit code), the issue status is reverted to `open`.
 
+**Combination with `--discover`:**
+- `--from-issue` MAY be combined with `--discover`. `--discover` first forces the task type to `discovery`; the `--from-issue` branch then runs the flow using that same (discovery) task type, so the issue's description seeds the discovery exploration. The issue lifecycle (in-progress on start, resolved/open on completion) is unchanged by the presence of `--discover`.
+
 #### Scenario: Run from a known issue ID
 - **WHEN** user executes `se3 run --from-issue ISSUE-123`
 - **THEN** the flow engine initializes a flow seeded from issue `ISSUE-123`
@@ -338,6 +341,12 @@ The system SHALL support starting a flow from an existing issue via the `--from-
 - **THEN** the system lists all open issues with their IDs, titles, and priorities
 - **AND** prompts the user to enter an issue ID
 - **AND** initializes a flow from the chosen issue
+
+#### Scenario: Run from issue with discovery
+- **WHEN** user executes `se3 run --discover --from-issue ISSUE-123`
+- **THEN** the task type is forced to `discovery`
+- **AND** the flow is initialized from issue `ISSUE-123` and runs through the discovery workflow seeded by the issue's description
+- **AND** the issue's status is set to `in-progress` and follows the same resolved/open lifecycle on completion
 
 #### Scenario: Issue already in progress
 - **GIVEN** issue `ISSUE-123` is in `in-progress` status

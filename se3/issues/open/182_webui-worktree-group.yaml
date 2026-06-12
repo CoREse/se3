@@ -1,0 +1,9 @@
+id: '182'
+description: webui里在worktree里实施的group，它的那个实施中的卡片，也要显示llm名称（跟其它步骤一样）
+status: open
+scope: in_scope
+tags: []
+source: human
+created_at: '2026-06-12T10:21:23.572202'
+updated_at: '2026-06-12T10:21:23.572202'
+type: feature

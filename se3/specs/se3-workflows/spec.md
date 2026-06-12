@@ -13,14 +13,14 @@ The system SHALL support six workflow types, mapped to different step sequences 
 
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `feature` | analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit | New functionality or significant enhancement |
-| `bugfix` | analyze → plan → implement → test → self_check → verify_spec → version_analyze → commit | Bug reports (plan uses medium depth) |
-| `review` | analyze → verify_spec | Code review, audit, or analysis |
-| `small` | analyze → implement → test → version_analyze → commit | Minor fixes, typos, simple changes |
-| `directive` | analyze → plan → implement → version_analyze → commit | Following specific instructions (plan uses shallow depth) |
-| `discovery` | discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit | Exploratory requirements gathering via multi-turn conversation, triggered by `--discover` flag |
+| `feature` | analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit → summarize | New functionality or significant enhancement |
+| `bugfix` | analyze → plan → implement → test → self_check → verify_spec → version_analyze → commit → summarize | Bug reports (plan uses medium depth) |
+| `review` | analyze → verify_spec → summarize | Code review, audit, or analysis |
+| `small` | analyze → implement → test → version_analyze → commit → summarize | Minor fixes, typos, simple changes |
+| `directive` | analyze → plan → implement → version_analyze → commit → summarize | Following specific instructions (plan uses shallow depth) |
+| `discovery` | discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit → summarize | Exploratory requirements gathering via multi-turn conversation, triggered by `--discover` flag |
 
-**Step Pool (11 active steps in default sequences):**
+**Step Pool (12 active steps in default sequences):**
 1. **discovery** - Multi-turn requirements exploration with user, generates refined task description
 2. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
 3. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
@@ -30,17 +30,19 @@ The system SHALL support six workflow types, mapped to different step sequences 
 7. **verify_spec** - Check implementation vs spec
 8. **update_spec** - Update spec records
 9. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
-10. **commit** - Commit changes (generates template summary when summarize step is absent)
-11. **confirm** - Review and confirm previous step output (human or LLM review gate). Inserted after configured steps via `se3.yaml` confirmation settings, not in default sequences.
+10. **commit** - Commit changes (generates template summary only as a fallback when summarize step is absent)
+11. **summarize** - Generate LLM-based summary and handoff. The final step of every default task-type sequence (appended after `commit`, or after `verify_spec` for `review`).
 
-**Optional step (available in pool, not in default sequences):**
-- **summarize** - Generate LLM-based summary and handoff. Can be added to step sequences via `se3.yaml` configuration. When absent, the commit step generates a template-based summary document.
+**Dynamically-inserted step (available in pool, not in default sequences):**
+- **confirm** - Review and confirm previous step output (human or LLM review gate). Inserted after configured steps via `se3.yaml` confirmation settings, not part of any default sequence.
+
+**Note on `steps.append`:** Because `summarize` is now a default sequence member, an existing `steps.append: [summarize]` configuration entry deduplicates to a no-op — `apply_step_config` skips a name already present in the sequence, so it neither errors nor warns nor adds a second `summarize`.
 
 **Note:** `project_summary` is deprecated — its functionality is now merged into the `analyze` step. Its deprecated handler is retained for backward compatibility with persisted flows. `read_spec` has been fully removed. The deprecated `propose`, `design`, and `plan_tasks` step types are retained for backward compatibility (their functionality is merged into the unified `plan` step).
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow with full 9 default steps
+- **THEN** the system uses the feature workflow with full 10 default steps (ending in `summarize`)
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"
@@ -52,7 +54,7 @@ The system SHALL support six workflow types, mapped to different step sequences 
 
 #### Scenario: Discovery workflow selection
 - **WHEN** the `--discover` flag is passed to `se3 run`
-- **THEN** the system uses the discovery workflow (discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit)
+- **THEN** the system uses the discovery workflow (discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit → summarize)
 - **AND** the analyze step MUST NOT auto-detect "discovery" as a task type — it is exclusively triggerable via `--discover`
 
 ### Requirement: Discovery Workflow
@@ -69,7 +71,7 @@ The discovery workflow SHALL explore requirements through multi-turn conversatio
    - MUST NOT produce implementation plans, design proposals, or code during discovery
    - Outputs: refined_description, discovery_summary, requirements_clarified
 
-**1. ANALYZE** through **9. COMMIT** — same as feature workflow after discovery completes.
+**1. ANALYZE** through **10. SUMMARIZE** — same as feature workflow after discovery completes (ending in `summarize`).
 
 #### Scenario: Discovery with multi-turn clarification
 - **WHEN** user runs `se3 run --discover "Improve performance"`
@@ -143,12 +145,17 @@ The feature workflow SHALL follow these steps:
    - Stage and commit all changes
    - Use commit message from version_analyze (or fallback chain)
    - Update version according to bump rules
-   - Generate template summary document when summarize step is absent
+   - Generate template summary document only as a fallback when the summarize step is absent
+
+**10. SUMMARIZE**
+   - Generate an LLM-based summary and handoff document for the completed flow
+   - Runs as the final default step; supersedes the commit step's template summary on the default path
 
 #### Scenario: Large feature
 - **WHEN** a feature is complex with multiple components
-- **THEN** go through all 9 default steps with full-depth plan
+- **THEN** go through all 10 default steps with full-depth plan
 - **AND** the plan includes formal proposal, design, and task groups
+- **AND** the flow ends with a `summarize` step
 
 #### Scenario: Medium feature
 - **WHEN** a feature is moderately complex
@@ -190,6 +197,9 @@ The bugfix workflow SHALL follow these steps (plan uses medium depth):
 **8. COMMIT**
    - Commit the fix with version bump
 
+**9. SUMMARIZE**
+   - Generate an LLM-based summary and handoff document as the final default step
+
 #### Scenario: Complex bug fix
 - **WHEN** a bug requires significant changes
 - **THEN** follow full bugfix workflow with plan step
@@ -212,6 +222,9 @@ The review workflow SHALL follow minimal steps:
    - Categorize findings by priority: critical / high / medium / low
    - Classify scope: in_scope / out_of_scope
 
+**3. SUMMARIZE**
+   - Generate an LLM-based summary and handoff of the review findings as the final default step
+
 #### Scenario: Code review
 - **WHEN** user asks for a review
 - **THEN** inspect the code and report findings
@@ -227,6 +240,7 @@ The small workflow SHALL be used for simple changes:
 3. TEST - Run tests
 4. VERSION_ANALYZE - Determine version bump and generate commit message
 5. COMMIT - Commit changes
+6. SUMMARIZE - Generate an LLM-based summary and handoff as the final default step
 
 #### Scenario: Documentation update
 - **WHEN** updating README or comments

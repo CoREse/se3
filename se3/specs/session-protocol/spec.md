@@ -792,6 +792,11 @@ The `se3 run` command SHALL accept the following options in addition to the star
 - **THEN** the open issues are listed and the user is prompted to enter an issue id
 - **AND** the selected issue drives the flow as described above
 
+#### Scenario: Run from an issue combined with discovery
+- **WHEN** the user runs `se3 run --discover --from-issue ISSUE-123`
+- **THEN** the task type is forced to `discovery` and the flow is started from the issue using the discovery workflow
+- **AND** `source_issue_id` is set to `ISSUE-123` and the issue follows the same in-progress → resolved/open lifecycle as a non-discovery issue run
+
 #### Scenario: Refuse to run from an in-progress issue
 - **WHEN** the user runs `se3 run --from-issue ISSUE-123` and `ISSUE-123` is already in-progress
 - **THEN** the command prints a message instructing the user to run `se3 issue reset ISSUE-123` first

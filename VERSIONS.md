@@ -36,6 +36,15 @@
 
 
 
+
+## 9.0.0 - 2026-06-12
+
+- Add summarize as the default final step in all task-type sequences (feature, bugfix, review, small, directive, discovery); existing `steps.append: [summarize]` configs become silent no-ops
+- Support nested per-pass self_check chain configuration (`[[agentA], [agentB, agentC]]`) with automatic pass-count derivation and last-chain reuse on overflow
+- Remove priority-based agent rotation ordering; agent chain order now follows the written list order in `llm_caller.defaults` / `llm_caller.steps.<step>`, deprecating `agents.<name>.priority`
+- Add ability to start a new flow session from an open issue in the webui, with optional discovery mode
+- Extend `MSG_SPAWN_FLOW` protocol and `POST /api/flows` with optional `from_issue_id` field for issue-driven flow spawning
+- Document `se3 run --discover --from-issue <id>` combination as a supported CLI contract with test coverage
 ## 8.14.0 - 2026-06-12
 
 - Display agent name and model name badges on assistant message bubbles in WebUI when metadata is available

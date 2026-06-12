@@ -396,18 +396,18 @@ The flow engine SHALL define a fixed pool of step types (the StepType enum), and
 | ~~`project_summary`~~ | ~~Generate a project context summary~~ (deprecated — merged into analyze) | Yes | Text | **Yes** | project state | summary string |
 
 **Step sequences for different task types:**
-- `discovery`: discovery → analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit
-- `feature`: analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit
-- `bugfix`: analyze → plan → implement → test → **self_check** → verify_spec → **version_analyze** → commit
-- `review`: analyze → verify_spec
-- `small`: analyze → implement → test → **version_analyze** → commit
-- `directive`: analyze → plan → implement → **version_analyze** → commit
+- `discovery`: discovery → analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit → **summarize**
+- `feature`: analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit → **summarize**
+- `bugfix`: analyze → plan → implement → test → **self_check** → verify_spec → **version_analyze** → commit → **summarize**
+- `review`: analyze → verify_spec → **summarize**
+- `small`: analyze → implement → test → **version_analyze** → commit → **summarize**
+- `directive`: analyze → plan → implement → **version_analyze** → commit → **summarize**
 
-**Note:** The `summarize` step is not in any default sequence. It remains available in the step pool and can be added via `se3.yaml` configuration. When `summarize` is not in the sequence, the `commit` step generates a template-based summary document (`se3/state/summary-{flow_id}.md`) using structured data from the flow state.
+**Note:** The `summarize` step is the final step of every default task-type sequence (it is appended after `commit`, or after `verify_spec` for the `review` type). It remains available in the step pool and is produced by `get_default_step_sequence`. Because `apply_step_config` deduplicates appended steps by step value, an existing `steps.append: [summarize]` configuration becomes a silent no-op (it neither errors nor warns, and does not add a second `summarize`). The `commit` step retains its template-summary fallback (`se3/state/summary-{flow_id}.md`, built from structured flow state) for the rare case where `summarize` is removed from the sequence; on the default path `summarize` runs and supersedes that template.
 
 #### Scenario: Feature Task Full Flow
 - **WHEN** the task type is `feature`
-- **THEN** execute the full 11-step flow (plan uses full depth), including the self_check step and the `spec_gate` step inserted between `update_spec` and `version_analyze`
+- **THEN** execute the full 12-step flow (plan uses full depth), including the self_check step, the `spec_gate` step inserted between `update_spec` and `version_analyze`, and the `summarize` step appended after `commit`
 
 #### Scenario: Small Task Simplified Flow
 - **WHEN** the task type is `small`

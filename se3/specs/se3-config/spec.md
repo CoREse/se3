@@ -881,6 +881,14 @@ The system SHALL support workflow-level configuration for the fix loop mechanism
 **Workflow section options:**
 - `workflow.max_fix_iterations`: Maximum number of fix loop iterations before the flow is marked FAILED (default: 100). The fix loop counter is shared across TEST, SELF_CHECK, and VERIFY_SPEC steps. When exhausted, the state machine sets the flow to FAILED status, generates an A-class issue, and stops execution. **Sentinel:** a value of exactly `0` (or `null`, which is normalized to `0` at load time) means "unlimited" — every fix-loop comparison point treats `max_iter == 0` as no upper bound, so the flow is never marked FAILED purely on iteration count and prompts/log lines render the iteration as `N (unlimited)` rather than `N of M`. **Negative values are rejected fail-fast** at config load (mirrors the `< 1` rejection on `self_check_passes_required`), so a typo like `-1` cannot silently disable exhaustion. The default deliberately remains finite (100) to avoid new users accidentally burning tokens; users must set `0`/`null` explicitly to opt into unlimited mode.
 - `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a single fix-loop round before advancing to the next step (default: 1). MUST be an integer `>= 1`. When set to N>1, each fix-loop round repeats the self_check step up to N times: any single instance reporting issues short-circuits to fix-loop immediately (remaining instances are not created). Only after N consecutive clean instances does the flow advance. Values `< 1` (including 0 and negatives) trigger startup fail-fast in `WorkflowConfig` loading.
+
+  **Interaction with nested `llm_caller.steps.self_check` chains.** When `self_check` is configured with the nested per-pass form (`[[...], [...]]`; see the *LLM Caller Configuration* requirement), the effective per-round pass count is reconciled with this field as follows:
+  - **Nested chains, count not explicitly set:** when the user has NOT explicitly set `workflow.self_check_passes_required`, the effective pass count is automatically the **number of nested chains** — the chain list alone fully expresses the intent, so the count need not be restated.
+  - **Both explicitly set:** when both the nested form and an explicit `self_check_passes_required` are present, they are NOT required to agree and no error is raised. The explicit count wins and determines the actual number of passes:
+    - If the count is **greater than** the number of chains, the passes beyond the last chain **reuse the last chain**.
+    - If the count is **smaller than** the number of chains, the surplus chains are simply not executed, and a single WARNING is logged noting that one or more configured chains will not be used.
+  - **Flat form:** the flat `list[str]` form (and the no-override case) leaves the pass count governed entirely by `self_check_passes_required` (default 1), fully back-compatible.
+  - The per-pass index resets at the start of each fix-loop round (consistent with the per-round semantics of `self_check_passes_required`).
 - `workflow.baseline_fix_max_attempts`: Independent per-flow bound on how many fix-loop attempts may target inherited (baseline) test failures under mechanism B (default: `3`). MUST be an integer `>= 0`. This budget is **deliberately not shared** with `workflow.max_fix_iterations`: the global cap may be the "unlimited" sentinel (`0`), but baseline failures — which are not this flow's regression and may be fundamentally un-fixable (a missing system library, a flaky test, one needing a human decision) — must always be bounded. A value of `0` disables baseline looping entirely (inherited failures are surfaced but never looped, the historical behavior). **Negative values are rejected fail-fast** at config load (mirrors `self_check_passes_required`'s `< 1` rejection). Non-integer types — YAML booleans (`true`/`false`/`yes`/`no`/`on`/`off`) and floats — log a WARNING and fall back to the default `3`, symmetric with `self_check_passes_required` / `max_fix_iterations` handling of the same types. The per-flow attempt counter lives in the flow state (`flow.state.context["baseline_fix_attempts"]`) and is incremented by the state machine whenever a fix transition targeted baseline failures; once it reaches this cap, the active baseline failures are recorded as given-up in `se3/state/baseline_fix_attempts.json` (a cross-flow persistent memory) and surfaced without further looping (see the flow-engine *Test Step Configuration and Multi-Phase Execution* mechanism B and base *Engine Module Extensions*).
 - `workflow.self_check_convergence_enabled`: Toggle for the cross-fix-loop self_check convergence shortcut (default: `false`). When `false`, the state machine never compares the current round's issues against the previous round's issues, and `_issues_converged` is not invoked. When `true`, only the first self_check instance of a new fix-loop round (pass_index=1) receives `prev_self_check_issues` and participates in the comparison; instances #2..#N within the same round never participate. **NOTE:** the default flipped from on to off in this revision; this flip is intentionally not announced via changelog or startup log because the project requires every issue to be resolved, making convergence-based early exit a no-op on the happy path.
 
@@ -944,6 +952,24 @@ workflow:
 - **WHEN** the framework loads `WorkflowConfig` at startup
 - **THEN** a WARNING is logged identifying the offending value
 - **AND** `max_fix_iterations` falls back to the default (100) — symmetric with `self_check_passes_required` handling of the same types
+
+#### Scenario: Nested self_check chains derive the pass count
+- **GIVEN** `llm_caller.steps.self_check: [[agentA], [agentB, agentC]]` and `workflow.self_check_passes_required` is NOT explicitly set
+- **WHEN** a fix-loop round enters self_check
+- **THEN** the effective pass count is 2 (the number of nested chains)
+- **AND** pass 1 uses `[agentA]` and pass 2 uses `[agentB, agentC]`
+
+#### Scenario: Explicit pass count larger than chain count reuses the last chain
+- **GIVEN** `llm_caller.steps.self_check: [[agentA], [agentB]]` and `workflow.self_check_passes_required: 3`
+- **WHEN** a fix-loop round enters self_check
+- **THEN** there are 3 passes: pass 1 → `[agentA]`, pass 2 → `[agentB]`, pass 3 → `[agentB]` (the last chain is reused for the overflow pass)
+- **AND** no error or warning is raised for the count exceeding the number of chains
+
+#### Scenario: Explicit pass count smaller than chain count warns and drops surplus chains
+- **GIVEN** `llm_caller.steps.self_check: [[agentA], [agentB], [agentC]]` and `workflow.self_check_passes_required: 2`
+- **WHEN** the framework reconciles the configuration
+- **THEN** only 2 passes run (pass 1 → `[agentA]`, pass 2 → `[agentB]`)
+- **AND** a WARNING is logged noting that the third chain (`[agentC]`) is configured but will not be used
 
 #### Scenario: Custom baseline_fix_max_attempts
 - **GIVEN** `workflow.baseline_fix_max_attempts: 5` in se3.yaml
@@ -1153,8 +1179,18 @@ values are `AgentDef` dicts. Each `AgentDef` has:
   Model selection and other extra parameters are expressed via flags
   carried directly on `cmd` (e.g. `-m <model>`); no additional config
   surface is introduced for them.
-- `priority`: integer used to order a chain; higher priority is tried
-  first (default `0`)
+- `priority`: **deprecated — accepted but ignored.** Historically an
+  integer used to reorder a chain (higher tried first). The global
+  agent-priority ordering system has been removed: resolved chains
+  (`llm_caller.defaults`, `llm_caller.steps.<step>`, and the
+  self_check per-pass chains) now preserve the **written order** of
+  their reference lists, and agent rotation on failure follows that
+  order. A `priority` value is still parsed onto the `AgentDef` for
+  backward compatibility (its presence does not fail-fast), but it no
+  longer affects any ordering. When any `agents.<name>.priority` field
+  is present, the loader logs a **one-shot per-source** deprecation
+  warning noting that `priority` is ignored and that list order is now
+  authoritative.
 
 Name uniqueness is inherent to the dict form: duplicate names in the
 same YAML are resolved by YAML itself (last wins). Across global +
@@ -1214,7 +1250,10 @@ agents:
     collisions append `_2`, `_3`, etc.
   - Migrated entries are registered in the top-level `agents` dict.
   - The original entry order is also copied into `llm_caller.defaults`
-    so the default chain semantics survive.
+    so the default chain semantics survive; the migrated chain
+    preserves the order in which the `claude_commands` entries appear,
+    and any `priority` carried by a legacy entry is ignored (order, not
+    priority, drives the chain).
   - A `DeprecationWarning` is emitted showing the equivalent new
     config snippet.
   - When the source already sets a dict-form `agents`, `claude_commands`
@@ -1234,6 +1273,21 @@ value is not looked up in the registry.
 - **THEN** each entry is parsed into an `AgentDef` with the given
   `type`, `cmd`, and `priority`
 - **AND** the name is taken from the dict key
+- **AND** `priority` is retained on the `AgentDef` for backward
+  compatibility but does NOT influence chain ordering or rotation
+
+#### Scenario: Deprecated priority field is accepted, ignored, and warned per source
+- **GIVEN** at least one `agents.<name>` entry declares a `priority`
+  field (in either the global or project config source)
+- **WHEN** the framework loads the agent registry
+- **THEN** loading does NOT fail fast — the entry is registered
+  normally and its `priority` value is ignored for ordering purposes
+- **AND** a one-shot deprecation warning is logged per source noting
+  that `agents.<name>.priority` is deprecated and that the written
+  order of the reference list is now authoritative
+- **AND** the resolved chains (`llm_caller.defaults`,
+  `llm_caller.steps.<step>`) preserve their list order regardless of
+  any `priority` values
 
 #### Scenario: Codex agent registered and referenced in caller chains
 - **GIVEN** an `agents` entry declaring `type: codex` (with its own
@@ -1316,8 +1370,11 @@ contains two keys:
 
 Both lists accept **only** registered agent names — anonymous / inline
 `{cmd: ...}` entries are rejected. Entries are invoked in the list's
-written order (name list is authoritative; the registry's `priority`
-field provides the ordering for any internal chain that needs it).
+**written order**, which is the sole authority for chain order and for
+agent rotation on failure. The registry's `priority` field is
+deprecated and plays no role in ordering (see the Agent Registry
+requirement); the global priority-based reordering that previously
+re-sorted chains has been removed.
 
 **Default chain (`defaults`):**
 
@@ -1357,11 +1414,45 @@ field provides the ordering for any internal chain that needs it).
   config sets `llm_caller.steps.<step>`, it fully replaces the global
   declaration for that step; other step overrides remain from global.
 
+**Per-pass chains for `self_check` (nested list form):**
+
+`llm_caller.steps.self_check` — and **only** `self_check` — additionally
+accepts a **nested list** of agent-name lists, expressing a distinct
+agent chain per self_check pass within a single fix-loop round:
+
+```yaml
+llm_caller:
+  steps:
+    self_check: [[agentA], [agentB, agentC]]   # pass 1 → [agentA]; pass 2 → [agentB, agentC]
+```
+
+- **Flat form (back-compatible):** a plain `list[str]` such as
+  `self_check: [agentA, agentB]` continues to mean a single chain used
+  by **every** pass; the number of passes is governed solely by
+  `workflow.self_check_passes_required` (default 1). This is the
+  existing schema and behavior, unchanged.
+- **Nested form:** a `list[list[str]]` assigns chain *i* (1-based) to
+  self_check pass *i*. The per-pass chain and rotation within it still
+  follow written order. See the *Workflow Configuration* requirement
+  for how the nested form interacts with
+  `workflow.self_check_passes_required` to derive the effective pass
+  count, reuse the last chain when the count exceeds the number of
+  chains, and warn when the count is smaller than the number of chains.
+- **Mixed form is a configuration error:** a list that contains *both*
+  bare strings and sub-lists (e.g. `[agentA, [agentB]]`) is invalid.
+  The loader logs a WARNING and falls back **entirely** to
+  `llm_caller.defaults` for `self_check` (it does not partially parse
+  the valid entries).
+- **Scope:** the nested form is recognized for `self_check` only. Every
+  other `llm_caller.steps.<step>` remains a flat `list[str]`; a nested
+  list under any other step is not a supported schema.
+
 **Fail-fast on unknown names:**
 
-Any name in `llm_caller.defaults` or `llm_caller.steps.<step>` that is
-absent from the agent registry is a startup-time error (see the Agent
-Registry requirement for the error-message format).
+Any name in `llm_caller.defaults` or `llm_caller.steps.<step>` (including
+any name inside a `self_check` per-pass sub-list) that is absent from
+the agent registry is a startup-time error (see the Agent Registry
+requirement for the error-message format).
 
 **Typo detection on `llm_caller.steps` keys:**
 
@@ -1489,6 +1580,34 @@ llm_caller:
 - **AND** project config declares `llm_caller.steps.implement: [c]`
 - **WHEN** the implement step runs in the project
 - **THEN** the chain is exactly `[c]` — the global list is not merged
+
+#### Scenario: Nested self_check chains map per pass
+- **GIVEN** `llm_caller.steps.self_check: [[agentA], [agentB, agentC]]`
+  and all three names are registered
+- **WHEN** the self_check step resolves the chain for pass 1
+- **THEN** the chain is `[agentA]`
+- **WHEN** the self_check step resolves the chain for pass 2
+- **THEN** the chain is `[agentB, agentC]`, rotated in written order
+
+#### Scenario: Flat self_check list applies to all passes
+- **GIVEN** `llm_caller.steps.self_check: [agentA, agentB]` (flat form)
+- **WHEN** any self_check pass resolves its chain
+- **THEN** every pass uses `[agentA, agentB]`, and the pass count is
+  governed solely by `workflow.self_check_passes_required`
+
+#### Scenario: Mixed self_check form warns and falls back to defaults
+- **GIVEN** `llm_caller.steps.self_check: [agentA, [agentB]]` (a list
+  mixing a bare string and a sub-list)
+- **WHEN** the framework resolves the self_check chain
+- **THEN** a WARNING is logged identifying the malformed mixed form
+- **AND** the self_check step falls back entirely to
+  `llm_caller.defaults` rather than partially parsing the entry
+
+#### Scenario: Nested form rejected for non-self_check steps
+- **GIVEN** a nested list under a step other than `self_check`, e.g.
+  `llm_caller.steps.implement: [[a], [b]]`
+- **THEN** the nested form is not a supported schema for that step —
+  only `self_check` recognizes per-pass nested chains
 
 ### Requirement: Step Sequence Configuration
 

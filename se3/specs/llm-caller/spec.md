@@ -11,6 +11,22 @@ The llm-caller subsystem orchestrates LLM step execution above the `agent-runner
 
 The caller maintains an ordered list of agents resolved from configuration. Each agent has a `Runner` instance (cached). On a failed call the caller rotates to the next agent in the list and retries; rotation is attempted on *any* failure (USAGE_LIMIT, TIMEOUT, OTHER are all treated identically — `detect_infra_error` is used only for log labelling).
 
+**List order is the rotation order.** The resolved agent list — whether it comes from `llm_caller.defaults`, a `llm_caller.steps.<step>` override, or (for `self_check`) the chain selected for the current pass — preserves the **written order** of its reference list. Rotation advances strictly in that order. The deprecated `agents.<name>.priority` field is NOT consulted: the global priority-based reordering that previously re-sorted chains has been removed, so the caller never re-sorts the list before rotating (see the `se3-config` *Agent Registry* and *LLM Caller Configuration* requirements).
+
+**Per-pass chain selection for `self_check`.** When `self_check` is configured with nested per-pass chains, the caller selects the chain for the current 1-based pass index. If the pass index exceeds the number of configured chains, it clamps to the last chain (reuse-last-chain), consistent with the pass-count reconciliation defined in the `se3-config` *Workflow Configuration* requirement. Each selected chain is still rotated in its own written order.
+
+#### Scenario: Rotation follows written list order, not priority
+- **WHEN** the resolved chain is `[A, B, C]` and the first call on `A` fails
+- **THEN** the caller rotates to `B`, then `C`, in that exact order
+- **AND** any `priority` values on the underlying `AgentDef`s are ignored — the list is not re-sorted before rotation
+
+#### Scenario: self_check selects the chain for the current pass
+- **GIVEN** `self_check` is configured with nested chains `[[A], [B, C]]`
+- **WHEN** the caller resolves the chain for pass 2
+- **THEN** the chain is `[B, C]` and rotation within it proceeds `B` → `C` in written order
+- **WHEN** the caller resolves the chain for a pass index greater than the number of chains
+- **THEN** it clamps to and reuses the last chain
+
 #### Scenario: Agents resolved from explicit argument
 - **WHEN** `LLMCaller` is constructed with a non-empty `agents` list argument
 - **THEN** that list is used verbatim

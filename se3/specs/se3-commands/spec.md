@@ -171,7 +171,7 @@ se3 run --from-issue <issue-id>       # Load the named issue by ID
 2. **Issue lookup.** The supplied (or interactively entered) ID is loaded via the issue manager. When no issue with that ID exists, the command prints an error and exits with a non-zero exit code.
 3. **In-progress rejection.** When the loaded issue is already in `in_progress` status, the command refuses to start a new flow and tells the user to run `se3 issue reset <id>` first. Exit code is non-zero.
 4. **Status transition on start.** Before running the flow, the issue's status is transitioned to `in_progress`. When the transition itself raises (invalid transition for the issue's current state), the command prints the error and exits non-zero without starting the flow.
-5. **Flow execution.** The flow runs with the issue's description as the task description, the `--type` option as the task type (default `feature`), `is_loop_mode=False`, and the issue ID recorded on the flow as its source issue.
+5. **Flow execution.** The flow runs with the issue's description as the task description, the `--type` option as the task type (default `feature`), `is_loop_mode=False`, and the issue ID recorded on the flow as its source issue. `--from-issue` may be combined with `--discover`: when `--discover` is supplied it first forces the task type to `discovery`, and the `--from-issue` branch then runs the flow with that discovery type (the issue's description seeds the discovery exploration). The issue lifecycle is unaffected by `--discover`. The `--from-issue` help text mentions that it can be combined with `--discover`.
 6. **Status transition on completion.** When the flow exits with code 0, the issue is transitioned to `resolved`. When the flow exits with any non-zero code, the issue is transitioned back to `open`. Failures of these final status transitions are best-effort (swallowed) so that the flow's exit code remains the command's exit code.
 
 #### Scenario: --from-issue with explicit ID resolves to flow run
@@ -197,6 +197,13 @@ se3 run --from-issue <issue-id>       # Load the named issue by ID
 - **WHEN** the user runs `se3 run --from-issue ""` (explicit empty-string value)
 - **THEN** the command prints a "No open issues found" message and exits with a non-zero exit code
 - **AND** no flow is started
+
+#### Scenario: --from-issue combined with --discover runs discovery from the issue
+- **GIVEN** an open issue with ID `<id>` and a non-empty description
+- **WHEN** the user runs `se3 run --discover --from-issue <id>`
+- **THEN** the task type is forced to `discovery`
+- **AND** the flow is started from the issue using the discovery workflow, with the issue ID recorded as the flow's source issue
+- **AND** the issue status lifecycle (in_progress → resolved/open) is unchanged by `--discover`
 
 #### Scenario: --from-issue rejects unknown issue ID
 - **GIVEN** no issue exists with the supplied ID
