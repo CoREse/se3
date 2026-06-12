@@ -645,6 +645,11 @@ class ServerState:
                     del self._history_data[flow_id]
                     self._history_requires_full.add(flow_id)
                     return False
+                # Back-fill a stable generation for an old-format bundle that the
+                # ``full`` branch never created (or that lost the field), so the
+                # extended bundle is a first-class delta participant rather than
+                # being stuck on the full fallback forever.
+                self._ensure_generation(existing)
                 existing["records"].extend(new_records)
                 existing["mode"] = mode
                 if cursor:
@@ -680,6 +685,35 @@ class ServerState:
         self._history_generation += 1
         return self._history_generation
 
+    def _ensure_generation(self, bundle: Dict[str, Any]) -> int:
+        """Return *bundle*'s stable generation, back-filling one on first contact.
+
+        Bundles created by the current ``full`` branch always carry a positive
+        ``generation``. An **old-format bundle** — one that predates the
+        ``generation`` field, or that has only ever been extended through the
+        ``append`` branch (which historically never initialised it) — carries no
+        ``generation`` key, or a falsy ``0``/``None``. Reading such a bundle with
+        the old ``int(cached.get("generation") or 0)`` idiom yielded ``0`` every
+        time, and because the per-bundle value was never written back, the token
+        minted on one read and the generation observed on the next never had a
+        durable anchor: the flow was perpetually shunted onto the ``full``
+        fallback instead of serving a ``delta``.
+
+        On first contact we hand the bundle a fresh, **stable** generation via
+        :meth:`_next_generation` and write it back into the bundle dict, so every
+        later snapshot read, ``get_history`` copy, and ``append`` extend observes
+        the SAME generation and a progress token minted against it validates on
+        the next reconnect (the delta path) rather than perpetually falling back
+        to a full reload. Missing / ``0`` / ``None`` are all treated as "not yet
+        assigned"; a positive int is returned unchanged. Caller must hold
+        ``self._lock``.
+        """
+        gen = bundle.get("generation")
+        if not isinstance(gen, int) or isinstance(gen, bool) or gen <= 0:
+            gen = self._next_generation()
+            bundle["generation"] = gen
+        return gen
+
     async def get_history(self, flow_id: str) -> Optional[Dict[str, Any]]:
         """Return a copy of cached history for *flow_id*, or ``None`` on miss."""
         async with self._lock:
@@ -692,7 +726,7 @@ class ServerState:
                 "mode": cached.get("mode", ""),
                 "records": list(cached["records"]),
                 "cursor": dict(cached.get("cursor") or {}),
-                "generation": int(cached.get("generation") or 0),
+                "generation": self._ensure_generation(cached),
                 "updated_at": cached.get("updated_at"),
             }
 
@@ -753,10 +787,20 @@ class ServerState:
                 ):
                     return None
             records = cached["records"]
-            generation = int(cached.get("generation") or 0)
+            # Back-fill a stable generation for an old-format bundle on first
+            # contact (see ``_ensure_generation``); a positive generation is
+            # returned unchanged. This makes the token minted here durable, so a
+            # reconnecting client echoing it gets a delta instead of being pinned
+            # to the full fallback forever.
+            generation = self._ensure_generation(cached)
             total = len(records)
 
             token = decode_progress(after, secret=self._history_progress_secret)
+            # Bind the delta to the exact bundle generation + machine, and clamp
+            # the offset into ``[0, total]`` so an out-of-range / forged offset
+            # can never slice past the records (which would silently drop the
+            # head). Any failed check falls through to the COMPLETE record list
+            # below — a delta is served only when the client is provably in sync.
             is_delta = (
                 token is not None
                 and token["generation"] == generation
@@ -767,6 +811,8 @@ class ServerState:
                 out_records = list(records[token["offset"]:])
                 delivery = "delta"
             else:
+                # Full fallback MUST carry the whole bundle — never a slice — so
+                # the client rebuilds a record set identical to the on-disk jsonl.
                 out_records = list(records)
                 delivery = "full"
 

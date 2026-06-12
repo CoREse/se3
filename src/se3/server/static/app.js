@@ -1502,8 +1502,17 @@ async function loadFlowConversation(flowId, opts) {
   // across the authoritative replacement.
   const requestRecords = state.flowConversationRecords;
   try {
+    // Echo the held progress token ONLY when we still hold the records it was
+    // issued against. A token whose backing records were dropped (the held
+    // array is empty) must NOT be echoed: the server would answer with just the
+    // delta tail, which the view would then render as the WHOLE conversation —
+    // a silently truncated history. An empty held set therefore forces a full
+    // reload even on a reconnect, so a stale offset can never be applied across
+    // a cleared/replaced bundle.
+    const heldProgress = state.flowConversationRecords.length
+      ? state.flowConversationProgress : null;
     const url = incremental
-      ? historySnapshotUrl(flowId, state.flowConversationProgress)
+      ? historySnapshotUrl(flowId, heldProgress)
       : `/api/history/${encodeURIComponent(flowId)}`;
     const resp = await authedFetch(url);
     // The user may have opened another flow while this was in flight.
@@ -2893,8 +2902,14 @@ async function openHistorySession(flowId, opts) {
   // generation being refreshed from live appends that arrive during the await.
   const requestRecords = state.historyRecords;
   try {
+    // See loadFlowConversation: only echo the held token when its backing
+    // records are still held, so a cleared/replaced bundle can never have a
+    // stale delta offset applied (which would render only the tail = a
+    // truncated session). An empty held set forces a full reload.
+    const heldProgress = state.historyRecords.length
+      ? state.historyProgress : null;
     const url = incremental
-      ? historySnapshotUrl(flowId, state.historyProgress)
+      ? historySnapshotUrl(flowId, heldProgress)
       : `/api/history/${encodeURIComponent(flowId)}`;
     const resp = await authedFetch(url);
     // The user may have clicked another session while this was in flight.
