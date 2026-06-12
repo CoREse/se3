@@ -820,3 +820,44 @@ def test_resume_button_appears_in_history_list():
     assert "makeResumeButton" in list_section, (
         "renderHistoryList does not call makeResumeButton"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. Static guardrail: start-flow-from-issue launch entry (G4)
+# ---------------------------------------------------------------------------
+
+
+def test_issue_launch_button_in_list_and_detail():
+    """``renderIssuesList`` and ``renderIssueDetail`` must both call
+    ``makeIssueLaunchButton`` so an issue can be launched from either surface."""
+    js = APP_JS.read_text(encoding="utf-8")
+    list_section = _extract_js_function_body(js, "renderIssuesList")
+    detail_section = _extract_js_function_body(js, "renderIssueDetail")
+    assert "makeIssueLaunchButton" in list_section, (
+        "renderIssuesList does not call makeIssueLaunchButton"
+    )
+    assert "makeIssueLaunchButton" in detail_section, (
+        "renderIssueDetail does not call makeIssueLaunchButton"
+    )
+
+
+def test_issue_launch_button_respects_launch_model():
+    """``makeIssueLaunchButton`` must gate availability through
+    ``issueLaunchModel`` so non-open issues render visible-but-disabled."""
+    js = APP_JS.read_text(encoding="utf-8")
+    body = _extract_js_function_body(js, "makeIssueLaunchButton")
+    assert "issueLaunchModel" in body, (
+        "makeIssueLaunchButton does not consult issueLaunchModel"
+    )
+    # The disabled-but-visible contract: the button is disabled (not removed)
+    # when the issue is not launchable.
+    assert "disabled" in body
+
+
+def test_issue_launch_modal_present_in_index_html():
+    """The start-flow-from-issue modal (with its discovery checkbox) must exist
+    in index.html so the launch interaction has a UI."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="issue-launch-modal"' in html
+    assert 'id="issue-launch-discover"' in html
+    assert 'id="issue-launch-confirm"' in html

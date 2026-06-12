@@ -1042,6 +1042,22 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   font-size: 12px;
 }
 
+/* Issue-row "启动 flow" entry: a compact action under the meta line. */
+.issue-item-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.issue-launch-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+.issue-launch-btn.disabled,
+.issue-launch-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
 /* Form row for side-by-side fields */
 .form-row {
   display: flex;

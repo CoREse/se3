@@ -751,6 +751,56 @@ def test_rest_resume_is_owner_isolated(authz_app):
             assert cross.status_code == 404
 
 
+def test_rest_publish_from_issue_is_owner_isolated(authz_app):
+    """POST /api/flows with from_issue_id is owner-gated: B's issue is 404 to A."""
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
+            da.send_text(_owner_hello(app, "A", "mA"))
+            protocol.decode(da.receive_text())
+            db.send_text(_owner_hello(app, "B", "mB"))
+            protocol.decode(db.receive_text())
+            da.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mA",
+                        "flows": [],
+                        "issues": [
+                            {"id": "001", "project_root": "/pa", "status": "open"}
+                        ],
+                    }
+                ).to_json()
+            )
+            db.send_text(
+                protocol.make_status_update(
+                    {
+                        "machine_id": "mB",
+                        "flows": [],
+                        "issues": [
+                            {"id": "900", "project_root": "/pb", "status": "open"}
+                        ],
+                    }
+                ).to_json()
+            )
+            _await_visible(ca, "mA")
+            _await_visible(cb, "mB")
+
+            # A may launch a flow from its OWN issue.
+            ok = ca.post("/api/flows", json={"from_issue_id": "001"})
+            assert ok.status_code == 202
+            spawn = protocol.decode(da.receive_text())
+            assert spawn.type == protocol.MSG_SPAWN_FLOW
+            assert spawn.payload["from_issue_id"] == "001"
+
+            # A may NOT launch from B's issue — cross-owner reads as absent (404).
+            cross = ca.post("/api/flows", json={"from_issue_id": "900"})
+            assert cross.status_code == 404
+
+
 def test_rest_unauthenticated_writes_are_401(authz_app):
     from fastapi.testclient import TestClient
 

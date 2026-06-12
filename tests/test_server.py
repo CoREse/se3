@@ -1254,3 +1254,125 @@ def test_resume_flow_daemon_disconnected_returns_404(client_and_app):
     # 404 when the flow itself is not in the live set.
     resp = client.post("/api/flows/f-nonexistent/resume")
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# POST /api/flows with from_issue_id (start a flow from an existing issue)
+# --------------------------------------------------------------------------
+
+
+def _push_issue(ws, client, app, *, issue_id="001", project_root="/p", status="open", machine_id="m1"):
+    """Push a status update carrying one issue and wait for it to land."""
+    ws.send_text(
+        protocol.make_status_update(
+            _snapshot_with_issues(
+                machine_id=machine_id,
+                issues=[
+                    {
+                        "id": issue_id,
+                        "project_root": project_root,
+                        "status": status,
+                        "source": "human",
+                    }
+                ],
+            )
+        ).to_json()
+    )
+    for _ in range(50):
+        if client.get(f"/api/issues/{issue_id}").status_code == 200:
+            return
+
+
+def test_publish_flow_from_issue_dispatches(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        _push_issue(ws, client, app, issue_id="001", project_root="/p")
+
+        # task content is supplied but MUST be ignored on the from-issue path.
+        resp = client.post(
+            "/api/flows",
+            json={"from_issue_id": "001", "task": "this is ignored"},
+        )
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["from_issue_id"] == "001"
+        assert body["machine_id"] == "m1"
+
+        spawn = protocol.decode(ws.receive_text())
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert spawn.payload["from_issue_id"] == "001"
+        assert spawn.payload["project_root"] == "/p"
+        # Issue content drives the task; the request task is dropped.
+        assert spawn.payload["task_description"] == ""
+        assert spawn.payload["discover"] is False
+
+
+def test_publish_flow_from_issue_threads_discover(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        _push_issue(ws, client, app, issue_id="007", project_root="/p")
+
+        resp = client.post(
+            "/api/flows",
+            json={"from_issue_id": "007", "discover": True},
+        )
+        assert resp.status_code == 202, resp.text
+        spawn = protocol.decode(ws.receive_text())
+        assert spawn.payload["from_issue_id"] == "007"
+        assert spawn.payload["discover"] is True
+
+
+def test_publish_flow_from_issue_unknown_404(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        # No issue pushed — the id resolves to nothing.
+        resp = client.post("/api/flows", json={"from_issue_id": "999"})
+        assert resp.status_code == 404
+
+
+def test_publish_flow_from_issue_non_open_409(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        _push_issue(ws, client, app, issue_id="002", status="in-progress")
+
+        resp = client.post("/api/flows", json={"from_issue_id": "002"})
+        assert resp.status_code == 409
+
+
+def test_publish_flow_from_issue_target_mismatch_404(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        _push_issue(ws, client, app, issue_id="003", machine_id="m1")
+
+        # Request names a machine that does not own the issue -> 404.
+        resp = client.post(
+            "/api/flows",
+            json={"from_issue_id": "003", "machine_id": "other-machine"},
+        )
+        assert resp.status_code == 404
+
+
+def test_publish_flow_from_issue_daemon_disconnected_404(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        _push_issue(ws, client, app, issue_id="004", project_root="/p")
+    # After the ws context exits the daemon is disconnected; the issue mirror
+    # persists (machine merely marked offline), so the not-connected branch
+    # is exercised.
+    for _ in range(50):
+        resp = client.post("/api/flows", json={"from_issue_id": "004"})
+        if resp.status_code == 404:
+            break
+    assert resp.status_code == 404
