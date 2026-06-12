@@ -233,6 +233,32 @@ class TestSpawner:
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
+    def test_spawn_from_issue_builds_from_issue_argv(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "ignored", project_root=str(tmp_path), from_issue_id="042"
+        )
+        assert "--from-issue" in spawned.args
+        idx = spawned.args.index("--from-issue")
+        assert spawned.args[idx + 1] == "042"
+        assert "--output-format" in spawned.args
+        assert "json" in spawned.args
+        # The request's task description must not reach the argv on this path.
+        assert "ignored" not in spawned.args
+        assert "--type" not in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_from_issue_appends_discover(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "", project_root=str(tmp_path), from_issue_id="7", discover=True
+        )
+        assert "--from-issue" in spawned.args
+        assert "--discover" in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
     def test_iter_events_parses_ndjson(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn("task", project_root=str(tmp_path))

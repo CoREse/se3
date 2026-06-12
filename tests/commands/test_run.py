@@ -876,3 +876,88 @@ class TestOutputFormatEventStream:
             self._run(mock_sm_class, mock_pm_class, "json")
 
         mock_render.assert_not_called()
+
+
+class TestDiscoverFromIssueCombination:
+    """CLI contract for ``se3 run --discover --from-issue <id>``.
+
+    The combination is wired through the existing code: ``--discover`` forces
+    the task type to ``discovery`` before the ``--from-issue`` branch runs, so
+    the issue-sourced flow goes through the discovery step while the issue
+    description, ``source_issue_id`` linkage, and status lifecycle are
+    unaffected. These tests lock that behavior in as a supported contract.
+    """
+
+    def _make_project_with_issue(self, tmp_path, description="Add caching layer"):
+        from se3.engine.issue_manager import IssueManager
+
+        (tmp_path / ".git").mkdir()
+        mgr = IssueManager(tmp_path)
+        issue = mgr.create(description, source="human")
+        return issue
+
+    def _invoke(self, args, project_root, run_flow_mock):
+        from typer.testing import CliRunner
+        from se3.cli import app
+
+        with patch("se3.commands.run.get_project_root", return_value=project_root), patch(
+            "se3.commands.run.run_flow", run_flow_mock
+        ):
+            return CliRunner().invoke(app, ["run"] + args)
+
+    def test_discover_from_issue_passes_discovery_task_type(self, tmp_path):
+        issue = self._make_project_with_issue(tmp_path)
+        rf = MagicMock(return_value=0)
+
+        result = self._invoke(
+            ["--discover", "--from-issue", issue.id], tmp_path, rf
+        )
+
+        assert result.exit_code == 0
+        rf.assert_called_once()
+        kwargs = rf.call_args.kwargs
+        # --discover forces the issue-sourced flow through the discovery step.
+        assert kwargs["task_type"] == "discovery"
+        # Issue description drives the task and source linkage is preserved.
+        assert kwargs["task_description"] == issue.description
+        assert kwargs["source_issue_id"] == issue.id
+        assert kwargs["is_loop_mode"] is False
+
+    def test_from_issue_without_discover_keeps_default_type(self, tmp_path):
+        """Without --discover the issue-sourced flow keeps the default type."""
+        issue = self._make_project_with_issue(tmp_path)
+        rf = MagicMock(return_value=0)
+
+        result = self._invoke(["--from-issue", issue.id], tmp_path, rf)
+
+        assert result.exit_code == 0
+        kwargs = rf.call_args.kwargs
+        assert kwargs["task_type"] == "feature"
+        assert kwargs["source_issue_id"] == issue.id
+
+    def test_discover_from_issue_runs_issue_lifecycle(self, tmp_path):
+        """The issue goes in-progress before the run and resolved on success."""
+        from se3.engine.issue_manager import IssueManager, IssueStatus
+
+        issue = self._make_project_with_issue(tmp_path)
+        rf = MagicMock(return_value=0)
+
+        result = self._invoke(
+            ["--discover", "--from-issue", issue.id], tmp_path, rf
+        )
+
+        assert result.exit_code == 0
+        # On a successful flow the source issue is resolved (lifecycle intact).
+        reloaded = IssueManager(tmp_path).load(issue.id)
+        assert reloaded.status == IssueStatus.RESOLVED
+
+    def test_from_issue_help_mentions_discover_combination(self):
+        from typer.testing import CliRunner
+        from se3.cli import app
+
+        result = CliRunner().invoke(
+            app, ["run", "--help"], env={"COLUMNS": "200"}
+        )
+        assert result.exit_code == 0
+        normalized = " ".join(result.output.split())
+        assert "discovery step" in normalized

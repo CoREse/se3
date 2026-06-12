@@ -104,13 +104,22 @@ BREAKGLASS_EXTERNAL_ID = "admin"
 
 
 class NewFlowRequest(BaseModel):
-    """Body of ``POST /api/flows`` — publish a new task to a machine."""
+    """Body of ``POST /api/flows`` — publish a new task to a machine.
 
-    machine_id: str
-    task: str
+    When *from_issue_id* is supplied the flow is sourced from an existing
+    issue: the issue's owner-scoped record is the authoritative source of the
+    target machine / project, the request's *task* content is ignored (the
+    issue description becomes the task), and the daemon drives the issue
+    lifecycle via the ``se3 run --from-issue`` CLI path.  *task* is optional in
+    that case, so it defaults to an empty string.
+    """
+
+    machine_id: str = ""
+    task: str = ""
     task_type: str = "feature"
     project_root: str = ""
     discover: bool = False
+    from_issue_id: str = ""
 
 
 class RespondRequest(BaseModel):
@@ -462,10 +471,81 @@ def create_app(
         machine_id, flow = result
         return {"machine_id": machine_id, "flow": flow}
 
+    async def _publish_flow_from_issue(
+        req: NewFlowRequest,
+        identity_: OwnerIdentity,
+        from_issue_id: str,
+    ) -> JSONResponse:
+        """Dispatch a SPAWN_FLOW sourced from an existing issue.
+
+        The issue's owner-scoped record is the authoritative source of the
+        target machine / project — the request's *task* content is ignored and
+        ``from_issue_id`` is threaded through to the daemon, which runs
+        ``se3 run --from-issue <id>`` and owns the full issue lifecycle
+        (in-progress on start, resolved/open on exit).  Only ``open`` issues
+        can be launched from the UI; the daemon still performs the final
+        in-progress race check.
+        """
+        scope = _scope_for(identity_)
+        # The owner-scoped lookup resolves the issue's authoritative
+        # machine / project.  A request-supplied machine_id / project_root
+        # narrows the search, so an inconsistent target reads as not-found.
+        result = await state.get_issue_by_id(
+            from_issue_id,
+            owner=scope,
+            machine_id=req.machine_id.strip() or None,
+            project_root=req.project_root.strip() or None,
+        )
+        if result is None:
+            # Covers unknown, cross-owner, and target-inconsistent issues.
+            raise HTTPException(
+                status_code=404, detail=f"issue '{from_issue_id}' not found"
+            )
+        machine_id, project_root, issue = result
+        status = str(issue.get("status") or "").strip().lower()
+        if status != "open":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"issue '{from_issue_id}' is not open (status {status!r}); "
+                    "only open issues can start a flow"
+                ),
+            )
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"machine '{machine_id}' owning issue '{from_issue_id}' "
+                "is not connected",
+            )
+        message = protocol.make_spawn_flow(
+            "",
+            project_root=project_root,
+            task_type=req.task_type,
+            discover=req.discover,
+            from_issue_id=from_issue_id,
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver SPAWN_FLOW to '{machine_id}'",
+            )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "dispatched",
+                "machine_id": machine_id,
+                "from_issue_id": from_issue_id,
+            },
+        )
+
     @app.post("/api/flows")
     async def publish_flow(
         req: NewFlowRequest, identity_: OwnerIdentity = Depends(require_owner)
     ) -> JSONResponse:
+        from_issue_id = req.from_issue_id.strip()
+        if from_issue_id:
+            return await _publish_flow_from_issue(req, identity_, from_issue_id)
         task = req.task.strip()
         if not task:
             raise HTTPException(status_code=422, detail="'task' must not be empty")

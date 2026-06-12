@@ -359,6 +359,7 @@ class DaemonSpawner:
         project_root: Optional[str] = None,
         task_type: str = "feature",
         discover: bool = False,
+        from_issue_id: str = "",
         extra_args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> SpawnedProcess:
@@ -373,6 +374,15 @@ class DaemonSpawner:
         discovery" option threads its ``discover`` flag down to here via the
         SPAWN_FLOW payload).
 
+        When *from_issue_id* is non-empty, the flow is started from an existing
+        issue instead: the argv becomes
+        ``se3 run --from-issue <id> --output-format json`` (plus ``--discover``
+        when *discover* is true), and *task_description* / *task_type* are
+        **not** placed on the argv — the CLI's ``--from-issue`` path takes the
+        task from the issue's own description and drives the issue's
+        in-progress → resolved/open lifecycle. The same ``_resolve_se3_command``
+        prefix and merged-PATH ``_launch`` machinery are reused.
+
         The child's stdout and stderr are redirected to per-flow log files (not
         to OS pipes) so the child can always write without blocking, even when
         no caller is draining its output. This is essential because a real flow
@@ -380,6 +390,24 @@ class DaemonSpawner:
         without a reader would deadlock the child.
         """
         cwd = str(Path(project_root).resolve()) if project_root else os.getcwd()
+        if from_issue_id:
+            # From-issue path: the CLI sources the task from the issue and owns
+            # the issue lifecycle, so the request's task_description/task_type
+            # must NOT leak onto the argv. A descriptive label is still kept on
+            # the SpawnedProcess for tracking/logging.
+            args = _resolve_se3_command() + [
+                "run",
+                "--from-issue",
+                str(from_issue_id),
+                "--output-format",
+                "json",
+            ]
+            if discover:
+                args.append("--discover")
+            if extra_args:
+                args.extend(extra_args)
+            label = task_description or f"[from issue {from_issue_id}]"
+            return self._launch(args, cwd, label, env)
         args = _resolve_se3_command() + [
             "run",
             task_description,

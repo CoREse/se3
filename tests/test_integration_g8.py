@@ -520,6 +520,145 @@ class TestResumeSpawnArgv:
 
 
 # =========================================================================
+# 4b. From-issue spawn transport chain
+# =========================================================================
+
+
+class TestFromIssueSpawnArgv:
+    """``from_issue_id`` threads through protocol → client → spawner argv."""
+
+    def test_make_spawn_flow_with_from_issue_id(self):
+        """make_spawn_flow includes from_issue_id when supplied."""
+        msg = make_spawn_flow(
+            "",  # ignored on the from-issue path
+            project_root="/p",
+            from_issue_id="042",
+        )
+        assert msg.type == MSG_SPAWN_FLOW
+        assert msg.payload["from_issue_id"] == "042"
+        assert msg.payload["project_root"] == "/p"
+
+    def test_make_spawn_flow_omits_empty_from_issue_id(self):
+        """An empty from_issue_id is omitted so fresh-spawn payloads are intact."""
+        msg = make_spawn_flow("Fix bug", project_root="/p")
+        assert "from_issue_id" not in msg.payload
+
+    def test_make_spawn_flow_from_issue_and_discover_coexist(self):
+        """discover and from_issue_id may be carried together."""
+        msg = make_spawn_flow(
+            "",
+            project_root="/p",
+            from_issue_id="042",
+            discover=True,
+        )
+        assert msg.payload["from_issue_id"] == "042"
+        assert msg.payload["discover"] is True
+
+    def test_handle_spawn_passes_from_issue_id_to_handler(self):
+        """_handle_spawn forwards from_issue_id as the 5th positional arg."""
+        spawn_calls = []
+
+        client = DaemonClient.__new__(DaemonClient)
+        client._resume_handler = lambda fid, root: None
+        client._spawn_handler = lambda *a: spawn_calls.append(a)
+        client._ensure_handler = None
+        client._snapshot_provider = lambda: MachineStatus(
+            machine_id="m", hostname="h", project_roots=["/p"]
+        )
+        client._history_provider = MagicMock()
+
+        payload = make_spawn_flow(
+            "", project_root="/p", from_issue_id="042", discover=True
+        ).payload
+
+        client._handle_spawn(payload)
+
+        assert len(spawn_calls) == 1
+        # (task, project_root, task_type, discover, from_issue_id)
+        assert spawn_calls[0] == ("", "/p", "feature", True, "042")
+
+    def test_handle_spawn_from_issue_allows_empty_task(self):
+        """An empty task_description does not abort a from-issue spawn."""
+        spawn_calls = []
+
+        client = DaemonClient.__new__(DaemonClient)
+        client._resume_handler = lambda fid, root: None
+        client._spawn_handler = lambda *a: spawn_calls.append(a)
+        client._ensure_handler = None
+        client._snapshot_provider = lambda: MachineStatus(
+            machine_id="m", hostname="h", project_roots=["/p"]
+        )
+        client._history_provider = MagicMock()
+
+        payload = make_spawn_flow("", project_root="/p", from_issue_id="7").payload
+        client._handle_spawn(payload)
+
+        assert len(spawn_calls) == 1
+
+    def test_spawn_builds_from_issue_argv(self, tmp_path):
+        """DaemonSpawner.spawn builds 'se3 run --from-issue <id> --output-format json'."""
+        from se3.daemon.spawner import DaemonSpawner
+
+        spawner = DaemonSpawner.__new__(DaemonSpawner)
+        spawner._processes = {}
+        spawner._supervisor = MagicMock()
+        spawner._on_spawn = None
+        spawner._login_shell_path = None
+
+        launched = []
+
+        def capture_launch(self, args, cwd, task_description, env):
+            launched.append((args, task_description))
+            proc = MagicMock()
+            proc.pid = 999
+            proc.project_root = cwd
+            proc.task_description = task_description
+            proc.args = args
+            return proc
+
+        with patch.object(DaemonSpawner, "_launch", capture_launch):
+            spawner.spawn(
+                "ignored task",
+                project_root=str(tmp_path),
+                from_issue_id="042",
+                discover=True,
+            )
+
+        assert len(launched) == 1
+        args, _label = launched[0]
+        assert "--from-issue" in args
+        idx = args.index("--from-issue")
+        assert args[idx + 1] == "042"
+        assert "--output-format" in args
+        assert "json" in args
+        assert "--discover" in args
+        # The request's task description must NOT enter the argv.
+        assert "ignored task" not in args
+        # Nor does --type leak onto the from-issue argv.
+        assert "--type" not in args
+
+    def test_spawn_from_issue_omits_discover_when_false(self, tmp_path):
+        from se3.daemon.spawner import DaemonSpawner
+
+        spawner = DaemonSpawner.__new__(DaemonSpawner)
+        spawner._processes = {}
+        spawner._supervisor = MagicMock()
+        spawner._on_spawn = None
+        spawner._login_shell_path = None
+
+        launched = []
+
+        def capture_launch(self, args, cwd, task_description, env):
+            launched.append(args)
+            return MagicMock(pid=1, project_root=cwd, args=args)
+
+        with patch.object(DaemonSpawner, "_launch", capture_launch):
+            spawner.spawn("", project_root=str(tmp_path), from_issue_id="9")
+
+        assert "--discover" not in launched[0]
+
+
+# =========================================================================
 # 5. Cross-owner rejection
 # =========================================================================
 

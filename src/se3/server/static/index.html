@@ -265,6 +265,28 @@
     </div>
   </div>
 
+  <!-- Start-flow-from-issue modal: confirm launch + optional discovery step. -->
+  <div id="issue-launch-modal" class="modal hidden">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-head">
+        <h3 id="issue-launch-title">从 Issue 启动 Flow</h3>
+        <button id="issue-launch-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="issue-launch-message"></p>
+        <label class="checkbox-label" for="issue-launch-discover">
+          <input type="checkbox" id="issue-launch-discover">
+          先进入 discovery 步骤（多轮需求澄清）
+        </label>
+        <p id="issue-launch-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="issue-launch-confirm">启动 flow</button>
+          <button type="button" id="issue-launch-cancel" class="ghost-btn">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Running-flow chat view — a full-screen, history-parity layout: a
        sidebar for Overview/Steps/Machine, a scrollable conversation as the
        main body, prominent intervention items, and a docked reply box. -->

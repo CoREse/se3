@@ -55,8 +55,11 @@ _HISTORY_POLL_INTERVAL = 1.0
 #: Type of the snapshot provider — returns a JSON-serializable machine snapshot.
 SnapshotProvider = Callable[[], Dict[str, Any]]
 #: Type of the spawn handler — called with
-#: (task_description, project_root, task_type, discover).
-SpawnHandler = Callable[[str, str, str, bool], Any]
+#: (task_description, project_root, task_type, discover) for a fresh spawn, and
+#: with an extra (… , from_issue_id) 5th positional when the SPAWN_FLOW carries
+#: a non-empty ``from_issue_id``. The 5th argument is passed only on the
+#: from-issue path so legacy 4-argument handlers keep working unchanged.
+SpawnHandler = Callable[..., Any]
 #: Type of the project-init handler — called with ``project_root`` before
 #: SPAWN_FLOW is routed to the spawn handler. Returns an object whose
 #: truthy ``.error`` attribute aborts the spawn; ``None`` means "skip the
@@ -677,8 +680,12 @@ class DaemonClient:
             return
 
         # -- fresh-spawn path (no resume_flow_id) --------------------------
+        # A ``from_issue_id`` selects the from-issue spawn variant: the CLI
+        # sources the task from the issue itself, so an empty task_description
+        # is allowed here (it would be ignored on the argv anyway).
+        from_issue_id = str(payload.get("from_issue_id") or "").strip()
         task = str(payload.get("task_description") or "").strip()
-        if not task:
+        if not task and not from_issue_id:
             logger.warning("Ignoring SPAWN_FLOW with empty task_description")
             return
         task_type = str(payload.get("task_type") or "feature")
@@ -704,8 +711,16 @@ class DaemonClient:
                 )
                 return
         try:
-            self._spawn_handler(task, project_root, task_type, discover)
-            logger.info("SPAWN_FLOW handled: %s", task[:80])
+            # The from_issue_id 5th positional is passed only when present so
+            # legacy 4-argument spawn handlers stay backward compatible.
+            if from_issue_id:
+                self._spawn_handler(
+                    task, project_root, task_type, discover, from_issue_id
+                )
+                logger.info("SPAWN_FLOW handled from issue %s", from_issue_id)
+            else:
+                self._spawn_handler(task, project_root, task_type, discover)
+                logger.info("SPAWN_FLOW handled: %s", task[:80])
         except Exception:
             logger.exception("SPAWN_FLOW handler failed")
             return

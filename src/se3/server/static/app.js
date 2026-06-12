@@ -130,6 +130,10 @@ const state = {
   _issuesRefreshPending: false,// true when a refresh was requested while in-flight
   selectedIssueId: null,       // composite key (machine_id::project_root::id) shown in detail pane
   issuesLoading: false,        // true while fetching issues
+  // Set of issue composite keys for which a "start flow from issue" request is
+  // in-flight.  Prevents duplicate POST /api/flows dispatches and disables the
+  // launch button until the server responds (success or error).
+  issueLaunchRequests: new Set(),
   // ---- Resume flow tracking ----
   // Set of flow_ids for which a resume request is currently in-flight.
   // Prevents duplicate POST /api/flows/{id}/resume calls and disables the
@@ -1031,6 +1035,51 @@ function buildIssueActionBody(machineId, projectRoot, reason) {
   if (projectRoot) body.project_root = projectRoot;
   if (reason) body.reason = reason;
   return body;
+}
+
+// Human-readable disable reasons for the "从此 issue 启动 flow" entry, keyed by
+// the non-open statuses an issue can carry.  Used by issueLaunchModel.  Pure.
+const ISSUE_LAUNCH_DISABLED_REASONS = {
+  "in-progress": "issue 进行中，无法重复启动 flow",
+  "resolved": "issue 已解决，无需启动 flow",
+  "won't-fix": "issue 已标记为不修复",
+  "closed": "issue 已关闭",
+};
+
+// Decide whether a flow may be started from an issue.  Only `open` issues are
+// launchable from the UI; every other status is disabled with a human-readable
+// reason (the daemon still performs the final in-progress race check).  Pure.
+function issueLaunchModel(iss) {
+  if (!iss || typeof iss !== "object") {
+    return { canLaunch: false, reason: "issue 无效" };
+  }
+  const status = (iss.status == null ? "open" : String(iss.status))
+    .trim()
+    .toLowerCase() || "open";
+  if (status === "open") {
+    return { canLaunch: true, reason: "" };
+  }
+  return {
+    canLaunch: false,
+    reason:
+      ISSUE_LAUNCH_DISABLED_REASONS[status] ||
+      `issue 状态为 ${status}，无法启动 flow`,
+  };
+}
+
+// Build the ``POST /api/flows`` body for starting a flow from an issue.  The
+// issue's machine/project are passed so the server can reject a target
+// mismatch; the server re-resolves them owner-scoped and ignores the task
+// content (the issue description becomes the task).  Pure.
+function buildIssueFlowBody(iss, discover) {
+  const id = iss && iss.id != null ? String(iss.id) : "";
+  return {
+    from_issue_id: id,
+    machine_id: issueMachineId(iss),
+    project_root: iss && iss.project_root ? String(iss.project_root) : "",
+    task: "",
+    discover: Boolean(discover),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -3057,6 +3106,10 @@ function renderIssuesList() {
     }
     card.appendChild(meta);
 
+    const rowActions = el("div", "issue-item-actions");
+    rowActions.appendChild(makeIssueLaunchButton(iss, "issue-item-launch"));
+    card.appendChild(rowActions);
+
     card.addEventListener("click", () => openIssueDetail(issueCompositeKey(iss)));
     list.appendChild(card);
   }
@@ -3130,6 +3183,7 @@ function renderIssueDetail(issueId) {
 
   // Action buttons
   const actions = el("div", "issue-detail-actions");
+  actions.appendChild(makeIssueLaunchButton(iss, "issue-detail-launch"));
   const editBtn = el("button", "ghost-btn", "编辑");
   editBtn.type = "button";
   editBtn.addEventListener("click", () => openIssueEditModal(iss));
@@ -3468,6 +3522,126 @@ async function confirmIssueAction() {
   } finally {
     confirmBtn.disabled = false;
     _issueActionPending = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Start a flow from an issue
+// ---------------------------------------------------------------------------
+//
+// Only `open` issues can be launched from the UI (issueLaunchModel). The
+// button is always rendered — for a non-open issue it stays visible but
+// disabled with the reason as its tooltip, matching the "可见但置灰" contract.
+// Clicking opens a small modal carrying a discovery checkbox (reusing the
+// New Task start-from-discovery interaction), then dispatches POST /api/flows
+// with the issue's machine/project and from_issue_id.
+
+function isIssueLaunchInProgress(key) {
+  return state.issueLaunchRequests.has(key);
+}
+
+// Build the "启动 flow" button for an issue (list row or detail pane).  When
+// the issue is not open the button is rendered disabled with the reason as its
+// title, so the entry is visible but greyed out.
+function makeIssueLaunchButton(iss, extraClass) {
+  const model = issueLaunchModel(iss);
+  const btn = el("button", "ghost-btn issue-launch-btn" + (extraClass ? " " + extraClass : ""), "启动 flow");
+  btn.type = "button";
+  if (!model.canLaunch) {
+    btn.disabled = true;
+    btn.classList.add("disabled");
+    btn.title = model.reason;
+  } else if (isIssueLaunchInProgress(issueCompositeKey(iss))) {
+    btn.disabled = true;
+    btn.title = "正在派发…";
+  } else {
+    btn.title = "从此 issue 启动一个新的 flow";
+  }
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (btn.disabled) return;
+    openIssueLaunchModal(iss);
+  });
+  return btn;
+}
+
+function openIssueLaunchModal(iss) {
+  if (!iss) return;
+  const model = issueLaunchModel(iss);
+  if (!model.canLaunch) {
+    showToast("error", model.reason);
+    return;
+  }
+  const modal = $("issue-launch-modal");
+  if (!modal) return;
+  const titleNode = $("issue-launch-title");
+  const msgNode = $("issue-launch-message");
+  const discoverInput = $("issue-launch-discover");
+  const errBox = $("issue-launch-error");
+  if (titleNode) titleNode.textContent = "从 Issue 启动 Flow";
+  if (msgNode) {
+    msgNode.textContent =
+      "将从 Issue #" + (iss.id || "?") + "（" + issueDisplayTitle(iss) + "）启动一个新的 flow。";
+  }
+  if (discoverInput) discoverInput.checked = false;
+  if (errBox) errBox.classList.add("hidden");
+  modal.dataset.issueKey = issueCompositeKey(iss);
+  modal.dataset.machineId = issueMachineId(iss);
+  modal.dataset.projectRoot = iss.project_root || "";
+  modal.dataset.issueId = iss.id || "";
+  modal.classList.remove("hidden");
+}
+
+function closeIssueLaunchModal() {
+  const modal = $("issue-launch-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function confirmIssueLaunch() {
+  const modal = $("issue-launch-modal");
+  if (!modal) return;
+  const key = modal.dataset.issueKey || "";
+  if (key && isIssueLaunchInProgress(key)) return; // debounce
+  const errBox = $("issue-launch-error");
+  if (errBox) errBox.classList.add("hidden");
+
+  // Find the live issue object so we send its current machine/project.
+  const iss =
+    (state.issues || []).find((i) => i && issueCompositeKey(i) === key) || {
+      id: modal.dataset.issueId,
+      machine_id: modal.dataset.machineId,
+      project_root: modal.dataset.projectRoot,
+    };
+  const discover = Boolean($("issue-launch-discover") && $("issue-launch-discover").checked);
+  const body = buildIssueFlowBody(iss, discover);
+
+  const confirmBtn = $("issue-launch-confirm");
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (key) state.issueLaunchRequests.add(key);
+  renderIssuesList();
+
+  try {
+    const resp = await authedFetch("/api/flows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (resp.status === 202) {
+      closeIssueLaunchModal();
+      showToast("success", "已从 Issue 派发 flow。");
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      const message = detail.detail || `Server returned ${resp.status}.`;
+      if (errBox) showFormError(errBox, message);
+      showToast("error", `启动 flow 失败：${message}`);
+    }
+  } catch (_) {
+    if (errBox) showFormError(errBox, "Network error — could not reach the server.");
+    showToast("error", "启动 flow 失败 — 网络错误。");
+  } finally {
+    if (key) state.issueLaunchRequests.delete(key);
+    if (confirmBtn) confirmBtn.disabled = false;
+    renderIssuesList();
   }
 }
 
@@ -9069,6 +9243,26 @@ function init() {
     if (e.target.id === "issue-action-modal") closeIssueActionModal();
   });
 
+  // Issue launch (start flow from issue) modal.
+  const issueLaunchConfirm = $("issue-launch-confirm");
+  if (issueLaunchConfirm) {
+    issueLaunchConfirm.addEventListener("click", confirmIssueLaunch);
+  }
+  const issueLaunchCancel = $("issue-launch-cancel");
+  if (issueLaunchCancel) {
+    issueLaunchCancel.addEventListener("click", closeIssueLaunchModal);
+  }
+  const issueLaunchClose = $("issue-launch-close");
+  if (issueLaunchClose) {
+    issueLaunchClose.addEventListener("click", closeIssueLaunchModal);
+  }
+  const issueLaunchModal = $("issue-launch-modal");
+  if (issueLaunchModal) {
+    issueLaunchModal.addEventListener("click", (e) => {
+      if (e.target.id === "issue-launch-modal") closeIssueLaunchModal();
+    });
+  }
+
   // Narrow-screen History panel switch: return from the session detail to the
   // session list. Inert on desktop (the back button is hidden and both panes
   // render).
@@ -9311,6 +9505,11 @@ if (typeof module !== "undefined" && module.exports) {
     buildIssueCreateBody,
     buildIssueEditBody,
     buildIssueActionBody,
+    // Start-flow-from-issue pure helpers (G4) — exposed for the DOM-free tests
+    // in tests/frontend/issue_management.test.mjs.
+    issueLaunchModel,
+    buildIssueFlowBody,
+    ISSUE_LAUNCH_DISABLED_REASONS,
     parseTagsFromString,
     formatTagsForInput,
     selectTypeDropdownOptions,

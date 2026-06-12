@@ -747,4 +747,85 @@ export function registerIssueManagementTests(ctx) {
     const roots = ["/projA"];
     assert.equal(app.pickDefaultIssueProjectRoot(roots, null), "");
   });
+
+  // ---- (l) issueLaunchModel — start-flow-from-issue gating (G4) -------------
+
+  check("G4 issueLaunchModel: open issue is launchable", () => {
+    const m = app.issueLaunchModel({ id: "001", status: "open" });
+    assert.equal(m.canLaunch, true);
+    assert.equal(m.reason, "");
+  });
+
+  check("G4 issueLaunchModel: missing status defaults to open and is launchable", () => {
+    assert.equal(app.issueLaunchModel({ id: "001" }).canLaunch, true);
+  });
+
+  check("G4 issueLaunchModel: in-progress is disabled with a reason", () => {
+    const m = app.issueLaunchModel({ id: "001", status: "in-progress" });
+    assert.equal(m.canLaunch, false);
+    assert.ok(m.reason.length > 0);
+  });
+
+  check("G4 issueLaunchModel: resolved / won't-fix / closed are all disabled", () => {
+    for (const status of ["resolved", "won't-fix", "closed"]) {
+      const m = app.issueLaunchModel({ id: "001", status });
+      assert.equal(m.canLaunch, false, `status ${status} should be disabled`);
+      assert.ok(m.reason.length > 0, `status ${status} should carry a reason`);
+    }
+  });
+
+  check("G4 issueLaunchModel: status matching is case-insensitive and trimmed", () => {
+    assert.equal(app.issueLaunchModel({ status: "  OPEN  " }).canLaunch, true);
+    assert.equal(app.issueLaunchModel({ status: "In-Progress" }).canLaunch, false);
+  });
+
+  check("G4 issueLaunchModel: an unknown status is disabled with a generic reason", () => {
+    const m = app.issueLaunchModel({ id: "001", status: "weird" });
+    assert.equal(m.canLaunch, false);
+    assert.ok(m.reason.includes("weird"));
+  });
+
+  check("G4 issueLaunchModel: a non-object is disabled", () => {
+    assert.equal(app.issueLaunchModel(null).canLaunch, false);
+    assert.equal(app.issueLaunchModel(undefined).canLaunch, false);
+  });
+
+  // ---- (m) buildIssueFlowBody — POST /api/flows from-issue body (G4) --------
+
+  check("G4 buildIssueFlowBody: carries issue id, machine/project and discover", () => {
+    const iss = {
+      id: "042",
+      machine_id: "m1",
+      project_root: "/proj",
+      status: "open",
+    };
+    const body = app.buildIssueFlowBody(iss, false);
+    assert.equal(body.from_issue_id, "042");
+    assert.equal(body.machine_id, "m1");
+    assert.equal(body.project_root, "/proj");
+    assert.equal(body.discover, false);
+    // task content is intentionally empty — the daemon sources it from the issue.
+    assert.equal(body.task, "");
+  });
+
+  check("G4 buildIssueFlowBody: threads the discover flag through", () => {
+    const iss = { id: "042", machine_id: "m1", project_root: "/proj" };
+    assert.equal(app.buildIssueFlowBody(iss, true).discover, true);
+    // Non-boolean discover is coerced.
+    assert.equal(app.buildIssueFlowBody(iss, 1).discover, true);
+    assert.equal(app.buildIssueFlowBody(iss, undefined).discover, false);
+  });
+
+  check("G4 buildIssueFlowBody: honors the _machine_id REST key fallback", () => {
+    // issueMachineId reads machine_id OR _machine_id (the aggregated REST shape).
+    const iss = { id: "042", _machine_id: "mX", project_root: "/proj" };
+    assert.equal(app.buildIssueFlowBody(iss, false).machine_id, "mX");
+  });
+
+  check("G4 buildIssueFlowBody: coerces numeric id to string and tolerates a bare issue", () => {
+    const body = app.buildIssueFlowBody({ id: 7 }, false);
+    assert.equal(body.from_issue_id, "7");
+    assert.equal(body.machine_id, "");
+    assert.equal(body.project_root, "");
+  });
 }
