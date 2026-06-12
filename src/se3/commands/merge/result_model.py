@@ -78,6 +78,12 @@ class EvidenceRecord:
     exception_type: Optional[str] = None
     exception_msg: Optional[str] = None
 
+    # --- Spec volume-governance evidence (size checks) ---
+    size_bytes: Optional[int] = None
+    limit_bytes: Optional[int] = None
+    spec_name: Optional[str] = None
+    requirement_name: Optional[str] = None
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dict, omitting fields whose value is ``None``.
 

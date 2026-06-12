@@ -855,6 +855,146 @@ def check_spec_diff(original_text: str, new_text: str, file_path: str = "<unknow
     return violations
 
 
+# Violation-type discriminators for the spec volume-governance size checks.
+# These are distinct from the merge content checks (WEAKENING / DELETE /
+# CHECK_FAILURE / CHECK_INCOMPLETE) so consumers can dispatch on them.
+SIZE_BASE = "SIZE_BASE"
+SIZE_SPEC_FILE = "SIZE_SPEC_FILE"
+SIZE_REQUIREMENT = "SIZE_REQUIREMENT"
+
+
+def _rel_spec_path(project_root: Path, spec_path: Path) -> str:
+    """Return ``spec_path`` relative to ``project_root`` (posix), best effort."""
+    try:
+        return spec_path.resolve().relative_to(project_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return spec_path.as_posix()
+
+
+def check_spec_sizes(project_root: Path, config) -> list[GuardrailViolation]:
+    """Check spec volume-governance size limits over a whole project.
+
+    A pure, LLM-free check that walks every ``se3/specs/<name>/spec.md`` under
+    *project_root* and reports a :class:`GuardrailViolation` for each of three
+    independent size budgets defined by *config* (a
+    :class:`se3.config.SpecGovernanceConfig`):
+
+    * ``SIZE_BASE`` — the ``base`` spec exceeds ``config.base_max_bytes``.
+      ``base`` is the only spec injected in full into every step, so its byte
+      size is a fixed per-call cost; it carries its own stricter budget and is
+      excluded from the per-spec-file check below to avoid a redundant report.
+    * ``SIZE_SPEC_FILE`` — any non-base spec file exceeds
+      ``config.spec_file_warn_bytes`` (a refactor-evaluation signal).
+    * ``SIZE_REQUIREMENT`` — any single Requirement (heading + body, the unit
+      injected in items mode and emitted by ``se3 spec show``) exceeds
+      ``config.requirement_warn_bytes`` (a split-the-Requirement signal).
+
+    Byte sizes are measured as UTF-8 byte lengths. Each violation carries
+    structured ``evidence`` with ``size_bytes`` / ``limit_bytes`` (and the
+    ``spec_name`` / ``requirement_name`` where applicable).
+
+    The function never raises on a malformed or unreadable spec — a file that
+    cannot be read or parsed is skipped (its size cannot be measured) so a
+    single bad file never aborts the whole check. Output order is deterministic
+    (specs in sorted path order; Requirements in document order).
+
+    Args:
+        project_root: Project root containing ``se3/specs/``.
+        config: A ``SpecGovernanceConfig`` carrying the byte thresholds.
+
+    Returns:
+        List of size :class:`GuardrailViolation` objects (empty when every
+        spec is within budget). The tier (warn vs enforce) is applied by the
+        caller, not here.
+    """
+    from ...utils import discover_specs
+    from ..spec_format import parse_spec
+
+    violations: list[GuardrailViolation] = []
+
+    base_max = config.base_max_bytes
+    file_warn = config.spec_file_warn_bytes
+    req_warn = config.requirement_warn_bytes
+
+    for spec_str in discover_specs(str(project_root)):
+        spec_path = Path(spec_str)
+        spec_name = spec_path.parent.name
+        rel_path = _rel_spec_path(project_root, spec_path)
+
+        try:
+            raw = spec_path.read_bytes()
+        except OSError:
+            # Unreadable file: cannot measure; skip rather than abort.
+            continue
+
+        file_bytes = len(raw)
+        is_base = spec_name == "base"
+
+        if is_base:
+            if file_bytes > base_max:
+                violations.append(GuardrailViolation(
+                    file_path=rel_path,
+                    violation_type=SIZE_BASE,
+                    message=(
+                        f"base spec is {file_bytes} bytes, exceeding the "
+                        f"base size limit of {base_max} bytes; base is injected "
+                        f"in full into every step — move module-specific detail "
+                        f"into the corresponding module spec."
+                    ),
+                    evidence=_evidence_dict(
+                        spec_name=spec_name,
+                        size_bytes=file_bytes,
+                        limit_bytes=base_max,
+                    ),
+                ))
+        else:
+            if file_bytes > file_warn:
+                violations.append(GuardrailViolation(
+                    file_path=rel_path,
+                    violation_type=SIZE_SPEC_FILE,
+                    message=(
+                        f"spec '{spec_name}' is {file_bytes} bytes, exceeding "
+                        f"the spec-file warning threshold of {file_warn} bytes; "
+                        f"evaluate whether it is multi-topic and should be split "
+                        f"into parallel specs."
+                    ),
+                    evidence=_evidence_dict(
+                        spec_name=spec_name,
+                        size_bytes=file_bytes,
+                        limit_bytes=file_warn,
+                    ),
+                ))
+
+        # Per-Requirement size check (applies to every spec including base).
+        try:
+            parsed = parse_spec(raw.decode("utf-8", errors="replace"))
+        except Exception:  # pragma: no cover - parse_spec is defensive
+            continue
+
+        for req in parsed.requirements:
+            block = f"### Requirement: {req.name}\n{req.body}"
+            req_bytes = len(block.encode("utf-8"))
+            if req_bytes > req_warn:
+                violations.append(GuardrailViolation(
+                    file_path=rel_path,
+                    violation_type=SIZE_REQUIREMENT,
+                    message=(
+                        f"Requirement '{req.name}' in spec '{spec_name}' is "
+                        f"{req_bytes} bytes, exceeding the single-Requirement "
+                        f"warning threshold of {req_warn} bytes; split it into "
+                        f"multiple smaller Requirements."
+                    ),
+                    evidence=_evidence_dict(
+                        spec_name=spec_name,
+                        requirement_name=req.name,
+                        size_bytes=req_bytes,
+                        limit_bytes=req_warn,
+                    ),
+                ))
+
+    return violations
+
+
 def _next_non_blank_line(
     lines: list[str], start: int,
 ) -> tuple[int, str]:
