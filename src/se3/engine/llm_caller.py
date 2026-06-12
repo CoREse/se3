@@ -681,8 +681,13 @@ class LLMCaller:
         agents: Optional[List[Dict[str, Any]]] = None,
         stream_prefix: str = '',
         fix_iteration: int = 0,
+        self_check_pass_index: Optional[int] = None,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
+        # 1-based self_check pass index used to select the per-pass agent
+        # chain when ``llm_caller.steps.self_check`` is a nested list. Only
+        # meaningful for the self_check step; ignored otherwise.
+        self.self_check_pass_index = self_check_pass_index
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.flow_id = flow_id
@@ -720,7 +725,10 @@ class LLMCaller:
             self._agents = agents
         else:
             from ..config import resolve_agents
-            resolved, is_override = resolve_agents(self.project_root, self.step_type)
+            resolved, is_override = resolve_agents(
+                self.project_root, self.step_type,
+                self_check_pass_index=self.self_check_pass_index,
+            )
             if is_override:
                 logger.info(
                     "Using per-step agent override for step '%s' (%d agent(s))",

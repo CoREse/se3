@@ -39,12 +39,14 @@ def _reset_module_caches():
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
     yield
     _cfg._warned_unknown_step_keys_for.clear()
     _cfg._warned_non_dict_llm_caller_for.clear()
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
 
 
 def _no_global(tmp_path):
@@ -226,8 +228,8 @@ class TestClaudeCommandsLegacyMigration:
         with _no_global(tmp_path):
             chain = load_agents(tmp_path)
 
-        # Chain is sorted by priority descending.
-        assert [a["name"] for a in chain] == ["claude-dev", "claude"]
+        # Chain preserves the legacy entry order — priority is ignored.
+        assert [a["name"] for a in chain] == ["claude", "claude-dev"]
 
     def test_claude_commands_ignored_when_agents_present(self, tmp_path, caplog):
         (tmp_path / "se3.yaml").write_text(

@@ -561,6 +561,11 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step_type=step.step_type.value,
             external_attempt=retry_count,
             fix_iteration=fix_iteration,
+            # Select the per-pass agent chain when a nested
+            # ``llm_caller.steps.self_check`` is configured. Each fix-loop
+            # round resets pass_index to 1 (state machine), so the first
+            # pass of every round re-selects the first chain.
+            self_check_pass_index=pass_index,
         )
         response = caller.call(
             prompt=prompt,

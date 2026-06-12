@@ -19,7 +19,11 @@ from unittest.mock import patch
 import pytest
 
 import se3.config as _cfg
-from se3.config import load_step_agents
+from se3.config import (
+    load_self_check_resolution,
+    load_step_agents,
+    resolve_agents,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -36,12 +40,14 @@ def _reset_module_caches():
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
     yield
     _cfg._warned_unknown_step_keys_for.clear()
     _cfg._warned_non_dict_llm_caller_for.clear()
     _cfg._warned_list_agents_for.clear()
     _cfg._warned_claude_commands_ignored_for.clear()
     _cfg._warned_claude_commands_deprecated_for.clear()
+    _cfg._warned_agent_priority_deprecated_for.clear()
 
 
 _REGISTRY_YAML = """agents:
@@ -76,7 +82,7 @@ class TestLoadStepAgentsNoConfig:
 
 
 class TestLoadStepAgentsLegalDeclaration:
-    def test_name_list_resolves_and_sorts_by_priority(self, tmp_path):
+    def test_name_list_preserves_written_order(self, tmp_path):
         (tmp_path / "se3.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
@@ -87,8 +93,8 @@ class TestLoadStepAgentsLegalDeclaration:
             agents = load_step_agents(tmp_path, "implement")
 
         assert agents is not None
-        # Sorted by priority descending: opus(20) > primary(10) > small(1).
-        assert [a["name"] for a in agents] == ["opus", "primary", "small"]
+        # Written order is preserved — priority is ignored for ordering.
+        assert [a["name"] for a in agents] == ["small", "opus", "primary"]
         assert all(a["type"] == "claude-code" for a in agents)
 
     def test_single_name_reference(self, tmp_path):
@@ -398,3 +404,168 @@ class TestUnknownStepKey:
         )
         with patch("se3.config.Path.home", return_value=tmp_path):
             assert load_step_agents(tmp_path, "not_a_real_step") is None
+
+
+# ---------------------------------------------------------------------------
+# Nested self_check schema (per-pass agent chains)
+# ---------------------------------------------------------------------------
+
+
+class TestSelfCheckFlatSchema:
+    """A flat self_check list is one chain reused for every pass."""
+
+    def test_flat_list_single_chain_all_passes(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    self_check: [opus, primary]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            res = load_self_check_resolution(tmp_path)
+
+        assert res.form == "flat"
+        assert res.chain_count == 1
+        names = [a["name"] for a in res.chain_for_pass(1)]
+        assert names == ["opus", "primary"]
+        # Pass 2 reuses the same (only) chain.
+        assert [a["name"] for a in res.chain_for_pass(2)] == ["opus", "primary"]
+
+    def test_flat_resolve_agents_is_override_for_all_passes(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    self_check: [opus]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            agents1, override1 = resolve_agents(
+                tmp_path, "self_check", self_check_pass_index=1)
+            agents2, override2 = resolve_agents(
+                tmp_path, "self_check", self_check_pass_index=2)
+
+        assert override1 and override2
+        assert [a["name"] for a in agents1] == ["opus"]
+        assert [a["name"] for a in agents2] == ["opus"]
+
+
+class TestSelfCheckNestedSchema:
+    """A nested self_check list selects a chain by 1-based pass index."""
+
+    def test_nested_chains_per_pass(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [primary]
+      - [opus, backup]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            res = load_self_check_resolution(tmp_path)
+
+        assert res.form == "nested"
+        assert res.chain_count == 2
+        assert [a["name"] for a in res.chain_for_pass(1)] == ["primary"]
+        assert [a["name"] for a in res.chain_for_pass(2)] == ["opus", "backup"]
+
+    def test_nested_pass_beyond_count_reuses_last_chain(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [primary]
+      - [opus, backup]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            res = load_self_check_resolution(tmp_path)
+            # Pass 3 / 4 reuse the last chain.
+            agents3, override3 = resolve_agents(
+                tmp_path, "self_check", self_check_pass_index=3)
+
+        assert [a["name"] for a in res.chain_for_pass(3)] == ["opus", "backup"]
+        assert [a["name"] for a in res.chain_for_pass(99)] == ["opus", "backup"]
+        assert override3
+        assert [a["name"] for a in agents3] == ["opus", "backup"]
+
+    def test_nested_resolve_agents_selects_per_pass(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [primary]
+      - [opus]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            a1, o1 = resolve_agents(tmp_path, "self_check", self_check_pass_index=1)
+            a2, o2 = resolve_agents(tmp_path, "self_check", self_check_pass_index=2)
+
+        assert o1 and o2
+        assert [a["name"] for a in a1] == ["primary"]
+        assert [a["name"] for a in a2] == ["opus"]
+
+    def test_nested_unknown_name_fails_fast(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    self_check:
+      - [primary]
+      - [doesnotexist]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with pytest.raises(ValueError) as exc_info:
+                load_self_check_resolution(tmp_path)
+        assert "doesnotexist" in str(exc_info.value)
+
+
+class TestSelfCheckMixedSchema:
+    """A mixed list (strings AND sub-lists) warns and falls back to defaults."""
+
+    def test_mixed_warns_and_falls_back(self, tmp_path, caplog):
+        import logging
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  defaults: [backup]
+  steps:
+    self_check:
+      - primary
+      - [opus]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with caplog.at_level(logging.WARNING, logger="se3.config"):
+                res = load_self_check_resolution(tmp_path)
+                agents, is_override = resolve_agents(
+                    tmp_path, "self_check", self_check_pass_index=1)
+
+        assert res.form == "default"
+        assert not res.is_override
+        assert any("mixes" in rec.message for rec in caplog.records)
+        # Falls back to llm_caller.defaults, NOT a step override.
+        assert is_override is False
+        assert [a["name"] for a in agents] == ["backup"]
+
+
+class TestSelfCheckNestedOnlyForSelfCheck:
+    """Nested lists are illegal for any step other than self_check."""
+
+    def test_nested_for_other_step_is_no_override(self, tmp_path, caplog):
+        import logging
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    implement:
+      - [opus]
+      - [primary]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with caplog.at_level(logging.WARNING, logger="se3.config"):
+                agents = load_step_agents(tmp_path, "implement")
+
+        # Sub-list entries are non-strings → skipped → no usable override.
+        assert agents is None
+        assert any("non-str entry" in rec.message for rec in caplog.records)
