@@ -26,7 +26,13 @@ from typing import Any, Dict, List
 
 from ..baseline_fix_memory import load_given_up, record_given_up
 from ..models import FlowInstance, Step, StepStatus
-from ..truncation import FAILURES_SECTION_MAX_CHARS, FIX_STDERR_TAIL_CHARS, TEST_HISTORY_STDERR_TAIL_CHARS, TEST_HISTORY_STDOUT_TAIL_CHARS
+from ..truncation import (
+    FAILURES_SECTION_MAX_CHARS,
+    FIX_STDERR_TAIL_CHARS,
+    TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS,
+    TEST_HISTORY_STDERR_TAIL_CHARS,
+    TEST_HISTORY_STDOUT_TAIL_CHARS,
+)
 from .implement import _sanitize_estimated_test_duration
 
 logger = logging.getLogger(__name__)
@@ -148,6 +154,55 @@ def _extract_failures_section(stdout: str, max_chars: int = FAILURES_SECTION_MAX
 
     result = header_line + "".join(truncated_blocks)
     return result[:max_chars]
+
+
+def _summarize_passed_phase_output(stdout: str, stderr: str) -> tuple[str, str]:
+    """Build the slimmed archive summary for a PASSED test phase.
+
+    A passed phase's full ``pytest -v`` stdout is pure noise in the archived
+    history (every line is a ``... PASSED`` line). Replace it with a compact
+    summary: a passed/failed count line derived from the parseable per-test
+    results, plus the tail of the output (which keeps the final
+    ``=== N passed in Ts ===`` summary line). Both stdout and stderr tails are
+    bounded by the centralized ``TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS`` limit.
+
+    Returns ``(slimmed_stdout, slimmed_stderr)``.
+    """
+    stdout = stdout or ""
+    stderr = stderr or ""
+    ids = _parse_test_ids(stdout)
+    passed = sum(1 for _tid, ok in ids if ok)
+    failed = sum(1 for _tid, ok in ids if not ok)
+    tail = stdout[-TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS:]
+    slimmed_stdout = (
+        f"[archived summary — passed phase: {passed} passed, {failed} failed; "
+        f"full stdout omitted to keep history compact, output tail follows]\n"
+        f"{tail}"
+    )
+    slimmed_stderr = stderr[-TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS:]
+    return slimmed_stdout, slimmed_stderr
+
+
+def _slim_passed_phase_archive(test_results: Dict[str, Any]) -> None:
+    """Slim the STORED stdout/stderr of PASSED phases in ``test_results``.
+
+    Mutates ``test_results`` in place: for every phase whose ``passed`` flag is
+    True, replaces its ``stdout`` / ``stderr`` with the compact summary from
+    :func:`_summarize_passed_phase_output`. The top-level ``stdout`` / ``stderr``
+    mirror the primary (default) phase, so they are slimmed together based on the
+    top-level ``passed`` flag. Failed phases are left untouched so their full
+    output remains available for diagnosis.
+    """
+    for phase in test_results.get("phases", []):
+        if phase.get("passed"):
+            phase["stdout"], phase["stderr"] = _summarize_passed_phase_output(
+                phase.get("stdout", ""), phase.get("stderr", ""),
+            )
+    # Top-level stdout/stderr are a copy of the primary (default) phase result.
+    if test_results.get("passed"):
+        test_results["stdout"], test_results["stderr"] = _summarize_passed_phase_output(
+            test_results.get("stdout", ""), test_results.get("stderr", ""),
+        )
 
 
 def _render_estimate(value: float | int | None) -> str:
@@ -324,6 +379,35 @@ def run_and_classify_tests(
     primary_result = _run_command(
         primary_command, project_root, primary_timeout,
     )
+
+    # 1b. Timeout retry: a timeout is NOT an assertion/test failure — it can be
+    #     a transient slowdown (machine load, cold caches, a one-off hang). Before
+    #     treating it as a real failure, retry the primary command ONCE in place
+    #     with the same command and timeout. Because this retry happens entirely
+    #     within a single test-step execution, it does NOT increment the
+    #     fix_iteration counter (the state machine bumps that only on a
+    #     REVISION_NEEDED transition back to implement). Only if the retry ALSO
+    #     times out do we fall through to the existing timeout→fix_context path
+    #     (which now explicitly labels the failure as a timeout, not an
+    #     assertion failure).
+    primary_retried_after_timeout = False
+    if primary_result.get("timed_out"):
+        logger.warning(
+            "Primary test command timed out after %ds; retrying once in place "
+            "before treating it as a failure (this retry does not count as a "
+            "fix iteration).",
+            primary_timeout,
+        )
+        primary_retried_after_timeout = True
+        primary_result = _run_command(
+            primary_command, project_root, primary_timeout,
+        )
+        if primary_result.get("timed_out"):
+            logger.warning(
+                "In-place retry of the primary test command also timed out "
+                "after %ds; entering the timeout-aware fix loop.",
+                primary_timeout,
+            )
 
     # 2. Classify primary results
     new_tests, regression = _classify_results(
@@ -675,8 +759,17 @@ Error output:
                 if primary_timeout_at_cap
                 else ""
             )
+            retry_note = (
+                " An automatic in-place retry of the same command also timed "
+                "out, so this is a persistent timeout rather than a one-off "
+                "slowdown."
+                if primary_retried_after_timeout
+                else ""
+            )
             fix_context["timeout_reason"] = (
-                f"Tests timed out after {primary_timeout}s. "
+                f"Tests timed out after {primary_timeout}s. This was a TIMEOUT, "
+                f"NOT an assertion / test-logic failure — the test suite did not "
+                f"finish within the time budget.{retry_note} "
                 f"Previous estimated_test_duration was {reported_estimate}. "
                 f"The timeout_multiplier is {config.timeout_multiplier}. "
                 f"Please provide a significantly higher estimated_test_duration to avoid repeated timeouts."
@@ -686,6 +779,11 @@ Error output:
             fix_context["previous_estimated_test_duration"] = sanitized_estimated_duration
             fix_context["timeout_multiplier"] = config.timeout_multiplier
             fix_context["timeout_at_cap"] = primary_timeout_at_cap
+            # Explicit machine-readable flags so the implement step (and any
+            # other consumer) can distinguish a timeout from an assertion
+            # failure without parsing the human-readable reason text.
+            fix_context["timed_out_not_assertion"] = True
+            fix_context["timeout_retried"] = primary_retried_after_timeout
             logger.warning(
                 "Test timed out (timeout=%ds, estimated=%s, at_cap=%s). Including timeout info in fix_context.",
                 primary_timeout, sanitized_estimated_duration, primary_timeout_at_cap,
@@ -707,6 +805,23 @@ Error output:
                 "investigate whether these phases are hanging or need their "
                 "phase-level `timeout` raised in se3.yaml.\n"
             )
+
+    # 9. Archive slimming of the STORED test_results copy.
+    #
+    # The full ``pytest -v`` stdout is carried on ``step.outputs["test_results"]``
+    # and written verbatim to the per-step history jsonl by HistorySink — the
+    # real bloat source. For a PASSED phase that stdout is pure noise (every line
+    # is a ``... PASSED`` line), so we replace the stored copy with a compact
+    # pass/fail count summary + a bounded tail (keeping the final
+    # ``=== N passed in Ts ===`` line). This runs AFTER every live use: the
+    # classification (_classify_results), the critical-acceptance gate, and the
+    # fix-instruction extraction all read the LOCAL ``primary_result`` (and
+    # fix_instructions was built from it above), never this stored dict, so the
+    # live verdict is fully decoupled from the slimmed archive copy. A FAILED
+    # phase keeps its full stdout so the failure stays diagnosable, and the
+    # independent ``critical_skipped`` / ``critical_missing`` fields are
+    # untouched.
+    _slim_passed_phase_archive(test_results)
 
     return TestVerdict(
         test_results=test_results,
