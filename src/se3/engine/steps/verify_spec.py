@@ -48,6 +48,22 @@ VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify
 ## Relevant Specifications
 {spec_content}
 
+## Spec Access Protocol (index-first — do NOT read whole specs or the index cache)
+
+The selected Requirements are embedded above. If you need MORE spec context than
+is shown, obtain it through the read-only `se3 spec` index commands — this is a
+read-only step, so the Bash and Read tools are available:
+
+- `se3 spec index` — root view: every spec's name, a one-sentence locator, and item count.
+- `se3 spec index <spec> [<group>...]` — drill into one spec's Requirement index; trailing group-path components open a folded domain group or a `pN` page.
+- `se3 spec show <spec>::<requirement>` — the authoritative body of ONE Requirement plus its physical location (file path + line range).
+
+You MUST NOT, for the purpose of gathering context, read an entire large spec
+file with the Read tool, and you MUST NOT read the index cache file
+`se3/cache/spec-index.json` directly — it is an internal, program-maintained
+format. Query the index commands above instead, then `se3 spec show` only the
+specific Requirements you need.
+
 ## Changes Made
 {changes_made}
 

@@ -562,7 +562,11 @@ class TestHandlerIntegrationPositive:
         assert INJECTION_MARKER in prompt
         assert INJECTION_REAL_SPECS in prompt
 
-    def test_update_spec_handler_injects_spec_names(self, tmp_path):
+    def test_update_spec_handler_injects_root_view_not_names_list(self, tmp_path):
+        """G7: update_spec consumes the root index view (name + one-sentence
+        locator + item count) produced by the `se3 spec index` renderer, REPLACING
+        the former plain spec-names list. The New Spec Decision step reads this
+        bounded navigation surface instead of a flat names dump."""
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.UPDATE_SPEC)
         step = Step(
@@ -582,9 +586,13 @@ class TestHandlerIntegrationPositive:
             from se3.engine.steps.update_spec import update_spec_handler
             update_spec_handler(step, flow)
             prompt = mock_caller.call.call_args[1]["prompt"]
-        assert INJECTION_HEADING in prompt
-        assert INJECTION_MARKER in prompt
-        assert INJECTION_REAL_SPECS in prompt
+        # Root index view replaces the plain names list.
+        assert "Root Index View" in prompt
+        assert "se3 spec index <spec>" in prompt
+        assert "se3 spec show <spec>::<requirement>" in prompt
+        # The former flat spec-names injection is no longer added by update_spec.
+        assert INJECTION_HEADING not in prompt
+        assert INJECTION_MARKER not in prompt
 
     def test_self_check_handler_injects_spec_names(self, tmp_path):
         _setup_project(tmp_path)

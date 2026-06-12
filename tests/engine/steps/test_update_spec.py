@@ -205,6 +205,7 @@ class TestFormatRedoGuidance:
             design_doc="No design document available.",
             specs_dir="/tmp/specs",
             redo_guidance="",
+            base_admission_standard="ADMISSION-STD",
         )
         assert "No specific spec changes planned." in rendered
         assert "No design document available." in rendered
@@ -219,6 +220,7 @@ class TestFormatRedoGuidance:
             design_doc="### Overview\nRefactor data flow.",
             specs_dir="/project/se3/specs",
             redo_guidance="",
+            base_admission_standard="ADMISSION-STD",
         )
         assert "[add_requirement] spec-a" in rendered
         assert "### Overview" in rendered

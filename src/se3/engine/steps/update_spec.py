@@ -13,6 +13,7 @@ from typing import Any
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..prompt_markers import inject_boundary
+from ..spec_governance import BASE_ADMISSION_STANDARD
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -38,16 +39,41 @@ UPDATE_SPEC_PROMPT = """You are an expert technical writer. Update the project s
 ## Specs Directory
 {specs_dir}
 
+## Spec Access Protocol (index-first — do NOT read whole specs or the index cache)
+
+Obtain spec context through the read-only `se3 spec` index commands. You MUST
+NOT, for the purpose of gathering context, read an entire large spec file with
+the Read tool, and you MUST NOT read the index cache file
+`se3/cache/spec-index.json` directly — it is an internal, program-maintained
+format, not an LLM-facing surface.
+
+- `se3 spec index` — root view: every spec's name, a one-sentence locator, and item count. Start here.
+- `se3 spec index <spec> [<group>...]` — drill into one spec's Requirement index (id / title / summary / tags); trailing group-path components open a folded domain group or a `pN` page.
+- `se3 spec show <spec>::<requirement>` — the authoritative body of ONE Requirement plus its physical location (file path + 1-based inclusive line range).
+
+**Directed edit of an existing Requirement (no whole-file reads):** to modify a
+Requirement that already exists, FIRST run `se3 spec show <spec>::<requirement>`
+to obtain its physical location (file path + line range), THEN Read ONLY that
+line range and Edit it in place. Never read the whole spec file for a localized
+change.
+
+{base_admission_standard}
+
 ## Instructions
-1. Read the relevant spec files in the specs directory using the Read tool.
+1. Use the index-first protocol above to locate the spec(s) and Requirement(s) that need updating — `se3 spec index` to navigate, `se3 spec show` to read a specific Requirement's body and its physical location. Do NOT read whole spec files or the index cache.
 2. If Spec Change Guidance is provided above, use it as your primary checklist for updates — execute each declared change intent (add, modify, deprecate) in the corresponding spec files. This is your guided mode.
 3. If no Spec Change Guidance is available, determine which specs need updating by analyzing the changes made and verification results. This is the inference mode.
-4. Use the Edit tool to directly modify the spec files. Follow existing formatting conventions.
+4. Use the Edit tool to directly modify the spec files — for an existing Requirement, do a directed Read+Edit on the physical line range returned by `se3 spec show`, never an integral read of the whole file. Follow existing formatting conventions.
 5. Only update specs that genuinely need changes — do not rewrite specs unnecessarily.
 6. Follow spec guardrails: do NOT delete existing requirements, only add or modify.
 7. If Design Context is provided, use it to understand the architectural rationale behind changes — this helps produce more accurate and well-motivated spec updates.
+8. Respect the base Spec Admission Standard above: when adding content would push the `base` spec over its size limit, route that content into the corresponding module spec rather than appending it to `base`.
 
 ## New Spec Decision (Mandatory)
+
+Consult the root index view appended below (the same view as `se3 spec index`),
+which lists every existing spec with a one-sentence locator, to check for naming
+collisions and to decide whether the new content belongs in an existing spec.
 
 Before appending ANY new Requirement to an existing spec, you MUST evaluate the following four criteria. ALL four must pass to append; if ANY fails, create a new spec.
 
@@ -65,8 +91,10 @@ Before appending ANY new Requirement to an existing spec, you MUST evaluate the 
 
 When creating a new spec:
 - Choose a concise, kebab-case directory name (e.g., `issue-discovery`, `test-runner`).
-- Include `## Purpose`, `## Requirements` with at least one `### Requirement: <name>`, and `#### Scenario:` blocks.
 - Add `<!-- spec-format: v1 -->` as the first line.
+- Immediately after the format marker, add a `<!-- domain: <layered/path> -->` header marker declaring the new spec's domain — a slash-separated classification path (e.g. `engine/steps`, `server/auth`) that places the spec above the spec level so the root index can group it. Choose the domain from where the subsystem lives relative to the existing specs in the root view.
+- Open `## Purpose` with a one-sentence locator stating, in a single line, what the spec is about (the root view shows each spec's name plus this locator).
+- Include `## Requirements` with at least one `### Requirement: <name>`, and `#### Scenario:` blocks.
 
 When you are done, output a JSON summary:
 ```json
@@ -157,13 +185,13 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         design_doc=design_doc_text,
         specs_dir=specs_dir,
         redo_guidance=redo_guidance_text,
+        base_admission_standard=BASE_ADMISSION_STANDARD,
     )
 
     # Append language instruction if configured
     from ..context_builder import (
         get_step_language_instruction,
         get_issue_discovery_injection,
-        get_spec_names_injection,
         get_runtime_environment_injection,
     )
     lang_instruction = get_step_language_instruction("update_spec", project_root)
@@ -175,12 +203,15 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if injection:
         prompt += injection
 
-    # Append available-specs names injection if applicable
-    spec_names = get_spec_names_injection(
-        "update_spec", project_root, step.inputs.get("relevant_specs"),
-    )
-    if spec_names:
-        prompt += spec_names
+    # Append the root index view (name + one-sentence locator + item count) for
+    # the New Spec Decision step. This replaces the former plain spec-names list
+    # (get_spec_names_injection): the root view is produced by the SAME renderer
+    # as `se3 spec index`, so the LLM sees a consistent navigation surface and
+    # can decide placement / detect naming collisions without reading whole spec
+    # files or the internal index cache.
+    root_view = _build_root_view_injection(project_root)
+    if root_view:
+        prompt += root_view
 
     # Append runtime environment injection if applicable
     runtime_env = get_runtime_environment_injection("update_spec", project_root)
@@ -376,6 +407,41 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Update spec step failed")
         step.error_message = f"Spec update failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _build_root_view_injection(project_root: Path) -> str:
+    """Render the spec-index root view for the New Spec Decision step.
+
+    Returns a self-describing section — the root view (every spec's name, a
+    one-sentence locator, and item count) produced by the SAME renderer as
+    ``se3 spec index`` — plus a one-line reminder of the drill / read commands.
+
+    The whole computation is read-only and never invokes the LLM. Any failure
+    (no specs yet, index build error, import problem) degrades to an empty
+    string so the step is never broken merely because the navigation aid could
+    not be assembled.
+    """
+    try:
+        from ..spec_index import load_or_build
+        from ..spec_index_render import render_index
+        from ...config import load_spec_governance_config
+
+        index = load_or_build(project_root)
+        threshold = load_spec_governance_config(project_root).index_render_threshold
+        root_view = render_index(index, threshold=threshold)
+        if not root_view or not root_view.strip():
+            return ""
+        return (
+            "\n\n## Existing Specs — Root Index View\n\n"
+            + root_view.rstrip("\n")
+            + "\n\nDrill in with `se3 spec index <spec> [<group>...]` and read a "
+            "single Requirement's body + physical location with "
+            "`se3 spec show <spec>::<requirement>`. Do NOT read whole spec files "
+            "or `se3/cache/spec-index.json`."
+        )
+    except Exception:
+        logger.debug("Failed to build root-view injection for update_spec", exc_info=True)
+        return ""
 
 
 def _format_redo_guidance(
