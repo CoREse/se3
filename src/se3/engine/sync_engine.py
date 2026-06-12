@@ -58,6 +58,32 @@ def _requirement_names(content: str) -> set[str]:
     return {m.group(1).strip() for m in _REQUIREMENT_HEADING_RE.finditer(content)}
 
 
+def _governance_prompt_injection(spec_name: str) -> str:
+    """Spec writing-discipline / split-criteria text appended to update prompts.
+
+    Every spec-update prompt the sync engine builds carries the per-Requirement
+    / per-spec writing discipline (a)-(d) and the cohesion-first split criteria,
+    so that any spec body the sub-agent (re)writes already follows the rules that
+    make the program-derived index views navigable. When the spec being updated
+    is ``base``, the base admission standard is prepended too, so module-level
+    detail is routed into the corresponding module spec rather than appended to
+    ``base``. ``update_spec`` (not sync) must never create a parallel spec on its
+    own; the split-criteria text states that responsibility split explicitly.
+    """
+    from .spec_governance import (
+        BASE_ADMISSION_STANDARD,
+        SPLIT_CRITERIA,
+        WRITING_DISCIPLINE,
+    )
+
+    sections = []
+    if spec_name == "base":
+        sections.append(BASE_ADMISSION_STANDARD)
+    sections.append(WRITING_DISCIPLINE)
+    sections.append(SPLIT_CRITERIA)
+    return "\n\n---\n\n" + "\n\n".join(sections) + "\n"
+
+
 class DiffType(Enum):
     """Type of difference between spec and code."""
 
@@ -794,6 +820,11 @@ class SyncEngine:
         from .context_builder import get_spec_language_instruction
         prompt += get_spec_language_instruction(self.project_root)
 
+        # Inject the spec writing discipline + split criteria (and the base
+        # admission standard when editing base) so the rewritten body follows
+        # the volume-governance rules.
+        prompt += _governance_prompt_injection(diff.spec_name)
+
         if self._update_spec_via_llm(diff.spec_name, prompt, llm_caller, llm_label):
             return True, f"{label_prefix}: {diff.description}"
         return False, ""
@@ -1226,6 +1257,435 @@ class SyncEngine:
                 )
 
     # ------------------------------------------------------------------
+    # Spec volume governance: base migration / parallel split / domain backfill
+    #
+    # All three are semantic-level refactors performed ONLY by sync. The
+    # *decision* (which Requirements, which target / new spec) is made by the
+    # LLM and confirmed by the user through the respond channel; the *mechanism*
+    # below is deterministic and never invokes an LLM (it only reads + rewrites
+    # spec text via the pure helpers in ``sync_governance``).
+    # ------------------------------------------------------------------
+
+    def _specs_dir(self) -> Path:
+        from .spec_index import SpecIndex
+
+        return SpecIndex._resolve_specs_dir(self.project_root)
+
+    def _all_spec_texts(self) -> Dict[str, Tuple[Path, str]]:
+        """Read every ``se3/specs/<name>/spec.md`` into ``{name: (path, text)}``."""
+        out: Dict[str, Tuple[Path, str]] = {}
+        specs_dir = self._specs_dir()
+        if not specs_dir.exists():
+            return out
+        for sub in sorted(specs_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            spec_file = sub / "spec.md"
+            if not spec_file.exists():
+                continue
+            try:
+                out[sub.name] = (spec_file, spec_file.read_text(encoding="utf-8"))
+            except OSError as exc:
+                logger.warning("Failed to read spec '%s': %s", sub.name, exc)
+        return out
+
+    def _rebuild_index(self) -> None:
+        """Full-rebuild the spec index so moved items get their new addresses."""
+        try:
+            from .spec_index import SpecIndex
+
+            idx = SpecIndex(self.project_root)
+            idx.build()
+            idx.save()
+        except Exception as exc:  # best-effort — index is derived data
+            logger.warning("Spec index rebuild after governance op failed: %s", exc)
+
+    def base_exceeds_limit(self) -> bool:
+        """True when the on-disk ``base`` spec is over its configured byte limit."""
+        from ..config import load_spec_governance_config
+
+        cfg = load_spec_governance_config(self.project_root)
+        specs = self._all_spec_texts()
+        base = specs.get("base")
+        if base is None:
+            return False
+        return len(base[1].encode("utf-8")) > cfg.base_max_bytes
+
+    def migrate_requirements(
+        self, migrations: List[Any]
+    ) -> Dict[str, Any]:
+        """Relocate the given ``base`` Requirements into their module specs.
+
+        ``migrations`` is a list of ``BaseMigration`` (``requirement_name`` +
+        ``target_spec``). Each Requirement block is cut from ``base`` and appended
+        to the target module spec; inter-spec ``base::<requirement>`` references
+        across every spec are relinked to ``<target>::<requirement>``. Every
+        changed spec is validated against the v1 structural contract BEFORE any
+        write — the whole migration aborts (writes nothing) if any changed spec
+        would become invalid, so the operation is atomic. On success the spec
+        index is rebuilt so moved items resolve at their new address.
+
+        Returns ``{"specs_updated": int, "migrated": [...], "skipped": [...]}``.
+        """
+        from .spec_validator import validate_spec_structure
+        from .sync_governance import (
+            append_requirements,
+            rewrite_moved_refs,
+            split_out_requirements,
+        )
+
+        specs = self._all_spec_texts()
+        result: Dict[str, Any] = {"specs_updated": 0, "migrated": [], "skipped": []}
+        if "base" not in specs:
+            logger.warning("migrate_requirements: no base spec on disk")
+            result["skipped"] = [getattr(m, "requirement_name", "") for m in migrations]
+            return result
+
+        base_path, base_text = specs["base"]
+        names = [getattr(m, "requirement_name", "") for m in migrations]
+        remaining_base, blocks = split_out_requirements(base_text, names)
+
+        target_to_blocks: Dict[str, List[str]] = {}
+        moves: Dict[Tuple[str, str], Tuple[str, str]] = {}
+        for mig in migrations:
+            name = getattr(mig, "requirement_name", "")
+            target = getattr(mig, "target_spec", "")
+            if name not in blocks or target not in specs or target == "base":
+                result["skipped"].append(name)
+                continue
+            target_to_blocks.setdefault(target, []).append(blocks[name])
+            moves[("base", name)] = (target, name)
+            result["migrated"].append({"requirement_name": name, "target_spec": target})
+
+        if not moves:
+            return result
+
+        # Build proposed new contents (base + targets), then relink refs across
+        # every spec so addresses stay consistent.
+        proposed: Dict[str, str] = {"base": remaining_base}
+        for target, blks in target_to_blocks.items():
+            proposed[target] = append_requirements(specs[target][1], blks)
+
+        changed: Dict[str, str] = {}
+        for name, (path, original) in specs.items():
+            candidate = proposed.get(name, original)
+            relinked = rewrite_moved_refs(candidate, moves)
+            if relinked != original:
+                changed[name] = relinked
+
+        # Atomic validation gate: any structural failure aborts the migration.
+        for name, content in changed.items():
+            validation = validate_spec_structure(content, name)
+            if not validation.passed:
+                logger.error(
+                    "Base migration aborted — '%s' would fail validation: %s",
+                    name, "; ".join(validation.errors),
+                )
+                return {
+                    "specs_updated": 0,
+                    "migrated": [],
+                    "skipped": names,
+                    "error": f"validation failed for {name}",
+                }
+
+        for name, content in changed.items():
+            try:
+                specs[name][0].write_text(content, encoding="utf-8")
+            except OSError as exc:
+                logger.error("Failed to write spec '%s' during migration: %s", name, exc)
+
+        result["specs_updated"] = len(changed)
+        self._rebuild_index()
+        return result
+
+    def apply_split(self, proposal: Any) -> Dict[str, Any]:
+        """Split a cluster of Requirements out of a spec into a parallel spec.
+
+        ``proposal`` is a ``SplitProposal`` (``source_spec`` / ``new_spec`` /
+        ``requirement_names`` / ``domain`` / ``purpose``). The named Requirements
+        are cut from the source spec and assembled into a brand-new parallel spec
+        carrying its own ``<!-- domain: ... -->`` marker; inter-spec
+        ``<source>::<requirement>`` references across every spec are relinked to
+        ``<new_spec>::<requirement>``. Both the trimmed source and the new spec
+        are validated before any write (atomic). On success the index is rebuilt
+        so the moved items resolve at their new ``<new_spec>::<requirement>``
+        addresses. Returns ``{"created": bool, "new_spec": str, ...}``.
+        """
+        from .spec_validator import validate_spec_structure
+        from .sync_governance import (
+            build_parallel_spec,
+            rewrite_moved_refs,
+            split_out_requirements,
+        )
+
+        source_spec = getattr(proposal, "source_spec", "")
+        new_spec = getattr(proposal, "new_spec", "")
+        req_names = list(getattr(proposal, "requirement_names", []) or [])
+        domain = getattr(proposal, "domain", None)
+        purpose = getattr(proposal, "purpose", "") or ""
+
+        specs = self._all_spec_texts()
+        if source_spec not in specs:
+            return {"created": False, "error": f"source spec '{source_spec}' not found"}
+        if new_spec in specs:
+            return {"created": False, "error": f"target spec '{new_spec}' already exists"}
+        if not req_names:
+            return {"created": False, "error": "no requirements to split"}
+
+        source_path, source_text = specs[source_spec]
+        remaining_source, blocks = split_out_requirements(source_text, req_names)
+        ordered_blocks = [blocks[n] for n in req_names if n in blocks]
+        if not ordered_blocks:
+            return {"created": False, "error": "none of the named requirements found"}
+
+        new_spec_text = build_parallel_spec(
+            new_spec, ordered_blocks, domain=domain, purpose=purpose
+        )
+        moves: Dict[Tuple[str, str], Tuple[str, str]] = {
+            (source_spec, n): (new_spec, n) for n in blocks
+        }
+
+        # Validate the trimmed source + new spec before writing anything.
+        for name, content in ((source_spec, remaining_source), (new_spec, new_spec_text)):
+            validation = validate_spec_structure(content, name)
+            if not validation.passed:
+                logger.error(
+                    "Spec split aborted — '%s' would fail validation: %s",
+                    name, "; ".join(validation.errors),
+                )
+                return {
+                    "created": False,
+                    "error": f"validation failed for {name}",
+                }
+
+        # Relink refs in every other spec.
+        changed: Dict[str, str] = {source_spec: rewrite_moved_refs(remaining_source, moves)}
+        for name, (path, original) in specs.items():
+            if name == source_spec:
+                continue
+            relinked = rewrite_moved_refs(original, moves)
+            if relinked != original:
+                changed[name] = relinked
+
+        # Write the trimmed source + relinked specs, then create the new spec.
+        for name, content in changed.items():
+            try:
+                specs[name][0].write_text(content, encoding="utf-8")
+            except OSError as exc:
+                logger.error("Failed to write spec '%s' during split: %s", name, exc)
+
+        new_dir = self._specs_dir() / new_spec
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+            (new_dir / "spec.md").write_text(new_spec_text, encoding="utf-8")
+        except OSError as exc:
+            logger.error("Failed to create parallel spec '%s': %s", new_spec, exc)
+            return {"created": False, "error": str(exc)}
+
+        self._rebuild_index()
+        return {
+            "created": True,
+            "new_spec": new_spec,
+            "source_spec": source_spec,
+            "moved_requirements": list(blocks.keys()),
+            "relinked_specs": [n for n in changed if n != source_spec],
+        }
+
+    def backfill_domains(self, domains: Dict[str, str]) -> List[str]:
+        """Backfill ``<!-- domain: ... -->`` markers for specs missing one.
+
+        ``domains`` maps spec name → domain path. Only specs that (a) are listed
+        in *domains*, (b) exist on disk, and (c) currently lack a domain marker
+        are touched. A spec absent from *domains* or already carrying a marker is
+        left unchanged — a missing domain never blocks sync; such specs simply
+        render under the "(未分类)" group. Returns the list of specs updated.
+        """
+        from .sync_governance import ensure_domain_marker, has_domain_marker
+
+        specs = self._all_spec_texts()
+        updated: List[str] = []
+        for name, domain in domains.items():
+            if not domain or not domain.strip():
+                continue
+            entry = specs.get(name)
+            if entry is None:
+                continue
+            path, text = entry
+            if has_domain_marker(text):
+                continue
+            new_text = ensure_domain_marker(text, domain)
+            if new_text != text:
+                try:
+                    path.write_text(new_text, encoding="utf-8")
+                    updated.append(name)
+                except OSError as exc:
+                    logger.warning("Failed to backfill domain for '%s': %s", name, exc)
+        if updated:
+            self._rebuild_index()
+        return updated
+
+    def specs_missing_domain(self) -> List[str]:
+        """Return the names of on-disk specs that declare no domain marker."""
+        from .sync_governance import has_domain_marker
+
+        missing: List[str] = []
+        for name, (path, text) in self._all_spec_texts().items():
+            if not has_domain_marker(text):
+                missing.append(name)
+        return sorted(missing)
+
+    @staticmethod
+    def _parse_json_array(raw: Any) -> List[Dict[str, Any]]:
+        """Parse a JSON array from LLM stdout (fence-tolerant). Returns ``[]`` on failure."""
+        if not isinstance(raw, str) or not raw.strip():
+            return []
+        cleaned = strip_markdown_fences(raw.strip()).strip()
+        try:
+            data = json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if isinstance(data, dict):
+            for key in ("migrations", "proposals", "items", "result"):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+        return data if isinstance(data, list) else []
+
+    def propose_base_migration(self, llm_caller: Any) -> Optional[Path]:
+        """LLM-assisted: propose which over-budget ``base`` Requirements to relocate.
+
+        Injects the base admission standard plus the list of base Requirements
+        and the available module specs, asks the LLM for a JSON array of
+        ``{"requirement_name", "target_spec"}`` entries, and writes a
+        ``sync_base_migration`` respond-channel call file. Returns the call-file
+        path, or ``None`` when base is within limit or the LLM proposes nothing.
+
+        This is the only LLM step in the base-migration flow; the actual content
+        move (``migrate_requirements`` via ``se3 sync-respond``) is pure.
+        """
+        from .spec_governance import BASE_ADMISSION_STANDARD
+        from .sync_governance import BaseMigration, requirement_names
+        from .sync_interaction import write_base_migration_call
+
+        specs = self._all_spec_texts()
+        base = specs.get("base")
+        if base is None:
+            return None
+        base_reqs = requirement_names(base[1])
+        module_specs = [n for n in specs if n != "base"]
+        if not base_reqs or not module_specs:
+            return None
+
+        prompt = (
+            "You are auditing the `base` spec against its admission standard.\n\n"
+            f"{BASE_ADMISSION_STANDARD}\n\n"
+            "## base Requirements\n"
+            + "\n".join(f"- {n}" for n in base_reqs)
+            + "\n\n## Available module specs (migration targets)\n"
+            + "\n".join(f"- {n}" for n in module_specs)
+            + "\n\n## Instructions\n"
+            "List ONLY the base Requirements that violate the admission standard "
+            "(module-specific detail that belongs in a module spec). Output a JSON "
+            "array; each entry is {\"requirement_name\": <exact base Requirement "
+            "name>, \"target_spec\": <one of the module specs above>}. Output an "
+            "empty array [] if base is already compliant. Output ONLY the JSON."
+        )
+        try:
+            raw = llm_caller.call(prompt=prompt, json_mode="off")
+        except Exception as exc:
+            logger.error("propose_base_migration LLM call failed: %s", exc)
+            return None
+
+        entries = self._parse_json_array(raw)
+        valid_reqs = set(base_reqs)
+        valid_targets = set(module_specs)
+        migrations: List[BaseMigration] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            req = entry.get("requirement_name", "")
+            target = entry.get("target_spec", "")
+            if req in valid_reqs and target in valid_targets:
+                migrations.append(
+                    BaseMigration(requirement_name=req, target_spec=target)
+                )
+        if not migrations:
+            return None
+        return write_base_migration_call(self.project_root, migrations)
+
+    def propose_spec_split(
+        self, spec_name: str, llm_caller: Any
+    ) -> Optional[Path]:
+        """LLM-assisted: propose splitting a multi-topic spec into a parallel spec.
+
+        Asks the LLM to cluster the spec's Requirements and, only when the spec
+        is genuinely multi-topic (sparse cross-cluster references), name a cluster
+        to move into a new parallel spec. Writes a ``sync_spec_split`` call file
+        and returns its path, or ``None`` when the spec is cohesive (no split) or
+        the LLM proposes nothing. ``update_spec`` never reaches this path — only
+        sync may create a parallel spec, and only after respond-channel approval.
+        """
+        from .spec_governance import SPLIT_CRITERIA
+        from .sync_governance import SplitProposal, requirement_names
+        from .sync_interaction import write_spec_split_call
+
+        specs = self._all_spec_texts()
+        entry = specs.get(spec_name)
+        if entry is None:
+            return None
+        reqs = requirement_names(entry[1])
+        if len(reqs) < 2:
+            return None
+
+        prompt = (
+            f"You are evaluating whether the `{spec_name}` spec should be split.\n\n"
+            f"{SPLIT_CRITERIA}\n\n"
+            f"## `{spec_name}` Requirements\n"
+            + "\n".join(f"- {n}" for n in reqs)
+            + "\n\n## Instructions\n"
+            "Apply cohesion before size. If `" + spec_name + "` is internally "
+            "cohesive, output an empty array []. Only if it is genuinely "
+            "multi-topic, output a JSON array with a SINGLE entry: "
+            "{\"new_spec\": <kebab-case new spec name>, \"requirement_names\": "
+            "[<exact Requirement names to move>], \"domain\": <layered/path or "
+            "null>, \"purpose\": <one-sentence locator>, \"rationale\": <why>}. "
+            "Output ONLY the JSON."
+        )
+        try:
+            raw = llm_caller.call(prompt=prompt, json_mode="off")
+        except Exception as exc:
+            logger.error("propose_spec_split LLM call failed: %s", exc)
+            return None
+
+        entries = self._parse_json_array(raw)
+        valid_reqs = set(reqs)
+        proposals: List[SplitProposal] = []
+        for entry_d in entries:
+            if not isinstance(entry_d, dict):
+                continue
+            new_spec = (entry_d.get("new_spec") or "").strip()
+            move = [
+                n for n in (entry_d.get("requirement_names") or [])
+                if n in valid_reqs
+            ]
+            # Refuse a degenerate "split" that moves everything (or nothing).
+            if not new_spec or not move or len(move) >= len(reqs):
+                continue
+            proposals.append(
+                SplitProposal(
+                    source_spec=spec_name,
+                    new_spec=new_spec,
+                    requirement_names=move,
+                    domain=entry_d.get("domain"),
+                    purpose=entry_d.get("purpose", "") or "",
+                    rationale=entry_d.get("rationale", "") or "",
+                )
+            )
+        if not proposals:
+            return None
+        return write_spec_split_call(self.project_root, proposals)
+
+    # ------------------------------------------------------------------
     # Call-response processing (sync-respond CLI)
     # ------------------------------------------------------------------
 
@@ -1263,14 +1723,18 @@ class SyncEngine:
             return {"specs_updated": 0, "skipped": 0}
 
         call_type = call_data.get("type")
+        if call_type == "sync_base_migration":
+            return self._process_base_migration_response(call_data, response_data)
+        if call_type == "sync_spec_split":
+            return self._process_split_response(call_data, response_data)
         if call_type != "sync_high_impact_deletion":
             raise ValueError(
                 "Unsupported sync call file type "
-                f"'{call_type}'. The single-directional sync only produces "
-                "'sync_high_impact_deletion' call files. Legacy formats "
-                "(sync_pending_decisions, conflict-only) are no longer "
-                "supported — re-run 'se3 sync --interactive' to generate "
-                "a fresh call file."
+                f"'{call_type}'. Supported sync call files are "
+                "'sync_high_impact_deletion', 'sync_base_migration', and "
+                "'sync_spec_split'. Legacy formats (sync_pending_decisions, "
+                "conflict-only) are no longer supported — re-run "
+                "'se3 sync --interactive' to generate a fresh call file."
             )
 
         if not self._specs:
@@ -1326,3 +1790,87 @@ class SyncEngine:
                 skipped += 1
 
         return {"specs_updated": specs_updated, "skipped": skipped}
+
+    # ------------------------------------------------------------------
+    # base migration / parallel split — respond-channel handlers
+    # ------------------------------------------------------------------
+
+    def _process_base_migration_response(
+        self, call_data: Dict[str, Any], response_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Apply the approved entries of a ``sync_base_migration`` call file."""
+        from .sync_governance import BaseMigration
+        from .sync_interaction import parse_decisions
+
+        decisions = parse_decisions(call_data, response_data)
+        by_id = {
+            item.get("item_id", ""): item for item in call_data.get("items", [])
+        }
+        approved: List[BaseMigration] = []
+        skipped = 0
+        for item_id, decision in decisions.items():
+            item = by_id.get(item_id)
+            if not item:
+                continue
+            if decision != "approve":
+                skipped += 1
+                continue
+            approved.append(
+                BaseMigration(
+                    requirement_name=item.get("requirement_name", ""),
+                    target_spec=item.get("target_spec", ""),
+                    item_id=item_id,
+                )
+            )
+
+        if not approved:
+            return {"specs_updated": 0, "skipped": skipped}
+
+        result = self.migrate_requirements(approved)
+        skipped += len(result.get("skipped", []))
+        return {
+            "specs_updated": result.get("specs_updated", 0),
+            "skipped": skipped,
+            "migrated": result.get("migrated", []),
+        }
+
+    def _process_split_response(
+        self, call_data: Dict[str, Any], response_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Apply the approved entries of a ``sync_spec_split`` call file."""
+        from .sync_governance import SplitProposal
+        from .sync_interaction import parse_decisions
+
+        decisions = parse_decisions(call_data, response_data)
+        by_id = {
+            item.get("item_id", ""): item for item in call_data.get("items", [])
+        }
+        specs_created: List[str] = []
+        skipped = 0
+        for item_id, decision in decisions.items():
+            item = by_id.get(item_id)
+            if not item:
+                continue
+            if decision != "approve":
+                skipped += 1
+                continue
+            proposal = SplitProposal(
+                source_spec=item.get("source_spec", ""),
+                new_spec=item.get("new_spec", ""),
+                requirement_names=list(item.get("requirement_names", []) or []),
+                domain=item.get("domain"),
+                purpose=item.get("purpose", "") or "",
+                rationale=item.get("rationale", "") or "",
+                item_id=item_id,
+            )
+            outcome = self.apply_split(proposal)
+            if outcome.get("created"):
+                specs_created.append(outcome.get("new_spec", ""))
+            else:
+                skipped += 1
+
+        return {
+            "specs_created": specs_created,
+            "specs_updated": len(specs_created),
+            "skipped": skipped,
+        }

@@ -101,7 +101,10 @@ def validate_spec_structure(content: str, spec_name: str) -> ValidationResult:
     # ------------------------------------------------------------------
     # Rule 2: '# <spec_name> Specification' heading follows the marker
     # ------------------------------------------------------------------
-    title_idx = _first_non_blank(raw_lines, body_start)
+    # Skip leading header comment lines (e.g. the ``<!-- domain: <path> -->``
+    # metadata marker that lives alongside the v1 marker) so a spec that
+    # declares a domain in its header is not mistaken for a missing title.
+    title_idx = _first_non_blank_noncomment(raw_lines, body_start)
     if title_idx is None:
         errors.append(
             f"no '# {spec_name} Specification' heading found"
@@ -210,6 +213,24 @@ def _first_non_blank(lines: List[str], start: int) -> int | None:
     for idx in range(start, len(lines)):
         if lines[idx].strip():
             return idx
+    return None
+
+
+def _first_non_blank_noncomment(lines: List[str], start: int) -> int | None:
+    """First non-blank line that is also not a self-contained HTML comment.
+
+    Header markers such as ``<!-- spec-format: v1 -->`` and
+    ``<!-- domain: <path> -->`` are single-line HTML comments that may precede
+    the spec title; this helper skips them (and blank lines) so the title search
+    lands on the real ``# <name> Specification`` heading.
+    """
+    for idx in range(start, len(lines)):
+        stripped = lines[idx].strip()
+        if not stripped:
+            continue
+        if stripped.startswith("<!--") and stripped.endswith("-->"):
+            continue
+        return idx
     return None
 
 

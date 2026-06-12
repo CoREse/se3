@@ -567,3 +567,130 @@ class SyncInteractionHandler:
                 raise
         except OSError as e:
             logger.warning("Failed to write response file: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Respond-channel call files for semantic-level refactors (HighImpactDeletion
+# style). base content migration and parallel-spec splitting are high-risk,
+# asymmetric operations that produce new logical addresses; they are proposed by
+# ``se3 sync`` as a call file under ``se3/calls/`` and only applied after the
+# user fills in the ``.response`` file (``approve``/``skip`` per item) and runs
+# ``se3 sync-respond``. Both share the ``items[*].decision`` response shape used
+# by ``sync_high_impact_deletion``.
+# ---------------------------------------------------------------------------
+
+# Call file ``type`` discriminators consumed by SyncEngine.process_call_response.
+CALL_TYPE_BASE_MIGRATION = "sync_base_migration"
+CALL_TYPE_SPEC_SPLIT = "sync_spec_split"
+
+
+def _write_call_file(project_root: Path, prefix: str, call_data: Dict[str, Any]) -> Path:
+    """Write a sync proposal call file to ``se3/calls/`` and return its path."""
+    calls_dir = Path(project_root) / "se3" / "calls"
+    calls_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = int(datetime.now().timestamp())
+    unique_id = uuid.uuid4().hex[:8]
+    call_file = calls_dir / f"{prefix}_{timestamp}_{unique_id}.json"
+    call_data = dict(call_data)
+    call_data.setdefault("timestamp", timestamp)
+    call_file.write_text(
+        json.dumps(call_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Generated sync proposal call file: %s", call_file)
+    return call_file
+
+
+def write_base_migration_call(
+    project_root: Path, migrations: List[Any]
+) -> Path:
+    """Write a ``sync_base_migration`` call file from ``BaseMigration`` items.
+
+    Each migration relocates one ``base`` Requirement to a module spec. The user
+    approves/skips each before ``se3 sync-respond`` applies the relocation.
+    """
+    items = []
+    for idx, mig in enumerate(migrations, 1):
+        item_id = getattr(mig, "item_id", "") or f"basemig_{idx}_{uuid.uuid4().hex[:8]}"
+        mig.item_id = item_id
+        items.append({
+            "id": idx,
+            "item_id": item_id,
+            "requirement_name": getattr(mig, "requirement_name", ""),
+            "target_spec": getattr(mig, "target_spec", ""),
+            "options": ["approve", "skip"],
+            "decision": "pending",
+        })
+    return _write_call_file(
+        project_root,
+        "sync_base_migration",
+        {"type": CALL_TYPE_BASE_MIGRATION, "items": items},
+    )
+
+
+def write_spec_split_call(
+    project_root: Path, proposals: List[Any]
+) -> Path:
+    """Write a ``sync_spec_split`` call file from ``SplitProposal`` items.
+
+    Each proposal moves a cluster of Requirements out of an over-sized,
+    multi-topic spec into a new parallel spec. The user approves/skips each
+    before ``se3 sync-respond`` performs the (logical-address-relinking) split.
+    """
+    items = []
+    for idx, prop in enumerate(proposals, 1):
+        item_id = getattr(prop, "item_id", "") or f"specsplit_{idx}_{uuid.uuid4().hex[:8]}"
+        prop.item_id = item_id
+        items.append({
+            "id": idx,
+            "item_id": item_id,
+            "source_spec": getattr(prop, "source_spec", ""),
+            "new_spec": getattr(prop, "new_spec", ""),
+            "requirement_names": list(getattr(prop, "requirement_names", []) or []),
+            "domain": getattr(prop, "domain", None),
+            "purpose": getattr(prop, "purpose", ""),
+            "rationale": getattr(prop, "rationale", ""),
+            "options": ["approve", "skip"],
+            "decision": "pending",
+        })
+    return _write_call_file(
+        project_root,
+        "sync_spec_split",
+        {"type": CALL_TYPE_SPEC_SPLIT, "items": items},
+    )
+
+
+def parse_decisions(call_data: Dict[str, Any], response_data: Dict[str, Any]) -> Dict[str, str]:
+    """Map ``item_id -> 'approve'|'skip'`` from a proposal call + its response.
+
+    Items present in the call file but absent from (or missing a valid decision
+    in) the response default to ``"skip"`` — the safe default that applies no
+    refactor. Response entries referencing unknown ``item_id``s are ignored.
+    """
+    call_items = call_data.get("items", []) or []
+    expected = {
+        item.get("item_id", "")
+        for item in call_items
+        if item.get("item_id")
+    }
+    id_to_item_id = {
+        item.get("id"): item.get("item_id", "")
+        for item in call_items
+        if item.get("item_id")
+    }
+
+    decisions: Dict[str, str] = {}
+    for resp in response_data.get("items", []) or []:
+        decision = (resp.get("decision") or "").lower()
+        if decision not in _VALID_DECISIONS:
+            continue
+        item_id = resp.get("item_id", "")
+        if not item_id:
+            num_id = resp.get("id")
+            item_id = id_to_item_id.get(num_id, "")
+        if item_id and item_id in expected:
+            decisions[item_id] = decision
+
+    for item_id in expected:
+        decisions.setdefault(item_id, "skip")
+    return decisions
