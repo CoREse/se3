@@ -25,6 +25,18 @@ TEST_HISTORY_STDOUT_TAIL_CHARS = 2000
 TEST_HISTORY_STDERR_TAIL_CHARS = 2000
 
 # ---------------------------------------------------------------------------
+# Test history archive slimming — passed-phase stored stdout/stderr tail
+# Used by: test.run_and_classify_tests (archive slimming of the stored
+#   test_results copy for PASSED phases)
+# A passed phase's full ``pytest -v`` stdout is pure noise in the archived
+# history jsonl (every line is a PASSED line). The STORED copy is replaced with
+# a compact pass/fail count summary plus this tail of the output (enough to keep
+# the final ``=== N passed in Ts ===`` summary line); failed phases keep their
+# full stdout. Shares the same numeric floor as the other test-history limits.
+# ---------------------------------------------------------------------------
+TEST_HISTORY_PASSED_SUMMARY_TAIL_CHARS = 2000
+
+# ---------------------------------------------------------------------------
 # Fix instructions — stderr tail-truncation
 # Used by: test.test_handler, verify_spec.verify_spec_handler
 # Spec minimum: 2000
