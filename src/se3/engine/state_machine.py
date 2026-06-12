@@ -690,6 +690,14 @@ class StateMachine:
             current_step.step_type == StepType.SELF_CHECK
             and current_step.status == StepStatus.COMPLETED
         ):
+            # Persist the defer-fix stash (item 1) the pass wrote back so the
+            # next pass (created below) inherits the accumulated issue set. A
+            # clean pass that left the stash untouched still echoes it, so this
+            # is a uniform mirror; ``_build_step_inputs`` resets it at pass #1.
+            if "self_check_deferred_issues" in current_step.outputs:
+                flow.state.context["self_check_deferred_issues"] = copy.deepcopy(
+                    current_step.outputs["self_check_deferred_issues"]
+                )
             passes_required = self._get_self_check_passes_required()
             consecutive_passes = self._count_consecutive_self_check_completed(flow)
 
@@ -1220,21 +1228,25 @@ class StateMachine:
         - Otherwise (flat / no self_check override), the configured
           ``self_check_passes_required`` (explicit or default 1) is used.
         """
+        from ..config import effective_self_check_passes_required
+
         cfg = self._get_workflow_config()
         resolution = self._get_self_check_resolution()
-        if resolution.form != "nested":
-            return cfg.self_check_passes_required
-
-        chain_count = resolution.chain_count
-        if not cfg.self_check_passes_required_explicit:
-            return chain_count
-
-        passes = cfg.self_check_passes_required
-        if passes < chain_count:
+        # One-shot WARNING when an explicit count is smaller than the chain
+        # count (extra chains will not run). The effective count itself is
+        # computed by the shared helper so the state machine and ``se3 history
+        # show`` can never disagree on the ``#i/N`` denominator.
+        if (
+            resolution.form == "nested"
+            and cfg.self_check_passes_required_explicit
+            and cfg.self_check_passes_required < resolution.chain_count
+        ):
             self._warn_self_check_passes_below_chains(
-                resolution.source_label, passes, chain_count,
+                resolution.source_label,
+                cfg.self_check_passes_required,
+                resolution.chain_count,
             )
-        return passes
+        return effective_self_check_passes_required(cfg, resolution)
 
     def _warn_self_check_passes_below_chains(
         self, source_label, passes: int, chain_count: int,
@@ -1609,6 +1621,18 @@ class StateMachine:
             inputs["self_check_pass_index"] = pass_index
             inputs["self_check_passes_required"] = self._get_self_check_passes_required()
             inputs["self_check_convergence_enabled"] = workflow_cfg.self_check_convergence_enabled
+            inputs["self_check_defer_fix_threshold"] = workflow_cfg.self_check_defer_fix_threshold
+
+            # Defer-fix stash (item 1) lifecycle. pass #1 is the start of every
+            # fix-loop round (and the very first round), so it resets the
+            # accumulated stash; pass #2+ inherits the stash the prior pass
+            # wrote back into context. The stash lives on ``flow.state.context``
+            # so it persists with engine.json across ``--resume``.
+            if pass_index == 1:
+                flow.state.context["self_check_deferred_issues"] = []
+            inputs["self_check_deferred_issues"] = copy.deepcopy(
+                flow.state.context.get("self_check_deferred_issues", [])
+            )
 
             # Always populate max_fix_iterations so the handler never has to
             # re-load WorkflowConfig on the initial pass (the per-transition

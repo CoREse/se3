@@ -509,6 +509,23 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     pass_index = step.inputs.get("self_check_pass_index", 1)
     passes_required = step.inputs.get("self_check_passes_required", 1)
 
+    # Defer-fix (item 1): when a non-terminal pass finds only a few
+    # non-critical/high issues, stash them and let the remaining nested passes
+    # run before entering one consolidated fix loop. ``threshold <= 0`` disables
+    # deferral (every issue-finding pass triggers fix immediately). The stash
+    # carried from prior passes of this fix-loop round is injected by the state
+    # machine and reset at pass #1.
+    raw_threshold = step.inputs.get("self_check_defer_fix_threshold", 0)
+    defer_threshold = (
+        raw_threshold if isinstance(raw_threshold, int)
+        and not isinstance(raw_threshold, bool) else 0
+    )
+    deferred_issues = step.inputs.get("self_check_deferred_issues") or []
+    if not isinstance(deferred_issues, list):
+        deferred_issues = []
+    defer_enabled = defer_threshold > 0
+    is_last_pass = pass_index >= passes_required
+
     # Write back so history renderers can read the pass position
     step.outputs["self_check_pass_index"] = pass_index
     step.outputs["self_check_passes_required"] = passes_required
@@ -632,6 +649,23 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 logger.info(
                     f"Self-check #{pass_index}/{passes_required} passed (no issues found)"
                 )
+            # Chain-tail flush (item 1): this pass found nothing, but earlier
+            # passes deferred issues. On the LAST pass, flush the accumulated
+            # stash into one consolidated fix loop instead of advancing clean.
+            if defer_enabled and deferred_issues and is_last_pass:
+                logger.info(
+                    f"Self-check #{pass_index}/{passes_required} clean but flushing "
+                    f"{len(deferred_issues)} deferred issue(s) accumulated from earlier passes"
+                )
+                return _build_fix_outputs(
+                    step, deferred_issues, fix_iteration, max_iterations,
+                    pass_index, passes_required,
+                )
+            # Non-terminal clean pass: carry the stash forward unchanged so the
+            # next pass keeps accumulating.
+            if defer_enabled and deferred_issues:
+                step.outputs["self_check_deferred_issues"] = deferred_issues
+                step.outputs["self_check_deferred"] = True
             return StepStatus.COMPLETED
 
         issues = kept_issues  # alias for the rest of the function
@@ -656,34 +690,36 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["unresolved_issues"] = list(issues)
             return StepStatus.COMPLETED
 
-        iter_display = format_fix_iteration_display(fix_iteration, max_iterations)
-        logger.warning(
-            f"Self-check #{pass_index}/{passes_required} found {len(issues)} "
-            f"issue(s) (fix iteration {iter_display})"
-        )
+        # Defer-fix decision (item 1). Defer only when ALL hold:
+        #  - deferral is enabled (threshold > 0),
+        #  - there is still a subsequent nested pass to run (not the last pass),
+        #  - this pass found FEWER than ``threshold`` issues, and
+        #  - none of this pass's issues is critical/high severity.
+        # Otherwise enter fix immediately, merging any earlier deferred issues so
+        # ``fix_instructions`` carries the FULL accumulated set.
+        if defer_enabled:
+            should_defer = (
+                not is_last_pass
+                and len(issues) < defer_threshold
+                and not _has_critical_or_high(issues)
+            )
+            if should_defer:
+                merged = _merge_dedup_issues(deferred_issues, issues)
+                step.outputs["self_check_deferred_issues"] = merged
+                step.outputs["self_check_deferred"] = True
+                logger.info(
+                    f"Self-check #{pass_index}/{passes_required} deferring "
+                    f"{len(issues)} non-critical issue(s) "
+                    f"(< threshold {defer_threshold}); {len(merged)} total deferred, "
+                    f"continuing to next pass"
+                )
+                return StepStatus.COMPLETED
+            issues = _merge_dedup_issues(deferred_issues, issues)
 
-        issue_details = "\n".join(
-            f"- [{i.get('severity', 'high')}] {_describe_issue(i)}"
-            for i in issues
+        return _build_fix_outputs(
+            step, issues, fix_iteration, max_iterations,
+            pass_index, passes_required,
         )
-        fix_instructions = (
-            f"Self-check found {len(issues)} issue(s) that need fixing:\n"
-            f"{issue_details}\n\n"
-            "Fix the issues listed above and ensure the logic is correct."
-        )
-
-        step.outputs["fix_needed"] = True
-        step.outputs["fix_iteration"] = fix_iteration
-        # ``max_fix_iterations <= 0`` is the unlimited sentinel.
-        step.outputs["max_fix_iterations"] = max_iterations
-        step.outputs["fix_instructions"] = fix_instructions
-        step.outputs["fix_context"] = {
-            "reason": "self_check",
-            "issues": issues,
-            "iteration": fix_iteration + 1,
-        }
-
-        return StepStatus.REVISION_NEEDED
 
     except Exception as e:
         logger.exception("Self-check step failed")
@@ -765,6 +801,89 @@ def _issue_signature(issues: list) -> set:
         if loc or desc:
             sigs.add((loc, desc))
     return sigs
+
+
+def _merge_dedup_issues(existing: list, incoming: list) -> list:
+    """Merge ``incoming`` issues into ``existing``, dropping mechanical dups.
+
+    Reuses :func:`_issue_signature` (``(location, normalized_description)``) as
+    the dedup key: an incoming issue whose signature already appears in the
+    accumulated set is dropped. Issues that produce no signature (no usable
+    location/description) cannot be deduped and are always kept. ``existing`` is
+    assumed already-deduped; its order is preserved and survivors of
+    ``incoming`` are appended in order. The residual semantic near-duplicates
+    are left for the implement step to merge when it consumes the list.
+    """
+    result = list(existing)
+    seen = _issue_signature(existing)
+    for issue in incoming:
+        sigs = _issue_signature([issue])
+        if sigs and sigs <= seen:
+            continue
+        result.append(issue)
+        seen |= sigs
+    return result
+
+
+def _has_critical_or_high(issues: list) -> bool:
+    """Return True if any issue is critical/high severity (case-insensitive)."""
+    for i in issues:
+        if not isinstance(i, dict):
+            continue
+        if str(i.get("severity", "")).strip().lower() in ("critical", "high"):
+            return True
+    return False
+
+
+def _build_fix_outputs(
+    step: Step,
+    issues: list,
+    fix_iteration: int,
+    max_iterations: int,
+    pass_index: int,
+    passes_required: int,
+) -> StepStatus:
+    """Populate the fix-loop outputs from ``issues`` and return REVISION_NEEDED.
+
+    Shared by the immediate-fix path, the threshold/critical-high terminal
+    path, and the chain-tail flush path so the consolidated ``fix_instructions``
+    always lists the FULL accumulated issue set.
+    """
+    iter_display = format_fix_iteration_display(fix_iteration, max_iterations)
+    logger.warning(
+        f"Self-check #{pass_index}/{passes_required} entering fix with "
+        f"{len(issues)} issue(s) (fix iteration {iter_display})"
+    )
+
+    issue_details = "\n".join(
+        f"- [{i.get('severity', 'high')}] {_describe_issue(i)}"
+        for i in issues
+    )
+    fix_instructions = (
+        f"Self-check found {len(issues)} issue(s) that need fixing:\n"
+        f"{issue_details}\n\n"
+        "Fix the issues listed above and ensure the logic is correct."
+    )
+
+    # Reflect the consolidated set so the renderer, ``actionable_count``, and
+    # the next round's ``prev_self_check_issues`` all see every issue that fed
+    # the fix loop (not just this pass's own findings).
+    step.outputs["issues"] = issues
+    step.outputs["actionable_count"] = len(issues)
+    step.outputs["fix_needed"] = True
+    step.outputs["fix_iteration"] = fix_iteration
+    # ``max_fix_iterations <= 0`` is the unlimited sentinel.
+    step.outputs["max_fix_iterations"] = max_iterations
+    step.outputs["fix_instructions"] = fix_instructions
+    step.outputs["fix_context"] = {
+        "reason": "self_check",
+        "issues": issues,
+        "iteration": fix_iteration + 1,
+    }
+    # The accumulated set has been consumed into the fix loop; clear the stash
+    # so a downstream reader cannot mistake it for still-pending deferrals.
+    step.outputs["self_check_deferred_issues"] = []
+    return StepStatus.REVISION_NEEDED
 
 
 def _issues_converged(current_issues: list, prev_issues: list | None) -> bool:

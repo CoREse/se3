@@ -213,10 +213,15 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
     # For history-only flows step.outputs are not preserved, but we can
     # reconstruct self_check pass numbering by counting consecutive self_check
     # sessions (resetting the counter at any non-self_check step).
-    from ..config import WorkflowConfig
+    from ..config import resolve_self_check_passes_required
 
     try:
-        passes_required = WorkflowConfig.load(project_root).self_check_passes_required
+        # Use the EFFECTIVE pass count (derived from nested
+        # ``llm_caller.steps.self_check`` chains when no explicit count is set),
+        # not the raw ``workflow.self_check_passes_required`` (which stays at the
+        # default 1 in the nested-derived case) — otherwise history-only flows
+        # would render ``#i/1`` instead of ``#i/2``.
+        passes_required = resolve_self_check_passes_required(project_root)
     except Exception:
         passes_required = None
 

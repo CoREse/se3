@@ -1778,6 +1778,47 @@ def load_self_check_resolution(
     )
 
 
+def effective_self_check_passes_required(
+    workflow_cfg: "WorkflowConfig",
+    resolution: SelfCheckResolution,
+) -> int:
+    """Derive the effective self_check pass count from config + chain resolution.
+
+    Single source of truth for the ``#i/N`` denominator, shared by the state
+    machine's per-transition cached path (``_get_self_check_passes_required``)
+    and the ``se3 history show`` history-only renderer:
+
+    - nested chains + no explicit ``self_check_passes_required`` → number of
+      declared chains (the chain list alone expresses the intent);
+    - both set → the explicit count wins (over/under-shoot reuses/skips chains);
+    - flat / default / no override → the configured ``self_check_passes_required``.
+    """
+    if resolution.form != "nested":
+        return workflow_cfg.self_check_passes_required
+    if not workflow_cfg.self_check_passes_required_explicit:
+        return resolution.chain_count
+    return workflow_cfg.self_check_passes_required
+
+
+def resolve_self_check_passes_required(project_root: Optional[Path] = None) -> int:
+    """Load config + resolution from disk and return the effective pass count.
+
+    Convenience wrapper around :func:`effective_self_check_passes_required` for
+    callers (e.g. ``se3 history show``) that do not have the cached config and
+    resolution objects on hand. Degrades to the raw
+    ``workflow.self_check_passes_required`` on any resolution loader error so a
+    malformed self_check chain never crashes history rendering.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    workflow_cfg = WorkflowConfig.load(project_root)
+    try:
+        resolution = load_self_check_resolution(project_root)
+    except (ValueError, IOError, OSError):
+        return workflow_cfg.self_check_passes_required
+    return effective_self_check_passes_required(workflow_cfg, resolution)
+
+
 def load_agents(project_root: Optional[Path] = None) -> list[dict]:
     """Load agent configurations from project and global configuration.
 
@@ -2200,6 +2241,13 @@ DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
 # ``0`` disables baseline looping entirely (inherited failures are surfaced,
 # never looped); negative values are rejected fail-fast at load.
 DEFAULT_BASELINE_FIX_MAX_ATTEMPTS = 3
+# Threshold below which a self_check pass that finds only a few non-critical/high
+# issues defers its fix and lets the remaining nested self_check passes run first
+# (accumulating their findings) before entering one consolidated fix loop. ``0``
+# (or ``null``) disables deferral entirely (every pass that finds issues triggers
+# fix immediately — the historical behavior). Negative values are rejected
+# fail-fast at load.
+DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD = 3
 
 # Dedup set for the "which config source won" load-time log line, keyed by the
 # resolved active config path. ``WorkflowConfig.load`` is called per step, so
@@ -2227,6 +2275,7 @@ class WorkflowConfig:
     self_check_passes_required: int = DEFAULT_SELF_CHECK_PASSES_REQUIRED
     self_check_convergence_enabled: bool = DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
     baseline_fix_max_attempts: int = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
+    self_check_defer_fix_threshold: int = DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
     # Whether ``workflow.self_check_passes_required`` was set explicitly in
     # the YAML. When False and ``llm_caller.steps.self_check`` is a nested
     # per-pass chain, the effective pass count is derived from the number
@@ -2379,11 +2428,48 @@ class WorkflowConfig:
                 f"(use 0 to disable baseline looping)"
             )
 
+        # self_check_defer_fix_threshold (item 1): below this many non-critical/
+        # high issues, a non-terminal self_check pass defers its fix so the
+        # remaining nested passes run first. ``None`` (null) is normalized to 0
+        # (= disabled), mirroring the max_fix_iterations sentinel handling.
+        # bool/float/non-integer types warn and fall back to the default; a
+        # negative value is rejected fail-fast (mirrors baseline_fix_max_attempts).
+        if (
+            "self_check_defer_fix_threshold" in workflow_data
+            and workflow_data["self_check_defer_fix_threshold"] is None
+        ):
+            defer_threshold = 0
+        else:
+            raw_defer = workflow_data.get(
+                "self_check_defer_fix_threshold", DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
+            )
+            if isinstance(raw_defer, bool) or isinstance(raw_defer, float):
+                logger.warning(
+                    f"workflow.self_check_defer_fix_threshold={raw_defer!r} is not a valid integer; "
+                    f"falling back to default {DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD}"
+                )
+                defer_threshold = DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
+            else:
+                try:
+                    defer_threshold = int(raw_defer)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"workflow.self_check_defer_fix_threshold={raw_defer!r} is not a valid integer; "
+                        f"falling back to default {DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD}"
+                    )
+                    defer_threshold = DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
+        if defer_threshold < 0:
+            raise ConfigError(
+                f"workflow.self_check_defer_fix_threshold={defer_threshold!r} must be >= 0 "
+                f"(use 0 or null to disable deferral)"
+            )
+
         return cls(
             max_fix_iterations=max_fix,
             self_check_passes_required=passes,
             self_check_convergence_enabled=convergence,
             baseline_fix_max_attempts=baseline_attempts,
+            self_check_defer_fix_threshold=defer_threshold,
             self_check_passes_required_explicit=passes_explicit,
         )
 

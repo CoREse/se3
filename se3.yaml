@@ -91,6 +91,14 @@ workflow:
   # different value (config loading is whole-file select-one, not key-merge).
   max_fix_iterations: 100
 
+  # Defer-fix threshold for nested self_check chains. When a non-final
+  # self_check pass finds FEWER than this many issues and none is critical/high
+  # severity, its fix is deferred and the remaining passes run first; their
+  # findings are then merged (deduped) into one consolidated fix loop. Set to 0
+  # (or null) to disable — every issue-finding pass triggers fix immediately
+  # (the historical behavior). Default: 3.
+  # self_check_defer_fix_threshold: 3
+
 # Preset Prompts (common-task library)
 # Project-level presets override the built-in presets shipped with se3
 # (read at runtime from the package, never copied by `se3 init`). Each
