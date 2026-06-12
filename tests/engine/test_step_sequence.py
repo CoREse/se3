@@ -11,29 +11,57 @@ from se3.engine.models import StepType, get_default_step_sequence
 from se3.config import StepConfig, load_step_config, apply_step_config
 
 
-class TestSummarizeNotInDefaults:
-    """SUMMARIZE must not appear in any default step sequence."""
+ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "directive", "discovery"]
 
-    @pytest.mark.parametrize("task_type", [
-        "feature", "bugfix", "review", "small", "directive", "discovery",
-    ])
-    def test_summarize_not_in_default_sequence(self, task_type):
+
+class TestSummarizeInDefaults:
+    """SUMMARIZE is the final step of every default step sequence."""
+
+    @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
+    def test_summarize_in_default_sequence(self, task_type):
         steps = get_default_step_sequence(task_type)
-        assert StepType.SUMMARIZE not in steps, (
-            f"SUMMARIZE should not be in default sequence for {task_type}"
+        assert StepType.SUMMARIZE in steps, (
+            f"SUMMARIZE should be in default sequence for {task_type}"
         )
 
-    @pytest.mark.parametrize("task_type", [
-        "feature", "bugfix", "review", "small", "directive", "discovery",
-    ])
-    def test_commit_is_last_step(self, task_type):
-        """COMMIT should be the last step in every default sequence (after SUMMARIZE removal)."""
+    @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
+    def test_summarize_is_last_step(self, task_type):
+        """SUMMARIZE is the last step in every default sequence."""
         steps = get_default_step_sequence(task_type)
-        # review has no COMMIT step
-        if task_type == "review":
-            assert StepType.COMMIT not in steps
-        else:
-            assert steps[-1] == StepType.COMMIT
+        assert steps[-1] == StepType.SUMMARIZE, (
+            f"SUMMARIZE should be the last step for {task_type}"
+        )
+
+    @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
+    def test_summarize_appears_once(self, task_type):
+        steps = get_default_step_sequence(task_type)
+        assert steps.count(StepType.SUMMARIZE) == 1
+
+    @pytest.mark.parametrize(
+        "task_type", ["feature", "bugfix", "small", "directive", "discovery"]
+    )
+    def test_summarize_follows_commit(self, task_type):
+        """For non-review sequences SUMMARIZE immediately follows COMMIT."""
+        steps = get_default_step_sequence(task_type)
+        commit_idx = steps.index(StepType.COMMIT)
+        summarize_idx = steps.index(StepType.SUMMARIZE)
+        assert summarize_idx == commit_idx + 1, (
+            "SUMMARIZE must immediately follow COMMIT"
+        )
+
+    def test_review_summarize_follows_verify_spec(self):
+        """The review sequence has no COMMIT; SUMMARIZE follows VERIFY_SPEC."""
+        steps = get_default_step_sequence("review")
+        assert StepType.COMMIT not in steps
+        assert steps[-1] == StepType.SUMMARIZE
+        verify_idx = steps.index(StepType.VERIFY_SPEC)
+        assert steps.index(StepType.SUMMARIZE) == verify_idx + 1
+
+    def test_unknown_task_type_falls_back_to_feature_with_summarize(self):
+        """An unknown task type falls back to the feature sequence, ending in SUMMARIZE."""
+        steps = get_default_step_sequence("not-a-real-type")
+        assert steps == get_default_step_sequence("feature")
+        assert steps[-1] == StepType.SUMMARIZE
 
 
 class TestSpecGateInDefaults:
@@ -110,16 +138,29 @@ class TestStepConfig:
 class TestApplyStepConfig:
     """apply_step_config appends valid steps from se3.yaml."""
 
-    def test_appends_summarize(self, tmp_path):
+    @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
+    def test_append_summarize_is_noop(self, task_type, tmp_path, caplog):
+        """`steps.append: [summarize]` is a no-op now that SUMMARIZE is a
+        default step: no duplication, no warning, position preserved."""
         config_path = tmp_path / "se3.yaml"
         config_path.write_text(yaml.dump({"steps": {"append": ["summarize"]}}))
 
-        steps = get_default_step_sequence("feature")
-        assert StepType.SUMMARIZE not in steps
+        steps = get_default_step_sequence(task_type)
+        assert StepType.SUMMARIZE in steps
 
-        result = apply_step_config(steps, tmp_path)
-        assert StepType.SUMMARIZE in result
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            result = apply_step_config(steps, tmp_path)
+
+        # No duplication: SUMMARIZE still appears exactly once and remains last.
+        assert result.count(StepType.SUMMARIZE) == 1
         assert result[-1] == StepType.SUMMARIZE
+        assert result == steps
+        # No warning emitted for the now-redundant append.
+        assert not any(
+            "summarize" in rec.getMessage().lower() for rec in caplog.records
+        )
 
     def test_no_duplicate_if_already_present(self, tmp_path):
         config_path = tmp_path / "se3.yaml"
@@ -144,14 +185,3 @@ class TestApplyStepConfig:
         steps = get_default_step_sequence("feature")
         result = apply_step_config(steps, tmp_path)
         assert result == steps
-
-    def test_multiple_steps_appended(self, tmp_path):
-        """Multiple valid steps can be appended."""
-        config_path = tmp_path / "se3.yaml"
-        config_path.write_text(yaml.dump({"steps": {"append": ["summarize"]}}))
-
-        steps = get_default_step_sequence("review")
-        result = apply_step_config(steps, tmp_path)
-        assert StepType.SUMMARIZE in result
-        # For review: ANALYZE, VERIFY_SPEC, + SUMMARIZE
-        assert result[-1] == StepType.SUMMARIZE

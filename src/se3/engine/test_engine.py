@@ -113,6 +113,30 @@ class TestModels:
         small_seq = get_default_step_sequence("small")
         assert len(small_seq) < len(feature_seq)  # Small tasks skip steps
 
+    def test_default_sequences_end_with_summarize(self):
+        """summarize is the final step of every default task-type sequence."""
+        for task_type in (
+            "feature",
+            "bugfix",
+            "review",
+            "small",
+            "directive",
+            "discovery",
+        ):
+            seq = get_default_step_sequence(task_type)
+            assert seq[-1] == StepType.SUMMARIZE, (
+                f"{task_type} sequence must end with SUMMARIZE"
+            )
+            assert seq.count(StepType.SUMMARIZE) == 1
+
+        # Non-review sequences place SUMMARIZE immediately after COMMIT.
+        for task_type in ("feature", "bugfix", "small", "directive", "discovery"):
+            seq = get_default_step_sequence(task_type)
+            assert seq.index(StepType.SUMMARIZE) == seq.index(StepType.COMMIT) + 1
+
+        # Unknown task type falls back to feature, which includes summarize.
+        assert get_default_step_sequence("???")[-1] == StepType.SUMMARIZE
+
 
 class TestPersistence:
     """Tests for persistence manager."""

@@ -679,6 +679,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.SPEC_GATE,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
+            StepType.SUMMARIZE,
         ],
         "bugfix": [
             StepType.ANALYZE,
@@ -689,10 +690,12 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.VERIFY_SPEC,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
+            StepType.SUMMARIZE,
         ],
         "review": [
             StepType.ANALYZE,
             StepType.VERIFY_SPEC,
+            StepType.SUMMARIZE,
         ],
         "small": [
             StepType.ANALYZE,
@@ -700,6 +703,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.TEST,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
+            StepType.SUMMARIZE,
         ],
         "directive": [
             StepType.ANALYZE,
@@ -707,6 +711,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.IMPLEMENT,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
+            StepType.SUMMARIZE,
         ],
         "discovery": [
             StepType.DISCOVERY,
@@ -720,6 +725,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.SPEC_GATE,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
+            StepType.SUMMARIZE,
         ],
     }
     return sequences.get(task_type, sequences["feature"])

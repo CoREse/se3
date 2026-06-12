@@ -696,7 +696,7 @@ class TestStepSequences:
             )
 
     def test_small_sequence_unchanged(self):
-        """Small task sequence: ANALYZE → IMPLEMENT → TEST → VERSION_ANALYZE → COMMIT."""
+        """Small task sequence: ANALYZE → IMPLEMENT → TEST → VERSION_ANALYZE → COMMIT → SUMMARIZE."""
         from .models import get_default_step_sequence
         seq = get_default_step_sequence("small")
         expected = [
@@ -705,6 +705,7 @@ class TestStepSequences:
             StepType.TEST,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
+            StepType.SUMMARIZE,
         ]
         assert seq == expected
 
@@ -715,12 +716,13 @@ class TestStepSequences:
         assert seq[0] == StepType.ANALYZE
 
     def test_review_sequence_has_verify_spec(self):
-        """Review sequence: ANALYZE → VERIFY_SPEC."""
+        """Review sequence: ANALYZE → VERIFY_SPEC → SUMMARIZE."""
         from .models import get_default_step_sequence
         seq = get_default_step_sequence("review")
         assert seq == [
             StepType.ANALYZE,
             StepType.VERIFY_SPEC,
+            StepType.SUMMARIZE,
         ]
 
     def test_discovery_sequence_starts_with_discovery_then_analyze(self):

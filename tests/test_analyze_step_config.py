@@ -53,9 +53,28 @@ def test_update_flow_steps_no_duplicate_append(tmp_path):
     assert steps.count(StepType.SUMMARIZE) == 1, "summarize must not be duplicated"
 
 
-def test_update_flow_steps_no_config_unchanged(tmp_path):
-    """Without steps.append config, summarize is not present."""
+def test_update_flow_steps_summarize_present_without_config(tmp_path):
+    """summarize is a default step, so it survives the analyze rebuild at the
+    end even with no steps.append config."""
     flow = _make_flow(tmp_path)
     _update_flow_steps(flow, "feature")
 
-    assert StepType.SUMMARIZE not in flow.state.selected_steps
+    steps = flow.state.selected_steps
+    assert StepType.SUMMARIZE in steps
+    assert steps[-1] == StepType.SUMMARIZE
+    assert steps.count(StepType.SUMMARIZE) == 1
+
+
+def test_update_flow_steps_append_summarize_noop(tmp_path):
+    """With summarize now a default step, configuring steps.append: [summarize]
+    is a no-op: it stays a single entry at the end after the analyze rebuild."""
+    (tmp_path / "se3.yaml").write_text(
+        yaml.dump({"steps": {"append": ["summarize"]}})
+    )
+
+    flow = _make_flow(tmp_path)
+    _update_flow_steps(flow, "feature")
+
+    steps = flow.state.selected_steps
+    assert steps.count(StepType.SUMMARIZE) == 1
+    assert steps[-1] == StepType.SUMMARIZE
