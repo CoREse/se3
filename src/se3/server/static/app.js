@@ -2392,6 +2392,15 @@ async function sendReply(flowId, target, text) {
       });
     }
     if (resp.ok) {
+      // Success is decided SOLELY by `resp.ok`. Everything that must happen on
+      // a successful send — clearing the input, the synthetic-chip visual
+      // state, and the success toast — runs here, BEFORE the optimistic echo
+      // is spliced in, so a fault in the (best-effort) conversation rendering
+      // can never demote a delivered reply back into the network-error catch
+      // below. This is the root-cause fix for the discovery-confirm regression
+      // (issue #193, same class as #191): a render exception inside the old
+      // wide try-block surfaced as "Could not send — network error" even
+      // though the daemon had already received and acted on the "1".
       if (state.selectedFlowId === flowId) {
         $("flow-reply-input").value = "";
         // Cleared content collapses the auto-grow textarea back to one line.
@@ -2407,10 +2416,13 @@ async function sendReply(flowId, target, text) {
       if (target.kind === "interjection" && target.synthetic) {
         state.flowSyntheticInterjectPending = true;
       }
-      appendLocalReply(flowId, target, text);
       showToast("success", target.kind === "interjection"
         ? "Interjection sent."
         : "Response sent.");
+      // Optimistic echo. `appendLocalReply` is best-effort: it writes the echo
+      // record into `state.flowConversationRecords` first, then renders behind
+      // its own try/catch, so it never throws back into this success path.
+      appendLocalReply(flowId, target, text);
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
@@ -2447,17 +2459,27 @@ function appendLocalReply(flowId, target, text) {
   // its rank — i.e. once THIS reply's own daemon record lands — so each pending
   // echo stays visible continuously until its own copy arrives, and a single
   // daemon arrival never sweeps away more than one pending echo.
-  const echoText = comparableUserText(text);
+  // Rank computation walks every existing record through normalizeRecord /
+  // comparableUserText. A pathological record could make those throw; that must
+  // NOT bubble back into sendReply's success path (issue #193) nor prevent the
+  // echo from being recorded. Guard it: on failure fall back to rank 0 (the echo
+  // still lands and `reconcileLocalEchoes` will pair it with its daemon copy).
   let priorCopies = 0;
-  for (const r of state.flowConversationRecords) {
-    if (r && r.__localEcho) {
-      const t = comparableUserText(
-        r.__localEchoText != null ? r.__localEchoText : normalizeRecord(r).content);
-      if (t === echoText) priorCopies += 1;
-      continue;
+  try {
+    const echoText = comparableUserText(text);
+    for (const r of state.flowConversationRecords) {
+      if (r && r.__localEcho) {
+        const t = comparableUserText(
+          r.__localEchoText != null ? r.__localEchoText : normalizeRecord(r).content);
+        if (t === echoText) priorCopies += 1;
+        continue;
+      }
+      const n = normalizeRecord(r);
+      if (n.role === "user" && comparableUserText(n.content) === echoText) priorCopies += 1;
     }
-    const n = normalizeRecord(r);
-    if (n.role === "user" && comparableUserText(n.content) === echoText) priorCopies += 1;
+  } catch (err) {
+    console.error("appendLocalReply: best-effort rank computation failed", err);
+    priorCopies = 0;
   }
   const record = {
     step_id: "interaction",
@@ -2478,11 +2500,23 @@ function appendLocalReply(flowId, target, text) {
       step_type: meta.label + " response",
     },
   };
+  // State is the source of truth: append the echo to the conversation records
+  // FIRST, before any DOM rendering, so a "1" confirm (or any reply) is in the
+  // message list even if a render helper throws. If rendering fails the next
+  // ws `history_data` push re-renders and the echo (or its reconciled
+  // authoritative copy) is shown anyway.
   state.flowConversationRecords = state.flowConversationRecords.concat([record]);
-  renderConversation($("flow-conversation"), state.flowConversationRecords, true);
-  refreshFlowStickyHeader();
-  updateFlowUsageBadge(state.flowConversationRecords);
-  scrollFlowConversationToBottom();
+  // Rendering is best-effort: a fault here must NOT bubble back to sendReply's
+  // success path and masquerade as a network error (issue #193). Swallow and
+  // log so the defect stays observable without breaking the delivered reply.
+  try {
+    renderConversation($("flow-conversation"), state.flowConversationRecords, true);
+    refreshFlowStickyHeader();
+    updateFlowUsageBadge(state.flowConversationRecords);
+    scrollFlowConversationToBottom();
+  } catch (err) {
+    console.error("appendLocalReply: best-effort render failed", err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -10433,6 +10467,14 @@ if (typeof module !== "undefined" && module.exports) {
     mergeHistoryResponse,
     reconcileLocalEchoes,
     comparableUserText,
+    // Optimistic reply echo + send path (G1/G2) — exposed for the DOM-stub
+    // tests in tests/frontend/reply_send_error_handling.test.mjs so the
+    // integrated success-branch-vs-network-error-catch behavior (issue #193)
+    // can be asserted, not just the appendLocalReply helper in isolation.
+    appendLocalReply,
+    sendReply,
+    showToast,
+    settlePendingSend,
     // Reconnect incremental load paths (G4) — exposed for the DOM-stub load
     // path tests in tests/frontend/test_app_pure.mjs.
     loadFlowConversation,

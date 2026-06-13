@@ -45,6 +45,13 @@
 
 
 
+
+## 9.5.4 - 2026-06-14
+
+- Fix false 'Could not send — network error' toast when confirming discovery (输入 1) via WebUI despite backend having accepted the reply
+- Ensure successfully-sent replies are inserted into the conversation message list instead of being silently dropped
+- Make optimistic echo rendering (appendLocalReply) best-effort so rendering failures do not mask a successful backend response
+- Add regression tests to prevent recurrence of the success-path misreported-as-network-error bug
 ## 9.5.3 - 2026-06-13
 
 - Remove semantically misplaced `scope` field from persisted Issue data model and YAML serialization

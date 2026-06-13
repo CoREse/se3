@@ -3693,6 +3693,14 @@ issueMgmtMod.registerIssueManagementTests({ app, check, findOne, findAll });
 const mobileResponsiveMod = await import("./mobile_responsive.test.mjs");
 mobileResponsiveMod.registerMobileResponsiveTests({ app, check, findOne, findAll });
 
+// Register the G1/G2 reply-send error-handling tests (separate module — same
+// `check` reporter, same `app` module, same shared DOM stub already installed
+// above). These lock the issue #193 regression: a post-success render fault in
+// appendLocalReply must not be reported as a network error and must not drop
+// the optimistic echo.
+const replySendErrMod = await import("./reply_send_error_handling.test.mjs");
+await replySendErrMod.registerReplySendErrorHandlingTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

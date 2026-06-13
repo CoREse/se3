@@ -358,6 +358,30 @@ keep the incremental render path. `reconcileLocalEchoes` and `comparableUserText
 are exported for DOM-stub tests. This mechanism is independent of, and does not
 disturb, the mobile tool-marker layout fix.
 
+Success/failure of a submitted reply MUST be decided **solely** by `resp.ok`,
+and that decision MUST be decoupled from the success-path optimistic echo
+rendering. `respond_flow` forwards the reply to the daemon and returns `200`
+immediately without waiting for the flow to ack, so once `resp.ok` is true the
+reply has been received and acted on — the frontend MUST treat it as a success.
+`sendReply` MUST therefore clear the input and show the success toast (e.g.
+`Response sent.`) on the `resp.ok` branch **before** invoking `appendLocalReply`,
+and the outer `catch` MUST handle only a genuine `fetch` rejection (the
+network-error toast) — never an exception raised by rendering a reply the backend
+already received. To uphold this, `appendLocalReply` MUST be best-effort: it
+MUST first `concat` the `__localEcho` record into `state.flowConversationRecords`
+(state is the source of truth, so the echo is recorded even if rendering fails),
+then run its rendering chain (the per-text rank computation, `renderConversation`,
+`refreshFlowStickyHeader`, `updateFlowUsageBadge`, `scrollFlowConversationToBottom`)
+inside a local `try/catch` that logs (`console.error`) and swallows any exception
+rather than rethrowing — so a render fault is observable but never re-classified
+as a network failure and never reverts an already-acknowledged reply to a failed
+state. This prevents the regression (issue #193) where a successfully delivered
+`discovery_confirm` confirmation (the "输入 1" / *Confirm and continue* action) —
+and any other reply on the shared `sendReply` path — falsely surfaced
+`Could not send — network error` and skipped its conversation echo. A real
+non-2xx response still takes the `Could not send: …` failure branch and appends
+no echo.
+
 #### Scenario: Optimistic echo is replaced by the authoritative record, shown once
 - **GIVEN** the user submits a reply and `appendLocalReply` splices an optimistic
   `__localEcho` user record into the conversation for instant feedback
@@ -396,6 +420,25 @@ disturb, the mobile tool-marker layout fix.
   incremental tail-append path, so index shifts do not corrupt the DOM
 - **AND** when no echo is removed, `reconcileLocalEchoes` returns the same array
   reference and the incremental-append render path is preserved
+
+#### Scenario: Backend-accepted reply with failing echo render is not misreported as a network error
+- **GIVEN** the user confirms a `discovery_confirm` pending item via the *Confirm
+  and continue* ("输入 1") action — or submits any other reply on the shared
+  `sendReply` path — and the backend `respond_flow` accepts it (`resp.ok`, HTTP
+  `2xx`) and the flow advances
+- **WHEN** the success-path optimistic echo rendering throws — the per-text rank
+  computation or any render helper (`renderConversation` /
+  `refreshFlowStickyHeader` / `updateFlowUsageBadge` /
+  `scrollFlowConversationToBottom`) raises an exception inside `appendLocalReply`
+- **THEN** the frontend MUST NOT surface a network-error toast
+  (`Could not send — network error reaching the server`) and MUST instead show
+  the success toast (`Response sent.`) and clear the reply input, because
+  success is decided solely by `resp.ok`
+- **AND** the reply's `__localEcho` record MUST already have been written into
+  `state.flowConversationRecords` (state-first), so the confirmation is inlined
+  into the conversation message list rather than dropped
+- **AND** the render exception MUST be logged (`console.error`) and swallowed by
+  `appendLocalReply` rather than propagating into `sendReply`'s outer `catch`
 
 ### Requirement: Live-Append Record Deduplication Against Snapshot
 
