@@ -46,6 +46,15 @@
 
 
 
+
+## 10.0.0 - 2026-06-14
+
+- Remove deprecated loop mode entirely, including --loop, --max-iterations, --no-worktree, --merge (loop), and --list-loops CLI options
+- Add --worktree isolation mode to se3 run for executing flows in isolated git worktrees with automatic merge-back on success
+- Change MergeLock from non-blocking fail-fast to blocking queue semantics, serializing synchronous runs and merges on the main worktree
+- Add worktree mode checkbox in WebUI new-task form for creating isolated runs via the web interface
+- Replace loop-related FlowInstance fields (is_loop_mode, loop_branch, loop_worktree_path, loop_original_branch) with worktree equivalents (is_worktree_mode, worktree_branch, worktree_path, worktree_original_branch)
+- Preserve generic worktree primitives (create_worktree, WorktreeContext, force_cleanup_worktree) for reuse by the new --worktree mode
 ## 9.5.4 - 2026-06-14
 
 - Fix false 'Could not send — network error' toast when confirming discovery (输入 1) via WebUI despite backend having accepted the reply

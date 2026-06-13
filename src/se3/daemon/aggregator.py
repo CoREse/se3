@@ -358,7 +358,14 @@ class DaemonAggregator:
         # ``_snapshot_for_root`` is cheap for roots without an engine.json
         # (a single failed file read that returns None), so the incremental
         # cost of scanning registry roots is negligible.
-        for root_str in self.all_project_roots():
+        #
+        # ``all_observable_roots`` additionally folds in any active
+        # ``se3 run --worktree`` subdirectory so an isolation run gets a live
+        # flow card / conversation for its whole flow body, not only after its
+        # trailing merge. The dropdown-facing ``project_roots`` field stays on
+        # ``all_project_roots`` (via ``_merge_project_roots``), so a transient
+        # worktree sandbox never appears as a New Task target.
+        for root_str in self.all_observable_roots():
             root = Path(root_str)
             snapshot = self._snapshot_for_root(root)
             if snapshot is not None:
@@ -440,6 +447,87 @@ class DaemonAggregator:
         merged.update(historical)
         return sorted(merged)
 
+    def all_observable_roots(self) -> List[str]:
+        """:meth:`all_project_roots` plus active ``--worktree`` run subdirectories.
+
+        This is the root view used for building flow snapshots
+        (:meth:`get_snapshot`) and for the history reader's enumeration, so a
+        ``se3 run --worktree`` flow is observable in the WebUI — flow card,
+        status, and live conversation — for its whole flow body, exactly like a
+        synchronous run rather than only after its trailing merge syncs history
+        back into the main repo.
+
+        It deliberately does NOT feed the snapshot's ``project_roots`` field
+        (the New Task project dropdown), which stays on :meth:`all_project_roots`
+        via :meth:`_merge_project_roots`: an isolation worktree is a transient
+        execution sandbox, not a project the user should start fresh tasks
+        against.
+        """
+        roots: Set[str] = set(self.all_project_roots())
+        roots.update(self._active_worktree_run_roots())
+        return sorted(roots)
+
+    def _active_worktree_run_roots(self) -> List[str]:
+        """Discover ``se3 run --worktree`` isolation subdirectories to observe.
+
+        A ``--worktree`` run executes its entire flow body inside
+        ``<main_repo>/se3/worktrees/<name>/``, persisting its own
+        ``se3/state/engine.json`` and ``se3/history/<flow_id>/`` there — never
+        in the main repo until the trailing merge syncs history back. The daemon
+        registers only the *main* repo as a project root, so without this
+        discovery the snapshot and history reader never see a worktree run while
+        it executes and the WebUI stays blank (or shows a stale main-repo flow)
+        for the whole flow body.
+
+        This scans every tracked main root's ``se3/worktrees/*/`` for a child
+        whose ``engine.json`` describes an ``is_worktree_mode`` flow and returns
+        those child paths. The strict ``is_worktree_mode`` gate keeps the
+        implement step's internal DAG isolation worktrees — which share the same
+        ``se3/worktrees/`` parent directory but never write a top-level
+        ``is_worktree_mode`` flow record — out of the observed set.
+
+        The scan covers the active root set (snapshotted up front so a
+        concurrent :meth:`add_project_root` cannot raise) unioned with the
+        persistent registry, mirroring the ``base`` of :meth:`all_project_roots`
+        so a failed worktree run stays observable across a daemon restart.
+        """
+        bases: Set[str] = {str(path) for path in list(self._project_roots)}
+        if self._registry_load is not None:
+            try:
+                for entry in self._registry_load() or []:
+                    if entry:
+                        bases.add(str(entry))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("aggregator: registry_load failed (worktree scan)")
+
+        roots: List[str] = []
+        seen: Set[str] = set()
+        for base in bases:
+            worktrees_dir = Path(base) / "se3" / "worktrees"
+            try:
+                entries = sorted(worktrees_dir.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:  # pragma: no cover - racy unlink
+                    continue
+                data = _read_json(entry / "se3" / "state" / "engine.json")
+                if not isinstance(data, dict):
+                    continue
+                if not data.get("flow_id") or not data.get("is_worktree_mode"):
+                    continue
+                try:
+                    resolved = os.path.realpath(str(entry))
+                except OSError:  # pragma: no cover - defensive
+                    resolved = str(entry)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    roots.append(resolved)
+        return roots
+
     def _historical_roots(self, base: Set[str]) -> List[str]:
         """Return the on-disk historical roots for *base*, TTL-cached.
 
@@ -506,7 +594,19 @@ class DaemonAggregator:
         scan picks the change up correctly.
         """
         signature: Dict[str, Any] = {}
-        for root in self._project_roots:
+        # Scan the active roots plus any active ``--worktree`` run subdir: an
+        # isolation run writes its human-call files (e.g. a discovery
+        # clarification) under ``<worktree>/se3/calls/``, so without the worktree
+        # roots here the fast (~1 s) call-change push would miss them and the
+        # chip would only surface on the slower full status tick.
+        roots = [str(r) for r in self._project_roots]
+        roots.extend(self._active_worktree_run_roots())
+        seen_dirs: Set[str] = set()
+        for root_str in roots:
+            if root_str in seen_dirs:
+                continue
+            seen_dirs.add(root_str)
+            root = Path(root_str)
             calls_dir = root / "se3" / "calls"
             try:
                 entries = sorted(calls_dir.iterdir())

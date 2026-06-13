@@ -434,6 +434,40 @@ class TestRunMergeSuccess:
         assert (tmp_path / "feature.txt").exists()
         assert (tmp_path / "feature.txt").read_text() == "feature content"
 
+    def test_lock_targets_resolved_main_repo_root(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """run_merge must acquire the main-worktree mutex on the *main*
+        repository root (resolved from a possibly-worktree project_root),
+        not on the bare project_root — so a merge launched from inside a
+        linked worktree contends on the single project-wide lock file.
+        """
+        from unittest.mock import MagicMock, patch
+
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feature.txt", "feature content", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        sentinel_root = Path("/resolved/main/repo")
+        with patch(
+            "se3.commands.run._resolve_main_lock_root",
+            return_value=sentinel_root,
+        ) as mock_resolve, patch(
+            "se3.commands.merge.merge_lock.MergeLock"
+        ) as MockLock:
+            MockLock.return_value = MagicMock()
+            exit_code = run_merge(["feature"], project_root=tmp_path)
+
+        assert exit_code == 0
+        # The lock target is the resolved MAIN repo root, acquired blocking.
+        mock_resolve.assert_called_once_with(tmp_path)
+        MockLock.assert_called_once_with(sentinel_root, blocking=True)
+
     def test_merge_multiple_branches(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)

@@ -762,6 +762,18 @@ def run_merge(
     # defensive fallback (blocking acquisition does not raise them).
     from ..engine.merge.orchestrator import MergeOrchestrator
     from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
+    from .run import _resolve_main_lock_root
+
+    # The main-worktree mutex always lives at the *main repository's*
+    # ``se3/state/merge.lock``. When ``se3 merge`` runs with cwd inside a
+    # linked worktree (``se3/`` is gitignored and therefore per-worktree),
+    # resolve ``project_root`` back to the main repo — the same way a
+    # synchronous ``se3 run`` does in ``run_flow`` — so all three
+    # main-worktree-mutex acquirers contend on a single lock file. The
+    # orchestrator and stash logic still operate on the original
+    # ``project_root`` (the worktree being mutated); only the lock target
+    # is resolved to the main repo.
+    lock_root = _resolve_main_lock_root(project_root)
 
     # Capture whether the user's tree has WIP BEFORE entering the lock.
     # The lock context writes ``se3/state/merge.lock`` (gitignored in
@@ -776,7 +788,7 @@ def run_merge(
 
     stash_audit_messages: list[str] = []
     try:
-        with MergeLock(project_root, blocking=True):
+        with MergeLock(lock_root, blocking=True):
             # Stashing happens INSIDE the lock so two racing ``se3 merge``
             # invocations cannot interleave; the second blocks at lock
             # acquisition above and only proceeds once the first has

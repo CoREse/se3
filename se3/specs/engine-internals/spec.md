@@ -62,7 +62,7 @@ Besides the core modules already registered under Directory Structure, `src/se3/
 - `implement.py` — the implement step; performs the actual code changes per the plan / plan_tasks output, working with `engine/worktree.py` to complete the implementation inside an isolated worktree
 - `verify_spec.py` — the verify_spec step; verifies whether the implementation artifacts satisfy the relevant spec requirements; the truncation strategy for its LLM-consumed content follows the centrally maintained limits in `engine/truncation.py`
 - `test.py` — the test step; runs the project test suite and parses the results; stdout/stderr truncation follows the shared limits in `engine/truncation.py`
-- `test_with_fail_loop.py` — a test-step variant with a failure loop; on test failure it drives a fix sub-flow and re-runs, constrained by the iteration cap and debouncing of `engine/loop_controller.py`
+- `test_with_fail_loop.py` — a test-step variant with a failure loop; on test failure it drives a fix sub-flow and re-runs, constrained by the `max_fix_iterations` fix-loop cap enforced by `engine/state_machine.py`
 - `self_check.py` — the self_check step; the agent performs a self-check of the current phase's artifacts; truncation limits are likewise centralized in `engine/truncation.py`
 - `_fix_context.py` — a private helper module that builds context (such as failure summaries, historical diffs, etc.) for fix / retry steps; not exposed directly as a step
 - `commit.py` — the commit step; invokes logic equivalent to `se3 commit` to land changes; enforces passing tests, intercepts sensitive files, and ensures the commit message contains context

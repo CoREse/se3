@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -2625,16 +2626,38 @@ def _slugify_for_branch(text: str) -> str:
 def _generate_worktree_branch_name(task: str) -> str:
     """Build the isolation branch name for a ``--worktree`` run.
 
-    Shape: ``worktree/<slug>-<timestamp>``. The timestamp keeps concurrent
-    ``--worktree`` runs of the same task from colliding, and the
-    ``worktree/`` prefix keeps these branches greppable and distinct from the
-    implement step's internal ``impl/*`` DAG branches. The result lands the
-    worktree under ``se3/worktrees/<branch-safe-name>/`` via
+    Shape: ``worktree/<slug>-<timestamp>-<rand>``. The timestamp keeps the name
+    human-readable/sortable, but its 1-second resolution does NOT guarantee
+    uniqueness: two ``--worktree`` runs of the same task launched within the
+    same wall-clock second would otherwise compute identical names and the
+    second ``git branch`` would fail with "already exists", losing that run.
+    A short random suffix (``uuid4`` hex) is therefore appended so concurrent
+    runs — including of the same task in the same second — always get distinct
+    branches and proceed in parallel. The ``worktree/`` prefix keeps these
+    branches greppable and distinct from the implement step's internal
+    ``impl/*`` DAG branches, and the suffix contains no slashes so the result
+    still lands the worktree under ``se3/worktrees/<branch-safe-name>/`` via
     :func:`worktree.create_worktree`'s path rule.
     """
     slug = _slugify_for_branch(task)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return f"worktree/{slug}-{timestamp}"
+    rand = uuid.uuid4().hex[:8]
+    return f"worktree/{slug}-{timestamp}-{rand}"
+
+
+def _worktree_flow_status(worktree_path: Path) -> Optional[str]:
+    """Read the on-disk flow status from a worktree's ``engine.json``.
+
+    Returns the persisted ``status`` string (e.g. ``"COMPLETED"`` / ``"PAUSED"``)
+    or ``None`` when the file is missing / unreadable.
+    """
+    engine_file = worktree_path / SE3_DIR / "state" / "engine.json"
+    try:
+        with open(engine_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        return None
+    return data.get("status")
 
 
 def _finalize_worktree_merge(
@@ -2768,6 +2791,28 @@ def run_worktree_mode(
         )
         return exit_code
 
+    # A 0 exit code is ambiguous in --output-format json: a flow that PAUSED
+    # for non-interactive input (e.g. a daemon-spawned --worktree --discover run
+    # awaiting a web answer) also returns 0. Only a genuinely COMPLETED flow may
+    # trigger the trailing merge — merging a paused flow would delete its branch
+    # and archive its worktree (engine.json + call files), irrecoverably losing
+    # the run that the web operator is about to answer. Preserve and exit.
+    status = _worktree_flow_status(worktree_path)
+    if status != FlowStatus.COMPLETED.value:
+        render_full(
+            "\n".join(
+                [
+                    f"Worktree run paused (status: {status or 'unknown'}); "
+                    "no merge attempted.",
+                    f"State preserved in worktree '{worktree_path}' "
+                    f"(branch '{worktree_branch}').",
+                    "It will be resumed once the pending input is answered.",
+                ]
+            ),
+            title="Worktree Run Paused",
+        )
+        return exit_code
+
     # Success: merge the isolation branch back into the original branch.
     return _finalize_worktree_merge(
         project_root, worktree_branch, original_branch
@@ -2838,6 +2883,44 @@ def _find_worktree_run_by_flow_id(
     return None
 
 
+def _self_worktree_run(
+    project_root: Path, flow_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return a worktree-run record when ``project_root`` *is* the worktree.
+
+    The daemon resumes a ``--worktree`` run by relaunching ``se3 run --resume``
+    with its ``cwd`` set to the worktree directory itself — that is where the
+    run's ``engine.json`` / history live, where its WebUI call-responses are
+    written, and what the daemon's resume validation reads. In that case the
+    flow is not discoverable via :func:`find_resumable_worktree_runs` (which
+    scans ``<main_repo>/se3/worktrees/``, one level up), so this reads the
+    worktree's own ``engine.json`` and recognises it as a resumable worktree
+    run. Returns ``None`` when ``project_root`` is not an ``is_worktree_mode``
+    flow, the flow id does not match, or the flow is already COMPLETED.
+    """
+    engine_file = project_root / SE3_DIR / "state" / "engine.json"
+    try:
+        with open(engine_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        return None
+    if not data.get("is_worktree_mode"):
+        return None
+    if str(data.get("flow_id")) != str(flow_id):
+        return None
+    if data.get("status", "unknown") == FlowStatus.COMPLETED.value:
+        return None
+    return {
+        "id": data.get("flow_id", flow_id),
+        "status": data.get("status", "unknown"),
+        "description": data.get("task_description", "No description"),
+        "is_worktree_run": True,
+        "worktree_path": data.get("worktree_path") or str(project_root),
+        "worktree_branch": data.get("worktree_branch"),
+        "worktree_original_branch": data.get("worktree_original_branch"),
+    }
+
+
 def _resume_worktree_run(
     project_root: Path,
     run: Dict[str, Any],
@@ -2883,6 +2966,25 @@ def _resume_worktree_run(
         )
         return exit_code
 
+    # A 0 exit is ambiguous in json mode: a flow that PAUSED again for further
+    # non-interactive input also returns 0. Only merge a genuinely COMPLETED
+    # flow — merging a still-paused flow would archive its worktree and delete
+    # its branch, losing the run mid-resume.
+    status = _worktree_flow_status(worktree_path)
+    if status != FlowStatus.COMPLETED.value:
+        render_full(
+            "\n".join(
+                [
+                    f"Worktree run paused again (status: {status or 'unknown'}); "
+                    "no merge attempted.",
+                    f"State preserved in worktree '{worktree_path}'.",
+                    "It will be resumed once the pending input is answered.",
+                ]
+            ),
+            title="Worktree Run Paused",
+        )
+        return exit_code
+
     if not worktree_branch:
         display_error(
             "Worktree run completed but no isolation branch was recorded; "
@@ -2905,13 +3007,26 @@ def resume_run(
 
     If ``flow_id`` names a resumable ``--worktree`` run (discovered under
     ``se3/worktrees/``), it is resumed inside its worktree and merged back on
-    success. Otherwise the main-repo flow is resumed in place (a synchronous
-    run that acquires the main-worktree mutex for its whole duration).
+    success. When ``project_root`` *is itself* such a worktree — the shape the
+    daemon uses when it relaunches ``se3 run --resume`` with ``cwd`` set to the
+    worktree directory — the same lock-free body + merge-back path is taken,
+    with the merge driven from the resolved main repo. Otherwise the main-repo
+    flow is resumed in place (a synchronous run that acquires the main-worktree
+    mutex for its whole duration).
     """
     worktree_run = _find_worktree_run_by_flow_id(project_root, flow_id)
     if worktree_run is not None:
         return _resume_worktree_run(
             project_root, worktree_run, prompt_history, output_format
+        )
+    self_run = _self_worktree_run(project_root, flow_id)
+    if self_run is not None:
+        # ``project_root`` is the worktree itself; the trailing merge must run
+        # from the main repo (where the original branch is checked out), so
+        # resolve it rather than merging from inside the worktree.
+        main_root = _resolve_main_lock_root(project_root)
+        return _resume_worktree_run(
+            main_root, self_run, prompt_history, output_format
         )
     return run_flow(
         project_root=project_root,

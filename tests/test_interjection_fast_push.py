@@ -436,3 +436,41 @@ def test_tracker_handles_malformed_snapshots_gracefully():
             ]
         },
     ) == []
+
+
+def test_pending_calls_signature_includes_worktree_run_calls(tmp_path):
+    """A --worktree run's call dir is covered by the fast call signature.
+
+    An isolation run writes its human-call files under
+    ``<worktree>/se3/calls/``; the fast (~1 s) call-change push must see them so
+    a worktree discovery clarification surfaces promptly, like a sync run.
+    """
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = main_root / "se3" / "worktrees" / "feat-x-1"
+    _write(
+        wt_root / "se3" / "state" / "engine.json",
+        {
+            "flow_id": "wt-flow-1",
+            "status": "PAUSED",
+            "is_worktree_mode": True,
+            "worktree_branch": "worktree/feat-x-1",
+            "worktree_original_branch": "main",
+            "worktree_path": str(wt_root),
+        },
+    )
+    _write(
+        wt_root / "se3" / "calls" / "discovery_1.json",
+        {"kind": "discovery", "prompt": "clarify?", "context": {"flow_id": "wt-flow-1"}},
+    )
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+    sig = agg.pending_calls_signature()
+
+    import os as _os
+
+    wt_key = _os.path.realpath(str(wt_root))
+    assert wt_key in sig
+    names = [entry[0] for entry in sig[wt_key]]
+    assert "discovery_1.json" in names

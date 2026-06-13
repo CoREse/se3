@@ -347,73 +347,49 @@ The analyze step SHALL auto-detect task type if not specified, but explicit type
 
 ### Requirement: Loop Mode Entry
 
-The system SHALL support a continuous task-execution mode invoked via `se3 run --loop` (alias `-l`). In loop mode, the configured task is executed repeatedly for a bounded number of iterations, with optional branch isolation via a dedicated loop branch / worktree.
+**DEPRECATED — removed.** Loop mode (`se3 run --loop` and its `--max-iterations` / `--no-worktree` / `--merge` / `--list-loops` flags, the per-iteration repeated execution, and the loop branch naming / merge-back / listing) has been removed from SE3. Its isolation capability is replaced by the [[Worktree Isolation Mode Entry]] requirement (`se3 run --worktree`).
 
-**Loop-Mode Flags (on `se3 run`):**
-- `--loop` / `-l` — Enable loop mode (continuous execution of the same task).
-- `--max-iterations <N>` / `-n <N>` — Maximum number of iterations (default: 10). The loop SHALL stop after `N` iterations even if the task continues to succeed.
-- `--no-worktree` — Disable branch isolation; iterations run directly on the current branch instead of in an isolated loop branch / worktree.
-- `--merge <branch>` — Merge an existing loop branch (e.g. `loop/<slug>-<iteration>` or the legacy `se3-loop/<timestamp>`) into the current branch and exit. Implies loop-mode handling but does not start new iterations.
-- `--list-loops` — List existing unmerged loop branches with commit counts and base branches, then exit without running.
+#### Scenario: Loop mode entry removed
+- **WHEN** a user wants isolated execution of a task
+- **THEN** loop mode is no longer available
+- **AND** `se3 run --worktree` provides isolated single-flow execution with automatic merge-back on success
 
-**Branch Isolation:**
-- When `--no-worktree` is NOT set, the loop SHALL create a new loop branch and a worktree, and execute iterations inside that worktree. The original branch is recorded so the loop branch can be merged back on completion.
-- **Branch naming (new convention, default):** When a non-empty task description is supplied, the loop branch SHALL be named `loop/{slugified_task_id}-{iteration}`. `slugified_task_id` is derived from the task description by lowercasing, replacing non-alphanumeric characters with hyphens, collapsing repeated hyphens, stripping leading/trailing hyphens, and truncating to 30 characters; if the result would be empty, `task` is used in its place. `iteration` is the upcoming iteration number (starting at 1).
-- **Branch naming (legacy fallback):** When no task description (or no derivable `task_id` / `iteration`) is available, the loop branch SHALL fall back to the legacy `se3-loop/{timestamp}` naming, where `timestamp` defaults to the current time in `YYYYMMDD-HHMMSS` format.
-- When `--no-worktree` IS set, iterations run directly on the current branch and a banner informing the user that isolation is disabled SHALL be displayed.
-- If worktree setup fails, the system SHALL fall back to non-isolated execution and display an error message indicating the fallback.
+### Requirement: Worktree Isolation Mode Entry
 
-**Iteration Lifecycle:**
-- Each iteration runs the same task description with the configured task type (default `pending` to allow auto-detection), via the same `run_flow` path used by single-run mode.
-- Between iterations, the system SHALL invalidate cached worktree/topology state so configuration lookups reflect any worktree changes from the previous iteration.
-- After each iteration, the system SHALL generate an iteration summary and feed it into the next iteration via the controller's prompt-history mechanism so successive iterations can build on prior results.
-- A `KeyboardInterrupt` SHALL be treated as a user interruption: the loop stops, the loop branch is preserved, and instructions for later merging or discarding are displayed.
+The system SHALL support an isolated-execution mode invoked via `se3 run --worktree`, which runs a single flow inside a dedicated git worktree and, on success, automatically folds the result back into the original branch via the heavy `se3 merge` orchestrator. Without the flag the default synchronous mode runs the flow in place with unchanged behavior.
 
-**Loop Completion and Merging:**
-- On normal completion (max iterations reached) with commits on the loop branch, the system SHALL automatically attempt to merge the loop branch back into the original branch and report success or a merge conflict (preserving the branch for manual resolution on conflict).
-- On normal completion with no commits on the loop branch, the system SHALL discard the empty loop branch / worktree.
-- On interruption, the loop branch SHALL be preserved and the user SHALL be shown the commands to merge (`se3 run --loop --merge <branch>`) or discard (`git branch -D <branch>`) it later.
+**Worktree-Mode Flag (on `se3 run`):**
+- `--worktree` — Run the flow in an isolated git worktree instead of in place.
+
+**Branch and Worktree Isolation:**
+- When `--worktree` is set, the system SHALL create an isolation branch and a git worktree under `se3/worktrees/{branch_safe_name}` via the generic `create_worktree` / `fork_worktree` primitives (see the `worktree-management` spec), recording the original branch on the flow as `worktree_original_branch`.
+- The flow body SHALL execute inside the worktree (the worktree path is passed as `project_root` to `run_flow`) using **exactly the same** step sequence, state persistence, `--resume`, and `--type` handling as a synchronous run.
+- The worktree flow body SHALL NOT hold the main-worktree lock, so multiple `--worktree` runs may execute their flow bodies concurrently; they contend only at their final merge step (see the `se3 merge` Concurrency Lock requirement in the `se3-commands` spec).
+
+**Completion and Merge-Back:**
+- On a genuinely COMPLETED flow, the system SHALL invoke the heavy `se3 merge` orchestrator from the main repository to merge the isolation branch back into the original branch, acquiring the main-worktree lock (blocking) for that step, with no additional diff-confirmation interaction.
+- On failure or interruption, the system SHALL preserve the run state, the isolation worktree, and the branch for a later `se3 run --resume`, and SHALL NOT trigger the merge.
 
 **Interaction with Other Flags:**
-- `--loop` and `--merge` may be combined: `se3 run --loop --merge <branch>` runs the merge-existing path and exits without entering an iteration loop.
-- `--from-issue`, `--resume`, and `--flow-id` are NOT compatible with loop mode; loop mode always starts fresh iterations of the supplied task.
+- `--worktree` composes with `--type` and `--change`.
+- `--resume` / `--flow-id` correctly dispatch a persisted worktree run back through the lock-free flow body plus the merge-back path.
 
-#### Scenario: Loop mode with branch isolation (new naming)
+#### Scenario: Worktree isolation run with auto-merge on success
 - **GIVEN** the user is on a feature branch
-- **WHEN** the user executes `se3 run --loop "Improve test coverage"`
-- **THEN** the system creates a loop branch named `loop/improve-test-coverage-1` (slugified task description with the upcoming iteration number) and a worktree
-- **AND** runs the task in that worktree for up to the default max iterations
-- **AND** auto-merges the loop branch back into the original branch on completion if commits were made
+- **WHEN** the user executes `se3 run --worktree "Improve test coverage"`
+- **THEN** the system creates an isolation branch and a worktree under `se3/worktrees/`
+- **AND** runs the identical flow inside the worktree without holding the main-worktree lock
+- **AND** on a genuinely COMPLETED flow it auto-merges the isolation branch back into the original branch via the heavy `se3 merge` orchestrator
 
-#### Scenario: Loop mode legacy fallback naming
-- **GIVEN** the user invokes loop mode without a task description (or otherwise without a derivable task_id / iteration)
-- **WHEN** the loop branch is created
-- **THEN** the system SHALL fall back to the legacy `se3-loop/<timestamp>` naming
+#### Scenario: Worktree run failure preserves state for resume
+- **WHEN** a `se3 run --worktree` flow fails or is interrupted before completion
+- **THEN** the run state, worktree, and isolation branch are preserved for a later `se3 run --resume`
+- **AND** no automatic merge is attempted
 
-#### Scenario: Loop mode with explicit iteration cap
-- **WHEN** the user executes `se3 run --loop -n 3 "Refine docs"`
-- **THEN** the loop runs at most 3 iterations and then reports that the maximum iteration count has been reached
-
-#### Scenario: Loop mode without isolation
-- **WHEN** the user executes `se3 run --loop --no-worktree "Quick polish"`
-- **THEN** iterations execute on the current branch with no loop branch or worktree created
-- **AND** a banner informs the user that isolation is disabled
-
-#### Scenario: Listing existing loop branches
-- **WHEN** the user executes `se3 run --list-loops`
-- **THEN** the system lists each unmerged loop branch (matching the `loop/*` new convention or the legacy `se3-loop/*` pattern) with its commit count ahead of its base branch
-- **AND** prints instructions for merging (`se3 run --loop --merge <branch>`) or discarding (`git branch -D <branch>`)
-- **AND** exits without starting any iterations
-
-#### Scenario: Merging an existing loop branch
-- **WHEN** the user executes `se3 run --loop --merge loop/<slug>-<iteration>` (or, for a legacy branch, `se3 run --loop --merge se3-loop/<timestamp>`)
-- **THEN** the system shows a diff summary against the current branch, prompts for confirmation, and on approval merges the loop branch into the current branch
-- **AND** on merge conflict the loop branch is preserved and the user is told to resolve manually
-
-#### Scenario: Loop interrupted by user
-- **GIVEN** a loop with branch isolation is in progress
-- **WHEN** the user sends Ctrl+C
-- **THEN** the loop stops, the loop branch is preserved, and the system prints the commands to merge or discard the branch later
+#### Scenario: Concurrent worktree runs
+- **GIVEN** two `se3 run --worktree` flows are launched in the same project
+- **THEN** their flow bodies execute concurrently in separate worktrees (neither holds the main-worktree lock)
+- **AND** they serialize only at their final merge step, which acquires the blocking main-worktree lock
 
 ### Requirement: Run From Existing Issue
 
@@ -441,7 +417,7 @@ The system SHALL support starting a flow from a recorded issue via the `--from-i
 
 **Interaction with Other Flags:**
 - `--type` selects the workflow type for the run started from the issue (default: `feature`).
-- `--from-issue` is mutually exclusive with `--loop`, `--merge`, and `--resume`/`--flow-id` semantics; when `--from-issue` is provided, the run starts a new flow rather than resuming or looping.
+- `--from-issue` is mutually exclusive with `--resume`/`--flow-id` semantics; when `--from-issue` is provided, the run starts a new flow rather than resuming. `--from-issue` may be combined with `--worktree` to run the issue-sourced flow in an isolated worktree.
 
 #### Scenario: Run from a specific issue ID
 - **GIVEN** an open issue with ID `ISSUE-123` exists

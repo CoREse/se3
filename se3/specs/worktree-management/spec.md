@@ -3,7 +3,7 @@
 
 ## Purpose
 
-The worktree-management subsystem provides the git branch and worktree lifecycle primitives that back SE3's loop mode and merge isolation. It owns loop branch naming (with slugification of task IDs), git worktree creation with retry/timeout handling, isolated execution via a context manager, merge-back of loop results with human or LLM-based conflict resolution, branch deletion gated on worktree state, and resilient multi-step cleanup of orphaned worktrees, locked worktrees, and stale `.git/worktrees/` metadata. It also exposes repository state queries (current branch, merge-in-progress detection, unmerged-index detection) and an auto-resolver for stale unmerged-index leftovers from prior aborted merges.
+The worktree-management subsystem provides the generic git branch and worktree lifecycle primitives that back SE3's `se3 run --worktree` isolation mode, the implement step's DAG-parallel worktrees, and merge isolation. It owns git worktree creation with retry/timeout handling (`create_worktree` / `fork_worktree`), isolated execution via a context manager (`WorktreeContext`), branch deletion gated on worktree state, resilient multi-step cleanup of orphaned worktrees, locked worktrees, and stale `.git/worktrees/` metadata (`force_cleanup_worktree`), and context-aware LLM merge-conflict resolution. It also exposes repository state queries (current branch, merge-in-progress detection, unmerged-index detection) and an auto-resolver for stale unmerged-index leftovers from prior aborted merges. (The loop-mode-specific primitives — loop branch naming, loop merge-back, basic per-file LLM conflict stripping, loop cleanup composition, and loop branch listing — have been removed along with loop mode.)
 
 ## Requirements
 
@@ -57,38 +57,16 @@ The subsystem exposes safe queries that work across normal repos, fresh `git ini
 
 ### Requirement: Loop Branch Naming
 
-The subsystem produces two branch-name shapes and treats the legacy shape as deprecated but functional.
+**DEPRECATED — removed.** The loop branch naming primitives (`create_loop_branch`, `_slugify_task_id`, and the `loop/{slug}-{iteration}` / legacy `se3-loop/{timestamp}` naming shapes) have been removed along with loop mode. Branch creation for isolated runs is now handled by the generic `fork_worktree` / `create_worktree` primitives (see *Worktree Creation*); `get_current_branch` (see *Repository State Queries*) remains available to capture the original branch.
 
-#### Scenario: New naming convention
-
-- **WHEN** `create_loop_branch` is called with both `task_id` and `iteration`
-- **THEN** the branch is named `loop/{slug}-{iteration}` where `{slug}` is the slugified `task_id`
-- **AND** if slugification yields an empty string, the slug defaults to `"task"`
-
-#### Scenario: Legacy naming fallback
-
-- **WHEN** `create_loop_branch` is called without `task_id` or without `iteration`
-- **THEN** the branch is named `se3-loop/{timestamp}` using the supplied timestamp or `datetime.now().strftime("%Y%m%d-%H%M%S")` if none
-
-#### Scenario: Task ID slugification rules
-
-- **WHEN** `_slugify_task_id(task)` runs
-- **THEN** the result is lowercased
-- **AND** any run of non-`[a-z0-9]` characters becomes a single `-`
-- **AND** leading and trailing hyphens are stripped
-- **AND** consecutive hyphens are collapsed to one
-- **AND** the result is truncated to 30 characters and any trailing `-` from truncation is stripped
-
-#### Scenario: Branch creation from current HEAD
-
-- **WHEN** `create_loop_branch` runs
-- **THEN** it records the current branch as `original_branch` via `get_current_branch`
-- **AND** runs `git branch {branch_name}` to create the new ref at HEAD
-- **AND** returns `(loop_branch_name, original_branch_name)`
+#### Scenario: Loop branch naming removed
+- **WHEN** an isolated run needs a branch and worktree
+- **THEN** the loop-specific naming helpers no longer exist
+- **AND** the generic `fork_worktree(project_root, source_branch, new_branch)` / `create_worktree` primitives are used instead
 
 ### Requirement: Worktree Creation
 
-Worktrees are created under `{project_root}/se3/worktrees/{safe_name}` where `safe_name` replaces `/` with `-`. Creation prunes stale entries beforehand and retries on timeout.
+Worktrees are created under `{project_root}/se3/worktrees/{safe_name}` where `safe_name` replaces `/` with `-`. Creation prunes stale entries beforehand and retries on timeout. These generic primitives (`create_worktree` / `fork_worktree`) are reused by `se3 run --worktree` to build an isolation worktree per run and by the implement step's DAG-parallel execution — both share the same `se3/worktrees/` parent directory, distinguished by per-branch slug subdirectories so they do not collide.
 
 #### Scenario: Path layout
 
@@ -197,77 +175,30 @@ Deleting a branch first ensures no worktree references it; if a worktree is regi
 
 ### Requirement: Loop Cleanup Composition
 
-#### Scenario: Cleanup with optional branch delete
+**DEPRECATED — removed.** The `cleanup_loop` composition helper has been removed along with loop mode. Worktree teardown is now performed directly via the generic `remove_worktree` / `force_cleanup_worktree` primitives (see *Worktree Removal* and *Forceful Worktree Cleanup*) and `delete_branch` (see *Branch Deletion*).
 
-- **WHEN** `cleanup_loop(project_root, loop_branch, worktree_path, delete_branch_flag)` is called
-- **THEN** `remove_worktree` runs first
-- **AND** `delete_branch` runs only if `delete_branch_flag` is `True`
+#### Scenario: Loop cleanup composition removed
+- **WHEN** an isolated run's worktree must be torn down
+- **THEN** `cleanup_loop` no longer exists
+- **AND** callers compose `remove_worktree` / `force_cleanup_worktree` and `delete_branch` directly
 
 ### Requirement: Merge-Back of Loop Branches
 
-`merge_loop_branch` checks out the target, stashes uncommitted changes, and runs a non-interactive merge. The conflict outcome depends on the requested strategy.
+**DEPRECATED — removed.** The lightweight loop merge-back helper (`merge_loop_branch`, with its stash/checkout/non-interactive-merge and human/`llm` conflict-strategy branches) has been removed along with loop mode. Merge-back for `se3 run --worktree` runs now goes through the heavy `se3 merge` orchestrator (version bump, postcondition assertions, typed `FailureReason`, and context-aware LLM conflict resolution); see the `se3-commands` `se3 merge` requirements and *Context-Aware LLM Conflict Resolution* below.
 
-#### Scenario: Pre-merge stash and checkout
-
-- **WHEN** `merge_loop_branch` runs and the current branch differs from `target_branch`
-- **THEN** `git checkout {target_branch}` runs first
-- **AND** `git stash --include-untracked` runs; a stash is considered created when the exit is zero and stdout does not contain `"No local changes"`
-
-#### Scenario: Clean merge restores stash
-
-- **WHEN** `git merge {loop_branch} --no-edit -m "Merge loop branch {loop_branch}"` succeeds
-- **THEN** if a stash was created, `git stash pop` runs
-- **AND** the function returns `True`
-- **AND** a `git stash pop` conflict is logged at warning level but is not raised
-
-#### Scenario: Non-conflict merge failure
-
-- **WHEN** the merge fails and stdout/stderr do not contain `"CONFLICT"`
-- **THEN** `git merge --abort` runs
-- **AND** any stash is popped
-- **AND** the function returns `False`
-
-#### Scenario: Conflict with `human` strategy
-
-- **WHEN** the merge fails with `"CONFLICT"` in stdout/stderr and `conflict_strategy == "human"`
-- **THEN** the conflict state is preserved (no abort, no stash pop)
-- **AND** a Rich-formatted block is rendered with the loop/target branches and conflicting files (with a plain-print fallback if Rich is unavailable)
-- **AND** a call file `se3/calls/merge_conflict_{ts}.json` is written with type, ISO timestamp, loop_branch, target_branch, conflict_files, and human instructions
-- **AND** the function returns the string `"pending_human"`
-
-#### Scenario: Conflict with `llm` strategy succeeds
-
-- **WHEN** `conflict_strategy == "llm"` and `_resolve_conflicts_with_llm` resolves every file
-- **THEN** any stash is popped
-- **AND** the function returns `True`
-
-#### Scenario: Conflict with `llm` strategy falls back to human
-
-- **WHEN** `conflict_strategy == "llm"` and LLM resolution does not resolve all files
-- **THEN** the same human-mode behavior runs (display + call file)
-- **AND** the function returns `"pending_human"`
+#### Scenario: Loop merge-back replaced by heavy orchestrator
+- **WHEN** an isolated `se3 run --worktree` flow succeeds and must fold its branch back
+- **THEN** `merge_loop_branch` no longer exists
+- **AND** the heavy `se3 merge` orchestrator performs the merge-back instead
 
 ### Requirement: LLM Conflict Resolution (Basic)
 
-`_resolve_conflicts_with_llm` issues a per-file LLM call to strip conflict markers. It writes the resolved content, stages it, and finishes with `git commit --no-edit`.
+**DEPRECATED — removed.** The basic per-file conflict-marker stripper (`_resolve_conflicts_with_llm`) used by the removed loop merge-back has been removed along with loop mode. The remaining conflict-resolution path is the richer `resolve_merge_conflicts_with_context` (see *Context-Aware LLM Conflict Resolution*), used by the heavy `se3 merge` orchestrator.
 
-#### Scenario: Per-file prompt and verification
-
-- **WHEN** each conflicting file is processed
-- **THEN** the prompt includes the file path and full content inside fenced code, and instructs the model to emit only the resolved content with no markers or explanation
-- **AND** if the LLM output still contains `<<<<<<<` or `>>>>>>>` the function returns `False` immediately
-- **AND** otherwise the resolved content is written and staged via `git add {filepath}`
-
-#### Scenario: Missing LLMCaller dependency
-
-- **WHEN** `from .llm_caller import LLMCaller` raises `ImportError`
-- **THEN** a warning is logged and the function returns `False`
-
-#### Scenario: Final merge commit
-
-- **WHEN** every file is resolved without error
-- **THEN** `git commit --no-edit` is run
-- **AND** the function returns `True` only when that commit exits zero
+#### Scenario: Basic LLM conflict resolver removed
+- **WHEN** merge conflicts must be resolved by an LLM
+- **THEN** `_resolve_conflicts_with_llm` no longer exists
+- **AND** the context-aware `resolve_merge_conflicts_with_context` resolver is used instead
 
 ### Requirement: Context-Aware LLM Conflict Resolution
 
@@ -354,14 +285,12 @@ Two related queries surface conflicting paths from different vantage points.
 
 ### Requirement: Loop Branch Listing
 
-#### Scenario: Listing both naming conventions
+**DEPRECATED — removed.** The loop branch listing helper (`list_loop_branches`) has been removed along with loop mode; there is no longer a `loop/*` / `se3-loop/*` branch convention to enumerate. Commit-count comparisons against a base branch remain available via the generic *Ahead-of-Base Check* and *Branch Diff Stat* primitives.
 
-- **WHEN** `list_loop_branches(project_root)` is called
-- **THEN** `git branch --list loop/*` and `git branch --list se3-loop/*` are queried in turn
-- **AND** every matched branch yields a dict with keys `branch`, `commit_count`, `base_branch`, `is_legacy`
-- **AND** `commit_count` is `git rev-list --count {current_branch}..{branch_name}` (defaults to 0 on failure)
-- **AND** `base_branch` is the current branch as resolved by `get_current_branch`
-- **AND** legacy `se3-loop/*` branches set `is_legacy=True` and emit a warning log noting the new format
+#### Scenario: Loop branch listing removed
+- **WHEN** a caller wants to inspect isolation branches
+- **THEN** `list_loop_branches` no longer exists
+- **AND** the generic ahead-of-base / diff-stat queries are used directly on the relevant branch
 
 ### Requirement: Branch Diff Stat
 
@@ -382,7 +311,7 @@ Two related queries surface conflicting paths from different vantage points.
 
 ### Requirement: WorktreeContext Manager
 
-A context manager wraps creation and exception-safe cleanup of a worktree while preserving the branch for recovery.
+A context manager wraps creation and exception-safe cleanup of a worktree while preserving the branch for recovery. It is reused by `se3 run --worktree` so that a failed or interrupted isolated run leaves its worktree branch intact for a later `se3 run --resume`.
 
 #### Scenario: Enter validates and creates
 

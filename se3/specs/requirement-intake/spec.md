@@ -253,58 +253,12 @@ The system SHALL persist flow state after each step for resumability.
 
 ### Requirement: Loop Mode Intake
 
-The system SHALL support a loop mode for continuous, repeated execution of a single task description across multiple iterations.
+**DEPRECATED — removed.** Loop-mode intake (`se3 run --loop` and its `--max-iterations` / `--no-worktree` / `--merge` / `--list-loops` flags, plus the per-iteration repeated-execution lifecycle) has been removed from SE3. The replacement intake for isolated execution is `se3 run --worktree` (see [[Explicit Task Metadata Flags]] and the `se3-commands` / `flow-engine` specs): it runs a single flow in an isolated git worktree and, on success, folds the result back into the original branch via the heavy `se3 merge` orchestrator.
 
-**Activation:**
-- Command: `se3 run --loop "Task description"` (alias `-l`)
-- The same task prompt is re-executed each iteration; an iteration summary is generated and injected as context for the next round.
-
-**Loop Control Flags:**
-- `--loop` / `-l` — Enable loop mode (continuous task execution).
-- `--max-iterations <N>` / `-n <N>` — Maximum number of iterations (default `10`). When `N <= 0`, the loop runs without an iteration cap until interrupted.
-- `--no-worktree` — Disable branch isolation; iterations run directly on the current branch instead of in a dedicated loop worktree.
-- `--merge <branch>` — Merge an existing loop branch (e.g. `se3-loop/20260324-120000`) into the current branch and exit, without starting a new loop.
-- `--list-loops` — List existing unmerged loop branches (with commit count ahead of base) and exit.
-
-**Branch Isolation:**
-- By default, loop mode creates a dedicated branch and worktree (e.g. `se3-loop/<timestamp>`) so that iteration changes are isolated from the user's working branch.
-- The original branch is recorded so that loop changes can be merged back when the loop finishes.
-- If worktree setup fails, the system falls back to non-isolated execution on the current branch and warns the user.
-- When `--no-worktree` is supplied, isolation is skipped entirely and iterations run on the current branch.
-
-**Iteration Lifecycle:**
-- Each iteration invokes the standard flow engine with the supplied task description and task type.
-- After each iteration, an LLM-generated summary of changes, test results, and remaining issues is produced and added to the loop context for subsequent iterations (with a deterministic fallback if generation fails).
-- The loop terminates when the maximum iteration count is reached, when the user interrupts via Ctrl+C, or when `--merge` is invoked in standalone mode.
-- On completion or interruption, the system handles loop finish (including optional merge of the loop branch back into the original branch).
-
-#### Scenario: Loop mode with default iteration cap
-- **WHEN** user executes `se3 run --loop "Improve test coverage"`
-- **THEN** the system creates a loop branch and worktree
-- **AND** repeatedly executes the task up to 10 iterations (the default `--max-iterations`)
-- **AND** injects an iteration summary as context for each subsequent iteration
-
-#### Scenario: Loop mode without branch isolation
-- **WHEN** user executes `se3 run --loop --no-worktree "Refactor module"`
-- **THEN** loop iterations execute directly on the current branch
-- **AND** no dedicated loop worktree is created
-
-#### Scenario: Listing existing loop branches
-- **WHEN** user executes `se3 run --list-loops`
-- **THEN** the system displays all unmerged `se3-loop/*` branches with commit counts ahead of their base branches
-- **AND** exits without starting a new flow
-
-#### Scenario: Merging an existing loop branch
-- **WHEN** user executes `se3 run --loop --merge se3-loop/20260324-120000`
-- **THEN** the system shows a diff summary of the loop branch versus the current branch
-- **AND** prompts the user to confirm the merge
-- **AND** merges the loop branch into the current branch on confirmation, then exits
-
-#### Scenario: Loop interruption
-- **GIVEN** a loop is executing iterations
-- **WHEN** the user interrupts via Ctrl+C
-- **THEN** the loop terminates gracefully
-- **AND** the post-loop finish handler runs to manage the loop branch state
+#### Scenario: Loop intake removed
+- **WHEN** a user wants isolated execution of a task
+- **THEN** loop-mode intake is no longer available
+- **AND** `se3 run --worktree "Task description"` provides isolated single-flow intake with automatic merge-back on success
 
 ### Requirement: Run From Existing Issue
 
@@ -371,11 +325,13 @@ The system SHALL allow callers of `se3 run` to override or supply task metadata 
 **Flags:**
 - `--type <task-type>` / `-t <task-type>` — Explicitly set the task type for this run (default: `feature`). Accepts any of the supported task types (`feature`, `bugfix`, `review`, `small`, `directive`, `discovery`, and other types recognized by the flow engine).
 - `--change <name>` / `-c <name>` — Provide an explicit change name for this task. The change name is forwarded to the flow engine and used as the `change_name` associated with the flow.
+- `--worktree` — Run the flow in an isolated git worktree (records `is_worktree_mode=True` on the flow instance, see [[Flow Instance Origin Metadata]]) and automatically merge the result back into the original branch on success.
 - `--flow-id <id>` — Resume a specific flow by its ID. Supplying `--flow-id` triggers resume behavior even if `--resume` is not also supplied.
 
 **Behavior:**
 - `--type` overrides the default task type (`feature`) for the run. When `--discover` is also supplied, `--type` is overridden to `discovery` (discovery mode takes precedence).
-- `--change` is passed through to the flow engine when starting a non-loop, non-issue-sourced flow; it has no effect on `--list-loops` or `--merge` standalone invocations.
+- `--change` is passed through to the flow engine when starting a non-issue-sourced flow.
+- `--worktree` selects isolated-worktree execution; it composes with `--type` and `--change` and is otherwise equivalent to a synchronous run except for the isolation and the end-of-run automatic merge.
 - `--flow-id` selects a specific persisted flow to resume. If `--flow-id` is supplied, the system skips the interactive resume picker and resumes that flow directly.
 
 #### Scenario: Explicit task type override
@@ -393,6 +349,11 @@ The system SHALL allow callers of `se3 run` to override or supply task metadata 
 - **WHEN** user executes `se3 run "Add login form" --change=login-form`
 - **THEN** the flow is created with `change_name` set to `login-form`
 
+#### Scenario: Worktree isolation flag
+- **WHEN** user executes `se3 run "Add login form" --worktree`
+- **THEN** the flow is created with `is_worktree_mode` set to `True` and executes in an isolated git worktree
+- **AND** on success the result is automatically merged back into the original branch
+
 #### Scenario: Resume a specific flow by ID
 - **WHEN** user executes `se3 run --flow-id <flow-id>`
 - **THEN** the system resumes the specified flow directly
@@ -405,7 +366,7 @@ The system MAY track the source of tasks for analytics.
 **Source markers (optional):**
 - `direct` - Direct `se3 run "task"` command
 - `discovery` - Discovery mode refined description
-- `loop` - Loop mode task
+- `worktree` - Isolated-worktree run (`se3 run --worktree`)
 
 #### Scenario: Source tracking
 - **WHEN** a flow completes
@@ -417,20 +378,20 @@ The system SHALL record origin and mode metadata directly on the flow instance s
 
 **Persisted Fields:**
 - `source_issue_id` — Optional issue identifier; set when the flow was started via `--from-issue` and used to link the flow back to the originating issue throughout its lifecycle.
-- `is_loop_mode` — Boolean flag indicating whether this flow instance is executing as part of a `--loop` run.
+- `is_worktree_mode` — Boolean flag indicating whether this flow instance is executing in an isolated git worktree (started via `se3 run --worktree`). Accompanied on the flow instance by `worktree_branch` / `worktree_path` / `worktree_original_branch` (see the *FlowInstance Persistence Schema* requirement in the `flow-engine` spec).
 
 **Behavior:**
 - These fields are persisted as part of the flow instance state (e.g. in `se3/state/engine.json`) and survive interruption and resume.
-- `source_issue_id` and `is_loop_mode` are independent of the optional task source markers in [[Task Source Tracking]]; they provide authoritative, machine-readable origin/mode metadata rather than analytics hints.
+- `source_issue_id` and `is_worktree_mode` are independent of the optional task source markers in [[Task Source Tracking]]; they provide authoritative, machine-readable origin/mode metadata rather than analytics hints.
 
 #### Scenario: Issue-sourced flow records source_issue_id
 - **GIVEN** a flow is started via `se3 run --from-issue ISSUE-123`
 - **THEN** the persisted flow instance has `source_issue_id` set to `ISSUE-123`
 - **AND** the value remains set across interrupt and resume
 
-#### Scenario: Loop flow records loop mode flag
-- **GIVEN** a flow is started via `se3 run --loop "Task"`
-- **THEN** the persisted flow instance has `is_loop_mode` set to `True`
+#### Scenario: Worktree flow records worktree mode flag
+- **GIVEN** a flow is started via `se3 run --worktree "Task"`
+- **THEN** the persisted flow instance has `is_worktree_mode` set to `True`
 
 ### Requirement: User Interjections During Step Execution
 

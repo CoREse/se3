@@ -3124,6 +3124,20 @@ behalf before spawning the flow — see the `spawner.py` / `client.py` bullets
 in the `base` spec and the `se3-commands` `se3 init` requirement; the New
 Task form itself need not require the user to pre-initialize the directory.
 
+The New Task form MUST also expose an **isolation / worktree** checkbox
+(`#nt-worktree`), styled like the existing discovery-mode toggle. When checked,
+it is equivalent to the CLI `se3 run --worktree`: the submitted flow runs in an
+isolated git worktree and auto-merges back into the original branch on success
+(see the `se3-commands` *Unified Entry Point `se3 run`* requirement and the
+`flow-engine` worktree-mode scenarios). The frontend (`buildNewFlowBody` in
+`app.js`) carries the boolean as `worktree` in the `POST /api/flows` body; the
+server (`NewFlowRequest` / `POST /api/flows` in `app.py`) threads `req.worktree`
+through the spawn protocol (`make_spawn_flow` → client → `request_spawn` →
+spawner), and the daemon spawner appends `--worktree` to the `se3 run` argv in
+the same position it appends `--discover`. Apart from this create-time toggle,
+the console displays and handles a worktree-mode flow identically to a
+synchronous run.
+
 #### Scenario: Dropdown lists known projects and an Other-path entry
 - **GIVEN** the user opens the New Task form for a machine that reports
   `project_roots = ["/path/A", "/path/B"]`
@@ -3180,6 +3194,23 @@ Task form itself need not require the user to pre-initialize the directory.
 - **THEN** the request is rejected as not-found (404) and no flow is spawned on
   `M2`, because the owner check gates the target machine regardless of the
   `project_root` path being absolute
+
+#### Scenario: Worktree isolation toggle dispatches an isolated run
+- **GIVEN** the user fills in the New Task form and checks the isolation /
+  worktree checkbox (`#nt-worktree`)
+- **WHEN** the form is submitted
+- **THEN** `buildNewFlowBody` includes `worktree: true` in the `POST /api/flows`
+  body, the server threads `req.worktree` through the spawn protocol, and the
+  daemon spawner appends `--worktree` to the spawned `se3 run` argv
+- **AND** the flow runs in an isolated git worktree and auto-merges back on
+  success, exactly as `se3 run --worktree` does on the CLI
+
+#### Scenario: Unchecked worktree toggle dispatches a synchronous run
+- **GIVEN** the user leaves the isolation / worktree checkbox unchecked
+- **WHEN** the form is submitted
+- **THEN** the `POST /api/flows` body carries `worktree: false` (or omits it),
+  no `--worktree` flag is appended, and the flow runs in the default
+  synchronous mode
 
 ### Requirement: Mobile Portrait Responsive Layout
 

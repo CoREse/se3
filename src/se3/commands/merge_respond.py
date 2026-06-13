@@ -228,15 +228,35 @@ def process_merge_response(
     # (e.g. a lazy import inside _process_merge_response_locked failing
     # before the function body executes) cannot leak the lock — the
     # ``with`` statement binds acquire and release into the same scope.
+    #
+    # The lock is the project-wide "main-worktree mutex" shared by every
+    # merge-completing path (``run_merge``, the orchestrator, and the
+    # synchronous ``se3 run`` flow), so acquire it in BLOCKING mode
+    # (``blocking=True``): an operator answering a paused merge with
+    # ``se3 merge-respond`` must QUEUE behind a running synchronous
+    # ``se3 run`` or another ``se3 merge`` and complete once that holder
+    # releases, rather than fail fast with MergeLockBusy. Blocking mode
+    # relies on the kernel releasing an flock when the holder process
+    # exits, so a crashed holder cannot wedge the queue and no PID
+    # stale-break path is needed; MergeLockBusy / MergeLockStale are not
+    # raised on this path, but the handlers are retained as defensive
+    # fallbacks.
     from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
+    from .run import _resolve_main_lock_root
 
     call_path = Path(call_file)
     if not call_path.exists():
         render_text(f"Call file not found: {call_path}", title="SE3 Merge Error")
         return 1
 
+    # Resolve the lock target back to the main repository so that a
+    # ``se3 merge-respond`` invoked with cwd inside a linked worktree still
+    # contends on the single project-wide ``<main_repo>/se3/state/merge.lock``
+    # — the same lock a synchronous ``se3 run`` and ``se3 merge`` acquire.
+    lock_root = _resolve_main_lock_root(project_root)
+
     try:
-        with MergeLock(project_root):
+        with MergeLock(lock_root, blocking=True):
             return _process_merge_response_locked(
                 call_path=call_path, project_root=project_root,
             )

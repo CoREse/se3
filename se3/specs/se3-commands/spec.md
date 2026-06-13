@@ -22,8 +22,8 @@ se3 run --resume
 # Resume a specific flow by ID
 se3 run --flow-id <flow-id>
 
-# Loop mode (continuous execution)
-se3 run --loop
+# Worktree isolation mode (isolated git worktree, auto-merge back on success)
+se3 run --worktree "Implement feature X"
 
 # Specify task type
 se3 run "Fix bug" --type=bugfix
@@ -53,6 +53,7 @@ se3 run --preset list
 | `--preset` | none | Run a *preset prompt* task by name (see the `preset-prompts` spec). A preset carries its own task type and full prompt text, so the invocation is equivalent to `se3 run --type <preset.type> --description "<preset prompt full text>"`. `--preset` is **mutually exclusive with `--type`**: supplying both on the command line raises a `BadParameter` error (the preset already determines the type). The reserved value `--preset list` (rather than running a flow) lists every available preset — built-in and project — with each one's type and source layer, then exits with code 0. An unknown preset name raises an error whose message includes the list of available preset names; a preset whose declared `prompt_file` is missing raises an error rather than being silently swallowed. |
 | `--flow-id` | none | Resume a specific flow by its ID, independent of the generic `--resume` interactive selector. When supplied, the command loads the named flow and resumes it directly without prompting; when both `--flow-id` and `--resume` are given, `--flow-id` takes precedence and the interactive selector is skipped. When `--flow-id` is supplied alone (without `--resume`) the behavior is identical to `--resume --flow-id <id>` — resume of the named flow is implied. |
 | `--change, -c` | none | Optional human-readable change name attached to the new flow. The change name is recorded on the flow record (`change_name`) at creation time and displayed in the "New Flow" startup panel as `Change: <name>` when set. The option applies to standard `se3 run "<task>"` invocations as well as to `se3 run --from-issue`; it does NOT apply to `--resume` (resuming a flow does not relabel it) and does NOT alter task-type selection. When omitted, no change label is attached to the flow. |
+| `--worktree` | off | Run the flow in an isolated git worktree instead of in place. When set, the command creates an isolation branch + worktree under `se3/worktrees/{branch_safe_name}` and executes **exactly the same** flow (same steps, state persistence, `--resume`, `--type`) inside it; the worktree flow body runs without holding the main-worktree lock so multiple `--worktree` runs proceed concurrently. On a genuinely COMPLETED flow the result is automatically folded back into the original branch via the heavy `se3 merge` orchestrator (no diff-confirmation prompt). On failure or interruption the run state, worktree, and branch are preserved for `se3 run --resume` and no merge is attempted. When omitted (the default, synchronous mode), the flow executes in place with unchanged behavior. |
 | `--output-format` | `cli` | Outermost event-stream sink selection. `cli` (default) hangs the existing Rich rendering sink and produces output byte-for-byte identical to current `se3 run`. `json` hangs the structured NDJSON sink — the form a daemon uses when it spawns a flow. `se3 run` itself does not branch on the caller; only the tail sink differs. An unrecognized value is rejected with a clear error and a non-zero exit. (See the *Event Stream and Sink Interface* requirement in the `flow-engine` spec.) |
 
 **Option aliases:** The long-form options on `se3 run` accept short aliases for ergonomic use:
@@ -60,8 +61,6 @@ se3 run --preset list
 |-----------|-------------|
 | `--resume` | `-r` |
 | `--discover` | `-d` |
-| `--loop` | `-l` |
-| `--max-iterations` | `-n` |
 | `--type` | `-t` |
 | `--change` | `-c` |
 
@@ -98,26 +97,16 @@ The short aliases are interchangeable with their long forms (e.g. `se3 run -r` i
 - **THEN** the flow engine loads that specific flow's persisted state and continues execution from the interrupted step
 - **AND** no interactive resume-selection prompt is displayed
 
-#### Scenario: Loop mode execution
-- **WHEN** user executes `se3 run --loop`
-- **THEN** the flow engine continuously executes tasks
+#### Scenario: Worktree isolation mode execution
+- **WHEN** user executes `se3 run --worktree "Implement feature X"`
+- **THEN** the flow engine creates an isolation branch and a git worktree under `se3/worktrees/{branch_safe_name}`
+- **AND** runs the identical flow inside the worktree without holding the main-worktree lock
+- **AND** on a genuinely COMPLETED flow it automatically folds the isolation branch back into the original branch via the heavy `se3 merge` orchestrator (no diff-confirmation prompt)
 
-#### Scenario: Loop mode with branch isolation
-- **WHEN** user executes `se3 run --loop` (without `--no-worktree`)
-- **THEN** creates a `se3-loop/{timestamp}` branch and git worktree
-- **AND** all tasks execute in the worktree
-- **AND** on completion, prompts user to merge/defer/discard
-
-#### Scenario: List loop branches
-- **WHEN** user executes `se3 run --list-loops`
-- **THEN** displays all unmerged loop branches with commit counts
-- **AND** shows instructions for merging or discarding
-
-#### Scenario: Merge loop branch with diff summary
-- **WHEN** user executes `se3 run --loop --merge <branch>`
-- **THEN** shows diff stat summary before merging
-- **AND** prompts for confirmation before proceeding
-- **AND** on conflict, displays conflicting file list with resolution instructions
+#### Scenario: Worktree run failure preserves state for resume
+- **WHEN** a `se3 run --worktree` flow fails or is interrupted before completion
+- **THEN** the run state, worktree, and isolation branch are preserved for a later `se3 run --resume`
+- **AND** no automatic merge is attempted
 
 #### Scenario: Discovery mode execution
 - **WHEN** user executes `se3 run --discover "Idea"`
@@ -171,7 +160,7 @@ se3 run --from-issue <issue-id>       # Load the named issue by ID
 2. **Issue lookup.** The supplied (or interactively entered) ID is loaded via the issue manager. When no issue with that ID exists, the command prints an error and exits with a non-zero exit code.
 3. **In-progress rejection.** When the loaded issue is already in `in_progress` status, the command refuses to start a new flow and tells the user to run `se3 issue reset <id>` first. Exit code is non-zero.
 4. **Status transition on start.** Before running the flow, the issue's status is transitioned to `in_progress`. When the transition itself raises (invalid transition for the issue's current state), the command prints the error and exits non-zero without starting the flow.
-5. **Flow execution.** The flow runs with the issue's description as the task description, the `--type` option as the task type (default `feature`), `is_loop_mode=False`, and the issue ID recorded on the flow as its source issue. `--from-issue` may be combined with `--discover`: when `--discover` is supplied it first forces the task type to `discovery`, and the `--from-issue` branch then runs the flow with that discovery type (the issue's description seeds the discovery exploration). The issue lifecycle is unaffected by `--discover`. The `--from-issue` help text mentions that it can be combined with `--discover`.
+5. **Flow execution.** The flow runs with the issue's description as the task description, the `--type` option as the task type (default `feature`), and the issue ID recorded on the flow as its source issue. `--from-issue` may be combined with `--discover`: when `--discover` is supplied it first forces the task type to `discovery`, and the `--from-issue` branch then runs the flow with that discovery type (the issue's description seeds the discovery exploration). The issue lifecycle is unaffected by `--discover`. The `--from-issue` help text mentions that it can be combined with `--discover`.
 6. **Status transition on completion.** When the flow exits with code 0, the issue is transitioned to `resolved`. When the flow exits with any non-zero code, the issue is transitioned back to `open`. Failures of these final status transitions are best-effort (swallowed) so that the flow's exit code remains the command's exit code.
 
 #### Scenario: --from-issue with explicit ID resolves to flow run
@@ -1023,7 +1012,7 @@ The call file SHALL have `type: sync_high_impact_deletion`. The only valid decis
 
 ### Requirement: `se3 merge` Command
 
-The `se3 merge` command SHALL sequentially merge one or more named branches into the current branch, targeting same-repo multi-task parallel aggregation. Branches are merged pairwise in the order given (no octopus merge); the command is unaware of the source workflow that produced each branch and coexists with `se3 run --loop --merge` (which remains the in-loop single-branch path).
+The `se3 merge` command SHALL sequentially merge one or more named branches into the current branch, targeting same-repo multi-task parallel aggregation. Branches are merged pairwise in the order given (no octopus merge); the command is unaware of the source workflow that produced each branch, and the same orchestrator is reused by the automatic merge-back appended to a `se3 run --worktree` run.
 
 **Interface:**
 ```bash
@@ -1074,7 +1063,7 @@ When `--strategy` is omitted, the default tier is **`fast`**. The legacy strateg
    - If a branch has a bound git worktree, the worktree is first archived to `<project_root>/.se3/archive/<slug>-<ts>/` along with an `.se3-archive-meta.json` capturing the HEAD SHA, then `git worktree remove` is called when the worktree is clean (`git status --porcelain` empty); when dirty the cleanup is refused with an error and `--force` is NEVER used.
    - The current branch and `main`/`master` are NEVER deleted.
 
-9. **Infrastructure reuse.** Execution logs go to `se3/logs/`. Human-decision artifacts go to `se3/calls/` as MCP call files (e.g., `se3/calls/merge_<timestamp>_<branch>.json`), consistent with `se3 sync` and the existing `merge_loop_branch` flow.
+9. **Infrastructure reuse.** Execution logs go to `se3/logs/`. Human-decision artifacts go to `se3/calls/` as MCP call files (e.g., `se3/calls/merge_<timestamp>_<branch>.json`), consistent with `se3 sync`.
 
 **Out of scope (first version):** octopus merge (git's strategy supports only conflict-free combinations); single LLM call resolving multiple branches simultaneously (no ground truth); cross-branch hunk-level batching (git does not support partial layered merges); rewriting per-branch historical commits' versions; auto-deciding which branches to merge (the list MUST be explicit); injecting unrelated full-file context or historical-merge few-shot examples into the LLM prompt (possible later enhancement).
 
@@ -1289,25 +1278,36 @@ The fast-strategy post-merge guardrail repair loop SHALL detect when the LLM is 
 
 ### Requirement: `se3 merge` Concurrency Lock
 
-`se3 merge` SHALL serialize concurrent invocations within the same project root via an exclusive non-blocking file lock at `se3/state/merge.lock`. A second `se3 merge` invoked while another is in progress SHALL fail immediately with the `lock_busy` failure category rather than queue or wait.
+The `MergeLock` at `se3/state/merge.lock` SHALL serve as the project's **main-worktree mutex** — at most one holder may exist at a time across the whole project — and acquisition SHALL be **blocking** (queue and wait for the current holder to release) rather than non-blocking fail-fast. Two classes of participant contend for this single lock:
+
+1. **Synchronous `se3 run`** — acquires the lock at run **startup**, blocking until it is free, and **holds it for the entire run** until the run ends.
+2. **`se3 merge`** — every merge (a standalone `se3 merge` invocation, and the automatic merge appended to the end of a `se3 run --worktree` run) acquires the lock before executing, blocking while it is held, and releases it when the merge completes.
+
+The lock therefore serializes naturally: synchronous runs are mutually exclusive, and a synchronous run is mutually exclusive with any merge (a merge waits for an in-flight synchronous run to finish). A `se3 run --worktree` flow body executes inside its isolation worktree **without** holding this lock, so multiple worktree flow bodies run concurrently and contend only at their final merge step. This lock governs **only** the main-worktree-level mutex; it is entirely unrelated to the DAG-parallel isolation worktrees used inside the `implement` step, which do not participate in it.
 
 **Lock contract:**
 - The lock file records the holder process's PID.
-- A new invocation acquires the lock with `fcntl.flock(LOCK_EX | LOCK_NB)`; on contention, the call surfaces `MergeLockBusy` and the CLI exits with the general-failure code.
-- A lock file whose recorded PID no longer exists is considered stale and MAY be reclaimed (with jittered backoff to avoid thundering herd) and the failure category is `lock_stale` if reclamation itself fails.
-- The lock is released automatically on process exit, context-manager exit, or explicit release.
+- A blocking acquirer acquires the lock with `fcntl.flock(LOCK_EX)` (no `LOCK_NB`), waiting in the OS until the current holder releases it.
+- A lock file whose recorded PID no longer exists is considered stale and MAY be reclaimed (with jittered backoff to avoid thundering herd); the failure category is `lock_stale` if reclamation itself fails.
+- The lock is released automatically on process exit (the OS releases an `flock` when the holding process dies), context-manager exit, or explicit release.
 - An inner caller (e.g. the orchestrator) that detects the lock is already held by the *same* process MUST skip re-acquisition rather than risk a same-process flock collision.
 
-#### Scenario: Concurrent merge rejected
+#### Scenario: Concurrent merge queues and waits
 - **GIVEN** an `se3 merge` invocation is in progress and currently holds `se3/state/merge.lock`
 - **WHEN** a second `se3 merge` is launched in the same project root
-- **THEN** the second invocation exits immediately with the `lock_busy` failure category
-- **AND** the first invocation continues unaffected
+- **THEN** the second invocation blocks waiting for the lock rather than failing fast
+- **AND** once the first invocation releases the lock, the second acquires it and proceeds
+
+#### Scenario: Merge waits for an in-flight synchronous run
+- **GIVEN** a synchronous `se3 run` holds the main-worktree lock for the duration of its run
+- **WHEN** a `se3 merge` is launched in the same project root while that run is still executing
+- **THEN** the merge blocks until the synchronous run ends and releases the lock
+- **AND** then the merge acquires the lock and proceeds
 
 #### Scenario: Stale lock reclaimed
 - **GIVEN** `se3/state/merge.lock` records a holder PID that no longer exists in the OS process table
-- **WHEN** a new `se3 merge` is invoked
-- **THEN** the stale lock is reclaimed and the merge proceeds normally
+- **WHEN** a new acquirer requests the lock
+- **THEN** the stale lock is reclaimed and acquisition proceeds normally
 
 ### Requirement: `se3 merge` Success Post-Conditions
 
@@ -1672,15 +1672,12 @@ After salvage, the user is expected to continue work via `se3 run --from-issue`.
 
 ### Requirement: Loop Mode CLI Options
 
-The system SHALL provide the following CLI options for loop mode:
+**DEPRECATED — removed.** Loop mode has been removed from SE3 entirely. The `--loop` / `-l`, `--max-iterations` / `-n`, `--no-worktree`, `--merge <branch>` (loop merge-back), and `--list-loops` options no longer exist on `se3 run`. Isolated execution is now provided by `se3 run --worktree` (see the *Unified Entry Point `se3 run`* requirement), which runs the flow in an isolated git worktree and automatically folds the result back into the original branch via the heavy `se3 merge` orchestrator on success.
 
-| Option | Description |
-|--------|-------------|
-| `--loop, -l` | Enable loop mode (continuous task execution) |
-| `--max-iterations, -n` | Maximum iterations for loop mode (default: 10) |
-| `--no-worktree` | Disable branch isolation in loop mode |
-| `--merge BRANCH` | Merge an existing loop branch (shows diff summary, prompts confirmation) |
-| `--list-loops` | List existing unmerged loop branches with commit counts |
+#### Scenario: Loop CLI options are no longer accepted
+- **WHEN** a caller passes `--loop`, `--max-iterations`, `--no-worktree`, `--merge` (loop), or `--list-loops` to `se3 run`
+- **THEN** the options are not recognized (they have been removed from the command surface)
+- **AND** callers needing isolated execution use `se3 run --worktree` instead
 
 ### Requirement: `se3 daemon` Command
 

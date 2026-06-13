@@ -289,16 +289,31 @@ def run_cmd(
             render_text(f"Error: {e}", title="Error")
             raise typer.Exit(1)
 
-        # Run flow with issue description
-        exit_code = run_flow(
-            project_root=project_root,
-            task_description=issue.description,
-            task_type=type,
-            change_name=change,
-            prompt_history=prompt_history,
-            source_issue_id=issue.id,
-            output_format=output_format,
-        )
+        # Run flow with issue description. Honour --worktree: an isolated
+        # from-issue run goes through run_worktree_mode (which threads
+        # source_issue_id through and merges back on success) so the
+        # daemon-spawned `--from-issue <id> --worktree` path is not silently
+        # downgraded to a synchronous in-place run.
+        if worktree:
+            exit_code = run_worktree_mode(
+                project_root=project_root,
+                task=issue.description,
+                task_type=type,
+                change_name=change,
+                prompt_history=prompt_history,
+                source_issue_id=issue.id,
+                output_format=output_format,
+            )
+        else:
+            exit_code = run_flow(
+                project_root=project_root,
+                task_description=issue.description,
+                task_type=type,
+                change_name=change,
+                prompt_history=prompt_history,
+                source_issue_id=issue.id,
+                output_format=output_format,
+            )
 
         # Update issue status based on result
         try:

@@ -870,3 +870,131 @@ def test_issue_snapshot_to_dict_omits_none_optional_fields(tmp_path: Path) -> No
     assert "type" not in d
     assert d["id"] == "001"
     assert d["description"] == "desc"
+
+
+# ---- worktree-run observability --------------------------------------------
+
+
+def _make_worktree_run(
+    main_root: Path,
+    *,
+    wt_name: str,
+    flow_id: str,
+    status: str = "RUNNING",
+    is_worktree_mode: bool = True,
+) -> Path:
+    """Create a ``se3 run --worktree`` isolation subdir under *main_root*.
+
+    Writes ``<main_root>/se3/worktrees/<wt_name>/se3/state/engine.json`` (and a
+    history jsonl) describing a worktree-mode flow, mirroring what a live
+    ``se3 run --worktree`` body persists. Returns the worktree directory path.
+    """
+    wt_root = main_root / "se3" / "worktrees" / wt_name
+    _write(
+        wt_root / "se3" / "state" / "engine.json",
+        {
+            "flow_id": flow_id,
+            "task_description": "isolated task",
+            "task_type": "feature",
+            "status": status,
+            "is_worktree_mode": is_worktree_mode,
+            "worktree_branch": f"worktree/{wt_name}",
+            "worktree_original_branch": "main",
+            "worktree_path": str(wt_root),
+            "state": {
+                "current_step_id": "s1",
+                "selected_steps": ["analyze", "implement"],
+                "current_step_index": 1,
+                "steps": {"s1": {"step_type": "implement"}},
+            },
+        },
+    )
+    hist = wt_root / "se3" / "history" / flow_id / "01_implement_abc.jsonl"
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    hist.write_text(json.dumps({"role": "user", "content": "go"}) + "\n", encoding="utf-8")
+    return wt_root
+
+
+def test_active_worktree_run_root_is_observable(tmp_path: Path) -> None:
+    """A live --worktree run's subdir is folded into the observable root view.
+
+    The daemon registers only the main repo; without worktree-run discovery the
+    isolation subdir (which holds the flow's engine.json + history during the
+    whole flow body) would never be scanned, leaving the WebUI blank until the
+    trailing merge. ``all_observable_roots`` must surface it.
+    """
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = _make_worktree_run(main_root, wt_name="feat-x-1", flow_id="wt-flow-1")
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+
+    observable = agg.all_observable_roots()
+    assert os.path.realpath(str(wt_root)) in observable
+    # The dropdown-facing project_roots view must NOT include the transient
+    # isolation sandbox.
+    assert os.path.realpath(str(wt_root)) not in agg.all_project_roots()
+
+
+def test_snapshot_includes_worktree_flow_but_not_in_project_roots(tmp_path: Path) -> None:
+    """get_snapshot reports the worktree flow as a live card; dropdown stays clean."""
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    # Main repo has its own (stale) prior flow.
+    _make_root(main_root, engine_flow_id="main-stale", call_specs=[])
+    wt_root = _make_worktree_run(main_root, wt_name="feat-x-1", flow_id="wt-flow-1")
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+    status = agg.get_snapshot()
+
+    flow_ids = {f.flow_id for f in status.flows}
+    assert "wt-flow-1" in flow_ids
+    assert "main-stale" in flow_ids
+    wt_flow = next(f for f in status.flows if f.flow_id == "wt-flow-1")
+    assert wt_flow.status == "RUNNING"
+    assert wt_flow.project_root == str(wt_root)
+    # The isolation sandbox is not a New Task target.
+    assert str(wt_root) not in status.project_roots
+    assert os.path.realpath(str(wt_root)) not in status.project_roots
+
+
+def test_dag_impl_worktree_not_observed(tmp_path: Path) -> None:
+    """An implement-step DAG isolation worktree (no is_worktree_mode) is ignored.
+
+    DAG implement worktrees share the ``se3/worktrees/`` parent but never write
+    a top-level ``is_worktree_mode`` flow record, so the strict gate must keep
+    them out of the observable root set.
+    """
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = _make_worktree_run(
+        main_root, wt_name="impl-g2", flow_id="impl-flow", is_worktree_mode=False
+    )
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+
+    assert os.path.realpath(str(wt_root)) not in agg.all_observable_roots()
+    assert "impl-flow" not in {f.flow_id for f in agg.get_snapshot().flows}
+
+
+def test_worktree_run_observed_from_registry_without_active_root(tmp_path: Path) -> None:
+    """A registry-only main root still has its worktree runs discovered.
+
+    After a daemon restart a failed worktree run's main repo may be present only
+    in the persistent registry (no live process re-adding it to the active set).
+    The worktree scan unions active ∪ registry, so it stays observable.
+    """
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = _make_worktree_run(
+        main_root, wt_name="feat-x-1", flow_id="wt-flow-1", status="FAILED"
+    )
+
+    agg = DaemonAggregator(
+        registry_load=lambda: [str(main_root)],
+    )
+    # Note: main_root is NOT add_project_root'd — it lives only in the registry.
+    assert os.path.realpath(str(wt_root)) in agg.all_observable_roots()

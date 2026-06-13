@@ -358,6 +358,34 @@ class TestManualChoice:
         assert exit_code == 0
 
 
+class TestMainWorktreeLockRoot:
+    def test_lock_targets_resolved_main_repo_root(self, tmp_path: Path) -> None:
+        """process_merge_response must acquire the main-worktree mutex on the
+        *main* repository root (resolved from a possibly-worktree
+        project_root), not on the bare project_root — so a merge-respond
+        launched from inside a linked worktree contends on the single
+        project-wide lock file shared with se3 run / se3 merge.
+        """
+        from unittest.mock import MagicMock, patch
+
+        call_file = _create_merge_call_file(tmp_path, [])
+        _create_response_file(call_file, "manual", "will fix later")
+
+        sentinel_root = Path("/resolved/main/repo")
+        with patch(
+            "se3.commands.run._resolve_main_lock_root",
+            return_value=sentinel_root,
+        ) as mock_resolve, patch(
+            "se3.commands.merge.merge_lock.MergeLock"
+        ) as MockLock:
+            MockLock.return_value = MagicMock()
+            exit_code = process_merge_response(call_file, project_root=tmp_path)
+
+        assert exit_code == 0
+        mock_resolve.assert_called_once_with(tmp_path)
+        MockLock.assert_called_once_with(sentinel_root, blocking=True)
+
+
 class TestEdgeCases:
     def test_missing_llm_resolution_key(self, tmp_path: Path) -> None:
         """Files missing llm_resolution key are handled gracefully."""

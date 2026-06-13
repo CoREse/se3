@@ -105,8 +105,10 @@ would silently ignore the developer's main-repo override.
   worktree of some other repository.
 - The framework MAY memoize the resolved main-repo root keyed by the
   absolute project-root path for the duration of a single run, and
-  SHALL invalidate that memoization at the start of each loop iteration
-  so subsequent iterations re-probe a possibly relocated worktree.
+  SHALL invalidate that memoization when execution enters a different
+  worktree (e.g. a `se3 run --worktree` isolation worktree or an
+  implement-step DAG worktree) so subsequent lookups re-probe a possibly
+  relocated worktree.
 - The above lookup applies uniformly to every loader that reads the
   project YAML (`load_project_yaml` and its callers), so version,
   agents, confirmation, implement, test, language, and any other
@@ -130,7 +132,7 @@ would silently ignore the developer's main-repo override.
 - `language.spec_language`: Language for spec writing (default: null)
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: `[]` — empty; `summarize` no longer participates, see issue-discovery *Whitelist Configuration*)
 - `test.critical_tests`: Critical acceptance test ID/substring patterns; a listed test that is skipped or missing is treated as not-passed (string list, default: `[]`; see Test Configuration requirement)
-- `conflict_resolver.strategy`: In-loop branch-merge conflict resolution strategy used by `se3 run --loop --merge` — `"human"` or `"llm"` (default: `"human"`)
+- `conflict_resolver.strategy`: Legacy conflict-resolution strategy key (`"human"` or `"llm"`, default: `"human"`). Its former consumer — the in-loop branch merge `se3 run --loop --merge` — has been removed along with loop mode; the key still loads via `load_conflict_resolver_config` but no longer governs any active command. Standalone and worktree-run merge-backs are governed by `merge.strategy` (see below).
 - `merge.strategy`: Default conflict-resolution tier for the standalone `se3 merge` command — `"fast"` (new default), `"safe"`, or `"strict"`. The previous `"default"` / `"robust"` values have been removed and trigger fail-fast at config load (see Merge Configuration requirement).
 - `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and archiving their worktrees under `.se3/archive/` (default: `true`).
 - `merge.max_conflict_resolve_iterations`: Maximum batched LLM-as-editor rounds the merge conflict resolver performs per `git merge` before the active strategy's cap-exhaustion policy kicks in (default: `10`, must be `>= 1`).
@@ -348,10 +350,10 @@ documentation:
 - **AND** a malformed `se3.yaml` (with no `se3.local.yaml` present)
   does NOT trigger this warning
 
-#### Scenario: Loop iterations re-probe worktree identity
-- **GIVEN** SE3 is running in `--loop` mode and each iteration may
-  create or remove a worktree
-- **WHEN** a new iteration starts
+#### Scenario: Entering a worktree re-probes worktree identity
+- **GIVEN** SE3 runs a flow inside a git worktree (e.g. `se3 run --worktree`
+  or an implement-step DAG worktree) that may be created or removed
+- **WHEN** execution moves into the worktree's project root
 - **THEN** any cached main-repo-root resolution is invalidated so the
   next config load re-runs the git probes against the current project
   root
@@ -663,23 +665,15 @@ both pathways converge on the same mechanism.
 
 ### Requirement: Conflict Resolver Configuration
 
-The system SHALL support configuring merge conflict resolution strategy for loop branch merges.
+The `conflict_resolver` section configures a legacy conflict-resolution strategy whose only consumer — the in-loop branch merge `se3 run --loop --merge` — has been **removed** along with loop mode. The section still parses and loads (via `load_conflict_resolver_config`) so existing `se3.yaml` files remain valid, but it no longer governs any active command. Active merge conflict handling (standalone `se3 merge` and the automatic merge-back of a `se3 run --worktree` run) is governed by the `merge.strategy` tier and the heavy orchestrator's context-aware resolver (see the Merge Configuration requirement and the `worktree-management` *Context-Aware LLM Conflict Resolution* requirement).
 
-**Conflict resolver section options:**
-- `conflict_resolver.strategy`: Resolution strategy (default: `"human"`). Any value other than `"human"` or `"llm"` is silently coerced to `"human"` at load time with no warning or error.
-  - `"human"`: Preserve conflict state in working tree, create a call file at `se3/calls/merge_conflict_{timestamp}.json` with conflict details, and return `pending_human` to the caller. The user resolves conflicts manually.
-  - `"llm"`: Attempt per-file LLM-based conflict resolution. Each conflicting file is sent to the LLM for resolution. If all files are resolved successfully, the merge completes automatically. If any file fails (LLM output still contains conflict markers), falls back to `"human"` mode.
+**Conflict resolver section options (legacy, inert):**
+- `conflict_resolver.strategy`: Resolution strategy (default: `"human"`). Any value other than `"human"` or `"llm"` is silently coerced to `"human"` at load time with no warning or error. The value is loaded but not acted upon by any current command.
 
-#### Scenario: Default conflict resolution
-- **WHEN** no `conflict_resolver` section exists in se3.yaml
-- **THEN** the framework uses `"human"` strategy (preserve conflicts, create call file)
-
-#### Scenario: LLM conflict resolution
-- **GIVEN** `conflict_resolver.strategy: "llm"` in se3.yaml
-- **WHEN** a merge conflict occurs during loop branch merge
-- **THEN** the framework attempts to resolve each conflicting file via LLM
-- **AND** if all files are resolved, the merge completes automatically
-- **AND** if any file fails, falls back to human mode
+#### Scenario: Legacy config still loads without error
+- **WHEN** an `se3.yaml` carries a `conflict_resolver` section (with or without `strategy`)
+- **THEN** `load_conflict_resolver_config` loads it without error (defaulting `strategy` to `"human"` when absent)
+- **AND** the value does not govern any active merge path (active conflict handling is driven by `merge.strategy`)
 
 ### Requirement: Merge Configuration
 
@@ -697,9 +691,9 @@ The system SHALL support configuration of the `se3 merge` command via a top-leve
   The strategy decides what happens on cap exhaustion: `fast` exits with a failure, `safe` escalates to a human MCP call, `strict` never enters the loop in the first place. There is no separate `merge.conflict_resolver` subtree — conflict-resolution behavior is fully determined by `merge.strategy` and this iteration cap.
 - `merge.strict_runtime_sync`: Whether `se3 merge` treats a tier A runtime sync collision as a fatal error that halts the merge sequence (default: `false`). When `true`, the old strict behavior is preserved: a collision raises `runtime_sync_collision` and stops the sequence. When `false` (default), collisions are bypassed by writing the source version to a sidecar file (`<dest>.from-<branch>`) and the sequence continues. Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `false`.
 
-**Orthogonality with `conflict_resolver.strategy`:**
+**Relationship to `conflict_resolver.strategy`:**
 
-`merge.strategy` is independent of and orthogonal to `conflict_resolver.strategy`. The latter governs only the in-loop branch merge performed by `se3 run --loop --merge`; the former governs the standalone `se3 merge <branch> ...` command. Setting one has no effect on the other.
+`merge.strategy` governs the standalone `se3 merge <branch> ...` command and the automatic merge-back of a `se3 run --worktree` run. The legacy `conflict_resolver.strategy` key is now inert (its in-loop consumer was removed with loop mode) and has no effect on `merge.strategy`.
 
 **Example configuration:**
 ```yaml
@@ -779,7 +773,7 @@ merge:
 - **GIVEN** `conflict_resolver.strategy: "llm"` and no `merge` section
 - **WHEN** the user runs `se3 merge feat/x`
 - **THEN** the standalone merge command uses `merge.strategy = fast`, NOT the `conflict_resolver` value
-- **AND** `se3 run --loop --merge` continues to honor `conflict_resolver.strategy: "llm"`
+- **AND** the legacy `conflict_resolver.strategy` key is inert (its in-loop consumer was removed with loop mode) and does not affect any merge path
 
 #### Scenario: Strict runtime sync halts on collision
 - **GIVEN** `merge.strict_runtime_sync: true` in se3.yaml
@@ -808,7 +802,7 @@ The system SHALL support configuration for the implement step's execution strate
     - Booleans are coerced via Python's `bool` ⊂ `int` rule: `True` becomes `1`, `False` becomes `0`.
     - Numeric strings (e.g. `"500"`) are parsed as their integer value.
   - Non-positive and negative results (zero, negative integers, `False` → `0`) are NOT rejected — the field has no `>= 1` floor at load time. Authors of `se3.yaml` SHOULD therefore supply a positive integer; surprising values such as `0`, `-5`, or `True` are stored verbatim and may cause unintended collapse / no-collapse behavior downstream.
-- `implement.use_worktree`: Boolean gate for the DAG parallel path's per-group worktree creation (default: `true`). When `false`, the implement step never creates `impl/*` branches or per-group worktrees and executes all groups sequentially on the original branch, regardless of DAG topology. This is the `implement`-step-scoped setting and is orthogonal to the loop mode `--no-worktree` CLI flag, which controls a different layer (whether the whole loop iteration runs in an isolated worktree). Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `true`.
+- `implement.use_worktree`: Boolean gate for the DAG parallel path's per-group worktree creation (default: `true`). When `false`, the implement step never creates `impl/*` branches or per-group worktrees and executes all groups sequentially on the original branch, regardless of DAG topology. This is the `implement`-step-scoped setting and is orthogonal to the `se3 run --worktree` CLI flag, which controls a different layer (whether the whole flow runs in an isolated worktree). Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `true`.
 - Environment variable `SE3_IMPLEMENT_USE_WORKTREE`: Overrides `implement.use_worktree` from the environment (useful for CI or one-off runs). Accepts the same string forms as the config value. Takes precedence over `se3.yaml`.
 
 **Example configuration:**
@@ -867,12 +861,12 @@ implement:
 - **THEN** the effective `use_worktree` is `False`
 - **AND** the environment variable takes precedence over the file value
 
-#### Scenario: Orthogonality with loop --no-worktree
-- **GIVEN** the user runs `se3 run ... --loop --no-worktree`
+#### Scenario: Orthogonality with run-level worktree isolation
+- **GIVEN** the user runs `se3 run` in the default synchronous mode (no `--worktree`)
 - **AND** `implement.use_worktree: true` in se3.yaml
-- **THEN** the loop iteration runs without its own isolated loop-level worktree
-- **AND** the implement step inside each iteration may still use DAG parallel worktrees when the topology justifies it
-- **AND** the two settings do not conflict because they govern different layers of the execution pipeline
+- **THEN** the flow runs without its own isolated run-level worktree
+- **AND** the implement step may still use DAG parallel worktrees when the topology justifies it
+- **AND** the two settings do not conflict because they govern different layers of the execution pipeline (the run-level `--worktree` isolation vs. the implement-step DAG worktrees)
 
 ### Requirement: Workflow Configuration
 

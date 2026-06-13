@@ -1734,3 +1734,67 @@ def test_read_flow_incremental_read_active_flows_equivalence(tmp_path):
     ref_contents = [r["message"]["content"] for r in ref.records]
 
     assert collected == ref_contents
+
+
+# --------------------------------------------------------------------------
+# --worktree run observability (aggregator-wired provider, as in daemon.py)
+# --------------------------------------------------------------------------
+
+
+def _make_worktree_run(main_root, *, wt_name, flow_id, status="RUNNING"):
+    """Create a ``se3 run --worktree`` isolation subdir under *main_root*."""
+    wt_root = main_root / "se3" / "worktrees" / wt_name
+    state_dir = wt_root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "status": status,
+                "task_description": "isolated task",
+                "is_worktree_mode": True,
+                "worktree_branch": f"worktree/{wt_name}",
+                "worktree_original_branch": "main",
+                "worktree_path": str(wt_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        wt_root / "se3" / "history" / flow_id / "01_implement_abc.jsonl",
+        [_msg("user", "go", step_type="implement")],
+    )
+    return wt_root
+
+
+def test_history_reader_indexes_active_worktree_run(tmp_path):
+    """The daemon-wired provider surfaces a live --worktree run in the index.
+
+    This mirrors daemon.py's wiring: the history reader's provider is the
+    aggregator's ``all_observable_roots``, which folds in active worktree-run
+    subdirs. The worktree flow must therefore appear in build_index and in the
+    active-flow signature during its flow body, not only after the merge.
+    """
+    from se3.daemon.aggregator import DaemonAggregator
+
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    _make_worktree_run(main_root, wt_name="feat-x-1", flow_id="wt-flow-1")
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+    reader = DaemonHistoryReader(
+        project_roots_provider=lambda: agg.all_observable_roots()
+    )
+
+    metas = {m.flow_id: m for m in reader.build_index()}
+    assert "wt-flow-1" in metas
+    assert metas["wt-flow-1"].active is True
+
+    # The active-flow signature (the fast push trigger) tracks the worktree flow.
+    assert "wt-flow-1" in reader.active_flow_signature()
+
+    # And its conversation is readable live.
+    read = reader.read_flow("wt-flow-1")
+    assert read.records
+    assert read.records[0]["step_type"] == "implement"

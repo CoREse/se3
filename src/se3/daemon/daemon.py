@@ -171,11 +171,14 @@ class Daemon:
         for root in self.config.project_roots:
             self.aggregator.add_project_root(root)
         # Reads se3/history of every root the aggregator tracks; injected into
-        # the outbound DaemonClient as its history_provider. Uses the merged
-        # root view (active ∪ registry ∪ disk-history) so build_index sees the
-        # registry roots even with no live flow.
+        # the outbound DaemonClient as its history_provider. Uses the
+        # worktree-inclusive root view (active ∪ registry ∪ disk-history ∪
+        # active ``--worktree`` run subdirs) so build_index / active_flow_signature
+        # see the registry roots even with no live flow AND surface a
+        # ``se3 run --worktree`` flow's engine.json / history live during its
+        # flow body, not only after the trailing merge syncs history back.
         self.history_reader = DaemonHistoryReader(
-            project_roots_provider=lambda: self.aggregator.all_project_roots()
+            project_roots_provider=lambda: self.aggregator.all_observable_roots()
         )
         self._stop_event: Optional[asyncio.Event] = None
         self._running = False

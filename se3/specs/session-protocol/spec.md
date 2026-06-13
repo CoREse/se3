@@ -167,7 +167,7 @@ Each flow MUST focus on a limited scope of work and MUST NOT attempt to complete
 **Scope Guidelines:**
 - A flow should complete in a reasonable number of steps
 - Complex work should be broken into multiple flows
-- Loop mode (`se3 run --loop`) handles multiple related tasks
+- Worktree isolation mode (`se3 run --worktree`) runs a single flow in an isolated worktree and auto-merges back on success
 
 #### Scenario: Flow scope limitation
 - **WHEN** the flow has determined work scope through analyze step
@@ -592,177 +592,43 @@ This mirrors the analogous logic for resuming an interrupted step (same `inputs[
 
 ### Requirement: Loop Mode
 
-The system SHALL support continuous task execution via `se3 run --loop`.
+**DEPRECATED — removed.** Loop mode (`se3 run --loop` and its continuous multi-iteration execution) has been removed from SE3. Isolated execution is now provided by `se3 run --worktree`, which runs a single flow in an isolated git worktree and folds the result back into the original branch via the heavy `se3 merge` orchestrator on success (see the `se3-commands` and `flow-engine` specs). The `--loop`, `--max-iterations`, `--no-worktree`, and `--merge` (loop) options no longer exist.
 
-**Loop Mode Behavior:**
-1. Execute current task flow to completion
-2. Continue with next iteration or exit when done
-
-**Loop Options:**
-- `--max-iterations N`: Limit iterations
-- `--type TYPE`: Filter task types
-- `--no-worktree`: Disable branch isolation (run on current branch)
-- `--merge BRANCH`: Merge an existing loop branch
-
-#### Scenario: Loop execution
-- **WHEN** `se3 run --loop` is executed
-- **THEN** tasks are executed continuously until iterations are exhausted or no more work remains
+#### Scenario: Loop mode removed
+- **WHEN** a user needs isolated or repeated execution
+- **THEN** loop mode is no longer available
+- **AND** `se3 run --worktree` provides isolated single-flow execution with automatic merge-back on success
 
 ### Requirement: Loop Mode Iteration Summaries
 
-Loop mode SHALL generate and propagate per-iteration summaries between iterations to preserve context across the loop.
+**DEPRECATED — removed.** The loop-mode per-iteration summary mechanism (`_generate_iteration_summary`, the `accumulated_summaries` list, `_truncate_summaries`, `_build_loop_context`, and the persistent-extra-prompt loop-context injection) has been removed along with loop mode. The `set_extra_prompt` / `get_extra_prompt` / `clear_extra_prompt` API in `llm_caller.py` continues to exist for one-shot Ctrl+C interrupt injection (see [[User Interjection Persistence Across Downstream Steps]]); only the persistent loop-context usage is gone.
 
-**Summary Generation:**
-- After each loop iteration completes, an LLM call (`_generate_iteration_summary` in `src/se3/commands/run.py`) produces a concise summary of what was accomplished in that iteration.
-- The summary is appended to the loop controller's `accumulated_summaries` list (`add_summary` in `src/se3/engine/loop_controller.py`).
-- Accumulated summaries are truncated to a bounded size (`_truncate_summaries`) so the propagated context does not grow without limit.
-
-**Summary Truncation Algorithm** (`_truncate_summaries` in `src/se3/engine/loop_controller.py`):
-- The total character length of all accumulated summaries (sum of `len(s)` across all entries) is capped at **8000 characters**.
-- When the cap is exceeded, the oldest non-placeholder entries are removed one at a time (by popping from the front of the list) until the total falls back under the cap.
-- If the first entry is already the `[...earlier iterations omitted...]` placeholder (from a prior truncation round), the placeholder is left in place and the next real entry (index 1) is removed instead.
-- After evicting entries, the `[...earlier iterations omitted...]` placeholder is inserted at the front of the list so the loop context framing renders it as a truncation marker. The placeholder's own length contributes to the total, so future truncation rounds account for it.
-- Truncation triggers on every call to `add_summary` — the new summary is appended first, then `_truncate_summaries` runs to enforce the cap.
-
-**Summary Propagation:**
-- Before starting the next iteration, the accumulated summaries are injected into the task context for that iteration as an additional prompt fragment.
-- This allows subsequent iterations to be aware of what prior iterations have already done, even though each iteration is otherwise an independent flow.
-
-**Persistent Extra Prompt Delivery Mechanism:**
-- Loop context is injected into every LLM call within an iteration via the `set_extra_prompt` / `get_extra_prompt` / `clear_persistent_extra_prompt` API in `src/se3/engine/llm_caller.py`.
-- `set_extra_prompt(prompt, persistent=True)` sets a persistent extra prompt that survives across multiple LLM calls within the same iteration, as opposed to the transient mode (`persistent=False`, the default) used for one-shot Ctrl+C interrupt injection, which is consumed after a single LLM call.
-- `get_extra_prompt()` returns the combined transient + persistent prompt text (joined with `\n\n` if both are present) without consuming either, so every LLM call in the iteration sees the loop context.
-- After each iteration, the loop controller calls `clear_persistent_extra_prompt()` in a `finally` block to clean up the persistent prompt before the next iteration sets a fresh one. This cleanup does NOT affect the transient extra prompt.
-- `clear_extra_prompt()` clears both transient and persistent prompts simultaneously.
-
-**Loop Context Framing** (`_build_loop_context` in `src/se3/engine/loop_controller.py`):
-- The loop context string begins with a `[Loop Mode Context]` header line: `You are running in loop mode, iteration N` (or `iteration N of M` when `max_iterations` is set).
-- The second line includes the current task: `Current task: {task}`.
-- When `accumulated_summaries` is non-empty, a `[Previous Iteration Summaries]` section is appended, with each summary prefixed by its iteration number or the `[...earlier iterations omitted...]` truncation marker.
-
-#### Scenario: Persistent extra prompt injected for every LLM call in an iteration
-- **WHEN** the loop controller starts a new iteration
-- **THEN** the loop context is set via `set_extra_prompt(loop_context, persistent=True)`
-- **AND** every LLM call within that iteration receives the combined persistent + transient extra prompt via `get_extra_prompt()`
-- **AND** the persistent prompt is cleaned up via `clear_persistent_extra_prompt()` in a finally block after the iteration completes
-
-#### Scenario: Transient and persistent extra prompts are combined
-- **WHEN** both a persistent extra prompt (loop context) and a transient extra prompt (Ctrl+C interrupt injection) are set simultaneously
-- **THEN** `get_extra_prompt()` returns them joined with `\n\n`, with the persistent prompt first
-- **AND** neither prompt is consumed by the call to `get_extra_prompt()`
-
-#### Scenario: Persistent prompt cleanup does not affect transient prompt
-- **WHEN** `clear_persistent_extra_prompt()` is called between loop iterations
-- **THEN** only the persistent extra prompt is cleared
-- **AND** any transient extra prompt remains set
-
-#### Scenario: Iteration summary generation
-- **WHEN** a loop iteration completes
-- **THEN** an LLM-generated summary of that iteration is produced
-- **AND** the summary is appended to `accumulated_summaries`
-
-#### Scenario: Iteration summaries propagate to the next iteration
-- **WHEN** the loop controller starts a new iteration with non-empty `accumulated_summaries`
-- **THEN** the accumulated summaries are injected into the task context/prompt for that iteration
-- **AND** the iteration can reference prior iterations' work via that context
-
-#### Scenario: Accumulated summaries are bounded to 8000 chars
-- **WHEN** `add_summary` is called and the total character length across all accumulated summaries exceeds 8000
-- **THEN** `_truncate_summaries` removes the oldest non-placeholder entries from the front of the list until the total falls back under 8000
-- **AND** inserts a `[...earlier iterations omitted...]` placeholder at the front to mark truncated entries
-
-#### Scenario: Placeholder preserved on subsequent truncation
-- **WHEN** `_truncate_summaries` runs and the first entry is already the `[...earlier iterations omitted...]` placeholder
-- **THEN** the placeholder is left at position 0 and the next real entry (index 1) is removed instead
+#### Scenario: Iteration summary mechanism removed
+- **WHEN** an isolated flow runs via `se3 run --worktree`
+- **THEN** there is no cross-iteration summary accumulation or loop-context prompt prefixing
+- **AND** each run is a single, independent flow
 
 ### Requirement: Loop Mode Branch Isolation
 
-Loop mode SHALL use git worktree-based branch isolation by default.
+**DEPRECATED — removed.** Loop-mode git-worktree branch isolation (loop branch naming `loop/{slug}-{iteration}` / legacy `se3-loop/{timestamp}`, the post-loop auto-merge/auto-discard cleanup, the loop interrupt handling, and the deferred-merge `se3 run --loop --merge` path) has been removed along with loop mode. Isolated execution is now provided by `se3 run --worktree`: it creates an isolation branch + worktree under `se3/worktrees/{branch_safe_name}` via the generic `create_worktree` primitive, runs the flow there, and on success folds the branch back into the original branch via the heavy `se3 merge` orchestrator; on failure or interruption the worktree and branch are preserved for `se3 run --resume`. See the *Unified entry point `se3 run`* requirement in the `flow-engine` spec and the *Worktree Creation* / *WorktreeContext Manager* requirements in the `worktree-management` spec.
 
-**Branch Naming:**
-- Default (task-aware) form: `loop/{slugified_task_id}-{iteration}`, where `slugified_task_id` is derived from the task description (lowercased, non-alphanumeric chars replaced with hyphens, collapsed, trimmed, truncated to 30 chars; empty slugs fall back to `task`) and `iteration` is the 1-based loop iteration number.
-- Legacy form: `se3-loop/{timestamp}` is used when no task description / task_id is available, and when an explicit timestamp is supplied.
-
-**Worktree Lifecycle:**
-1. Before loop: create the loop branch (per the naming rules above) from HEAD, create worktree at `se3/worktrees/{branch_safe_name}` (slashes in the branch name are replaced with hyphens)
-2. During loop: all task flows execute in the worktree (worktree path passed as `project_root` to `run_flow()`)
-3. After loop (non-interrupted): cleanup is automatic — no interactive three-way prompt is shown:
-   - The worktree is removed (the branch is preserved at this stage)
-   - If the loop branch has new commits relative to the original branch, it is auto-merged into the original branch; on success the loop branch is deleted, on conflict the branch is preserved and the user is told to resolve and merge manually
-   - If the loop branch has no new commits, it is auto-discarded (branch deleted) and a "no changes" message is printed
-
-**FlowInstance Fields:**
-- `loop_branch`: The loop branch name (either `loop/{slug}-{iteration}` or legacy `se3-loop/{timestamp}`)
-- `loop_worktree_path`: Reserved field for the active worktree directory path. The field is defined on `FlowInstance` and is round-tripped through `to_dict()` / `from_dict()` so persisted state preserves whatever value it holds across resumes, but the loop controller does not currently assign it during loop execution. Consumers MUST treat `loop_worktree_path` as optional and MUST NOT rely on it being populated; the authoritative worktree path is derived from `loop_branch` (via the `se3/worktrees/{branch_safe_name}` convention) or passed explicitly as `project_root` to `run_flow()`.
-- `loop_original_branch`: Branch to merge back to
-
-#### Scenario: `loop_worktree_path` is reserved and unpopulated
-- **GIVEN** a loop-mode flow is running or has been persisted to `se3/state/engine.json`
-- **WHEN** code inspects `FlowInstance.loop_worktree_path`
-- **THEN** the field MAY be `None` even while the loop is actively executing in a worktree, because the loop controller does not assign it
-- **AND** serialization (`to_dict`) and deserialization (`from_dict`) MUST still preserve any value present on the field so future writers can populate it without breaking persisted state
-- **AND** the actual worktree path MUST be derived from `loop_branch` or supplied via the `project_root` argument to `run_flow()`, not by reading `loop_worktree_path`
-
-**Interrupt Behavior:**
-- On Ctrl-C during loop: remove worktree, preserve branch
-- Print instructions for deferred merge: `se3 run --loop --merge {branch}`
-- User can discard with `git branch -D {branch}`
-
-**Deferred Merge:**
-- `se3 run --loop --merge {branch}` shows a diff stat (`get_diff_stat`) comparing the branch to the current branch, then prompts for interactive confirmation before performing the merge (accepts either the new `loop/{slug}-{iteration}` form or the legacy `se3-loop/{timestamp}` form)
-- On cancel: the merge is aborted without touching the working tree
-- On merge conflict: abort merge, report error, user resolves manually
-
-#### Scenario: Worktree isolation with task-aware naming
-- **WHEN** `se3 run --loop "Implement feature X"` is executed without `--no-worktree`
-- **THEN** a branch named `loop/{slugified-task}-{iteration}` (e.g. `loop/implement-feature-x-1`) is created
-- **AND** a git worktree is set up at `se3/worktrees/`
-- **AND** tasks execute in the isolated worktree
-
-#### Scenario: Worktree isolation falls back to legacy naming
-- **WHEN** loop mode runs without a task description / task_id
-- **THEN** a `se3-loop/{timestamp}` branch is created instead
-- **AND** the worktree is set up at `se3/worktrees/` as usual
-
-#### Scenario: Post-loop auto-merge when commits exist
-- **WHEN** loop mode finishes normally (not interrupted) and the loop branch has new commits relative to the original branch
-- **THEN** the worktree is removed
-- **AND** the loop branch is automatically merged into the original branch (no interactive prompt)
-- **AND** on success the loop branch is deleted
-- **AND** on merge conflict the loop branch is preserved with a message instructing the user to resolve manually
-
-#### Scenario: Post-loop auto-discard when no commits
-- **WHEN** loop mode finishes normally (not interrupted) and the loop branch has no new commits
-- **THEN** the worktree is removed
-- **AND** the loop branch is automatically deleted (no interactive prompt)
-- **AND** a "no changes" message is printed
-
-#### Scenario: Loop interrupt cleanup
-- **WHEN** user presses Ctrl-C during loop mode
-- **THEN** worktree is removed
-- **AND** loop branch is preserved for later merge
-- **AND** instructions are printed for deferred merge
-
-#### Scenario: Deferred merge with interactive confirmation
-- **WHEN** `se3 run --loop --merge loop/implement-feature-x-1` (or a legacy `se3-loop/20260324-120000`) is executed
-- **THEN** a diff stat comparing the loop branch to the current branch is displayed via `get_diff_stat`
-- **AND** the user is prompted with "Proceed with merge?" and the options `Merge <branch> into <target>` / `Cancel`
-- **AND** on confirmation the branch is merged into the current branch and success or conflict is reported
-- **AND** on cancel the merge is aborted without touching the working tree
+#### Scenario: Loop branch isolation replaced by --worktree
+- **WHEN** a user needs branch-isolated execution
+- **THEN** the loop-specific branch naming, post-loop cleanup, and deferred-merge prompts no longer exist
+- **AND** `se3 run --worktree` provides isolation with automatic heavy-merge-back on success and resume-preservation on failure
 
 ### Requirement: `se3 run` CLI Options
 
-The `se3 run` command SHALL accept the following options in addition to the startup, discovery, resume, and loop options described in earlier requirements.
+The `se3 run` command SHALL accept the following options in addition to the startup, discovery, and resume options described in earlier requirements.
 
 **Additional Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--from-issue [ID]` | — | Run a new flow seeded by an existing issue. When `ID` is supplied, that issue is loaded; when the flag is supplied without a value, the user is prompted to pick from open issues. |
-| `--list-loops` | — | List unmerged loop branches and exit without running any flow. |
+| `--worktree` | — | Run the flow in an isolated git worktree; on success the result is automatically folded back into the original branch via the heavy `se3 merge` orchestrator (see the *Worktree isolation mode startup* scenarios in the `flow-engine` spec). |
 | `--flow-id ID` | — | Resume the specific flow with the given id (equivalent to `--resume` but without the interactive picker). |
 | `--change NAME` | `-c` | Optional human-readable change name attached to the flow. |
-| `--max-iterations N` | `-n` | Maximum loop iterations. Defaults to `10` when not provided. |
 
 **`--from-issue` Behavior:**
 1. Load the referenced issue (interactively prompting if no id was supplied).
@@ -770,16 +636,8 @@ The `se3 run` command SHALL accept the following options in addition to the star
 3. Transition the issue to `in-progress`, run the flow using the issue's description as the task description, and record the issue id on the flow as `source_issue_id`.
 4. On flow completion, transition the issue to `resolved` on exit code 0, or back to `open` on non-zero exit. Status-update failures are tolerated as best-effort.
 
-**`--list-loops` Behavior:**
-- Prints each unmerged loop branch with its commit count ahead of its base branch.
-- Prints usage hints for merging (`se3 run --loop --merge <branch>`) and discarding (`git branch -D <branch>`).
-- Exits with code 0 without invoking the flow engine.
-
 **`--flow-id` Behavior:**
 - When supplied (with or without `--resume`), the resume path is taken directly for the given flow id, bypassing the interactive resume picker that `--resume` alone uses.
-
-**`--max-iterations` Default:**
-- The `max_iterations` parameter passed to loop mode defaults to `10` when the user does not specify a value.
 
 #### Scenario: Run from an explicit issue id
 - **WHEN** the user runs `se3 run --from-issue ISSUE-123`
@@ -802,28 +660,24 @@ The `se3 run` command SHALL accept the following options in addition to the star
 - **THEN** the command prints a message instructing the user to run `se3 issue reset ISSUE-123` first
 - **AND** exits with a non-zero status without starting a flow
 
-#### Scenario: List unmerged loop branches
-- **WHEN** the user runs `se3 run --list-loops`
-- **THEN** the unmerged loop branches are printed with their commit counts ahead of their base branches
-- **AND** the command exits without running any flow
+#### Scenario: Run in an isolated worktree
+- **WHEN** the user runs `se3 run --worktree "..."`
+- **THEN** the flow executes in an isolated git worktree and, on a genuinely COMPLETED flow, is automatically merged back into the original branch via the heavy `se3 merge` orchestrator
+- **AND** on failure or interruption the worktree and branch are preserved for `se3 run --resume`
 
 #### Scenario: Resume a specific flow id
 - **WHEN** the user runs `se3 run --flow-id <id>`
 - **THEN** the flow with that id is resumed directly without the interactive resume picker
 
-#### Scenario: Default maximum iterations
-- **WHEN** the user runs `se3 run --loop` without `--max-iterations`
-- **THEN** loop mode runs with a maximum of 10 iterations
-
 ### Requirement: Coexistence with `se3 merge`
 
-#### Scenario: Coexistence with standalone `se3 merge`
-- **GIVEN** the project supports both the in-loop `se3 run --loop --merge <branch>` path and the standalone `se3 merge <branch> [<branch> ...]` command
-- **WHEN** a user wants to fold one loop branch back into the original branch at the end of an iteration
-- **THEN** they use `se3 run --loop --merge`, which retains the existing in-loop semantics (single branch, governed by `conflict_resolver.strategy`)
+#### Scenario: Coexistence of automatic and standalone `se3 merge`
+- **GIVEN** the project supports both the automatic merge-back appended to a `se3 run --worktree` run and the standalone `se3 merge <branch> [<branch> ...]` command
+- **WHEN** a `se3 run --worktree` flow completes successfully
+- **THEN** it automatically invokes the same heavy `se3 merge` orchestrator to fold its isolation branch back into the original branch (governed by the `merge.*` config section), with no separate in-loop merge path
 - **WHEN** a user wants to aggregate multiple parallel-task branches into the current branch in one shot, with strategy tiers, mandatory spec guardrails, and aggregated SemVer bumping
-- **THEN** they use `se3 merge <branch> [<branch> ...]`, which is governed by the `merge.*` config section and is independent of `conflict_resolver.strategy`
-- **AND** the two commands intentionally coexist — neither replaces the other
+- **THEN** they invoke `se3 merge <branch> [<branch> ...]` directly, governed by the same `merge.*` config section
+- **AND** both paths share the one heavy orchestrator and the one blocking main-worktree lock
 
 ### Requirement: Standalone `se3 merge` CLI Options and Strategies
 
@@ -909,28 +763,31 @@ Before merging, the command SHALL also reject:
 
 ### Requirement: Standalone `se3 merge` Concurrency Lock
 
-The standalone `se3 merge` command SHALL serialize concurrent invocations via an exclusive file-based merge lock so that two runs cannot mutate the same working tree, index, and runtime-sync targets simultaneously.
+The standalone `se3 merge` command SHALL serialize concurrent invocations via the shared **main-worktree** merge lock so that two runs cannot mutate the same working tree, index, and runtime-sync targets simultaneously. Acquisition is **blocking** (queue and wait for the current holder to release) rather than non-blocking fail-fast, and the same lock is also held by a synchronous `se3 run` for the duration of its run, so a merge waits for any in-flight synchronous run as well as for any other merge.
 
 **Lock Behavior:**
-- The lock file lives at `se3/state/merge.lock` and is acquired with `fcntl.flock` inside the `MergeLock` context manager (`src/se3/commands/merge/merge_lock.py`).
-- The CLI wrapper acquires the lock; the orchestrator is invoked with `acquire_lock=False` so the same process does not try to re-acquire the same lock (which would surface as `MergeLockBusy`).
+- The lock file lives at `se3/state/merge.lock` and is acquired with `fcntl.flock(LOCK_EX)` (blocking, no `LOCK_NB`) inside the `MergeLock` context manager (`src/se3/commands/merge/merge_lock.py`).
+- The CLI wrapper acquires the lock; the orchestrator is invoked with `acquire_lock=False` so the same process does not try to re-acquire the same lock.
 - Any pre-merge stashing under the fast strategy happens INSIDE the lock; the pre-lock dirty check is used only to capture the user's pre-merge intent, since the lock file itself would otherwise show up as untracked dirty state.
 
 **Lock Errors:**
-- `MergeLockBusy`: another `se3 merge` is already running. The CLI prints the holder PID and lock file path and exits non-zero.
-- `MergeLockStale`: the lock file exists but the holder PID no longer exists or is unparseable. The CLI prints recovery instructions (`rm <lock file>`) and exits non-zero.
+- `MergeLockStale`: the lock file exists but the holder PID no longer exists or is unparseable, and reclamation fails. The CLI prints recovery instructions (`rm <lock file>`) and exits non-zero. (Because acquisition now blocks rather than failing fast on a live holder, the previous `MergeLockBusy` fail-fast path is retained only as a rarely-triggered fallback.)
 
-#### Scenario: Concurrent merges are serialized
+#### Scenario: Concurrent merges are serialized by waiting
 - **GIVEN** one `se3 merge` invocation has acquired the merge lock
 - **WHEN** a second `se3 merge` invocation starts in the same project
-- **THEN** the second invocation reports the holder PID and lock file path
-- **AND** exits non-zero without touching the working tree
+- **THEN** the second invocation blocks until the first releases the lock
+- **AND** then acquires the lock and proceeds without touching the working tree before it does
+
+#### Scenario: Merge waits for an in-flight synchronous run
+- **GIVEN** a synchronous `se3 run` holds the main-worktree lock for the duration of its run
+- **WHEN** a `se3 merge` invocation starts in the same project
+- **THEN** the merge blocks until the synchronous run releases the lock, then proceeds
 
 #### Scenario: Stale merge lock is detected
 - **GIVEN** `se3/state/merge.lock` exists but the recorded PID no longer exists
 - **WHEN** the user runs `se3 merge <branch>`
-- **THEN** the command reports the stale lock and prints instructions to remove the lock file
-- **AND** exits non-zero
+- **THEN** the stale lock is reclaimed (or, if reclamation fails, the command reports the stale lock and prints instructions to remove the lock file and exits non-zero)
 
 ### Requirement: Standalone `se3 merge` Post-Conditions and Guardrails
 
