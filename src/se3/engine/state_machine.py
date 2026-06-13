@@ -271,7 +271,7 @@ class StateMachine:
         task_description: str,
         task_type: str = "feature",
         change_name: Optional[str] = None,
-        is_loop_mode: bool = False,
+        is_worktree_mode: bool = False,
     ) -> FlowInstance:
         """Create a new flow instance.
 
@@ -279,7 +279,8 @@ class StateMachine:
             task_description: User's task description
             task_type: Type of task (feature, bugfix, review, etc.)
             change_name: Optional associated change name
-            is_loop_mode: Whether this is a loop mode flow
+            is_worktree_mode: Whether this flow runs in worktree isolation mode
+                (``se3 run --worktree``)
 
         Returns:
             New flow instance
@@ -309,7 +310,7 @@ class StateMachine:
             task_description=task_description,
             task_type=task_type,
             change_name=change_name,
-            is_loop_mode=is_loop_mode,
+            is_worktree_mode=is_worktree_mode,
             status=FlowStatus.INIT,
         )
 

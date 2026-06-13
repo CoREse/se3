@@ -13,8 +13,6 @@ from se3.engine.worktree import (
     WorktreeContext,
     _branch_safe_name,
     _cleanup_git_worktree_metadata,
-    cleanup_loop,
-    create_loop_branch,
     create_worktree,
     delete_branch,
     detect_unmerged_paths,
@@ -24,9 +22,7 @@ from se3.engine.worktree import (
     get_diff_stat,
     has_commits,
     has_new_commits,
-    list_loop_branches,
     merge_in_progress,
-    merge_loop_branch,
     recover_stale_unmerged_paths,
     remove_worktree,
 )
@@ -73,6 +69,22 @@ def _init_empty_repo(path: Path) -> None:
         ["git", "-C", str(path), "config", "user.name", "Test"],
         check=True, capture_output=True,
     )
+
+
+def _make_test_branch(project_root: Path, timestamp: str = "auto") -> tuple[str, str]:
+    """Test helper: create a branch from HEAD; return (branch, original_branch).
+
+    Replaces the removed loop-specific ``create_loop_branch`` helper. The
+    branch-name shape is arbitrary — these tests exercise the generic worktree
+    primitives, not any branch-naming convention.
+    """
+    original = get_current_branch(project_root)
+    branch_name = f"wt/{timestamp}"
+    subprocess.run(
+        ["git", "-C", str(project_root), "branch", branch_name],
+        check=True, capture_output=True,
+    )
+    return branch_name, original
 
 
 class TestGetCurrentBranch:
@@ -125,50 +137,10 @@ class TestGetCurrentBranch:
         assert branch == "develop"
 
 
-class TestCreateLoopBranch:
-    def test_creates_branch(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        branch_name, original = create_loop_branch(tmp_path, timestamp="20260324-120000")
-
-        assert branch_name == "se3-loop/20260324-120000"
-        assert original in ("master", "main")
-
-        # Verify branch exists
-        result = subprocess.run(
-            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
-            capture_output=True, text=True,
-        )
-        assert branch_name in result.stdout
-
-    def test_auto_timestamp(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path)
-        assert branch_name.startswith("se3-loop/")
-
-    def test_branch_points_to_head(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        _add_commit(tmp_path, "file.txt", "content", "second commit")
-
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
-
-        # Both HEAD and the new branch should point to the same commit
-        head_sha = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        branch_sha = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", branch_name],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        assert head_sha == branch_sha
-
-
 class TestCreateWorktree:
     def test_creates_worktree_directory(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
 
         wt_path = create_worktree(tmp_path, branch_name)
 
@@ -178,29 +150,29 @@ class TestCreateWorktree:
 
     def test_worktree_at_expected_path(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
 
         wt_path = create_worktree(tmp_path, branch_name)
 
-        expected = tmp_path / "se3" / "worktrees" / "se3-loop-test"
+        expected = tmp_path / "se3" / "worktrees" / "wt-test"
         assert wt_path == expected
 
     def test_worktree_listed_by_git(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
         create_worktree(tmp_path, branch_name)
 
         result = subprocess.run(
             ["git", "-C", str(tmp_path), "worktree", "list"],
             capture_output=True, text=True, check=True,
         )
-        assert "se3-loop-test" in result.stdout
+        assert "wt-test" in result.stdout
 
 
 class TestRemoveWorktree:
     def test_removes_worktree(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
         wt_path = create_worktree(tmp_path, branch_name)
 
         remove_worktree(tmp_path, wt_path)
@@ -220,7 +192,7 @@ class TestRemoveWorktreeLocked:
     def test_removes_locked_worktree_with_double_force(self, tmp_path: Path) -> None:
         """Locked worktree should be removed via double-force retry."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="lock-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="lock-test")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Lock the worktree
@@ -238,7 +210,7 @@ class TestRemoveWorktreeLocked:
     def test_cleans_stale_metadata_when_dir_gone(self, tmp_path: Path) -> None:
         """When worktree dir is manually deleted, metadata should still be cleaned."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="stale-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="stale-test")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Manually delete the worktree directory (simulating crash)
@@ -256,7 +228,7 @@ class TestRemoveWorktreeLocked:
     def test_removes_locked_worktree_with_custom_reason(self, tmp_path: Path) -> None:
         """Locked worktree with 'initializing' reason (the actual bug scenario)."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="lock-reason")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="lock-reason")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Lock with the exact reason from the bug report
@@ -277,7 +249,7 @@ class TestForceCleanupWorktree:
 
     def test_cleans_normal_worktree(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-normal")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="fc-normal")
         create_worktree(tmp_path, branch_name)
 
         force_cleanup_worktree(tmp_path, branch_name)
@@ -286,7 +258,7 @@ class TestForceCleanupWorktree:
 
     def test_cleans_locked_worktree(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-locked")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="fc-locked")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Lock the worktree
@@ -303,7 +275,7 @@ class TestForceCleanupWorktree:
     def test_cleans_missing_directory(self, tmp_path: Path) -> None:
         """Handles case where directory was already deleted but metadata remains."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-missing")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="fc-missing")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Manually remove directory
@@ -316,7 +288,7 @@ class TestForceCleanupWorktree:
     def test_cleans_locked_with_missing_directory(self, tmp_path: Path) -> None:
         """Handles combined state: locked worktree + directory already deleted."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-lock-miss")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="fc-lock-miss")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Lock, then delete directory (simulating interrupted initialization)
@@ -338,7 +310,7 @@ class TestForceCleanupWorktree:
     def test_noop_when_no_worktree(self, tmp_path: Path) -> None:
         """Should not raise when there's nothing to clean up."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-noop")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="fc-noop")
 
         # No worktree created — should not raise
         force_cleanup_worktree(tmp_path, branch_name)
@@ -348,7 +320,7 @@ class TestForceCleanupWorktree:
     def test_idempotent_double_call(self, tmp_path: Path) -> None:
         """Calling force_cleanup_worktree twice should not raise."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-idem")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="fc-idem")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # Lock it for good measure
@@ -365,108 +337,10 @@ class TestForceCleanupWorktree:
         assert not exists_for_branch(tmp_path, branch_name)
 
 
-class TestMergeLoopBranch:
-    def test_fast_forward_merge(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
-        wt_path = create_worktree(tmp_path, branch_name)
-
-        # Add commit in worktree
-        _add_commit(wt_path, "new_file.txt", "hello", "loop work")
-
-        # Remove worktree before merging
-        remove_worktree(tmp_path, wt_path)
-
-        success = merge_loop_branch(tmp_path, branch_name, original)
-        assert success
-
-        # Verify the file exists on original branch
-        assert (tmp_path / "new_file.txt").exists()
-
-    def test_merge_with_no_new_commits(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
-
-        # No new commits on loop branch
-        success = merge_loop_branch(tmp_path, branch_name, original)
-        assert success
-
-    def test_merge_conflict_human_returns_pending(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
-        wt_path = create_worktree(tmp_path, branch_name)
-
-        # Create conflicting changes
-        _add_commit(wt_path, "conflict.txt", "loop version", "loop change")
-
-        # Remove worktree so we can switch branches in main repo
-        remove_worktree(tmp_path, wt_path)
-
-        # Add conflicting commit on original branch
-        _add_commit(tmp_path, "conflict.txt", "main version", "main change")
-
-        # Default conflict_strategy='human' returns 'pending_human'
-        result = merge_loop_branch(tmp_path, branch_name, original)
-        assert result == "pending_human"
-
-        # Conflict state is preserved (not aborted) — repo has unmerged files
-        status_result = subprocess.run(
-            ["git", "-C", str(tmp_path), "status", "--porcelain"],
-            capture_output=True, text=True, check=True,
-        )
-        assert "U" in status_result.stdout or "conflict.txt" in status_result.stdout
-
-        # Call file should be created
-        calls_dir = tmp_path / "se3" / "calls"
-        call_files = list(calls_dir.glob("merge_conflict_*.json"))
-        assert len(call_files) == 1
-
-        # Abort merge for cleanup
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "merge", "--abort"],
-            capture_output=True, check=False,
-        )
-
-
-class TestCleanupLoop:
-    def test_cleanup_removes_worktree_keeps_branch(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
-        wt_path = create_worktree(tmp_path, branch_name)
-
-        cleanup_loop(tmp_path, branch_name, wt_path, delete_branch_flag=False)
-
-        assert not wt_path.exists()
-        # Branch should still exist
-        result = subprocess.run(
-            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
-            capture_output=True, text=True,
-        )
-        assert branch_name in result.stdout
-
-    def test_cleanup_removes_worktree_and_branch(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
-        wt_path = create_worktree(tmp_path, branch_name)
-
-        cleanup_loop(tmp_path, branch_name, wt_path, delete_branch_flag=True)
-
-        assert not wt_path.exists()
-        # Branch should be deleted
-        result = subprocess.run(
-            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
-            capture_output=True, text=True,
-        )
-        assert branch_name not in result.stdout
-
-
 class TestDeleteBranch:
     def test_deletes_existing_branch(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
 
         delete_branch(tmp_path, branch_name)
 
@@ -486,14 +360,14 @@ class TestHasNewCommits:
     def test_no_new_commits(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
 
         assert not has_new_commits(tmp_path, branch_name, original)
 
     def test_has_new_commits(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
         wt_path = create_worktree(tmp_path, branch_name)
 
         _add_commit(wt_path, "new.txt", "content", "new work")
@@ -510,21 +384,23 @@ class TestFlowInstanceWorktreeFields:
 
         flow = FlowInstance(
             task_description="test",
-            is_loop_mode=True,
-            loop_branch="se3-loop/20260324-120000",
-            loop_worktree_path="/tmp/worktree",
-            loop_original_branch="master",
+            is_worktree_mode=True,
+            worktree_branch="wt/20260324-120000",
+            worktree_path="/tmp/worktree",
+            worktree_original_branch="master",
         )
 
         data = flow.to_dict()
-        assert data["loop_worktree_path"] == "/tmp/worktree"
-        assert data["loop_original_branch"] == "master"
-        assert data["loop_branch"] == "se3-loop/20260324-120000"
+        assert data["is_worktree_mode"] is True
+        assert data["worktree_path"] == "/tmp/worktree"
+        assert data["worktree_original_branch"] == "master"
+        assert data["worktree_branch"] == "wt/20260324-120000"
 
         restored = FlowInstance.from_dict(data)
-        assert restored.loop_worktree_path == "/tmp/worktree"
-        assert restored.loop_original_branch == "master"
-        assert restored.loop_branch == "se3-loop/20260324-120000"
+        assert restored.is_worktree_mode is True
+        assert restored.worktree_path == "/tmp/worktree"
+        assert restored.worktree_original_branch == "master"
+        assert restored.worktree_branch == "wt/20260324-120000"
 
     def test_round_trip_without_worktree_fields(self) -> None:
         from se3.engine.models import FlowInstance
@@ -532,16 +408,18 @@ class TestFlowInstanceWorktreeFields:
         flow = FlowInstance(task_description="test")
         data = flow.to_dict()
 
-        assert data["loop_worktree_path"] is None
-        assert data["loop_original_branch"] is None
+        assert data["is_worktree_mode"] is False
+        assert data["worktree_path"] is None
+        assert data["worktree_original_branch"] is None
 
         restored = FlowInstance.from_dict(data)
-        assert restored.loop_worktree_path is None
-        assert restored.loop_original_branch is None
+        assert restored.is_worktree_mode is False
+        assert restored.worktree_path is None
+        assert restored.worktree_original_branch is None
 
     def test_backward_compat_missing_fields(self) -> None:
         """Old persisted state without new fields should deserialize fine."""
-        from se3.engine.models import FlowInstance, FlowStatus
+        from se3.engine.models import FlowInstance
 
         data = {
             "flow_id": "test-123",
@@ -553,9 +431,36 @@ class TestFlowInstanceWorktreeFields:
         }
 
         flow = FlowInstance.from_dict(data)
-        assert flow.loop_worktree_path is None
-        assert flow.loop_original_branch is None
-        assert flow.loop_branch is None
+        assert flow.is_worktree_mode is False
+        assert flow.worktree_path is None
+        assert flow.worktree_original_branch is None
+        assert flow.worktree_branch is None
+
+    def test_backward_compat_legacy_loop_fields_ignored(self) -> None:
+        """An engine.json with the old loop_* fields loads without error.
+
+        The retired loop_* keys are silently ignored by from_dict (which only
+        reads the worktree_* keys via data.get), so a flow persisted by a
+        pre-worktree build still deserializes cleanly.
+        """
+        from se3.engine.models import FlowInstance
+
+        data = {
+            "flow_id": "legacy-1",
+            "status": "running",
+            "task_description": "test",
+            "state": {},
+            "created_at": "2026-01-01T00:00:00",
+            "updated_at": "2026-01-01T00:00:00",
+            "is_loop_mode": True,
+            "loop_branch": "se3-loop/20260101-000000",
+            "loop_worktree_path": "/tmp/old",
+            "loop_original_branch": "master",
+        }
+
+        flow = FlowInstance.from_dict(data)
+        assert flow.is_worktree_mode is False
+        assert flow.worktree_branch is None
 
 
 class TestWorktreeContext:
@@ -563,7 +468,7 @@ class TestWorktreeContext:
 
     def test_creates_and_removes_worktree(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="ctx-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="ctx-test")
 
         with WorktreeContext(tmp_path, branch_name) as wt_path:
             assert wt_path.exists()
@@ -574,7 +479,7 @@ class TestWorktreeContext:
 
     def test_cleanup_on_exception(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="exc-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="exc-test")
 
         wt_path_ref = None
         with pytest.raises(RuntimeError):
@@ -595,7 +500,7 @@ class TestWorktreeContext:
 
     def test_rejects_duplicate_worktree(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="dup-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="dup-test")
 
         # Create first worktree
         wt_path = create_worktree(tmp_path, branch_name)
@@ -613,12 +518,12 @@ class TestWorktreeContext:
 class TestExistsForBranch:
     def test_returns_false_when_no_worktree(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="exists-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="exists-test")
         assert not exists_for_branch(tmp_path, branch_name)
 
     def test_returns_true_when_worktree_exists(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="exists-test2")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="exists-test2")
         wt_path = create_worktree(tmp_path, branch_name)
 
         try:
@@ -627,40 +532,11 @@ class TestExistsForBranch:
             remove_worktree(tmp_path, wt_path)
 
 
-class TestListLoopBranches:
-    def test_no_loop_branches(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        result = list_loop_branches(tmp_path)
-        assert result == []
-
-    def test_lists_loop_branches(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        branch1, _ = create_loop_branch(tmp_path, timestamp="20260324-100000")
-        branch2, _ = create_loop_branch(tmp_path, timestamp="20260324-110000")
-
-        result = list_loop_branches(tmp_path)
-        branch_names = [b["branch"] for b in result]
-        assert branch1 in branch_names
-        assert branch2 in branch_names
-
-    def test_includes_commit_count(self, tmp_path: Path) -> None:
-        _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="count-test")
-        wt_path = create_worktree(tmp_path, branch_name)
-        _add_commit(wt_path, "new.txt", "content", "loop commit")
-        remove_worktree(tmp_path, wt_path)
-
-        result = list_loop_branches(tmp_path)
-        matching = [b for b in result if b["branch"] == branch_name]
-        assert len(matching) == 1
-        assert matching[0]["commit_count"] == 1
-
-
 class TestGetDiffStat:
     def test_returns_diff_stat(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="diff-test")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="diff-test")
         wt_path = create_worktree(tmp_path, branch_name)
         _add_commit(wt_path, "new_file.txt", "hello world", "add file")
         remove_worktree(tmp_path, wt_path)
@@ -671,7 +547,7 @@ class TestGetDiffStat:
     def test_empty_diff_stat(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         original = get_current_branch(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="empty-diff")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="empty-diff")
 
         stat = get_diff_stat(tmp_path, branch_name, original)
         assert stat == ""
@@ -683,7 +559,7 @@ class TestCreateWorktreeRetry:
     def test_succeeds_on_second_attempt(self, tmp_path: Path) -> None:
         """TimeoutExpired on first attempt should retry and succeed."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-ok")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-ok")
 
         original_run_git = __import__(
             "se3.engine.worktree", fromlist=["_run_git"]
@@ -713,7 +589,7 @@ class TestCreateWorktreeRetry:
     def test_raises_after_all_retries_exhausted(self, tmp_path: Path) -> None:
         """Should re-raise TimeoutExpired after max retries."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-fail")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-fail")
 
         original_run_git = __import__(
             "se3.engine.worktree", fromlist=["_run_git"]
@@ -741,7 +617,7 @@ class TestCreateWorktreeRetry:
     def test_timeout_doubles_on_each_retry(self, tmp_path: Path) -> None:
         """Timeout should double on each retry attempt."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-double")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-double")
 
         timeouts_seen = []
 
@@ -764,7 +640,7 @@ class TestCreateWorktreeRetry:
     def test_partial_worktree_dir_cleaned_on_retry(self, tmp_path: Path) -> None:
         """Partial worktree directory should be removed before retry."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-clean")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-clean")
 
         safe_name = branch_name.replace("/", "-")
         worktree_path = tmp_path / "se3" / "worktrees" / safe_name
@@ -829,7 +705,7 @@ class TestForceCleanupWorktreeFaultTolerance:
     def test_unlock_timeout_does_not_block_subsequent_steps(self, tmp_path: Path) -> None:
         """Step 1 (unlock) timing out should not prevent Steps 2-6 from running."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-unlock")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="ft-unlock")
         wt_path = create_worktree(tmp_path, branch_name)
 
         original_run_git = __import__(
@@ -862,7 +738,7 @@ class TestForceCleanupWorktreeFaultTolerance:
     def test_remove_exception_does_not_block_subsequent_steps(self, tmp_path: Path) -> None:
         """Step 2 (remove) failing should not prevent Steps 3-6 from running."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-remove")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="ft-remove")
         wt_path = create_worktree(tmp_path, branch_name)
 
         original_run_git = __import__(
@@ -898,7 +774,7 @@ class TestForceCleanupWorktreeFaultTolerance:
     def test_run_git_calls_use_timeout_60(self, tmp_path: Path) -> None:
         """All _run_git calls in force_cleanup_worktree should use timeout=60."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-timeout")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="ft-timeout")
 
         original_run_git = __import__(
             "se3.engine.worktree", fromlist=["_run_git"]
@@ -928,7 +804,7 @@ class TestForceCleanupWorktreeFaultTolerance:
     def test_metadata_cleanup_called(self, tmp_path: Path) -> None:
         """Step 5 (_cleanup_git_worktree_metadata) should be called."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-meta")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="ft-meta")
 
         with patch(
             "se3.engine.worktree._cleanup_git_worktree_metadata"
@@ -988,7 +864,7 @@ class TestDeleteBranchWorktreeVerification:
     def test_no_worktree_deletes_directly(self, tmp_path: Path) -> None:
         """When no worktree exists, branch is deleted directly without cleanup."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="db-direct")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="db-direct")
 
         with patch("se3.engine.worktree.force_cleanup_worktree") as mock_cleanup:
             delete_branch(tmp_path, branch_name)
@@ -1005,7 +881,7 @@ class TestDeleteBranchWorktreeVerification:
     def test_worktree_exists_triggers_cleanup_then_deletes(self, tmp_path: Path) -> None:
         """When worktree exists, force_cleanup_worktree is called before delete."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="db-cleanup")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="db-cleanup")
         wt_path = create_worktree(tmp_path, branch_name)
 
         # delete_branch should detect the worktree and clean it up
@@ -1023,7 +899,7 @@ class TestDeleteBranchWorktreeVerification:
     def test_cleanup_fails_still_attempts_branch_delete(self, tmp_path: Path) -> None:
         """When cleanup fails and worktree persists, branch delete is still attempted."""
         _init_repo(tmp_path)
-        branch_name, _ = create_loop_branch(tmp_path, timestamp="db-fail")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="db-fail")
 
         original_exists = __import__(
             "se3.engine.worktree", fromlist=["exists_for_branch"]
