@@ -92,6 +92,21 @@ HISTORY_INDEX_REFRESH_TIMEOUT = 2.0
 #: Issue operations are lightweight YAML I/O so a short timeout suffices.
 ISSUE_COMMAND_TIMEOUT = 10.0
 
+#: When the daemon ack does not arrive within :data:`ISSUE_COMMAND_TIMEOUT`,
+#: the server does NOT immediately report failure — a heavy daemon-side snapshot
+#: can delay the ack past the window even though the issue already landed on
+#: disk. Instead it spends up to this many seconds reconciling against the
+#: in-memory issue mirror (refreshed by STATUS_UPDATE) to confirm the
+#: operation's post-condition, and only reports failure if the window elapses
+#: with the change still absent. This bounds the wait so the request never
+#: blocks indefinitely.
+ISSUE_RECONCILE_TIMEOUT = 15.0
+
+#: Interval between issue-mirror polls inside the reconcile window. Each poll is
+#: a cheap in-memory lookup, so a sub-second cadence picks up the next
+#: STATUS_UPDATE promptly without busy-spinning.
+ISSUE_RECONCILE_POLL_INTERVAL = 0.5
+
 #: The identity-binding discriminator + external id of the single break-glass
 #: admin subject. Break-glass is deliberately a *single* admin subject (not a
 #: per-user impersonation channel), so every consumed break-glass token resolves
@@ -772,17 +787,119 @@ def create_app(
         mid, root, issue = result
         return {"machine_id": mid, "project_root": root, "issue": issue}
 
+    async def _reconcile_issue_command(
+        *,
+        operation: str,
+        machine_id: str,
+        project_root: str,
+        owner: Optional[str],
+        baseline_ids: Optional[set] = None,
+        target_issue_id: Optional[str] = None,
+        expected_fields: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Poll the in-memory issue mirror to confirm the operation landed.
+
+        Used as the stop-the-bleeding fallback when the daemon ack does not
+        arrive in time: the issue may already be on disk, with the ack merely
+        delayed behind a heavy daemon-side snapshot.  Polls ``state``'s issue
+        mirror (refreshed by STATUS_UPDATE) for up to
+        :data:`ISSUE_RECONCILE_TIMEOUT` seconds, checking the operation's
+        expected post-condition.  Returns the affected ``issue_id`` once the
+        change is observed, or ``None`` if the window elapses with the change
+        still absent (a genuine failure / lost command).
+
+        * ``create`` — a new human-sourced issue under *project_root* whose id
+          is absent from *baseline_ids* (the pre-send id set).
+        * ``edit`` — *target_issue_id* now reflects every *expected_fields*
+          value.
+        * ``close`` — *target_issue_id* is no longer open / in-progress.
+        * ``reopen`` — *target_issue_id* is open again.
+        """
+
+        def _field_matches(actual: Any, expected: Any) -> bool:
+            if isinstance(expected, (list, tuple)):
+                actual_list = actual if isinstance(actual, (list, tuple)) else []
+                return list(actual_list) == list(expected)
+            return str(actual or "") == str(expected or "")
+
+        async def _check_once() -> Optional[str]:
+            if operation == "create":
+                issues = await state.get_issues(
+                    owner=owner,
+                    machine_id=machine_id,
+                    project_root=project_root,
+                    include_closed=True,
+                )
+                base = baseline_ids or set()
+                for iss in issues:
+                    iid = str(iss.get("id") or "")
+                    if (
+                        iid
+                        and iid not in base
+                        and str(iss.get("source") or "") == "human"
+                    ):
+                        return iid
+                return None
+            # edit / close / reopen all key off a known target id.
+            if not target_issue_id:
+                return None
+            found = await state.get_issue_by_id(
+                target_issue_id,
+                owner=owner,
+                machine_id=machine_id,
+                project_root=project_root,
+            )
+            if found is None:
+                return None
+            _, _, iss = found
+            status = str(iss.get("status") or "open")
+            if operation == "close":
+                return target_issue_id if status not in ("open", "in-progress") else None
+            if operation == "reopen":
+                return target_issue_id if status == "open" else None
+            if operation == "edit":
+                for key, val in (expected_fields or {}).items():
+                    if not _field_matches(iss.get(key), val):
+                        return None
+                return target_issue_id
+            return None
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + ISSUE_RECONCILE_TIMEOUT
+        while True:
+            iid = await _check_once()
+            if iid is not None:
+                return iid
+            if loop.time() >= deadline:
+                return None
+            await asyncio.sleep(ISSUE_RECONCILE_POLL_INTERVAL)
+
     async def _send_issue_command(
         machine_id: str,
         message: protocol.Message,
         request_id: str,
+        *,
+        operation: str,
+        project_root: str,
+        owner: Optional[str] = None,
+        baseline_ids: Optional[set] = None,
+        target_issue_id: Optional[str] = None,
+        expected_fields: Optional[Dict[str, Any]] = None,
     ) -> dict:
         """Send an issue command and wait for the daemon's acknowledgment.
 
         Registers a future in *issue_command_registry*, dispatches the message,
         and awaits the result with :data:`ISSUE_COMMAND_TIMEOUT`.  Returns the
-        daemon's result payload dict on success; raises HTTPException on
-        delivery failure or timeout.
+        daemon's result payload dict on success.
+
+        On ack timeout it does NOT immediately fail: it reconciles against the
+        issue mirror (see :func:`_reconcile_issue_command`) for up to
+        :data:`ISSUE_RECONCILE_TIMEOUT` seconds, since the issue may already be
+        on disk with only the ack delayed.  If the expected post-condition is
+        observed it returns a synthesised success result (``ok=True`` plus the
+        affected ``issue_id`` and ``reconciled=True``); only if the reconcile
+        window elapses with the change still absent does it raise the 504.
+        Delivery failure still raises 503 immediately.
         """
         fut = issue_command_registry.register(request_id)
         sent = await manager.send_to(machine_id, message)
@@ -796,6 +913,28 @@ def create_app(
             result = await asyncio.wait_for(fut, timeout=ISSUE_COMMAND_TIMEOUT)
         except asyncio.TimeoutError:
             issue_command_registry.discard(request_id, fut)
+            reconciled_id = await _reconcile_issue_command(
+                operation=operation,
+                machine_id=machine_id,
+                project_root=project_root,
+                owner=owner,
+                baseline_ids=baseline_ids,
+                target_issue_id=target_issue_id,
+                expected_fields=expected_fields,
+            )
+            if reconciled_id is not None:
+                logger.info(
+                    "issue command '%s' ack timed out from '%s' but reconciled "
+                    "against the issue mirror (issue_id=%s); reporting success",
+                    operation,
+                    machine_id,
+                    reconciled_id,
+                )
+                return {
+                    "ok": True,
+                    "issue_id": reconciled_id,
+                    "reconciled": True,
+                }
             raise HTTPException(
                 status_code=504,
                 detail=f"timed out waiting for issue command result from '{machine_id}'",
@@ -839,6 +978,18 @@ def create_app(
                 status_code=503,
                 detail=f"machine '{machine_id}' is not connected",
             )
+        # Reconcile baseline: snapshot the project's current issue ids BEFORE
+        # dispatching, so the timeout fallback can detect a newly-landed issue
+        # by set difference (the daemon assigns the new id, so the server can
+        # only recognise it as "an id that wasn't here before").
+        owner = _scope_for(identity_)
+        baseline = await state.get_issues(
+            owner=owner,
+            machine_id=machine_id,
+            project_root=project_root,
+            include_closed=True,
+        )
+        baseline_ids = {str(i.get("id") or "") for i in baseline}
         request_id = uuid.uuid4().hex
         message = protocol.make_issue_command(
             "create",
@@ -851,7 +1002,15 @@ def create_app(
             tags=req.tags if req.tags else None,
             request_id=request_id,
         )
-        result = await _send_issue_command(machine_id, message, request_id)
+        result = await _send_issue_command(
+            machine_id,
+            message,
+            request_id,
+            operation="create",
+            project_root=project_root,
+            owner=owner,
+            baseline_ids=baseline_ids,
+        )
         if not result.get("ok"):
             raise HTTPException(
                 status_code=422,
@@ -927,7 +1086,16 @@ def create_app(
             request_id=request_id,
             **kwargs,
         )
-        result = await _send_issue_command(machine_id, message, request_id)
+        result = await _send_issue_command(
+            machine_id,
+            message,
+            request_id,
+            operation="edit",
+            project_root=project_root,
+            owner=_scope_for(identity_),
+            target_issue_id=issue_id,
+            expected_fields=kwargs,
+        )
         if not result.get("ok"):
             raise HTTPException(
                 status_code=422,
@@ -974,7 +1142,15 @@ def create_app(
             reason=req.reason,
             request_id=request_id,
         )
-        result = await _send_issue_command(machine_id, message, request_id)
+        result = await _send_issue_command(
+            machine_id,
+            message,
+            request_id,
+            operation="close",
+            project_root=project_root,
+            owner=_scope_for(identity_),
+            target_issue_id=issue_id,
+        )
         if not result.get("ok"):
             raise HTTPException(
                 status_code=422,
@@ -1020,7 +1196,15 @@ def create_app(
             issue_id=issue_id,
             request_id=request_id,
         )
-        result = await _send_issue_command(machine_id, message, request_id)
+        result = await _send_issue_command(
+            machine_id,
+            message,
+            request_id,
+            operation="reopen",
+            project_root=project_root,
+            owner=_scope_for(identity_),
+            target_issue_id=issue_id,
+        )
         if not result.get("ok"):
             raise HTTPException(
                 status_code=422,
