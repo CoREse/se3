@@ -4056,7 +4056,15 @@ function normalizeRecord(rec) {
       stepId: pick("step_id") || "",
       raw: { raw_json: [msg], raw_ndjson: pick("raw_ndjson") },
       attempt: null,
-      agentName: null, modelName: null,
+      // Agent/model metadata: record_group_status (chat_history.py) attaches an
+      // optional `agent_name` (the configured runner name the group's LLMCaller
+      // selected for the current attempt) and, once parsed from the NDJSON
+      // init/system metadata, `model_name` (the actual model). Extracted the
+      // same way as the chat-record branch below so the marker can show the
+      // group's live agent · model. Null for legacy records lacking the fields
+      // (backward-compatible) — only displayed when present, no placeholder.
+      agentName: typeof pick("agent_name") === "string" && pick("agent_name") ? pick("agent_name") : null,
+      modelName: typeof pick("model_name") === "string" && pick("model_name") ? pick("model_name") : null,
     };
   }
 
@@ -7306,6 +7314,19 @@ function renderGroupStatusRecord(norm) {
   row.appendChild(
     el("span", "group-status-text", groupStatusLabel(norm.groupId, norm.status)),
   );
+  // Agent/model badge: show the agent the group's LLMCaller is currently using
+  // (and, once parsed, the actual model) so the "正在 worktree 实施中" marker
+  // shows the same `agent` / `agent · model` text as other LLM steps. Reuses
+  // formatAgentBadgeText so the format never drifts from the chat-bubble badge,
+  // and renders nothing for legacy records lacking these fields (no placeholder).
+  // As successive group_status records arrive for the same group, the marker is
+  // replaced in place by addConversationRecords, so the badge upgrades from
+  // agent → agent · model and across retries/rotations without reordering.
+  const badgeText = formatAgentBadgeText(norm.agentName, norm.modelName);
+  if (badgeText) {
+    const badge = el("span", "agent-badge group-status-agent", badgeText);
+    row.appendChild(badge);
+  }
   return row;
 }
 

@@ -415,6 +415,49 @@ def test_group_status_record_stays_affordance_free():
         )
 
 
+def test_group_status_record_renders_agent_model_badge():
+    """G4: the per-group DAG status marker MUST surface the group's live
+    agent (and, once parsed, model) by reusing the shared
+    ``formatAgentBadgeText`` helper — the same format as every other LLM step's
+    badge — rather than hand-rolling its own text. Guarding on the call keeps
+    the marker's badge format from drifting away from the chat-bubble badge.
+    """
+    body = _extract_js_function_body(_read_app_js(), "renderGroupStatusRecord")
+    assert "formatAgentBadgeText" in body, (
+        "renderGroupStatusRecord must reuse formatAgentBadgeText so the marker "
+        "badge format matches the other LLM steps"
+    )
+    assert "agent-badge" in body, (
+        "renderGroupStatusRecord must emit an .agent-badge element for the "
+        "group's agent/model"
+    )
+
+
+def test_group_status_normalize_extracts_agent_model():
+    """G4: the ``group_status`` branch of ``normalizeRecord`` MUST extract
+    ``agent_name`` / ``model_name`` from the record rather than hard-coding them
+    to null, so the marker can display the group's live agent/model. We assert
+    the legacy hard-coded ``agentName: null, modelName: null,`` literal no longer
+    appears inside that branch (it would silently suppress the badge).
+    """
+    src = _read_app_js()
+    # Isolate the group_status branch: from its `if (recType === "group_status")`
+    # guard up to the next top-level `// Stream-progress records` comment.
+    start = src.index('recType === "group_status"')
+    end = src.index("Stream-progress records", start)
+    branch = src[start:end]
+    assert "pick(\"agent_name\")" in branch, (
+        "the group_status branch must extract agent_name from the record"
+    )
+    assert "pick(\"model_name\")" in branch, (
+        "the group_status branch must extract model_name from the record"
+    )
+    assert "agentName: null, modelName: null," not in branch, (
+        "the group_status branch must no longer hard-code agentName/modelName to "
+        "null — it should extract them so the marker can show the live agent/model"
+    )
+
+
 def test_step_event_record_stays_affordance_free():
     """The step_completed / step_failed report-card path
     (``renderStepEventRecord``) is the other non-conversation synthetic UI and

@@ -1813,6 +1813,13 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 .group-status-marker .group-status-icon { font-size: 12px; line-height: 1; }
 .group-status-marker .group-status-text { white-space: pre-wrap; }
+/* The agent/model badge rides inline inside the flex-row marker, so drop the
+   stacked-bubble bottom margin and shrink it to sit beside the status text. */
+.group-status-marker .agent-badge.group-status-agent {
+  margin-bottom: 0;
+  padding: 1px 6px;
+  font-size: 11px;
+}
 
 .group-status-marker.status-queued {
   border-left-color: var(--grey);
