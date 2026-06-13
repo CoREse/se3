@@ -3589,6 +3589,17 @@ chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 const groupStatusMod = await import("./group_status.test.mjs");
 groupStatusMod.registerGroupStatusTests({ app, check, findOne, findAll });
 
+// Register the G2 step_started RUNNING-region tests (separate module — same
+// `check` reporter, same `app` module, same shared DOM stub already installed
+// above).
+const stepStartedMod = await import("./step_started_region.test.mjs");
+stepStartedMod.registerStepStartedRegionTests({ app, check, findOne, findAll });
+
+// Register the G2 step-grouping tests (separate module — same `check` reporter,
+// same `app` module, same shared DOM stub already installed above).
+const stepGroupingMod = await import("./step_grouping.test.mjs");
+stepGroupingMod.registerStepGroupingTests({ app, check, findOne, findAll });
+
 // Register the G3 live accumulating-bubble agent/model badge tests (separate
 // module — same `check` reporter, same `app` module, same shared DOM stub
 // already installed above).

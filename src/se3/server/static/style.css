@@ -1845,6 +1845,59 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg-dim);
 }
 
+/* -- per-step RUNNING status row (step_started) --------------------- */
+/*
+ * A lightweight "进行中" status line surfaced the instant a step enters
+ * RUNNING (including non-LLM steps TEST / COMMIT / SPEC_GATE that emit no
+ * conversation records). Like the group-status marker it is affordance-free
+ * (no fold / raw / chip) so a step-header rebuild around it, and the later
+ * arrival of the step's chat / report records under the same step region,
+ * never disturbs it. Status is carried by BOTH an icon and explicit text so
+ * it is legible without relying on color alone.
+ */
+.conv-record.step-status-row {
+  align-self: flex-start;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--grey);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg-dim);
+}
+.step-status-row .step-status-icon { font-size: 12px; line-height: 1; }
+.step-status-row .step-status-text { white-space: pre-wrap; }
+.conv-record.step-status-running {
+  border-left-color: var(--accent);
+  background: rgba(76, 141, 255, 0.10);
+  color: var(--fg);
+}
+.conv-record.step-status-retrying {
+  border-left-color: var(--yellow);
+  background: rgba(214, 178, 70, 0.10);
+  color: var(--fg);
+}
+.conv-record.step-status-paused {
+  border-left-color: var(--yellow);
+  color: var(--fg-dim);
+}
+.conv-record.step-status-completed {
+  border-left-color: var(--green);
+  background: rgba(76, 175, 106, 0.10);
+  color: var(--fg);
+}
+.conv-record.step-status-failed {
+  border-left-color: var(--red);
+  background: rgba(224, 86, 75, 0.12);
+  color: var(--fg);
+}
+
 /* -- step report card ----------------------------------------------- */
 /*
  * Default-expanded report card mirroring the CLI's per-step Rich Panel.

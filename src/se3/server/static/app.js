@@ -4032,6 +4032,32 @@ function normalizeRecord(rec) {
     };
   }
 
+  // `step_started` lifecycle anchor (persisted by chat_history.record_step_started
+  // the moment a step enters RUNNING — including non-LLM steps TEST / COMMIT /
+  // SPEC_GATE that produce no conversation records). It rides the same channel
+  // as step_completed but carries NO `data.step` outputs (the step has not
+  // produced anything yet), so it normalizes to a lightweight "进行中" anchor
+  // with `stepReport: null`: renderStepStartedRecord shows only a status row,
+  // never a report card. Its `stepId` matches the step's later chat /
+  // step_output / step_completed / step_failed records, so all of them share one
+  // `stepKey` and collapse into a SINGLE visual step region (no duplicate
+  // same-named region is created by the terminal/intermediate events).
+  if (eventType === "step_started") {
+    return {
+      role: "step-event",
+      kind: "step_started",
+      content: "",
+      timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
+      stepType: pickStepType(),
+      stepId: pick("step_id") || "",
+      status: String(pick("status") || "running").toLowerCase(),
+      stepReport: null,
+      raw: { raw_json: [msg], raw_ndjson: null },
+      attempt: null,
+      agentName: null, modelName: null,
+    };
+  }
+
   // Per-group DAG status records (written by chat_history.record_group_status
   // from the implement step's DAGScheduler lifecycle hooks). They ride the
   // conversation channel as a lightweight, time-ordered status marker — NOT a
@@ -4591,6 +4617,20 @@ function stepKey(norm) {
   return String(norm.stepId || norm.stepType || "step");
 }
 
+// Tag a conversation bubble with a stable, lower-cased `step-type-<type>` DOM
+// class so a later group can paint each step region with a low-saturation,
+// distinguishable per-step grouping style. Applied uniformly to every bubble
+// (chat turns, step-event rows, step_started anchors) in addConversationRecords
+// so the whole step region — start status, conversation, and final report —
+// shares one step-type class. No-op when the step type is empty (legacy
+// records), so nothing dangling is added.
+function tagStepType(bubble, stepType) {
+  const key = String(stepType || "").toLowerCase();
+  if (key && bubble && bubble.classList) {
+    bubble.classList.add("step-type-" + key);
+  }
+}
+
 // Friendly, upper-case step-section headings matching the message paradigm
 // (DISCOVERY / ANALYZE / PLAN / IMPLEMENT / TEST / SELF CHECK / UPDATE SPEC /
 // VERSION ANALYZE / COMMIT / SUMMARY …). Keyed by lower-case `step_type`. These
@@ -4639,6 +4679,29 @@ const GROUP_STATUS_ICON = {
   failed: "✗",
   skipped: "⊘",
 };
+
+// Step lifecycle status → {icon, text} for the lightweight per-step status
+// rows. Status is conveyed by BOTH an explicit text label and an icon (never
+// color alone), so running / retrying / paused / completed / failed / partial
+// stay legible and accessible regardless of the status background tint a later
+// group applies. Keyed by the lower-case StepStatus value the engine persists.
+const STEP_STATUS_DISPLAY = {
+  running: { icon: "◐", text: "进行中" },
+  retrying: { icon: "↻", text: "重试中" },
+  paused: { icon: "⏸", text: "已暂停" },
+  completed: { icon: "✓", text: "已完成" },
+  failed: { icon: "✗", text: "失败" },
+  partial: { icon: "◑", text: "部分完成" },
+};
+
+// Pure: resolve a step's status display ({icon, text}); unknown statuses fall
+// back to the raw token (text) with a neutral dot icon so nothing is silently
+// dropped. Exposed for unit testing.
+function stepStatusDisplay(status) {
+  const key = String(status == null ? "" : status).toLowerCase();
+  if (STEP_STATUS_DISPLAY[key]) return STEP_STATUS_DISPLAY[key];
+  return { icon: "•", text: key || "running" };
+}
 
 // Pure: render a per-group DAG status marker label, e.g.
 // groupStatusLabel("G3", "running") → "G3 正在 worktree 实施中". An unknown
@@ -4766,6 +4829,7 @@ function addConversationRecords(container, st, records, startIndex) {
           bubble.__convIdx = i;
           bubble.__convStepKey = stepKey(norm);
           bubble.__convStepType = norm.stepType || "";
+          tagStepType(bubble, bubble.__convStepType);
           bubble.__convStepLabel = norm.stepType || norm.stepId || "step";
           bubble.__convPartial = true;
           bubble.__convSegmentKey = segKey;
@@ -4798,6 +4862,7 @@ function addConversationRecords(container, st, records, startIndex) {
     bubble.__convIdx = i;
     bubble.__convStepKey = stepKey(norm || {});
     bubble.__convStepType = (norm && norm.stepType) || "";
+    tagStepType(bubble, bubble.__convStepType);
     bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
     // Tag partial (stream-progress) bubbles so they can be folded away once the
     // turn's final result arrives (see removeSupersededProgress).
@@ -7172,6 +7237,14 @@ function renderConversationRecord(norm) {
     return renderStepEventRecord(norm);
   }
 
+  // Step started — a lightweight "进行中" status row (text + icon). No report
+  // card, no fold / raw / chip: the step has only just entered RUNNING. Grouped
+  // under the same stepKey as the step's later records, so it anchors a single
+  // visual step region the instant the step starts — vital for non-LLM steps.
+  if (norm.kind === "step_started") {
+    return renderStepStartedRecord(norm);
+  }
+
   // Non-terminal step usage events — render a lightweight usage-only chip
   // (not a full report card, since the step hasn't completed). Shows the
   // step's token usage so the user sees self_check / verify_spec / test
@@ -7341,6 +7414,37 @@ function renderGroupStatusRecord(norm) {
 // ---------------------------------------------------------------------------
 // Step event records (step_completed / step_failed)
 // ---------------------------------------------------------------------------
+
+// Build the conversation-row form of a `step_started` event — a lightweight
+// "进行中" status row marking that the step has entered RUNNING. It is
+// intentionally affordance-free: a single status line carrying BOTH an icon and
+// the explicit "进行中" text (never color alone), with no report card, no fold,
+// no raw toggle, no chip. This makes a step's region appear the instant it
+// starts — most importantly for non-LLM steps (TEST / COMMIT / SPEC_GATE) that
+// emit no conversation records and would otherwise stay blank until their
+// terminal step_completed lands. Because it shares the step's `stepKey`
+// (= step_id) with the step's later chat / step_output / step_completed /
+// step_failed records, all of them group into ONE visual step region; the
+// terminal/intermediate events never spawn a second same-named region. The DOM
+// carries a `step-type-<type>` class (added by addConversationRecords) plus a
+// `step-status-running` class so a later group can apply low-saturation
+// per-step grouping styles.
+function renderStepStartedRecord(norm) {
+  const stepLabel = norm.stepType
+    ? (STEP_REPORT_TITLES[String(norm.stepType).toLowerCase()] || norm.stepType)
+    : "step";
+  const status = String(norm.status || "running").toLowerCase();
+  const display = stepStatusDisplay(status);
+  const row = el(
+    "div",
+    "history-record conv-record role-step-event kind-step_started "
+      + "step-status-row step-status-" + status,
+  );
+  row.appendChild(el("span", "step-status-icon", display.icon));
+  row.appendChild(
+    el("span", "step-status-text", stepLabel + " · " + display.text));
+  return row;
+}
 
 // Build the conversation-row form of a step_completed / step_failed event:
 // the raw event surfaces as a default-collapsed chip (preserving the original
@@ -9822,6 +9926,10 @@ if (typeof module !== "undefined" && module.exports) {
     groupStatusLabel,
     GROUP_STATUS_TEXT,
     renderGroupStatusRecord,
+    STEP_STATUS_DISPLAY,
+    stepStatusDisplay,
+    renderStepStartedRecord,
+    tagStepType,
     hasRawPayload,
     makeRawToggle,
     makeUserRawToggle,
