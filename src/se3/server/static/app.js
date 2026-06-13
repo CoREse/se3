@@ -7698,6 +7698,33 @@ const STEP_REPORT_TITLES = {
   summarize: "Work Summary",
 };
 
+// Per-step report-card title suffix (G3): the final report card of a step must
+// read as that step's *result / summary*, never as a bare step name that a
+// reader could mistake for a brand-new step heading. So instead of titling the
+// card with the bare step label (e.g. "Implementation" — easily read as the
+// start of a fresh IMPLEMENT step), every card is suffixed with an explicit
+// `结果` / `总结` semantic word. `summarize` (which already IS a summary step)
+// reads "总结"; every other step's final card reads "结果". The suffix is kept
+// as data (not a literal at the call site) so the title is unit-testable and
+// stays in parity across every registered STEP_REPORT_RENDERERS step.
+const STEP_REPORT_TITLE_SUFFIX = {
+  summarize: "总结",
+};
+const STEP_REPORT_TITLE_SUFFIX_DEFAULT = "结果";
+
+// Pure: build a report-card title for `stepType` as `<步骤> · 结果/总结`. The
+// base label comes from STEP_REPORT_TITLES (title-case, intentionally distinct
+// from the uppercase `.history-step-header` step labels in STEP_HEADER_TITLES),
+// and the `· 结果` / `· 总结` suffix makes the card unmistakably the step's
+// result rather than a new step. Unknown step types degrade to the raw key (or
+// "Step") plus the default suffix so nothing is silently dropped or thrown.
+function reportCardTitle(stepType) {
+  const key = String(stepType || "").toLowerCase();
+  const base = STEP_REPORT_TITLES[key] || key || "Step";
+  const suffix = STEP_REPORT_TITLE_SUFFIX[key] || STEP_REPORT_TITLE_SUFFIX_DEFAULT;
+  return base + " · " + suffix;
+}
+
 // ---------------------------------------------------------------------------
 // Token-usage display (G4)
 // ---------------------------------------------------------------------------
@@ -8082,8 +8109,7 @@ function renderStepReport(step) {
   if (!step || typeof step !== "object") return null;
   const stepType = String(step.step_type || "").toLowerCase();
   const renderer = STEP_REPORT_RENDERERS[stepType] || renderDefaultReport;
-  const title =
-    "Report — " + (STEP_REPORT_TITLES[stepType] || stepType || "Step");
+  const title = reportCardTitle(stepType);
   return makeReportCard(stepType || "unknown", title, () => {
     const body = renderer(step, step.outputs || {});
     const frag = document.createDocumentFragment();
@@ -9921,6 +9947,7 @@ if (typeof module !== "undefined" && module.exports) {
     PROJECT_MANUAL_SENTINEL,
     splitUserPromptByMarker,
     STEP_REPORT_TITLES,
+    reportCardTitle,
     STEP_HEADER_TITLES,
     stepHeaderLabel,
     groupStatusLabel,
