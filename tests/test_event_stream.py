@@ -326,11 +326,14 @@ def test_history_sink_writes_step_failed(tmp_path):
 
 
 def test_history_sink_ignores_non_step_events(tmp_path):
-    """Events without a step payload are ignored — STEP_OUTPUT without a step
-    is also ignored (only STEP_OUTPUT events carrying a step object are persisted)."""
+    """Flow-level lifecycle events are ignored, and STEP_OUTPUT without a step
+    is also ignored (only STEP_OUTPUT events carrying a step object are
+    persisted). STEP_STARTED is intentionally NOT in this set — it is persisted
+    as a lightweight ``step_started`` anchor (covered in
+    tests/test_history_sink_step_started.py)."""
     sink = HistorySink(tmp_path)
     for et in (
-        EventType.FLOW_STARTED, EventType.STEP_STARTED,
+        EventType.FLOW_STARTED,
         EventType.FLOW_COMPLETED, EventType.FLOW_PAUSED,
     ):
         sink.consume(new_event(et, flow_id="f", step_id="s"))

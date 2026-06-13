@@ -317,6 +317,17 @@ class JsonSink(Sink):
 class HistorySink(Sink):
     """Persist step-lifecycle events into the per-step chat history jsonl.
 
+    ``STEP_STARTED`` events are persisted as a lightweight
+    ``{type: 'step_started', status: 'running', ...}`` anchor line the moment a
+    step enters the RUNNING state, so the web console can show the step's
+    region (with a "进行中" status) immediately — including the non-LLM
+    TEST / COMMIT / SPEC_GATE steps that emit no conversation records and would
+    otherwise stay blank until their final ``step_completed`` lands. The write
+    is kept idempotent (guarded by ``has_step_started_event`` /
+    ``has_step_terminal_event``) so a step re-entered on resume, or a
+    re-emitted STEP_STARTED, never appends a second started record for the same
+    step_id.
+
     ``STEP_COMPLETED`` and ``STEP_FAILED`` events carry the step's full
     structured output (the same data the CLI's ``step_renderers`` Panel
     renders). Writing them into ``se3/history/<flow_id>/<step_id>.jsonl``
@@ -347,6 +358,9 @@ class HistorySink(Sink):
         self.project_root = Path(project_root)
 
     def consume(self, event: Event) -> None:
+        if event.type == EventType.STEP_STARTED:
+            self._record_started(event)
+            return
         if event.type not in (
             EventType.STEP_COMPLETED,
             EventType.STEP_FAILED,
@@ -369,5 +383,40 @@ class HistorySink(Sink):
             step_type=event.step_type or (step_dict.get("step_type") or ""),
             event_type=event.type.value,
             step_dict=step_dict,
+            timestamp=event.timestamp,
+        )
+
+    def _record_started(self, event: Event) -> None:
+        """Persist a STEP_STARTED event as an idempotent ``step_started`` anchor.
+
+        Unlike the terminal/output events, STEP_STARTED carries no ``step``
+        object — only ``flow_id`` / ``step_id`` / ``step_type`` on the event
+        itself. The write is skipped (no-op) when a ``step_started`` or a
+        terminal (``step_completed`` / ``step_failed``) record already exists
+        for the same step_id, so a step re-entered on resume or a re-emitted
+        STEP_STARTED never produces a duplicate "进行中" region for the same
+        step. Failures are swallowed so a flaky filesystem cannot break the
+        running flow.
+        """
+        flow_id = event.flow_id or ""
+        step_id = event.step_id or ""
+        if not step_id:
+            return
+        # Lazy import: keeps the sink module free of heavier engine deps.
+        from .chat_history import (
+            has_step_started_event,
+            has_step_terminal_event,
+            record_step_started,
+        )
+
+        if has_step_started_event(
+            self.project_root, flow_id, step_id
+        ) or has_step_terminal_event(self.project_root, flow_id, step_id):
+            return
+        record_step_started(
+            project_root=self.project_root,
+            flow_id=flow_id,
+            step_id=step_id,
+            step_type=event.step_type or "",
             timestamp=event.timestamp,
         )

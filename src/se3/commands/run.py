@@ -2136,8 +2136,21 @@ def _run_flow_impl(
         # (meaning a fresh token-consuming LLM round actually happened).
         step_ran_llm = True
 
-        # Emit STEP_STARTED — no-op in CliSink (the per-step renderer presents
-        # output only on completion), forwarded by JsonSink.
+        # Emit STEP_STARTED for EVERY step type the moment it enters RUNNING —
+        # including the non-LLM TEST / COMMIT / SPEC_GATE steps and the
+        # interactive CONFIRM / DISCOVERY steps. It is a no-op in CliSink (the
+        # per-step renderer presents output only on completion), forwarded by
+        # JsonSink, and persisted by HistorySink as a lightweight
+        # ``step_started`` anchor so the web console shows the step's region
+        # (with a "进行中" status) immediately rather than waiting for the
+        # first conversation record or the final step_completed.
+        #
+        # This emit sits *after* the resume short-circuits above (a step that
+        # already reached a terminal / REVISION_NEEDED status `continue`s before
+        # here), so a re-entered-on-resume PAUSED step is the only case that can
+        # re-emit STEP_STARTED. HistorySink dedups that by step_id
+        # (has_step_started_event / has_step_terminal_event), so re-emission
+        # never produces a duplicate step region — no extra guard is needed here.
         emitter.emit(new_event(
             EventType.STEP_STARTED,
             flow_id=flow.flow_id,

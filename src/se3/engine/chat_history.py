@@ -329,6 +329,97 @@ def record_step_event(
         logger.warning("Failed to record step event for %s: %s", step_id, exc)
 
 
+def record_step_started(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Record a ``step_started`` lifecycle event into the step's jsonl.
+
+    Writes a single ``{type: 'step_started', step_id, step_type,
+    status: 'running', timestamp}`` line into
+    ``se3/history/{flow_id}/{step_id}.jsonl`` the moment a step enters the
+    RUNNING state. This lets the web console show the step's region (with a
+    "进行中" status) immediately — including non-LLM steps (TEST / COMMIT /
+    SPEC_GATE) that produce no conversation records and would otherwise leave
+    a blank until their final ``step_completed`` lands.
+
+    The line is intentionally NOT a :class:`ChatMessage` (it carries no
+    ``role``); like :func:`record_step_event` it rides the existing
+    ``history_data`` push channel without protocol changes, and
+    :func:`get_step_history` skips it so CLI history rendering and
+    retry-context construction never ingest it.
+
+    Follows the established write semantics — ``mkdir`` + a single whole-line
+    ``write`` (so a half-written line cannot corrupt earlier lines) wrapped in
+    an ``OSError`` guard so a write failure never breaks the running step.
+    """
+    record = {
+        "type": "step_started",
+        "step_id": step_id,
+        "step_type": step_type,
+        "status": "running",
+        "timestamp": (
+            datetime.fromtimestamp(timestamp).isoformat()
+            if timestamp is not None
+            else datetime.now().isoformat()
+        ),
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record step started for %s: %s", step_id, exc)
+
+
+def has_step_started_event(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+) -> bool:
+    """Check if a ``step_started`` event already exists in the step's jsonl.
+
+    Like :func:`has_step_terminal_event` but looks for the ``step_started``
+    record written by :func:`record_step_started`.  Used by
+    :class:`~se3.engine.sink.HistorySink` to keep step-started persistence
+    idempotent: a step re-entered on resume (or a re-emitted STEP_STARTED)
+    must not append a duplicate started record that would render as a second
+    "进行中" status row for the same step region.
+
+    Returns ``True`` when such a record is found, ``False`` otherwise (file
+    missing, unreadable, or contains no started event).
+    """
+    path = _history_file(project_root, flow_id, step_id)
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") == "step_started"
+                        and "role" not in data
+                    ):
+                        return True
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError as exc:
+        logger.debug(
+            "Could not read history file for step-started check %s: %s",
+            step_id, exc,
+        )
+    return False
+
+
 def has_step_terminal_event(
     project_root: Path,
     flow_id: str,
@@ -602,6 +693,7 @@ def get_step_history(
             # for steps like self_check REVISION_NEEDED) so they do not
             # produce warnings or inflate retry context.
             if isinstance(data, dict) and data.get("type") in (
+                "step_started",
                 "step_completed",
                 "step_failed",
                 "step_output",
