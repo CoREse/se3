@@ -1069,6 +1069,24 @@ flow's execution state — it is pure navigation.
   `#flow-conversation` — same viewport-top step selection, same mutual
   exclusion with the original header, and same click-to-locate navigation
 
+#### Scenario: Floating header pins flush to the scroll viewport top with no gap
+- **GIVEN** a conversation scroll container — `#flow-conversation` or
+  `#history-detail` — whose content box carries a non-zero `padding-top`, on
+  either the desktop or the mobile breakpoint
+- **WHEN** a step's floating header becomes pinned at the top of the scroller
+- **THEN** the floating header's top edge sits flush against the top of the
+  scroll **viewport** (the padding outer edge / border inner edge), leaving no
+  visible gap of exposed top padding between the header and the viewport top —
+  the sticky anchor's pin offset cancels the container's `padding-top` so the
+  pin point lands on the viewport top rather than the content-box top
+- **AND** this flush-to-top alignment is identical across the
+  `#flow-conversation` and `#history-detail` views and across the desktop and
+  mobile breakpoints
+- **AND** the conversation body's own padding and vertical spacing are
+  unchanged, and the floating header's show/hide trigger, its mutual exclusion
+  with the in-stream original `.history-step-header`, and its click-to-locate
+  navigation all remain as specified above
+
 ### Requirement: Long-Content Wrapping
 
 All long-line text content rendered inside the running-flow conversation —

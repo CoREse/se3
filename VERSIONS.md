@@ -43,6 +43,11 @@
 
 
 
+
+## 9.5.2 - 2026-06-13
+
+- Eliminate visible gap between floating step name header and scroll viewport top in both running-flow and history views
+- Ensure floating step header pins flush to scroll container edge on both desktop and mobile layouts
 ## 9.5.1 - 2026-06-13
 
 - Fix webui issue creation falsely reporting timeout failure when the issue already landed on disk

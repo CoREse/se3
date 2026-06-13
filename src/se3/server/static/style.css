@@ -1262,7 +1262,13 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
  */
 .conv-sticky-header {
   position: sticky;
-  top: 0;
+  /* Must equal the negative of the scroll container's padding-top
+   * (.flow-conversation / .history-detail-pane both use padding-top: 14px).
+   * The sticky `top` threshold is measured against the content box (inner edge
+   * of padding); offsetting by -padding-top cancels that padding so the anchor
+   * pins to the scroll-viewport edge (outer edge of padding) instead, leaving
+   * no gap between the floating header and the top of the scroll region. */
+  top: -14px;
   height: 0;
   z-index: 6;
   overflow: visible;
