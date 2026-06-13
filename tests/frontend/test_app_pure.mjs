@@ -850,6 +850,12 @@ class FakeNode {
     this.value = "";
     this.disabled = false;
     this.placeholder = "";
+    // Scroll geometry — defaults to 0; tests assign explicit values to drive
+    // the sticky-header viewport logic. `__rect` backs getBoundingClientRect.
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+    this.clientHeight = 0;
+    this.__rect = null;
     this.classList = {
       add: (...cs) => { for (const c of cs) if (c) this._classes.add(c); },
       remove: (...cs) => { for (const c of cs) this._classes.delete(c); },
@@ -929,6 +935,15 @@ class FakeNode {
   closest() { return null; }
   focus() {}
   scrollIntoView() {}
+  // Sticky-header geometry stubs. getBoundingClientRect returns a settable rect
+  // (defaults to all-zero); scrollTo mirrors the browser's options form by
+  // assigning scrollTop, so smoothScrollTo can be exercised headlessly.
+  getBoundingClientRect() {
+    return this.__rect || { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  }
+  scrollTo(opts) {
+    if (opts && typeof opts.top === "number") this.scrollTop = opts.top;
+  }
   // Sibling helpers used by openHistorySession's Resume-bar bookkeeping.
   get nextElementSibling() {
     if (!this.parentNode) return null;
@@ -3599,6 +3614,11 @@ stepStartedMod.registerStepStartedRegionTests({ app, check, findOne, findAll });
 // same `app` module, same shared DOM stub already installed above).
 const stepGroupingMod = await import("./step_grouping.test.mjs");
 stepGroupingMod.registerStepGroupingTests({ app, check, findOne, findAll });
+
+// Register the G5 viewport-driven sticky floating step-header tests (separate
+// module — same `check` reporter, same `app` module, same shared DOM stub).
+const stickyHeaderMod = await import("./sticky_step_header.test.mjs");
+stickyHeaderMod.registerStickyStepHeaderTests({ app, check, findOne, findAll });
 
 // Register the G3 live accumulating-bubble agent/model badge tests (separate
 // module — same `check` reporter, same `app` module, same shared DOM stub

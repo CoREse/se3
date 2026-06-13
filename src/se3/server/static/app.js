@@ -1565,6 +1565,7 @@ async function loadFlowConversation(flowId, opts) {
     // full fallback, or any echo removal, → authoritative full rebuild.
     const appendRender = result.render === "delta" && !echoRemoved;
     renderConversation(container, state.flowConversationRecords, appendRender);
+    refreshFlowStickyHeader();
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) scrollFlowConversationToBottom();
   } catch (_) {
@@ -2481,6 +2482,7 @@ function appendLocalReply(flowId, target, text) {
   };
   state.flowConversationRecords = state.flowConversationRecords.concat([record]);
   renderConversation($("flow-conversation"), state.flowConversationRecords, true);
+  refreshFlowStickyHeader();
   updateFlowUsageBadge(state.flowConversationRecords);
   scrollFlowConversationToBottom();
 }
@@ -2576,6 +2578,7 @@ function applyHistoryData(msg) {
       if (fresh.length) {
         state.historyRecords = state.historyRecords.concat(fresh);
         renderHistoryRecords(msg.flow_id, state.historyRecords, append);
+        refreshHistoryStickyHeader();
         if (stick) scrollHistoryToBottom();
       }
       // else: all duplicates — skip state update and render entirely
@@ -2588,6 +2591,7 @@ function applyHistoryData(msg) {
       // stale delta cursor.
       state.historyProgress = null;
       renderHistoryRecords(msg.flow_id, state.historyRecords, append);
+      refreshHistoryStickyHeader();
       if (stick) scrollHistoryToBottom();
     }
   }
@@ -2616,6 +2620,7 @@ function applyHistoryData(msg) {
     state.flowConversationRecords = reconciled;
     renderConversation(
       $("flow-conversation"), state.flowConversationRecords, append && !echoRemoved);
+    refreshFlowStickyHeader();
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) scrollFlowConversationToBottom();
   }
@@ -2949,6 +2954,7 @@ async function openHistorySession(flowId, opts) {
     state.historyRecords = result.records;
     // Delta delivery → incremental append render; full fallback → full rebuild.
     renderHistoryRecords(flowId, state.historyRecords, result.render === "delta");
+    refreshHistoryStickyHeader();
     if (stick) scrollHistoryToBottom();
   } catch (_) {
     if (
@@ -5210,6 +5216,208 @@ function rebuildStepHeaders(container) {
 
 function renderHistoryRecords(flowId, records, append) {
   renderConversation($("history-detail"), records, append);
+}
+
+// ---------------------------------------------------------------------------
+// Viewport-driven sticky floating step header (G5)
+// ---------------------------------------------------------------------------
+//
+// As the reader scrolls a conversation, a floating banner pinned to the top of
+// the scroll area shows the title of whichever step's content currently sits at
+// the viewport top. It is the JS-driven counterpart of the `.history-step-header`
+// separator rows: the SAME paradigm step label, surfaced when the original
+// header has scrolled out of view, and hidden the instant the original header is
+// itself at the top (mutual exclusion). Clicking it smooth-scrolls that step's
+// original header back to the very top. The logic is identical for the
+// running-flow view (`#flow-conversation`, its own scroller) and the history
+// view (`#history-detail`, whose scroller is the enclosing
+// `.history-detail-pane`), so both share `computeStickyStep` + the helpers below.
+//
+// A small tolerance absorbs fractional scroll positions so a header sitting
+// exactly at the top reliably counts as "visible" (→ hide the float).
+const STICKY_EPS = 1;
+
+// Pure, DOM-free: given each step header's content-relative offset
+// (`headerOffsets[i].top`, sorted ascending) and the scroller's current
+// `scrollTop`, return the step whose content the viewport top falls within —
+// `{ index, label, key }` — or `null` when the floating header must be hidden.
+//
+// The float is hidden (returns null) when the viewport top is ABOVE the first
+// header, or when a header sits essentially AT the viewport top (its original
+// header is visible, so the float would be a redundant duplicate). Otherwise it
+// reflects the LAST header that has scrolled strictly above the viewport top —
+// so scrolling down advances to the next step the moment its header crosses the
+// top, and scrolling up falls back to the previous step the instant its content
+// re-enters the top. The returned step reflects ONLY the viewport-top position,
+// never the flow's currently-executing step.
+function computeStickyStep(headerOffsets, scrollTop) {
+  if (!Array.isArray(headerOffsets) || !headerOffsets.length) return null;
+  const y = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  let active = null;
+  for (let i = 0; i < headerOffsets.length; i++) {
+    const h = headerOffsets[i];
+    const top = h && Number(h.top);
+    if (!Number.isFinite(top)) continue;
+    if (top <= y - STICKY_EPS) {
+      // Header strictly above the viewport top → its step owns the top edge.
+      active = { index: i, label: h.label, key: h.key };
+    } else if (top <= y + STICKY_EPS) {
+      // Header essentially AT the viewport top → original header visible, the
+      // float must stay hidden (mutual exclusion), regardless of any earlier
+      // candidate.
+      return null;
+    } else {
+      // Header below the viewport top; offsets are ascending so we can stop.
+      break;
+    }
+  }
+  return active;
+}
+
+// Pure: the scrollTop that places step `index`'s original header exactly at the
+// top of the scroll area (the click-to-locate target). Returns null for an
+// out-of-range index so a stale click is a no-op rather than a NaN scroll.
+function stickyScrollTarget(headerOffsets, index) {
+  if (!Array.isArray(headerOffsets)) return null;
+  const h = headerOffsets[index];
+  const top = h && Number(h.top);
+  return Number.isFinite(top) ? Math.max(0, top) : null;
+}
+
+// Read the title text out of a `.history-step-header` separator row (its inner
+// `.history-step-title`), falling back to the row's own text.
+function stickyHeaderTitle(headerEl) {
+  for (const k of (headerEl.children || [])) {
+    if (k.classList && k.classList.contains("history-step-title")) {
+      return k.textContent;
+    }
+  }
+  return headerEl.textContent || "";
+}
+
+// Measure the content-relative top offset of every `.history-step-header` that
+// is a direct child of `content`, relative to `scroller`'s scroll-content
+// origin (so the value is directly comparable with `scroller.scrollTop`).
+// Uses getBoundingClientRect so it is correct whether `content` IS the scroller
+// (flow view) or is nested inside it (history view → the detail pane scrolls).
+function measureStepHeaderOffsets(scroller, content) {
+  const out = [];
+  if (!scroller || !content) return out;
+  const sRect = scroller.getBoundingClientRect();
+  const scrollTop = scroller.scrollTop || 0;
+  let idx = 0;
+  for (const child of content.children) {
+    if (!child.classList || !child.classList.contains("history-step-header")) {
+      continue;
+    }
+    const r = child.getBoundingClientRect();
+    out.push({
+      index: idx,
+      top: r.top - sRect.top + scrollTop,
+      label: stickyHeaderTitle(child),
+    });
+    idx += 1;
+  }
+  return out;
+}
+
+// Smooth-scroll `scroller` so its content offset `top` reaches the top, falling
+// back to an instant jump where the smooth-options form is unsupported.
+function smoothScrollTo(scroller, top) {
+  if (!scroller) return;
+  const dest = Math.max(0, Number(top) || 0);
+  if (typeof scroller.scrollTo === "function") {
+    try { scroller.scrollTo({ top: dest, behavior: "smooth" }); return; }
+    catch (_) { /* options form unsupported — fall through to instant */ }
+  }
+  scroller.scrollTop = dest;
+}
+
+function hideStickyHeader(floatEl) {
+  if (!floatEl) return;
+  floatEl.classList.add("hidden");
+  floatEl.__index = -1;
+}
+
+// Recompute which step the viewport top is in and reflect it in the float. Uses
+// the offsets cached on the scroller (refreshed by `ensureStickyHeaderMounted`
+// after each render) so a scroll event never forces a fresh layout pass.
+function updateStickyHeader(scroller) {
+  if (!scroller) return;
+  const floatEl = scroller.__convStickyFloat;
+  if (!floatEl) return;
+  const offsets = scroller.__convStickyOffsets || [];
+  const active = computeStickyStep(offsets, scroller.scrollTop || 0);
+  if (!active) { hideStickyHeader(floatEl); return; }
+  floatEl.__index = active.index;
+  floatEl.__title.textContent = active.label;
+  floatEl.classList.remove("hidden");
+}
+
+// Build the floating-header element (lazily, once per scroller). It is a
+// zero-height `position: sticky` anchor whose absolutely-positioned inner button
+// paints the banner over the content top, so it pins to the viewport top without
+// consuming layout space or shifting the conversation. Clicking it locates the
+// active step's original header back to the top.
+function buildStickyHeaderEl(scroller) {
+  const floatEl = el("div", "conv-sticky-header hidden");
+  const inner = el("button", "conv-sticky-header__inner");
+  inner.type = "button";
+  const titleEl = el("span", "conv-sticky-header__title");
+  inner.appendChild(titleEl);
+  floatEl.appendChild(inner);
+  floatEl.__inner = inner;
+  floatEl.__title = titleEl;
+  floatEl.__index = -1;
+  inner.addEventListener("click", () => {
+    const idx = floatEl.__index;
+    const target = stickyScrollTarget(scroller.__convStickyOffsets || [], idx);
+    if (target == null) return;
+    // Pure navigation: scroll only — never mutate step or flow state. Hide
+    // eagerly for snappy feedback; the scroll-driven update keeps it hidden
+    // once the original header settles at the top.
+    smoothScrollTo(scroller, target);
+    hideStickyHeader(floatEl);
+  });
+  return floatEl;
+}
+
+// Ensure the floating step header is mounted on `scroller` (as its first child,
+// so the sticky anchor pins to the scroll viewport top), wire the scroll
+// listener once, refresh the cached header offsets from the freshly-rendered
+// `content`, and update the float. Idempotent — safe to call after every render
+// (a full rebuild wipes the float via innerHTML="", so re-inserting the same
+// detached node re-mounts it without disturbing fold/raw/chip state on bubbles).
+function ensureStickyHeaderMounted(scroller, content) {
+  if (!scroller || !content) return;
+  let floatEl = scroller.__convStickyFloat;
+  if (!floatEl) {
+    floatEl = buildStickyHeaderEl(scroller);
+    scroller.__convStickyFloat = floatEl;
+    const onScroll = () => updateStickyHeader(scroller);
+    scroller.addEventListener("scroll", onScroll);
+    scroller.__convStickyOnScroll = onScroll;
+  }
+  scroller.__convStickyContent = content;
+  if (scroller.firstChild !== floatEl) {
+    scroller.insertBefore(floatEl, scroller.firstChild || null);
+  }
+  scroller.__convStickyOffsets = measureStepHeaderOffsets(scroller, content);
+  updateStickyHeader(scroller);
+}
+
+// View-specific mounts: the running-flow view's `#flow-conversation` is its own
+// scroller; the history view's `#history-detail` is nested inside the scrolling
+// `.history-detail-pane`. Both funnel through the shared logic above.
+function refreshFlowStickyHeader() {
+  const conv = $("flow-conversation");
+  if (conv) ensureStickyHeaderMounted(conv, conv);
+}
+
+function refreshHistoryStickyHeader() {
+  const detail = $("history-detail");
+  const scroller = historyScrollContainer();
+  if (detail && scroller) ensureStickyHeaderMounted(scroller, detail);
 }
 
 // ---------------------------------------------------------------------------
@@ -10018,6 +10226,14 @@ if (typeof module !== "undefined" && module.exports) {
     addConversationRecords,
     insertBubbleSorted,
     rebuildStepHeaders,
+    // Viewport-driven sticky floating step header (G5) — exposed for the
+    // DOM-free + DOM-stub tests in tests/frontend/sticky_step_header.test.mjs.
+    computeStickyStep,
+    stickyScrollTarget,
+    measureStepHeaderOffsets,
+    updateStickyHeader,
+    ensureStickyHeaderMounted,
+    smoothScrollTo,
     markSupersededProgress,
     partialSegments,
     progressTurnKey,

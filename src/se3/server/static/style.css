@@ -1246,6 +1246,61 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--cyan);
 }
 
+/* -- viewport-driven sticky floating step header (G5) --------------- */
+/*
+ * A floating banner that pins to the top of the conversation scroll area and
+ * shows the title of whichever step's content currently sits at the viewport
+ * top. Shared by the running-flow view (#flow-conversation, its own scroller)
+ * and the history view (#history-detail inside the scrolling
+ * .history-detail-pane). The outer anchor is a zero-height `position: sticky`
+ * box so it never consumes layout height or shifts the conversation; its
+ * absolutely-positioned inner button paints the banner over the content top.
+ * It is mutually exclusive with the in-stream `.history-step-header` separator
+ * rows (JS hides it the instant an original header reaches the top), so the
+ * label is never shown twice. Status is carried by the explicit text label, not
+ * by colour alone.
+ */
+.conv-sticky-header {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 6;
+  overflow: visible;
+  pointer-events: none;
+}
+.conv-sticky-header.hidden { display: none; }
+.conv-sticky-header__inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  padding: 7px 11px;
+  background: var(--bg-raised);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+  font: inherit;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--cyan);
+  text-align: left;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.conv-sticky-header__inner:hover { background: var(--bg-card, var(--bg-raised)); }
+.conv-sticky-header__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .history-record {
   padding: 8px 11px;
   border-bottom: 1px dotted var(--border);
