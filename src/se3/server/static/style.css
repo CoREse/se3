@@ -13,6 +13,30 @@
   --red: #e0564b;
   --cyan: #3bb6c4;
   --grey: #6a6b70;
+
+  /* Per-step-type grouping accents (G4). A stable, low-saturation, mutually
+   * distinguishable hue per StepType, used both for each step region's left
+   * rail / faint background lane in the conversation and for the matching
+   * step-report card border, so the same step always reads in the same colour
+   * across running-flow and history views. Deliberately desaturated so the
+   * faint background tints never drop text contrast below AA on the dark
+   * surface — status is ALSO carried by text + icon (see step-status rows), so
+   * colour is never the sole signal. Adjacent flow steps
+   * (discovery→analyze→plan→implement→test→self_check→verify_spec→update_spec
+   * →spec_gate→version_analyze→commit→summarize) carry visibly different hues. */
+  --step-discovery: #5b8fd6;
+  --step-analyze: #3fa9bf;
+  --step-plan: #8a82e0;
+  --step-confirm: #6f86c9;
+  --step-implement: #57a86a;
+  --step-test: #3fae9a;
+  --step-self_check: #c89a46;
+  --step-verify_spec: #d0824e;
+  --step-update_spec: #54aec4;
+  --step-spec_gate: #c2a13f;
+  --step-version_analyze: #a87fc4;
+  --step-commit: #79a83f;
+  --step-summarize: #828b98;
 }
 
 * { box-sizing: border-box; }
@@ -1898,6 +1922,93 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg);
 }
 
+/* -- per-step-type visual grouping (G4) ------------------------------ */
+/*
+ * Every conversation bubble already carries a stable `step-type-<type>` DOM
+ * class (added by addConversationRecords in app.js, G2). Here we turn that
+ * class into a low-saturation, distinguishable per-step grouping style so a
+ * step's boundary is obvious and all records of one step_id read as one
+ * region. Two coordinated signals per step:
+ *   1. the record's 3px LEFT RAIL is recoloured to the step accent (it
+ *      overrides the role-based left stripe ONLY inside the conversation —
+ *      role identity is still carried by the bubble's own alignment + tint,
+ *      lines below — so the rail now encodes the STEP, the bubble the ROLE);
+ *   2. a very faint full-width BACKGROUND LANE in the same hue, kept at
+ *      ~0.07 alpha so it tints the lane without lowering text contrast and
+ *      survives on mobile where the rail itself is dropped.
+ *
+ * Scoped to `.history-detail`, the conversation container shared by BOTH the
+ * running-flow view (`#flow-conversation.flow-conversation.history-detail`)
+ * and the history-detail view (`#history-detail.history-detail`), so the two
+ * views group identically. The non-flow history LIST (`.history-item` /
+ * top-level `.history-record`) lives OUTSIDE `.history-detail`, so its 3px
+ * left identity stripe and padding are untouched.
+ *
+ * The lightweight status / DAG markers (`.step-status-row`,
+ * `.group-status-marker`) keep their own status-coloured styling (they carry
+ * a step-type class too), so they are explicitly excluded here.
+ */
+.history-detail .conv-record.step-type-discovery:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-discovery);
+  background: rgba(91, 143, 214, 0.07);
+}
+.history-detail .conv-record.step-type-analyze:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-analyze);
+  background: rgba(63, 169, 191, 0.07);
+}
+.history-detail .conv-record.step-type-plan:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-plan);
+  background: rgba(138, 130, 224, 0.08);
+}
+.history-detail .conv-record.step-type-confirm:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-confirm);
+  background: rgba(111, 134, 201, 0.07);
+}
+.history-detail .conv-record.step-type-implement:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-implement);
+  background: rgba(87, 168, 106, 0.07);
+}
+.history-detail .conv-record.step-type-test:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-test);
+  background: rgba(63, 174, 154, 0.07);
+}
+.history-detail .conv-record.step-type-self_check:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-self_check);
+  background: rgba(200, 154, 70, 0.08);
+}
+.history-detail .conv-record.step-type-verify_spec:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-verify_spec);
+  background: rgba(208, 130, 78, 0.08);
+}
+.history-detail .conv-record.step-type-update_spec:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-update_spec);
+  background: rgba(84, 174, 196, 0.07);
+}
+.history-detail .conv-record.step-type-spec_gate:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-spec_gate);
+  background: rgba(194, 161, 63, 0.08);
+}
+.history-detail .conv-record.step-type-version_analyze:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-version_analyze);
+  background: rgba(168, 127, 196, 0.08);
+}
+.history-detail .conv-record.step-type-commit:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-commit);
+  background: rgba(121, 168, 63, 0.07);
+}
+.history-detail .conv-record.step-type-summarize:not(.step-status-row):not(.group-status-marker) {
+  border-left-color: var(--step-summarize);
+  background: rgba(130, 139, 152, 0.09);
+}
+
+/* The step-header separator row is the explicit boundary between two step
+ * regions. Give it a little extra breathing room above (never before the very
+ * first header) so the colour change between lanes is unmistakable; the title
+ * keeps its existing reverse-block look. Scoped to the conversation so the
+ * history LIST is untouched. */
+.history-detail .history-step-header { margin-top: 4px; }
+.history-detail .history-step-header:first-child { margin-top: 0; }
+
 /* -- step report card ----------------------------------------------- */
 /*
  * Default-expanded report card mirroring the CLI's per-step Rich Panel.
@@ -1915,17 +2026,21 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   display: flex;
   flex-direction: column;
 }
-.step-report.kind-implement   { border-left-color: var(--green); }
-.step-report.kind-test        { border-left-color: var(--green); }
-.step-report.kind-self_check  { border-left-color: var(--yellow); }
-.step-report.kind-verify_spec { border-left-color: var(--yellow); }
-.step-report.kind-update_spec { border-left-color: var(--cyan); }
-.step-report.kind-commit      { border-left-color: var(--cyan); }
-.step-report.kind-summarize   { border-left-color: var(--cyan); }
-.step-report.kind-discovery   { border-left-color: var(--accent); }
-.step-report.kind-analyze     { border-left-color: var(--accent); }
-.step-report.kind-plan        { border-left-color: var(--accent); }
-.step-report.kind-version_analyze { border-left-color: var(--accent); }
+/* Match each report card's left border to its step's grouping accent so the
+ * card reads as the "result/summary" of the same coloured step region. */
+.step-report.kind-discovery       { border-left-color: var(--step-discovery); }
+.step-report.kind-analyze         { border-left-color: var(--step-analyze); }
+.step-report.kind-plan            { border-left-color: var(--step-plan); }
+.step-report.kind-confirm         { border-left-color: var(--step-confirm); }
+.step-report.kind-implement       { border-left-color: var(--step-implement); }
+.step-report.kind-test            { border-left-color: var(--step-test); }
+.step-report.kind-self_check      { border-left-color: var(--step-self_check); }
+.step-report.kind-verify_spec     { border-left-color: var(--step-verify_spec); }
+.step-report.kind-update_spec     { border-left-color: var(--step-update_spec); }
+.step-report.kind-spec_gate       { border-left-color: var(--step-spec_gate); }
+.step-report.kind-version_analyze { border-left-color: var(--step-version_analyze); }
+.step-report.kind-commit          { border-left-color: var(--step-commit); }
+.step-report.kind-summarize       { border-left-color: var(--step-summarize); }
 
 .step-report__head {
   display: flex;
@@ -2931,6 +3046,38 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
      * desktop rule untouched. */
     padding-top: 2px;
     padding-bottom: 2px;
+  }
+
+  /* -- per-step grouping: contain on mobile, status text wraps (G4) ------- *
+   * The per-step grouping lanes (faint background + left rail, defined at the
+   * top level on `.history-detail .conv-record.step-type-*`) and the
+   * lightweight "进行中" / status rows must never widen the conversation past
+   * the phone viewport. These are CSS-only containment + wrapping guards,
+   * scoped to `#flow-view` / `#history-view` so desktop and every other view
+   * stay byte-for-byte unchanged. Following the Mobile Horizontal-Overflow
+   * contract, no horizontal-scroll escape hatch is introduced: content WRAPS.
+   *
+   * `min-width: 0` is the flex/grid blowout guard (a wide tinted lane child can
+   * otherwise pin the column wider than the viewport); `max-width: 100%` caps
+   * the lane to the column. */
+  #flow-view .flow-conversation .conv-record,
+  #history-view .history-detail .conv-record {
+    min-width: 0;
+    max-width: 100%;
+  }
+  /* The status row is an inline-flex pill; let it wrap and break a long step
+   * label rather than forcing a horizontal scroll. */
+  #flow-view .step-status-row,
+  #history-view .step-status-row {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+  }
+  #flow-view .step-status-row .step-status-text,
+  #history-view .step-status-row .step-status-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   /* -- idle reply placeholder: shrink so it fits one line (problem 2) ------ *
