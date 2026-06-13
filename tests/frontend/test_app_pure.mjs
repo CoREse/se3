@@ -3589,6 +3589,12 @@ chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 const groupStatusMod = await import("./group_status.test.mjs");
 groupStatusMod.registerGroupStatusTests({ app, check, findOne, findAll });
 
+// Register the G3 live accumulating-bubble agent/model badge tests (separate
+// module — same `check` reporter, same `app` module, same shared DOM stub
+// already installed above).
+const agentBadgeLiveMod = await import("./agent_badge_live.test.mjs");
+agentBadgeLiveMod.registerAgentBadgeLiveTests({ app, check, findOne, findAll });
+
 // Register the G1 docked reply-box prompt-collapse tests (separate module —
 // same `check` reporter, same `app` module, same shared DOM stub already
 // installed above).
