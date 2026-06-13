@@ -16,9 +16,44 @@
  * by the static-source guards in tests/test_frontend_mobile.py.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Resolve and read style.css once so the G4 step-grouping / mobile-grouping
+// static-source guards can assert the key rules exist and live at the correct
+// scope (desktop grouping at top level, mobile containment inside the
+// @media (max-width: 600px) breakpoint).
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STYLE_CSS = path.join(
+  HERE, "..", "..", "src", "se3", "server", "static", "style.css");
+const CSS = fs.readFileSync(STYLE_CSS, "utf8");
+
+// Brace-balanced body of the @media (max-width: 600px) block (mirrors the
+// Python guard's _block_text). Returns { start, end } char offsets of the
+// block body so callers can test in/out-of-breakpoint scope.
+function mobileBreakpointRange(css) {
+  const open = "@media (max-width: 600px) {";
+  const start = css.indexOf(open);
+  assert.notEqual(start, -1, "missing @media (max-width: 600px) block");
+  const brace = css.indexOf("{", start);
+  let depth = 0;
+  let j = brace;
+  for (; j < css.length; j++) {
+    if (css[j] === "{") depth += 1;
+    else if (css[j] === "}") {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+  }
+  return { start: brace, end: j };
+}
 
 export function registerMobileResponsiveTests(ctx) {
   const { app, check } = ctx;
+
+  const MOBILE = mobileBreakpointRange(CSS);
+  const insideMobile = (idx) => idx > MOBILE.start && idx < MOBILE.end;
 
   // -- navMenuNextState (G2 topbar overflow menu) ---------------------------
   // The hamburger is a plain toggle: the next state is simply the negation of
@@ -309,5 +344,131 @@ export function registerMobileResponsiveTests(ctx) {
     assert.ok(bubble, "assistant content must render inside .conv-bubble");
     assert.ok(bubble.textContent.includes(LONG_PATH),
       "the long path must appear in the bubble, not be dropped");
+  });
+
+  // -- G4 step-grouping style guards ----------------------------------------
+  //
+  // G4 turns the `step-type-<type>` DOM class (added by addConversationRecords,
+  // G2) into a stable, low-saturation, distinguishable per-step grouping style.
+  // These static-source guards (mirroring the Python style guard's approach,
+  // but kept in the listed G4 test file) lock that the key grouping classes and
+  // their mobile-containment rules exist and live at the correct scope:
+  //   - desktop grouping rules at the TOP LEVEL (so both running + history
+  //     views, which share `.history-detail`, group identically);
+  //   - mobile containment rules strictly INSIDE the 600px breakpoint (so the
+  //     desktop layout stays byte-for-byte unchanged).
+
+  // Active step types that must carry a distinguishable grouping accent.
+  const G4_STEP_TYPES = [
+    "discovery", "analyze", "plan", "implement", "test", "self_check",
+    "verify_spec", "update_spec", "spec_gate", "version_analyze", "commit",
+    "summarize",
+  ];
+
+  check("G4 :root defines a per-step grouping accent var for every step type", () => {
+    for (const t of G4_STEP_TYPES) {
+      assert.ok(CSS.includes(`--step-${t}:`),
+        `:root must define the --step-${t} grouping accent variable`);
+    }
+  });
+
+  check("G4 each step type has a top-level .history-detail grouping rule", () => {
+    for (const t of G4_STEP_TYPES) {
+      const sel = `.history-detail .conv-record.step-type-${t}`;
+      const idx = CSS.indexOf(sel);
+      assert.notEqual(idx, -1, `missing grouping rule for ${sel}`);
+      // Must be a DESKTOP (top-level) rule so running + history views share it.
+      assert.ok(!insideMobile(idx),
+        `${sel} must live at the top level (shared by both views), not inside the breakpoint`);
+      // Rule body must recolour the left rail to the step accent and tint the lane.
+      const body = CSS.slice(idx, CSS.indexOf("}", idx));
+      assert.ok(body.includes(`border-left-color: var(--step-${t})`),
+        `${sel} must set border-left-color to var(--step-${t})`);
+      assert.ok(/background:\s*rgba\(/.test(body),
+        `${sel} must set a faint rgba background lane`);
+    }
+  });
+
+  check("G4 grouping rules exclude the lightweight status / DAG markers", () => {
+    // The status / group-status markers carry a step-type class too, so the
+    // grouping rules must NOT clobber their own status colouring.
+    const sel = ".history-detail .conv-record.step-type-test";
+    const idx = CSS.indexOf(sel);
+    const body = CSS.slice(idx, CSS.indexOf("{", idx));
+    assert.ok(body.includes(":not(.step-status-row)")
+      && body.includes(":not(.group-status-marker)"),
+      "grouping rule must exclude .step-status-row and .group-status-marker");
+  });
+
+  check("G4 report card border colours match the per-step grouping accents", () => {
+    // The report card (the step's "result/summary") reads in the same colour
+    // as its step region.
+    for (const t of ["discovery", "implement", "test", "commit", "summarize"]) {
+      const sel = `.step-report.kind-${t}`;
+      const idx = CSS.indexOf(sel);
+      assert.notEqual(idx, -1, `missing report-card colour rule for ${sel}`);
+      const body = CSS.slice(idx, CSS.indexOf("}", idx));
+      assert.ok(body.includes(`border-left-color: var(--step-${t})`),
+        `${sel} must use the matching var(--step-${t}) accent`);
+    }
+  });
+
+  check("G4 mobile containment rules live inside the 600px breakpoint and scope to flow/history views", () => {
+    // The mobile grouping containment must be scoped to #flow-view / #history-view
+    // and sit strictly inside the breakpoint so desktop is unaffected.
+    const tokens = [
+      "#flow-view .flow-conversation .conv-record",
+      "#history-view .history-detail .conv-record",
+      "#flow-view .step-status-row",
+      "#history-view .step-status-row",
+    ];
+    for (const tok of tokens) {
+      const idx = CSS.indexOf(tok);
+      assert.notEqual(idx, -1, `missing mobile containment token ${tok}`);
+      assert.ok(insideMobile(idx),
+        `${tok} must live INSIDE the @media (max-width: 600px) breakpoint`);
+    }
+  });
+
+  check("G4 mobile status row wraps long labels and never adds horizontal scroll", () => {
+    const sel = "#flow-view .step-status-row .step-status-text";
+    const idx = CSS.indexOf(sel);
+    assert.notEqual(idx, -1, `missing mobile status-text wrap rule ${sel}`);
+    const body = CSS.slice(idx, CSS.indexOf("}", idx));
+    assert.ok(
+      body.includes("overflow-wrap: anywhere") || body.includes("word-break: break-word"),
+      `${sel} must carry a per-character break rule`);
+    // The status row itself must shrink (min-width: 0) and wrap, not scroll.
+    const rowIdx = CSS.indexOf("#flow-view .step-status-row,");
+    const rowBody = CSS.slice(rowIdx, CSS.indexOf("}", rowIdx));
+    assert.ok(rowBody.includes("flex-wrap: wrap") && rowBody.includes("min-width: 0"),
+      "the mobile status row must wrap (flex-wrap) and shrink (min-width: 0)");
+    // No horizontal-scroll escape hatch anywhere in the G4 mobile additions.
+    const groupBlock = CSS.slice(
+      CSS.indexOf("per-step grouping: contain on mobile"),
+      CSS.indexOf("idle reply placeholder: shrink"));
+    assert.ok(!groupBlock.includes("overflow-x: auto"),
+      "G4 mobile grouping rules must NOT use overflow-x: auto");
+  });
+
+  check("G4 DOM: records of different step types carry distinct step-type classes", () => {
+    // The grouping CSS keys off `step-type-<type>` on each record. Verify the
+    // render path actually applies a per-step-type class so the styling target
+    // exists for both the flow and history views (shared renderConversation).
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      {
+        step_id: "01_analyze_aa", step_type: "analyze",
+        message: { role: "assistant", content: "analysis", timestamp: 1 },
+      },
+      {
+        step_id: "02_implement_bb", step_type: "implement",
+        message: { role: "assistant", content: "impl", timestamp: 2 },
+      },
+    ], false);
+    assert.ok(findOneG7(container, "step-type-analyze"),
+      "an analyze record must carry the step-type-analyze class");
+    assert.ok(findOneG7(container, "step-type-implement"),
+      "an implement record must carry the step-type-implement class");
   });
 }
