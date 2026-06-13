@@ -99,6 +99,29 @@ class TestIssueModel:
         issue = Issue.from_dict(data)
         assert issue.source == "human"
 
+    def test_from_dict_ignores_legacy_scope_key(self):
+        """A retired ``scope`` key in historical YAML loads without error and
+        leaves no ``scope`` attribute on the resulting Issue."""
+        data = {
+            "id": "010",
+            "description": "A desc",
+            "status": "open",
+            "scope": "out_of_scope",
+            "tags": [],
+            "source": "system",
+        }
+        issue = Issue.from_dict(data)
+        assert issue.id == "010"
+        assert issue.description == "A desc"
+        assert not hasattr(issue, "scope")
+        # And the re-serialized form never re-introduces the key.
+        assert "scope" not in issue.to_dict()
+
+    def test_to_dict_never_emits_scope(self):
+        """``scope`` is fully retired — it must never appear in serialized output."""
+        issue = Issue(id="011", description="desc", title="t", priority="high", type="bug")
+        assert "scope" not in issue.to_dict()
+
     def test_to_dict_omits_none_optional_fields(self):
         """title/priority/type are omitted from dict when None."""
         issue = Issue(id="006", description="desc only")

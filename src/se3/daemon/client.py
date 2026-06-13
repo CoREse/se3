@@ -927,12 +927,11 @@ class DaemonClient:
             title = str(payload.get("title") or "").strip() or None
             priority = str(payload.get("priority") or "").strip() or None
             issue_type = str(payload.get("type") or "").strip() or None
-            scope = str(payload.get("scope") or "").strip() or None
             tags = payload.get("tags")
             if not isinstance(tags, list):
                 tags = None
             # Web-initiated creates are always source=human
-            create_kwargs: Dict[str, Any] = dict(
+            created = mgr.create(
                 description=description,
                 title=title,
                 priority=priority,
@@ -940,9 +939,6 @@ class DaemonClient:
                 tags=tags,
                 source="human",
             )
-            if scope:
-                create_kwargs["scope"] = scope
-            created = mgr.create(**create_kwargs)
             return created.id
 
         elif operation == "edit":
@@ -950,7 +946,7 @@ class DaemonClient:
             if not issue_id:
                 raise ValueError("ISSUE_COMMAND edit: issue_id is required")
             kwargs: Dict[str, Any] = {}
-            for field in ("title", "description", "priority", "type", "scope"):
+            for field in ("title", "description", "priority", "type"):
                 val = payload.get(field)
                 if val is not None and isinstance(val, str):
                     kwargs[field] = val

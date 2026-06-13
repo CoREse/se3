@@ -43,7 +43,6 @@ class Issue:
     description: str = ""
     status: IssueStatus = IssueStatus.OPEN
     priority: Optional[str] = None
-    scope: str = "in_scope"
     type: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     source: str = "system"
@@ -71,7 +70,6 @@ class Issue:
             "id": self.id,
             "description": self.description,
             "status": self.status.value,
-            "scope": self.scope,
             "tags": self.tags,
             "source": self.source,
             "created_at": self.created_at.isoformat(),
@@ -93,7 +91,8 @@ class Issue:
         Missing ``source`` defaults to ``"system"`` (backward compat with
         pre-source YAML files).  ``title``, ``priority`` and ``type`` are
         optional — absent means the user/programmer intentionally left them
-        blank.
+        blank.  A legacy ``scope`` key (written before the field was retired)
+        is tolerated and silently ignored.
         """
         created_at = data.get("created_at")
         if isinstance(created_at, str):
@@ -140,7 +139,6 @@ class Issue:
             description=str(desc) if desc else "",
             status=IssueStatus(data.get("status", "open")),
             priority=priority,
-            scope=data.get("scope", "in_scope"),
             type=issue_type,
             tags=data.get("tags", []),
             source=data.get("source", "system"),
@@ -273,7 +271,6 @@ class IssueManager:
         description: str,
         title: Optional[str] = None,
         priority: Optional[str] = None,
-        scope: str = "in_scope",
         tags: Optional[List[str]] = None,
         type: Optional[str] = None,
         source: str = "system",
@@ -288,7 +285,6 @@ class IssueManager:
             description: The issue body (**required**, must be non-empty).
             title: Optional explicit title.
             priority: Optional priority (e.g. ``"high"``).
-            scope: Scope classification (default ``"in_scope"``).
             tags: Tag list.
             type: Optional issue type (e.g. ``"bug"``).
             source: Origin of the issue — ``"human"`` for CLI/webui,
@@ -311,7 +307,6 @@ class IssueManager:
             description=description,
             status=IssueStatus.OPEN,
             priority=priority,
-            scope=scope,
             type=type,
             tags=tags or [],
             source=source,
@@ -533,7 +528,6 @@ class IssueManager:
         description: Optional[str] = None,
         priority: Optional[str] = None,
         type: Optional[str] = None,
-        scope: Optional[str] = None,
         tags: Optional[List[str]] = None,
     ) -> Issue:
         """Update editable fields on an issue, renaming the YAML file when the
@@ -549,9 +543,6 @@ class IssueManager:
             description: New description body.
             priority: New priority (empty string clears to ``None``).
             type: New issue type (empty string clears to ``None``).
-            scope: New scope classification (e.g. ``"in_scope"`` or
-                ``"out_of_scope"``).  Empty string clears to the default
-                ``"in_scope"``.
             tags: New tag list.
 
         Returns:
@@ -586,8 +577,6 @@ class IssueManager:
             issue.priority = priority.strip() or None
         if type is not None:
             issue.type = type.strip() or None
-        if scope is not None:
-            issue.scope = scope.strip() or "in_scope"
         if tags is not None:
             issue.tags = tags
 

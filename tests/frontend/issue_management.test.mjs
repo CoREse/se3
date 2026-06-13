@@ -287,24 +287,19 @@ export function registerIssueManagementTests(ctx) {
     assert.equal("tags" in body, false);
   });
 
-  check("G7 buildIssueCreateBody: includes scope when truthy", () => {
-    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "out_of_scope");
-    assert.equal(body.scope, "out_of_scope");
-  });
-
-  check("G7 buildIssueCreateBody: omits scope when falsy", () => {
-    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "");
-    assert.equal("scope" in body, false);
-  });
-
   check("G7 buildIssueCreateBody: includes tags when non-empty", () => {
-    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "", ["ui", "perf"]);
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", ["ui", "perf"]);
     assert.deepEqual(body.tags, ["ui", "perf"]);
   });
 
   check("G7 buildIssueCreateBody: omits tags when empty", () => {
-    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", "", []);
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "", "", "", []);
     assert.equal("tags" in body, false);
+  });
+
+  check("G7 buildIssueCreateBody: never emits a scope field", () => {
+    const body = app.buildIssueCreateBody("desc", "m1", "/proj", "t", "bug", "high", ["ui"]);
+    assert.equal("scope" in body, false);
   });
 
   // ---- (j) buildIssueEditBody -----------------------------------------------
@@ -342,15 +337,7 @@ export function registerIssueManagementTests(ctx) {
     assert.equal(body.priority, "");
   });
 
-  check("G7 buildIssueEditBody: includes scope when dirty", () => {
-    const dirty = new Set(["issue-scope"]);
-    const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
-      scope: "out_of_scope",
-    });
-    assert.equal(body.scope, "out_of_scope");
-  });
-
-  check("G7 buildIssueEditBody: omits scope when not dirty", () => {
+  check("G7 buildIssueEditBody: never emits a scope field even if formValues has one", () => {
     const dirty = new Set(["issue-title"]);
     const body = app.buildIssueEditBody("desc", "m1", "/proj", dirty, {
       title: "Updated",

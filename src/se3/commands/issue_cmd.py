@@ -171,7 +171,7 @@ def _issue_to_editor_yaml(issue) -> str:
     data = issue.to_dict()
     # Only include editable fields plus id (read-only context).
     ordered = {}
-    for key in ["id", "title", "description", "priority", "type", "scope", "tags"]:
+    for key in ["id", "title", "description", "priority", "type", "tags"]:
         if key in data:
             ordered[key] = data[key]
     return yaml.dump(ordered, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -184,7 +184,6 @@ def _new_issue_editor_yaml() -> str:
         "description": "",
         "type": "",
         "priority": "",
-        "scope": "in_scope",
         "tags": [],
     }
     return yaml.dump(template, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -322,7 +321,6 @@ def create_cmd(
     title: Optional[str] = typer.Option(None, "--title", help="Issue title (optional)"),
     issue_type: Optional[str] = typer.Option(None, "--type", help="Issue type (optional)"),
     priority: Optional[str] = typer.Option(None, "--priority", help="Issue priority (optional)"),
-    scope: str = typer.Option("in_scope", "--scope", help="Issue scope"),
     tags: Optional[str] = typer.Option(None, "--tags", help="Comma-separated tags"),
     use_editor: bool = typer.Option(False, "--editor", help="Open external editor for full editing"),
 ):
@@ -369,7 +367,6 @@ def create_cmd(
             description=desc,
             title=str(iss_title).strip() if iss_title else None,
             priority=str(iss_priority).strip() if iss_priority else None,
-            scope=str(data.get("scope") or "in_scope").strip(),
             tags=iss_tags,
             type=str(iss_type).strip() if iss_type else None,
             source="human",
@@ -395,7 +392,6 @@ def create_cmd(
         description=description,
         title=title,
         priority=priority,
-        scope=scope,
         tags=tag_list,
         type=issue_type,
         source="human",
@@ -482,7 +478,6 @@ def edit_cmd(
         iss_desc = str(data.get("description", "")).strip()
         iss_priority = str(data.get("priority") or "").strip()
         iss_type = str(data.get("type") or "").strip()
-        iss_scope = str(data.get("scope") or "").strip()
         iss_tags = data.get("tags")
         if isinstance(iss_tags, str):
             iss_tags = [t.strip() for t in iss_tags.split(",") if t.strip()]
@@ -495,7 +490,6 @@ def edit_cmd(
             description=iss_desc,
             priority=iss_priority,
             type=iss_type,
-            scope=iss_scope,
             tags=iss_tags,
         )
         typer.echo(f"Updated issue {updated.id}: {updated.display_title}")

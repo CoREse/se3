@@ -200,7 +200,6 @@ class CreateIssueRequest(BaseModel):
     title: str = ""
     priority: str = ""
     type: str = ""
-    scope: str = ""
     tags: list = []
 
 
@@ -213,7 +212,6 @@ class EditIssueRequest(BaseModel):
     description: Optional[str] = None
     priority: Optional[str] = None
     type: Optional[str] = None
-    scope: Optional[str] = None
     tags: Optional[list] = None
 
 
@@ -998,7 +996,6 @@ def create_app(
             title=req.title,
             priority=req.priority,
             type=req.type,
-            scope=req.scope if req.scope else None,
             tags=req.tags if req.tags else None,
             request_id=request_id,
         )
@@ -1070,8 +1067,6 @@ def create_app(
             kwargs["priority"] = req.priority
         if req.type is not None:
             kwargs["type"] = req.type
-        if req.scope is not None:
-            kwargs["scope"] = req.scope
         if req.tags is not None:
             kwargs["tags"] = req.tags
         if not kwargs:

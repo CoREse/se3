@@ -44,6 +44,15 @@
 
 
 
+
+## 9.5.3 - 2026-06-13
+
+- Remove semantically misplaced `scope` field from persisted Issue data model and YAML serialization
+- Remove `--scope` option from `se3 issue create` CLI command
+- Remove scope handling from daemon aggregator snapshots and protocol layer
+- Remove scope dropdown and display from webUI issue create/edit forms
+- Preserve backward compatibility: legacy issue YAML files with `scope:` key load without error
+- Keep transient flow-internal in_scope/out_of_scope classification unchanged
 ## 9.5.2 - 2026-06-13
 
 - Eliminate visible gap between floating step name header and scroll viewport top in both running-flow and history views

@@ -1507,7 +1507,7 @@ se3 issue close <id> [--reason TEXT]   # Close an issue with an optional reason
 se3 issue reset <id>                   # Reset an in-progress issue back to open
 ```
 
-`se3 issue create` accepts optional `--title`, `--type`, `--priority`, `--scope`, and `--tags` flags alongside the description; only `description` is required.
+`se3 issue create` accepts optional `--title`, `--type`, `--priority`, and `--tags` flags alongside the description; only `description` is required. There is no `--scope` flag: the `in_scope` / `out_of_scope` classification is a transient, flow-relative concept and is never persisted onto an issue record.
 
 **Project root resolution:** The command walks up from the current working directory looking for `.git` or any SE3 config file (`se3.yaml`, `se3.local.yaml`, `se3.config.yaml`). If none is found, the current working directory is used.
 

@@ -791,6 +791,11 @@ def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
     assert iss.type == "bug"
     assert iss.tags == ["auth", "mobile"]
     assert iss.source == "human"
+    # ``scope`` is a retired field: even though the on-disk YAML fixture still
+    # carries a legacy ``scope: in_scope`` key (tolerated on load), the snapshot
+    # neither exposes it as an attribute nor serializes it.
+    assert not hasattr(iss, "scope")
+    assert "scope" not in iss.to_dict()
 
 
 def test_collect_issues_skips_malformed(tmp_path: Path) -> None:

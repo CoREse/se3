@@ -1029,12 +1029,11 @@ function issueCompositeKey(iss) {
 }
 
 // Build the POST body for ``POST /api/issues`` (create).  Pure.
-function buildIssueCreateBody(description, machineId, projectRoot, title, type, priority, scope, tags) {
+function buildIssueCreateBody(description, machineId, projectRoot, title, type, priority, tags) {
   const body = { description, machine_id: machineId, project_root: projectRoot };
   if (title) body.title = title;
   if (type) body.type = type;
   if (priority) body.priority = priority;
-  if (scope) body.scope = scope;
   if (tags && tags.length) body.tags = tags;
   return body;
 }
@@ -1048,7 +1047,6 @@ function buildIssueEditBody(description, machineId, projectRoot, dirtyFields, fo
   if (dirtyFields.has("issue-title"))   body.title = formValues.title || "";
   if (dirtyFields.has("issue-type"))    body.type = formValues.type || "";
   if (dirtyFields.has("issue-priority")) body.priority = formValues.priority || "";
-  if (dirtyFields.has("issue-scope"))   body.scope = formValues.scope || "";
   if (dirtyFields.has("issue-tags"))    body.tags = formValues.tags || [];
   return body;
 }
@@ -3288,9 +3286,6 @@ function renderIssuesList() {
     if (iss.priority) {
       meta.appendChild(el("span", issuePriorityClass(iss.priority), iss.priority));
     }
-    if (iss.scope && iss.scope !== "in_scope") {
-      meta.appendChild(el("span", null, iss.scope));
-    }
     meta.appendChild(el("span", null, iss.source || "system"));
     if (iss.created_at) {
       meta.appendChild(el("span", null, formatTime(iss.created_at)));
@@ -3346,7 +3341,6 @@ function renderIssueDetail(issueId) {
     ["ID", "#" + (iss.id || "?")],
     ["类型", iss.type || "-"],
     ["优先级", iss.priority || "-"],
-    ["范围", iss.scope || "in_scope"],
     ["来源", iss.source || "system"],
     ["创建时间", formatTime(iss.created_at)],
     ["更新时间", formatTime(iss.updated_at)],
@@ -3487,7 +3481,6 @@ function openIssueCreateModal() {
   $("issue-title").value = "";
   $("issue-type").value = "";
   $("issue-priority").value = "";
-  $("issue-scope").value = "in_scope";
   $("issue-tags").value = "";
   $("issue-form-submit").textContent = "创建";
   $("issue-form-error").classList.add("hidden");
@@ -3512,7 +3505,6 @@ function openIssueEditModal(iss) {
   $("issue-title").value = iss.title || "";
   $("issue-type").value = iss.type || "";
   $("issue-priority").value = iss.priority || "";
-  $("issue-scope").value = iss.scope || "in_scope";
   $("issue-tags").value = formatTagsForInput(iss.tags);
   $("issue-form-submit").textContent = "保存";
   $("issue-form-error").classList.add("hidden");
@@ -3573,7 +3565,6 @@ async function submitIssueForm(event) {
         $("issue-title").value.trim(),
         $("issue-type").value,
         $("issue-priority").value,
-        $("issue-scope") ? $("issue-scope").value : "",
         parseTagsFromString($("issue-tags").value),
       );
       resp = await authedFetch("/api/issues", {
@@ -3592,7 +3583,6 @@ async function submitIssueForm(event) {
           title: $("issue-title").value.trim(),
           type: $("issue-type").value,
           priority: $("issue-priority").value,
-          scope: $("issue-scope") ? $("issue-scope").value : "",
           tags: parseTagsFromString($("issue-tags").value),
         },
       );

@@ -154,7 +154,6 @@ class IssueSnapshot:
     description: str = ""
     status: str = "open"
     priority: Optional[str] = None
-    scope: str = "in_scope"
     type: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     source: str = "system"
@@ -167,7 +166,6 @@ class IssueSnapshot:
             "project_root": self.project_root,
             "description": self.description,
             "status": self.status,
-            "scope": self.scope,
             "tags": list(self.tags),
             "source": self.source,
             "created_at": self.created_at,
@@ -902,7 +900,6 @@ class DaemonAggregator:
                             description=str(data.get("description") or ""),
                             status=str(data.get("status") or "open"),
                             priority=data.get("priority"),
-                            scope=str(data.get("scope") or "in_scope"),
                             type=data.get("type"),
                             tags=list(data.get("tags") or []),
                             source=str(data.get("source") or "system"),

@@ -9,9 +9,9 @@ The issue-management subsystem provides the `se3 issue` CLI and the underlying `
 
 ### Requirement: Issue Data Model
 
-An issue is represented by the `Issue` dataclass with fields: `id` (string, zero-padded 3-digit), `title` (`Optional[str]`, defaults `None`), `description` (string), `status` (`IssueStatus` enum), `priority` (`Optional[str]`, defaults `None`), `scope` (defaults `"in_scope"`), `type` (`Optional[str]`, defaults `None`), `tags` (list of strings), `source` (string, one of `"human"` / `"system"`, defaults `"system"`), `created_at`, and `updated_at` (datetimes). Only `description` is conceptually required — `title`, `priority`, and `type` are optional and their `None` value faithfully represents "not specified" rather than being coerced to a placeholder default. Issues serialize to and from YAML dictionaries via `to_dict` and `from_dict`, where status is stored by its string value and timestamps as ISO-format strings.
+An issue is represented by the `Issue` dataclass with fields: `id` (string, zero-padded 3-digit), `title` (`Optional[str]`, defaults `None`), `description` (string), `status` (`IssueStatus` enum), `priority` (`Optional[str]`, defaults `None`), `type` (`Optional[str]`, defaults `None`), `tags` (list of strings), `source` (string, one of `"human"` / `"system"`, defaults `"system"`), `created_at`, and `updated_at` (datetimes). Only `description` is conceptually required — `title`, `priority`, and `type` are optional and their `None` value faithfully represents "not specified" rather than being coerced to a placeholder default. The model carries **no** `scope` field: the `in_scope` / `out_of_scope` classification is a transient, flow-relative relationship (the boundary between a finding and one particular flow), not an intrinsic property of a persisted issue, so it is never frozen onto the `Issue` record. Issues serialize to and from YAML dictionaries via `to_dict` and `from_dict`, where status is stored by its string value and timestamps as ISO-format strings. `from_dict` tolerates a legacy `scope:` key present in historical YAML — it is silently ignored (neither stored nor re-emitted), so old issue files load without error and shed the key on the next rewrite (no batch migration is performed).
 
-**Optional fields are omitted from `to_dict()` when `None`:** `title`, `priority`, and `type` are written to the YAML dict only when they are not `None`, so an issue with no title/priority/type produces a YAML file that simply lacks those keys (rather than carrying `null` or a placeholder). `description`, `status`, `scope`, `tags`, `source`, and the timestamps are always present.
+**Optional fields are omitted from `to_dict()` when `None`:** `title`, `priority`, and `type` are written to the YAML dict only when they are not `None`, so an issue with no title/priority/type produces a YAML file that simply lacks those keys (rather than carrying `null` or a placeholder). `description`, `status`, `tags`, `source`, and the timestamps are always present.
 
 **Derived display title.** Because `title` is optional, the `Issue.display_title` property derives a human-readable title with the priority: explicit `title` → the first non-empty line of `description` → the literal `"untitled"` only when both are empty. This replaces the previous `"untitled"` fallback as the *only* default; an issue created with just a description shows (and is filed under a slug derived from) the description's first line, never `"untitled"`.
 
@@ -21,7 +21,6 @@ An issue is represented by the `Issue` dataclass with fields: `id` (string, zero
 - **WHEN** an `Issue` is constructed with only `id`, `title`, and `description`
 - **THEN** `status` defaults to `IssueStatus.OPEN`
 - **AND** `priority` defaults to `None`
-- **AND** `scope` defaults to `"in_scope"`
 - **AND** `type` defaults to `None`
 - **AND** `tags` defaults to an empty list
 - **AND** `source` defaults to `"system"`
@@ -38,7 +37,8 @@ An issue is represented by the `Issue` dataclass with fields: `id` (string, zero
 - **THEN** `status` is converted to/from its string value
 - **AND** `created_at` and `updated_at` are converted to/from ISO-format strings
 - **AND** `title`, `priority`, and `type` are omitted from `to_dict()` output when `None`, and re-hydrate to `None` when absent from the input dict
-- **AND** other missing fields in the input dict fall back to defaults (`description=""`, `status="open"`, `scope="in_scope"`, `tags=[]`)
+- **AND** other missing fields in the input dict fall back to defaults (`description=""`, `status="open"`, `tags=[]`)
+- **AND** a legacy `scope:` key present in the input dict is ignored (neither stored on the `Issue` nor re-emitted by a subsequent `to_dict()`)
 - **AND** a missing `source` key falls back to `"system"` (legacy YAML written before the field existed reads as `system`)
 - **AND** if timestamps are missing or invalid, they fall back to `datetime.now()`
 
@@ -99,11 +99,11 @@ Issues are stored as YAML files under `<project_root>/se3/issues/`, split into `
 
 ### Requirement: Issue Creation
 
-`IssueManager.create()` creates a new issue and writes it to the `open/` directory regardless of project state. Its signature is `create(description, *, title=None, priority=None, scope="in_scope", tags=None, type=None, source="system")`: only `description` is required (an empty or whitespace-only `description` raises `ValueError`), `title`/`priority`/`type` are optional and default to `None`, and `source` defaults to `"system"`. Programmatic callers therefore default to `system`; the CLI and webui pass `source="human"` explicitly (see the `se3 issue` CLI requirement and the base spec's *Server Modules* issue API).
+`IssueManager.create()` creates a new issue and writes it to the `open/` directory regardless of project state. Its signature is `create(description, *, title=None, priority=None, tags=None, type=None, source="system")`: only `description` is required (an empty or whitespace-only `description` raises `ValueError`), `title`/`priority`/`type` are optional and default to `None`, and `source` defaults to `"system"`. Programmatic callers therefore default to `system`; the CLI and webui pass `source="human"` explicitly (see the `se3 issue` CLI requirement and the base spec's *Server Modules* issue API).
 
 #### Scenario: Programmatic create
-- **GIVEN** the keyword-only signature `create(description, *, title=None, priority=None, scope="in_scope", tags=None, type=None, source="system")` where only `description` is required
-- **WHEN** `mgr.create(title, description, priority, scope, tags, type)` is called
+- **GIVEN** the keyword-only signature `create(description, *, title=None, priority=None, tags=None, type=None, source="system")` where only `description` is required
+- **WHEN** `mgr.create(title, description, priority, tags, type)` is called
 - **THEN** a new `Issue` is constructed with `status=OPEN`, a freshly allocated ID, and `created_at`/`updated_at` set to now
 - **AND** the YAML file `{id}_{slug}.yaml` is written under `open/`, the slug derived from `display_title`
 - **AND** an info log line records the created issue's id and display title
@@ -229,12 +229,12 @@ Issues are stored as YAML files under `<project_root>/se3/issues/`, split into `
 
 ### Requirement: Field Update and Canonical Rename
 
-`IssueManager.update_fields(issue_id, *, title, description, priority, type, scope, tags)` edits the mutable fields of an existing issue and rewrites its YAML file in place, renaming the file when the derived slug changes. Only fields passed as non-`None` are applied; an omitted (`None`) field retains its current value, while an **empty string** clears `title` / `priority` / `type` back to `None` (and clears `scope` back to `"in_scope"`). `description` may be changed but may never be cleared — an empty/whitespace-only `description` raises `ValueError`. This method is the shared write primitive behind the CLI `se3 issue edit` and the webui edit operation.
+`IssueManager.update_fields(issue_id, *, title, description, priority, type, tags)` edits the mutable fields of an existing issue and rewrites its YAML file in place, renaming the file when the derived slug changes. Only fields passed as non-`None` are applied; an omitted (`None`) field retains its current value, while an **empty string** clears `title` / `priority` / `type` back to `None`. `description` may be changed but may never be cleared — an empty/whitespace-only `description` raises `ValueError`. This method is the shared write primitive behind the CLI `se3 issue edit` and the webui edit operation.
 
 #### Scenario: Selective field update preserves omitted fields
 - **WHEN** `update_fields(id, priority="high")` is called
 - **THEN** the issue's `priority` becomes `"high"` and `updated_at` is refreshed
-- **AND** fields not passed (title, description, type, scope, tags) keep their previous values
+- **AND** fields not passed (title, description, type, tags) keep their previous values
 
 #### Scenario: Empty string clears an optional field
 - **WHEN** `update_fields(id, title="")` is called on an issue with a title
@@ -271,7 +271,7 @@ Issue files are written with `yaml.dump(..., default_flow_style=False, allow_uni
 
 #### Scenario: Field order on write
 - **WHEN** an issue is serialized to YAML
-- **THEN** the always-present keys appear in this order: `id`, `description`, `status`, `scope`, `tags`, `source`, `created_at`, `updated_at`
+- **THEN** the always-present keys appear in this order: `id`, `description`, `status`, `tags`, `source`, `created_at`, `updated_at`
 - **AND** the optional keys `title`, `priority`, and `type` are appended only when their value is not `None`, so a title-less / priority-less / type-less issue omits the corresponding key entirely
 
 ### Requirement: `se3 issue` CLI
@@ -317,7 +317,7 @@ The `se3 issue` Typer app exposes sub-commands `list`, `show`, `create`, `edit`,
 - **THEN** that argument is used as the description (it takes priority over stdin and the interactive prompt)
 - **AND** when no positional argument is given and stdin is piped (non-TTY), the entire stdin content is read as the description
 - **AND** when no positional argument is given and stdin is a TTY, exactly **one** multi-line description is collected via the shared `_read_multiline_input` (the same prompt_toolkit multi-line editor `se3 run` uses) — the command does NOT step through separate Title/Type/Priority/Tags prompts, and it does NOT open an external editor
-- **AND** the remaining fields are taken from optional flags `--title`, `--type`, `--priority`, `--scope`, and `--tags` (comma-separated, stripped, empties discarded); any flag left unset stays unspecified (`None`)
+- **AND** the remaining fields are taken from optional flags `--title`, `--type`, `--priority`, and `--tags` (comma-separated, stripped, empties discarded); any flag left unset stays unspecified (`None`)
 - **AND** the issue is created with `source="human"`, and its assigned id and display title are printed
 - **AND** an empty/whitespace-only resolved description aborts with an error and a non-zero exit code
 
@@ -326,7 +326,7 @@ The `se3 issue` Typer app exposes sub-commands `list`, `show`, `create`, `edit`,
 - **WHEN** `se3 issue create` is invoked
 - **THEN** the command collects exactly **one** multi-line description via the shared `_read_multiline_input` (from `cli`), and does NOT step through separate Title/Description/Type/Priority/Tags prompts
 - **AND** it does NOT open an external editor (that is the `--editor` path)
-- **AND** any other fields come only from the optional `--title` / `--type` / `--priority` / `--scope` / `--tags` flags, and the created issue uses `source="human"`
+- **AND** any other fields come only from the optional `--title` / `--type` / `--priority` / `--tags` flags, and the created issue uses `source="human"`
 
 #### Scenario: `create --editor` opens an external editor with a prefilled template
 - **WHEN** `se3 issue create --editor` is invoked

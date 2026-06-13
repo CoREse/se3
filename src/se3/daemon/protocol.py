@@ -419,7 +419,6 @@ def make_issue_command(
     title: Optional[str] = None,
     priority: Optional[str] = None,
     type: Optional[str] = None,
-    scope: Optional[str] = None,
     tags: Optional[List[str]] = None,
     reason: str = "",
     request_id: str = "",
@@ -431,9 +430,9 @@ def make_issue_command(
     SE3 project.  The remaining fields are operation-specific:
 
     * ``create``: *description* is required; *title*, *priority*, *type*,
-      *scope*, *tags* are optional.
+      *tags* are optional.
     * ``edit``: *issue_id* is required; *title*, *description*, *priority*,
-      *type*, *scope*, *tags* are optional.  ``None`` means "do not change";
+      *type*, *tags* are optional.  ``None`` means "do not change";
       an empty string means "clear the field".
     * ``close``: *issue_id* is required; *reason* is optional.
     * ``reopen``: *issue_id* is required.
@@ -455,8 +454,6 @@ def make_issue_command(
         payload["priority"] = priority
     if type is not None:
         payload["type"] = type
-    if scope is not None:
-        payload["scope"] = scope
     if tags is not None:
         payload["tags"] = list(tags)
     if reason:

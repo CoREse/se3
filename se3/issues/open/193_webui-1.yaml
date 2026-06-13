@@ -1,0 +1,8 @@
+id: '193'
+description: 一个最近几次版本更新出现的回归：webui点击那个输入1的确认按钮时，会出现“could not send，network xxx”的错误提示，并且消息列表也没有被送出去的消息，但是消息实际是送出去了的。
+status: open
+scope: in_scope
+tags: []
+source: human
+created_at: '2026-06-13T23:19:26.073049'
+updated_at: '2026-06-13T23:19:26.073049'

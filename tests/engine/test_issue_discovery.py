@@ -84,7 +84,6 @@ class TestCreateFromFixLoopExhaustion:
 
         assert issue is not None
         assert issue.priority == "high"
-        assert issue.scope == "in_scope"  # A-class issues are always in_scope
         assert "auto-discovered" in issue.tags
         assert "source:fix-loop" in issue.tags
         assert issue.source == "system"
@@ -314,7 +313,6 @@ class TestCollectIssuesFromOutput:
         assert len(issues) == 1
         assert "auto-discovered" in issues[0].tags
         assert "source:summarize" in issues[0].tags
-        assert issues[0].scope == "in_scope"  # B-class issues default to in_scope
         assert issues[0].source == "system"
 
     def test_multiple_issues(self, discovery, basic_flow):
