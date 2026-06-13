@@ -663,6 +663,47 @@ def test_issue_command_falls_back_to_snapshot_when_cache_cold(tmp_path):
     assert len(files) == 1
 
 
+def test_issue_command_replies_failure_when_cold_snapshot_raises(tmp_path):
+    """A cold-cache snapshot that raises must fail closed, not write disk.
+
+    When ``_last_known_project_roots`` is None the handler builds one snapshot
+    to validate ``project_root``. If that provider raises (filesystem error,
+    corrupt state, permission issue), the handler must send a failure ack and
+    never reach the IssueManager write.
+    """
+
+    def _failing_snapshot():
+        raise OSError("disk gone")
+
+    client = _make_client(snapshot_provider=_failing_snapshot)
+    assert client._last_known_project_roots is None
+    ws = _FakeWS()
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(tmp_path),
+            description="Should not persist",
+            request_id="req-cold-fail",
+        )
+        await client._dispatch(ws, msg)
+
+    asyncio.run(scenario())
+
+    # A failure ack was sent, echoing the request_id.
+    acks = [m for m in ws.sent if m.type == protocol.MSG_ISSUE_RESULT]
+    assert len(acks) == 1
+    ack = acks[0]
+    assert ack.payload["request_id"] == "req-cold-fail"
+    assert ack.payload["ok"] is False
+    assert ack.payload["error"] == "snapshot lookup failed"
+    # The cache stays cold so a later snapshot can still populate it.
+    assert client._last_known_project_roots is None
+    # No issue was written to disk.
+    issues_dir = tmp_path / "se3" / "issues" / "open"
+    assert not issues_dir.exists() or not list(issues_dir.glob("*.yaml"))
+
+
 def test_issue_command_replies_before_fast_push(tmp_path):
     """The MSG_ISSUE_RESULT ack must be sent before _trigger_fast_push().
 

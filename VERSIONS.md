@@ -42,6 +42,15 @@
 
 
 
+
+## 9.5.1 - 2026-06-13
+
+- Fix webui issue creation falsely reporting timeout failure when the issue already landed on disk
+- Reuse cached project_roots in daemon issue handler to avoid re-running heavy snapshot on every issue command
+- Send MSG_ISSUE_RESULT acknowledgment before triggering fast push to minimize daemon-side ack latency
+- Add server-side reconcile window on issue command timeout to confirm persistence via in-memory mirror before reporting failure
+- Add tests for daemon project_roots caching and ack-before-push ordering
+- Add tests for server-side issue reconcile logic across create, edit, close, and reopen operations
 ## 9.5.0 - 2026-06-13
 
 - Show step regions immediately when a step enters RUNNING status, including non-LLM steps like TEST, COMMIT, and SPEC_GATE
