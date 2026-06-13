@@ -269,6 +269,15 @@ class DaemonClient:
         # lazily inside :meth:`_session` because :class:`asyncio.Event` must
         # bind to a running event loop.
         self._fast_push_event: Optional[asyncio.Event] = None
+        # Cache of the most recent snapshot's ``project_roots`` set, refreshed
+        # on every successful :meth:`_push_status`. ``_handle_issue_command``
+        # validates an incoming ``project_root`` against this cache so a webui
+        # issue write no longer has to re-run the heavy snapshot provider (which
+        # walks the whole ``se3/history`` tree) on the issue-command hot path —
+        # the periodic STATUS_UPDATE loop already keeps it fresh. ``None`` means
+        # "no snapshot built yet"; the issue handler then falls back to building
+        # one snapshot to validate against.
+        self._last_known_project_roots: Optional[set] = None
 
     # -- introspection -----------------------------------------------------
 
@@ -840,16 +849,25 @@ class DaemonClient:
             return
 
         # The project must be registered with the aggregator (live or
-        # persistent) so it is an actual SE3 project on this machine.
-        try:
-            snapshot = await asyncio.to_thread(self._snapshot_provider)
-        except Exception:
-            logger.debug(
-                "ISSUE_COMMAND: snapshot lookup failed", exc_info=True
-            )
-            await _reply(ok=False, error="snapshot lookup failed")
-            return
-        known_roots = set(snapshot.get("project_roots") or [])
+        # persistent) so it is an actual SE3 project on this machine. Prefer the
+        # cache refreshed by the periodic STATUS_UPDATE loop so the issue-command
+        # hot path does not re-run the heavy snapshot provider (which walks the
+        # whole se3/history tree) — that repeated heavyweight call is what
+        # delayed the ack past the server's ISSUE_COMMAND_TIMEOUT. Only fall back
+        # to building one snapshot when no cache exists yet (e.g. an issue
+        # command arrives before the first STATUS_UPDATE).
+        known_roots = self._last_known_project_roots
+        if known_roots is None:
+            try:
+                snapshot = await asyncio.to_thread(self._snapshot_provider)
+            except Exception:
+                logger.debug(
+                    "ISSUE_COMMAND: snapshot lookup failed", exc_info=True
+                )
+                await _reply(ok=False, error="snapshot lookup failed")
+                return
+            known_roots = set(snapshot.get("project_roots") or [])
+            self._last_known_project_roots = known_roots
         resolved = str(Path(project_root).resolve())
         if resolved not in known_roots:
             logger.warning(
@@ -873,13 +891,20 @@ class DaemonClient:
             await _reply(ok=False, error=str(exc) or type(exc).__name__)
             return
 
+        # Reply with the ack *before* triggering the fast push. The ack
+        # (MSG_ISSUE_RESULT) is the frame the server blocks on within
+        # ISSUE_COMMAND_TIMEOUT; the write has already succeeded, so send it
+        # immediately and let the heavier fast-push (which only schedules a
+        # follow-up STATUS_UPDATE) run afterwards. This keeps end-to-end ack
+        # latency low and avoids the server falsely reporting a timeout for an
+        # issue that already landed on disk.
+        await _reply(ok=True, issue_id=str(result or ""))
         # The issue file changed on disk — trigger a fast push so the web
         # sees the update on the next tick.
         self._trigger_fast_push()
         logger.info(
             "ISSUE_COMMAND %s handled for project %s", operation, project_root
         )
-        await _reply(ok=True, issue_id=str(result or ""))
 
     def _execute_issue_operation(
         self, operation: str, project_root: str, payload: Dict[str, Any]
@@ -1052,6 +1077,9 @@ class DaemonClient:
         except Exception:
             logger.exception("Snapshot provider failed; skipping STATUS_UPDATE")
             return
+        # Cache the snapshot's project_roots so the issue-command hot path can
+        # validate project_root without re-running the heavy snapshot provider.
+        self._last_known_project_roots = set(snapshot.get("project_roots") or [])
         message = protocol.make_status_update(snapshot, seq=self._next_seq())
         try:
             await self._send(ws, message)

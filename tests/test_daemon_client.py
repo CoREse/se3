@@ -7,6 +7,7 @@ import json
 import socket
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -598,6 +599,148 @@ def test_dispatch_issue_command_ignores_empty_operation():
         await client._dispatch(_FakeWS(), msg)
 
     asyncio.run(scenario())  # must not raise
+
+
+def test_issue_command_reuses_cached_project_roots_without_snapshot(tmp_path):
+    """With a warm cache, the issue command must not rebuild the snapshot.
+
+    The heavy snapshot provider (which walks se3/history) is the cause of the
+    ack delay; a populated ``_last_known_project_roots`` cache means the
+    project_root validation reuses it and never invokes the provider.
+    """
+    calls = {"n": 0}
+
+    def _counting_snapshot():
+        calls["n"] += 1
+        return {"machine_id": "m1", "flows": [], "project_roots": [str(tmp_path)]}
+
+    client = _make_client(snapshot_provider=_counting_snapshot)
+    # Warm the cache exactly as a prior STATUS_UPDATE would have.
+    client._last_known_project_roots = {str(Path(tmp_path).resolve())}
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(tmp_path),
+            description="Cached path",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    # Snapshot provider was never called on the issue hot path.
+    assert calls["n"] == 0
+    # The issue still landed on disk.
+    files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+    assert len(files) == 1
+
+
+def test_issue_command_falls_back_to_snapshot_when_cache_cold(tmp_path):
+    """With no cache yet, the handler builds one snapshot and validates."""
+    calls = {"n": 0}
+
+    def _counting_snapshot():
+        calls["n"] += 1
+        return {"machine_id": "m1", "flows": [], "project_roots": [str(tmp_path)]}
+
+    client = _make_client(snapshot_provider=_counting_snapshot)
+    assert client._last_known_project_roots is None
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(tmp_path),
+            description="Cold path",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    # Snapshot built exactly once for validation, then cached for next time.
+    assert calls["n"] == 1
+    assert client._last_known_project_roots == {str(Path(tmp_path).resolve())}
+    files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+    assert len(files) == 1
+
+
+def test_issue_command_replies_before_fast_push(tmp_path):
+    """The MSG_ISSUE_RESULT ack must be sent before _trigger_fast_push().
+
+    The ack is the frame the server blocks on within ISSUE_COMMAND_TIMEOUT, so
+    it must precede the heavier fast-push that only schedules a follow-up
+    STATUS_UPDATE.
+    """
+    client = _make_issue_client(tmp_path)
+    order = []
+
+    real_send = client._send
+
+    async def _recording_send(ws, message):
+        if message.type == protocol.MSG_ISSUE_RESULT:
+            order.append("ack")
+        return await real_send(ws, message)
+
+    def _recording_fast_push():
+        order.append("fast_push")
+
+    client._send = _recording_send
+    client._trigger_fast_push = _recording_fast_push
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(tmp_path),
+            description="Ordering",
+            request_id="req-order",
+        )
+        await client._dispatch(_FakeWS(), msg)
+
+    asyncio.run(scenario())
+
+    assert order == ["ack", "fast_push"]
+
+
+def test_issue_command_ack_echoes_request_id_and_issue_id(tmp_path):
+    """The ack echoes request_id, ok=True and the created issue_id."""
+    client = _make_issue_client(tmp_path)
+    ws = _FakeWS()
+
+    async def scenario():
+        msg = protocol.make_issue_command(
+            "create",
+            project_root=str(tmp_path),
+            description="Echo fields",
+            request_id="req-123",
+        )
+        await client._dispatch(ws, msg)
+
+    asyncio.run(scenario())
+
+    acks = [m for m in ws.sent if m.type == protocol.MSG_ISSUE_RESULT]
+    assert len(acks) == 1
+    ack = acks[0]
+    assert ack.payload["request_id"] == "req-123"
+    assert ack.payload["ok"] is True
+    # issue_id is the freshly assigned id (non-empty).
+    assert ack.payload["issue_id"]
+
+
+def test_push_status_refreshes_project_roots_cache(tmp_path):
+    """A successful _push_status populates the project_roots cache."""
+    client = _make_client(
+        snapshot_provider=lambda: {
+            "machine_id": "m1",
+            "flows": [],
+            "project_roots": [str(tmp_path)],
+        }
+    )
+    assert client._last_known_project_roots is None
+
+    async def scenario():
+        await client._push_status(_FakeWS())
+
+    asyncio.run(scenario())
+    assert client._last_known_project_roots == {str(tmp_path)}
 
 
 def test_push_status_sends_status_update():
