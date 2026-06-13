@@ -268,6 +268,7 @@ class StreamJSONTracker:
         step_type: str = '',
         attempt: int = 0,
         agent_name: Optional[str] = None,
+        on_agent_change: Optional[Callable[[str, Optional[str]], None]] = None,
     ):
         self.stream_prefix = stream_prefix
         self.message_count = 0
@@ -297,6 +298,14 @@ class StreamJSONTracker:
         # the caller builds a fresh tracker with the new agent's name, so each
         # attempt's progress lines carry their own real agent.
         self._agent_name = agent_name
+        # Optional notification fired once the actual model name is parsed from
+        # the stream's init/system metadata, as (agent_name, model_name). Used by
+        # DAG-parallel implement to upgrade the group's live status card from
+        # "agent" to "agent · model". The initial (agent, None) notification is
+        # the caller's responsibility (fired at attempt selection, before the
+        # tracker exists); the tracker only adds the model upgrade. Called
+        # best-effort — a faulty callback must never disturb stream processing.
+        self._on_agent_change = on_agent_change
         # Actual model name (e.g. "claude-opus-4-8"), best-effort parsed from
         # the stream's init/system metadata as lines arrive. Stays None until a
         # model is seen; once set, subsequent progress lines carry it so the
@@ -499,6 +508,17 @@ class StreamJSONTracker:
                 model = extract_model_name_from_obj(data)
                 if model:
                     self._model_name = model
+                    # Notify the consumer that the actual model is now known so
+                    # it can upgrade its label to "agent · model". Best-effort;
+                    # a callback error must never disturb the stream.
+                    if self._on_agent_change is not None and self._agent_name is not None:
+                        try:
+                            self._on_agent_change(self._agent_name, self._model_name)
+                        except Exception:  # pragma: no cover - defensive
+                            logger.debug(
+                                "on_agent_change(agent, model) notify failed",
+                                exc_info=True,
+                            )
 
             if msg_type == 'assistant':
                 self.message_count += 1
@@ -714,8 +734,18 @@ class LLMCaller:
         stream_prefix: str = '',
         fix_iteration: int = 0,
         self_check_pass_index: Optional[int] = None,
+        on_agent_change: Optional[Callable[[str, Optional[str]], None]] = None,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
+        # Optional notification invoked whenever the agent selected for an
+        # attempt is known — once as (agent_name, None) when the attempt starts
+        # (including each rotation, so retries surface their real agent) and
+        # again as (agent_name, model_name) once the stream reveals the actual
+        # model. Used by DAG-parallel implement to keep a group's live
+        # "running in worktree" status card labelled with its current agent
+        # (then "agent · model"). Always invoked defensively via
+        # ``_notify_agent_change`` so a faulty callback can never break a call.
+        self._on_agent_change = on_agent_change
         # 1-based self_check pass index used to select the per-pass agent
         # chain when ``llm_caller.steps.self_check`` is a nested list. Only
         # meaningful for the self_check step; ignored otherwise.
@@ -816,6 +846,24 @@ class LLMCaller:
         """Return the set of project-relative file paths touched by the most
         recent ``call()`` invocation's Read/Grep/Glob tool calls."""
         return set(self._last_touched_files)
+
+    def _notify_agent_change(
+        self, agent_name: str, model_name: Optional[str]
+    ) -> None:
+        """Fire the optional ``on_agent_change`` notification, swallowing any
+        error so a faulty consumer callback never breaks an in-flight call.
+
+        Invoked with ``model_name=None`` when an attempt's agent is first
+        selected (and on every rotation, so each attempt reports its own real
+        agent) and again with the parsed ``model_name`` once the stream's
+        init/system metadata reveals it.
+        """
+        if self._on_agent_change is None:
+            return
+        try:
+            self._on_agent_change(agent_name, model_name)
+        except Exception:  # pragma: no cover - defensive; never break the call
+            logger.debug("on_agent_change notification failed", exc_info=True)
 
     def _rotate_agent(self) -> bool:
         """Rotate to the next agent in the list.
@@ -1388,6 +1436,13 @@ class LLMCaller:
             # records for this attempt carry the same agent attribution.
             attempt_agent_name = self._agents[self._current_agent_index].get("name", "?")
 
+            # Announce this attempt's agent (model not yet known) so a consumer
+            # — e.g. the DAG-parallel implement group closure — can show the
+            # real agent the moment the attempt starts, and so each rotation /
+            # retry surfaces its own agent rather than sticking with a stale
+            # name. The model upgrade follows from the tracker once parsed.
+            self._notify_agent_change(attempt_agent_name, None)
+
             # On retry (either external or internal), inject previous conversation context
             if is_retry:
                 retry_context = self._get_retry_context()
@@ -1499,6 +1554,10 @@ class LLMCaller:
                         # ran — and a rotation/retry's fresh tracker carries the
                         # new agent rather than the stale one.
                         agent_name=attempt_agent_name,
+                        # Let the tracker upgrade the consumer's label to
+                        # "agent · model" once the model name is parsed from
+                        # the stream's init/system metadata.
+                        on_agent_change=self._notify_agent_change,
                     )
 
                     def on_stream_output(line: str) -> None:

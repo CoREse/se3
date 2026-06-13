@@ -78,6 +78,75 @@ class TestRecordGroupStatus:
         records = _read_lines(tmp_project, "flow1", "01_implement_abcd")
         assert [r["status"] for r in records] == ["queued", "running", "completed"]
 
+    def test_agent_only_field_written(self, tmp_project):
+        record_group_status(
+            tmp_project,
+            "flow1",
+            "01_implement_abcd",
+            "implement",
+            "G3",
+            "running",
+            agent_name="dclaude",
+        )
+        rec = _read_lines(tmp_project, "flow1", "01_implement_abcd")[0]
+        assert rec["agent_name"] == "dclaude"
+        # Model not known yet → no key, no empty placeholder.
+        assert "model_name" not in rec
+
+    def test_agent_and_model_fields_written(self, tmp_project):
+        record_group_status(
+            tmp_project,
+            "flow1",
+            "01_implement_abcd",
+            "implement",
+            "G3",
+            "running",
+            agent_name="dclaude",
+            model_name="claude-opus-4-8",
+        )
+        rec = _read_lines(tmp_project, "flow1", "01_implement_abcd")[0]
+        assert rec["agent_name"] == "dclaude"
+        assert rec["model_name"] == "claude-opus-4-8"
+
+    def test_all_none_record_is_byte_identical_to_legacy(self, tmp_project):
+        """With both optional fields defaulting to None the written record's
+        key set stays byte-identical to the pre-extension schema, so legacy
+        readers are unaffected."""
+        ts = "2026-06-01T12:00:00"
+        record_group_status(
+            tmp_project,
+            "flow1",
+            "01_implement_abcd",
+            "implement",
+            "G1",
+            "queued",
+            timestamp=ts,
+        )
+        rec = _read_lines(tmp_project, "flow1", "01_implement_abcd")[0]
+        assert rec == {
+            "type": "group_status",
+            "role": "system",
+            "step_type": "implement",
+            "group_id": "G1",
+            "status": "queued",
+            "timestamp": ts,
+        }
+
+    def test_agent_model_lines_still_skipped_by_get_step_history(self, tmp_project):
+        record_group_status(
+            tmp_project,
+            "flow1",
+            "01_implement_abcd",
+            "implement",
+            "G1",
+            "running",
+            agent_name="dclaude",
+            model_name="claude-opus-4-8",
+        )
+        session = get_step_history(tmp_project, "flow1", "01_implement_abcd")
+        # group_status lines (even enriched ones) never become ChatMessages.
+        assert session is None
+
     def test_write_failure_does_not_raise(self, tmp_project, monkeypatch):
         # Force the open() inside record_group_status to raise OSError; the
         # function must swallow it (logger.warning) rather than propagate.

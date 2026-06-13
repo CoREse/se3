@@ -18,6 +18,9 @@ from typing import Any, Callable
 
 from ..dag_scheduler import (
     DAGScheduler,
+    GROUP_STATUS_COMPLETED,
+    GROUP_STATUS_FAILED,
+    GROUP_STATUS_RUNNING,
     GroupResult,
     RelayContext,
     RelayPlan,
@@ -985,12 +988,20 @@ def _make_execute_fn(
     spec_summary: str,
     injection: str | None,
     retry_count: int,
+    group_agent_info: dict[str, tuple[str, str | None]] | None = None,
 ) -> Callable[[dict, dict[str, GroupResult], RelayContext], GroupResult]:
     """Build the execute_fn closure for relay-based DAG parallel execution.
 
     The returned callable acquires a worktree via the relay strategy
     (reuse predecessor / fork / create new), handles convergence merges,
     runs the LLM agent, commits changes, and returns a GroupResult.
+
+    ``group_agent_info`` (when provided) is a shared ``group_id -> (agent_name,
+    model_name|None)`` map recording each group's latest known agent/model as
+    reported by the in-worktree ``LLMCaller``. The closure both updates it and
+    emits live ``running`` ``group_status`` records carrying that agent (then
+    "agent · model"); ``_run_dag_parallel``'s coarse status sink reads it back
+    so the ``completed`` / ``failed`` records carry the final agent/model too.
     """
     git_lock = threading.Lock()
 
@@ -1141,6 +1152,38 @@ def _make_execute_fn(
             # Restore history from main repo so retry context injection works
             _restore_history_to_worktree(project_root, worktree_path, flow.flow_id)
 
+            # Live agent/model relay: as the in-worktree LLMCaller selects the
+            # agent for each attempt (and as it parses the actual model name),
+            # write a "running" group_status record into the MAIN repo's step
+            # jsonl so the web console's "running in worktree" card shows the
+            # group's real agent the moment it starts — and upgrades to
+            # "agent · model" once known. Retries/rotations report their own
+            # real agent (the caller fires this per attempt), never a stale one.
+            # Best-effort: a write failure must not break the worker thread.
+            def _on_agent_change(
+                agent_name: str,
+                model_name: str | None,
+                _group_id: str = group_id,
+            ) -> None:
+                try:
+                    if group_agent_info is not None:
+                        group_agent_info[_group_id] = (agent_name, model_name)
+                    record_group_status(
+                        project_root,
+                        flow.flow_id,
+                        step.step_id,
+                        "implement",
+                        _group_id,
+                        GROUP_STATUS_RUNNING,
+                        agent_name=agent_name,
+                        model_name=model_name,
+                    )
+                except Exception:  # pragma: no cover - defensive in worker thread
+                    logger.debug(
+                        "group %s agent/model status relay failed",
+                        _group_id, exc_info=True,
+                    )
+
             caller = LLMCaller(
                 worktree_path,
                 flow_id=flow.flow_id,
@@ -1149,6 +1192,7 @@ def _make_execute_fn(
                 external_attempt=retry_count,
                 stream_prefix=f'[{group_id}] ',
                 fix_iteration=step.inputs.get("fix_iteration", 0),
+                on_agent_change=_on_agent_change,
             )
             response = caller.call(
                 prompt=prompt,
@@ -1920,7 +1964,16 @@ def _run_dag_parallel(
     # daemon's history signature shifts and pushes a live status marker. This
     # only relays *status*, never the per-group conversation content (which
     # still appears at step end after the worktree history is salvaged).
+    # Shared latest-known agent/model per group, populated by each group's
+    # in-worktree LLMCaller via its on_agent_change callback. The coarse status
+    # sink below reads it back so the terminal (completed/failed) records carry
+    # the same final agent/model the live running records showed — keeping the
+    # console's status card labelled consistently through to completion. Old
+    # records without these fields simply omit them (no empty placeholder).
+    group_agent_info: dict[str, tuple[str, str | None]] = {}
+
     def _on_group_status(group_id: str, status: str) -> None:
+        agent_name, model_name = group_agent_info.get(group_id, (None, None))
         record_group_status(
             project_root,
             flow.flow_id,
@@ -1928,6 +1981,8 @@ def _run_dag_parallel(
             "implement",
             group_id,
             status,
+            agent_name=agent_name,
+            model_name=model_name,
         )
 
     scheduler = DAGScheduler(
@@ -1947,6 +2002,7 @@ def _run_dag_parallel(
         spec_summary=spec_summary,
         injection=injection,
         retry_count=retry_count,
+        group_agent_info=group_agent_info,
     )
 
     results: list[GroupResult] = []

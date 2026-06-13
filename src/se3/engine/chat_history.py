@@ -508,6 +508,9 @@ def record_group_status(
     group_id: str,
     status: str,
     timestamp: Optional[str] = None,
+    *,
+    agent_name: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> None:
     """Append a single per-group DAG status line to the step jsonl.
 
@@ -537,6 +540,17 @@ def record_group_status(
     whole-line ``write`` (so a half-written line cannot corrupt earlier lines)
     wrapped in an ``OSError`` guard so a write failure never breaks the
     in-flight scheduler callback.
+
+    Optional ``agent_name`` / ``model_name`` carry the identity of the agent
+    (e.g. "dclaude") and the actual model (e.g. "claude-opus-4-8") behind the
+    group's in-worktree LLM call, so the web console can label the group's
+    "running in worktree" status card with its agent the moment the group
+    begins streaming and upgrade it to "agent · model" once the model name is
+    parsed — matching the labelling of every other LLM step. Each is written
+    only when non-None; when both default to ``None`` the written record is
+    byte-identical to the pre-extension schema, so legacy jsonl readers (and
+    the CLI history view, which skips ``group_status`` lines entirely) are
+    unaffected.
     """
     record = {
         "type": "group_status",
@@ -546,6 +560,10 @@ def record_group_status(
         "status": status,
         "timestamp": timestamp or datetime.now().isoformat(),
     }
+    if agent_name is not None:
+        record["agent_name"] = agent_name
+    if model_name is not None:
+        record["model_name"] = model_name
     path = _history_file(project_root, flow_id, step_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
