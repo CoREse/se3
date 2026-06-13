@@ -207,7 +207,7 @@ def record_response(
     # NDJSON stream. Failures are swallowed — the model field stays None and
     # is omitted from serialization, so a stream with no model info does not
     # break anything.
-    model_name = _extract_model_from_ndjson(raw_ndjson if raw_ndjson else "")
+    model_name = extract_model_name_from_ndjson(raw_ndjson if raw_ndjson else "")
     msg = ChatMessage(
         role="assistant",
         content=text,
@@ -424,6 +424,8 @@ def record_stream_progress(
     tool_use_id: Optional[str] = None,
     is_error: Optional[bool] = None,
     tool_detail: Optional[Dict[str, Any]] = None,
+    agent_name: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> None:
     """Append a single in-progress (partial) stream line to the step jsonl.
 
@@ -459,6 +461,15 @@ def record_stream_progress(
     all three fields are at their defaults (``None``) the written record is
     byte-identical to the pre-extension schema, so legacy jsonl readers and
     narrative-text progress lines are unaffected.
+
+    Optional ``agent_name`` / ``model_name`` carry the identity of the agent
+    (e.g. "dclaude") and the actual model (e.g. "claude-opus-4-8") behind the
+    in-flight turn, so the web console can label the accumulating bubble with
+    its agent the moment the first fragment streams, and upgrade it to
+    "agent · model" once the model name is parsed from the stream's
+    init/system metadata. Each is written only when non-None; when both default
+    to ``None`` (together with the tool-event fields above) the record stays
+    byte-identical to the pre-extension schema.
     """
     record = {
         "type": "stream_progress",
@@ -476,6 +487,10 @@ def record_stream_progress(
         record["is_error"] = bool(is_error)
     if tool_detail is not None:
         record["tool_detail"] = tool_detail
+    if agent_name is not None:
+        record["agent_name"] = agent_name
+    if model_name is not None:
+        record["model_name"] = model_name
     path = _history_file(project_root, flow_id, step_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1211,19 +1226,57 @@ def parse_usage_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> dict:
     return {}
 
 
-def _extract_model_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> Optional[str]:
-    """Best-effort extraction of the actual model name from a stream-json NDJSON.
+def extract_model_name_from_obj(obj: Any) -> Optional[str]:
+    """Best-effort extraction of the actual model name from a single parsed object.
 
-    Scans for the ``type == "init"`` / ``type == "system"`` metadata lines
-    that some agent runners emit at the start of the stream. Known shapes:
+    Inspects one already-parsed stream-json record (a dict) for the
+    ``type == "init"`` / ``type == "system"`` metadata lines that some agent
+    runners emit at the start of the stream. Known shapes:
 
     - ``{"type": "init", "model": "<model-name>"}`` (Claude Code CLI)
     - ``{"type": "system", "model": "<model-name>"}`` (alternate header)
     - ``{"type": "init", "session": {"model": "<model-name>"}}``
 
-    Returns the extracted model string (e.g. "claude-opus-4-8") on the first
-    match, ``None`` when no known shape is found or parsing fails. Pure
-    function — no side effects, no exceptions raised on malformed input.
+    Returns the extracted model string (e.g. "claude-opus-4-8") when the object
+    is a known init/system metadata record carrying a model name, ``None``
+    otherwise. Pure function — never raises on malformed input. This is the
+    per-object building block reused by :func:`extract_model_name_from_ndjson`
+    (multi-line / list scan) and by the streaming tracker, which calls it once
+    per incoming line to cheaply catch the model the moment it streams.
+    """
+    try:
+        if not isinstance(obj, dict):
+            return None
+        msg_type = obj.get("type", "")
+        if msg_type not in ("init", "system"):
+            return None
+        # Shape 1: top-level "model" key
+        model = obj.get("model")
+        if isinstance(model, str) and model:
+            return model
+        # Shape 2: nested "session.model"
+        session = obj.get("session")
+        if isinstance(session, dict):
+            model = session.get("model")
+            if isinstance(model, str) and model:
+                return model
+        return None
+    except Exception:  # pragma: no cover — defensive; never raise
+        logger.debug("Failed to extract model from object", exc_info=True)
+        return None
+
+
+def extract_model_name_from_ndjson(
+    raw_ndjson: Union[str, list[dict]]
+) -> Optional[str]:
+    """Best-effort extraction of the actual model name from a stream-json NDJSON.
+
+    Accepts a full multi-line NDJSON string, a single NDJSON line, or an
+    already-parsed list of dicts, and returns the first model name found in an
+    ``init`` / ``system`` metadata record (see
+    :func:`extract_model_name_from_obj` for the recognized shapes). Returns
+    ``None`` when no known shape is found or parsing fails. Pure function —
+    never raises on malformed input.
     """
     if not raw_ndjson:
         return None
@@ -1231,7 +1284,7 @@ def _extract_model_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> Optional[s
     try:
         # Normalize to an iterable of parsed dicts.
         if isinstance(raw_ndjson, list):
-            items = raw_ndjson
+            items: list = raw_ndjson
         else:
             items = []
             for line in raw_ndjson.strip().split("\n"):
@@ -1246,25 +1299,17 @@ def _extract_model_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> Optional[s
                     items.append(parsed)
 
         for data in items:
-            if not isinstance(data, dict):
-                continue
-            msg_type = data.get("type", "")
-            if msg_type not in ("init", "system"):
-                continue
-            # Shape 1: top-level "model" key
-            model = data.get("model")
-            if isinstance(model, str) and model:
+            model = extract_model_name_from_obj(data)
+            if model:
                 return model
-            # Shape 2: nested "session.model"
-            session = data.get("session")
-            if isinstance(session, dict):
-                model = session.get("model")
-                if isinstance(model, str) and model:
-                    return model
         return None
     except Exception:  # pragma: no cover — defensive; never raise
         logger.debug("Failed to extract model from ndjson", exc_info=True)
         return None
+
+
+# Backward-compatible private alias retained for existing internal callers.
+_extract_model_from_ndjson = extract_model_name_from_ndjson
 
 
 def extract_assistant_text(raw_ndjson: str) -> str:

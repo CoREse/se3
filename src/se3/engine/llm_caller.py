@@ -267,6 +267,7 @@ class StreamJSONTracker:
         step_id: Optional[str] = None,
         step_type: str = '',
         attempt: int = 0,
+        agent_name: Optional[str] = None,
     ):
         self.stream_prefix = stream_prefix
         self.message_count = 0
@@ -289,6 +290,18 @@ class StreamJSONTracker:
         self._step_id = step_id
         self._step_type = step_type or ''
         self._attempt = attempt
+        # Identity of the agent behind this attempt (e.g. "dclaude"), fixed at
+        # construction so every stream_progress record can label its
+        # accumulating bubble with the agent the moment the first fragment
+        # streams — before the final assistant result lands. On agent rotation
+        # the caller builds a fresh tracker with the new agent's name, so each
+        # attempt's progress lines carry their own real agent.
+        self._agent_name = agent_name
+        # Actual model name (e.g. "claude-opus-4-8"), best-effort parsed from
+        # the stream's init/system metadata as lines arrive. Stays None until a
+        # model is seen; once set, subsequent progress lines carry it so the
+        # frontend upgrades the bubble label from "agent" to "agent · model".
+        self._model_name: Optional[str] = None
         # Pending coalesced text/thinking awaiting a flush.
         self._progress_text_buf: List[str] = []
         self._progress_text_len = 0
@@ -336,6 +349,14 @@ class StreamJSONTracker:
                 extra["is_error"] = is_error
             if tool_detail is not None:
                 extra["tool_detail"] = tool_detail
+            # Carry the agent identity on every progress line (when known) so
+            # the bubble shows its agent from the first fragment; carry the
+            # model only once it has been parsed from the stream metadata so
+            # the bubble upgrades to "agent · model" in place.
+            if self._agent_name is not None:
+                extra["agent_name"] = self._agent_name
+            if self._model_name is not None:
+                extra["model_name"] = self._model_name
 
             record_stream_progress(
                 self._project_root or Path.cwd(),
@@ -467,6 +488,17 @@ class StreamJSONTracker:
         try:
             data = json.loads(line)
             msg_type = data.get('type', '')
+
+            # Best-effort parse the actual model name from this line's
+            # init/system metadata. The first match is cached so subsequent
+            # progress lines carry "agent · model"; a parse miss leaves the
+            # cache untouched and never disturbs the stream.
+            if self._model_name is None:
+                from .chat_history import extract_model_name_from_obj
+
+                model = extract_model_name_from_obj(data)
+                if model:
+                    self._model_name = model
 
             if msg_type == 'assistant':
                 self.message_count += 1
@@ -1461,6 +1493,12 @@ class LLMCaller:
                         step_id=self.step_id,
                         step_type=self.step_type,
                         attempt=self.external_attempt,
+                        # Same agent name used for this attempt's prompt/response
+                        # records, so the streamed progress lines, the prompt,
+                        # and the response all agree on the agent that actually
+                        # ran — and a rotation/retry's fresh tracker carries the
+                        # new agent rather than the stale one.
+                        agent_name=attempt_agent_name,
                     )
 
                     def on_stream_output(line: str) -> None:
