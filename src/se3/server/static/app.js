@@ -4943,13 +4943,53 @@ function buildPartialBubble(norm) {
   row.appendChild(head);
   row.appendChild(bubble);
   row.__partialHead = head;
+  row.__partialBubble = bubble;
   row.__partialInline = inline;
+  // Most-complete agent/model seen so far for this accumulating bubble. Updated
+  // to the latest non-empty value as each fragment arrives so the live badge
+  // tracks the real agent from the first fragment and upgrades to agent·model
+  // once a later fragment carries the parsed model name.
+  row.__partialAgentName = null;
+  row.__partialModelName = null;
   // Per-bubble chip registry: keyed by tool_use_id, so the terminal
   // (tool_result) fragment for an id upgrades the SAME in-flight chip rather
   // than appending a new one.
   row.__chipRegistry = new Map();
+  refreshPartialAgentBadge(row, norm);
   applyFragmentToBubble(row, norm);
   return row;
+}
+
+// Prepend / refresh the agent·model badge on an accumulating partial bubble.
+// The badge is shown ONLY once a fragment carries a non-empty agentName; it is
+// inserted above the inline-process container (mirroring the final assistant
+// bubble, where the badge is the bubble's first child). On later fragments the
+// existing badge is updated in place — no new bubble, no DOM churn beyond the
+// badge text — so an agent-only badge upgrades to "agent · model" once the
+// model name is parsed mid-stream. Records that never carry an agentName render
+// no badge and no placeholder, staying byte-compatible with legacy streams.
+function refreshPartialAgentBadge(row, norm) {
+  if (norm && typeof norm.agentName === "string" && norm.agentName) {
+    row.__partialAgentName = norm.agentName;
+  }
+  if (norm && typeof norm.modelName === "string" && norm.modelName) {
+    row.__partialModelName = norm.modelName;
+  }
+  const text = formatAgentBadgeText(row.__partialAgentName, row.__partialModelName);
+  if (!text) return;
+  const bubble = row.__partialBubble;
+  if (!bubble) return;
+  let badge = row.__partialBadge;
+  if (badge) {
+    badge.textContent = text;
+    return;
+  }
+  badge = el("span", "agent-badge");
+  badge.textContent = text;
+  // Insert above the inline-process container (the bubble's first child) so the
+  // badge sits at the top of the bubble, consistent with the final form.
+  bubble.insertBefore(badge, bubble.childNodes[0] || null);
+  row.__partialBadge = badge;
 }
 
 // Apply one stream_progress fragment to a bubble: either upgrade an existing
@@ -5016,6 +5056,7 @@ function applyFragmentToBubble(row, norm) {
 // state uses, so the displayed time is byte-identical. The head swap uses
 // insertBefore + removeChild (no `replaceChild`, which the test DOM stub lacks).
 function appendPartialFragment(row, norm) {
+  refreshPartialAgentBadge(row, norm);
   applyFragmentToBubble(row, norm);
   const oldHead = row.__partialHead;
   const newHead = renderRecordHead(norm);
@@ -9804,6 +9845,7 @@ if (typeof module !== "undefined" && module.exports) {
     renderChipEvents,
     renderNarrativeNodes,
     applyFragmentToBubble,
+    refreshPartialAgentBadge,
     buildPartialBubble,
     appendPartialFragment,
     // Incremental conversation reconciliation + chip refresh (exposed for the
