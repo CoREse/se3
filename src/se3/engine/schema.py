@@ -134,8 +134,8 @@ class FlowInstanceSchema(TypedDict, total=False):
             "completed_at": null,
             "change_name": "feature-x-implementation",
             "change_path": "se3/specs/_changelog/feature-x",
-            "is_loop_mode": false,
-            "loop_branch": null
+            "is_worktree_mode": false,
+            "worktree_branch": null
         }
     """
 
@@ -149,8 +149,8 @@ class FlowInstanceSchema(TypedDict, total=False):
     completed_at: Optional[str]  # ISO format datetime
     change_name: Optional[str]
     change_path: Optional[str]
-    is_loop_mode: bool
-    loop_branch: Optional[str]
+    is_worktree_mode: bool
+    worktree_branch: Optional[str]
 
 
 ENGINE_JSON_SCHEMA: Dict[str, Any] = {
@@ -185,8 +185,8 @@ ENGINE_JSON_SCHEMA: Dict[str, Any] = {
         "completed_at": {"type": ["string", "null"], "format": "date-time"},
         "change_name": {"type": ["string", "null"]},
         "change_path": {"type": ["string", "null"]},
-        "is_loop_mode": {"type": "boolean"},
-        "loop_branch": {"type": ["string", "null"]}
+        "is_worktree_mode": {"type": "boolean"},
+        "worktree_branch": {"type": ["string", "null"]}
     }
 }
 

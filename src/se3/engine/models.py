@@ -447,11 +447,11 @@ class FlowInstance:
     # Baseline commit for change detection (used in multi-worktree scenarios)
     baseline_commit: Optional[str] = None
 
-    # Loop mode
-    is_loop_mode: bool = False
-    loop_branch: Optional[str] = None
-    loop_worktree_path: Optional[str] = None
-    loop_original_branch: Optional[str] = None
+    # Worktree isolation mode (se3 run --worktree)
+    is_worktree_mode: bool = False
+    worktree_branch: Optional[str] = None
+    worktree_path: Optional[str] = None
+    worktree_original_branch: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize flow instance to dictionary."""
@@ -468,10 +468,10 @@ class FlowInstance:
             "change_path": str(self.change_path) if self.change_path else None,
             "source_issue_id": self.source_issue_id,
             "baseline_commit": self.baseline_commit,
-            "is_loop_mode": self.is_loop_mode,
-            "loop_branch": self.loop_branch,
-            "loop_worktree_path": self.loop_worktree_path,
-            "loop_original_branch": self.loop_original_branch,
+            "is_worktree_mode": self.is_worktree_mode,
+            "worktree_branch": self.worktree_branch,
+            "worktree_path": self.worktree_path,
+            "worktree_original_branch": self.worktree_original_branch,
         }
 
     @classmethod
@@ -490,10 +490,10 @@ class FlowInstance:
             change_path=Path(data["change_path"]) if data.get("change_path") else None,
             source_issue_id=data.get("source_issue_id"),
             baseline_commit=data.get("baseline_commit"),
-            is_loop_mode=data.get("is_loop_mode", False),
-            loop_branch=data.get("loop_branch"),
-            loop_worktree_path=data.get("loop_worktree_path"),
-            loop_original_branch=data.get("loop_original_branch"),
+            is_worktree_mode=data.get("is_worktree_mode", False),
+            worktree_branch=data.get("worktree_branch"),
+            worktree_path=data.get("worktree_path"),
+            worktree_original_branch=data.get("worktree_original_branch"),
         )
 
     def get_progress(self) -> tuple[int, int]:

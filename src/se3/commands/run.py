@@ -2,13 +2,11 @@
 
 Replaces start/work/done with a state machine-driven workflow that:
 - Creates new flows or resumes interrupted ones
-- Runs in single mode (one task) or loop mode (continuous)
 - Handles all step types programmatically
 
 Usage:
     se3 run "Implement feature X"              # New flow
     se3 run --resume                           # Resume interrupted flow
-    se3 run --loop                             # Loop mode (find next task automatically)
     se3 run "Fix bug" --type=bugfix            # Specify task type
 """
 
@@ -1817,7 +1815,7 @@ def run_flow(
     task_description: Optional[str] = None,
     task_type: str = "pending",
     change_name: Optional[str] = None,
-    is_loop_mode: bool = False,
+    is_worktree_mode: bool = False,
     prompt_history: Any = None,
     source_issue_id: Optional[str] = None,
     output_format: str = "cli",
@@ -1830,7 +1828,7 @@ def run_flow(
         task_description: Task description for new flow
         task_type: Type of task (feature, bugfix, etc., or 'pending' to auto-detect)
         change_name: Optional change name
-        is_loop_mode: Whether to run in loop mode
+        is_worktree_mode: Whether this flow runs in worktree isolation mode
         source_issue_id: Optional issue ID that triggered this flow
         output_format: Outermost event-stream sink selection — ``"cli"`` hangs
             the Rich rendering :class:`CliSink` (default, byte-identical to the
@@ -1852,7 +1850,7 @@ def run_flow(
     try:
         return _run_flow_impl(
             project_root, flow_id, task_description, task_type, change_name,
-            is_loop_mode, persistence, state_machine, prompt_history,
+            is_worktree_mode, persistence, state_machine, prompt_history,
             source_issue_id=source_issue_id,
             output_format=output_format,
         )
@@ -1874,7 +1872,7 @@ def _run_flow_impl(
     task_description: Optional[str],
     task_type: str,
     change_name: Optional[str],
-    is_loop_mode: bool,
+    is_worktree_mode: bool,
     persistence: PersistenceManager,
     state_machine: StateMachine,
     prompt_history: Any = None,
@@ -1962,7 +1960,7 @@ def _run_flow_impl(
                 task_description=task_description,
                 task_type=task_type,
                 change_name=change_name,
-                is_loop_mode=is_loop_mode,
+                is_worktree_mode=is_worktree_mode,
             )
 
             # Set source issue ID if provided
@@ -2006,7 +2004,7 @@ def _run_flow_impl(
         flow_id=flow.flow_id,
         task_description=flow.task_description,
         task_type=flow.task_type,
-        is_loop_mode=is_loop_mode,
+        is_worktree_mode=is_worktree_mode,
     ))
 
     # Execute flow
@@ -2525,247 +2523,8 @@ def _run_flow_impl(
         return 0
 
 
-def _generate_iteration_summary(
-    controller,
-    result,
-    iteration: int,
-    project_root: Path,
-) -> str:
-    """Generate a structured iteration summary using LLM.
-
-    Falls back to a simple status string if LLM call fails.
-    """
-    fallback = f"{'success' if result.success else 'failed'}"
-
-    try:
-        import subprocess as _sp
-
-        # Collect git diff since iteration start
-        diff_text = ""
-        if controller.iteration_start_commit:
-            diff_result = _sp.run(
-                ["git", "-C", str(controller.effective_root),
-                 "diff", controller.iteration_start_commit, "HEAD"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if diff_result.returncode == 0:
-                diff_text = diff_result.stdout[:5000]
-
-        # Collect test results from flow state if available
-        test_output = ""
-        # We don't have direct access to flow state here, so skip test output
-        # Test result is partially reflected in result.success
-
-        if not diff_text:
-            return fallback
-
-        from ..engine.llm_caller import LLMCaller
-
-        prompt = (
-            "Summarize this loop iteration in ≤200 words with three sections:\n"
-            "1. What was done\n"
-            "2. Test results\n"
-            "3. Remaining issues\n\n"
-            f"Task: {result.task}\n"
-            f"Outcome: {'success' if result.success else 'failed'}\n\n"
-            f"Git diff (truncated):\n```\n{diff_text}\n```"
-        )
-
-        caller = LLMCaller(project_root, step_type="iteration_summary")
-        summary = caller.call(prompt=prompt)
-        if summary and len(summary.strip()) > 10:
-            return summary.strip()
-        return fallback
-    except Exception:
-        return fallback
-
-
-def run_loop_mode(
-    project_root: Path,
-    initial_task: str,
-    task_type: str = "pending",
-    max_iterations: Optional[int] = None,
-    prompt_history: Any = None,
-    no_worktree: bool = False,
-    merge_branch: Optional[str] = None,
-    output_format: str = "cli",
-) -> int:
-    """Run in Ralph Loop mode - repeat a user prompt across iterations.
-
-    Delegates to LoopController for all loop lifecycle management.
-    This function handles user interaction (display, prompts) while
-    the controller manages state, worktree, and summary injection.
-
-    Args:
-        project_root: Project root directory
-        initial_task: User prompt to execute each iteration (required)
-        task_type: Type of tasks to look for (default 'pending' for auto-detect)
-        max_iterations: Maximum number of iterations (None for unlimited)
-        prompt_history: Prompt input history
-        no_worktree: If True, disable branch isolation (run on current branch)
-        merge_branch: If provided, merge this loop branch and exit
-        output_format: Event-stream sink selection forwarded to each
-            iteration's ``run_flow`` (``"cli"`` or ``"json"``).
-
-    Returns:
-        Exit code
-    """
-    import functools
-
-    from ..engine.loop_controller import LoopController
-
-    controller = LoopController(
-        project_root=project_root,
-        max_iterations=max_iterations,
-        no_worktree=no_worktree,
-        prompt_history=prompt_history,
-    )
-
-    # --merge: merge an existing loop branch and exit
-    if merge_branch:
-        return _handle_merge_existing(controller, project_root, merge_branch)
-
-    # Start: create branch/worktree
-    setup_ok = controller.start(task=initial_task)
-    if setup_ok and controller.use_worktree and controller.has_worktree:
-        render_full(
-            "SE3 Loop Mode (branch isolated)\n\n"
-            f"Branch: {controller.loop_branch}\n"
-            f"Worktree: {controller.worktree_path}\n"
-            f"Original: {controller.original_branch}\n\n"
-            "Tasks execute in the worktree. Changes merge back when done.",
-            title="Loop Mode"
-        )
-    elif not controller.use_worktree:
-        if no_worktree:
-            render_full(
-                "SE3 Loop Mode (no isolation)\n\n"
-                "Tasks run directly on the current branch.",
-                title="Loop Mode"
-            )
-        else:
-            display_error("Falling back to non-isolated mode (--no-worktree)")
-            render_full(
-                "SE3 Loop Mode\n\n"
-                "WARNING: Running without branch isolation.",
-                title="Loop Mode"
-            )
-
-    # Iteration loop
-    iter_limit = max_iterations if max_iterations and max_iterations > 0 else 2**31
-    interrupted = False
-
-    try:
-        for iteration in range(1, iter_limit + 1):
-            # Invalidate cached worktree topology before each iteration so
-            # that config lookups reflect the current state (worktrees may
-            # have been created or removed between iterations).
-            #
-            # Defensive assumption: config is loaded only at iteration
-            # boundaries (here, before the implement step runs), NOT inside
-            # per-group worktrees created by the DAG-parallel implement path.
-            # If a future change adds config reads inside transient worktrees,
-            # this single cache clear at the top of the loop would be
-            # insufficient — an additional clear would be needed after each
-            # per-group worktree is torn down.
-            clear_main_repo_root_cache()
-
-            get_console().print(Rule(f"[bold]Loop #{iteration}[/bold]", style="cyan"))
-
-            result = controller.run_iteration(
-                run_flow_fn=functools.partial(run_flow, output_format=output_format),
-                task=initial_task,
-                task_type=task_type,
-            )
-
-            if not result.success:
-                display_error(f"Task failed with exit code {result.exit_code}")
-
-            # Generate iteration summary for next round
-            summary = _generate_iteration_summary(
-                controller, result, iteration, project_root,
-            )
-            controller.add_summary(summary)
-            controller.iteration_summary = summary
-
-            if max_iterations is not None and iteration >= max_iterations:
-                display_success(
-                    f"Loop mode completed: Reached maximum iterations ({max_iterations})"
-                )
-                break
-
-    except KeyboardInterrupt:
-        interrupted = True
-        get_console().print("[yellow]Loop interrupted by user.[/yellow]")
-
-    # Post-loop: auto merge
-    return _handle_loop_finish(controller, interrupted)
-
-
-def _handle_merge_existing(controller, project_root: Path, merge_branch: str) -> int:
-    """Handle --merge flag: show diff summary, confirm, then merge."""
-    from ..engine.worktree import get_current_branch, get_diff_stat
-
-    target = get_current_branch(project_root)
-    diff_stat = get_diff_stat(project_root, merge_branch, target)
-
-    render_full(f"Merging loop branch: {merge_branch}\n\n{diff_stat}", title="Merge")
-
-    options = [f"Merge {merge_branch} into {target}", "Cancel"]
-    choice = prompt_user_choice("Proceed with merge?", options)
-    if choice == 1:
-        render_full("Merge cancelled.", title="Cancelled")
-        return 0
-
-    success = controller.merge_existing(merge_branch)
-    if success:
-        display_success(f"Successfully merged {merge_branch} into {target}")
-        return 0
-    else:
-        display_error("Merge failed (conflict?). Resolve manually and retry.")
-        return 1
-
-
-def _handle_loop_finish(controller, interrupted: bool) -> int:
-    """Handle post-loop cleanup with automatic merge."""
-    finish_state = controller.finish(interrupted=interrupted)
-
-    if not finish_state["loop_branch"] or not finish_state["original_branch"]:
-        get_console().print("[dim]Loop mode ended.[/dim]")
-        return 0
-
-    loop_branch = finish_state["loop_branch"]
-    original_branch = finish_state["original_branch"]
-
-    if interrupted:
-        render_full(
-            f"Loop interrupted. Branch preserved: {loop_branch}\n\n"
-            f"To merge later:\n"
-            f"  se3 run --loop --merge {loop_branch}\n\n"
-            f"To discard:\n"
-            f"  git branch -D {loop_branch}",
-            title="Interrupted"
-        )
-        return 0
-
-    if finish_state["has_commits"]:
-        success = controller.merge()
-        if success:
-            display_success(f"Merged {loop_branch} into {original_branch}")
-        else:
-            display_error(
-                f"Merge conflict. Branch preserved: {loop_branch}\n"
-                f"Resolve conflicts and merge manually."
-            )
-    else:
-        controller.discard()
-        get_console().print("[dim]Loop ended with no changes. Branch cleaned up.[/dim]")
-
-    return 0
-
-
 ## CLI entry point is in cli.py (@app.command("run"))
-## This module provides the logic functions: run_flow, run_loop_mode, etc.
+## This module provides the logic functions: run_flow, etc.
 
 
 if __name__ == "__main__":
