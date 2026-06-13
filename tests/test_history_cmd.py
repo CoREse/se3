@@ -51,10 +51,10 @@ def _make_flow_dict(flow_id: str, task: str = "Test task", status: str = "comple
         "change_path": None,
         "source_issue_id": None,
         "baseline_commit": None,
-        "is_loop_mode": False,
-        "loop_branch": None,
-        "loop_worktree_path": None,
-        "loop_original_branch": None,
+        "is_worktree_mode": False,
+        "worktree_branch": None,
+        "worktree_path": None,
+        "worktree_original_branch": None,
     }
 
 

@@ -74,9 +74,8 @@ def _init_empty_repo(path: Path) -> None:
 def _make_test_branch(project_root: Path, timestamp: str = "auto") -> tuple[str, str]:
     """Test helper: create a branch from HEAD; return (branch, original_branch).
 
-    Replaces the removed loop-specific ``create_loop_branch`` helper. The
-    branch-name shape is arbitrary — these tests exercise the generic worktree
-    primitives, not any branch-naming convention.
+    The branch-name shape is arbitrary — these tests exercise the generic
+    worktree lifecycle primitives, not any branch-naming convention.
     """
     original = get_current_branch(project_root)
     branch_name = f"wt/{timestamp}"
@@ -820,7 +819,7 @@ class TestCleanupGitWorktreeMetadata:
     def test_removes_existing_metadata_directory(self, tmp_path: Path) -> None:
         """Should remove .git/worktrees/<safe_name> when it exists."""
         _init_repo(tmp_path)
-        branch_name = "se3-loop/meta-exists"
+        branch_name = "wt/meta-exists"
         safe_name = _branch_safe_name(branch_name)
         metadata_path = tmp_path / ".git" / "worktrees" / safe_name
         metadata_path.mkdir(parents=True)
@@ -833,7 +832,7 @@ class TestCleanupGitWorktreeMetadata:
     def test_noop_when_metadata_absent(self, tmp_path: Path) -> None:
         """Should do nothing when metadata directory doesn't exist."""
         _init_repo(tmp_path)
-        branch_name = "se3-loop/meta-absent"
+        branch_name = "wt/meta-absent"
         safe_name = _branch_safe_name(branch_name)
         metadata_path = tmp_path / ".git" / "worktrees" / safe_name
 
@@ -845,7 +844,7 @@ class TestCleanupGitWorktreeMetadata:
     def test_logs_warning_on_rmtree_failure(self, tmp_path: Path) -> None:
         """Should log warning but not raise when shutil.rmtree fails."""
         _init_repo(tmp_path)
-        branch_name = "se3-loop/meta-fail"
+        branch_name = "wt/meta-fail"
         safe_name = _branch_safe_name(branch_name)
         metadata_path = tmp_path / ".git" / "worktrees" / safe_name
         metadata_path.mkdir(parents=True)
