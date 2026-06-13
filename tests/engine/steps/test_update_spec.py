@@ -206,6 +206,8 @@ class TestFormatRedoGuidance:
             specs_dir="/tmp/specs",
             redo_guidance="",
             base_admission_standard="ADMISSION-STD",
+            writing_discipline="WRITING-DISCIPLINE",
+            split_criteria="SPLIT-CRITERIA",
         )
         assert "No specific spec changes planned." in rendered
         assert "No design document available." in rendered
@@ -221,9 +223,16 @@ class TestFormatRedoGuidance:
             specs_dir="/project/se3/specs",
             redo_guidance="",
             base_admission_standard="ADMISSION-STD",
+            writing_discipline="WRITING-DISCIPLINE",
+            split_criteria="SPLIT-CRITERIA",
         )
         assert "[add_requirement] spec-a" in rendered
         assert "### Overview" in rendered
+        # writing_discipline / split_criteria are baked-in governance constants,
+        # not per-call placeholders, so the passed kwargs are ignored and the
+        # canonical section headings appear instead.
+        assert "## Spec Writing Discipline" in rendered
+        assert "## Spec Split Criteria" in rendered
 
 
 class TestUpdateSpecHandlerIntegration:

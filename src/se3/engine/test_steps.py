@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from .models import FlowInstance, Step, StepStatus, StepType
+from .steps import analyze
 from .steps import (
     STEP_HANDLERS,
     analyze_handler,
@@ -120,8 +121,14 @@ class TestAnalyzeStep:
     @patch("se3.engine.steps.analyze.ProjectContextCollector")
     @patch("se3.engine.steps.analyze.ContextBuilder")
     @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_invalid_spec_names_skipped(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
-        """Test that invalid spec names from LLM are skipped without failure."""
+    def test_analyze_invalid_spec_names_rejected(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
+        """Unknown/hallucinated spec names are rejected by the out-port validation
+        (item-identity invariant, machine guarantee c): an unknown ``<spec>`` (or
+        unknown ``<spec>::<requirement>``) carries no flat item address, so it is a
+        validation failure rather than being silently skipped. Because the mock
+        returns the same invalid selection on every call, the handler exhausts its
+        bounded in-step retries and then FAILs, surfacing the rejected addresses
+        for the engine-level retry path."""
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
             "task_type": "feature",
@@ -131,7 +138,6 @@ class TestAnalyzeStep:
             "selected_items": [
                 {"spec": "nonexistent-spec", "requirement_name": "X"},
                 {"spec": "also-fake", "requirement_name": "Y"},
-                {"spec": "flow-engine", "requirement_name": "16-Step Flow Pool"},
             ],
         })
         MockLLMCaller.return_value = mock_caller
@@ -151,14 +157,17 @@ class TestAnalyzeStep:
 
         result = analyze_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED
-        # Invalid specs should be skipped, only base and flow-engine loaded
-        assert "nonexistent-spec" not in step.outputs["spec_content"]
-        assert "also-fake" not in step.outputs["spec_content"]
-        assert "base" in step.outputs["spec_content"]
-        assert "flow-engine" in step.outputs["spec_content"]
-        assert "nonexistent-spec" not in step.outputs["relevant_specs"]
-        assert "also-fake" not in step.outputs["relevant_specs"]
+        # Persistently-invalid selection: retried in-step up to the bound, then FAILED.
+        assert result == StepStatus.FAILED
+        assert mock_caller.call.call_count == analyze.MAX_SELECTION_ATTEMPTS
+        # The rejected non-item addresses are surfaced for the engine-level retry.
+        assert step.error_message
+        assert "nonexistent-spec::X" in step.error_message
+        assert "also-fake::Y" in step.error_message
+        # No partial/hallucinated selection leaks downstream as a base::* fallback.
+        assert step.outputs.get("selected_items") != [
+            {"spec": "base", "requirement_name": "*"}
+        ]
 
     @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine"])
     @patch("se3.engine.steps.analyze.ProjectContextCollector")

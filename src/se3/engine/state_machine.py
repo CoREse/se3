@@ -1451,8 +1451,9 @@ class StateMachine:
             spec_loading = load_spec_loading_config(self.project_root)
             load_mode = spec_loading.mode_for(step_type.value)
         except Exception:
-            # Fall back to per-step built-in defaults so update_spec still
-            # gets full_spec even when config loading fails.
+            # Fall back to per-step built-in defaults (items for every step
+            # unless a project explicitly opts a step into full_spec) when
+            # config loading fails.
             load_mode = SpecLoadingConfig().mode_for(step_type.value)
 
         if load_mode == "full_spec":

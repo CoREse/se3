@@ -218,7 +218,6 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Append issue discovery injection if applicable
     from ..context_builder import (
         get_issue_discovery_injection,
-        get_spec_names_injection,
         get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
@@ -226,12 +225,13 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if injection:
         prompt += injection
 
-    # Append available-specs names injection if applicable
-    spec_names = get_spec_names_injection(
-        "verify_spec", project_root, step.inputs.get("relevant_specs"),
-    )
-    if spec_names:
-        prompt += spec_names
+    # NOTE: the legacy ``get_spec_names_injection`` is deliberately NOT appended
+    # here. Its guidance permits reading ``se3/specs/<name>/spec.md`` directly,
+    # which directly contradicts this step's index-first Spec Access Protocol
+    # (do NOT read whole specs). The root view obtained via ``se3 spec index``
+    # already enumerates every spec, so the names list is both redundant and
+    # contradictory; appending it would let the LLM follow the later injection
+    # and read an entire large spec, defeating the bounded-context protocol.
 
     # Append runtime environment injection if applicable
     runtime_env = get_runtime_environment_injection("verify_spec", project_root)

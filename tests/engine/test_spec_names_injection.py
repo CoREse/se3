@@ -532,7 +532,15 @@ class TestHandlerIntegrationPositive:
         # Sanity: confirm we actually took the fix path, not a regular one.
         assert "## Fix Instructions" in prompt
 
-    def test_verify_spec_handler_injects_spec_names(self, tmp_path):
+    def test_verify_spec_handler_uses_index_first_not_names_list(self, tmp_path):
+        """verify_spec relies on the index-first Spec Access Protocol and does
+        NOT append the legacy spec-names injection.
+
+        The former ``get_spec_names_injection`` guidance permits reading whole
+        ``se3/specs/<name>/spec.md`` files, which contradicts verify_spec's
+        index-first protocol (do NOT read whole specs). The root view obtained
+        via ``se3 spec index`` already enumerates every spec, so the names list
+        is removed to avoid handing the LLM contradictory instructions."""
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.VERIFY_SPEC)
         step = Step(
@@ -558,9 +566,11 @@ class TestHandlerIntegrationPositive:
             from se3.engine.steps.verify_spec import verify_spec_handler
             verify_spec_handler(step, flow)
             prompt = mock_caller.call.call_args[1]["prompt"]
-        assert INJECTION_HEADING in prompt
-        assert INJECTION_MARKER in prompt
-        assert INJECTION_REAL_SPECS in prompt
+        # The index-first protocol is present; the contradictory names list is not.
+        assert "se3 spec index" in prompt
+        assert "se3 spec show <spec>::<requirement>" in prompt
+        assert INJECTION_HEADING not in prompt
+        assert INJECTION_MARKER not in prompt
 
     def test_update_spec_handler_injects_root_view_not_names_list(self, tmp_path):
         """G7: update_spec consumes the root index view (name + one-sentence

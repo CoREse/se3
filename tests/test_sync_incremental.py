@@ -763,6 +763,64 @@ class TestLevel1GlobalShutter:
         if eng is not None:
             assert len(eng.calls) == 0
 
+    def test_governance_runs_on_level_1_cache_hit(self, tmp_path, monkeypatch):
+        """A zero-LLM level-1 cache hit must still run post-convergence
+        governance — otherwise a project that converged once silently skips
+        oversized-spec proposals / domain backfill on every later sync."""
+        import subprocess
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('hello')")
+        subprocess.run(["git", "add", "src/main.py"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(tmp_path), check=True)
+
+        from se3.engine.sync_state import compute_code_fingerprint
+        fp = compute_code_fingerprint(tmp_path)
+        _write_sync_state_file(tmp_path, fp, discovery_converged=True)
+
+        engine_holder = {}
+
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng.governance_calls = 0
+
+            def run_governance(llm_caller):
+                eng.governance_calls += 1
+                return {
+                    "base_migration_call": None,
+                    "split_calls": [],
+                    "specs_missing_domain": ["lonely-spec"],
+                }
+
+            eng.run_governance = run_governance
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        assert result.converged is True
+        assert result.level_1_cache_hit is True
+        eng = engine_holder["engine"]
+        assert len(eng.calls) == 0  # zero LLM rounds
+        assert eng.governance_calls == 1  # governance still ran
+        assert result.governance.get("specs_missing_domain") == ["lonely-spec"]
+
     def test_global_shutter_skipped_on_mismatched_fingerprint(
         self, tmp_path, monkeypatch
     ):

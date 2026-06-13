@@ -238,14 +238,19 @@ class TestStateMachineSelectedItemsPassthrough:
         assert inputs["selected_items"][0]["requirement_name"] == "State-Machine-Driven Flow"
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_gets_full_spec_mode(self, _cfg, sm):
-        """update_spec defaults to full_spec mode (naming collision check)."""
+    def test_update_spec_gets_items_mode(self, _cfg, sm):
+        """update_spec defaults to items mode under the index-first protocol.
+
+        It no longer reads ``spec_content`` (its naming/placement context comes
+        from the injected root view + ``se3 spec show``), so the state machine
+        must NOT re-render and persist the full spec corpus into engine.json.
+        The items-mode passthrough keeps analyze's already-filtered content.
+        """
         flow = self._flow_with_analyze_selected_items()
         inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
-        # full_spec mode should re-render spec_content from the actual spec files
-        assert "spec_content" in inputs
-        # The full spec text should be longer than the analyze item-filtered version
-        assert "Requirement: 16-Step Flow Pool" in inputs["spec_content"]
+        # items mode: spec_content is the analyze-produced item-filtered version,
+        # NOT a full re-render of every spec file.
+        assert inputs["spec_content"] == "base + flow-engine header + items"
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_plan_gets_items_mode(self, _cfg, sm):
@@ -263,8 +268,13 @@ class TestStateMachineSelectedItemsPassthrough:
         assert "flow-engine" in inputs["relevant_specs"]
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_full_spec_empty_items_loads_base(self, _cfg, sm):
-        """Empty selected_items is handled as backward-compat safety net."""
+    def test_update_spec_empty_items_no_fail_fast(self, _cfg, sm):
+        """Empty selected_items must NOT fail update_spec under items mode.
+
+        The old full_spec default raised ValueError on empty selected_items;
+        because update_spec no longer consumes spec_content, that fail-fast over
+        unused data is gone — items mode simply keeps the analyze passthrough.
+        """
         flow = _make_flow(PROJECT_ROOT)
         _add_completed_step(flow, StepType.ANALYZE, {
             "task_type": "feature",
@@ -276,13 +286,14 @@ class TestStateMachineSelectedItemsPassthrough:
             "spec_content": "base only",
             "selected_items": [],
         })
+        # Must not raise (no full_spec ValueError fail-fast anymore).
         inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
-        assert inputs["spec_content"] != "base only"  # full_spec re-renders
+        assert inputs["spec_content"] == "base only"  # items-mode passthrough
         assert "base" in inputs["relevant_specs"]
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_full_spec_base_wildcard_loads_base(self, _cfg, sm):
-        """base::* explicitly signals 'no non-base items needed' — loads base only."""
+    def test_update_spec_base_wildcard_items_mode(self, _cfg, sm):
+        """base::* under items mode does not re-render the spec corpus."""
         flow = _make_flow(PROJECT_ROOT)
         _add_completed_step(flow, StepType.ANALYZE, {
             "task_type": "feature",
@@ -297,6 +308,7 @@ class TestStateMachineSelectedItemsPassthrough:
             ],
         })
         inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
+        assert inputs["spec_content"] == "base only"  # items-mode passthrough
         assert "base" in inputs["relevant_specs"]
 
 

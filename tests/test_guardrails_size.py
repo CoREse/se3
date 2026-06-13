@@ -148,6 +148,51 @@ def test_unreadable_or_empty_project_does_not_raise(tmp_path: Path) -> None:
     assert check_spec_sizes(tmp_path, config) == []
 
 
+def test_unreadable_spec_yields_check_incomplete(tmp_path: Path, monkeypatch) -> None:
+    """An OSError reading a spec must NOT be silently skipped: it yields a
+    CHECK_INCOMPLETE violation so enforce mode blocks (its size limits were
+    never verified)."""
+    specs = tmp_path / "se3" / "specs"
+    _write_spec(specs, "base", _spec_body("base", "Base R1", 50))
+
+    real_read_bytes = Path.read_bytes
+
+    def fake_read_bytes(self: Path):
+        if self.parent.name == "base":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
+
+    config = SpecGovernanceConfig()
+    violations = check_spec_sizes(tmp_path, config)
+    incomplete = [v for v in violations if v.violation_type == "CHECK_INCOMPLETE"]
+    assert incomplete, "unreadable spec should produce a CHECK_INCOMPLETE violation"
+    assert (incomplete[0].evidence or {}).get("exception_type") == "OSError"
+
+
+def test_cli_enforce_blocks_on_unreadable_spec(tmp_path: Path, monkeypatch) -> None:
+    """Under enforce, an unreadable (un-verifiable) spec fails the CLI rather
+    than exiting 0."""
+    specs = tmp_path / "se3" / "specs"
+    _write_spec(specs, "base", _spec_body("base", "Base R1", 50))
+    _write_yaml(tmp_path, "enforce")
+
+    real_read_bytes = Path.read_bytes
+
+    def fake_read_bytes(self: Path):
+        if self.parent.name == "base":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["guardrails", "--sizes", "-p", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "CHECK_INCOMPLETE" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # CLI pathway: se3 guardrails --sizes
 # ---------------------------------------------------------------------------

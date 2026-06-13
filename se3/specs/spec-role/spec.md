@@ -26,6 +26,11 @@ The system SHALL maintain a single authoritative, machine- and human-readable st
 - Future intent and desired changes enter through issues (`se3 issue`), not by rewriting specs to describe a not-yet-built future.
 - Agents do not proactively propose creating or rewriting spec files. Recording code into specs is the job of the `update_spec` step and `se3 sync`, not of analysis/discovery work.
 
+**Where content lands, and who restructures the spec corpus (spec-volume governance roles):**
+
+- The `base` spec carries only project-top-level content that every session genuinely needs loaded in full (project identity, the global architecture picture, cross-cutting conventions, and a one-line locator index of each module / spec); module-specific detail belongs in the corresponding module spec, reachable on demand via `se3 spec index` / `se3 spec show`. This admission standard is stated in full in the `spec-format` *Spec Volume Governance Standards* Requirement.
+- Semantic-level restructuring of the spec corpus — relocating over-admission `base` content into module specs, and splitting an over-sized multi-topic spec into parallel specs — is performed ONLY by `se3 sync` (with the plan confirmed through sync's respond channel). The `update_spec` step MUST NOT create a parallel spec on its own; when it judges a spec should be split, it only records the recommendation in its output and leaves the restructure to `se3 sync`.
+
 The human-readable README mirrors this wording (the "Spec ↔ code two-way governance (asymmetric)" entry) so the CLI documentation and the injected prompt wording cannot drift apart.
 
 #### Scenario: Single authoritative wording is imported, not re-paraphrased
@@ -37,6 +42,11 @@ The human-readable README mirrors this wording (the "Spec ↔ code two-way gover
 - **WHEN** the role definition describes code↔spec governance
 - **THEN** it names `se3 sync` as the primary `code → spec` direction in which the code wins on disagreement
 - **AND** it names `se3 guardrails` as a bounded, within-flow `spec → code` drift guard that does NOT make the spec authoritative over the code in general
+
+#### Scenario: Spec-corpus restructuring is reserved to se3 sync
+- **WHEN** the implementation introduces detail that belongs to a module rather than to `base`, or a spec grows large enough to warrant a split
+- **THEN** `update_spec` writes module detail into the corresponding module spec (not `base`) and, for a split, only records a recommendation in its output
+- **AND** the actual `base` content relocation or parallel-spec split is performed by `se3 sync`, confirmed through sync's respond channel
 
 ### Requirement: Spec Role Prompt Injection
 

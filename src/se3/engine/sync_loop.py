@@ -271,6 +271,10 @@ class SyncLoop:
                     "Level-1 global shutter: code fingerprint matches, "
                     "0 LLM calls."
                 )
+                # Governance still runs on a zero-LLM cache hit so a project
+                # that converged once does not silently skip oversized-spec
+                # proposals / domain backfill on every subsequent sync.
+                self._run_governance(engine, llm_caller, loop_result)
                 return loop_result
 
         # Level 2 — per-spec gate (only if discovery was converged in cache)
@@ -620,6 +624,10 @@ class SyncLoop:
         # Record level-3 per-spec early-exit telemetry for the final report.
         loop_result.level_3_early_exit_specs = sorted(per_spec_converged)
 
+        # ── Post-convergence spec volume-governance ──────────────────────
+        if loop_result.converged and normal_exit:
+            self._run_governance(engine, llm_caller, loop_result)
+
         # ── Write sync_state on genuine convergence ──────────────────────
         if loop_result.converged and normal_exit:
             try:
@@ -961,6 +969,45 @@ class SyncLoop:
                 self._emit("discovering", round_index=round_index)
 
         return adapter
+
+    def _run_governance(self, engine: Any, llm_caller: Any, loop_result: Any) -> None:
+        """Run post-convergence spec volume-governance on a successful sync.
+
+        Detect an over-limit base / over-sized multi-topic specs and write the
+        respond-channel confirmation calls; migration / split itself stays gated
+        behind ``se3 sync-respond``. Surfaces the governance outcome on
+        ``loop_result.governance`` and emits events (base migration, spec split,
+        and the still-missing-domain backlog) so the CLI renders the proposals
+        and the backfill backlog rather than burying them in an internal field.
+
+        This runs on **every** successful sync — including a level-1 cache hit
+        (zero-LLM convergence) — so a project that converged once does not then
+        silently skip governance on subsequent runs. Invoked defensively via
+        ``getattr`` so a scripted / stub engine without ``run_governance`` simply
+        skips it, and wrapped so a governance hiccup never fails an
+        otherwise-converged sync.
+        """
+        run_governance = getattr(engine, "run_governance", None)
+        if not callable(run_governance):
+            return
+        try:
+            governance = run_governance(llm_caller) or {}
+            loop_result.governance = governance
+            if governance.get("base_migration_call"):
+                self._emit(
+                    "governance_base_migration",
+                    call_file=governance["base_migration_call"],
+                )
+            for call in governance.get("split_calls", []):
+                self._emit("governance_spec_split", call_file=call)
+            backfilled = governance.get("domains_backfilled") or []
+            if backfilled:
+                self._emit("governance_domains_backfilled", specs=list(backfilled))
+            missing = governance.get("specs_missing_domain") or []
+            if missing:
+                self._emit("governance_missing_domains", specs=list(missing))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Post-convergence governance step failed: %s", exc)
 
     def _emit(self, phase: str, **kwargs: Any) -> None:
         cb = self.progress_callback

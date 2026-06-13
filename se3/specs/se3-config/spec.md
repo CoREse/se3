@@ -1744,6 +1744,46 @@ spec_loading:
 - **THEN** the loader raises `ValueError` with a message identifying the empty-`selected_items` condition
 - **AND** the error surfaces upstream rather than silently producing a base-only or single-spec context
 
+### Requirement: Spec Governance Configuration
+
+The system SHALL support a `spec_governance` section in `se3.yaml`, sibling to `spec_loading`, that centralizes every configurable size threshold and enforcement tier used by spec **volume governance**. Collecting these values in one place gives the three governance execution points — `se3 guardrails` size checks, the `update_spec` write-prevention prompt, and `se3 sync` content relocation — a single authoritative threshold source, and makes the `base` admission standard a measurable, machine-checkable proxy (see the `spec-format` *Spec Volume Governance Standards* Requirement for the prose standards these numbers operationalize).
+
+**Purpose:** The `base` spec is the only spec injected in full into every step of every session, so its byte size is a fixed per-call cost that neither on-demand loading nor index drill-down can reduce. Bounding it — and the other spec-volume units — requires configurable thresholds that all governance points agree on.
+
+**Schema and defaults:**
+```yaml
+spec_governance:
+  base_size_limit: 32768          # bytes; base admission cap (default 32 KiB)
+  index_output_threshold: 16384   # bytes; size-bounded index render fold threshold (default 16 KiB)
+  spec_file_warn_threshold: 65536 # bytes; per-spec-file warning size (default 64 KiB)
+  requirement_warn_threshold: 8192 # bytes; per-Requirement warning size (default 8 KiB)
+  size_check_tier: warn           # guardrails size-check tier: "warn" | "enforce" (default warn)
+```
+
+**Option semantics:**
+- `spec_governance.base_size_limit`: Byte ceiling for the `base` spec (default `32768`). Used by the `se3 guardrails` base-size check and injected into the `update_spec` prompt as the write-prevention budget. A write that would push `base` over this limit MUST be routed into the corresponding module spec rather than appended to `base`.
+- `spec_governance.index_output_threshold`: Byte threshold that drives the deterministic-greedy fold in the size-bounded index renderer (default `16384`). When any single `se3 spec index` view exceeds this, the renderer folds its largest collapsible unit into a group handle and repeats until the output is at or below the threshold (see the `se3-commands` *`se3 spec` Command* Requirement).
+- `spec_governance.spec_file_warn_threshold`: Per-spec-file byte size above which `se3 guardrails` emits a warning (default `65536`). The warning is a refactor-evaluation signal, not an order to split (cohesion is applied before size).
+- `spec_governance.requirement_warn_threshold`: Per-Requirement byte size above which `se3 guardrails` warns that the Requirement SHOULD be split into multiple Requirements (default `8192`). The Requirement is the unit injected in items mode and served by `se3 spec show`, so this discipline underpins per-item loading.
+- `spec_governance.size_check_tier`: The enforcement tier for the `se3 guardrails` spec-size checks — `"warn"` (report only, never blocking) or `"enforce"` (over-limit findings cause a non-zero exit). Default `"warn"`, so a project can run the checks informationally and switch to `"enforce"` once `base` is slimmed to within `base_size_limit`.
+
+**Defaults and validation:** All five keys have built-in defaults and MAY be omitted entirely; an absent `spec_governance` section yields the defaults above. The size thresholds are positive byte counts; `size_check_tier` accepts only `"warn"` or `"enforce"` (an unrecognized value falls back to the default `"warn"`).
+
+#### Scenario: Default spec governance configuration
+- **WHEN** `se3.yaml` has no `spec_governance` section
+- **THEN** the framework uses `base_size_limit = 32768`, `index_output_threshold = 16384`, `spec_file_warn_threshold = 65536`, `requirement_warn_threshold = 8192`, and `size_check_tier = "warn"`
+
+#### Scenario: Configured base size limit drives guardrails and write prevention
+- **GIVEN** `spec_governance.base_size_limit: 49152` in `se3.yaml`
+- **WHEN** the `se3 guardrails` base-size check runs and the `update_spec` prompt is built
+- **THEN** both consult the configured `49152`-byte ceiling rather than the default `32768`
+
+#### Scenario: Enforce tier makes size violations blocking
+- **GIVEN** `spec_governance.size_check_tier: enforce` in `se3.yaml`
+- **WHEN** `se3 guardrails` detects an over-limit `base`, spec file, or Requirement
+- **THEN** the command reports the violation and exits with a non-zero status
+- **AND** under the default `warn` tier the same violation is reported without a non-zero exit
+
 ### Requirement: Claude Subprocess Setting Sources Isolation
 
 When SE3 spawns Claude CLI subprocesses (for any step that drives an

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.spec_index import SpecIndex, ItemMeta, load_or_build
+from se3.engine.spec_index import INDEX_VERSION, SpecIndex, ItemMeta, load_or_build
 from se3.engine.spec_format import SPEC_FORMAT_VERSION_MARKER
 
 
@@ -407,6 +407,75 @@ New req.
     assert "updated" in index.items["s1::R1"].summary
 
 
+def test_load_or_build_reloads_under_lock_before_save(tmp_project, monkeypatch) -> None:
+    """``load_or_build`` reloads the on-disk index AFTER acquiring the rebuild
+    lock, so a concurrent writer's update to a spec NOT in this process's
+    rebuild set is not clobbered by this process's stale in-memory snapshot.
+
+    Race re-created: this process computes its rebuild set as ``{y}`` while
+    ``x`` still looks fresh. *Then* a concurrent writer updates ``x`` and saves
+    the index. The pre-fix code only re-checked its own ``{y}`` subset and would
+    save its stale ``x``, losing the concurrent update. The fix reloads the
+    on-disk index (and re-derives the full rebuild set) under the lock, so the
+    concurrent ``x`` update survives.
+    """
+    import se3.engine.spec_index as si
+
+    write_spec(
+        tmp_project, "x",
+        f"{SPEC_FORMAT_VERSION_MARKER}\n# X\n## Purpose\nP.\n### Requirement: A\nX original body.\n",
+    )
+    write_spec(
+        tmp_project, "y",
+        f"{SPEC_FORMAT_VERSION_MARKER}\n# Y\n## Purpose\nP.\n### Requirement: B\nY original.\n",
+    )
+    # Build the initial on-disk index (x and y both fresh).
+    load_or_build(tmp_project)
+
+    # Make only ``y`` stale, so this process's rebuild set is exactly ``{y}``
+    # and ``x`` is NOT in it.
+    time.sleep(0.01)
+    write_spec(
+        tmp_project, "y",
+        f"{SPEC_FORMAT_VERSION_MARKER}\n# Y\n## Purpose\nP.\n### Requirement: B\nY changed.\n",
+    )
+
+    # A concurrent writer updates ``x`` and saves the whole index — fired EXACTLY
+    # once, right after this process computed its initial rebuild set (the first
+    # ``_compute_specs_to_rebuild`` return), i.e. inside the lock-acquisition
+    # window the fix must close.
+    real_compute = si._compute_specs_to_rebuild
+    state = {"fired": False}
+
+    def _compute_with_race(index):
+        result = real_compute(index)
+        if not state["fired"]:
+            state["fired"] = True
+            time.sleep(0.01)
+            write_spec(
+                tmp_project, "x",
+                f"{SPEC_FORMAT_VERSION_MARKER}\n# X\n## Purpose\nP.\n"
+                f"### Requirement: A\nX CONCURRENTLY changed.\n",
+            )
+            other = si.SpecIndex(tmp_project)
+            other.build()
+            other.save()
+        return result
+
+    monkeypatch.setattr(si, "_compute_specs_to_rebuild", _compute_with_race)
+    index = load_or_build(tmp_project)
+
+    # The concurrent update to ``x`` survived — not clobbered by this process's
+    # stale in-memory copy.
+    assert "CONCURRENTLY" in index.items["x::A"].summary
+    # ``y`` is consistent too.
+    assert "y::B" in index.items
+    # The persisted file on disk also retains the concurrent ``x`` update.
+    reloaded = si.SpecIndex(tmp_project)
+    assert reloaded.load() is True
+    assert "CONCURRENTLY" in reloaded.items["x::A"].summary
+
+
 def test_save_and_load_roundtrip(tmp_project: Path) -> None:
     """Index survives save/load roundtrip intact."""
     write_spec(
@@ -526,7 +595,7 @@ def test_real_specs_index_file_is_valid_json() -> None:
     with open(index_file, encoding="utf-8") as f:
         data = json.load(f)
 
-    assert data["version"] == 2
+    assert data["version"] == INDEX_VERSION
     assert isinstance(data["items"], dict)
 
     for key, item_data in data["items"].items():
@@ -540,3 +609,144 @@ def test_real_specs_index_file_is_valid_json() -> None:
         assert "keywords" in item_data
         assert "refs" in item_data
         assert "summary" in item_data
+
+
+def test_same_length_content_change_with_restored_mtime_rebuilds(tmp_project: Path) -> None:
+    """A same-size edit whose mtime is restored must still be detected.
+
+    Trusting mtime+size alone would serve a stale index (wrong item names,
+    summaries, line locations) indefinitely; the content hash is the
+    authoritative currency proof and is validated on every needs_rebuild call.
+    """
+    spec_file = write_spec(
+        tmp_project,
+        "epsilon",
+        f"""{SPEC_FORMAT_VERSION_MARKER}
+# Epsilon
+## Purpose
+P.
+### Requirement: AAAA
+body one
+""",
+    )
+    index = load_or_build(tmp_project)
+    index.save()
+    assert "epsilon::AAAA" in index.items
+    st = spec_file.stat()
+
+    # Rename the requirement AAAA -> BBBB (identical byte length), then restore
+    # the original mtime so both mtime AND size match the cached entry.
+    spec_file.write_text(
+        f"""{SPEC_FORMAT_VERSION_MARKER}
+# Epsilon
+## Purpose
+P.
+### Requirement: BBBB
+body one
+""",
+        encoding="utf-8",
+    )
+    os.utime(spec_file, (st.st_atime, st.st_mtime))
+    assert spec_file.stat().st_size == st.st_size
+    assert spec_file.stat().st_mtime == st.st_mtime
+
+    assert index.needs_rebuild("epsilon") is True
+    index2 = load_or_build(tmp_project)
+    assert "epsilon::BBBB" in index2.items
+    assert "epsilon::AAAA" not in index2.items
+
+
+def test_item_records_enclosing_chapter_section(tmp_project: Path) -> None:
+    """Each item records its nearest preceding ``## `` chapter heading."""
+    write_spec(
+        tmp_project,
+        "chapters",
+        f"""{SPEC_FORMAT_VERSION_MARKER}
+# Chapters
+## Purpose
+P.
+## Core
+### Requirement: One
+First.
+## Advanced
+### Requirement: Two
+Second.
+""",
+    )
+    index = load_or_build(tmp_project)
+    assert index.items["chapters::One"].section == "Core"
+    assert index.items["chapters::Two"].section == "Advanced"
+
+
+def test_item_records_enclosing_subsection_divider(tmp_project: Path) -> None:
+    """A ``#### `` divider (one whose next non-blank line is a ``### Requirement:``
+    heading) opens a sub-section every following Requirement belongs to until the
+    next divider or a new ``## `` chapter. A ``#### `` heading inside a Requirement
+    body (followed by prose, not a Requirement) is NOT a divider and does not leak
+    its label onto the next Requirement."""
+    write_spec(
+        tmp_project,
+        "subs",
+        f"""{SPEC_FORMAT_VERSION_MARKER}
+# Subs
+## Purpose
+P.
+## Requirements
+
+#### Core
+### Requirement: One
+First.
+
+### Requirement: Two
+Second.
+
+#### Advanced
+### Requirement: Three
+Third.
+
+### Requirement: Four
+Fourth.
+
+#### Inline Note
+Prose under an inline note (not a divider — prose follows, not a Requirement).
+
+### Requirement: Five
+Fifth.
+""",
+    )
+    index = load_or_build(tmp_project)
+    # The two real dividers group the requirements that follow them.
+    assert index.items["subs::One"].subsection == "Core"
+    assert index.items["subs::Two"].subsection == "Core"
+    assert index.items["subs::Three"].subsection == "Advanced"
+    assert index.items["subs::Four"].subsection == "Advanced"
+    # "Inline Note" is followed by prose, not a Requirement, so it is NOT a
+    # divider — Five keeps the most recent real divider (Advanced), not the note.
+    assert index.items["subs::Five"].subsection == "Advanced"
+
+
+def test_subsection_does_not_leak_across_chapter_boundary(tmp_project: Path) -> None:
+    """A ``#### `` divider's sub-section is scoped to its ``## `` chapter; a later
+    chapter's Requirements without their own divider carry an empty subsection."""
+    write_spec(
+        tmp_project,
+        "scoped",
+        f"""{SPEC_FORMAT_VERSION_MARKER}
+# Scoped
+## Purpose
+P.
+## Chapter A
+
+#### Group X
+### Requirement: A1
+Body.
+
+## Chapter B
+### Requirement: B1
+Body.
+""",
+    )
+    index = load_or_build(tmp_project)
+    assert index.items["scoped::A1"].subsection == "Group X"
+    # B1 is in a different chapter with no divider of its own — no leak.
+    assert index.items["scoped::B1"].subsection == ""

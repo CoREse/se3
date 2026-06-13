@@ -531,6 +531,19 @@ def guardrails_cmd(
             "message": v.message,
         })
 
+    # Size governance runs automatically alongside the per-file diff check (no
+    # separate --sizes flag needed). The configured tier decides whether size
+    # violations block: ``enforce`` fails the command, ``warn`` (default) only
+    # reports. Resolve the project root from the spec file's location.
+    size_root = _project_root_for_spec(spec_file)
+    from .config import load_spec_governance_config
+    from .engine.merge.guardrails import check_spec_sizes
+
+    gov_config = load_spec_governance_config(size_root)
+    size_violations = check_spec_sizes(size_root, gov_config)
+    size_tier = gov_config.guardrails_size_tier
+    size_blocks = bool(size_violations) and size_tier == "enforce"
+
     # Use full-content display for guardrails output
     lines = [
         "",
@@ -546,14 +559,49 @@ def guardrails_cmd(
         for v in violations:
             lines.append(f"\n  [{v['type']}] {v['message']}")
             lines.append(f"  Rule: {v['guardrail']}")
-        lines.append(f"\n{'=' * 60}")
-        render_full("\n".join(lines), title="Guardrails Check")
-        raise typer.Exit(code=1)
     else:
-        lines.append("\n✓ All guardrails passed - no violations found")
-        lines.append(f"\n{'=' * 60}")
-        render_full("\n".join(lines), title="Guardrails Check")
-        raise typer.Exit(code=0)
+        lines.append("\n✓ Content guardrails passed - no diff violations found")
+
+    if size_violations:
+        lines.append(
+            f"\n⚠️  {len(size_violations)} size violation(s) found "
+            f"(tier: {size_tier}):"
+        )
+        for v in size_violations:
+            ev = v.evidence or {}
+            size_b = ev.get("size_bytes")
+            limit_b = ev.get("limit_bytes")
+            detail = (
+                f" ({size_b} > {limit_b} bytes)"
+                if size_b is not None and limit_b is not None
+                else ""
+            )
+            lines.append(f"\n  [{v.violation_type}] {v.file_path}{detail}")
+            lines.append(f"  {v.message}")
+        if size_tier == "enforce":
+            lines.append("\n  Size tier is 'enforce' — failing the check.")
+        else:
+            lines.append("\n  Size tier is 'warn' — reporting only, not blocking.")
+
+    lines.append(f"\n{'=' * 60}")
+    render_full("\n".join(lines), title="Guardrails Check")
+    if violations or size_blocks:
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=0)
+
+
+def _project_root_for_spec(spec_file: Path) -> Path:
+    """Resolve the SE3 project root that owns *spec_file* for size governance."""
+    try:
+        p = spec_file.resolve()
+    except OSError:
+        p = spec_file
+    for anc in [p] + list(p.parents):
+        if (anc / "se3" / "specs").is_dir() \
+                or (anc / "se3.yaml").is_file() \
+                or (anc / "se3.local.yaml").is_file():
+            return anc
+    return Path.cwd()
 
 
 # Register history command

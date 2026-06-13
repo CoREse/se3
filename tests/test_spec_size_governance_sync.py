@@ -186,10 +186,96 @@ class TestRequirementTransforms:
         assert "base::Project Identity" in out  # untouched
         assert "base::Daemon Modules" not in out
 
+    def test_rewrite_moved_refs_prefix_name_not_corrupted(self):
+        # Edge case: one Requirement name is a literal prefix of another in the
+        # same spec. Moving only the shorter ``Auth`` must NOT corrupt the
+        # longer ``Auth Token`` reference (a blind substring replace would).
+        text = "see base::Auth and also base::Auth Token here."
+        out = g.rewrite_moved_refs(text, {("base", "Auth"): ("authsvc", "Auth")})
+        # The standalone ``base::Auth`` was rewritten.
+        assert "authsvc::Auth and" in out
+        # The longer ``base::Auth Token`` is left intact.
+        assert "base::Auth Token" in out
+        # And it was NOT corrupted into the moved spec.
+        assert "authsvc::Auth Token" not in out
+
+    def test_rewrite_moved_refs_prefix_both_moved(self):
+        # When both the prefix and the longer name are moved, each rewrites to
+        # its own target independently (refs delimited so the greedy name span
+        # stops cleanly at the punctuation boundary).
+        text = "alpha base::Auth, beta base::Auth Token."
+        out = g.rewrite_moved_refs(
+            text,
+            {
+                ("base", "Auth"): ("authsvc", "Auth"),
+                ("base", "Auth Token"): ("authsvc", "Auth Token"),
+            },
+        )
+        assert "authsvc::Auth," in out
+        assert "authsvc::Auth Token" in out
+        assert "base::Auth" not in out
+
+    def test_rewrite_moved_refs_lowercase_known_name_not_corrupted(self):
+        # A distinct Requirement whose name extends the moved one with a
+        # *lowercase* word (``Foo bar``) must be preserved when only ``Foo``
+        # moves. The capitalization heuristic alone would miss this; the known
+        # requirement-name set disambiguates it.
+        text = "see base::Foo and base::Foo bar here."
+        out = g.rewrite_moved_refs(
+            text,
+            {("base", "Foo"): ("target", "Foo")},
+            known_reqs={"base": ["Foo", "Foo bar"]},
+        )
+        assert "target::Foo and" in out
+        # The distinct lowercase-continuation reference is untouched.
+        assert "base::Foo bar" in out
+        assert "target::Foo bar" not in out
+
+    def test_relink_intra_lowercase_known_name_not_corrupted(self):
+        text = "See Requirement: Foo bar for detail; also Requirement: Foo here."
+        # final_location only relocates ``Foo``; the known-name set carries the
+        # distinct lowercase-extended ``Foo bar`` so it is not corrupted.
+        out = g.relink_intra_spec_refs(
+            text, "base", {"Foo": "daemon"}, known_reqs=["Foo", "Foo bar"]
+        )
+        assert "Requirement: Foo bar for detail" in out  # untouched
+        assert "daemon::Foo here" in out
+
     def test_requirement_names_order(self):
         assert g.requirement_names(BASE_SPEC) == [
             "Project Identity", "Daemon Modules", "Coding Conventions",
         ]
+
+    def test_relink_intra_spec_refs_source_points_at_moved(self):
+        # Home = source spec; a `Requirement: Foo` pointing at a Requirement that
+        # moved out is rewritten to the inter-spec form; one that stayed is kept.
+        text = "See Requirement: Foo for detail; also Requirement: Bar here."
+        final_location = {"Foo": "daemon", "Bar": "base"}
+        out = g.relink_intra_spec_refs(text, "base", final_location)
+        assert "daemon::Foo for detail" in out
+        assert "Requirement: Bar here" in out  # stayed — intra form kept
+        assert "Requirement: Foo" not in out
+
+    def test_relink_intra_spec_refs_moved_block_points_back(self):
+        # Home = target spec (a moved block); a `Requirement: Bar` pointing back
+        # at a Requirement that stayed in the source is rewritten to source::Bar,
+        # while a reference to the block's own (co-moved) name stays intra.
+        block = (
+            "### Requirement: Foo\n"
+            "Depends on Requirement: Bar that stayed; see Requirement: Foo too."
+        )
+        final_location = {"Foo": "daemon", "Bar": "base"}
+        out = g.relink_intra_spec_refs(block, "daemon", final_location)
+        assert "base::Bar that stayed" in out
+        assert "Requirement: Foo too" in out  # co-located — intra form kept
+        # The boundary heading is never rewritten.
+        assert out.startswith("### Requirement: Foo\n")
+
+    def test_relink_intra_spec_refs_prefix_collision_guarded(self):
+        # `Requirement: Foo` must not match the longer `Requirement: Foo Bar`.
+        text = "See Requirement: Foo Bar here."
+        out = g.relink_intra_spec_refs(text, "base", {"Foo": "daemon"})
+        assert out == text  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -247,12 +333,71 @@ class TestBaseMigration:
         assert _spec_text(tmp_path, "base") == BASE_SPEC
         assert _spec_text(tmp_path, "daemon") == DAEMON_SPEC
 
+    def test_migrate_relinks_intra_spec_refs(self, tmp_path):
+        # base's Project Identity references the moved Requirement with the
+        # documented intra-spec `Requirement: <name>` form, and the moved block
+        # references a base Requirement that stays. Both must be relinked across
+        # the relocation boundary so 1-hop expansion keeps resolving.
+        base = (
+            "<!-- spec-format: v1 -->\n<!-- domain: project -->\n\n"
+            "# base Specification\n\n## Purpose\n\nbaseline, one line.\n\n"
+            "## Requirements\n\n"
+            "### Requirement: Project Identity\n"
+            "Identity line. See Requirement: Daemon Modules for the daemon.\n\n"
+            "### Requirement: Daemon Modules\n"
+            "Daemon detail. Built on Requirement: Project Identity.\n\n"
+            "### Requirement: Coding Conventions\nPEP 8.\n"
+        )
+        _make_project(tmp_path, {"base": base, "daemon": DAEMON_SPEC})
+        eng = SyncEngine(tmp_path)
+        res = eng.migrate_requirements([BaseMigration("Daemon Modules", "daemon")])
+        assert res["specs_updated"] >= 1
+
+        new_base = _spec_text(tmp_path, "base")
+        new_daemon = _spec_text(tmp_path, "daemon")
+        # Source spec: intra ref pointing at the moved Requirement is relinked.
+        assert "daemon::Daemon Modules" in new_base
+        assert "Requirement: Daemon Modules" not in new_base
+        # Moved block now in daemon: intra ref pointing back at a stayed
+        # Requirement is relinked to base::Project Identity.
+        assert "base::Project Identity" in new_daemon
+        assert "Requirement: Project Identity" not in new_daemon
+        # The moved Requirement's own heading survives intact.
+        assert "### Requirement: Daemon Modules" in new_daemon
+
     def test_migrate_skips_unknown_target(self, tmp_path):
         _make_project(tmp_path, {"base": BASE_SPEC, "daemon": DAEMON_SPEC})
         eng = SyncEngine(tmp_path)
         res = eng.migrate_requirements([BaseMigration("Daemon Modules", "nonexistent")])
         assert res["specs_updated"] == 0
         assert "Daemon Modules" in res["skipped"]
+
+    def test_migrate_keeps_skipped_requirement_in_base(self, tmp_path):
+        # A response with one valid migration and one whose target spec is
+        # missing (e.g. deleted after the proposal was created). The valid move
+        # proceeds, but the skipped migration's Requirement MUST stay intact in
+        # base — it must NOT be silently dropped without a destination.
+        _make_project(tmp_path, {"base": BASE_SPEC, "daemon": DAEMON_SPEC})
+        eng = SyncEngine(tmp_path)
+        res = eng.migrate_requirements([
+            BaseMigration("Daemon Modules", "daemon"),       # valid
+            BaseMigration("Coding Conventions", "nonexistent"),  # stale target
+        ])
+
+        assert {"requirement_name": "Daemon Modules", "target_spec": "daemon"} in res["migrated"]
+        assert "Coding Conventions" in res["skipped"]
+
+        new_base = _spec_text(tmp_path, "base")
+        new_daemon = _spec_text(tmp_path, "daemon")
+        # The valid move happened.
+        assert "### Requirement: Daemon Modules" not in new_base
+        assert "### Requirement: Daemon Modules" in new_daemon
+        # The skipped Requirement is preserved verbatim in base — not lost.
+        assert "### Requirement: Coding Conventions" in new_base
+        assert "PEP 8 style throughout the project." in new_base
+        # Project Identity (never migrated) is also still present.
+        assert "### Requirement: Project Identity" in new_base
+        assert validate_spec_structure(new_base, "base").passed
 
     def test_base_exceeds_limit_config_driven(self, tmp_path):
         _make_project(tmp_path, {"base": BASE_SPEC})
@@ -303,6 +448,46 @@ class TestSpecSplit:
         idx = load_or_build(tmp_path)
         assert idx.resolve_item_location("big-topic-b", "Topic B One") is not None
         assert idx.resolve_item_location("big", "Topic B One") is None
+
+    def test_split_rewrites_inter_spec_ref_between_co_moved_blocks(self, tmp_path):
+        # A moved Requirement block that references a *sibling* which also moves
+        # into the new spec, via the explicit inter-spec ``<source>::<req>``
+        # address, must have that address rewritten to ``<new_spec>::<req>`` in
+        # the new spec — otherwise the reference no longer resolves after split.
+        big = (
+            "<!-- spec-format: v1 -->\n\n"
+            "# big Specification\n\n"
+            "## Purpose\n\n"
+            "A multi-topic spec, in one sentence.\n\n"
+            "## Requirements\n\n"
+            "### Requirement: Topic A One\n"
+            "A1 opening summary.\n\n"
+            "### Requirement: Topic B One\n"
+            "B1 opening summary. See big::Topic B Two for the sibling rule.\n\n"
+            "### Requirement: Topic B Two\n"
+            "B2 opening summary.\n"
+        )
+        _make_project(tmp_path, {"big": big})
+        eng = SyncEngine(tmp_path)
+        out = eng.apply_split(SplitProposal(
+            source_spec="big",
+            new_spec="big-topic-b",
+            requirement_names=["Topic B One", "Topic B Two"],
+            domain="engine/big",
+            purpose="Topic B cluster.",
+        ))
+        assert out["created"] is True
+
+        new_split = _spec_text(tmp_path, "big-topic-b")
+        # The inter-spec reference inside the moved block is relinked to the new
+        # spec address; the stale source address is gone.
+        assert "big-topic-b::Topic B Two" in new_split
+        assert "big::Topic B Two" not in new_split
+
+        # The reference resolves against the rebuilt index at its new address.
+        idx = load_or_build(tmp_path)
+        assert idx.resolve_item_location("big-topic-b", "Topic B Two") is not None
+        assert idx.resolve_item_location("big", "Topic B Two") is None
 
     def test_split_refuses_existing_target(self, tmp_path):
         _make_project(tmp_path, {"big": BIG_SPEC, "other": OTHER_SPEC})
@@ -531,6 +716,58 @@ class TestProposalGeneration:
         assert eng.propose_spec_split("big", caller) is None
 
 
+class TestDomainBackfillProposal:
+    def test_propose_domain_backfill_assigns_and_persists(self, tmp_path):
+        # base has a domain; daemon + big do not.
+        _make_project(tmp_path, {"base": BASE_SPEC, "daemon": DAEMON_SPEC, "big": BIG_SPEC})
+        eng = SyncEngine(tmp_path)
+        assert set(eng.specs_missing_domain()) == {"daemon", "big"}
+
+        caller = _MockCaller(json.dumps([
+            {"spec_name": "daemon", "domain": "engine/daemon"},
+            {"spec_name": "big", "domain": "engine/big"},
+        ]))
+        updated = eng.propose_domain_backfill(caller)
+        assert caller.calls == 1
+        assert set(updated) == {"daemon", "big"}
+        # Markers are persisted to disk.
+        assert g.domain_of(_spec_text(tmp_path, "daemon")) == "engine/daemon"
+        assert g.domain_of(_spec_text(tmp_path, "big")) == "engine/big"
+        # Nothing left unclassified.
+        assert SyncEngine(tmp_path).specs_missing_domain() == []
+
+    def test_propose_domain_backfill_noop_when_all_have_domain(self, tmp_path):
+        _make_project(tmp_path, {"base": BASE_SPEC})  # base already has a domain
+        eng = SyncEngine(tmp_path)
+        caller = _MockCaller("should-not-be-called")
+        assert eng.propose_domain_backfill(caller) == []
+        assert caller.calls == 0  # zero-LLM when nothing is missing
+
+    def test_propose_domain_backfill_drops_invalid_entries(self, tmp_path):
+        _make_project(tmp_path, {"base": BASE_SPEC, "daemon": DAEMON_SPEC})
+        eng = SyncEngine(tmp_path)
+        # Unknown spec + empty domain → nothing valid applied.
+        caller = _MockCaller(json.dumps([
+            {"spec_name": "ghost", "domain": "x/y"},
+            {"spec_name": "daemon", "domain": "  "},
+        ]))
+        assert eng.propose_domain_backfill(caller) == []
+        assert g.domain_of(_spec_text(tmp_path, "daemon")) is None
+
+    def test_run_governance_wires_domain_backfill(self, tmp_path):
+        _make_project(tmp_path, {"base": BASE_SPEC, "daemon": DAEMON_SPEC})
+        eng = SyncEngine(tmp_path)
+        caller = _MockCaller(json.dumps([
+            {"spec_name": "daemon", "domain": "engine/daemon"},
+        ]))
+        result = eng.run_governance(caller)
+        # The backfill ran (production wiring), and the reported missing-domain
+        # backlog reflects the POST-backfill state.
+        assert result["domains_backfilled"] == ["daemon"]
+        assert "daemon" not in result["specs_missing_domain"]
+        assert g.domain_of(_spec_text(tmp_path, "daemon")) == "engine/daemon"
+
+
 # ---------------------------------------------------------------------------
 # zero-LLM invariant for the navigation / refactor-application layer
 # ---------------------------------------------------------------------------
@@ -572,3 +809,56 @@ def test_governance_application_and_index_make_no_llm_calls(tmp_path, monkeypatc
 
 def _spec_text(root: Path, name: str) -> str:
     return (root / "se3" / "specs" / name / "spec.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Atomic write / rollback (issue: a mid-write failure must never leave a spec
+# truncated; rollback must restore every committed file).
+# ---------------------------------------------------------------------------
+
+class TestAtomicWriteOrRestore:
+    def test_temp_write_failure_leaves_destination_intact(self, tmp_path, monkeypatch):
+        import builtins
+        eng = SyncEngine(tmp_path)
+        f = tmp_path / "b.md"
+        f.write_text("ORIGINAL CONTENT", encoding="utf-8")
+
+        real_open = builtins.open
+
+        def boom(file, *a, **k):
+            if str(file).endswith(".sync-tmp"):
+                raise OSError("disk full")
+            return real_open(file, *a, **k)
+
+        monkeypatch.setattr(builtins, "open", boom)
+        with pytest.raises(OSError):
+            eng._atomic_write(f, "NEW CONTENT")
+        # Destination is never half-written; no stray temp left behind.
+        assert f.read_text(encoding="utf-8") == "ORIGINAL CONTENT"
+        assert not (tmp_path / "b.md.sync-tmp").exists()
+
+    def test_rollback_restores_committed_edit_when_later_write_fails(self, tmp_path, monkeypatch):
+        eng = SyncEngine(tmp_path)
+        f1 = tmp_path / "a.md"
+        f1.write_text("ORIG-A", encoding="utf-8")
+        f2 = tmp_path / "b.md"
+        f2.write_text("ORIG-B", encoding="utf-8")
+
+        real_atomic = SyncEngine._atomic_write
+        state = {"n": 0}
+
+        def flaky(path, content):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise OSError("disk full")  # destination stays intact
+            real_atomic(path, content)
+
+        monkeypatch.setattr(SyncEngine, "_atomic_write", staticmethod(flaky))
+        err = eng._write_all_or_restore(
+            edits=[(f1, "NEW-A", "ORIG-A"), (f2, "NEW-B", "ORIG-B")],
+            creates=[],
+        )
+        assert err is not None  # failure reported
+        # The committed first edit was rolled back; the failing one is untouched.
+        assert f1.read_text(encoding="utf-8") == "ORIG-A"
+        assert f2.read_text(encoding="utf-8") == "ORIG-B"

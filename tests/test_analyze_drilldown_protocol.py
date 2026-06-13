@@ -9,9 +9,22 @@ Covers the protocol改造 added by group G6 (``src/se3/engine/steps/analyze.py``
 - The out-port validation (``_validate_selected_items_against_flat_set``) checks
   every ``selected_items`` entry against the flat item full set by its full
   ``<spec>::<requirement>`` address: a domain group name, a ``pN`` page handle,
-  or any intermediate navigation node is rejected and fed back to the LLM to
-  retry; a real leaf address (or ``requirement_name == "*"`` whole-spec select)
-  passes.
+  or any intermediate navigation node is rejected; a real leaf address (or
+  ``requirement_name == "*"`` whole-spec select) passes.
+- A non-item address surfacing in the result (group/page handle, intermediate
+  node) is treated as a validation failure. Each attempt is one ``caller.call()``
+  (the subprocess carries its own internal tool loop for drilling down). On
+  validation failure — whether the selection is entirely group/page handles or a
+  mix of valid leaves and invalid handles (ANY invalid address fails the whole
+  selection; a valid sibling never suppresses it) — the handler feeds the
+  rejected addresses back into a fresh selection call and auto-retries in-step,
+  up to ``MAX_SELECTION_ATTEMPTS``, WITHOUT pausing for a human Retry/Skip/Abort
+  decision. Only after exhausting those attempts does the step return FAILED with
+  the rejected addresses in ``error_message`` (and record the diagnosis into the
+  step's chat history) so the engine-level retry replays it as feedback, rather
+  than substituting a ``base::*`` fallback that would mask the failure.
+  ``base::*`` remains the fallback only for a genuinely empty (no-handle)
+  selection.
 - ``requirement_name == "*"`` semantics are preserved.
 """
 
@@ -118,8 +131,13 @@ def _resp(selected_items: list[dict], task_type: str = "feature") -> str:
 
 
 def _install_fake_caller(monkeypatch, responses: list[str]) -> dict:
-    """Replace ``analyze.LLMCaller`` with a scripted fake; record the prompts."""
-    state = {"prompts": [], "responses": list(responses)}
+    """Replace ``analyze.LLMCaller`` with a scripted fake; record the prompts.
+
+    Responses are consumed in order; once the scripted list is exhausted the
+    last response is repeated, so an exhaustion test can supply a single invalid
+    response and have it returned for every in-step retry attempt.
+    """
+    state = {"prompts": [], "responses": list(responses), "last": None}
 
     class FakeCaller:
         def __init__(self, *args, **kwargs):
@@ -127,7 +145,9 @@ def _install_fake_caller(monkeypatch, responses: list[str]) -> dict:
 
         def call(self, prompt, **kwargs):
             state["prompts"].append(prompt)
-            return state["responses"].pop(0)
+            if state["responses"]:
+                state["last"] = state["responses"].pop(0)
+            return state["last"]
 
     monkeypatch.setattr(analyze, "LLMCaller", FakeCaller)
     return state
@@ -232,63 +252,99 @@ def test_validate_rejects_intermediate_node_and_unknowns(project):
     assert "alpha::Nonexistent" in invalid
 
 
-def test_keep_valid_items_drops_invalid(project):
-    index = load_or_build(project)
-    kept = analyze._keep_valid_items(
-        [
-            {"spec": "alpha", "requirement_name": "First Req"},   # valid
-            {"spec": "alpha", "requirement_name": "p1"},          # handle -> dropped
-            {"spec": "alpha", "requirement_name": "*"},           # wildcard -> kept
-        ],
-        index,
-    )
-    assert {"spec": "alpha", "requirement_name": "First Req"} in kept
-    assert {"spec": "alpha", "requirement_name": "*"} in kept
-    assert {"spec": "alpha", "requirement_name": "p1"} not in kept
-
-
-def test_validation_feedback_lists_addresses_and_drill_hint():
-    fb = analyze._build_validation_feedback(["alpha::engine/steps", "alpha::p1"])
-    assert "Selection Validation Error" in fb
-    assert "alpha::engine/steps" in fb
-    assert "alpha::p1" in fb
-    assert "se3 spec index" in fb
-
-
 # ---------------------------------------------------------------------------
-# Handler-level retry behaviour
+# Handler-level out-port validation: bounded in-step auto-retry + engine retry
 # ---------------------------------------------------------------------------
 
-def test_handler_reprompts_on_invalid_then_succeeds(project, monkeypatch):
-    """A group-name selection triggers a re-prompt carrying the feedback, and a
-    subsequent valid selection completes the step."""
-    state = _install_fake_caller(
-        monkeypatch,
-        [
-            # 1st: an invalid group-name selection.
-            _resp([{"spec": "alpha", "requirement_name": "engine/steps"}]),
-            # 2nd: a valid leaf selection.
-            _resp([{"spec": "alpha", "requirement_name": "First Req"}]),
-        ],
-    )
+def test_handler_invalid_selection_auto_retries_then_succeeds(project, monkeypatch):
+    """An invalid (group-name-only) first selection does NOT fail immediately:
+    the handler feeds the rejected address back into a fresh selection call and
+    retries automatically (no human intervention). A subsequent valid leaf
+    selection completes the step."""
+    invalid = _resp([{"spec": "alpha", "requirement_name": "engine/steps"}])
+    good = _resp([{"spec": "alpha", "requirement_name": "First Req"}])
+    state = _install_fake_caller(monkeypatch, [invalid, good])
 
     flow = _make_flow(project)
     step = _make_step()
     status = analyze.analyze_handler(step, flow)
     assert status == StepStatus.COMPLETED
 
-    # Exactly two calls were made (one re-prompt).
+    # Two calls: the rejected attempt, then the auto-retried successful one.
     assert len(state["prompts"]) == 2
-    # The second prompt carries the validation feedback (re-prompt channel).
-    assert "Selection Validation Error" in state["prompts"][1]
-    assert "alpha::engine/steps" in state["prompts"][1]
-    # The first prompt did NOT carry feedback.
-    assert "Selection Validation Error" not in state["prompts"][0]
 
-    # The final selection is the valid leaf only.
+    # The retry prompt fed the rejected non-item address back to the LLM.
+    assert "Previous Selection Rejected" in state["prompts"][1]
+    assert "alpha::engine/steps" in state["prompts"][1]
+
+    # The valid leaf selection landed, not a base::* fallback.
     assert step.outputs["selected_items"] == [
         {"spec": "alpha", "requirement_name": "First Req"}
     ]
+
+
+def test_handler_invalid_selection_exhausts_retries_then_fails(project, monkeypatch):
+    """A persistently-invalid selection retries in-step up to
+    ``MAX_SELECTION_ATTEMPTS`` and only then FAILs for the engine-level retry
+    path. The failure surfaces the rejected addresses and never silently degrades
+    to a base::* fallback."""
+    invalid = _resp([{"spec": "alpha", "requirement_name": "engine/steps"}])
+    state = _install_fake_caller(monkeypatch, [invalid])
+
+    flow = _make_flow(project)
+    step = _make_step()
+    status = analyze.analyze_handler(step, flow)
+    assert status == StepStatus.FAILED
+
+    # The handler retried in-step up to the bound before deferring to the engine.
+    assert len(state["prompts"]) == analyze.MAX_SELECTION_ATTEMPTS
+
+    # The failure surfaces the rejected non-item address (so the engine retry can
+    # feed it back); selected_items is NOT populated with a base::* fallback.
+    assert step.error_message
+    assert "alpha::engine/steps" in step.error_message
+    assert step.outputs.get("selected_items") != [
+        {"spec": "base", "requirement_name": "*"}
+    ]
+
+
+def test_handler_all_invalid_records_feedback_for_retry(project, monkeypatch):
+    """When the in-step retries are exhausted, the post-validation diagnosis is
+    recorded into the step's chat history as a user-role turn, so the
+    engine-level retry's ``format_history_for_retry`` surfaces it (the validation
+    runs AFTER ``caller.call()``, so it is otherwise absent from the recorded
+    prompt/response history and a fresh engine-issued attempt would repeat the
+    same invalid handle)."""
+    _install_fake_caller(
+        monkeypatch,
+        [_resp([{"spec": "alpha", "requirement_name": "engine/steps"}])],
+    )
+
+    flow = _make_flow(project)
+    step = _make_step()
+    # The state machine populates step_id in real runs (the LLM caller keys its
+    # own prompt/response history on it too); set it so the feedback record lands.
+    step.step_id = "01_analyze_feedbacktest"
+    status = analyze.analyze_handler(step, flow)
+    assert status == StepStatus.FAILED
+
+    # The diagnosis is persisted as a user-role chat record under the step's
+    # history, tagged so the retry context replays it as feedback.
+    from se3.engine.chat_history import format_history_for_retry, get_step_history
+
+    session = get_step_history(project, flow.flow_id, step.step_id)
+    assert session is not None
+    user_feedback = [
+        m for m in session.messages
+        if m.role == "user" and "non-item address" in m.content
+    ]
+    assert user_feedback, "selection-failure diagnosis was not recorded for retry"
+    assert "alpha::engine/steps" in user_feedback[0].content
+
+    # And it actually appears in the retry context the next analyze call prepends.
+    retry_ctx = format_history_for_retry(project, flow.flow_id, step.step_id)
+    assert retry_ctx is not None
+    assert "alpha::engine/steps" in retry_ctx
 
 
 def test_handler_valid_selection_no_retry(project, monkeypatch):
@@ -326,30 +382,40 @@ def test_handler_wildcard_selection_no_retry(project, monkeypatch):
     ]
 
 
-def test_handler_exhausts_retries_then_drops_invalid(project, monkeypatch):
-    """After the bounded retries the invalid entries are dropped; a valid leaf
-    in the same selection survives and the step still completes."""
+def test_handler_mixed_invalid_auto_retries(project, monkeypatch):
+    """A mixed selection (one invalid handle + one valid leaf) is REJECTED — a
+    group/page handle represents additional Requirements the LLM meant to select,
+    so it MUST NOT be silently dropped while proceeding on the valid sibling (that
+    would feed downstream steps incomplete spec context and mask the failure). The
+    valid sibling does NOT suppress the rejection; the handler feeds the rejected
+    handle back and auto-retries in-step rather than pausing. A subsequent valid
+    selection completes the step."""
     bad_and_good = _resp(
         [
-            {"spec": "alpha", "requirement_name": "engine/steps"},  # invalid
-            {"spec": "alpha", "requirement_name": "First Req"},     # valid
+            {"spec": "alpha", "requirement_name": "engine/steps"},  # invalid handle
+            {"spec": "alpha", "requirement_name": "First Req"},     # valid leaf
         ]
     )
-    # Always invalid -> exhausts retries; valid entry survives the final drop.
-    state = _install_fake_caller(
-        monkeypatch,
-        [bad_and_good, bad_and_good, bad_and_good],
+    good = _resp(
+        [
+            {"spec": "alpha", "requirement_name": "First Req"},
+            {"spec": "alpha", "requirement_name": "Second Req"},
+        ]
     )
+    state = _install_fake_caller(monkeypatch, [bad_and_good, good])
 
     flow = _make_flow(project)
     step = _make_step()
     status = analyze.analyze_handler(step, flow)
     assert status == StepStatus.COMPLETED
-    # MAX retries (2) + initial = 3 calls.
-    assert len(state["prompts"]) == 3
-    # Only the valid leaf survives.
+    # The mixed selection was rejected and auto-retried in-step.
+    assert len(state["prompts"]) == 2
+    # The retry prompt fed the rejected handle back to the LLM.
+    assert "alpha::engine/steps" in state["prompts"][1]
+    # The valid re-selection landed; the partial mixed selection never leaked.
     assert step.outputs["selected_items"] == [
-        {"spec": "alpha", "requirement_name": "First Req"}
+        {"spec": "alpha", "requirement_name": "First Req"},
+        {"spec": "alpha", "requirement_name": "Second Req"},
     ]
 
 

@@ -239,6 +239,38 @@ def _render_loop_result(loop_result, show_diff: bool) -> None:
             f"{', '.join(sorted(fmt_err_specs))}"
         )
 
+    # Spec volume-governance outcome (runs on every successful sync, including a
+    # level-1 zero-LLM cache hit). Surface the respond-channel proposals and the
+    # still-missing-domain backlog so they are visible rather than buried in the
+    # internal ``governance`` field.
+    governance = getattr(loop_result, "governance", None) or {}
+    if governance:
+        base_call = governance.get("base_migration_call")
+        if base_call:
+            summary_line += (
+                f"\nBase over limit — migration proposed. Review and apply with "
+                f"`se3 sync-respond {base_call}`."
+            )
+        split_calls = list(governance.get("split_calls") or [])
+        for call in split_calls:
+            summary_line += (
+                f"\nOversized spec — split proposed. Review and apply with "
+                f"`se3 sync-respond {call}`."
+            )
+        backfilled = list(governance.get("domains_backfilled") or [])
+        if backfilled:
+            summary_line += (
+                f"\nDomain markers assigned to: {', '.join(backfilled)} "
+                f"(these specs now group under their domain instead of '(未分类)')."
+            )
+        missing_domain = list(governance.get("specs_missing_domain") or [])
+        if missing_domain:
+            summary_line += (
+                f"\nSpecs still missing a domain marker (render under '(未分类)'): "
+                f"{', '.join(missing_domain)}. A domain is assigned automatically "
+                f"during `se3 sync` restructuring."
+            )
+
     render_block_header(title, color)
     console.print(summary_line)
     console.print("")
@@ -491,6 +523,11 @@ def process_call_response(
             for m in result["migrated"]
         )
         extra += f"\nMigrated: {moved}"
+    if result.get("error"):
+        extra += (
+            f"\nThe approved operation was NOT applied — it aborted: "
+            f"{result['error']}"
+        )
     render_text(
         f"Specs updated: {specs_updated}, Skipped: {skipped}{extra}",
         title="SE3 Sync — Call Response Processed",

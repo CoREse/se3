@@ -205,6 +205,261 @@ def test_show_outputs_body_and_location(project: Path) -> None:
     assert file_lines[start - 1] == "### Requirement: First Req"
 
 
+def test_show_bounds_oversized_requirement(tmp_path: Path, monkeypatch) -> None:
+    """An oversized Requirement body is paged so the whole ``show`` output stays
+    within ``index_render_threshold`` (the context-boundedness invariant), with a
+    notice naming the bounded ``--page`` continuation command (not a raw Read)."""
+    big_body = "Opening summary sentence.\n\n" + ("x" * 50000)
+    _write_spec(
+        tmp_path,
+        "huge",
+        _simple_spec("huge", "engine", ("Big Req", big_body)),
+    )
+    monkeypatch.setattr(spec_cmd, "get_project_root", lambda: tmp_path)
+
+    from se3 import config
+
+    threshold = 16384
+    monkeypatch.setattr(
+        config,
+        "load_spec_governance_config",
+        lambda root: config.SpecGovernanceConfig(index_render_threshold=threshold),
+    )
+
+    result = runner.invoke(app, ["spec", "show", "huge::Big Req"])
+    assert result.exit_code == 0, result.output
+    # The whole output (header + bounded body) stays within the byte threshold.
+    assert len(result.output.encode("utf-8")) <= threshold
+    # The location line and a paging notice are present.
+    assert "# location:" in result.output
+    assert "truncated" in result.output
+    # Recovery is a bounded CLI continuation, not a raw file read.
+    assert "se3 spec show 'huge::Big Req' --page 2" in result.output
+
+
+def test_show_oversized_multibyte_respects_byte_threshold(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Requirement full of multibyte (CJK) text is bounded by UTF-8 byte length,
+    not Python character count, so the page cannot overrun the threshold ~3x."""
+    # 20000 CJK chars ~= 60000 UTF-8 bytes, far above the threshold.
+    big_body = "中文开头摘要句。\n\n" + ("中" * 20000)
+    _write_spec(
+        tmp_path,
+        "cjk",
+        _simple_spec("cjk", "engine", ("Big CJK Req", big_body)),
+    )
+    monkeypatch.setattr(spec_cmd, "get_project_root", lambda: tmp_path)
+
+    from se3 import config
+
+    threshold = 16384
+    monkeypatch.setattr(
+        config,
+        "load_spec_governance_config",
+        lambda root: config.SpecGovernanceConfig(index_render_threshold=threshold),
+    )
+
+    result = runner.invoke(app, ["spec", "show", "cjk::Big CJK Req"])
+    assert result.exit_code == 0, result.output
+    # Byte length — not character count — must respect the threshold.
+    assert len(result.output.encode("utf-8")) <= threshold
+    # The page must not have split a multibyte character (output decodes cleanly).
+    assert isinstance(result.output, str)
+
+
+def test_show_multibyte_at_minimum_threshold_respects_byte_bound(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """At the accepted-minimum ``show`` threshold (exactly the render floor), a
+    Requirement body that begins with a multibyte (CJK) character must still be
+    paged within the configured byte limit — the per-page body budget reserves
+    room for at least one whole UTF-8 character so the paginator never emits an
+    over-budget leading character. This is the regression for the self-check
+    finding that the floor reserved only one byte for the body."""
+    big_body = "中文开头摘要句。\n\n" + ("中" * 4000)
+    _write_spec(
+        tmp_path,
+        "cjkmin",
+        _simple_spec("cjkmin", "engine", ("Min CJK Req", big_body)),
+    )
+    monkeypatch.setattr(spec_cmd, "get_project_root", lambda: tmp_path)
+
+    from se3 import config
+    from se3.engine.spec_index import load_or_build
+
+    # Resolve the physical location so we can pin the threshold to EXACTLY the
+    # show render floor — the smallest value the CLI accepts.
+    index = load_or_build(tmp_path)
+    spec_path, line_start, line_end, _body = index.resolve_item_location(
+        "cjkmin", "Min CJK Req"
+    )
+    floor = spec_cmd._show_render_threshold_floor(spec_path, line_start, line_end)
+
+    monkeypatch.setattr(
+        config,
+        "load_spec_governance_config",
+        lambda root: config.SpecGovernanceConfig(index_render_threshold=floor),
+    )
+
+    result = runner.invoke(app, ["spec", "show", "cjkmin::Min CJK Req"])
+    # The configured threshold equals the floor, so the page renders (exit 0) and
+    # — critically — stays within the byte bound despite the 3-byte leading char.
+    assert result.exit_code == 0, result.output
+    assert len(result.output.encode("utf-8")) <= floor
+    # Output decodes cleanly: no multibyte character was split across the cut.
+    assert isinstance(result.output, str)
+
+
+def test_show_bounds_pathologically_long_requirement_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Requirement whose NAME alone dwarfs the threshold: ``show`` stays WITHIN
+    the byte threshold (the context-boundedness invariant — every ``se3 spec``
+    response entering the LLM context is bounded). The header echo and the paging
+    notice both carry the BOUNDED display address; the notice tells the LLM to
+    re-use the exact ``<spec>::<requirement>`` it supplied (which it already holds,
+    since the address is INPUT it typed) when the echoed form is truncated. The
+    authoritative physical location line is always emitted intact, so paging is
+    never severed even though the echoed command is shortened to honour the
+    bound."""
+    long_name = "X" * 20000
+    big_body = "Opening summary sentence.\n\n" + ("y" * 40000)
+    _write_spec(
+        tmp_path,
+        "huge",
+        _simple_spec("huge", "engine", (long_name, big_body)),
+    )
+    monkeypatch.setattr(spec_cmd, "get_project_root", lambda: tmp_path)
+
+    from se3 import config
+
+    threshold = 16384
+    monkeypatch.setattr(
+        config,
+        "load_spec_governance_config",
+        lambda root: config.SpecGovernanceConfig(index_render_threshold=threshold),
+    )
+
+    full_address = f"huge::{long_name}"
+
+    # Page 1 is a continuation page (the 40 KB body needs paging).
+    page1 = runner.invoke(
+        app, ["spec", "show", full_address, "--page", "1"]
+    )
+    assert page1.exit_code == 0, page1.output[:500]
+    # The whole page stays within the byte threshold even though the name is 20 KB.
+    assert len(page1.output.encode("utf-8")) <= threshold
+    # The authoritative location line is always present and intact.
+    assert "# location:" in page1.output
+    # The header echo is truncated (the name alone is 20 KB) to bound the output.
+    assert "…[truncated]" in page1.output
+    # The notice names the bounded ``--page 2`` continuation and instructs the LLM
+    # to re-use the exact address it supplied when the echoed one was truncated.
+    assert "--page 2" in page1.output
+    assert "re-use the exact <spec>::<requirement> you supplied" in page1.output
+    # The full 20 KB address is NOT dumped into the bounded output.
+    assert full_address not in page1.output
+
+    # The LLM holds the address it typed, so re-running with it resolves page 2.
+    page2 = runner.invoke(
+        app, ["spec", "show", full_address, "--page", "2"]
+    )
+    assert page2.exit_code == 0, page2.output[:500]
+    assert len(page2.output.encode("utf-8")) <= threshold
+    assert "# location:" in page2.output
+
+
+def test_show_paging_reconstructs_full_body(tmp_path: Path, monkeypatch) -> None:
+    """Walking the deterministic ``--page`` sequence yields the complete body
+    through bounded ``se3 spec`` stdout, without ever reading the spec file."""
+    big_body = "Opening summary sentence.\n\n" + ("x" * 50000)
+    _write_spec(
+        tmp_path,
+        "huge",
+        _simple_spec("huge", "engine", ("Big Req", big_body)),
+    )
+    monkeypatch.setattr(spec_cmd, "get_project_root", lambda: tmp_path)
+
+    from se3 import config
+
+    threshold = 16384
+    monkeypatch.setattr(
+        config,
+        "load_spec_governance_config",
+        lambda root: config.SpecGovernanceConfig(index_render_threshold=threshold),
+    )
+
+    def _page_body(page: int) -> tuple[str, bool]:
+        result = runner.invoke(
+            app, ["spec", "show", "huge::Big Req", "--page", str(page)]
+        )
+        assert result.exit_code == 0, result.output
+        assert len(result.output.encode("utf-8")) <= threshold
+        out = result.output
+        # Strip the header (first two '# ' lines + blank line).
+        _h1, _, rest = out.partition("\n")
+        _h2, _, rest = rest.partition("\n")
+        body_part = rest.lstrip("\n")
+        # Strip the trailing notice block, if any.
+        marker = "\n[..."
+        more = "--page" in body_part
+        if marker in body_part:
+            body_part = body_part[: body_part.index(marker)]
+        return body_part, more
+
+    collected = ""
+    page = 1
+    while True:
+        body_part, more = _page_body(page)
+        collected += body_part
+        if not more:
+            break
+        page += 1
+        assert page < 100, "paging did not terminate"
+
+    # Expected = the resolved Requirement body (normalized to a single trailing
+    # newline, exactly as the bounded renderer paginates it).
+    from se3.engine.spec_index import load_or_build
+
+    index = load_or_build(tmp_path)
+    _path, _ls, _le, resolved_body = index.resolve_item_location("huge", "Big Req")
+    expected = resolved_body.rstrip("\n") + "\n"
+    assert collected == expected
+
+
+def test_show_page_out_of_range_errors(tmp_path: Path, monkeypatch) -> None:
+    """Requesting a page beyond the last one fails with a clear range error."""
+    big_body = "Opening summary sentence.\n\n" + ("x" * 50000)
+    _write_spec(
+        tmp_path,
+        "huge",
+        _simple_spec("huge", "engine", ("Big Req", big_body)),
+    )
+    monkeypatch.setattr(spec_cmd, "get_project_root", lambda: tmp_path)
+
+    from se3 import config
+
+    threshold = 16384
+    monkeypatch.setattr(
+        config,
+        "load_spec_governance_config",
+        lambda root: config.SpecGovernanceConfig(index_render_threshold=threshold),
+    )
+
+    result = runner.invoke(app, ["spec", "show", "huge::Big Req", "--page", "999"])
+    assert result.exit_code == 1
+    assert "out of range" in result.output
+
+
+def test_show_small_requirement_not_truncated(project: Path) -> None:
+    """A small Requirement body is emitted verbatim (no truncation notice)."""
+    result = runner.invoke(app, ["spec", "show", "alpha::First Req"])
+    assert result.exit_code == 0, result.output
+    assert "First requirement opening summary sentence." in result.output
+    assert "truncated" not in result.output
+
+
 # ---------------------------------------------------------------------------
 # show: interface rejection (item-identity invariant, guarantee b)
 # ---------------------------------------------------------------------------

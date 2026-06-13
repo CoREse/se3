@@ -175,7 +175,13 @@ def generate_token(prefix: str = "", *, nbytes: int = _TOKEN_NBYTES) -> Tuple[st
       persist.
     """
     random_part = secrets.token_urlsafe(nbytes)
-    plaintext = f"{prefix}_{random_part}" if prefix else random_part
+    if prefix:
+        plaintext = f"{prefix}_{random_part}"
+    else:
+        # token_urlsafe draws from a base64 alphabet that includes "_" and
+        # "-"; strip any leading separator chars so a prefix-less token never
+        # begins with a stray "_" (which would look like an empty prefix).
+        plaintext = random_part.lstrip("_-")
     return plaintext, token_hash(plaintext)
 
 

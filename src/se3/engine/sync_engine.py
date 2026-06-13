@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -286,6 +287,10 @@ class LoopResult:
     level_2_skipped_specs: List[str] = field(default_factory=list)
     # Level 3: specs that reached per-spec convergence and exited early.
     level_3_early_exit_specs: List[str] = field(default_factory=list)
+    # Spec volume-governance outcome (post-convergence): respond-channel call
+    # files written for an over-limit base migration / multi-topic spec split,
+    # and the specs still missing a ``<!-- domain: -->`` marker.
+    governance: Dict[str, Any] = field(default_factory=dict)
 
     # --- Compatibility helpers ----------------------------------------
     # These properties expose a flattened view of the final round so legacy
@@ -1289,6 +1294,90 @@ class SyncEngine:
                 logger.warning("Failed to read spec '%s': %s", sub.name, exc)
         return out
 
+    @staticmethod
+    def _atomic_write(path: Path, content: str) -> None:
+        """Write *content* to *path* atomically via a temp file + ``os.replace``.
+
+        The new bytes land in a sibling ``*.tmp`` file first and are then swapped
+        into place with ``os.replace`` (an atomic rename on POSIX/Windows). The
+        destination is therefore **never** left half-written: a failure while
+        writing the temp file (disk full, mid-write I/O error) leaves the
+        original file untouched, and the stray temp file is removed. This is the
+        property ``_write_all_or_restore`` relies on so a write that raises can
+        never corrupt the spec it was targeting. Raises ``OSError`` on failure.
+        """
+        tmp = path.with_name(path.name + ".sync-tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:  # pragma: no cover - defensive
+                pass
+            raise
+
+    def _write_all_or_restore(
+        self,
+        edits: List[Tuple[Path, str, str]],
+        creates: List[Tuple[Path, str]],
+    ) -> Optional[str]:
+        """Write *edits* and *creates* atomically; roll back on any failure.
+
+        ``edits`` is a list of ``(path, new_content, original_content)`` for
+        existing files, ``creates`` a list of ``(new_file_path, content)`` for
+        brand-new files. Every individual write goes through ``_atomic_write``
+        (temp file + ``os.replace``), so a write that raises mid-flight never
+        leaves its own destination truncated — the file is either the old
+        content or the new content, never a partial. On the first ``OSError``
+        the edits that *did* commit are restored to their original content (also
+        atomically) and every freshly created file (and any directory created
+        for it) is removed, so a partial migration / split never leaves source
+        requirements deleted while their new home failed to materialise. Returns
+        ``None`` on success or the error string on failure.
+        """
+        written_edits: List[Tuple[Path, str]] = []
+        created_files: List[Path] = []
+        created_dirs: List[Path] = []
+        try:
+            for path, new_content, original in edits:
+                self._atomic_write(path, new_content)
+                written_edits.append((path, original))
+            for new_path, content in creates:
+                parent = new_path.parent
+                if not parent.exists():
+                    parent.mkdir(parents=True, exist_ok=True)
+                    created_dirs.append(parent)
+                self._atomic_write(new_path, content)
+                created_files.append(new_path)
+            return None
+        except OSError as exc:
+            logger.error("Atomic spec write failed (%s) — rolling back", exc)
+            # The failing write left its own destination intact (atomic replace),
+            # so only the edits that already committed need restoring.
+            for path, original in written_edits:
+                try:
+                    self._atomic_write(path, original)
+                except OSError as rb_exc:  # pragma: no cover - defensive
+                    logger.error(
+                        "Rollback could not restore %s: %s", path, rb_exc
+                    )
+            for f in created_files:
+                try:
+                    f.unlink()
+                except OSError:  # pragma: no cover - defensive
+                    pass
+            for d in created_dirs:
+                try:
+                    d.rmdir()
+                except OSError:  # pragma: no cover - defensive
+                    pass
+            return str(exc)
+
     def _rebuild_index(self) -> None:
         """Full-rebuild the spec index so moved items get their new addresses."""
         try:
@@ -1330,6 +1419,8 @@ class SyncEngine:
         from .spec_validator import validate_spec_structure
         from .sync_governance import (
             append_requirements,
+            relink_intra_spec_refs,
+            requirement_names,
             rewrite_moved_refs,
             split_out_requirements,
         )
@@ -1343,10 +1434,15 @@ class SyncEngine:
 
         base_path, base_text = specs["base"]
         names = [getattr(m, "requirement_name", "") for m in migrations]
-        remaining_base, blocks = split_out_requirements(base_text, names)
+        # First pass: discover which Requirement blocks actually exist in base.
+        # This is parse-only; the returned ``remaining_base`` (which would strip
+        # *every* requested name) is intentionally discarded — base must only
+        # lose the Requirements that are actually relocated below.
+        _, blocks = split_out_requirements(base_text, names)
 
         target_to_blocks: Dict[str, List[str]] = {}
         moves: Dict[Tuple[str, str], Tuple[str, str]] = {}
+        valid_names: List[str] = []
         for mig in migrations:
             name = getattr(mig, "requirement_name", "")
             target = getattr(mig, "target_spec", "")
@@ -1355,21 +1451,51 @@ class SyncEngine:
                 continue
             target_to_blocks.setdefault(target, []).append(blocks[name])
             moves[("base", name)] = (target, name)
+            valid_names.append(name)
             result["migrated"].append({"requirement_name": name, "target_spec": target})
 
         if not moves:
             return result
 
+        # Recompute base removing ONLY the validly-migrated Requirements, so a
+        # skipped migration's Requirement is left intact in base rather than
+        # being silently dropped without a destination.
+        remaining_base, _ = split_out_requirements(base_text, valid_names)
+
+        # Post-move location of every Requirement originally in base: a migrated
+        # name lands in its target spec, every other name stays in base. This
+        # drives intra-spec `Requirement: <name>` relinking so the documented
+        # primary reference form survives the move alongside the inter-spec form.
+        base_names = requirement_names(base_text)
+        final_location: Dict[str, str] = {n: "base" for n in base_names}
+        for (_old_spec, mname), (mtarget, _new_req) in moves.items():
+            final_location[mname] = mtarget
+
         # Build proposed new contents (base + targets), then relink refs across
-        # every spec so addresses stay consistent.
+        # every spec so addresses stay consistent. Intra-spec references crossing
+        # the relocation boundary are relinked per-text first (the remaining base
+        # pointing at moved Requirements, and each moved block pointing back at
+        # Requirements that stayed in base or moved to a different target).
+        remaining_base = relink_intra_spec_refs(
+            remaining_base, "base", final_location, known_reqs=base_names
+        )
         proposed: Dict[str, str] = {"base": remaining_base}
         for target, blks in target_to_blocks.items():
-            proposed[target] = append_requirements(specs[target][1], blks)
+            relinked_blks = [
+                relink_intra_spec_refs(b, target, final_location, known_reqs=base_names)
+                for b in blks
+            ]
+            proposed[target] = append_requirements(specs[target][1], relinked_blks)
 
+        # The moved addresses all reference ``base`` requirements, so the known-name
+        # guard for inter-spec relinking is the base spec's indexed requirement set
+        # (distinguishes ``base::Foo`` from a distinct ``base::Foo bar`` that did
+        # not move, regardless of capitalization).
+        moved_known: Dict[str, list] = {"base": base_names}
         changed: Dict[str, str] = {}
         for name, (path, original) in specs.items():
             candidate = proposed.get(name, original)
-            relinked = rewrite_moved_refs(candidate, moves)
+            relinked = rewrite_moved_refs(candidate, moves, known_reqs=moved_known)
             if relinked != original:
                 changed[name] = relinked
 
@@ -1388,11 +1514,18 @@ class SyncEngine:
                     "error": f"validation failed for {name}",
                 }
 
-        for name, content in changed.items():
-            try:
-                specs[name][0].write_text(content, encoding="utf-8")
-            except OSError as exc:
-                logger.error("Failed to write spec '%s' during migration: %s", name, exc)
+        edits = [
+            (specs[name][0], content, specs[name][1])
+            for name, content in changed.items()
+        ]
+        error = self._write_all_or_restore(edits, [])
+        if error is not None:
+            return {
+                "specs_updated": 0,
+                "migrated": [],
+                "skipped": names,
+                "error": f"write failed: {error}",
+            }
 
         result["specs_updated"] = len(changed)
         self._rebuild_index()
@@ -1414,19 +1547,42 @@ class SyncEngine:
         from .spec_validator import validate_spec_structure
         from .sync_governance import (
             build_parallel_spec,
+            normalize_spec_name,
+            relink_intra_spec_refs,
+            requirement_names,
             rewrite_moved_refs,
             split_out_requirements,
         )
 
         source_spec = getattr(proposal, "source_spec", "")
-        new_spec = getattr(proposal, "new_spec", "")
+        raw_new_spec = getattr(proposal, "new_spec", "")
         req_names = list(getattr(proposal, "requirement_names", []) or [])
         domain = getattr(proposal, "domain", None)
         purpose = getattr(proposal, "purpose", "") or ""
 
+        # The new spec name is interpolated unquoted into the filesystem path
+        # (``se3/specs/<new_spec>/spec.md``) and into every relinked
+        # ``<new_spec>::<req>`` logical address, so it MUST be a flat, safe
+        # kebab component. An LLM that confuses the name with the layered
+        # ``domain`` field (e.g. ``"engine/merge-internals"``) or emits ``..``
+        # would otherwise create a nested or out-of-tree directory the
+        # one-level index and ``_all_spec_texts()`` cannot see, silently
+        # losing the moved Requirements from the navigation layer.
+        new_spec = normalize_spec_name(raw_new_spec)
+        if not new_spec:
+            return {
+                "created": False,
+                "error": f"invalid new spec name '{raw_new_spec}'",
+            }
+
         specs = self._all_spec_texts()
         if source_spec not in specs:
             return {"created": False, "error": f"source spec '{source_spec}' not found"}
+        if new_spec == source_spec:
+            return {
+                "created": False,
+                "error": f"new spec name '{new_spec}' collides with source spec",
+            }
         if new_spec in specs:
             return {"created": False, "error": f"target spec '{new_spec}' already exists"}
         if not req_names:
@@ -1434,9 +1590,32 @@ class SyncEngine:
 
         source_path, source_text = specs[source_spec]
         remaining_source, blocks = split_out_requirements(source_text, req_names)
-        ordered_blocks = [blocks[n] for n in req_names if n in blocks]
-        if not ordered_blocks:
+        if not blocks:
             return {"created": False, "error": "none of the named requirements found"}
+
+        # Post-move location of every Requirement originally in the source spec:
+        # a split-out name lands in the new parallel spec, every other name stays
+        # in the source. This drives intra-spec `Requirement: <name>` relinking so
+        # the documented primary reference form survives the split — the trimmed
+        # source pointing at moved Requirements, and each moved block pointing
+        # back at Requirements that stayed in the source.
+        source_names = requirement_names(source_text)
+        final_location: Dict[str, str] = {
+            n: source_spec for n in source_names
+        }
+        for n in blocks:
+            final_location[n] = new_spec
+
+        remaining_source = relink_intra_spec_refs(
+            remaining_source, source_spec, final_location, known_reqs=source_names
+        )
+        ordered_blocks = [
+            relink_intra_spec_refs(
+                blocks[n], new_spec, final_location, known_reqs=source_names
+            )
+            for n in req_names
+            if n in blocks
+        ]
 
         new_spec_text = build_parallel_spec(
             new_spec, ordered_blocks, domain=domain, purpose=purpose
@@ -1444,6 +1623,20 @@ class SyncEngine:
         moves: Dict[Tuple[str, str], Tuple[str, str]] = {
             (source_spec, n): (new_spec, n) for n in blocks
         }
+
+        # A moved Requirement block may carry an explicit inter-spec
+        # `<source>::<other-moved-req>` reference pointing at a *sibling* that
+        # moved into the new spec alongside it. `relink_intra_spec_refs` only
+        # rewrites the intra-spec `Requirement: <name>` prose form, so without
+        # this the new spec would retain a `<source>::<name>` address that no
+        # longer resolves after the split. Apply the same move map used for the
+        # trimmed source and every other spec so the new spec's own inter-spec
+        # references to relocated siblings relink to `<new_spec>::<name>`.
+        # The moved addresses all reference the source spec, so the known-name
+        # guard for inter-spec relinking is the source spec's indexed requirement
+        # set (capitalization-independent prefix disambiguation).
+        moved_known: Dict[str, list] = {source_spec: source_names}
+        new_spec_text = rewrite_moved_refs(new_spec_text, moves, known_reqs=moved_known)
 
         # Validate the trimmed source + new spec before writing anything.
         for name, content in ((source_spec, remaining_source), (new_spec, new_spec_text)):
@@ -1459,28 +1652,28 @@ class SyncEngine:
                 }
 
         # Relink refs in every other spec.
-        changed: Dict[str, str] = {source_spec: rewrite_moved_refs(remaining_source, moves)}
+        changed: Dict[str, str] = {
+            source_spec: rewrite_moved_refs(remaining_source, moves, known_reqs=moved_known)
+        }
         for name, (path, original) in specs.items():
             if name == source_spec:
                 continue
-            relinked = rewrite_moved_refs(original, moves)
+            relinked = rewrite_moved_refs(original, moves, known_reqs=moved_known)
             if relinked != original:
                 changed[name] = relinked
 
-        # Write the trimmed source + relinked specs, then create the new spec.
-        for name, content in changed.items():
-            try:
-                specs[name][0].write_text(content, encoding="utf-8")
-            except OSError as exc:
-                logger.error("Failed to write spec '%s' during split: %s", name, exc)
-
-        new_dir = self._specs_dir() / new_spec
-        try:
-            new_dir.mkdir(parents=True, exist_ok=True)
-            (new_dir / "spec.md").write_text(new_spec_text, encoding="utf-8")
-        except OSError as exc:
-            logger.error("Failed to create parallel spec '%s': %s", new_spec, exc)
-            return {"created": False, "error": str(exc)}
+        # Write the trimmed source + relinked specs and create the new spec
+        # atomically: if creating the parallel spec fails, the source/ref edits
+        # are rolled back so requirements never vanish from the source while the
+        # new spec is missing (and no relinked ref points at a nonexistent spec).
+        edits = [
+            (specs[name][0], content, specs[name][1])
+            for name, content in changed.items()
+        ]
+        new_path = self._specs_dir() / new_spec / "spec.md"
+        error = self._write_all_or_restore(edits, [(new_path, new_spec_text)])
+        if error is not None:
+            return {"created": False, "error": f"write failed: {error}"}
 
         self._rebuild_index()
         return {
@@ -1503,6 +1696,7 @@ class SyncEngine:
         from .sync_governance import ensure_domain_marker, has_domain_marker
 
         specs = self._all_spec_texts()
+        edits: List[Tuple[Path, str, str]] = []
         updated: List[str] = []
         for name, domain in domains.items():
             if not domain or not domain.strip():
@@ -1515,13 +1709,22 @@ class SyncEngine:
                 continue
             new_text = ensure_domain_marker(text, domain)
             if new_text != text:
-                try:
-                    path.write_text(new_text, encoding="utf-8")
-                    updated.append(name)
-                except OSError as exc:
-                    logger.warning("Failed to backfill domain for '%s': %s", name, exc)
-        if updated:
-            self._rebuild_index()
+                edits.append((path, new_text, text))
+                updated.append(name)
+        if not edits:
+            return []
+        # Write every backfilled spec through the same atomic write-and-restore
+        # mechanism the split/migration paths use: each individual write goes via
+        # ``_atomic_write`` (temp file + ``os.replace``) so a write that raises
+        # never truncates an authoritative ``spec.md``, and on the first failure
+        # every already-committed marker is rolled back to its original content.
+        # A partial / interrupted / disk-full write therefore never leaves one
+        # spec truncated while earlier specs retain their new marker.
+        error = self._write_all_or_restore(edits, [])
+        if error is not None:
+            logger.warning("Failed to backfill domains atomically: %s", error)
+            return []
+        self._rebuild_index()
         return updated
 
     def specs_missing_domain(self) -> List[str]:
@@ -1533,6 +1736,156 @@ class SyncEngine:
             if not has_domain_marker(text):
                 missing.append(name)
         return sorted(missing)
+
+    def oversized_specs(self) -> List[str]:
+        """Return non-base spec names whose file exceeds the warn threshold.
+
+        These are split-evaluation candidates: a spec over the configured
+        ``spec_file_warn_bytes`` *may* be multi-topic and warrant a parallel
+        split (the LLM judges cohesion in ``propose_spec_split``). ``base`` is
+        excluded — its over-limit treatment is content migration, not split.
+        """
+        from ..config import load_spec_governance_config
+
+        cfg = load_spec_governance_config(self.project_root)
+        limit = cfg.spec_file_warn_bytes
+        out: List[str] = []
+        for name, (path, text) in self._all_spec_texts().items():
+            if name == "base":
+                continue
+            if len(text.encode("utf-8")) > limit:
+                out.append(name)
+        return sorted(out)
+
+    def propose_domain_backfill(self, llm_caller: Any) -> List[str]:
+        """LLM-assisted: assign + persist a ``<!-- domain: -->`` marker for every
+        spec that currently lacks one, so existing domain-less specs stop
+        rendering under ``(未分类)`` forever.
+
+        This is the restructuring-time domain maintenance the governance model
+        promises (``se3 sync`` *维护与补全* domains): it asks the LLM to place
+        each domain-less spec in the hierarchical domain taxonomy already used by
+        the project's other specs, validates the proposal, and applies it via the
+        pure :meth:`backfill_domains`. No-ops (zero LLM calls) when every spec
+        already declares a domain. The single LLM use here is proposal
+        generation; the actual write is pure and never blocks sync. Returns the
+        list of specs that received a marker.
+        """
+        missing = self.specs_missing_domain()
+        if not missing:
+            return []
+
+        from .sync_governance import domain_of, requirement_names
+
+        specs = self._all_spec_texts()
+        # Existing domain taxonomy (examples that steer the LLM toward a
+        # consistent hierarchy rather than inventing a parallel one).
+        existing: List[str] = []
+        for name, (_p, text) in specs.items():
+            dom = domain_of(text)
+            if dom:
+                existing.append(f"- {name}: {dom}")
+
+        def _spec_brief(name: str) -> str:
+            entry = specs.get(name)
+            if entry is None:
+                return f"- {name}"
+            reqs = requirement_names(entry[1])[:6]
+            req_hint = ("; ".join(reqs)) if reqs else "(no requirements)"
+            return f"- {name} — Requirements: {req_hint}"
+
+        prompt = (
+            "You are assigning a hierarchical `domain` path to each spec that "
+            "currently lacks a `<!-- domain: <path> -->` header marker.\n\n"
+            "A domain is a layered path (e.g. `engine/steps`, `server`, "
+            "`engine/merge`) that classifies the spec ABOVE the spec level so "
+            "the navigation index can group related specs. Reuse the existing "
+            "taxonomy below where a spec fits under it; otherwise introduce a "
+            "concise new path.\n\n"
+            "## Existing domain taxonomy\n"
+            + ("\n".join(sorted(existing)) if existing else "(none yet)")
+            + "\n\n## Specs needing a domain\n"
+            + "\n".join(_spec_brief(n) for n in missing)
+            + "\n\n## Instructions\n"
+            "Output a JSON array; each entry is {\"spec_name\": <one of the "
+            "specs needing a domain above>, \"domain\": <hierarchical path, "
+            "lowercase, '/'-separated>}. Assign a domain to EVERY listed spec. "
+            "Output ONLY the JSON array."
+        )
+        try:
+            raw = llm_caller.call(prompt=prompt, json_mode="off")
+        except Exception as exc:
+            logger.error("propose_domain_backfill LLM call failed: %s", exc)
+            return []
+
+        entries = self._parse_json_array(raw)
+        valid_specs = set(missing)
+        domains: Dict[str, str] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("spec_name", "")
+            domain = entry.get("domain", "")
+            if (
+                isinstance(name, str)
+                and isinstance(domain, str)
+                and name in valid_specs
+                and domain.strip()
+            ):
+                domains[name] = domain.strip()
+        if not domains:
+            return []
+        return self.backfill_domains(domains)
+
+    def run_governance(self, llm_caller: Any) -> Dict[str, Any]:
+        """Post-convergence spec volume-governance detection + proposal.
+
+        Deterministically detects governance work — an over-limit ``base`` and
+        over-sized (potentially multi-topic) module specs — and generates the
+        respond-channel confirmation call files the user approves via ``se3
+        sync-respond``. The actual content move (migration / split) stays a pure
+        operation gated behind that human confirmation; the only LLM use here is
+        proposal generation, and each proposal step no-ops when its threshold is
+        not exceeded (so a compliant project incurs zero extra LLM calls). Also
+        reports specs still missing a ``<!-- domain: -->`` marker so the caller
+        can surface the backfill backlog. Never raises — each sub-step is
+        independently fault-tolerant so a governance hiccup cannot fail an
+        otherwise-converged sync.
+        """
+        result: Dict[str, Any] = {
+            "base_migration_call": None,
+            "split_calls": [],
+            "domains_backfilled": [],
+            "specs_missing_domain": [],
+        }
+        try:
+            if self.base_exceeds_limit():
+                call = self.propose_base_migration(llm_caller)
+                if call is not None:
+                    result["base_migration_call"] = str(call)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Governance: base migration proposal failed: %s", exc)
+        try:
+            for spec_name in self.oversized_specs():
+                call = self.propose_spec_split(spec_name, llm_caller)
+                if call is not None:
+                    result["split_calls"].append(str(call))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Governance: spec split proposal failed: %s", exc)
+        # Restructuring-time domain maintenance: actually ASSIGN and PERSIST a
+        # domain marker for specs that lack one, rather than only reporting them
+        # — otherwise a domain-less spec renders under "(未分类)" on every sync
+        # forever. Runs before the audit below so the reported backlog reflects
+        # what remains after the backfill.
+        try:
+            result["domains_backfilled"] = self.propose_domain_backfill(llm_caller)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Governance: domain backfill failed: %s", exc)
+        try:
+            result["specs_missing_domain"] = self.specs_missing_domain()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Governance: domain audit failed: %s", exc)
+        return result
 
     @staticmethod
     def _parse_json_array(raw: Any) -> List[Dict[str, Any]]:
@@ -1828,11 +2181,14 @@ class SyncEngine:
 
         result = self.migrate_requirements(approved)
         skipped += len(result.get("skipped", []))
-        return {
+        response: Dict[str, Any] = {
             "specs_updated": result.get("specs_updated", 0),
             "skipped": skipped,
             "migrated": result.get("migrated", []),
         }
+        if result.get("error"):
+            response["error"] = result["error"]
+        return response
 
     def _process_split_response(
         self, call_data: Dict[str, Any], response_data: Dict[str, Any]
@@ -1846,6 +2202,7 @@ class SyncEngine:
             item.get("item_id", ""): item for item in call_data.get("items", [])
         }
         specs_created: List[str] = []
+        errors: List[str] = []
         skipped = 0
         for item_id, decision in decisions.items():
             item = by_id.get(item_id)
@@ -1868,9 +2225,15 @@ class SyncEngine:
                 specs_created.append(outcome.get("new_spec", ""))
             else:
                 skipped += 1
+                if outcome.get("error"):
+                    new_spec = item.get("new_spec", "") or "?"
+                    errors.append(f"{new_spec}: {outcome['error']}")
 
-        return {
+        response: Dict[str, Any] = {
             "specs_created": specs_created,
             "specs_updated": len(specs_created),
             "skipped": skipped,
         }
+        if errors:
+            response["error"] = "; ".join(errors)
+        return response

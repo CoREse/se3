@@ -37,12 +37,36 @@ from ...config import (
 
 logger = logging.getLogger(__name__)
 
-# Bounded number of out-port re-prompts when ``selected_items`` contains an
-# address that is not a real flat item (a group/page handle or an intermediate
-# navigation node). The agent is fed the offending addresses and asked to
-# re-drill; if it still fails after these retries the invalid entries are
-# dropped and the flow proceeds (with a base::* fallback when nothing survives).
-_MAX_SELECTION_VALIDATION_RETRIES = 2
+# The analyze step performs task classification + spec selection. Each attempt is
+# one tool-enabled ``caller.call()``: the underlying CLI subprocess carries its
+# own tool loop, so the agent drills the spec index down to leaf items via
+# ``se3 spec index`` / ``se3 spec show`` and self-corrects INSIDE that single call
+# before emitting its ``selected_items``.
+#
+# After the call the out-port validation (item-identity invariant, machine
+# guarantee c) checks every ``selected_items`` entry against the flat item full
+# set by its full ``<spec>::<requirement>`` address. Entries that are not real
+# flat items (a domain group / ``pN`` page handle or an intermediate navigation
+# node) are validation failures, and a single non-item address fails the whole
+# selection (a valid sibling never suppresses it, because dropping a group/page
+# handle would silently lose the Requirements it represents).
+#
+# On a validation failure the step does NOT immediately bubble FAILED to the
+# engine: in a non-interactive flow the failed-step path would pause for a
+# Retry/Skip/Abort human decision rather than continue the selection protocol.
+# Instead the handler runs a bounded IN-STEP retry loop (``MAX_SELECTION_ATTEMPTS``)
+# that feeds the rejected addresses straight back into a fresh selection call so
+# the agent drills each handle down to leaf items, and retries automatically with
+# no human intervention. Only after exhausting those attempts does it return
+# FAILED with the rejected addresses in ``error_message`` AND record the diagnosis
+# into the step's chat history, so the ENGINE-LEVEL retry path replays it as
+# feedback — instead of silently degrading to unrelated base-only context.
+
+# Bounded in-step selection-validation retries before deferring to the
+# engine-level retry path. Each attempt is one tool-enabled ``caller.call()``
+# whose subprocess drills the index down on its own; between attempts the
+# rejected non-item addresses are fed back into the prompt.
+MAX_SELECTION_ATTEMPTS = 3
 
 
 ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze the following task description and determine:
@@ -178,14 +202,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info(f"Analyzing task: {task_description[:60]}...")
 
     try:
-        # --- LLM call: task classification + spec selection ---
-        # The call is a single `caller.call()` whose underlying CLI subprocess
-        # carries its own tool loop, so the agent drills the spec index down to
-        # leaf items WITHIN one call. The bounded loop here is the OUT-PORT
-        # validation channel of the item-identity invariant (machine guarantee
-        # c): after parsing the JSON we check every selected_items entry against
-        # the flat item full set; if any is a group/page handle or intermediate
-        # navigation node we feed the offending addresses back and re-prompt.
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count, fix_iteration=step.inputs.get("fix_iteration", 0))
 
@@ -200,12 +216,28 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             '"selected_items": [{"spec": "spec-name", "requirement_name": "Requirement Name or * for all items in spec"}]}'
         )
 
-        result: dict = {}
+        # --- LLM call(s): task classification + spec selection ---
+        # Bounded in-step retry loop. Each iteration is one tool-enabled
+        # `caller.call()` whose subprocess drills the spec index down to leaf
+        # items via `se3 spec index` / `se3 spec show` and self-corrects within
+        # that single call. After the call, the out-port validation (item-identity
+        # invariant, machine guarantee c) rejects any non-item address (domain
+        # group / `pN` page handle / intermediate node); ANY invalid address fails
+        # the whole selection (a valid sibling never suppresses it).
+        #
+        # On a validation failure we do NOT immediately return FAILED — in a
+        # non-interactive flow that would pause for a Retry/Skip/Abort human
+        # decision instead of continuing the protocol. Instead we feed the rejected
+        # addresses straight back into a fresh selection call and retry
+        # automatically, up to MAX_SELECTION_ATTEMPTS. Only after exhausting those
+        # attempts do we return FAILED for the ENGINE-LEVEL retry path, recording
+        # the rejected addresses so it can replay them as feedback.
+        selection_prompt = prompt
+        result: dict | None = None
         selected_items: list = []
-        feedback = ""
-        for attempt in range(_MAX_SELECTION_VALIDATION_RETRIES + 1):
+        for attempt in range(MAX_SELECTION_ATTEMPTS):
             response = caller.call(
-                prompt=prompt + feedback,
+                prompt=selection_prompt,
                 json_mode="two_phase",
                 json_schema_hint=ANALYZE_SCHEMA_HINT,
                 required_keys=["task_type"],
@@ -213,45 +245,60 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
             # Parse JSON response
             result = parse_json_response(response, required_keys=["task_type"])
-
             if not result:
                 step.error_message = "Failed to parse LLM response"
                 return StepStatus.FAILED
 
-            # Normalize selected_items (legacy fallback + list coercion), then
-            # run the out-port validation against the flat item full set.
+            # Normalize selected_items (legacy fallback + list coercion), then run
+            # the out-port validation against the flat item full set (item-identity
+            # invariant, machine guarantee c).
             selected_items = _normalize_selected_items(result, index, spec_names)
             invalid = _validate_selected_items_against_flat_set(selected_items, index)
-
             if not invalid:
                 break
 
-            if attempt < _MAX_SELECTION_VALIDATION_RETRIES:
-                logger.warning(
-                    "selected_items contained %d non-item address(es) "
-                    "(group/page handle or intermediate node); re-prompting "
-                    "(attempt %d/%d): %r",
-                    len(invalid), attempt + 1,
-                    _MAX_SELECTION_VALIDATION_RETRIES, invalid,
-                )
-                feedback = _build_validation_feedback(invalid)
-                continue
-
-            # Retries exhausted: drop the invalid entries (keep the valid ones)
-            # so the flow still proceeds rather than failing outright.
+            # Item-identity invariant, machine guarantee (c): ANY non-item address
+            # in the selection is a validation failure. A group / page handle
+            # represents additional Requirements the LLM intended to select, so we
+            # MUST NOT silently drop it and proceed on the valid siblings alone —
+            # that would feed downstream steps incomplete spec context while
+            # masking the failure.
+            failure_message = _build_selection_failure_message(invalid)
+            is_last_attempt = attempt == MAX_SELECTION_ATTEMPTS - 1
             logger.warning(
-                "selected_items still invalid after %d retries; dropping "
-                "non-item address(es): %r",
-                _MAX_SELECTION_VALIDATION_RETRIES, invalid,
+                "analyze selection (attempt %d/%d): selected_items contained %d "
+                "non-item address(es): %s%s",
+                attempt + 1, MAX_SELECTION_ATTEMPTS, len(invalid), invalid,
+                "" if is_last_attempt else
+                "; feeding the rejected addresses back and retrying selection "
+                "automatically (no human intervention)",
             )
-            selected_items = _keep_valid_items(selected_items, index)
 
-        # Validate task_type
-        valid_types = ["feature", "bugfix", "review", "small", "directive"]
-        task_type = result.get("task_type", "feature")
-        if task_type not in valid_types:
-            logger.warning(f"Invalid task_type '{task_type}', defaulting to 'feature'")
-            task_type = "feature"
+            if is_last_attempt:
+                # Exhausted the in-step retries. Surface the rejected addresses and
+                # record the diagnosis into the step's chat history so the
+                # engine-level retry path replays it as feedback. The out-port
+                # validation runs AFTER `caller.call()` returns, so the diagnosis
+                # is otherwise absent from the recorded prompt/response history and
+                # a fresh engine-issued attempt would repeat the same handle.
+                step.error_message = failure_message
+                _record_selection_failure_feedback(
+                    project_root,
+                    flow,
+                    step,
+                    failure_message,
+                    attempt=retry_count,
+                )
+                return StepStatus.FAILED
+
+            # Feed the rejected addresses back into a fresh selection call so the
+            # agent drills each handle down to its constituent leaf items, then
+            # retry in-step.
+            selection_prompt = (
+                prompt
+                + "\n\n## Previous Selection Rejected\n"
+                + failure_message
+            )
 
         # Extract task_type from analyze result (discovery only valid with --discover flag)
         resolved_task_type = _extract_task_type(result, flow)
@@ -264,9 +311,11 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         flow.task_type = resolved_task_type
 
         # --- Post-processing: load spec content programmatically ---
-        # Guarantee non-empty selected_items (LLM is instructed to output
-        # base::* when no items are relevant). If all items were dropped by
-        # validation, insert base::* as a safe fallback.
+        # Guarantee non-empty selected_items. At this point a selection that was
+        # entirely invalid handles has already returned FAILED above, so reaching
+        # here with an empty selection means the LLM genuinely produced no items
+        # (the prompt instructs it to output base::* when nothing is relevant).
+        # base::* is the safe fallback for that legitimate no-item case.
         if not selected_items:
             logger.warning(
                 "selected_items is empty after validation; falling back to base::*"
@@ -301,8 +350,11 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 len(non_base_selected_ids), len(loaded_ids), missing,
             )
 
-        # Store outputs
-        step.outputs["task_type"] = task_type
+        # Store outputs. Use the authoritative resolved value (after the
+        # --discover preservation and --type override) so step.outputs agrees
+        # with flow.task_type rather than diverging from a separately defaulted
+        # raw value.
+        step.outputs["task_type"] = resolved_task_type
         step.outputs["scope"] = result.get("scope", "")
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["reasoning"] = result.get("reasoning", "")
@@ -349,14 +401,20 @@ def _extract_task_type(analyze_output: dict, flow: FlowInstance) -> str:
     valid_types = ["feature", "bugfix", "review", "small", "directive"]
     task_type = analyze_output.get("task_type", "feature")
     
-    # Discovery mode can ONLY be triggered by --discover flag, never by analyze
-    # If analyze returns "discovery", treat it as "feature"
+    # Discovery mode can ONLY be triggered by the --discover flag, never by
+    # analyze on its own. If analyze returns "discovery", preserve it ONLY when
+    # --discover was actually set (explicit_type == "discovery"); otherwise
+    # downgrade to "feature".
     if task_type == "discovery":
         explicit_type = flow.state.context.get("explicit_type")
-        if explicit_type != "discovery":
-            logger.warning(f"Analyze returned 'discovery' but --discover flag not set, treating as 'feature'")
-            task_type = "feature"
-    
+        if explicit_type == "discovery":
+            # --discover is set, so "discovery" is a legitimate, intended value.
+            # Return early so the valid_types check below (which excludes
+            # "discovery") does not overwrite it with "feature".
+            return "discovery"
+        logger.warning(f"Analyze returned 'discovery' but --discover flag not set, treating as 'feature'")
+        task_type = "feature"
+
     # Validate and normalize task type
     if task_type not in valid_types:
         logger.warning(f"Invalid task_type '{task_type}' from analyze, defaulting to 'feature'")
@@ -521,34 +579,77 @@ def _validate_selected_items_against_flat_set(
     return invalid
 
 
-def _keep_valid_items(selected_items: list, index: Any) -> list:
-    """Drop every entry that fails the flat-set validation, keeping the rest."""
-    flat_ids = _flat_item_ids(index)
-    known_specs = set(getattr(index, "spec_metas", {}))
-    return [
-        item
-        for item in selected_items
-        if _item_is_valid(item, flat_ids, known_specs)
-    ]
+def _build_selection_failure_message(invalid: list[str]) -> str:
+    """Build the ``step.error_message`` surfaced when the selection contained one
+    or more non-item addresses.
 
-
-def _build_validation_feedback(invalid: list[str]) -> str:
-    """Build the re-prompt suffix listing the rejected non-item addresses."""
-    bullets = "\n".join(f"  - {addr}" for addr in invalid)
+    Implements the out-port half of the item-identity invariant (machine
+    guarantee c) WITHOUT re-prompting in-step: instead of spawning extra
+    ``caller.call()`` invocations, the step fails and names EVERY rejected
+    address so the ENGINE-LEVEL retry path can feed them back when it re-issues
+    the analyze step as a fresh single call. Any non-item address fails the whole
+    selection — a valid sibling never suppresses the failure, because a dropped
+    group/page handle would silently lose the Requirements it represents. The
+    message instructs the agent to drill each rejected handle down to its
+    constituent ``<spec>::<requirement>`` leaf items via
+    ``se3 spec index <spec> [<group>...]`` and never re-return a group/page handle.
+    """
     return (
-        "\n\n## Selection Validation Error\n"
-        "Your previous `selected_items` contained entries that are NOT valid "
-        "flat item addresses. Each selected item MUST be a real "
-        "`<spec>::<requirement>` leaf exactly as it appears in a "
-        "`- <spec>::<requirement>` line of `se3 spec index <spec>` output "
-        "(or `<spec>` with `requirement_name` set to `\"*\"` to select the whole "
-        "spec). A domain group name, a `pN` page handle, or any intermediate "
-        "navigation node is NOT a selectable item.\n"
-        f"Rejected entries:\n{bullets}\n"
-        "Re-run `se3 spec index <spec> [<group>...]` to drill down to the leaf "
-        "items, then output `selected_items` using only full "
-        "`<spec>::<requirement>` addresses.\n"
+        "Spec selection failed: selected_items contained non-item "
+        f"addresses {invalid} (domain group names, `pN` page handles, or "
+        "intermediate navigation nodes), none of which carries a flat "
+        "`<spec>::<requirement>` address. Each selected item MUST be a leaf "
+        "address — drill any group/page handle down to its constituent "
+        "Requirements via `se3 spec index <spec> [<group>...]` (Bash is "
+        "available) and select only real `- <spec>::<requirement>` lines (or "
+        "`\"*\"` for a whole spec). Do NOT return any group or page handle, and "
+        "do NOT drop one — re-select EVERY relevant Requirement as a leaf address."
     )
+
+
+def _record_selection_failure_feedback(
+    project_root: Path,
+    flow: FlowInstance,
+    step: Step,
+    failure_message: str,
+    attempt: int,
+) -> None:
+    """Persist the post-validation selection diagnosis into the step's chat
+    history so the engine-level retry can feed it back to the next analyze call.
+
+    The out-port validation (item-identity invariant, machine guarantee c) fires
+    in step code AFTER ``caller.call()`` has already recorded the prompt/response
+    pair. ``format_history_for_retry`` only replays those recorded turns, so the
+    rejected-handle diagnosis would otherwise never reach the next attempt and the
+    model could keep returning the same group/page handle until retries exhaust.
+    Recording it as a ``user``-role turn (the role ``format_history_for_retry``
+    re-emits as ``[User Prompt]:``) tagged with the same ``attempt`` /
+    ``fix_iteration`` as the rejected response makes the diagnosis appear as
+    feedback immediately after that response in the next retry's context.
+
+    Best-effort: a recording failure must never mask the FAILED return, so a
+    missing flow_id / step_id is a soft no-op and any error is swallowed by the
+    underlying ``record_prompt`` write guard.
+    """
+    if not flow.flow_id or not step.step_id:
+        return
+    try:
+        from ..chat_history import record_prompt
+
+        record_prompt(
+            project_root,
+            flow.flow_id,
+            step.step_id,
+            step.step_type.value,
+            failure_message,
+            attempt=attempt,
+            fix_iteration=step.inputs.get("fix_iteration", 0),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to record analyze selection-failure feedback for retry: %s",
+            exc,
+        )
 
 
 def _normalize_selected_items(

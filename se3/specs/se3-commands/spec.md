@@ -399,6 +399,7 @@ se3 guardrails <spec-file> [--original <original-file>]
 **Guardrail Checks:**
 1. **must_not_delete**: Detect deleted WHEN/THEN scenarios
 2. **must_not_weaken**: Detect weakened language (SHALL → SHOULD, MUST → SHOULD)
+3. **spec size checks**: Detect spec-volume violations against the configured thresholds (see the `se3-config` *Spec Governance Configuration* Requirement) — an over-limit `base` spec (default 32 KiB), an over-threshold spec file (default 64 KiB), and an over-threshold single Requirement (default 8 KiB). The size checks honour the configured tier (`spec_governance.size_check_tier`): in the default `warn` tier they emit advisory warnings without failing the command, and in the `enforce` tier an over-limit finding causes a non-zero exit. The `base` cap is checked because `base` is injected in full on every LLM call; the per-spec-file and per-Requirement thresholds are refactor / split-evaluation signals (see the `spec-format` *Spec Volume Governance Standards* Requirement).
 
 #### Scenario: Detect spec violations
 - **GIVEN** a modified spec file
@@ -410,6 +411,81 @@ se3 guardrails <spec-file> [--original <original-file>]
 - **GIVEN** a spec file with no guardrail violations
 - **WHEN** user runs `se3 guardrails <spec-file>`
 - **THEN** the command reports success
+
+#### Scenario: Warn-tier size check reports without blocking
+- **GIVEN** the configured `spec_governance.size_check_tier` is `warn` (the default)
+- **AND** the `base` spec exceeds `base_size_limit`, a spec file exceeds `spec_file_warn_threshold`, or a single Requirement exceeds `requirement_warn_threshold`
+- **WHEN** the user runs `se3 guardrails`
+- **THEN** the command emits a size warning naming the offending spec / Requirement and its byte size
+- **AND** the command does NOT exit non-zero on the strength of the size finding alone
+
+#### Scenario: Enforce-tier size check blocks on over-limit base
+- **GIVEN** the configured `spec_governance.size_check_tier` is `enforce`
+- **AND** the `base` spec exceeds its configured `base_size_limit`
+- **WHEN** the user runs `se3 guardrails`
+- **THEN** the command reports the over-limit `base` violation
+- **AND** the command exits with a non-zero status
+
+### Requirement: `se3 spec` Command
+
+The `se3 spec` command SHALL expose the item-level spec index to the LLM (and to humans) as a pair of read-only subcommands — `se3 spec index` and `se3 spec show` — that render the program-derived navigation layer as **size-bounded** views over the authoritative `spec.md` storage. The index is a navigation layer (programmatically derived, rebuildable at any time, holding no authoritative content); the spec files are the storage layer (the authoritative content, unified as a single `spec.md` per spec). These subcommands are the unified LLM-facing surface for spec information retrieval; their stdout (plus the program-injected root view produced by the same renderer) is the only spec-index channel the LLM consumes — the `se3/cache/spec-index.json` cache is an internal format and is NOT a direct LLM read target.
+
+**Interface:**
+```bash
+se3 spec index [<spec> [<group>...]]    # render a size-bounded index view
+se3 spec show <spec>::<requirement>     # print one Requirement body + its physical location
+```
+
+**`se3 spec index` rendering:**
+- With **no argument**, it renders the **root view**: every spec's name + one-line locator (the `## Purpose` first sentence) + item count.
+- With a `<spec>` argument, it renders that spec's **item index**: each item's id, title, summary, tags, and refs.
+- Additional `<group>...` path segments select a recursive subgroup or pagination handle within the spec view, so deeper drill-down is addressable.
+- Every view is rendered **size-bounded** by a deterministic-greedy fold against the configured `spec_governance.index_output_threshold` (default 16 KiB): the view is first rendered fully expanded; while it exceeds the threshold the renderer folds the **largest** currently-rendered collapsible unit (a domain group in the root view; a `###` section group in a spec view; a `####` subgroup or page in a group view) into a single **group handle** (group name + one-line summary + the exact command to fetch that group), breaking ties by name in lexicographic order, repeating until the output is at or below the threshold. The result MAY be a **mixed view** (some units folded to handles, the rest listed as item entries). When every unit is folded and the output is still over threshold, the renderer applies the next abstraction layer (domain path, level by level) or deterministic pagination (`<group>/p1`, `<group>/p2`, …) recursively until the output is bounded. The same input always produces the same output. The whole pipeline — summary derivation, grouping, folding, rendering — runs with NO LLM involvement.
+- Each command's output is **self-describing**: it embeds the command format for fetching the next layer down and for fetching an item body, so the LLM needs no external knowledge to drill down. Group handles and item entries are visibly distinguished per the *item identity invariant*: an item entry carries its full `<spec>::<requirement>` logical address; a group handle has no `::` address and carries only the command to take that group.
+
+**`se3 spec show` output:**
+- `se3 spec show <spec>::<requirement>` prints the single Requirement's body together with its **physical location** — the spec file path plus the line-number range — resolved from the index's internal physical-location fields, with the body and the location consistent.
+- It accepts **only an item address** (`<spec>::<requirement>`). A group name, an intermediate-node name, or any non-item address is rejected with an error and a non-zero exit; the body of a group handle is never a valid `show` target.
+
+**Freshness:** Both subcommands reuse the existing `load_or_build()` incremental-rebuild mechanism — each invocation first runs the mtime / size / sha256 incremental check (and the index-version self-invalidation) before rendering, so the output is always current with the on-disk specs.
+
+#### Scenario: Root view lists every spec with locator and item count
+- **WHEN** the user (or an LLM step) runs `se3 spec index` with no argument
+- **THEN** the output lists every spec's name, its one-line locator (the `## Purpose` first sentence), and its item count
+- **AND** the output embeds the command format for drilling into a specific spec
+
+#### Scenario: Spec view lists items with full logical addresses
+- **WHEN** the user runs `se3 spec index <spec>`
+- **THEN** the output lists that spec's items, each carrying its full `<spec>::<requirement>` address plus title, summary, tags, and refs
+
+#### Scenario: Over-threshold view folds the largest unit first into a mixed view
+- **GIVEN** a rendered index view whose fully expanded size exceeds `spec_governance.index_output_threshold`
+- **WHEN** `se3 spec index` renders it
+- **THEN** the renderer folds the largest collapsible unit into a group handle (name + one-line summary + the exact command to fetch that group), repeating largest-first until the output is at or below the threshold
+- **AND** ties in unit size are broken by name in lexicographic order, so the same input always produces the same output
+- **AND** the result may be a mixed view in which group handles and item entries coexist, visibly distinguished (handles have no `::` address)
+
+#### Scenario: Folded group can be drilled into recursively
+- **GIVEN** a root-view or spec-view render that folded one or more groups into handles
+- **WHEN** the user runs the exact command shown on a group handle (with the `<group>...` path)
+- **THEN** the renderer renders that group's contents, itself size-bounded — folding further `####` subgroups or paginating with `<group>/pN` handles when the group view is itself over threshold
+- **AND** the root view, when over threshold, groups specs by their `domain` path level by level
+
+#### Scenario: `se3 spec show` prints a Requirement body with its physical location
+- **WHEN** the user runs `se3 spec show <spec>::<requirement>` for an existing item
+- **THEN** the output contains that Requirement's body and its physical location (spec file path + line-number range)
+- **AND** the body and the reported line range are consistent
+
+#### Scenario: `se3 spec show` rejects a non-item address
+- **WHEN** the user runs `se3 spec show` with a group name, an intermediate-node name, or any address lacking a `<spec>::<requirement>` form
+- **THEN** the command prints an error and exits with a non-zero status
+- **AND** no Requirement body is printed
+
+#### Scenario: `se3 spec` output reflects on-disk edits without a manual rebuild
+- **GIVEN** a spec file was edited on disk since the last index build
+- **WHEN** the user runs `se3 spec index` or `se3 spec show`
+- **THEN** the command first runs the `load_or_build()` mtime / size / sha256 incremental check and rebuilds the affected entries
+- **AND** the rendered output reflects the current on-disk content
 
 ### Requirement: `se3 history` Command
 
@@ -778,6 +854,32 @@ se3 sync --confirm-cleanup            # Prompt for human approval before deletin
 - **THEN** both values MUST be integers >= 1
 - **AND** `--stable-rounds` MUST NOT exceed `--max-rounds`
 - **AND** any violation of these constraints produces a usage error and the command exits with a non-zero status without invoking the LLM or starting the sync loop
+
+**Spec-volume governance (base relocation, parallel split, domain maintenance):** As the spec-volume governance *repair* execution point, `se3 sync` SHALL additionally:
+
+- **base content relocation** — when the `base` spec carries content that violates the `base` admission standard (module-specific detail such as daemon/server submodule lists or per-step mechanics) or pushes `base` over its configured `spec_governance.base_size_limit`, sync relocates that content into the corresponding module spec, keeping `base` within its admission limit. The over-limit disposition for `base` is content relocation, not truncation.
+- **parallel spec split** — splitting an over-sized, multi-topic spec into parallel specs is a semantic-level refactor (it produces a new spec name and must update logical addresses, cross-spec refs, the index, and `domain` metadata), so it is performed ONLY by `se3 sync`; the split plan is confirmed by the user through sync's respond channel (the same call-file pathway used for high-impact deletions). The cohesion-first / size-second split criterion is applied (see the `spec-format` *Spec Volume Governance Standards* Requirement): an internally cohesive but merely long spec is NOT force-split.
+- **domain maintenance** — sync maintains and back-fills each spec's `<!-- domain: <layered/path> -->` header metadata during refactors, so the program-derived root-view grouping stays accurate.
+
+#### Scenario: Sync relocates over-admission base content into module specs
+- **GIVEN** the `base` spec contains module-specific detail (e.g. a Daemon Modules or Server Modules section) and/or exceeds `spec_governance.base_size_limit`
+- **WHEN** the user runs `se3 sync`
+- **THEN** the offending content is relocated into the corresponding module spec
+- **AND** `base` is brought within its configured admission size limit
+- **AND** sync writes only under `se3/specs/` (no source code or issues are touched)
+
+#### Scenario: Parallel spec split is confirmed through the respond channel
+- **GIVEN** sync judges that an over-sized, multi-topic spec should be split into parallel specs
+- **WHEN** the round reaches the split decision
+- **THEN** sync writes a call file describing the split plan and pauses for the user to confirm via `se3 sync-respond`
+- **AND** on confirmation the split produces the new spec name(s) and updates logical addresses, cross-spec refs, the index, and `domain` metadata accordingly
+- **AND** an internally cohesive but merely long spec is NOT force-split
+
+#### Scenario: Sync back-fills missing domain metadata
+- **GIVEN** a spec lacks a `<!-- domain: <layered/path> -->` header marker
+- **WHEN** `se3 sync` refactors or maintains that spec
+- **THEN** sync back-fills the `domain` header so the root-view grouping can classify the spec
+- **AND** a spec still missing `domain` renders under the `(未分类)` group in the root view
 
 ### Requirement: Incremental Sync Optimization
 

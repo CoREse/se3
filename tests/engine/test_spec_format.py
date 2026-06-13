@@ -467,7 +467,12 @@ class TestRealSpecFiles:
     def test_base_spec_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "base" / "spec.md").read_text()
         parsed = parse_spec(text)
-        assert len(parsed.requirements) == 19
+        # Base was trimmed by the spec volume-governance migration: the
+        # module-detail registries (Daemon Modules, Server Modules, Server
+        # Identity..., Engine Module Extensions, Engine Step Implementations,
+        # Engine Merge Submodules) were relocated into the daemon / server /
+        # engine-internals specs to keep base under its 32 KiB admission limit.
+        assert len(parsed.requirements) == 13
         names = [r.name for r in parsed.requirements]
         assert "Project Identity" in names
         assert "Directory Structure" in names
@@ -478,7 +483,10 @@ class TestRealSpecFiles:
     def test_flow_engine_spec_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "flow-engine" / "spec.md").read_text()
         parsed = parse_spec(text)
-        assert len(parsed.requirements) == 47
+        # 48 after the "Index-First Spec Information Protocol" Requirement was
+        # added documenting the se3 spec index/show navigation protocol that
+        # analyze / update_spec / verify_spec now follow.
+        assert len(parsed.requirements) == 48
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()
@@ -507,8 +515,12 @@ class TestRealSpecFiles:
         text = (specs_dir / "spec-format" / "spec.md").read_text()
         parsed = parse_spec(text)
         assert parsed.has_v1_marker is True
-        assert len(parsed.requirements) == 12
+        # 13 after the "Spec Volume Governance Standards" Requirement was added
+        # to durably record the base admission standard / writing discipline /
+        # split criteria in the spec corpus (mirrors spec_governance.py).
+        assert len(parsed.requirements) == 13
         names = [r.name for r in parsed.requirements]
+        assert "Spec Volume Governance Standards" in names
         assert "Spec Format Version" in names
         assert "Requirement Boundary" in names
         assert "Shared Sections" in names
@@ -518,7 +530,8 @@ class TestRealSpecFiles:
     def test_base_spec_line_numbers(self, specs_dir: Path):
         text = (specs_dir / "base" / "spec.md").read_text()
         parsed = parse_spec(text)
-        # First requirement "Project Identity" starts at line 9
-        assert parsed.requirements[0].line_start == 9
-        # Second requirement "Directory Structure" starts at line 14
-        assert parsed.requirements[1].line_start == 14
+        # First requirement "Project Identity" starts at line 10 (the base header
+        # now carries a `<!-- domain: project -->` marker line above the title).
+        assert parsed.requirements[0].line_start == 10
+        # Second requirement "Directory Structure" starts at line 15.
+        assert parsed.requirements[1].line_start == 15

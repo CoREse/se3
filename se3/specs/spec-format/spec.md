@@ -34,6 +34,20 @@ A spec file MAY declare its format version via a v1 marker. The marker is an HTM
 - A spec without a v1 marker is parsed in "lenient mode": the parser processes it using v1 rules but emits a warning that the format version is undeclared.
 - Future format versions (v2, v3, etc.) will use the same marker pattern with an updated version string.
 
+**Domain header marker (same marker region):**
+
+Alongside the `<!-- spec-format: v1 -->` marker, a spec MAY declare a `<!-- domain: <layered/path> -->` HTML-comment marker in the same header region. The `domain` path (e.g. `engine/steps`) is the derived source of the spec's **above-spec classification**: the root index view groups specs by their `domain` path, level by level, when the root view grows past its size threshold (see the `se3-commands` *`se3 spec` Command* Requirement and the `spec-format` *Spec Volume Governance Standards* Requirement). The `domain` marker is purely a navigation-classification input read mechanically at render time; it does not affect parsing of Requirements. A spec with no `domain` marker is classified under the `(未分类)` group when the root view is grouped by domain.
+
+#### Scenario: Domain header marker classifies the spec in the root view
+- **GIVEN** a spec whose header declares `<!-- domain: engine/steps -->` alongside its `<!-- spec-format: v1 -->` marker
+- **WHEN** the root index view is grouped by domain
+- **THEN** the spec is classified under the `engine/steps` domain path
+
+#### Scenario: Spec without a domain marker falls into the uncategorized group
+- **GIVEN** a spec whose header declares no `<!-- domain: ... -->` marker
+- **WHEN** the root index view is grouped by domain
+- **THEN** the spec is classified under the `(未分类)` group
+
 #### Scenario: Valid v1 marker at file start
 - **GIVEN** a spec file whose first line is `<!-- spec-format: v1 -->`
 - **WHEN** the parser reads the file
@@ -654,3 +668,32 @@ The validator inspects the parsed spec in the following order. All applicable is
 - **WHEN** `validate(parsed)` is called
 - **THEN** the returned issues include one `severity="error"` entry with `location="line 17"` and a message naming the empty-name condition
 - **AND** that same Requirement does NOT additionally produce an illegal-character error or a duplicate-name error in this iteration step
+
+### Requirement: Spec Volume Governance Standards
+
+This Requirement is the durable, human- and tool-readable statement of se3's spec **volume governance**: what the `base` spec may carry, the per-Requirement / per-spec writing discipline that gives the program-derived index its navigational quality, and the criteria for deciding whether an over-sized spec should be split. These standards are mirrored by the constants in `src/se3/engine/spec_governance.py` (`BASE_ADMISSION_STANDARD`, `WRITING_DISCIPLINE`, `SPLIT_CRITERIA`), which the `update_spec` / `se3 sync` prompts inject so the written spec and the injected prompt wording cannot drift apart; this Requirement is the authoritative source the code mirrors, so the standards persist in the spec corpus rather than living only in Python.
+
+**base admission standard.** The `base` spec is the ONLY spec injected — in full — into every step of every session, so its byte size is a fixed cost paid on every single LLM call, and neither on-demand loading nor index drill-down can reduce it. `base` MAY carry ONLY content that every session genuinely needs loaded in full: project identity / positioning; the global architecture picture (the top-level directory map and how the major pieces fit together); cross-cutting conventions that apply project-wide; and a one-line locator index of each module / spec (the name plus a single sentence pointing at where its detail lives). `base` MUST NOT carry module-specific detail — a subsystem's submodule list, internal mechanics, or per-step behaviour belongs in that module's own spec, reachable on demand via `se3 spec index` / `se3 spec show`, NOT in `base`. When a write would push `base` over its configured size limit (default 32 KiB, see `se3-config` *Spec Governance Configuration*), the new content MUST be routed into the corresponding module spec rather than appended to `base`; the over-limit disposition is content relocation, performed by `se3 sync`.
+
+**Writing discipline.** Each layer of the spec index is derived mechanically (no LLM) from text that already exists in the spec at write time. Authors SHALL follow these rules so the derived text stays navigable:
+
+(a) Each Requirement's body SHALL open its first paragraph with a one-sentence, summary-level overview, because the index truncates that opening paragraph (first ~200 chars) into the item's entry summary.
+(b) Each spec's `## Purpose` section SHALL open with a one-sentence locator stating, in a single line, what the spec is about; the root index view shows each spec's name plus this locator.
+(c) Each spec SHALL declare a `<!-- domain: <layered/path> -->` header marker alongside the `<!-- spec-format: v1 -->` marker; the domain path is how the root view groups specs when it grows past its size threshold, and a spec with no domain marker renders under the `(未分类)` bucket.
+(d) Section organisation SHALL keep the number of items under any single `###` section moderate, avoiding hanging an excessive number of Requirements off one section heading. (The renderer paginates over-large groups as a fallback, so this is guidance, not a hard checked rule.)
+
+**Split criteria (cohesion first, size second).** A spec growing past its size warning threshold (default 64 KiB) is a *signal to evaluate*, not an order to split. Cohesion is applied before size: if the over-sized spec is multi-topic (its items cluster into groups with sparse cross-cluster references) it SHOULD be split into parallel specs; if the spec is internally cohesive and merely long it MUST NOT be force-split — its byte size does not pressure the LLM context under the size-bounded index, and it should be slimmed gradually via the per-Requirement discipline (a) instead. A single Requirement growing past its own warning threshold (default 8 KiB) is the unit that SHOULD be split into multiple Requirements, since the Requirement is the body unit injected in items mode and served by `se3 spec show`.
+
+**Responsibility split.** Splitting into parallel specs is a semantic-level refactor (it produces a new spec name and must update logical addresses, cross-spec refs, the index, and domain metadata), so it is performed ONLY by `se3 sync`, with the split plan confirmed by the user through sync's respond channel. The `update_spec` step MUST NOT create a parallel spec on its own; when it judges that a spec should be split it only records the recommendation in its output and leaves the split to `se3 sync`.
+
+#### Scenario: Module-specific detail is admitted into a module spec, not base
+- **GIVEN** an implementation introduces detail belonging to one subsystem (e.g. a daemon submodule list)
+- **WHEN** `update_spec` or `se3 sync` decides where the content lands
+- **THEN** the detail is written into that subsystem's own spec, reachable on demand via `se3 spec index` / `se3 spec show`
+- **AND** it is NOT appended to `base`, keeping `base` within its configured admission size limit
+
+#### Scenario: Over-sized but cohesive spec is not force-split
+- **GIVEN** a spec whose byte size exceeds the spec-file warning threshold but whose items are internally cohesive (dense cross-references, single topic)
+- **WHEN** the split criteria are applied
+- **THEN** the spec is NOT split into parallel specs
+- **AND** it is slimmed gradually via the per-Requirement writing discipline rather than by a semantic split

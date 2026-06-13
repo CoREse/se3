@@ -2839,16 +2839,28 @@ class SpecLoadingConfig:
                 # per-step built-in default instead of shadowing it.
         return cls(steps=steps)
 
-    # Steps that default to full_spec loading (can be overridden in se3.yaml)
-    _DEFAULT_FULL_SPEC_STEPS = {"update_spec"}
+    # Steps that default to full_spec loading (can be overridden in se3.yaml).
+    #
+    # Historically ``update_spec`` defaulted to ``full_spec`` so the LLM could
+    # see all existing spec names for naming-collision avoidance. With the
+    # index-first protocol, ``update_spec`` no longer reads ``spec_content`` at
+    # all — its naming/placement context comes from the injected root view and
+    # on-demand ``se3 spec show`` directed reads — so it has been removed from
+    # this set. Programmatically re-rendering and persisting the entire spec
+    # corpus into ``engine.json`` for an input no consumer uses was pure dead
+    # weight (and the ``full_spec`` empty-``selected_items`` ValueError could
+    # fail a flow over data update_spec ignores). No step currently defaults to
+    # ``full_spec``; the set is retained as the extension point and any step
+    # can still opt in explicitly via ``spec_loading.steps.<step>``.
+    _DEFAULT_FULL_SPEC_STEPS = frozenset()  # type: ignore[var-annotated]
 
     def mode_for(self, step_type: str) -> Literal["items", "full_spec"]:
         """Return the loading mode for *step_type*.
 
-        Defaults to ``"items"`` for most steps. ``update_spec`` defaults to
-        ``"full_spec"`` so the LLM can see all existing spec names for naming
-        collision avoidance and cross-spec consistency checks. Both defaults
-        can be overridden via ``spec_loading.steps.<step>`` in ``se3.yaml``.
+        Defaults to ``"items"`` for every step. No step defaults to
+        ``"full_spec"`` (``update_spec`` moved to the index-first protocol and
+        no longer consumes full spec text), but any step can be switched to
+        ``"full_spec"`` via ``spec_loading.steps.<step>`` in ``se3.yaml``.
         """
         # Explicit config always wins
         if step_type in self.steps:
@@ -2856,7 +2868,8 @@ class SpecLoadingConfig:
             if mode in ("items", "full_spec"):
                 return mode  # type: ignore[return-value]
             return "items"
-        # Default: full_spec for update_spec, items for everything else
+        # Default: items for every step (set is empty); a step opts into
+        # full_spec only when listed in _DEFAULT_FULL_SPEC_STEPS.
         if step_type in self._DEFAULT_FULL_SPEC_STEPS:
             return "full_spec"  # type: ignore[return-value]
         return "items"
@@ -2958,6 +2971,24 @@ class SpecGovernanceConfig:
         index_render_threshold = cls._coerce_positive_int(
             data, "index_render_threshold", DEFAULT_INDEX_RENDER_THRESHOLD
         )
+        # Clamp up to the renderer's irreducible navigation floor: a threshold
+        # below the compact navigation header would force the renderer to
+        # byte-truncate that header and sever a drill command mid-line, leaving a
+        # bounded-but-not-self-describing view. Clamping here keeps every emitted
+        # view BOTH within budget and navigable. The floor is owned by the render
+        # module (single source of truth); import lazily to avoid an import cycle.
+        try:
+            from .engine.spec_index_render import MIN_RENDER_THRESHOLD
+        except Exception:  # pragma: no cover - defensive
+            MIN_RENDER_THRESHOLD = 0
+        if MIN_RENDER_THRESHOLD and index_render_threshold < MIN_RENDER_THRESHOLD:
+            logger.warning(
+                "spec_governance.index_render_threshold=%d is below the minimum "
+                "navigable floor of %d bytes; clamping up so every index view "
+                "stays self-describing.",
+                index_render_threshold, MIN_RENDER_THRESHOLD,
+            )
+            index_render_threshold = MIN_RENDER_THRESHOLD
         spec_file_warn_bytes = cls._coerce_positive_int(
             data, "spec_file_warn_bytes", DEFAULT_SPEC_FILE_WARN_BYTES
         )

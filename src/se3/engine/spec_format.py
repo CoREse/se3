@@ -36,7 +36,15 @@ _INTRA_REF_RE = re.compile(
 # Inter-spec reference: <spec>::<requirement>
 # Spec name segment stays ASCII (it's a directory name).
 # Requirement name uses Unicode-aware \w (includes CJK, etc.) plus space/hyphen.
-_INTER_REF_RE = re.compile(r"([a-zA-Z0-9_\-]+)::([\w\- ]+)")
+# The leading ``(?<![a-zA-Z0-9_\-])`` anchors the spec-name token to the start of
+# a contiguous run of spec-name characters. Without it, a long run of word
+# characters NOT followed by ``::`` (e.g. a multi-KB Requirement body) makes the
+# greedy ``[a-zA-Z0-9_\-]+`` re-consume the whole run at every starting offset,
+# which is O(n^2) catastrophic backtracking (an 40 KB body costs ~8s). The
+# look-behind lets a match start ONLY at a run boundary, so each run is scanned
+# once — O(n) — while preserving identical matches (the leftmost greedy match
+# always begins at a non-spec-char boundary anyway).
+_INTER_REF_RE = re.compile(r"(?<![a-zA-Z0-9_\-])([a-zA-Z0-9_\-]+)::([\w\- ]+)")
 
 # Common English stop-words that signal the end of a reference name
 # when it appears inside prose (e.g. "see Requirement: Foo for details").

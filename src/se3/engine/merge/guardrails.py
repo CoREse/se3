@@ -26,10 +26,13 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..worktree import _run_git
 from ...commands.merge.result_model import EvidenceRecord
+
+if TYPE_CHECKING:
+    from ...config import SpecGovernanceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -871,7 +874,9 @@ def _rel_spec_path(project_root: Path, spec_path: Path) -> str:
         return spec_path.as_posix()
 
 
-def check_spec_sizes(project_root: Path, config) -> list[GuardrailViolation]:
+def check_spec_sizes(
+    project_root: Path, config: "SpecGovernanceConfig"
+) -> list[GuardrailViolation]:
     """Check spec volume-governance size limits over a whole project.
 
     A pure, LLM-free check that walks every ``se3/specs/<name>/spec.md`` under
@@ -923,8 +928,30 @@ def check_spec_sizes(project_root: Path, config) -> list[GuardrailViolation]:
 
         try:
             raw = spec_path.read_bytes()
-        except OSError:
-            # Unreadable file: cannot measure; skip rather than abort.
+        except OSError as exc:
+            # Unreadable file: its size budgets cannot be verified. Do NOT
+            # silently skip — that would let an oversized but unreadable spec
+            # pass `se3 guardrails --sizes` under enforce mode. Emit a
+            # CHECK_INCOMPLETE violation so the check is reported as not fully
+            # verified and enforce mode blocks on it.
+            logger.warning(
+                "Could not read spec file %s for size check (%s): %s",
+                rel_path, type(exc).__name__, exc,
+            )
+            violations.append(GuardrailViolation(
+                file_path=rel_path,
+                violation_type="CHECK_INCOMPLETE",
+                message=(
+                    f"Spec file could not be read for size guardrails check: "
+                    f"{type(exc).__name__}: {exc}; its size limits were not "
+                    f"verified."
+                ),
+                evidence=_evidence_dict(
+                    spec_name=spec_name,
+                    exception_type=type(exc).__name__,
+                    exception_msg=str(exc),
+                ),
+            ))
             continue
 
         file_bytes = len(raw)
@@ -966,14 +993,51 @@ def check_spec_sizes(project_root: Path, config) -> list[GuardrailViolation]:
                 ))
 
         # Per-Requirement size check (applies to every spec including base).
+        # Decode with errors="surrogateescape" so any invalid UTF-8 byte is
+        # preserved as a lone surrogate that re-encodes back to the exact same
+        # original byte. This keeps the per-Requirement byte count consistent
+        # with the raw file-level byte count (file_bytes above), instead of the
+        # divergence that errors="replace" would introduce (U+FFFD re-encodes to
+        # 3 bytes regardless of the original invalid byte length).
         try:
-            parsed = parse_spec(raw.decode("utf-8", errors="replace"))
-        except Exception:  # pragma: no cover - parse_spec is defensive
+            parsed = parse_spec(raw.decode("utf-8", errors="surrogateescape"))
+        except Exception as exc:
+            # The file was readable but could not be parsed (e.g. broken
+            # markdown structure). Do NOT silently skip — that would let the
+            # per-Requirement size checks be bypassed without the operator
+            # knowing the spec was not fully verified. Emit a CHECK_INCOMPLETE
+            # violation, consistent with the unreadable-file path above.
+            logger.warning(
+                "Could not parse spec file %s for per-Requirement size check "
+                "(%s): %s",
+                rel_path, type(exc).__name__, exc,
+            )
+            violations.append(GuardrailViolation(
+                file_path=rel_path,
+                violation_type="CHECK_INCOMPLETE",
+                message=(
+                    f"Spec file could not be parsed for per-Requirement size "
+                    f"guardrails check: {type(exc).__name__}: {exc}; its "
+                    f"per-Requirement size limits were not verified."
+                ),
+                evidence=_evidence_dict(
+                    spec_name=spec_name,
+                    exception_type=type(exc).__name__,
+                    exception_msg=str(exc),
+                ),
+            ))
             continue
 
         for req in parsed.requirements:
+            # ``req.body`` already includes every ``#### Scenario:`` /
+            # ``##### Scenario:`` sub-heading and its content: parse_spec only
+            # terminates a Requirement body at the next ``### Requirement:`` or a
+            # level-2 ``## `` heading (``_H2_HEADING_RE = ^##\s+``), never at a
+            # deeper scenario heading. So this byte count covers exactly the text
+            # that items-mode loading injects for the Requirement (header line +
+            # full body including scenarios) — no scenario content is undercounted.
             block = f"### Requirement: {req.name}\n{req.body}"
-            req_bytes = len(block.encode("utf-8"))
+            req_bytes = len(block.encode("utf-8", errors="surrogateescape"))
             if req_bytes > req_warn:
                 violations.append(GuardrailViolation(
                     file_path=rel_path,
@@ -1621,6 +1685,21 @@ class MergeGuardrailsCheck:
                 if v.violation_type == "CHECK_INCOMPLETE":
                     incomplete = True
             violations.extend(file_violations)
+
+        # Size governance: when the project configures the size tier to
+        # ``enforce``, an over-budget base / spec file / Requirement blocks the
+        # merge just like a content violation. Under the default ``warn`` tier
+        # the merge is unaffected (size violations are surfaced by `se3
+        # guardrails`, not by blocking the merge), so existing merge behaviour
+        # is unchanged unless a project opts into enforcement.
+        try:
+            from ...config import load_spec_governance_config
+            gov_config = load_spec_governance_config(self.project_root)
+            if gov_config.guardrails_size_tier == "enforce":
+                size_violations = check_spec_sizes(self.project_root, gov_config)
+                violations.extend(size_violations)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Merge size-governance check skipped: %s", exc)
 
         return GuardrailReport(
             passed=len(violations) == 0,

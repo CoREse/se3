@@ -1751,6 +1751,48 @@ The `update_spec` step SHALL receive `spec_changes` and `design_doc` from the pl
 - **AND** the JSON output includes `spec_decisions` with `decision: new_spec` and `reasoning`
 - **AND** a new spec file is created following the standard structure
 
+### Requirement: Index-First Spec Information Protocol
+
+The spec-consuming LLM steps — `analyze`, `update_spec`, and `verify_spec` — SHALL obtain spec information through the **index-first, fetch-on-demand** protocol built on the `se3 spec` commands (`se3 spec index` → `se3 spec show`), rather than by injecting the full item set or by reading a large `spec.md` file (or the index cache file) in full. Because each of these steps runs as a single `LLMCaller.call()` whose underlying CLI subprocess carries its own tool loop, the step's agent can run `se3 spec index <spec> [<group>...]` and `se3 spec show <spec>::<requirement>` itself, inside that one call, to drill down to the items it needs. `analyze` is a read-only step (Write/Edit are disallowed) but `Bash`/`Read`/`Grep` remain available, so it can run the `se3 spec` commands the same way. The program-injected root view the steps receive is produced by the **same** renderer as `se3 spec index` (no argument), so the injected view and the command output are consistent. The framework's own non-LLM code paths (parsing, index build, items / full_spec program injection, sync, guardrails) still read the `spec.md` files directly; this protocol governs only the LLM-facing retrieval surface.
+
+**`analyze` selection protocol.** The `analyze` step SHALL NOT inject the full item set into its prompt. Instead it injects the root view (same renderer as `se3 spec index`) plus the drill-down protocol description; the agent drills down via `se3 spec index <spec> [<group>...]` to the leaf items within the single call and emits its final `selected_items`. The existing `requirement_name: "*"` (whole-spec select-all) semantics are preserved.
+
+**`update_spec` / `verify_spec` retrieval protocol.** Both steps' prompts instruct the agent to first consult the index (`se3 spec index`) and then fetch only the needed item bodies (`se3 spec show`), and explicitly forbid reading an entire large `spec.md` file or the index cache file to gather context. For modifying an existing item, `update_spec` uses **targeted writing**: it obtains the item's physical location via `se3 spec show`, then does a local `Read` + `Edit` over that line range — never reading the whole large spec file. The `update_spec` New Spec Decision step consumes the **root view** (name + one-line locator), superseding the older bare-names list, and when it creates a new spec it writes that spec's `<!-- domain: <layered/path> -->` header metadata.
+
+**Item identity invariant and exit validation.** An item is a single Requirement; the item identity space is flat and the logical address is always `<spec>::<requirement>`, independent of how the index renders grouping. Rendering group handles (domain groups, pagination) are navigation handles only — they produce no new item identity and are not selectable units. Three mechanical safeguards enforce this: (a) **render distinction** — item entries carry the full `<spec>::<requirement>` address; group handles have no `::` address and carry only the command to take that group; (b) **interface rejection** — `se3 spec show` accepts only an item address and errors on a group name; (c) **exit validation** — the engine code that consumes a step's selection result validates each entry by full `<spec>::<requirement>` address against the flat item set, and a group name or intermediate-node name is a validation failure that is fed back to the LLM to retry. Specifically, `analyze`'s `selected_items` undergo this exit validation after the JSON is parsed: each entry is checked against the flat item set, `requirement_name: "*"` is accepted as whole-spec selection, and any group/intermediate name is rejected with feedback for a retry.
+
+#### Scenario: analyze injects the root view and drills down within one call
+- **WHEN** the `analyze` step builds its prompt
+- **THEN** the prompt contains the program-injected root view (produced by the same renderer as `se3 spec index`) and the drill-down protocol description, NOT a full dump of every item
+- **AND** within the single `LLMCaller.call()` the agent runs `se3 spec index <spec> [<group>...]` to reach leaf items before emitting `selected_items`
+
+#### Scenario: analyze exit validation rejects a group name and retries
+- **GIVEN** `analyze` emits a `selected_items` entry that names a group handle or intermediate node rather than a flat `<spec>::<requirement>` item address
+- **WHEN** the engine validates the selection against the flat item set
+- **THEN** the entry is rejected as a validation failure
+- **AND** the error is fed back to the LLM to retry the selection
+
+#### Scenario: analyze preserves the whole-spec select-all semantics
+- **GIVEN** `analyze` emits a `selected_items` entry with `requirement_name: "*"` for a spec
+- **WHEN** the engine validates the selection
+- **THEN** the `"*"` entry is accepted as selecting that spec's whole item set (it is not treated as an invalid non-item address)
+
+#### Scenario: update_spec modifies an existing item via show-then-local-edit
+- **GIVEN** `update_spec` needs to modify an existing Requirement in a large spec
+- **WHEN** it gathers context for that edit
+- **THEN** it resolves the item's physical location via `se3 spec show <spec>::<requirement>`
+- **AND** performs a local `Read` + `Edit` over that line range without reading the entire `spec.md` file or the index cache file
+
+#### Scenario: update_spec New Spec Decision consumes the root view and writes domain on creation
+- **WHEN** `update_spec` reaches the New Spec Decision step
+- **THEN** it consumes the root view (each spec's name + one-line locator), superseding the older bare-names list
+- **AND** when it creates a new spec, it writes that spec's `<!-- domain: <layered/path> -->` header metadata
+
+#### Scenario: verify_spec uses index-first retrieval rather than full-file reads
+- **WHEN** the `verify_spec` step gathers spec context
+- **THEN** its prompt directs it to consult `se3 spec index` and fetch only needed item bodies via `se3 spec show`
+- **AND** it is forbidden from reading an entire large `spec.md` file or the index cache file merely to obtain context
+
 ### Requirement: Summarize Session Report and Completion Gate
 
 The `summarize` step SHALL be a pure, user-facing session report whose only job is to clearly tell the user what THIS session actually did. It does NOT hunt for new problems, does NOT propose unrelated issues to file, and does NOT pad the report with speculative work that did not happen.

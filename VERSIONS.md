@@ -39,6 +39,17 @@
 
 
 
+
+## 9.3.0 - 2026-06-13
+
+- Add `se3 spec index` command with size-bounded deterministic-greedy folding for navigating large spec collections within 16KB output limits
+- Add `se3 spec show <spec>::<requirement>` command to display individual requirement content with physical file location
+- Add SpecGovernanceConfig section to se3-config with configurable thresholds for base size (32KB), index output (16KB), spec file (64KB), and single requirement (8KB)
+- Add guardrails size checks with warn/enforce modes for base spec, spec files, and individual requirements
+- Restructure analyze step to use root-view + drilldown protocol instead of injecting all items into prompt
+- Restructure update_spec and verify_spec to use index-first retrieval with targeted Read+Edit instead of reading entire spec files
+- Slim base spec from 141KB to under 32KB by relocating module-level detail to new daemon, server, and engine-internals specs
+- Add `<!-- domain: -->` header metadata to spec format for hierarchical index grouping
 ## 9.2.0 - 2026-06-12
 
 - Add self_check_defer_fix_threshold workflow config to defer fix when self-check finds few non-critical issues, merging findings across passes

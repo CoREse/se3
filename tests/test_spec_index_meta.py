@@ -338,6 +338,95 @@ def test_resolve_item_location_unknown_returns_none(tmp_project: Path) -> None:
     assert index.resolve_item_location("nonexistent", "First Req") is None
 
 
+def test_resolve_item_location_reconciles_after_atomic_replace(
+    tmp_project: Path,
+) -> None:
+    """If spec.md is atomically replaced after indexing but before the read, the
+    stale line interval must NOT be sliced into the new file (which could return a
+    different Requirement under the requested logical address). The read validates
+    the on-disk content hash against the indexed snapshot and reconciles by
+    rebuilding the spec, returning the CORRECT Requirement body."""
+    write_spec(tmp_project, "alpha", ALPHA_SPEC)
+    index = SpecIndex(tmp_project).build()
+
+    # Sanity: the original interval brackets First Req.
+    original = index.resolve_item_location("alpha", "First Req")
+    assert original is not None and original[3].startswith("### Requirement: First Req")
+
+    # Atomically replace the file with content where a NEW requirement is prepended
+    # so that "First Req" now lives at a different line interval. Slicing the stale
+    # interval would land on the prepended requirement instead.
+    rewritten = f"""{SPEC_FORMAT_VERSION_MARKER}
+<!-- domain: engine/steps -->
+
+# Alpha Spec
+
+## Purpose
+
+Alpha governs the example subsystem in one sentence. More detail follows here.
+
+### Requirement: Brand New Req
+
+A freshly prepended requirement that shifts every later line down.
+
+Extra padding line one.
+Extra padding line two.
+Extra padding line three.
+
+### Requirement: First Req
+
+First requirement opening summary sentence.
+
+More body for first requirement.
+
+### Requirement: Second Req
+
+Second requirement opening summary sentence.
+
+Trailing body for the second requirement.
+"""
+    write_spec(tmp_project, "alpha", rewritten)
+
+    resolved = index.resolve_item_location("alpha", "First Req")
+    assert resolved is not None
+    _, _, _, body = resolved
+    # The reconciled read returns First Req's body, NOT the prepended requirement.
+    assert body.startswith("### Requirement: First Req")
+    assert "Brand New Req" not in body
+    assert "First requirement opening summary sentence." in body
+
+
+def test_resolve_item_location_returns_none_when_requirement_removed(
+    tmp_project: Path,
+) -> None:
+    """When the spec is replaced and the requested Requirement no longer exists
+    under the logical address, reconciliation returns None rather than slicing a
+    stale interval into unrelated content."""
+    write_spec(tmp_project, "alpha", ALPHA_SPEC)
+    index = SpecIndex(tmp_project).build()
+    assert index.resolve_item_location("alpha", "First Req") is not None
+
+    # Replace with content that dropped "First Req" entirely.
+    rewritten = f"""{SPEC_FORMAT_VERSION_MARKER}
+<!-- domain: engine/steps -->
+
+# Alpha Spec
+
+## Purpose
+
+Alpha governs the example subsystem in one sentence. More detail follows here.
+
+### Requirement: Second Req
+
+Second requirement opening summary sentence.
+
+Trailing body for the second requirement.
+"""
+    write_spec(tmp_project, "alpha", rewritten)
+
+    assert index.resolve_item_location("alpha", "First Req") is None
+
+
 def test_resolve_item_location_rejects_no_requirements_sentinel(
     tmp_project: Path,
 ) -> None:

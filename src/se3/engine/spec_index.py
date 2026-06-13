@@ -36,12 +36,17 @@ from .spec_format import parse_spec
 
 logger = logging.getLogger(__name__)
 
-# Index schema version. Bumped from 1 -> 2 when ItemMeta gained physical line
+# Index schema version. Bumped 1 -> 2 when ItemMeta gained physical line
 # numbers (line_start / line_end) and a per-spec ``specs`` metadata section
-# (domain / locator / item_count). A cached index whose ``version`` is not the
-# current value is treated as a load miss and rebuilt from scratch, so an old
-# v1 cache is never mis-read against the v2 schema.
-INDEX_VERSION = 2
+# (domain / locator / item_count); bumped 2 -> 3 when ItemMeta gained the
+# enclosing ``## `` chapter ``section`` (the chapter-outline grouping the spec
+# view renders before falling back to pagination); bumped 3 -> 4 when ItemMeta
+# gained the enclosing ``#### `` ``subsection`` divider (the deeper sub-section
+# grouping the spec view prefers before deterministic name-range pagination). A
+# cached index whose ``version`` is not the current value is treated as a load
+# miss and rebuilt from scratch, so an older cache is never mis-read against a
+# newer schema.
+INDEX_VERSION = 4
 
 # Domain header marker: ``<!-- domain: <layered/path> -->`` placed alongside the
 # ``<!-- spec-format: v1 -->`` marker at the top of a spec file. Parsed
@@ -82,6 +87,26 @@ class ItemMeta:
     # without re-parsing the whole spec. ``0`` means "unknown" (legacy / sentinel).
     line_start: int = 0
     line_end: int = 0
+    # Enclosing ``## `` chapter heading text (e.g. ``"Requirements"``) this
+    # Requirement falls under, program-derived at index time (the nearest
+    # preceding second-level heading). The spec-view renderer groups items by
+    # this chapter outline *before* falling back to deterministic pagination,
+    # so a multi-chapter spec drills down by semantic group rather than by an
+    # anonymous page boundary. Empty string when no enclosing ``## `` heading
+    # precedes the Requirement (degenerate / legacy).
+    section: str = ""
+    # Enclosing ``#### `` sub-section *divider* heading text this Requirement
+    # falls under, program-derived at index time. A ``#### `` heading qualifies
+    # as a divider only when the next non-blank line after it is a
+    # ``### Requirement:`` heading (it introduces a run of Requirements rather
+    # than being prose inside one Requirement's body); such a divider opens a
+    # sub-section that every following Requirement belongs to until the next
+    # divider or a new ``## `` chapter. The spec-view renderer prefers these
+    # deeper sub-section dividers over deterministic name-range pagination when an
+    # oversized chapter must be split, so meaningful ``#### `` boundaries are
+    # honoured before anonymous pages appear. Empty string when no divider
+    # precedes the Requirement within its chapter (the common flat layout).
+    subsection: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -101,6 +126,8 @@ class ItemMeta:
             summary=data.get("summary", ""),
             line_start=int(data.get("line_start", 0) or 0),
             line_end=int(data.get("line_end", 0) or 0),
+            section=data.get("section", "") or "",
+            subsection=data.get("subsection", "") or "",
         )
 
     @property
@@ -202,6 +229,11 @@ class SpecIndex:
         return legacy
 
     @staticmethod
+    def _sha256_prefix_of_bytes(data: bytes, prefix_bytes: int = 16) -> str:
+        """Return hex-encoded SHA-256 of *data*, truncated to *prefix_bytes*."""
+        return hashlib.sha256(data).hexdigest()[: prefix_bytes * 2]
+
+    @staticmethod
     def _compute_sha256_prefix(path: Path, prefix_bytes: int = 16) -> str:
         """Return hex-encoded SHA-256 of the file, truncated to *prefix_bytes*."""
         h = hashlib.sha256()
@@ -213,6 +245,42 @@ class SpecIndex:
                     break
                 h.update(chunk)
         return h.hexdigest()[: prefix_bytes * 2]
+
+    @staticmethod
+    def _hash_and_slice_lines(
+        path: Path, start: int, end: int, prefix_bytes: int = 16,
+    ) -> tuple[str, int, str]:
+        """Single streaming pass over *path*: hash the full content AND slice it.
+
+        Computes the sha256 prefix of the entire file (so the soundness check
+        below still validates that on-disk content matches the indexed snapshot)
+        while collecting only lines ``[start, end]`` (1-based, inclusive). The
+        whole file is never held in memory: it is iterated line by line, the raw
+        bytes feed the running hash, and only the target slice (typically a few
+        KiB out of a multi-hundred-KiB spec) is retained and decoded.
+
+        Line numbering counts ``\\n`` only, matching ``parse_spec``'s
+        ``text.count("\\n")`` convention (so the recorded ``line_start`` lines up
+        with the slice). Returns ``(sha256_prefix, total_lines, body)`` where
+        ``body`` is the ``\\n``-joined slice. Raises ``OSError`` on read failure
+        and ``UnicodeDecodeError`` if a sliced line is not valid UTF-8.
+        """
+        h = hashlib.sha256()
+        collected: List[str] = []
+        line_no = 0
+        with open(path, "rb") as f:
+            for raw in f:  # binary iteration splits on b"\n" only
+                h.update(raw)  # reproduce exact bytes so the hash matches
+                line_no += 1
+                if start <= line_no <= end:
+                    # Drop the trailing line terminator (\n, and a preceding \r
+                    # for CRLF files) the way str.splitlines() does, so the
+                    # joined body matches the prior whole-file slice behaviour.
+                    stripped = raw[:-1] if raw.endswith(b"\n") else raw
+                    if stripped.endswith(b"\r"):
+                        stripped = stripped[:-1]
+                    collected.append(stripped.decode("utf-8"))
+        return (h.hexdigest()[: prefix_bytes * 2], line_no, "\n".join(collected))
 
     # Tags / keywords metadata lines that may appear at the top of a
     # Requirement body and should be skipped when forming a summary.
@@ -338,13 +406,118 @@ class SpecIndex:
         if spec_file.exists():
             self._index_spec(spec_name, spec_file)
 
+    @staticmethod
+    def _h2_heading_lines(text: str) -> List[int]:
+        """1-based line numbers of ``## `` headings, excluding fenced code blocks.
+
+        Mirrors the v1 parser's body-termination rule (a ``## `` second-level
+        heading ends a Requirement body), so ``se3 spec show`` returns exactly
+        the Requirement block and not any trailing ``## Appendix`` section.
+        Only headings with exactly two leading hashes match (``###``/``####``
+        Requirement/Scenario headings and deeper do not).
+        """
+        result: List[int] = []
+        in_fence = False
+        for i, line in enumerate(text.splitlines(), start=1):
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if re.match(r"^##\s+", line):
+                result.append(i)
+        return result
+
+    @staticmethod
+    def _h2_headings(text: str) -> List[tuple[int, str]]:
+        """1-based ``(line, heading_text)`` of ``## `` headings outside fences.
+
+        ``heading_text`` is the heading content with the leading ``## `` markers
+        and surrounding whitespace stripped (e.g. ``"Requirements"``). Used to
+        derive each Requirement's enclosing chapter ``section``. Only exactly
+        two-hash headings match (``###``/deeper Requirement/Scenario headings do
+        not), matching the v1 Requirement-body boundary rule.
+        """
+        result: List[tuple[int, str]] = []
+        in_fence = False
+        for i, line in enumerate(text.splitlines(), start=1):
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            m = re.match(r"^##\s+(.*\S)\s*$", line)
+            if m:
+                result.append((i, m.group(1).strip()))
+        return result
+
+    @staticmethod
+    def _h4_dividers(text: str) -> List[tuple[int, str]]:
+        """1-based ``(line, heading_text)`` of ``#### `` sub-section *divider* headings.
+
+        A ``#### `` heading qualifies as a divider only when the next non-blank
+        line after it is a ``### Requirement:`` heading — i.e. it introduces a run
+        of Requirements rather than being prose inside a single Requirement's
+        body. Fenced code blocks are skipped, and exactly four leading hashes
+        match (``###``/``#####`` headings do not). Such a divider opens a
+        sub-section that every following Requirement belongs to until the next
+        divider or a new ``## `` chapter, giving the spec-view renderer a deeper
+        semantic boundary to prefer before deterministic name-range pagination.
+        """
+        raw = text.splitlines()
+        n = len(raw)
+        # 1-based "is this line code (fence delimiter or inside a fence)?" map so
+        # both the heading scan and the look-ahead respect code fences.
+        in_fence: List[bool] = [False] * (n + 1)
+        fence = False
+        for i, line in enumerate(raw, start=1):
+            if line.lstrip().startswith("```"):
+                fence = not fence
+                in_fence[i] = True
+                continue
+            in_fence[i] = fence
+
+        req_re = re.compile(r"^###\s+Requirement:\s+\S")
+        h4_re = re.compile(r"^####\s+(.*\S)\s*$")
+        dividers: List[tuple[int, str]] = []
+        for i, line in enumerate(raw, start=1):
+            if in_fence[i]:
+                continue
+            m = h4_re.match(line)
+            if not m:
+                continue
+            # Look ahead to the first non-blank line; a divider is one whose next
+            # non-blank line is a (non-fenced) ``### Requirement:`` heading.
+            j = i + 1
+            while j <= n and not raw[j - 1].strip():
+                j += 1
+            if j <= n and not in_fence[j] and req_re.match(raw[j - 1]):
+                dividers.append((i, m.group(1).strip()))
+        return dividers
+
     def _index_spec(self, spec_name: str, spec_file: Path) -> None:
         """Parse a single spec file and add its Requirements to *items*."""
         self._specs = None
+        # Read the raw bytes ONCE so the parsed content, the recorded size, and
+        # the recorded content hash all describe a single consistent snapshot of
+        # the file. Reading the text and then separately re-reading the file for
+        # stat()/hash would create a race window: an atomic replacement of the
+        # spec between the two reads would store the OLD items/line ranges keyed
+        # to the NEW file's hash, after which ``needs_rebuild`` (which compares
+        # the cached hash against the on-disk hash) would see a match and serve
+        # the stale index indefinitely. Hashing the same bytes we parsed closes
+        # that window — if the file is replaced after this read, the cached hash
+        # is the old content's hash and the next reconciliation detects the drift.
         try:
-            text = spec_file.read_text(encoding="utf-8")
+            data = spec_file.read_bytes()
         except OSError as exc:
             logger.warning("Failed to read spec %s: %s", spec_name, exc)
+            return
+
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            logger.warning("Failed to decode spec %s: %s", spec_name, exc)
             return
 
         try:
@@ -353,10 +526,16 @@ class SpecIndex:
             logger.warning("Failed to parse spec %s: %s", spec_name, exc)
             return
 
-        stat = spec_file.stat()
-        mtime = stat.st_mtime
-        size = stat.st_size
-        sha256_prefix = self._compute_sha256_prefix(spec_file)
+        # Size and hash are derived from the in-memory snapshot, not a fresh
+        # disk read. The mtime is non-authoritative (it is only a cheap hint;
+        # the SHA-256 prefix is the authoritative change signal), so reading it
+        # from a separate stat() is harmless even under a concurrent replace.
+        try:
+            mtime = spec_file.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        size = len(data)
+        sha256_prefix = self._sha256_prefix_of_bytes(data)
 
         # Total line count of the file, used to bound the last Requirement's
         # physical interval at EOF. ``splitlines()`` matches how
@@ -373,6 +552,57 @@ class SpecIndex:
             item_count=len(parsed.requirements),
         )
 
+        # A ``## `` heading (any second-level section: an orphan ``## Notes`` /
+        # ``## Appendix`` between Requirements, or a trailing section after the
+        # last one) terminates a Requirement's body per the v1 boundary rule. A
+        # Requirement's physical interval must therefore stop at the first such
+        # heading after it and never spill across a trailing section into EOF.
+        # ``_h2_heading_lines`` returns 1-based line numbers against the file
+        # text — the same coordinate system as ``req.line_start`` /
+        # ``total_lines``.
+        h2_lines = self._h2_heading_lines(text)
+
+        # Headings with their text, used to derive each Requirement's enclosing
+        # chapter ``section`` (the nearest preceding ``## `` heading).
+        h2_headings = self._h2_headings(text)
+
+        def _next_h2_after(line: int) -> Optional[int]:
+            for ln in h2_lines:
+                if ln > line:
+                    return ln
+            return None
+
+        def _section_of(line: int) -> str:
+            """The nearest ``## `` heading text at or before *line*."""
+            sec = ""
+            for ln, heading in h2_headings:
+                if ln <= line:
+                    sec = heading
+                else:
+                    break
+            return sec
+
+        # ``#### `` sub-section dividers, used to derive each Requirement's
+        # enclosing ``subsection`` (the most recent divider at or before it,
+        # scoped to its ``## `` chapter so a sub-section never leaks across a
+        # chapter boundary).
+        h4_dividers = self._h4_dividers(text)
+
+        def _subsection_of(line: int) -> str:
+            chapter_line = 0
+            for ln in h2_lines:
+                if ln <= line:
+                    chapter_line = ln
+                else:
+                    break
+            sub = ""
+            for ln, heading in h4_dividers:
+                if ln > line:
+                    break
+                if ln > chapter_line:
+                    sub = heading
+            return sub
+
         first_item: Optional[ItemMeta] = None
         reqs = parsed.requirements
         for i, req in enumerate(reqs):
@@ -380,9 +610,16 @@ class SpecIndex:
             # or the last line of the file for the final Requirement (the
             # interval is 1-based and inclusive).
             if i + 1 < len(reqs):
-                line_end = max(req.line_start, reqs[i + 1].line_start - 1)
+                hard_end = reqs[i + 1].line_start - 1
             else:
-                line_end = max(req.line_start, total_lines)
+                hard_end = total_lines
+            # Tighten the bound to the first intervening ``## `` heading so the
+            # final Requirement (and any Requirement followed by a ``## ``
+            # section before the next one) does not absorb that section.
+            h2 = _next_h2_after(req.line_start)
+            if h2 is not None and h2 - 1 < hard_end:
+                hard_end = h2 - 1
+            line_end = max(req.line_start, hard_end)
             item = ItemMeta(
                 spec_name=spec_name,
                 requirement_name=req.name,
@@ -396,6 +633,8 @@ class SpecIndex:
                 summary=self._make_summary(req.body),
                 line_start=req.line_start,
                 line_end=line_end,
+                section=_section_of(req.line_start),
+                subsection=_subsection_of(req.line_start),
             )
             self.items[item.item_id] = item
             if first_item is None:
@@ -482,8 +721,15 @@ class SpecIndex:
     def needs_rebuild(self, spec_name: str) -> bool:
         """Check whether *spec_name* needs re-indexing.
 
-        Compares on-disk mtime + size with the cached values. If they differ,
-        computes SHA-256 prefix for a definitive answer.
+        Validates the cached entry against the on-disk **content hash** on every
+        call, not merely against mtime + size. A spec edited so that its size is
+        unchanged and its mtime is restored to the cached value (e.g. an
+        in-place same-length rewrite followed by ``os.utime``) leaves both
+        metadata values equal yet has different content; trusting mtime/size
+        alone would then serve a stale index (wrong item names, summaries, and
+        line locations) indefinitely. The SHA-256 prefix is the authoritative
+        change signal, so it is always recomputed here — the spec files are
+        small and this runs once per spec per CLI invocation.
         """
         spec_file = self.specs_dir / spec_name / "spec.md"
         if not spec_file.exists():
@@ -493,7 +739,7 @@ class SpecIndex:
             )
 
         try:
-            stat = spec_file.stat()
+            spec_file.stat()
         except OSError:
             return True
 
@@ -502,12 +748,14 @@ class SpecIndex:
         if cached is None:
             return True
 
-        if cached.mtime != stat.st_mtime or cached.size != stat.st_size:
-            # mtime/size changed — verify with hash before declaring stale
+        # Always validate with the content hash. mtime/size are not trusted as
+        # a sufficient currency proof, because a same-length edit with a
+        # restored mtime would slip past a metadata-only check.
+        try:
             current_hash = self._compute_sha256_prefix(spec_file)
-            return cached.sha256_prefix != current_hash
-
-        return False
+        except OSError:
+            return True
+        return cached.sha256_prefix != current_hash
 
     # -- query API ----------------------------------------------------------
 
@@ -545,30 +793,80 @@ class SpecIndex:
         if item.line_start < 1:
             return None
 
-        spec_path = Path(item.spec_path)
-        try:
-            text = spec_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "resolve_item_location: failed to read %s: %s", spec_path, exc
-            )
-            return None
+        # Read the spec file and slice the recorded interval, but ONLY after
+        # confirming the on-disk content still matches the indexed snapshot
+        # hash. If the spec file was atomically replaced after the index was
+        # loaded/built (mtime/size unchanged or not), slicing the recorded line
+        # interval into the *new* file could return an unrelated Requirement
+        # under the requested logical address. To stay sound we hash the full
+        # content and slice the target lines in a SINGLE streaming pass (so the
+        # body we slice and the hash we validate come from the same snapshot —
+        # no read-vs-hash TOCTOU inside this method — without ever holding the
+        # whole file in memory: only the requested line interval is retained).
+        # On a hash mismatch we reconcile by rebuilding this spec's items ONCE
+        # and re-resolving against the fresh interval before reading again. A
+        # bounded two-attempt loop guarantees termination even if the file is
+        # being rewritten in a tight loop.
+        for reconcile_attempt in range(2):
+            spec_path = Path(item.spec_path)
+            start = item.line_start
+            # Effective end: a stale/degenerate line_end below line_start
+            # collapses to the single heading line.
+            eff_end = item.line_end if item.line_end >= start else start
+            try:
+                current_hash, total, body = self._hash_and_slice_lines(
+                    spec_path, start, eff_end
+                )
+            except OSError as exc:
+                logger.warning(
+                    "resolve_item_location: failed to read %s: %s", spec_path, exc
+                )
+                return None
+            except UnicodeDecodeError as exc:
+                logger.warning(
+                    "resolve_item_location: failed to decode %s: %s", spec_path, exc
+                )
+                return None
 
-        lines = text.splitlines()
-        total = len(lines)
-        if total == 0:
-            return None
+            if current_hash != item.sha256_prefix:
+                # The on-disk content drifted from the indexed snapshot whose
+                # line interval we hold. Never slice stale coordinates into a
+                # changed file.
+                if reconcile_attempt == 0:
+                    logger.info(
+                        "resolve_item_location: %s changed since indexing "
+                        "(hash %s != %s); rebuilding spec '%s' before slicing.",
+                        spec_path, current_hash, item.sha256_prefix, spec_name,
+                    )
+                    self.rebuild_for(spec_name)
+                    refreshed = self.get_item(spec_name, requirement_name)
+                    if refreshed is None or refreshed.line_start < 1:
+                        # The Requirement no longer exists under this logical
+                        # address in the new content (renamed / removed).
+                        return None
+                    item = refreshed
+                    continue
+                # Still mismatched after one rebuild — refuse to return a
+                # possibly inconsistent body rather than slice a stale interval.
+                logger.warning(
+                    "resolve_item_location: %s still drifting after rebuild; "
+                    "refusing to slice a stale interval.", spec_path,
+                )
+                return None
 
-        start = item.line_start
-        # Clamp the end to the file's actual length (the file may have shrunk
-        # since indexing; a stale cache would otherwise over-read).
-        end = item.line_end if item.line_end >= start else start
-        end = min(end, total)
-        if start > total:
-            return None
+            if total == 0 or start > total:
+                # Empty file, or the recorded heading line is past EOF (the file
+                # shrank since indexing). The hash matched, so this only happens
+                # for a degenerate / out-of-range coordinate; refuse to return.
+                return None
 
-        body = "\n".join(lines[start - 1 : end])
-        return (str(spec_path), start, end, body)
+            # Clamp the reported end to the file's actual length (the file may
+            # have shrunk; the streamed slice already stopped at EOF, so the
+            # returned body and this clamped interval stay consistent).
+            end = min(eff_end, total)
+            return (str(spec_path), start, end, body)
+
+        return None
 
     def list_all(self) -> List[ItemMeta]:
         """Return all indexed items, sorted by compound key."""
@@ -665,6 +963,51 @@ class SpecIndex:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+def _compute_specs_to_rebuild(index: "SpecIndex") -> List[str]:
+    """Specs that are stale on disk or were deleted, vs *index*'s current state.
+
+    Pure read against ``index`` + the spec directory. Re-evaluable: callers run
+    it both before acquiring the index lock (to decide whether any work is
+    needed) and again after reloading the cache under the lock (so a spec a
+    concurrent writer already refreshed drops out of the rebuild set).
+    """
+    specs_to_rebuild: List[str] = []
+
+    # Every spec currently represented in the cache (item rows + metadata rows).
+    indexed_specs = {item.spec_name for item in index.items.values()}
+    indexed_specs.update(index.spec_metas.keys())
+
+    if not index.specs_dir.exists():
+        # The whole specs directory vanished: every cached spec is now deleted
+        # on disk and MUST be purged, otherwise subsequent index commands keep
+        # displaying stale specs and item locations from the cache. Rebuilding a
+        # spec whose ``spec.md`` no longer exists removes its rows (see
+        # ``SpecIndex.rebuild_for``). Sorted for deterministic logging.
+        return sorted(indexed_specs)
+
+    # Stale specs still present on disk.
+    for spec_dir in index.specs_dir.iterdir():
+        if not spec_dir.is_dir():
+            continue
+        spec_file = spec_dir / "spec.md"
+        if not spec_file.exists():
+            continue
+        if index.needs_rebuild(spec_dir.name):
+            specs_to_rebuild.append(spec_dir.name)
+
+    # Specs that were indexed but have since been deleted from disk.
+    disk_specs = {
+        spec_dir.name
+        for spec_dir in index.specs_dir.iterdir()
+        if spec_dir.is_dir() and (spec_dir / "spec.md").exists()
+    }
+    for spec_name in indexed_specs - disk_specs:
+        if spec_name not in specs_to_rebuild:
+            specs_to_rebuild.append(spec_name)
+
+    return specs_to_rebuild
+
+
 def load_or_build(project_root: Path) -> SpecIndex:
     """Load an existing index or build a fresh one.
 
@@ -712,29 +1055,8 @@ def load_or_build(project_root: Path) -> SpecIndex:
                     pass
         return index
 
-    # Determine which specs need rebuilding
-    specs_to_rebuild: List[str] = []
-    if index.specs_dir.exists():
-        # Check existing specs on disk
-        for spec_dir in index.specs_dir.iterdir():
-            if not spec_dir.is_dir():
-                continue
-            spec_file = spec_dir / "spec.md"
-            if not spec_file.exists():
-                continue
-            if index.needs_rebuild(spec_dir.name):
-                specs_to_rebuild.append(spec_dir.name)
-
-        # Check for specs that were indexed but have since been deleted
-        indexed_specs = {item.spec_name for item in index.items.values()}
-        disk_specs = {
-            spec_dir.name
-            for spec_dir in index.specs_dir.iterdir()
-            if spec_dir.is_dir() and (spec_dir / "spec.md").exists()
-        }
-        for spec_name in indexed_specs - disk_specs:
-            if spec_name not in specs_to_rebuild:
-                specs_to_rebuild.append(spec_name)
+    # Determine which specs need rebuilding (against the just-loaded cache).
+    specs_to_rebuild = _compute_specs_to_rebuild(index)
 
     if specs_to_rebuild:
         # Advisory exclusive lock around rebuild+save to prevent a second
@@ -746,12 +1068,19 @@ def load_or_build(project_root: Path) -> SpecIndex:
                 if fcntl is not None:
                     fcntl.flock(lock_fd, fcntl.LOCK_EX)
                     lock_acquired = True
-                # Re-check after acquiring lock — another process may have
-                # already rebuilt while we were waiting.
-                still_stale: List[str] = []
-                for spec_name in specs_to_rebuild:
-                    if index.needs_rebuild(spec_name):
-                        still_stale.append(spec_name)
+                # Now that we hold the lock, RELOAD the latest on-disk index:
+                # another process may have rebuilt and saved a fresher snapshot
+                # (for a different spec) while we computed the stale set or
+                # waited for the lock. Without this reload we would save our own
+                # stale copy of that spec and clobber the other writer's update.
+                # ``load()`` only mutates state on success, so a vanished /
+                # corrupt file leaves our in-memory cache intact (we then
+                # proceed with the originally-computed set).
+                index.load()
+                # Re-check against the freshly loaded cache — a spec another
+                # process already rebuilt is no longer stale and is skipped,
+                # while genuinely stale / deleted specs are rebuilt here.
+                still_stale = _compute_specs_to_rebuild(index)
                 if still_stale:
                     logger.info(
                         "Rebuilding spec index for: %s",
