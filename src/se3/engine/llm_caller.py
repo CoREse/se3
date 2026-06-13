@@ -380,6 +380,45 @@ class StreamJSONTracker:
         except Exception:  # pragma: no cover - defensive; never break the stream
             logger.debug("Failed to record stream progress", exc_info=True)
 
+    def emit_agent_identity(self) -> None:
+        """Emit an identity-only progress record at attempt start.
+
+        The web console builds its accumulating assistant bubble from the FIRST
+        ``stream_progress`` fragment of a turn. Without this seed, the bubble —
+        and therefore the agent badge — only appears once the first text/tool
+        fragment streams; a call that produces no intermediate fragments (or
+        only returns a final result) would leave the current reply area without
+        the real agent name for the whole call. This writes one record carrying
+        the attempt's ``agent_name`` (and ``model_name`` if already known) so
+        the agent shows the moment the attempt starts, before any model output.
+
+        Unlike :meth:`_emit_progress`, the content is intentionally EMPTY: the
+        frontend renders empty content as nothing, so only the agent badge
+        appears until real fragments arrive. No-op without flow context or a
+        known agent name; a write failure is swallowed so the in-flight LLM
+        stream is never disrupted.
+        """
+        if not self._progress_enabled or self._agent_name is None:
+            return
+        try:
+            from .chat_history import record_stream_progress
+
+            extra: Dict[str, Any] = {"agent_name": self._agent_name}
+            if self._model_name is not None:
+                extra["model_name"] = self._model_name
+            record_stream_progress(
+                self._project_root or Path.cwd(),
+                self._flow_id,
+                self._step_id,
+                self._step_type,
+                "",  # identity-only seed: no visible content, just the badge
+                None,
+                self._attempt,
+                **extra,
+            )
+        except Exception:  # pragma: no cover - defensive; never break the stream
+            logger.debug("Failed to record agent identity progress", exc_info=True)
+
     def _buffer_progress_text(self, text: str) -> None:
         """Accumulate streamed text/thinking; flush when it crosses the batch
         threshold so writes stay at semantic-event granularity."""
@@ -508,6 +547,14 @@ class StreamJSONTracker:
                 model = extract_model_name_from_obj(data)
                 if model:
                     self._model_name = model
+                    # Immediately emit an identity-only progress record so the
+                    # current reply bubble's badge upgrades from "agent" to
+                    # "agent · model" the moment the model is known — without
+                    # waiting for the next text/tool fragment (which may be a
+                    # long pause away, or never come for a result-only call).
+                    # The record carries empty content (badge-only) and now also
+                    # the freshly parsed model_name via _emit_progress's extras.
+                    self.emit_agent_identity()
                     # Notify the consumer that the actual model is now known so
                     # it can upgrade its label to "agent · model". Best-effort;
                     # a callback error must never disturb the stream.
@@ -1559,6 +1606,14 @@ class LLMCaller:
                         # the stream's init/system metadata.
                         on_agent_change=self._notify_agent_change,
                     )
+
+                    # Seed the accumulating bubble with an identity-only record
+                    # so the current reply area shows the real agent the moment
+                    # this attempt starts — before any text/tool fragment (or a
+                    # call that only returns a final result) would otherwise make
+                    # it visible. Retries / rotations build a fresh tracker, so
+                    # each attempt seeds its own agent.
+                    stream_tracker.emit_agent_identity()
 
                     def on_stream_output(line: str) -> None:
                         stream_tracker.process_line(line)

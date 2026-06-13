@@ -1,0 +1,18 @@
+id: '189'
+description: 'spec 体积治理任务之外，实测发现的步骤级 token 浪费点：
+
+  1. discovery 每轮把完整对话历史原文重注入 prompt（含历史 assistant JSON 的 thinking 字段），N 轮对话 O(N²)
+  token。需要历史压缩/滚动摘要，并剥离 thinking 字段。
+
+  2. two_phase JSON 模式每步两次 LLM 调用，第二次抽取把第一次的全文重发一遍。评估改为单次结构化输出或裁剪重发内容。
+
+  3. items 模式的 1-hop refs 扩展会把被引用的超大 Requirement 整段拉入。在 Requirement 体积纪律（治理任务中的 8KB
+  告警）落地后复测，必要时对 ref 注入做摘要降级。
+
+  也许还有更多，探索一下。'
+status: resolved
+scope: in_scope
+tags: []
+source: human
+created_at: '2026-06-13T11:18:45.977419'
+updated_at: '2026-06-13T11:24:18.760084'

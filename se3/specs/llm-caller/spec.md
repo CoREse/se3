@@ -325,6 +325,8 @@ The bracket-marker convention covers all three tool-event kinds — `tool_use`, 
 
 These fields ride alongside `content` inside each `stream_progress` record's payload (e.g. `chat_history.record_stream_progress` accepts the matching keyword-only `tool_use_id` / `is_error` / `tool_detail` parameters, defaulting to `None`). When all three default to `None` the persisted jsonl record's key set MUST stay byte-identical to the pre-extension schema, so legacy readers and the existing CLI history view continue to work unchanged.
 
+**Live agent / model identity fields.** Independently of the per-chip tool fields, the tracker MUST also stamp the *calling identity* onto every `stream_progress` record it emits so the running-flow console can show the agent in the accumulating bubble from the turn's very first fragment instead of waiting for the final assistant result. The tracker is constructed with the agent name selected for the current attempt and MUST carry that `agent_name` on **every** `stream_progress` record it emits, starting with the first. In addition, the tracker best-effort parses the real model identifier from each `init` / `system` NDJSON line as the stream arrives (reusing the shared single-line/object model-name helper — the same parser, `extract_model_name_from_ndjson`, that `record_response` uses); once a model name has been resolved it is cached on the tracker and every *subsequent* `stream_progress` record additionally carries `model_name`, so the console can upgrade the live badge in place from agent-only to `agent · model`. `chat_history.record_stream_progress` accepts matching keyword-only `agent_name` / `model_name` parameters defaulting to `None`, and — exactly as with the per-chip extension fields — when `agent_name`, `model_name`, and the three tool fields all default to `None` the persisted jsonl record's key set MUST stay byte-identical to the pre-extension schema, so legacy readers and the existing CLI history view continue to work unchanged. On a retry or agent rotation each attempt constructs its own tracker with that attempt's actual agent name (and never inherits any model name resolved for a prior attempt), so each attempt's `stream_progress` records are attributed to the agent that actually ran them, never a stale name from an earlier attempt.
+
 **Single-record-per-phase rule.** Each tool call produces **exactly two** `stream_progress` records on the web/jsonl channel — one in-flight record at `tool_use` time and one terminal record at `tool_result` time — and **no more**. In particular, the tracker MUST NOT emit a separate result-preview chip in addition to the terminal record: the terminal event's header (computed by `tool_formatters.format_tool_chip_header(...)` from both the cached `tool_use` input and the arriving `tool_result` payload) and its `tool_detail` payload together carry every piece of information the frontend chip needs, so any third `[<preview>]` chip would be a duplicate that the frontend would render as a zombie sibling. The CLI terminal stdout is unaffected by this rule — its emoji-prefixed lines (`🔧` for use, `✅` / `❌` for result) continue to be printed byte-for-byte as before.
 
 #### Scenario: Text and thinking streamed inline
@@ -382,6 +384,19 @@ These fields ride alongside `content` inside each `stream_progress` record's pay
 - **THEN** the tracker has emitted **exactly one** terminal record for the failure (no extra preview chip), and its `content` is the failure bracket marker `[Bash ✗ <error_preview>]` (or `[Tool error: <preview>]` when the tool name is unknown)
 - **AND** the terminal record carries the matching `tool_use_id`, `is_error = true`, and a `tool_detail` payload that describes the error so the frontend chip can default the detail panel to expanded for failures (per the `running-flow-console` *Tool Call Chip State Machine* requirement)
 - **AND** the CLI terminal stdout for the same failure still prints the emoji-prefixed `❌` line byte-for-byte as before
+
+#### Scenario: stream_progress records carry the live agent and (once parsed) model identity
+- **GIVEN** an attempt whose `StreamJSONTracker` was constructed with the selected agent name `dclaude`, streaming an `init` / `system` line that reports model `claude-opus-4-8` followed by later assistant fragments
+- **WHEN** the `stream_progress` records produced by the tracker are inspected
+- **THEN** every record from the first fragment onward carries `agent_name = "dclaude"`
+- **AND** records emitted after the `init` / `system` line is parsed additionally carry `model_name = "claude-opus-4-8"` (extracted via the shared `extract_model_name_from_ndjson` helper), while records emitted before any model could be resolved carry no `model_name` key
+- **AND** when none of `agent_name` / `model_name` / the per-chip tool fields are set, the record's key set is byte-identical to the pre-extension schema
+
+#### Scenario: Each retry/rotation attempt attributes its own agent
+- **GIVEN** a first attempt that runs under agent `dclaude` and a second attempt, after an agent rotation, that runs under agent `claude`
+- **WHEN** the `stream_progress` records of both attempts are inspected
+- **THEN** the first attempt's records carry `agent_name = "dclaude"` and the second attempt's records carry `agent_name = "claude"`, each attempt's tracker having been constructed with that attempt's actual agent
+- **AND** a model name resolved during the first attempt is not carried over to the second attempt's records
 
 #### Scenario: Malformed JSON tolerated
 - **WHEN** a streamed line is not valid JSON

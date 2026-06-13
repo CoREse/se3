@@ -1,8 +1,0 @@
-id: '185'
-description: webui显示llm名，在这个llm回复开始的时候就要显示，而不是要等到结束才显示。如果结束才能加上实际的模型的话，那就等结束再加上也行，但是llm名要开始就显示。
-status: open
-scope: in_scope
-tags: []
-source: human
-created_at: '2026-06-12T11:58:11.703511'
-updated_at: '2026-06-12T11:58:11.703511'

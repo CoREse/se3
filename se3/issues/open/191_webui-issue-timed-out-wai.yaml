@@ -1,0 +1,8 @@
+id: '191'
+description: webui issue创建时显示：timed out waiting for issue command result from 'hdev-bc2411715b49'。但是发现其实已经落盘了。
+status: open
+scope: in_scope
+tags: []
+source: human
+created_at: '2026-06-13T11:20:25.402760'
+updated_at: '2026-06-13T11:20:25.402760'

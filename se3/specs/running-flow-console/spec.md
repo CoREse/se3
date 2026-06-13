@@ -2034,6 +2034,21 @@ chip — this is forbidden). The running-flow console therefore relies on the
 producer side for byte-identical marker text between live and final views;
 no client-side reformatting is required.
 
+**Live agent / model badge.** From its very first fragment the accumulating
+bubble MUST display the agent badge for the turn, reusing the same
+`renderAgentBadge` / `formatAgentBadgeText` helpers and unobtrusive small-print
+styling as the final assistant bubble (see *Per-Step Report Cards*). The badge
+is seeded from the first fragment's normalized `agentName` so the operator sees
+which agent is producing the reply the moment streaming begins, rather than only
+after the final result lands. When a later same-turn fragment first carries a
+`modelName`, the existing badge is upgraded **in place** to the `agent · model`
+form — without opening a new headed bubble and without reflowing the accumulated
+content. Consistent with the final form, when a fragment carries no `agentName`
+no badge, label, or placeholder of any kind is rendered, so legacy records
+lacking these fields reflow exactly as before. This relies on the producer side
+stamping `agent_name` on every `stream_progress` record (and `model_name` once
+resolved), per the `llm-caller` *Streaming NDJSON Output Display* requirement.
+
 **Final state is unchanged.** This requirement governs only the *in-progress*
 (pre-final) intermediate rendering. When the turn's final (non-partial) result
 arrives, the accumulating bubble is superseded and the turn collapses to the
@@ -2109,6 +2124,19 @@ one bubble per fragment.
 - **AND** no emoji-prefixed text (`🔧`, `✅`, `❌`) appears in the rendered
   live bubble as unboxed markdown — the live and final views share one
   marker grammar with no second parsing path
+
+#### Scenario: Accumulating bubble shows the agent badge from the first fragment and upgrades to agent · model
+- **GIVEN** a running LLM turn whose first streaming fragment carries
+  `agentName = "dclaude"` with no `modelName`, and a later same-turn fragment
+  that carries both `agentName = "dclaude"` and `modelName = "claude-opus-4-8"`
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** from the first fragment the accumulating assistant bubble shows the
+  agent badge `dclaude`
+- **AND** when the model-bearing fragment arrives the badge upgrades in place to
+  `dclaude · claude-opus-4-8` within the same bubble — no new headed bubble is
+  opened and the accumulated content does not reflow
+- **AND** a turn whose fragments carry no `agentName` renders no badge or
+  placeholder, exactly as before these fields existed
 
 #### Scenario: History residual partials merge into one bubble
 - **GIVEN** a history / playback record stream from a run interrupted mid-turn,
@@ -2724,13 +2752,34 @@ jsonl as each group transitions, and the console MUST render them.
 `normalizeRecord` MUST recognize a conversation record whose `type` is
 `group_status` and normalize it into a record carrying at least its `group_id`,
 `status` (one of `queued` / `running` / `completed` / `failed` / `skipped`),
-and `timestamp`. Within the `implement` step's section, each such record MUST
+and `timestamp`, plus the optional `agentName` / `modelName` identity fields
+extracted from the record's `agent_name` / `model_name` (defaulting to `null`
+when absent — these MUST be read from the record, never hard-coded to `null`).
+Within the `implement` step's section, each such record MUST
 be rendered as a lightweight, **affordance-free** per-group status marker
 (e.g. a `.group-status-marker` element) mapping status to a short human phrase
 — for example `running` → "G3 正在 worktree 实施中", `completed` → "G1 已完成",
 `queued` → "G{n} 排队中", `failed` → "G{n} 失败", `skipped` → "G{n} 已跳过".
 The marker is a plain status line: it carries no fold chip, no "View raw"
 toggle, and no reply affordance.
+
+**Live agent / model on the marker.** For a group running in a worktree the
+status marker MUST also display the agent the group is currently using, and —
+once the real model identifier becomes available — upgrade to the
+`agent · model` form, using the same `renderAgentBadge` / `formatAgentBadgeText`
+helpers and identical formatting as every other LLM step's badge (see
+*Per-Step Report Cards*). The agent/model identity rides each `group_status`
+record: the orchestrator relays it from the group's `LLMCaller` (via the
+caller's per-attempt agent-change notification) as each attempt's agent is
+selected and again once the model is parsed, per the `llm-caller` *Streaming
+NDJSON Output Display* requirement. Because successive `group_status` records
+for the same group are reflected in place, a marker that first showed only the
+agent upgrades to `agent · model` when a later record carries the model, and a
+retry / agent rotation inside the group updates the marker to the agent that is
+actually running — never a stale name. Consistent with the badge rule elsewhere,
+when a record carries no agent/model the marker shows no badge or placeholder,
+and the marker remains affordance-free and in strict chronological order
+regardless.
 
 These markers MUST obey the existing *Conversation Strict Chronological Order*
 contract: they are placed by their `(timestamp, original-index)` key like every
@@ -2756,6 +2805,21 @@ pre-empt that final content.
   phrasing for `running`, a "completed" phrasing for `completed`)
 - **AND** the marker carries no fold chip, no "View raw" toggle, and no reply
   affordance
+
+#### Scenario: Running marker shows the group's live agent and upgrades to agent · model
+- **GIVEN** an `implement` step's jsonl where a group's `group_status` records
+  first carry `status: "running"` with an `agent_name` only, then a later
+  `running` / `completed` record additionally carries a `model_name`
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** the "running in worktree" marker for that group shows the agent name
+  from the first record (e.g. the agent badge appended to "G3 正在 worktree
+  实施中")
+- **AND** when the model-bearing record arrives the marker upgrades in place to
+  the `agent · model` form, using the same badge formatting as every other LLM
+  step
+- **AND** a `group_status` record carrying no agent/model renders its status
+  marker with no badge or placeholder, and the marker stays affordance-free and
+  in strict chronological order
 
 #### Scenario: Status markers advance before the step ends
 - **GIVEN** a DAG-parallel implement step still in progress whose groups are

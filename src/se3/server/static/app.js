@@ -4978,6 +4978,14 @@ function buildPartialBubble(norm) {
 // no badge and no placeholder, staying byte-compatible with legacy streams.
 function refreshPartialAgentBadge(row, norm) {
   if (norm && typeof norm.agentName === "string" && norm.agentName) {
+    // A changed agent (e.g. a retry/rotation whose fragments reuse this
+    // accumulating bubble) invalidates the model cached for the OLD agent —
+    // drop it so the badge does not show "newAgent · oldModel". The new
+    // agent's own model (if any) is re-applied below from this same fragment
+    // or a later one; until then the badge shows the new agent name alone.
+    if (row.__partialAgentName && row.__partialAgentName !== norm.agentName) {
+      row.__partialModelName = null;
+    }
     row.__partialAgentName = norm.agentName;
   }
   if (norm && typeof norm.modelName === "string" && norm.modelName) {

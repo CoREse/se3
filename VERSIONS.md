@@ -40,6 +40,14 @@
 
 
 
+
+## 9.4.0 - 2026-06-13
+
+- Display agent name badge from the first streaming fragment instead of waiting for completion
+- Upgrade badge in-place to 'agent · model' once model name is parsed from NDJSON metadata
+- Attribute each retry or agent rotation to its own agent name (no stale carry-over)
+- Show live agent/model on DAG worktree-group status cards with identical formatting
+- Preserve legacy records without agent/model fields — no empty placeholders displayed
 ## 9.3.0 - 2026-06-13
 
 - Add `se3 spec index` command with size-bounded deterministic-greedy folding for navigating large spec collections within 16KB output limits

@@ -201,6 +201,111 @@ def test_tracker_stores_agent_name():
     assert t._model_name is None
 
 
+def test_emit_agent_identity_seeds_agent_before_any_output(monkeypatch, tmp_path):
+    """At attempt start the tracker emits an identity-only record carrying the
+    agent (empty content) so the web console shows the real agent before any
+    text/tool fragment — or even when the call returns only a final result."""
+    tracker, captured = _make_capturing_tracker(monkeypatch, tmp_path)
+
+    tracker.emit_agent_identity()
+
+    assert len(captured) == 1, "exactly one identity record expected"
+    rec = captured[0]
+    assert rec["content"] == "", "identity record carries no visible content"
+    assert rec["agent_name"] == "dclaude"
+    assert "model_name" not in rec  # model not parsed yet
+
+
+def test_emit_agent_identity_includes_model_when_known(monkeypatch, tmp_path):
+    """If the model is already parsed, the identity seed carries agent · model."""
+    tracker, captured = _make_capturing_tracker(monkeypatch, tmp_path)
+    tracker._model_name = "claude-opus-4-8"
+
+    tracker.emit_agent_identity()
+
+    assert captured[-1]["agent_name"] == "dclaude"
+    assert captured[-1]["model_name"] == "claude-opus-4-8"
+
+
+def test_emit_agent_identity_noop_without_agent(monkeypatch, tmp_path):
+    """No agent name → no identity record (legacy/ad-hoc callers unaffected)."""
+    tracker, captured = _make_capturing_tracker(
+        monkeypatch, tmp_path, agent_name=None
+    )
+
+    tracker.emit_agent_identity()
+
+    assert captured == []
+
+
+def test_emit_agent_identity_noop_without_flow_context():
+    """No flow_id/step_id → progress disabled → no write attempted."""
+    t = StreamJSONTracker(agent_name="dclaude")  # no flow context
+    # Should simply not raise and not attempt any record write.
+    t.emit_agent_identity()
+
+
+def test_call_emits_identity_seed_before_result(monkeypatch, tmp_path):
+    """The regular call() path emits an identity seed at attempt start, so even
+    a call that streams no intermediate fragments still surfaces its agent."""
+    captured = []
+
+    def fake_record_stream_progress(
+        project_root,
+        flow_id,
+        step_id,
+        step_type,
+        content,
+        raw_obj,
+        attempt,
+        timestamp=None,
+        **kwargs,
+    ):
+        captured.append({"content": content, **kwargs})
+
+    monkeypatch.setattr(
+        chat_history, "record_stream_progress", fake_record_stream_progress
+    )
+
+    caller = LLMCaller(
+        project_root=tmp_path,
+        max_retries=1,
+        retry_delay=0,
+        flow_id="flow-seed",
+        step_id="01_implement_abc12345",
+        step_type="implement",
+        agents=[{"name": "agentA", "type": "claude-code", "cmd": "echo"}],
+    )
+
+    class _ResultOnlyRunner:
+        """Streams nothing intermediate — returns only the final result line."""
+
+        def build_call_args(self, prompt, read_only, context_files=None):
+            return ["-p", prompt]
+
+        def detect_infra_error(self, returncode, output, stderr_tail):
+            from se3.agent_runner import InfraErrorType
+
+            return InfraErrorType.NONE
+
+        def run_with_monitor(self, args, on_output=None, **kwargs):
+            # No on_output calls — the tracker sees no fragments at all.
+            return _FakeResult(
+                success=True,
+                output='{"type": "result", "result": "done"}',
+            )
+
+    with patch.object(caller, "_get_current_runner", return_value=_ResultOnlyRunner()), \
+         patch.object(LLMCaller, "_record_prompt"), \
+         patch.object(LLMCaller, "_record_response"):
+        caller.call("do the thing", json_mode="off")
+
+    # The identity seed (empty content, agentA) must be present even though the
+    # runner streamed no intermediate fragments.
+    seeds = [c for c in captured if c.get("content") == "" and c.get("agent_name") == "agentA"]
+    assert seeds, f"expected an identity seed record, got {captured}"
+
+
 def test_tracker_progress_carries_agent_before_model(monkeypatch, tmp_path):
     """A tool_use that streams before any init/system line yields a progress
     record carrying agent_name but no model_name yet."""
@@ -308,6 +413,28 @@ def test_tracker_init_line_first_all_records_carry_model(monkeypatch, tmp_path):
     for rec in captured:
         assert rec["agent_name"] == "dclaude"
         assert rec["model_name"] == "claude-opus-4-8"
+
+
+def test_init_line_emits_model_upgrade_without_further_fragments(monkeypatch, tmp_path):
+    """The moment an init/system line reveals the model, the tracker MUST emit an
+    identity-only progress record so the reply bubble's badge upgrades from
+    "agent" to "agent · model" immediately — without waiting for the next
+    text/tool fragment (which may pause indefinitely or never arrive for a
+    result-only call)."""
+    tracker, captured = _make_capturing_tracker(monkeypatch, tmp_path)
+
+    # Only the init line streams; no subsequent text/tool fragment follows.
+    tracker.process_line(json.dumps({"type": "init", "model": "claude-opus-4-8"}))
+
+    # An upgrade record (empty content, agent · model) must already be present.
+    upgrades = [
+        c
+        for c in captured
+        if c.get("content") == ""
+        and c.get("agent_name") == "dclaude"
+        and c.get("model_name") == "claude-opus-4-8"
+    ]
+    assert upgrades, f"expected an immediate model-upgrade record, got {captured}"
 
 
 # ---------------------------------------------------------------------------

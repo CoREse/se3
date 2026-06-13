@@ -89,6 +89,31 @@ export function registerAgentBadgeLiveTests(ctx) {
     assert.equal(badges[0].textContent, "dclaude · claude-opus-4-8");
   });
 
+  check("G3 agent change clears the previous agent's model", () => {
+    // attempt A shows "A · model-A"; a rotation reuses this accumulating bubble
+    // and B's fragment carries only agent_name. The stale model-A MUST be
+    // dropped — the badge shows "B", never "B · model-A".
+    const row = app.buildPartialBubble(
+      app.normalizeRecord(frag("A", "model-A", "a", 1)));
+    app.appendPartialFragment(row, app.normalizeRecord(frag("B", null, "b", 2)));
+    const badges = findAll(row, "agent-badge");
+    assert.equal(badges.length, 1, "must remain a single badge after rotation");
+    assert.equal(badges[0].textContent, "B",
+      "agent change must clear the stale model and show the new agent alone");
+  });
+
+  check("G3 agent change adopts the new agent's own model when present", () => {
+    // If B's fragment carries both agent_name and model_name, the badge shows
+    // B's own model — never the prior agent's stale model.
+    const row = app.buildPartialBubble(
+      app.normalizeRecord(frag("A", "model-A", "a", 1)));
+    app.appendPartialFragment(row, app.normalizeRecord(frag("B", "model-B", "b", 2)));
+    const badges = findAll(row, "agent-badge");
+    assert.equal(badges.length, 1);
+    assert.equal(badges[0].textContent, "B · model-B",
+      "the rotated agent must show its own model, not the previous agent's");
+  });
+
   // ---- (c) missing agent_name renders no badge / no placeholder -----------
   check("G3 fragment without agent_name renders no badge and no placeholder", () => {
     const row = app.buildPartialBubble(app.normalizeRecord(frag(null, null, "x", 1)));
