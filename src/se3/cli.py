@@ -155,6 +155,7 @@ def run_cmd(
     from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection). Combine with --discover to start the issue-sourced flow from the discovery step."),
     output_format: str = typer.Option("cli", "--output-format", help="Output sink: 'cli' (Rich rendering, default) or 'json' (structured NDJSON event stream)"),
     preset: Optional[str] = typer.Option(None, "--preset", help="Run a preset prompt task by name (mutually exclusive with --type; the preset carries its own type). Use '--preset list' to list available presets."),
+    worktree: bool = typer.Option(False, "--worktree", help="Isolation mode: run the flow in a dedicated git worktree (concurrent with other --worktree runs), then auto-merge the result back into the current branch. Without this flag, the flow runs in place (synchronous mode)."),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -163,8 +164,16 @@ def run_cmd(
         se3 run "Fix login bug" --type=bugfix
         se3 run --resume
         se3 run --discover "I want to build something related to authentication"
+        se3 run --worktree "Implement feature X"   # isolated worktree, auto-merged back
     """
-    from .commands.run import run_flow, get_project_root, handle_resume_interactive, SE3_DIR
+    from .commands.run import (
+        run_flow,
+        run_worktree_mode,
+        resume_run,
+        get_project_root,
+        handle_resume_interactive,
+        SE3_DIR,
+    )
     from .engine.prompt_history import get_prompt_history
 
     # Validate the output-format sink selection (the outermost sink choice).
@@ -309,7 +318,10 @@ def run_cmd(
             target_flow_id = handle_resume_interactive(project_root)
 
         if target_flow_id:
-            exit_code = run_flow(
+            # resume_run resolves whether the selected flow is an isolated
+            # --worktree run (re-dispatch inside its worktree + trailing merge)
+            # or a plain main-repo flow (resumed in place under the main lock).
+            exit_code = resume_run(
                 project_root=project_root,
                 flow_id=target_flow_id,
                 prompt_history=prompt_history,
@@ -344,14 +356,26 @@ def run_cmd(
             )
             raise typer.Exit(1)
 
-    exit_code = run_flow(
-        project_root=project_root,
-        task_description=task,
-        task_type=type,
-        change_name=change,
-        prompt_history=prompt_history,
-        output_format=output_format,
-    )
+    if worktree:
+        # Isolation mode: run the same flow in a dedicated worktree, then
+        # auto-merge the result back into the current branch.
+        exit_code = run_worktree_mode(
+            project_root=project_root,
+            task=task,
+            task_type=type,
+            change_name=change,
+            prompt_history=prompt_history,
+            output_format=output_format,
+        )
+    else:
+        exit_code = run_flow(
+            project_root=project_root,
+            task_description=task,
+            task_type=type,
+            change_name=change,
+            prompt_history=prompt_history,
+            output_format=output_format,
+        )
     raise typer.Exit(exit_code)
 
 
