@@ -891,6 +891,48 @@ tail. Stateful UI affordances of already-rendered records — fold state, raw
 toggles, chip selections — MUST NOT be disturbed by an out-of-order
 insertion or by a step-header rebuild that follows it.
 
+**Single step region per `step_id`.** All records sharing the same `step_id`
+— the `step_started` running anchor, `assistant` / `user` / `system`
+conversation turns, `step_output` process records, and the terminal
+`step_completed` / `step_failed` report — MUST be grouped into **one** visual
+step region (they share a single `stepKey` / `__convStepKey = step_id`). A
+`step_completed`, `step_failed`, or `step_output` record MUST NOT spawn a new
+step region bearing the same step name as one that already exists; only a
+record with a **new** `step_id` opens a new step region. Terminal and
+non-terminal records for the same `step_id` reconcile by supersede (the
+terminal report supersedes the `step_started` running anchor in place) rather
+than appending a second same-named section.
+
+**Stable, low-saturation visual grouping.** Each step region MUST carry a
+**stable, low-saturation** visual grouping style (a per-`step_type` background
+or accent applied through a consistent CSS-variable set) that makes the step
+boundary clear and that is **distinguishable yet consistent** across step
+types — the same step type always renders the same low-key accent. The styling
+MUST preserve text contrast and long-content readability and MUST NOT break the
+mobile (phone-portrait) layout. Step status (running / completed / failed /
+paused / retrying) MUST be conveyed with **explicit text or an icon**, never by
+colour alone, so the status stays legible under reduced-colour rendering.
+
+#### Scenario: Same step_id records group into one step region
+- **GIVEN** a `step_started` anchor, one or more `assistant` / `step_output`
+  records, and a terminal `step_completed` record that all carry the same
+  `step_id`
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** all of them fall into a single visual step region keyed by that
+  `step_id`, and the terminal report supersedes the running anchor in place
+- **AND** the `step_completed` / `step_failed` / `step_output` records do NOT
+  open a second step region bearing the same step name; only a record with a
+  new `step_id` starts a new region
+
+#### Scenario: Step status is conveyed by text or icon, not colour alone
+- **GIVEN** step regions in running, completed, failed, paused, and retrying
+  states, each carrying its stable per-`step_type` low-saturation grouping
+  style
+- **WHEN** the regions are rendered
+- **THEN** each region's status is shown with explicit text or an icon (not
+  colour alone), and the grouping style preserves text contrast and does not
+  introduce horizontal overflow on the phone-portrait breakpoint
+
 #### Scenario: Records sort by timestamp across role and step boundaries
 - **GIVEN** a conversation NDJSON containing, in this timestamp order:
   `assistant A1` (step=discovery, ts=1), `user U1` (step=discovery_continue,
@@ -917,6 +959,115 @@ insertion or by a step-header rebuild that follows it.
   at the tail
 - **AND** existing records' fold state, raw toggles, and chip selections
   are preserved across the rebuild
+
+### Requirement: Step Region Appears at RUNNING
+
+A step's region MUST appear in the running flow's conversation the moment the
+step enters `RUNNING` — showing the step and an explicit *in-progress* status
+(text + icon) — **without** waiting for the step's first chat record or its
+`step_completed` event. This behaviour MUST be uniform across **every**
+`StepType`, including the steps that produce no LLM conversation at all
+(`TEST`, `COMMIT`, `SPEC_GATE`): such a step would otherwise stay invisible on
+the web console until it finished.
+
+The mechanism reuses the existing per-step jsonl / `history_data` channel: the
+engine persists a `STEP_STARTED` event as a `type: "step_started"` record (see
+`flow-engine: Event Stream and Sink Interface`), and the frontend's
+`normalizeRecord` recognises `eventType === 'step_started'` and produces a
+lightweight running **anchor** record — `{ role: 'step-event', kind:
+'step_started', stepType, stepId, status: 'running', timestamp }` with **no**
+report card and no fold/raw/chip affordances. The anchor shares the same
+`step_id` (`__convStepKey`) as the step's later conversation, `step_output`,
+and terminal `step_completed` / `step_failed` records, so it groups into the
+same single step region (see *Conversation Strict Chronological Order*) and is
+superseded in place by the terminal report when the step finishes — it never
+produces a second same-named region.
+
+#### Scenario: Non-LLM step shows a region the moment it enters RUNNING
+- **GIVEN** a `TEST` (or `COMMIT` / `SPEC_GATE`) step that produces no LLM
+  conversation and has just entered `RUNNING`, emitting a `step_started` record
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** a step region for that step appears immediately with an explicit
+  *in-progress* status (text + icon) and no report card, before any chat
+  record or `step_completed` event arrives
+- **AND** `normalizeRecord` produced the running anchor from
+  `eventType === 'step_started'`
+
+#### Scenario: Running anchor is superseded in place by the terminal report
+- **GIVEN** a step whose `step_started` running anchor is already shown
+- **WHEN** the step's terminal `step_completed` / `step_failed` record (same
+  `step_id`) arrives
+- **THEN** the terminal report card supersedes the running anchor inside the
+  same step region, and no new same-named step region is created
+
+### Requirement: Viewport-Driven Sticky Step Header
+
+The conversation scroll region MUST present a **viewport-driven sticky step
+header**: a floating header pinned to the top of the scroller that always shows
+the title of whichever step the **top of the viewport** currently falls inside.
+This behaviour MUST be identical in the running-flow view (`#flow-conversation`)
+and the history detail view (`#history-detail`), since both render through the
+shared `renderConversation` engine.
+
+The floating header and the step region's own in-stream original
+`.history-step-header` MUST be **mutually exclusive**: when a step's original
+header is normally visible in the scroll viewport, the floating header for that
+step is hidden; the floating header shows only when the original header has
+scrolled out of view above the top edge. The header reflects **only** the step
+the viewport top currently belongs to — NOT the step the flow is currently
+executing.
+
+Scrolling MUST switch the floating title immediately and symmetrically: when
+the user scrolls **up** far enough that part of the previous step's content
+re-enters the top of the viewport, the floating title MUST switch to that
+previous step's title at once; scrolling **down** switches forward by the same
+rule. The decision logic MUST be factored into a pure function
+`computeStickyStep(headerOffsets, scrollTop)` so it is unit-testable in a
+layout-free DOM stub.
+
+Clicking the floating header MUST smoothly scroll the region so that step's
+original `.history-step-header` lands exactly at the top of the scroll region;
+once the scroll completes the original header is normally visible and the
+floating header hides. This interaction MUST NOT change any step status or the
+flow's execution state — it is pure navigation.
+
+#### Scenario: Floating header reflects the step at the viewport top
+- **GIVEN** a conversation scrolled so that step B's content occupies the top
+  of `#flow-conversation` while step A's content is above the top edge
+- **WHEN** the sticky logic re-measures via `computeStickyStep(headerOffsets,
+  scrollTop)`
+- **THEN** the floating header shows step B's title — the step at the viewport
+  top — regardless of which step the flow is currently executing
+
+#### Scenario: Scrolling up switches the floating title to the previous step
+- **GIVEN** the floating header currently showing step B
+- **WHEN** the user scrolls up until part of step A's content re-appears at the
+  top of the viewport
+- **THEN** the floating header immediately switches to step A's title; scrolling
+  back down switches it forward to step B by the same rule
+
+#### Scenario: Floating and original headers are mutually exclusive
+- **GIVEN** a step whose original `.history-step-header` scrolls into the
+  visible region at the top
+- **WHEN** the original header becomes normally visible
+- **THEN** the floating header for that step is hidden, and it re-appears only
+  once the original header scrolls back out above the top edge
+
+#### Scenario: Clicking the floating header scrolls the original header to the top
+- **GIVEN** the floating header is shown for a step
+- **WHEN** the user clicks it
+- **THEN** the region smoothly scrolls until that step's original
+  `.history-step-header` sits exactly at the top of the scroll region, after
+  which the original header is visible and the floating header hides
+- **AND** no step status or flow execution state changes as a result
+
+#### Scenario: Sticky behaviour is identical in the history detail view
+- **GIVEN** a past flow opened in the history detail view (`#history-detail`),
+  rendered through the shared `renderConversation` engine
+- **WHEN** the user scrolls the detail region
+- **THEN** the viewport-driven floating step header behaves exactly as in
+  `#flow-conversation` — same viewport-top step selection, same mutual
+  exclusion with the original header, and same click-to-locate navigation
 
 ### Requirement: Long-Content Wrapping
 
@@ -2436,6 +2587,13 @@ The report card MUST:
   renderer).
 - Render structured output (markdown, tables, field lists) rather than
   re-dumping the raw JSON blob.
+- **Be labeled as the step's result/summary, never as a bare step name.** The
+  report card's heading MUST explicitly mark the card as that step's *result*
+  or *summary* (e.g. a `· 结果` / `· 总结` suffix on the step name), so it can
+  never be misread as the opening of a **new** step. This applies to **every**
+  step type uniformly; in particular the `implement` summary card's previously
+  ambiguous bare-step-name heading MUST carry the result/summary marker, and
+  all other report cards are audited to eliminate the same ambiguity.
 
 **`spec_gate` report card (summary, never a raw test dump).** The `spec_gate`
 step (mechanism A — see `flow-engine` *Post-update_spec Spec Verification Gate*)
@@ -2573,6 +2731,14 @@ not re-render them.
 - **THEN** the corresponding web report renderer MUST surface the same field
   set (mapped to markdown / tables / field lists), so the web and CLI users
   see the same structured report content
+
+#### Scenario: Report card is labeled as the step's result, not a new step
+- **GIVEN** a `step_completed` event for any step type (notably `implement`)
+- **WHEN** its report card is rendered in `#flow-view`
+- **THEN** the card's heading marks it as that step's result/summary (e.g. a
+  `· 结果` / `· 总结` suffix), not a bare step name
+- **AND** no report card uses a heading that could be misread as the start of
+  a new step region
 
 #### Scenario: Implement Summary groups are numbered G1…Gn matching the CLI
 - **GIVEN** an `implement` `step_completed` event whose `outputs` carries a

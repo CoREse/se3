@@ -266,6 +266,18 @@ new CSS.
 - **AND** the History rendering path never routes such long content into a node
   with no wrapping protection
 
+#### Scenario: History detail shares step grouping, result cards, and sticky header without mobile overflow
+- **GIVEN** a past flow opened in the History detail pane, rendered through the
+  same shared `renderConversation` engine as the running-flow view, on a
+  phone-portrait viewport (`max-width: 600px`)
+- **WHEN** the detail is rendered and scrolled
+- **THEN** records sharing a `step_id` group into one step region, the terminal
+  report cards carry the `· 结果` / `· 总结` result/summary labeling, and the
+  viewport-driven sticky step header behaves identically to `#flow-conversation`
+  (per `running-flow-console` *Viewport-Driven Sticky Step Header*)
+- **AND** none of these shared affordances introduce horizontal overflow on the
+  mobile breakpoint
+
 #### Scenario: Desktop History layout and identity stripe are unchanged
 - **WHEN** `#history-view` is rendered on a viewport wider than the
   narrow-screen breakpoint

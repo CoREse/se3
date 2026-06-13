@@ -60,8 +60,11 @@ export function registerStepGroupingTests(ctx) {
     ], false);
     assert.deepEqual(stepHeaders(container), ["IMPLEMENT"],
       "all same-step_id records must collapse into ONE region header");
-    // The running anchor and the terminal report both live in that one region.
-    assert.ok(findOne(container, "step-status-row"), "running anchor present");
+    // Once the terminal report lands, the running status anchor is superseded
+    // (the completed report IS the region's final state) — the region must NOT
+    // show both "进行中" and a completed report at once.
+    assert.ok(!findOne(container, "step-status-row"),
+      "running anchor is superseded by the terminal report");
     assert.ok(findOne(container, "step-report"), "terminal report card present");
   });
 
@@ -120,26 +123,245 @@ export function registerStepGroupingTests(ctx) {
     app.renderConversation(container, records, true);
     assert.deepEqual(stepHeaders(container), ["TEST"],
       "the terminal event must not create a duplicate region on append");
-    // Both the running anchor and the report coexist in the one region.
-    assert.ok(findOne(container, "step-status-row"));
+    // The terminal report supersedes the running anchor on the append path too:
+    // one region, the report card only (no stale 进行中 row beside it).
+    assert.ok(!findOne(container, "step-status-row"),
+      "running anchor superseded by the terminal report on append");
     assert.ok(findOne(container, "step-report"));
+  });
+
+  const statusRecord = (stepId, stepType, status, ts) => ({
+    type: "step_status", step_id: stepId, step_type: stepType,
+    status, timestamp: ts,
+  });
+
+  // ---- (c2) a NON-CONTIGUOUS same step_id gets its own boundary header ----
+  // SELF_CHECK(A) → IMPLEMENT(B) → SELF_CHECK(A) on a revision/retry loop: the
+  // re-appearing step_id A's records physically sit AFTER B, so under strict
+  // chronological order they must get their OWN boundary header. Without one,
+  // A's second segment would render beneath B's IMPLEMENT header and sticky
+  // navigation would mis-attribute that content to IMPLEMENT. A header is
+  // therefore emitted per CONTIGUOUS run, not once per step_id.
+  check("G2 a re-appearing step_id gets its own boundary header per contiguous run", () => {
+    const a = "06_self_check_aa";
+    const b = "07_implement_bb";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(a, "self_check", 1),
+      completedRecord(a, "self_check", 2),
+      startedRecord(b, "implement", 3),
+      completedRecord(b, "implement", 4),
+      // step A re-runs (same step_id) after B — strictly later in time.
+      startedRecord(a, "self_check", 5),
+      completedRecord(a, "self_check", 6),
+    ], false);
+    // Three contiguous runs → three headers: SELF CHECK, IMPLEMENT, SELF CHECK.
+    // The re-appearance gets its own boundary so its content is attributable to
+    // SELF_CHECK (not visually absorbed under the IMPLEMENT header above it).
+    assert.deepEqual(stepHeaders(container),
+      ["SELF CHECK", "IMPLEMENT", "SELF CHECK"],
+      "non-contiguous re-appearance of a step_id opens its own boundary header");
+  });
+
+  // ---- (c2b) contiguous same step_id still collapses to one header --------
+  check("G2 contiguous records of one step_id still collapse to a single header", () => {
+    const sid = "06_self_check_aa";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(sid, "self_check", 1),
+      chatRecord(sid, "self_check", "assistant", "checking", 2),
+      outputRecord(sid, "self_check", 3),
+    ], false);
+    assert.deepEqual(stepHeaders(container), ["SELF CHECK"],
+      "a contiguous run of one step_id has exactly one boundary header");
+  });
+
+  // ---- (c2c) running → completed: no stale 进行中 beside the report --------
+  check("G2 running → completed supersedes the 进行中 anchor (issue 1)", () => {
+    const sid = "05_test_aa";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(sid, "test", 1),
+      completedRecord(sid, "test", 2),
+    ], false);
+    // The terminal report exists; the running status row is gone.
+    assert.ok(findOne(container, "step-report"), "terminal report present");
+    assert.ok(!findOne(container, "step-status-row"),
+      "running anchor must not coexist with the completed report");
+  });
+
+  // ---- (c2d) running → paused → running → completed (same step_id) --------
+  // The resumed run re-arms a 'running' anchor (later ts than the paused one),
+  // so before completion the region reads 进行中; once the terminal report
+  // lands every status anchor is superseded — no stale 已暂停 / 进行中 remains.
+  check("G2 resumed step shows 进行中, then the terminal report supersedes all anchors", () => {
+    const sid = "01_discovery_ab";
+    const container = document.createElement("div");
+    // Mid-resume: running → paused → running (no terminal yet).
+    app.renderConversation(container, [
+      startedRecord(sid, "discovery", 1),
+      statusRecord(sid, "discovery", "paused", 2),
+      startedRecord(sid, "discovery", 3),
+    ], false);
+    let rows = findAll(container, "step-status-row");
+    assert.equal(rows.length, 1, "exactly one surviving status row mid-resume");
+    let text = findOne(rows[0], "step-status-text");
+    assert.ok(text && text.textContent.includes("进行中"),
+      `resumed step must read 进行中, got ${text && text.textContent}`);
+    // Now the step completes: every lifecycle anchor is superseded.
+    app.renderConversation(container, [
+      startedRecord(sid, "discovery", 1),
+      statusRecord(sid, "discovery", "paused", 2),
+      startedRecord(sid, "discovery", 3),
+      completedRecord(sid, "discovery", 4),
+    ], false);
+    assert.ok(!findOne(container, "step-status-row"),
+      "no 已暂停 / 进行中 anchor remains after completion");
+    assert.ok(findOne(container, "step-report"), "the completed report is shown");
+    assert.deepEqual(stepHeaders(container), ["DISCOVERY"], "still one region");
+  });
+
+  // ---- (c3) step_status (paused) supersedes the running anchor ------------
+  check("G2 a paused step_status supersedes the running anchor in one region", () => {
+    const sid = "01_discovery_ab";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(sid, "discovery", 1),
+      statusRecord(sid, "discovery", "paused", 2),
+    ], false);
+    // One region.
+    assert.deepEqual(stepHeaders(container), ["DISCOVERY"]);
+    // Exactly one status row, and it reads 已暂停 (not the stale 进行中).
+    const rows = findAll(container, "step-status-row");
+    assert.equal(rows.length, 1, "the running anchor is superseded by the paused row");
+    const text = findOne(rows[0], "step-status-text");
+    assert.ok(text && text.textContent.includes("已暂停"),
+      `the surviving status row must read 已暂停, got ${text && text.textContent}`);
+    assert.ok(rows[0].classList.contains("step-status-paused"));
+  });
+
+  check("G2 paused supersede holds on the incremental append path too", () => {
+    const sid = "01_discovery_ab";
+    const container = document.createElement("div");
+    const records = [startedRecord(sid, "discovery", 1)];
+    app.renderConversation(container, records, false);
+    assert.ok(findOne(container, "step-status-running"), "running anchor first");
+    // The paused status arrives as a live append.
+    records.push(statusRecord(sid, "discovery", "paused", 2));
+    app.renderConversation(container, records, true);
+    const rows = findAll(container, "step-status-row");
+    assert.equal(rows.length, 1, "running anchor superseded on append");
+    assert.ok(rows[0].classList.contains("step-status-paused"));
+    assert.deepEqual(stepHeaders(container), ["DISCOVERY"]);
+  });
+
+  // ---- (c2e) terminal supersede is PER REGION, not per step_id ------------
+  // SELF_CHECK(A) completes, then runs again (same step_id) after IMPLEMENT(B)
+  // and is still RUNNING. The first A region's running anchor is superseded by
+  // its own terminal report, but the SECOND A region (a fresh contiguous run,
+  // no terminal yet) must keep its 进行中 anchor — the terminal of the first
+  // region must NOT reach across and strip the live second region's status.
+  check("G2 terminal supersede is scoped to its own region (re-running step keeps 进行中)", () => {
+    const a = "06_self_check_aa";
+    const b = "07_implement_bb";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(a, "self_check", 1),
+      completedRecord(a, "self_check", 2),
+      startedRecord(b, "implement", 3),
+      completedRecord(b, "implement", 4),
+      // A re-runs and is still in progress (no terminal yet).
+      startedRecord(a, "self_check", 5),
+    ], false);
+    // Three regions: SELF CHECK, IMPLEMENT, SELF CHECK.
+    assert.deepEqual(stepHeaders(container),
+      ["SELF CHECK", "IMPLEMENT", "SELF CHECK"]);
+    // Exactly one surviving status row — the live second A region's 进行中.
+    const rows = findAll(container, "step-status-row");
+    assert.equal(rows.length, 1,
+      "only the live re-run region keeps a status anchor");
+    const text = findOne(rows[0], "step-status-text");
+    assert.ok(text && text.textContent.includes("进行中"),
+      `the re-running region must read 进行中, got ${text && text.textContent}`);
+    // Two terminal report cards (the two completed runs) are present.
+    assert.equal(findAll(container, "step-report").length, 2);
+  });
+
+  // ---- (c2f) terminal supersedes a split-off earlier anchor (issue 2) -----
+  // step_started(A) → record(B) → step_completed(A): another step's record
+  // splits A's running anchor and A's terminal report into SEPARATE contiguous
+  // runs. The terminal must still reach back and supersede A's earlier 进行中
+  // anchor (they belong to the SAME execution of A) — a per-contiguous-run
+  // reconciliation would strand the first 进行中 beside the completed report.
+  check("G2 terminal supersedes an earlier anchor split by another step (issue 2)", () => {
+    const a = "06_self_check_aa";
+    const b = "07_implement_bb";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(a, "self_check", 1),
+      chatRecord(b, "implement", "assistant", "working", 2),
+      completedRecord(a, "self_check", 3),
+    ], false);
+    // No surviving 进行中 anchor — A's terminal superseded its split-off
+    // running row even though IMPLEMENT(B) sits between them.
+    assert.ok(!findOne(container, "step-status-row"),
+      "A's running anchor must be superseded by its terminal across the split");
+    // A's completed report card is present.
+    assert.equal(findAll(container, "step-report").length, 1,
+      "the completed step shows its report, not a stale 进行中");
+  });
+
+  // ---- (c2g) split terminal does NOT strip a later fresh execution --------
+  // started(A) → record(B) → completed(A) → record(B2) → started(A again).
+  // The first A execution's terminal supersedes only its OWN preceding anchor;
+  // the later, still-running A execution keeps its 进行中.
+  check("G2 split terminal preserves a later fresh execution's 进行中 (issue 2)", () => {
+    const a = "06_self_check_aa";
+    const b = "07_implement_bb";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      startedRecord(a, "self_check", 1),
+      chatRecord(b, "implement", "assistant", "working", 2),
+      completedRecord(a, "self_check", 3),
+      chatRecord(b, "implement", "assistant", "more", 4),
+      startedRecord(a, "self_check", 5),
+    ], false);
+    const rows = findAll(container, "step-status-row");
+    assert.equal(rows.length, 1,
+      "only the later fresh A execution keeps a status anchor");
+    const text = findOne(rows[0], "step-status-text");
+    assert.ok(text && text.textContent.includes("进行中"),
+      `the later A execution must read 进行中, got ${text && text.textContent}`);
+    assert.equal(findAll(container, "step-report").length, 1,
+      "the first A execution's terminal report is present");
   });
 
   // ---- (e) shared step-type identity class --------------------------------
   check("G2 every bubble in a region carries the step-type identity class", () => {
     const sid = "07_implement_abcd1234";
     const container = document.createElement("div");
+    // A still-RUNNING region (no terminal report yet) so the running anchor
+    // survives: the anchor, the chat bubble, and the step_output usage row all
+    // share the step-type-implement class (header rows are excluded — they are
+    // stateless separators).
     app.renderConversation(container, [
+      startedRecord(sid, "implement", 1),
+      chatRecord(sid, "implement", "assistant", "working", 2),
+      outputRecord(sid, "implement", 3),
+    ], false);
+    const tagged = findAll(container, "step-type-implement");
+    assert.ok(tagged.length >= 3,
+      `expected the anchor + chat + output rows tagged, got ${tagged.length}`);
+    // Once a terminal report supersedes the anchor, the surviving rows (chat +
+    // report) still carry the identity class.
+    const c2 = document.createElement("div");
+    app.renderConversation(c2, [
       startedRecord(sid, "implement", 1),
       chatRecord(sid, "implement", "assistant", "working", 2),
       completedRecord(sid, "implement", 3),
     ], false);
-    // The running anchor, the chat bubble, and the step-event row all share
-    // the step-type-implement class (header rows are excluded — they are
-    // stateless separators).
-    const tagged = findAll(container, "step-type-implement");
-    assert.ok(tagged.length >= 3,
-      `expected the anchor + chat + report rows tagged, got ${tagged.length}`);
+    assert.ok(findAll(c2, "step-type-implement").length >= 2,
+      "the chat + report rows keep the identity class after the anchor is superseded");
   });
 
   // ==========================================================================

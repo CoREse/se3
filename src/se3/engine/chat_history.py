@@ -376,6 +376,96 @@ def record_step_started(
         logger.warning("Failed to record step started for %s: %s", step_id, exc)
 
 
+def record_step_status(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    status: str,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Record a non-terminal ``step_status`` lifecycle event into the jsonl.
+
+    Writes a single ``{type: 'step_status', step_id, step_type, status,
+    timestamp}`` line into ``se3/history/{flow_id}/{step_id}.jsonl`` when a step
+    settles into a non-terminal but *displayed* state — ``paused`` or
+    ``retrying``. It lets the web console replace the step region's stale
+    "进行中" running anchor (written by :func:`record_step_started`) with the
+    real current state, most importantly the DISCOVERY step that shows "进行中"
+    the instant it enters RUNNING and then pauses awaiting user input with no
+    terminal event.
+
+    Like :func:`record_step_started` the line is intentionally NOT a
+    :class:`ChatMessage` (no ``role``); it rides the existing ``history_data``
+    push channel without protocol changes, and :func:`get_step_history` skips
+    it so CLI history rendering and retry-context construction never ingest it.
+    Same write semantics — ``mkdir`` + a single whole-line ``write`` wrapped in
+    an ``OSError`` guard so a write failure never breaks the running step.
+    """
+    record = {
+        "type": "step_status",
+        "step_id": step_id,
+        "step_type": step_type,
+        "status": status,
+        "timestamp": (
+            datetime.fromtimestamp(timestamp).isoformat()
+            if timestamp is not None
+            else datetime.now().isoformat()
+        ),
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record step status for %s: %s", step_id, exc)
+
+
+def has_step_status_event(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    status: str,
+) -> bool:
+    """Check if a ``step_status`` event with ``status`` already exists.
+
+    Used to keep :func:`record_step_status` idempotent per (step_id, status):
+    a PAUSED step re-entered on resume must not append a second identical
+    status row that would stack duplicate "已暂停" anchors in one region.
+
+    Returns ``True`` when a ``step_status`` record carrying the same ``status``
+    is found, ``False`` otherwise (file missing, unreadable, or no such event).
+    """
+    path = _history_file(project_root, flow_id, step_id)
+    if not path.exists():
+        return False
+    want = str(status).lower()
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") == "step_status"
+                        and "role" not in data
+                        and str(data.get("status", "")).lower() == want
+                    ):
+                        return True
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError as exc:
+        logger.debug(
+            "Could not read history file for step-status check %s: %s",
+            step_id, exc,
+        )
+    return False
+
+
 def has_step_started_event(
     project_root: Path,
     flow_id: str,
@@ -500,6 +590,57 @@ def has_step_output_event(
             step_id, exc,
         )
     return False
+
+
+def last_step_lifecycle_status(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+) -> Optional[str]:
+    """Return the status of the MOST RECENT lifecycle anchor for a step.
+
+    Scans the per-step jsonl for the last ``step_started`` / ``step_status``
+    record (in file order) and returns its effective status — ``"running"`` for
+    a ``step_started`` line, the explicit ``status`` for a ``step_status`` line.
+    Returns ``None`` when the file is missing / unreadable or carries no
+    lifecycle anchor.
+
+    Used by :class:`~se3.engine.sink.HistorySink` to decide whether a fresh
+    ``STEP_STARTED`` should be persisted: a step re-entered on resume AFTER it
+    paused (last lifecycle is ``paused`` / ``retrying``) SHOULD re-arm a
+    ``running`` anchor so the web region switches back from "已暂停" to "进行中",
+    whereas a re-emitted ``STEP_STARTED`` while the last lifecycle is already
+    ``running`` must NOT stack a duplicate running anchor.
+    """
+    path = _history_file(project_root, flow_id, step_id)
+    if not path.exists():
+        return None
+    last: Optional[str] = None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(data, dict) or "role" in data:
+                    continue
+                rec_type = data.get("type")
+                if rec_type == "step_started":
+                    last = "running"
+                elif rec_type == "step_status":
+                    status = str(data.get("status", "")).lower()
+                    if status:
+                        last = status
+    except OSError as exc:
+        logger.debug(
+            "Could not read history file for lifecycle-status check %s: %s",
+            step_id, exc,
+        )
+    return last
 
 
 def record_stream_progress(
@@ -694,6 +835,7 @@ def get_step_history(
             # produce warnings or inflate retry context.
             if isinstance(data, dict) and data.get("type") in (
                 "step_started",
+                "step_status",
                 "step_completed",
                 "step_failed",
                 "step_output",

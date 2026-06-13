@@ -298,6 +298,52 @@ class TestStateMachine:
             assert result == StepStatus.FAILED
             assert "No handler" in step.error_message
 
+    def test_run_step_on_running_called_after_running(self):
+        """on_running fires exactly once, AFTER the step is RUNNING and before
+        the handler runs — so the orchestrator only persists a 'running' anchor
+        for a step that genuinely entered RUNNING."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            seen = []
+
+            def mock_handler(step, flow):
+                # By the time the handler runs, on_running must already have
+                # observed the RUNNING status.
+                seen.append(("handler", step.status))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, mock_handler)
+            flow = sm.create_flow("Test on_running")
+            step = flow.state.get_current_step()
+
+            def on_running(s):
+                seen.append(("on_running", s.status))
+
+            sm.run_step(flow, step, on_running=on_running)
+
+            assert seen[0] == ("on_running", StepStatus.RUNNING)
+            assert seen[1][0] == "handler"
+            # Exactly one on_running invocation.
+            assert [s for s in seen if s[0] == "on_running"] == [
+                ("on_running", StepStatus.RUNNING)
+            ]
+
+    def test_run_step_on_running_not_called_without_handler(self):
+        """A missing-handler step fails BEFORE entering RUNNING, so on_running
+        is never invoked — no dangling 'running' anchor is left behind."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+            flow = sm.create_flow("Test no handler on_running")
+            step = flow.state.get_current_step()
+
+            called = []
+            result = sm.run_step(
+                flow, step, on_running=lambda s: called.append(s))
+
+            assert result == StepStatus.FAILED
+            assert called == []
+
 
 class TestRecovery:
     """Tests for interrupt recovery scenarios."""

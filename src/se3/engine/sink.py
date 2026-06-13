@@ -387,16 +387,29 @@ class HistorySink(Sink):
         )
 
     def _record_started(self, event: Event) -> None:
-        """Persist a STEP_STARTED event as an idempotent ``step_started`` anchor.
+        """Persist a STEP_STARTED event as a state-aware ``step_started`` anchor.
 
         Unlike the terminal/output events, STEP_STARTED carries no ``step``
         object — only ``flow_id`` / ``step_id`` / ``step_type`` on the event
-        itself. The write is skipped (no-op) when a ``step_started`` or a
-        terminal (``step_completed`` / ``step_failed``) record already exists
-        for the same step_id, so a step re-entered on resume or a re-emitted
-        STEP_STARTED never produces a duplicate "进行中" region for the same
-        step. Failures are swallowed so a flaky filesystem cannot break the
-        running flow.
+        itself.
+
+        The write is decided by the step's CURRENT lifecycle state rather than a
+        blanket "started already exists" guard, so the web region always tracks
+        the step's latest state:
+
+        * Skip once a terminal (``step_completed`` / ``step_failed``) record
+          exists — a finished step must never re-gain a "进行中" anchor.
+        * Skip when the LAST lifecycle anchor is already ``running`` — a
+          re-emitted STEP_STARTED with no intervening pause must not stack a
+          duplicate running anchor (no duplicate "进行中" row).
+        * Otherwise (no anchor yet, or the last anchor is a non-running settled
+          state such as ``paused`` / ``retrying``) write a fresh ``running``
+          anchor. This is what re-arms "进行中" when a paused step resumes, so
+          the region switches back from "已暂停" to "进行中" instead of staying
+          frozen on the stale paused state.
+
+        Failures are swallowed so a flaky filesystem cannot break the running
+        flow.
         """
         flow_id = event.flow_id or ""
         step_id = event.step_id or ""
@@ -404,14 +417,14 @@ class HistorySink(Sink):
             return
         # Lazy import: keeps the sink module free of heavier engine deps.
         from .chat_history import (
-            has_step_started_event,
             has_step_terminal_event,
+            last_step_lifecycle_status,
             record_step_started,
         )
 
-        if has_step_started_event(
-            self.project_root, flow_id, step_id
-        ) or has_step_terminal_event(self.project_root, flow_id, step_id):
+        if has_step_terminal_event(self.project_root, flow_id, step_id):
+            return
+        if last_step_lifecycle_status(self.project_root, flow_id, step_id) == "running":
             return
         record_step_started(
             project_root=self.project_root,

@@ -405,12 +405,24 @@ class StateMachine:
 
         return self.create_flow(task_description, **kwargs), False
 
-    def run_step(self, flow: FlowInstance, step: Step) -> StepStatus:
+    def run_step(
+        self,
+        flow: FlowInstance,
+        step: Step,
+        on_running: Optional[Callable[[Step], None]] = None,
+    ) -> StepStatus:
         """Execute a single step.
 
         Args:
             flow: Current flow instance
             step: Step to execute
+            on_running: Optional callback invoked exactly once, AFTER the step
+                has actually transitioned to ``RUNNING`` and been persisted, and
+                BEFORE its handler runs. The orchestrator uses this to emit
+                ``STEP_STARTED`` so a "进行中" anchor is shown only for a step
+                that genuinely entered RUNNING — never for a missing-handler
+                step (which fails before this point) nor for a step whose
+                pre-handler preprocessing (baseline / spec snapshot) raised.
 
         Returns:
             Final status of the step
@@ -442,6 +454,17 @@ class StateMachine:
         step.started_at = datetime.now()
         flow.status = FlowStatus.RUNNING
         self.persistence.save_flow(flow)
+
+        # The step is now genuinely RUNNING and persisted — notify the
+        # orchestrator so it can emit STEP_STARTED here (not before the call,
+        # where a missing handler or a failed pre-handler step would otherwise
+        # leave a dangling "进行中" anchor that never reaches a terminal event).
+        # Best-effort: a fault in the callback must never break the step.
+        if on_running is not None:
+            try:
+                on_running(step)
+            except Exception:
+                logger.debug("on_running callback failed", exc_info=True)
 
         logger.info(f"Running step: {step.step_type.value}")
 

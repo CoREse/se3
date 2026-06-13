@@ -1,8 +1,8 @@
 id: '186'
 description: webui的几个问题：1. test步骤要开始test时就在webui里显示，而不是要test结束才显示。2. implement的卡片上面又重新出现了一个implement，让人以为这是一个新的implement步骤，实际上它是前面implement步骤的总结卡片。你看看还有没有其它步骤也有类似问题。另外就是同一个步骤是否要在视觉上表示出是一个整体（比如不同步骤用不同颜色的背景之类的）？以及在任意的地方考虑显示这是哪个步骤（比如最上面浮动当前步骤的名字，然后点击这个名字可以到当前这个步骤的最上面）。
-status: open
+status: resolved
 scope: in_scope
 tags: []
 source: human
 created_at: '2026-06-12T12:34:48.163644'
-updated_at: '2026-06-12T13:03:06.946076'
+updated_at: '2026-06-13T14:10:02.877332'

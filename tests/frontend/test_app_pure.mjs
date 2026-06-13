@@ -938,8 +938,29 @@ class FakeNode {
   // Sticky-header geometry stubs. getBoundingClientRect returns a settable rect
   // (defaults to all-zero); scrollTo mirrors the browser's options form by
   // assigning scrollTop, so smoothScrollTo can be exercised headlessly.
+  //
+  // `__rect` is stored in *content space* (the layout position at scrollTop 0).
+  // A real browser's rect is *screen space*: a scrolled-down ancestor pulls a
+  // child's rect.top up by that ancestor's scrollTop. To make re-measuring at a
+  // non-zero scroll position behave like the browser (so updateStickyHeader can
+  // safely re-measure on every scroll / after a fold-expand reflow), the stub
+  // subtracts the summed scrollTop of every strict ancestor from the stored
+  // top/bottom. A node's OWN scrollTop is never subtracted from itself (it is
+  // the reference frame), so a scroller's rect stays put while its children
+  // move — exactly the relationship measureStepHeaderOffsets relies on.
   getBoundingClientRect() {
-    return this.__rect || { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    if (!this.__rect) {
+      return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    }
+    let scroll = 0;
+    for (let n = this.parentNode; n; n = n.parentNode) {
+      scroll += Number(n.scrollTop) || 0;
+    }
+    return {
+      ...this.__rect,
+      top: this.__rect.top - scroll,
+      bottom: this.__rect.bottom - scroll,
+    };
   }
   scrollTo(opts) {
     if (opts && typeof opts.top === "number") this.scrollTop = opts.top;
@@ -3398,10 +3419,21 @@ check("renderConversation: user marker reply interleaves by ts; step headers onl
   const ucb = findOne(mid, "user-content-bubble");
   assert.ok(ucb && ucb.textContent.includes("my answer"));
 
-  // Step headers separate discovery / discovery_continue / discovery (visual only):
-  // three boundaries → three headers, and they never shuffle the bubbles.
+  // Step headers separate the regions (visual only) WITHOUT ever shuffling the
+  // bubbles. The two assistant turns share one step_id ("discovery"); the user
+  // reply carries a different step_id ("discovery_continue"). Under strict
+  // chronological order the second "discovery" turn (A2) physically sits AFTER
+  // the discovery_continue reply, so it is a fresh CONTIGUOUS run and opens its
+  // own boundary header — otherwise A2 would render beneath the
+  // discovery_continue header and be mis-attributed. So there are three headers
+  // (DISCOVERY, discovery_continue, DISCOVERY) while the bubbles stay in strict
+  // timestamp order.
   const headers = findAll(container, "history-step-header");
-  assert.equal(headers.length, 3, "a header at each step boundary");
+  assert.equal(headers.length, 3,
+    "a re-appearing step_id opens its own boundary header per contiguous run");
+  const titles = headers.map((h) => { const t = findOne(h, "history-step-title"); return t ? t.textContent : ""; });
+  assert.deepEqual(titles, ["DISCOVERY", "discovery_continue", "DISCOVERY"],
+    "the second discovery turn opens its own boundary header (correct attribution)");
 });
 
 // -- historyListEmptyState: loading / connecting / confirmed-empty split ----

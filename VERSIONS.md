@@ -41,6 +41,16 @@
 
 
 
+
+## 9.5.0 - 2026-06-13
+
+- Show step regions immediately when a step enters RUNNING status, including non-LLM steps like TEST, COMMIT, and SPEC_GATE
+- Group all records sharing the same step_id into a single visual region — step_completed, step_failed, and step_output no longer create duplicate named regions
+- Label all step report cards with explicit result or summary semantics to eliminate ambiguity, especially for IMPLEMENT
+- Apply stable low-saturation per-step-type visual grouping with text and icon status indicators for clear step boundaries
+- Add viewport-driven sticky step header that tracks the current scroll position and allows click-to-locate navigation
+- Ensure history view shares the same step grouping, report labeling, and sticky header behavior as the running flow view
+- Improve mobile responsive layout for step grouping and report cards
 ## 9.4.0 - 2026-06-13
 
 - Display agent name badge from the first streaming fragment instead of waiting for completion

@@ -42,9 +42,16 @@ export function registerStickyStepHeaderTests(ctx) {
     h.__rect = { top, left: 0, right: 100, bottom: top + 28, width: 100, height: 28 };
     return h;
   }
+  // The visible scroll viewport height. The sticky float hides as soon as an
+  // original header is visible ANYWHERE in this viewport (the reveal band is the
+  // viewport height, per stickyRevealPx), so the float only shows while scrolled
+  // into a step region TALLER than the viewport. The DOM fixtures therefore use
+  // a small viewport and headers spaced far apart (≫ VIEWPORT) so each step
+  // region is "tall" and the float meaningfully appears mid-region.
+  const VIEWPORT = 100;
   function buildContent(headers) {
     const content = document.createElement("div");
-    content.__rect = { top: 0, left: 0, right: 100, bottom: 600, width: 100, height: 600 };
+    content.__rect = { top: 0, left: 0, right: 100, bottom: VIEWPORT, width: 100, height: VIEWPORT };
     for (const h of headers) content.appendChild(h);
     return content;
   }
@@ -116,6 +123,30 @@ export function registerStickyStepHeaderTests(ctx) {
     assert.ok(r && r.index === 2 && r.label === "C");
   });
 
+  check("G5 computeStickyStep hides the float once a header enters the reveal band", () => {
+    const o = offs(0, 100, 300);
+    // Pure contract: `revealPx` is the band below the viewport top within which
+    // a visible header hides the float. The DOM layer passes the visible
+    // viewport height; here we exercise the mechanic with explicit values.
+    // Default (no reveal arg) → only a ~1px tolerance hides: at 90 the next
+    // header (100, 10px below) is still outside the band, so step 0 shows.
+    assert.ok(app.computeStickyStep(o, 90) && app.computeStickyStep(o, 90).index === 0);
+    // With a reveal band of 28, a header 10px below the top is "visible" within
+    // the band → mutual exclusion hides the float.
+    assert.equal(app.computeStickyStep(o, 90, 28), null,
+      "an original header within the reveal band hides the float");
+    // A header outside the band (300 is 150px below at y=150, band 28) does NOT hide.
+    const r = app.computeStickyStep(o, 150, 28);
+    assert.ok(r && r.index === 1,
+      "a header beyond the reveal band keeps the float showing");
+    // A larger band (viewport-height-like) hides the same header: at y=150 the
+    // header 300 is 150px below but within a 200px band → float hidden.
+    assert.equal(app.computeStickyStep(o, 150, 200), null,
+      "a visible header within a viewport-sized band hides the float");
+    // A reveal arg <= STICKY_EPS is treated as the bare tolerance (no widening).
+    assert.ok(app.computeStickyStep(o, 90, 0) && app.computeStickyStep(o, 90, 0).index === 0);
+  });
+
   // ======================================================================
   // (b) stickyScrollTarget — click-to-locate target offset (pure)
   // ======================================================================
@@ -148,8 +179,13 @@ export function registerStickyStepHeaderTests(ctx) {
   };
   const isHidden = (floatEl) => floatEl.classList.contains("hidden");
 
+  // Tall-step header offsets: regions are 400px tall, far bigger than the 100px
+  // VIEWPORT, so a step's next header is off-screen while scrolled into its
+  // middle and the float meaningfully shows.
+  const DISCOVERY_TOP = 0, ANALYZE_TOP = 400, IMPLEMENT_TOP = 800;
+
   check("G5 ensureStickyHeaderMounted creates a hidden float at the top of the scroll area", () => {
-    const conv = mountFlow([makeHeader("DISCOVERY", 0), makeHeader("ANALYZE", 100)]);
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP)]);
     const floatEl = floatOf(conv);
     assert.ok(floatEl, "a floating step header is mounted");
     // It is the FIRST child so the sticky anchor pins to the viewport top.
@@ -158,36 +194,39 @@ export function registerStickyStepHeaderTests(ctx) {
     assert.equal(isHidden(floatEl), true, "float hidden while the original header is at the top");
   });
 
-  check("G5 scrolling down shows the float with the active step's label", () => {
-    const conv = mountFlow([makeHeader("DISCOVERY", 0), makeHeader("ANALYZE", 100),
-      makeHeader("IMPLEMENT", 300)]);
+  check("G5 scrolling deep into a step shows the float with that step's label", () => {
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP),
+      makeHeader("IMPLEMENT", IMPLEMENT_TOP)]);
     const floatEl = floatOf(conv);
-    conv.scrollTop = 150;
+    // Deep inside ANALYZE (400..800), viewport 500..600: DISCOVERY & IMPLEMENT
+    // headers are both off-screen → the float shows ANALYZE.
+    conv.scrollTop = 500;
     conv.dispatch("scroll");
-    assert.equal(isHidden(floatEl), false, "float shows once a header scrolls off the top");
+    assert.equal(isHidden(floatEl), false, "float shows once no original header is visible");
     assert.equal(floatLabel(floatEl), "ANALYZE", "float reflects the step at the viewport top");
   });
 
   check("G5 scrolling up switches the float to the previous step immediately", () => {
-    const conv = mountFlow([makeHeader("DISCOVERY", 0), makeHeader("ANALYZE", 100),
-      makeHeader("IMPLEMENT", 300)]);
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP),
+      makeHeader("IMPLEMENT", IMPLEMENT_TOP)]);
     const floatEl = floatOf(conv);
-    conv.scrollTop = 150; conv.dispatch("scroll");
+    conv.scrollTop = 500; conv.dispatch("scroll");
     assert.equal(floatLabel(floatEl), "ANALYZE");
-    // Scroll back up so DISCOVERY's content re-enters the top.
-    conv.scrollTop = 70; conv.dispatch("scroll");
+    // Scroll back up deep into DISCOVERY (0..400), viewport 200..300: ANALYZE's
+    // header (400) is off-screen below → float switches to DISCOVERY.
+    conv.scrollTop = 200; conv.dispatch("scroll");
     assert.equal(isHidden(floatEl), false);
     assert.equal(floatLabel(floatEl), "DISCOVERY",
       "scrolling up must switch the float to the previous step");
   });
 
   check("G5 float hides when the original header re-enters the viewport top", () => {
-    const conv = mountFlow([makeHeader("DISCOVERY", 0), makeHeader("ANALYZE", 100)]);
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP)]);
     const floatEl = floatOf(conv);
-    conv.scrollTop = 150; conv.dispatch("scroll");
+    conv.scrollTop = 500; conv.dispatch("scroll");
     assert.equal(isHidden(floatEl), false);
     // Land the ANALYZE original header exactly at the top → float hidden.
-    conv.scrollTop = 100; conv.dispatch("scroll");
+    conv.scrollTop = ANALYZE_TOP; conv.dispatch("scroll");
     assert.equal(isHidden(floatEl), true,
       "float and the original header are mutually exclusive");
   });
@@ -195,20 +234,73 @@ export function registerStickyStepHeaderTests(ctx) {
   check("G5 clicking the float smooth-scrolls the original header to the top and hides the float", () => {
     const records = [{ message: { role: "user", content: "x" } }]; // sentinel for no-state-mutation
     const before = JSON.stringify(records);
-    const conv = mountFlow([makeHeader("DISCOVERY", 0), makeHeader("ANALYZE", 100),
-      makeHeader("IMPLEMENT", 300)]);
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP),
+      makeHeader("IMPLEMENT", IMPLEMENT_TOP)]);
     const floatEl = floatOf(conv);
-    conv.scrollTop = 180; conv.dispatch("scroll");
+    conv.scrollTop = 550; conv.dispatch("scroll");
     assert.equal(floatLabel(floatEl), "ANALYZE");
-    // Click the floating banner: scroll ANALYZE's original header (offset 100)
+    // Click the floating banner: scroll ANALYZE's original header (offset 400)
     // to the top and hide the float.
     const inner = findOne(floatEl, "conv-sticky-header__inner");
     inner.dispatch("click");
-    assert.equal(conv.scrollTop, 100, "click scrolls the original header to the top");
+    assert.equal(conv.scrollTop, ANALYZE_TOP, "click scrolls the original header to the top");
     assert.equal(isHidden(floatEl), true, "float hides after the click locates the header");
     // The interaction is pure navigation: it never touches conversation records
     // or any flow/step state.
     assert.equal(JSON.stringify(records), before, "click must not mutate any records/state");
+  });
+
+  check("G5 the float re-measures after a reflow shifts later headers", () => {
+    const d = makeHeader("DISCOVERY", DISCOVERY_TOP);
+    const a = makeHeader("ANALYZE", ANALYZE_TOP);
+    const im = makeHeader("IMPLEMENT", IMPLEMENT_TOP);
+    const conv = mountFlow([d, a, im]);
+    const floatEl = floatOf(conv);
+    conv.scrollTop = 500; conv.dispatch("scroll");
+    assert.equal(floatLabel(floatEl), "ANALYZE");
+
+    // Simulate expanding a long message inside the DISCOVERY region: every
+    // header below it slides down by 300px. The mount-time cached offsets are
+    // now stale — only a re-measure reflects the true positions.
+    a.__rect = { top: 700, left: 0, right: 100, bottom: 728, width: 100, height: 28 };
+    im.__rect = { top: 1100, left: 0, right: 100, bottom: 1128, width: 100, height: 28 };
+
+    // At the SAME scrollTop the viewport top now falls in DISCOVERY (ANALYZE
+    // moved to 700, off-screen below 500..600). A re-measuring update reflects
+    // that; a stale cache would wrongly keep showing ANALYZE.
+    conv.dispatch("scroll");
+    assert.equal(floatLabel(floatEl), "DISCOVERY",
+      "the float must reflect the post-reflow header positions, not the cache");
+
+    // Click-to-locate must also use the fresh positions: with ANALYZE active at
+    // a deeper scroll, the click scrolls to its NEW offset (700), not the stale 400.
+    conv.scrollTop = 900; conv.dispatch("scroll");
+    assert.equal(floatLabel(floatEl), "ANALYZE");
+    const inner = findOne(floatEl, "conv-sticky-header__inner");
+    inner.dispatch("click");
+    assert.equal(conv.scrollTop, 700,
+      "click locates the re-measured header offset, not the stale cached one");
+  });
+
+  check("G5 the float hides as soon as an original header is visible in the viewport", () => {
+    // Issue-3 core: the float must hide whenever an original header is visible
+    // anywhere in the scroll viewport — not only once it reaches the float
+    // banner's own (small) height of the top.
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP),
+      makeHeader("IMPLEMENT", IMPLEMENT_TOP)]);
+    const floatEl = floatOf(conv);
+    // ANALYZE (400) is 50px below the top (viewport 350..450) → VISIBLE → the
+    // float must be hidden even though the header is well outside any tiny
+    // banner band. This is the exact divergence the fix closes.
+    conv.scrollTop = 350; conv.dispatch("scroll");
+    assert.equal(isHidden(floatEl), true,
+      "a visible original header 50px below the top hides the float");
+    // Scroll so ANALYZE is off-screen below (150px below, viewport 250..350) →
+    // no header visible → float shows the active step (DISCOVERY).
+    conv.scrollTop = 250; conv.dispatch("scroll");
+    assert.equal(isHidden(floatEl), false);
+    assert.equal(floatLabel(floatEl), "DISCOVERY",
+      "an off-screen next header keeps the float showing the active step");
   });
 
   check("G5 an empty conversation (no headers) keeps the float hidden", () => {
@@ -221,18 +313,18 @@ export function registerStickyStepHeaderTests(ctx) {
   });
 
   check("G5 a full re-render (cleared scroller) re-mounts the same float", () => {
-    const conv = mountFlow([makeHeader("DISCOVERY", 0), makeHeader("ANALYZE", 100)]);
+    const conv = mountFlow([makeHeader("DISCOVERY", DISCOVERY_TOP), makeHeader("ANALYZE", ANALYZE_TOP)]);
     const first = floatOf(conv);
     // Simulate renderConversation's full rebuild wiping the container.
     conv.innerHTML = "";
-    conv.appendChild(makeHeader("DISCOVERY", 0));
-    conv.appendChild(makeHeader("ANALYZE", 100));
+    conv.appendChild(makeHeader("DISCOVERY", DISCOVERY_TOP));
+    conv.appendChild(makeHeader("ANALYZE", ANALYZE_TOP));
     conv.scrollTop = 0;
     app.ensureStickyHeaderMounted(conv, conv);
     const again = floatOf(conv);
     assert.strictEqual(again, first, "the same float node is re-used across rebuilds");
     assert.strictEqual(conv.firstChild, again, "float re-mounts as the first child");
-    conv.scrollTop = 150; conv.dispatch("scroll");
+    conv.scrollTop = 500; conv.dispatch("scroll");
     assert.equal(floatLabel(again), "ANALYZE", "float still tracks scrolling after a rebuild");
   });
 
@@ -242,30 +334,31 @@ export function registerStickyStepHeaderTests(ctx) {
   check("G5 history view (nested scroller) shares the identical sticky behavior", () => {
     // The history detail (`content`) lives inside a separate scrolling pane
     // (`scroller`), unlike the flow view where they are the same element. The
-    // SAME ensureStickyHeaderMounted drives both.
-    const content = buildContent([makeHeader("TEST", 0), makeHeader("COMMIT", 120),
-      makeHeader("SUMMARY", 320)]);
+    // SAME ensureStickyHeaderMounted drives both. Tall regions (500px) ≫ the
+    // 100px pane viewport so the float shows mid-region.
+    const content = buildContent([makeHeader("TEST", 0), makeHeader("COMMIT", 500),
+      makeHeader("SUMMARY", 1000)]);
     const scroller = document.createElement("div");
-    scroller.__rect = { top: 0, left: 0, right: 100, bottom: 600, width: 100, height: 600 };
+    scroller.__rect = { top: 0, left: 0, right: 100, bottom: VIEWPORT, width: 100, height: VIEWPORT };
     scroller.scrollTop = 0;
     scroller.appendChild(content);
     app.ensureStickyHeaderMounted(scroller, content);
     const floatEl = scroller.__convStickyFloat;
     assert.ok(floatEl, "history float mounts on the pane scroller");
     assert.strictEqual(scroller.firstChild, floatEl, "float is the pane's first child");
-    // Hidden at the top, shows the active step after scrolling, switches on up.
+    // Hidden at the top, shows the active step deep in a region, switches on up.
     assert.equal(floatEl.classList.contains("hidden"), true);
-    scroller.scrollTop = 200; scroller.dispatch("scroll");
+    scroller.scrollTop = 600; scroller.dispatch("scroll");  // deep in COMMIT
     assert.equal(floatLabel(floatEl), "COMMIT");
-    scroller.scrollTop = 350; scroller.dispatch("scroll");
+    scroller.scrollTop = 1100; scroller.dispatch("scroll"); // past SUMMARY
     assert.equal(floatLabel(floatEl), "SUMMARY");
-    scroller.scrollTop = 60; scroller.dispatch("scroll");
+    scroller.scrollTop = 200; scroller.dispatch("scroll");  // back deep in TEST
     assert.equal(floatLabel(floatEl), "TEST");
     // Click-to-locate works the same as the flow view.
     const inner = findOne(floatEl, "conv-sticky-header__inner");
-    scroller.scrollTop = 200; scroller.dispatch("scroll"); // COMMIT active
+    scroller.scrollTop = 600; scroller.dispatch("scroll"); // COMMIT active
     inner.dispatch("click");
-    assert.equal(scroller.scrollTop, 120, "history click locates COMMIT's header to the top");
+    assert.equal(scroller.scrollTop, 500, "history click locates COMMIT's header to the top");
     assert.equal(floatEl.classList.contains("hidden"), true);
   });
 }

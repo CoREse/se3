@@ -812,7 +812,16 @@ class TestOutputFormatEventStream:
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
-        mock_sm.run_step.return_value = StepStatus.COMPLETED
+
+        # The real run_step emits STEP_STARTED via on_running once the step is
+        # RUNNING; mirror that so the mocked state machine still drives the
+        # orchestrator's step_started emission.
+        def _run_step(flow, step, on_running=None):
+            if on_running is not None:
+                on_running(step)
+            return StepStatus.COMPLETED
+
+        mock_sm.run_step.side_effect = _run_step
         mock_sm.transition_to_next.side_effect = (
             lambda flow: setattr(flow, "status", FlowStatus.COMPLETED)
         )

@@ -3551,6 +3551,7 @@ The `Transition` dataclass (`se3/engine/models.py`) SHALL describe a single step
 - `Sink` — an ABC declaring `consume(event: Event) -> None`.
 - `CliSink` — the CLI-mode tail. It delegates step-output rendering entirely to the pre-existing `step_renderers.render_step_output(step)` and adds no rendering logic of its own, keeping CLI output byte-for-byte identical to today's `se3 run`. Flow-level lifecycle events and raw `STEP_STARTED` / `STEP_OUTPUT` events are deliberately a no-op in `CliSink` because the `se3 run` orchestrator already renders those directly; having the sink render them too would double the CLI output. Additionally, `CliSink` skips the `STEP_COMPLETED` / `STEP_FAILED` events of the interactive/special step types in its `_CLI_SKIP_STEP_TYPES` set — `confirm`, `discovery`, and `plan` — because their CLI output is owned by the orchestrator's interactive/special paths (the discovery message panel, the confirm approval prompt, the plan presentation). Re-rendering those terminal events through `render_step_output` would double the CLI output, so `CliSink` is the layer that preserves byte-identical CLI behavior while still letting the other sinks observe the events.
 - `JsonSink` — the daemon-mode tail. It serializes each event via `Event.to_dict()` and writes one line of JSON (NDJSON) per event, using `default=str` so non-serializable payload values degrade gracefully. It supports a compact (default) and a `pretty` mode.
+- `HistorySink` — the always-subscribed persistence tail wired up from `src/se3/commands/run.py`. It persists step events into the per-step jsonl files (`se3/history/{flow_id}/{step_id}.jsonl`) consumed by the daemon history reader and the web console. Beyond the terminal `STEP_COMPLETED` / `STEP_FAILED` and the per-turn `STEP_OUTPUT` records it already writes, `HistorySink` MUST ALSO persist `STEP_STARTED` as a `type: "step_started"` record (carrying `step_id` / `step_type` / `status: "running"` / `timestamp`) via `chat_history.record_step_started` (atomic append, `OSError`-tolerant — a persistence fault is swallowed and never breaks the flow). This anchor record is what lets the web console surface a step region the moment the step enters `RUNNING`, including steps that produce no LLM conversation (`TEST`, `COMMIT`, `SPEC_GATE`). The CLI history reader (`get_step_history`) skips the `step_started` line so CLI history is unaffected, and resuming the same step does NOT produce a duplicate terminal record. `CliSink` remains a no-op on `STEP_STARTED` (see above).
 
 **Terminal step-event emission for every step type:**
 
@@ -3608,6 +3609,17 @@ still receive every terminal event.
 #### Scenario: JsonSink emits one NDJSON line per event
 - **WHEN** `JsonSink` consumes an event
 - **THEN** it writes exactly one newline-terminated line of valid JSON (the `Event.to_dict()` payload) to its destination stream
+
+#### Scenario: HistorySink persists STEP_STARTED as a running anchor record
+- **WHEN** any step (including a non-LLM `TEST` / `COMMIT` / `SPEC_GATE`
+  step) emits a `STEP_STARTED` event
+- **THEN** `HistorySink` writes one record to
+  `se3/history/{flow_id}/{step_id}.jsonl` with `type: "step_started"`,
+  `status: "running"`, and the step's `step_id` / `step_type` / `timestamp`
+- **AND** `get_step_history` skips that `step_started` line so the CLI history
+  reader is unaffected
+- **AND** resuming the same step does NOT produce a duplicate terminal record,
+  and a `HistorySink` persistence fault is swallowed without breaking the flow
 
 #### Scenario: se3 run --output-format selects the outermost sink
 - **WHEN** the user runs `se3 run "<task>"` without `--output-format` (or with `--output-format cli`)

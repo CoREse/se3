@@ -4048,15 +4048,24 @@ function normalizeRecord(rec) {
   // step_output / step_completed / step_failed records, so all of them share one
   // `stepKey` and collapse into a SINGLE visual step region (no duplicate
   // same-named region is created by the terminal/intermediate events).
-  if (eventType === "step_started") {
+  //
+  // `step_status` (persisted by chat_history.record_step_status) is the same
+  // affordance-free anchor but for a non-terminal SETTLED state — `paused` /
+  // `retrying`. It shares the step's `stepId` so it groups into the same
+  // region as the `step_started` running anchor; addConversationRecords then
+  // supersedes the earlier anchor so the region shows only its CURRENT state
+  // (进行中 → 已暂停) instead of stacking status rows.
+  if (eventType === "step_started" || eventType === "step_status") {
     return {
       role: "step-event",
-      kind: "step_started",
+      kind: eventType,
       content: "",
       timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
       stepType: pickStepType(),
       stepId: pick("step_id") || "",
-      status: String(pick("status") || "running").toLowerCase(),
+      status: String(
+        pick("status") || (eventType === "step_started" ? "running" : "paused"),
+      ).toLowerCase(),
       stepReport: null,
       raw: { raw_json: [msg], raw_ndjson: null },
       attempt: null,
@@ -4877,6 +4886,20 @@ function addConversationRecords(container, st, records, startIndex) {
       bubble.classList.add("conv-partial");
       bubble.__convTurnKey = progressTurnKey(norm);
     }
+    // Tag the step lifecycle status anchors (step_started / step_status) so a
+    // later, more-current anchor for the SAME step region supersedes the
+    // earlier one — the region then shows only its current state (进行中 →
+    // 已暂停) rather than stacking redundant status rows.
+    bubble.__convStatusRow = !!(
+      norm && (norm.kind === "step_started" || norm.kind === "step_status"));
+    // Tag the terminal report rows (step_completed / step_failed). Once a step
+    // region has a terminal report, ITS non-terminal status anchors (进行中 /
+    // 已暂停 / 重试中) are stale — the report card itself conveys the final
+    // completed/failed state — so removeSupersededStatusRows drops them. This
+    // is what stops a finished region from simultaneously showing 进行中 (or a
+    // stale 已暂停) alongside its completed report.
+    bubble.__convTerminalRow = !!(
+      norm && (norm.kind === "step_completed" || norm.kind === "step_failed"));
     insertBubbleSorted(container, bubble);
   }
   // Advance the cursor before the (stateless) header rebuild so the count is
@@ -4889,7 +4912,90 @@ function addConversationRecords(container, st, records, startIndex) {
   // is the turn's terminal form per the message paradigm. Stateful affordances
   // (folds / raw toggles / chips) on surviving bubbles are untouched.
   removeSupersededProgress(container, records);
+  removeSupersededStatusRows(container);
   rebuildStepHeaders(container);
+}
+
+// For each step region (keyed by `__convStepKey`), reconcile the lifecycle
+// status anchors (`step_started` / `step_status`) against the region's current
+// state so the region shows ONE truthful status — never two stacked anchors,
+// and never a stale non-terminal anchor next to a terminal report:
+//
+//   * If the region has a TERMINAL report (`step_completed` / `step_failed`),
+//     ALL of its non-terminal status anchors are dropped — the report card is
+//     the region's final state. This is what stops a completed step from
+//     simultaneously showing "进行中" (running → completed) or a stale "已暂停"
+//     (running → paused → running → completed) alongside its completed report.
+//   * Otherwise only the LATEST anchor by (__convTs, __convIdx) survives, so a
+//     "进行中" step_started updates in place to "已暂停" (a later paused
+//     step_status), and a resumed step re-arms "进行中" (a later running anchor
+//     supersedes the earlier paused one) — without ever stacking two rows.
+//
+// Status anchors are affordance-free (no fold / raw / chip state), so removing
+// them is as safe as the stateless header rebuild and never disturbs the
+// conversation bubbles or the report card itself.
+function removeSupersededStatusRows(container) {
+  // Reconcile PER step_id (`__convStepKey`) across the WHOLE container — NOT per
+  // maximal contiguous DOM run. Another step's record (or a late-arriving
+  // record) can split one execution's lifecycle anchors and its terminal report
+  // into separate contiguous runs (e.g. step_started(A) → record(B) →
+  // step_completed(A)); a contiguous-run reconciliation would then leave A's
+  // first "进行中" row stranded next to A's completed report. Grouping by key
+  // globally lets the terminal supersede every preceding non-terminal anchor of
+  // the SAME execution regardless of what splits them in the DOM.
+  //
+  // Within a key, anchors are segmented by terminal rows so multiple executions
+  // reusing one step_id are reconciled independently: a terminal supersedes only
+  // the non-terminal anchors of ITS OWN execution (those preceding it since the
+  // last terminal), while anchors started AFTER an earlier terminal (a fresh
+  // execution) are preserved. The trailing (still-open) execution — anchors
+  // after the last terminal, or all anchors when there is no terminal — keeps
+  // only its LATEST anchor (进行中 → 已暂停, or a resumed 进行中 superseding the
+  // earlier paused row).
+  //
+  // Bubbles already sit in strict (__convTs, __convIdx) order, so filtering by
+  // key preserves each execution's chronological order. `.history-step-header`
+  // separators (no `__convStepKey`) are skipped.
+  const bubbles = Array.from(container.children).filter(
+    (c) => c.__convStepKey !== undefined);
+  const byKey = new Map();
+  for (const c of bubbles) {
+    let arr = byKey.get(c.__convStepKey);
+    if (!arr) { arr = []; byKey.set(c.__convStepKey, arr); }
+    arr.push(c);
+  }
+  const toRemove = [];
+  const flushOpenSegment = (segStatusRows, segLatest) => {
+    // No terminal closed this segment — keep only the latest anchor.
+    for (const sr of segStatusRows) {
+      if (sr !== segLatest) toRemove.push(sr);
+    }
+  };
+  for (const arr of byKey.values()) {
+    let segStatusRows = [];     // non-terminal anchors in the current execution
+    let segLatest = null;       // latest anchor in the current execution
+    for (const c of arr) {
+      if (c.__convTerminalRow) {
+        // A terminal closes this execution: drop ALL of its non-terminal
+        // anchors (the report card is the execution's final state), then start
+        // a fresh execution segment.
+        for (const sr of segStatusRows) toRemove.push(sr);
+        segStatusRows = [];
+        segLatest = null;
+        continue;
+      }
+      if (c.__convStatusRow) {
+        segStatusRows.push(c);
+        if (!segLatest
+            || c.__convTs > segLatest.__convTs
+            || (c.__convTs === segLatest.__convTs && c.__convIdx > segLatest.__convIdx)) {
+          segLatest = c;
+        }
+      }
+    }
+    flushOpenSegment(segStatusRows, segLatest);
+  }
+  for (const c of toRemove) container.removeChild(c);
 }
 
 // Stable per-turn key grouping a streamed turn's partial progress lines with
@@ -5195,11 +5301,24 @@ function rebuildStepHeaders(container) {
   );
   for (const h of existing) container.removeChild(h);
 
+  // A header is inserted at the start of every CONTIGUOUS run of a step key —
+  // i.e. whenever the key differs from the immediately-previous bubble. Under
+  // strict chronological ordering one step_id can be split by another step's
+  // records (e.g. SELF_CHECK(A) → IMPLEMENT(B) → SELF_CHECK(A) on a
+  // retry/revision loop). A re-appearing step's records physically sit AFTER
+  // the interleaving step, so they MUST get their own boundary header: without
+  // one the second A segment would render beneath B's header and sticky
+  // navigation would mis-attribute that content to B (its viewport-top step
+  // would resolve to IMPLEMENT, not SELF_CHECK). Emitting a header per
+  // contiguous run keeps each physical segment correctly attributed to its own
+  // step. Adjacent same-key bubbles still collapse into one header (no header
+  // mid-run) because `lastKey` only changes at a real boundary.
   let lastKey = null;
   const children = Array.from(container.children);
   for (const child of children) {
     if (child.__convStepKey === undefined) continue;
-    if (child.__convStepKey !== lastKey) {
+    const key = child.__convStepKey;
+    if (key !== lastKey) {
       const header = el("div", "history-step-header");
       // Use the paradigm step name (DISCOVERY / ANALYZE / …); unknown step
       // types fall back to the record's original label / step key.
@@ -5209,8 +5328,8 @@ function rebuildStepHeaders(container) {
       );
       header.appendChild(el("h5", "history-step-title", title));
       container.insertBefore(header, child);
-      lastKey = child.__convStepKey;
     }
+    lastKey = key;
   }
 }
 
@@ -5250,8 +5369,21 @@ const STICKY_EPS = 1;
 // top, and scrolling up falls back to the previous step the instant its content
 // re-enters the top. The returned step reflects ONLY the viewport-top position,
 // never the flow's currently-executing step.
-function computeStickyStep(headerOffsets, scrollTop) {
+// `revealPx` is the mutual-exclusion band below the viewport top: a header
+// whose offset is within `revealPx` of the top is treated as "visible in the
+// viewport" and hides the float, so the floating banner is never displayed at
+// the same time as a visible original header. The DOM path passes the VISIBLE
+// SCROLL VIEWPORT HEIGHT (see `stickyRevealPx`), so the float hides as soon as
+// any original header enters the visible viewport — not merely once it reaches
+// the narrow band of the float banner's own height. The float therefore shows
+// only while scrolled into a step region taller than the viewport (its next
+// header off-screen below). It defaults to the bare `STICKY_EPS` tolerance;
+// pure callers that omit it keep the 1px-only behavior, and callers that pass a
+// specific band (e.g. the float banner height) get exactly that band.
+function computeStickyStep(headerOffsets, scrollTop, revealPx) {
   if (!Array.isArray(headerOffsets) || !headerOffsets.length) return null;
+  const reveal = Number.isFinite(revealPx) && revealPx > STICKY_EPS
+    ? revealPx : STICKY_EPS;
   const y = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
   let active = null;
   for (let i = 0; i < headerOffsets.length; i++) {
@@ -5261,9 +5393,10 @@ function computeStickyStep(headerOffsets, scrollTop) {
     if (top <= y - STICKY_EPS) {
       // Header strictly above the viewport top → its step owns the top edge.
       active = { index: i, label: h.label, key: h.key };
-    } else if (top <= y + STICKY_EPS) {
-      // Header essentially AT the viewport top → original header visible, the
-      // float must stay hidden (mutual exclusion), regardless of any earlier
+    } else if (top <= y + reveal) {
+      // Header at — or just below, within the reveal band — the viewport top.
+      // Its original header is (about to be) visible at the top, so the float
+      // must stay hidden (mutual exclusion), regardless of any earlier
       // candidate.
       return null;
     } else {
@@ -5339,15 +5472,53 @@ function hideStickyHeader(floatEl) {
   floatEl.__index = -1;
 }
 
-// Recompute which step the viewport top is in and reflect it in the float. Uses
-// the offsets cached on the scroller (refreshed by `ensureStickyHeaderMounted`
-// after each render) so a scroll event never forces a fresh layout pass.
+// The reveal band passed to computeStickyStep — the height of the VISIBLE
+// scroll viewport. The float must hide as soon as ANY original step header is
+// visible in the scroll viewport (mutual exclusion), not merely once that
+// header has scrolled to within the float banner's own height of the top:
+// otherwise the floating banner sits on screen at the same time as a fully
+// visible original header just below it. Using the scroller's on-screen height
+// makes "within the reveal band" equivalent to "visible in the viewport", so
+// the float only shows while scrolled into a step region taller than the
+// viewport (its next header off-screen below) and hides the instant a boundary
+// header emerges into view. Falls back to the float banner's height, then to
+// the bare STICKY_EPS, when the viewport height is unavailable (e.g. before
+// layout).
+function stickyRevealPx(scroller, floatEl) {
+  if (scroller && typeof scroller.getBoundingClientRect === "function") {
+    const h = Number(scroller.getBoundingClientRect().height);
+    if (Number.isFinite(h) && h > STICKY_EPS) return h;
+  }
+  const inner = floatEl && floatEl.__inner;
+  if (inner && typeof inner.getBoundingClientRect === "function") {
+    const h = Number(inner.getBoundingClientRect().height);
+    if (Number.isFinite(h) && h > STICKY_EPS) return h;
+  }
+  return STICKY_EPS;
+}
+
+// Recompute which step the viewport top is in and reflect it in the float.
+//
+// The header offsets are RE-MEASURED from the live DOM on every update (not
+// read from a stale mount-time cache): expanding a folded message, a font /
+// image reflow, or a window resize / rotation shifts the headers below it, and
+// a cached offset would then switch the float early and scroll a click to the
+// wrong place. measureStepHeaderOffsets is scroll-invariant (it adds back
+// scrollTop), so re-measuring at any scroll position yields the same
+// content-space offsets — only their REAL post-reflow positions change. The
+// fresh offsets are also stored back on the scroller so the click handler
+// locates against current layout too.
 function updateStickyHeader(scroller) {
   if (!scroller) return;
   const floatEl = scroller.__convStickyFloat;
   if (!floatEl) return;
-  const offsets = scroller.__convStickyOffsets || [];
-  const active = computeStickyStep(offsets, scroller.scrollTop || 0);
+  const content = scroller.__convStickyContent;
+  const offsets = content
+    ? measureStepHeaderOffsets(scroller, content)
+    : (scroller.__convStickyOffsets || []);
+  scroller.__convStickyOffsets = offsets;
+  const active = computeStickyStep(
+    offsets, scroller.scrollTop || 0, stickyRevealPx(scroller, floatEl));
   if (!active) { hideStickyHeader(floatEl); return; }
   floatEl.__index = active.index;
   floatEl.__title.textContent = active.label;
@@ -5370,6 +5541,13 @@ function buildStickyHeaderEl(scroller) {
   floatEl.__title = titleEl;
   floatEl.__index = -1;
   inner.addEventListener("click", () => {
+    // Re-measure against current layout before locating: a fold-expand / reflow
+    // since the last scroll may have moved the target header, and a stale cached
+    // offset would scroll to the wrong place.
+    const content = scroller.__convStickyContent;
+    if (content) {
+      scroller.__convStickyOffsets = measureStepHeaderOffsets(scroller, content);
+    }
     const idx = floatEl.__index;
     const target = stickyScrollTarget(scroller.__convStickyOffsets || [], idx);
     if (target == null) return;
@@ -5397,6 +5575,16 @@ function ensureStickyHeaderMounted(scroller, content) {
     const onScroll = () => updateStickyHeader(scroller);
     scroller.addEventListener("scroll", onScroll);
     scroller.__convStickyOnScroll = onScroll;
+    // A window resize / orientation change reflows the conversation and shifts
+    // every header. Re-measure + re-evaluate the float on resize so the sticky
+    // header and click-to-locate keep tracking the real layout. Guarded for
+    // headless / non-window environments (the test DOM stub has no window).
+    if (typeof window !== "undefined"
+        && typeof window.addEventListener === "function") {
+      const onResize = () => updateStickyHeader(scroller);
+      window.addEventListener("resize", onResize);
+      scroller.__convStickyOnResize = onResize;
+    }
   }
   scroller.__convStickyContent = content;
   if (scroller.firstChild !== floatEl) {
@@ -7445,11 +7633,13 @@ function renderConversationRecord(norm) {
     return renderStepEventRecord(norm);
   }
 
-  // Step started — a lightweight "进行中" status row (text + icon). No report
-  // card, no fold / raw / chip: the step has only just entered RUNNING. Grouped
-  // under the same stepKey as the step's later records, so it anchors a single
-  // visual step region the instant the step starts — vital for non-LLM steps.
-  if (norm.kind === "step_started") {
+  // Step started / step status — a lightweight status row (text + icon). No
+  // report card, no fold / raw / chip: it is just the step region's lifecycle
+  // anchor. `step_started` marks RUNNING ("进行中"); `step_status` marks a
+  // non-terminal SETTLED state ("已暂停" / "重试中"). Both group under the same
+  // stepKey as the step's other records, so the region appears the instant the
+  // step starts (vital for non-LLM steps) and updates in place as it pauses.
+  if (norm.kind === "step_started" || norm.kind === "step_status") {
     return renderStepStartedRecord(norm);
   }
 
@@ -7643,9 +7833,10 @@ function renderStepStartedRecord(norm) {
     : "step";
   const status = String(norm.status || "running").toLowerCase();
   const display = stepStatusDisplay(status);
+  const kind = norm.kind === "step_status" ? "step_status" : "step_started";
   const row = el(
     "div",
-    "history-record conv-record role-step-event kind-step_started "
+    "history-record conv-record role-step-event kind-" + kind + " "
       + "step-status-row step-status-" + status,
   );
   row.appendChild(el("span", "step-status-icon", display.icon));

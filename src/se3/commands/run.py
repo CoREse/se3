@@ -2136,8 +2136,8 @@ def _run_flow_impl(
         # (meaning a fresh token-consuming LLM round actually happened).
         step_ran_llm = True
 
-        # Emit STEP_STARTED for EVERY step type the moment it enters RUNNING —
-        # including the non-LLM TEST / COMMIT / SPEC_GATE steps and the
+        # Emit STEP_STARTED for EVERY step type the moment it ACTUALLY enters
+        # RUNNING — including the non-LLM TEST / COMMIT / SPEC_GATE steps and the
         # interactive CONFIRM / DISCOVERY steps. It is a no-op in CliSink (the
         # per-step renderer presents output only on completion), forwarded by
         # JsonSink, and persisted by HistorySink as a lightweight
@@ -2145,18 +2145,22 @@ def _run_flow_impl(
         # (with a "进行中" status) immediately rather than waiting for the
         # first conversation record or the final step_completed.
         #
-        # This emit sits *after* the resume short-circuits above (a step that
-        # already reached a terminal / REVISION_NEEDED status `continue`s before
-        # here), so a re-entered-on-resume PAUSED step is the only case that can
-        # re-emit STEP_STARTED. HistorySink dedups that by step_id
-        # (has_step_started_event / has_step_terminal_event), so re-emission
-        # never produces a duplicate step region — no extra guard is needed here.
-        emitter.emit(new_event(
-            EventType.STEP_STARTED,
-            flow_id=flow.flow_id,
-            step_id=current_step.step_id,
-            step_type=step_type_value,
-        ))
+        # The emit is wired as ``run_step``'s ``on_running`` callback rather than
+        # fired here before the call: ``run_step`` invokes it only AFTER the step
+        # is marked RUNNING and persisted (and after its pre-handler
+        # preprocessing succeeds). A step with no registered handler fails before
+        # that point, and a step whose baseline / spec-snapshot preprocessing
+        # raises never reaches it either — so neither leaves a dangling "进行中"
+        # anchor that would never be terminated. HistorySink additionally dedups
+        # by step_id (has_step_started_event / has_step_terminal_event), so a
+        # PAUSED step re-entered on resume never produces a duplicate region.
+        def _emit_step_started(started_step: Any) -> None:
+            emitter.emit(new_event(
+                EventType.STEP_STARTED,
+                flow_id=flow.flow_id,
+                step_id=started_step.step_id,
+                step_type=started_step.step_type.value,
+            ))
 
         # Special handling for CONFIRM steps on resume - check for existing response
         if current_step.step_type == StepType.CONFIRM and flow_id and current_step.status == StepStatus.PAUSED:
@@ -2168,7 +2172,8 @@ def _run_flow_impl(
                 step_ran_llm = False
             else:
                 try:
-                    result = state_machine.run_step(flow, current_step)
+                    result = state_machine.run_step(
+                        flow, current_step, on_running=_emit_step_started)
                 except KeyboardInterrupt:
                     result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                     if result is None:
@@ -2192,7 +2197,8 @@ def _run_flow_impl(
 
         else:
             try:
-                result = state_machine.run_step(flow, current_step)
+                result = state_machine.run_step(
+                    flow, current_step, on_running=_emit_step_started)
             except KeyboardInterrupt:
                 result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                 if result is None:
@@ -2269,6 +2275,47 @@ def _run_flow_impl(
                         step_type=step_type_value,
                         step=current_step,
                     ))
+
+        # Persist a non-terminal SETTLED status (PAUSED / RETRYING) so the web
+        # console's step region reflects the step's real state instead of being
+        # frozen on the stale "进行中" running anchor — most visibly the DISCOVERY
+        # step, which shows "进行中" the instant it enters RUNNING and then
+        # pauses awaiting user input with no terminal event and (by design) no
+        # STEP_OUTPUT. The lightweight ``step_status`` jsonl line rides the same
+        # history_data channel as ``step_started`` and the frontend renders it as
+        # the region's current "已暂停" / "重试中" status row (superseding the
+        # running anchor). The write is idempotent against the step's CURRENT
+        # lifecycle state — not "this status appeared anywhere earlier" — so a
+        # multi-round step (DISCOVERY running -> paused -> running -> paused, all
+        # reusing one step_id) records the SECOND ``paused`` after the intervening
+        # ``running`` re-arm, instead of suppressing it and leaving ``running`` as
+        # the latest persisted status while the step is actually paused. Only a
+        # back-to-back re-entry whose last lifecycle anchor is ALREADY this status
+        # is skipped (no duplicate stacked row). ``get_step_history`` skips the
+        # line so the CLI history / retry context never ingest it. Best-effort: a
+        # write fault must never break the running flow.
+        if result in (StepStatus.PAUSED, StepStatus.RETRYING):
+            try:
+                from ..engine.chat_history import (
+                    last_step_lifecycle_status,
+                    record_step_status,
+                )
+                _status_val = result.value
+                if last_step_lifecycle_status(
+                    project_root, flow.flow_id, current_step.step_id
+                ) != _status_val:
+                    record_step_status(
+                        project_root=project_root,
+                        flow_id=flow.flow_id,
+                        step_id=current_step.step_id,
+                        step_type=step_type_value,
+                        status=_status_val,
+                    )
+            except Exception:
+                logger.debug(
+                    "failed to persist step_status for %s",
+                    current_step.step_id, exc_info=True,
+                )
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
