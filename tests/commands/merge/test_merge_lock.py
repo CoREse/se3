@@ -162,6 +162,136 @@ time.sleep(5)
             holder.wait(timeout=5)
 
 
+class TestMergeLockBlocking:
+    """Blocking (queueing) acquisition semantics — ``acquire(blocking=True)``.
+
+    A blocking acquire must wait for the current holder to release the
+    lock instead of failing fast with :class:`MergeLockBusy`. PID stale
+    detection and ``_write_pid`` behaviour remain intact: a blocking
+    acquire still records its own PID, and an unheld stale lock file does
+    not wedge the blocking path (the kernel grants the lock immediately
+    since no process holds the flock).
+    """
+
+    def test_blocking_acquire_waits_for_release(self, tmp_project: Path) -> None:
+        import threading
+        import time
+
+        lock1 = MergeLock(tmp_project)
+        lock1.acquire()  # non-blocking; lock1 now holds the flock
+
+        release_delay = 0.5
+        released_at: list[float] = []
+
+        def _release_later() -> None:
+            time.sleep(release_delay)
+            released_at.append(time.monotonic())
+            lock1.release()
+
+        releaser = threading.Thread(target=_release_later)
+        releaser.start()
+        try:
+            lock2 = MergeLock(tmp_project)
+            start = time.monotonic()
+            # Blocking acquire MUST wait until lock1 is released rather
+            # than raising MergeLockBusy.
+            lock2.acquire(blocking=True)
+            acquired_at = time.monotonic()
+            try:
+                assert lock2._fd is not None
+                # It waited for the holder to release (allow a small slack
+                # for timer granularity).
+                assert acquired_at - start >= release_delay - 0.1
+                assert released_at and acquired_at >= released_at[0]
+                # _write_pid recorded OUR pid after acquiring.
+                pid_str = lock2._resolved_path.read_text(
+                    encoding="utf-8"
+                ).strip()
+                assert int(pid_str) == os.getpid()
+            finally:
+                lock2.release()
+        finally:
+            releaser.join(timeout=5)
+            lock1.release()
+
+    def test_blocking_context_manager_default(self, tmp_project: Path) -> None:
+        """``MergeLock(root, blocking=True)`` seeds the CM acquire mode."""
+        lock = MergeLock(tmp_project, blocking=True)
+        assert lock.blocking is True
+        with lock:
+            assert lock._fd is not None
+        assert lock._fd is None
+
+    def test_blocking_acquire_over_unheld_stale_file(
+        self, tmp_project: Path
+    ) -> None:
+        """A stale lock file (dead PID, no holder) does not block.
+
+        Nothing holds the flock, so ``LOCK_EX`` is granted immediately and
+        our PID overwrites the stale record — blocking mode does not get
+        wedged on a leftover lock file from a crashed process.
+        """
+        lock_path = tmp_project / "se3" / "state" / "merge.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("999999\n", encoding="utf-8")
+
+        lock = MergeLock(tmp_project)
+        lock.acquire(blocking=True)
+        try:
+            assert lock._fd is not None
+            assert int(lock_path.read_text(encoding="utf-8").strip()) == os.getpid()
+        finally:
+            lock.release()
+
+    def test_factory_passes_blocking(self, tmp_project: Path) -> None:
+        lock = acquire_merge_lock(tmp_project, blocking=True)
+        try:
+            assert lock._fd is not None
+        finally:
+            lock.release()
+
+    def test_blocking_serializes_across_processes(
+        self, tmp_project: Path
+    ) -> None:
+        """A blocking acquire queues behind a holder in another process."""
+        import time
+
+        script = f"""
+import sys, time
+sys.path.insert(0, {_SRC_ROOT!r})
+from se3.commands.merge.merge_lock import MergeLock
+lock = MergeLock({str(tmp_project)!r})
+lock.acquire()
+print("HOLDING", flush=True)
+time.sleep(1.0)
+lock.release()
+"""
+        holder = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        try:
+            # Wait for the subprocess to actually hold the lock.
+            assert holder.stdout is not None
+            line = holder.stdout.readline()
+            assert "HOLDING" in line
+
+            lock = MergeLock(tmp_project)
+            start = time.monotonic()
+            lock.acquire(blocking=True)  # queues until subprocess releases
+            elapsed = time.monotonic() - start
+            try:
+                assert lock._fd is not None
+                # It blocked rather than failing fast immediately.
+                assert elapsed >= 0.3
+            finally:
+                lock.release()
+        finally:
+            holder.wait(timeout=10)
+
+
 class TestMergeLockSubprocess:
     """Verify lock is actually exclusive across subprocesses."""
 

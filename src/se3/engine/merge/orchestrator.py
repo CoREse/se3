@@ -1151,14 +1151,14 @@ class MergeOrchestrator:
             MergeReport summarizing the outcome.
 
         Concurrency: when ``self.acquire_lock`` is ``True`` (default),
-        the merge body is wrapped in a :class:`MergeLock` so two
+        the merge body is wrapped in a blocking :class:`MergeLock` so two
         ``execute()`` calls that share the same project root — even
-        within the same Python process — serialise on the on-disk
-        lock file instead of stomping on each other's working tree,
-        index, and runtime sync targets.  Callers that have already
-        acquired the lock externally (e.g. ``merge_cmd.run_merge``)
-        construct the orchestrator with ``acquire_lock=False`` to
-        avoid re-acquiring.
+        within the same Python process — serialise on the on-disk lock
+        file, the second queueing until the first releases instead of
+        stomping on each other's working tree, index, and runtime sync
+        targets.  Callers that have already acquired the lock externally
+        (e.g. ``merge_cmd.run_merge``) construct the orchestrator with
+        ``acquire_lock=False`` to avoid re-acquiring.
         """
         if not self.acquire_lock:
             return self._execute_inner(branches)
@@ -1187,7 +1187,12 @@ class MergeOrchestrator:
             return self._execute_inner(branches)
 
         try:
-            with MergeLock(self.project_root):
+            # Blocking acquisition (main-worktree mutex): a concurrent
+            # holder causes this call to queue until the lock is free
+            # rather than failing fast. The MergeLockBusy / MergeLockStale
+            # handlers below are retained as defensive fallbacks only —
+            # blocking acquisition does not raise them.
+            with MergeLock(self.project_root, blocking=True):
                 return self._execute_inner(branches)
         except MergeLockBusy as exc:
             self._log(

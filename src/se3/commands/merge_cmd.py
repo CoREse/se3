@@ -752,9 +752,14 @@ def run_merge(
             )
             return 1
 
-    # Run the orchestrator under an exclusive merge lock so that two
-    # `se3 merge` invocations cannot mutate the same working tree, index,
-    # and runtime sync targets simultaneously (K1 / G1).
+    # Run the orchestrator under the main-worktree mutex so that two
+    # `se3 merge` invocations (and any synchronous `se3 run` holding the
+    # same lock) cannot mutate the same working tree, index, and runtime
+    # sync targets simultaneously (K1 / G1). The lock is acquired in
+    # BLOCKING mode: a second invocation queues until the in-progress
+    # holder releases it rather than failing fast — the legacy non-blocking
+    # `MergeLockBusy` / `MergeLockStale` rendering below is kept only as a
+    # defensive fallback (blocking acquisition does not raise them).
     from ..engine.merge.orchestrator import MergeOrchestrator
     from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
 
@@ -771,7 +776,7 @@ def run_merge(
 
     stash_audit_messages: list[str] = []
     try:
-        with MergeLock(project_root):
+        with MergeLock(project_root, blocking=True):
             # Stashing happens INSIDE the lock so two racing ``se3 merge``
             # invocations cannot interleave; the second blocks at lock
             # acquisition above and only proceeds once the first has

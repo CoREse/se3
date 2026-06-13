@@ -1,14 +1,26 @@
-"""Merge lock — prevents concurrent ``se3 merge`` invocations.
+"""Merge lock — the project's main-worktree mutex.
 
-Uses ``fcntl.flock(LOCK_EX | LOCK_NB)`` on a dedicated lock file so
-that competing processes receive an immediate error (non-blocking)
-rather than queuing.  The lock is automatically released when the
-file descriptor is closed (process exit, context-manager exit, or
-explicit release).
+Wraps a dedicated lock file with ``fcntl.flock``. Two acquisition modes
+are supported:
 
-Staleness detection is based on the lock-holder's PID: if the PID
-stored in the lock file no longer exists, the lock is considered
-stale and can be broken.
+* Non-blocking (default, ``acquire()`` / ``acquire(blocking=False)``):
+  uses ``LOCK_EX | LOCK_NB`` so competing processes receive an immediate
+  error (:class:`MergeLockBusy`) rather than queuing.
+* Blocking (``acquire(blocking=True)`` or ``MergeLock(root, blocking=True)``):
+  uses ``LOCK_EX`` (no ``LOCK_NB``) so competing callers queue and wait
+  until the current holder releases the lock. This is the "main-worktree
+  mutex" semantics used by ``se3 merge`` and synchronous ``se3 run`` so
+  that only one holder mutates the main working tree at a time.
+
+The lock is automatically released when the file descriptor is closed
+(process exit, context-manager exit, or explicit release) — including a
+crashed holder, which the kernel releases on process exit so the blocking
+queue cannot wedge indefinitely.
+
+Staleness detection (non-blocking mode) is based on the lock-holder's
+PID: if the PID stored in the lock file no longer exists, the lock is
+considered stale and can be broken. The blocking mode does not need this
+because the kernel guarantees exclusivity on return from ``flock``.
 """
 
 from __future__ import annotations
@@ -135,6 +147,14 @@ class MergeLock:
 
     project_root: Path
     lock_path: Path = field(default_factory=lambda: _DEFAULT_LOCK_PATH)
+    # Default acquisition mode used by the context-manager protocol
+    # (``with MergeLock(...)``). When True, ``__enter__`` blocks on
+    # ``LOCK_EX`` until the lock is free (queueing semantics) instead of
+    # failing fast with ``MergeLockBusy``. The explicit ``acquire(...)``
+    # call can still override per-invocation via its own ``blocking``
+    # argument; this field only seeds the context-manager default so
+    # callers can write ``with MergeLock(root, blocking=True):``.
+    blocking: bool = False
     _fd: Optional[int] = None
     # Sticky flag set by ``_read_holder_pid`` when the on-disk PID record
     # could not be parsed as an integer.  Read by ``acquire()`` to surface
@@ -458,18 +478,29 @@ class MergeLock:
             raise last_oserror
         raise MergeLockBusy(self._resolved_path, last_busy_pid)
 
-    def acquire(self, break_stale: bool = False) -> None:
+    def acquire(self, break_stale: bool = False, blocking: bool = False) -> None:
         """Acquire the exclusive merge lock.
 
         Args:
             break_stale: If ``True`` and the lock appears stale (holder
                 PID does not exist), remove the old lock file and retry
-                once.  Defaults to ``False`` to avoid races.
+                once.  Defaults to ``False`` to avoid races. Has no
+                effect when ``blocking=True`` (see below).
+            blocking: If ``True``, queue on ``fcntl.flock(LOCK_EX)``
+                (without ``LOCK_NB``) and wait until the current holder
+                releases the lock, then acquire it. This gives the merge
+                lock blocking "main-worktree mutex" semantics — competing
+                ``se3 merge`` / synchronous ``se3 run`` callers serialise
+                rather than failing fast. Defaults to ``False`` (the
+                legacy non-blocking ``LOCK_EX | LOCK_NB`` fail-fast path
+                that raises :class:`MergeLockBusy` / :class:`MergeLockStale`
+                on contention).
 
         Raises:
-            MergeLockBusy: Another process holds the lock.
-            MergeLockStale: The lock appears stale (only when
-                ``break_stale=False``).
+            MergeLockBusy: Another process holds the lock (non-blocking
+                mode only).
+            MergeLockStale: The lock appears stale (non-blocking mode and
+                ``break_stale=False`` only).
         """
         # Idempotent: if this instance already holds the lock, noop.
         if self._fd is not None:
@@ -489,6 +520,29 @@ class MergeLock:
             open_flags,
             0o644,
         )
+
+        if blocking:
+            # Blocking acquisition: queue on LOCK_EX (no LOCK_NB) until
+            # the current holder releases the lock. The kernel releases
+            # an flock automatically when the holding process exits — so
+            # a crashed holder cannot wedge the queue indefinitely and no
+            # explicit PID stale-detection / break path is needed here
+            # (it remains intact on the non-blocking path below). Once
+            # flock returns we are guaranteed to be the sole holder, so we
+            # simply overwrite the recorded PID with our own.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                os.close(fd)
+                raise
+            self._fd = fd
+            self._write_pid()
+            _HELD_LOCK_PATHS.add(str(self._resolved_path))
+            logger.debug(
+                "Acquired merge lock (blocking): %s", self._resolved_path
+            )
+            return
+
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
@@ -578,7 +632,7 @@ class MergeLock:
             logger.debug("Released merge lock: %s", self._resolved_path)
 
     def __enter__(self) -> MergeLock:
-        self.acquire()
+        self.acquire(blocking=self.blocking)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -586,17 +640,23 @@ class MergeLock:
 
 
 def acquire_merge_lock(
-    project_root: Path, *, break_stale: bool = False
+    project_root: Path, *, break_stale: bool = False, blocking: bool = False
 ) -> MergeLock:
     """Convenience factory: acquire and return a held :class:`MergeLock`.
 
     The caller is responsible for calling ``release()`` or using the
     context-manager protocol.
 
+    Args:
+        break_stale: Forwarded to :meth:`MergeLock.acquire` (non-blocking
+            mode only).
+        blocking: When ``True``, queue on the lock until it is free rather
+            than failing fast (see :meth:`MergeLock.acquire`).
+
     Raises:
-        MergeLockBusy: Another process holds the lock.
-        MergeLockStale: The lock appears stale.
+        MergeLockBusy: Another process holds the lock (non-blocking mode).
+        MergeLockStale: The lock appears stale (non-blocking mode).
     """
     lock = MergeLock(project_root)
-    lock.acquire(break_stale=break_stale)
+    lock.acquire(break_stale=break_stale, blocking=blocking)
     return lock
