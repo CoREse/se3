@@ -930,7 +930,8 @@ class TestDiscoverFromIssueCombination:
         # Issue description drives the task and source linkage is preserved.
         assert kwargs["task_description"] == issue.description
         assert kwargs["source_issue_id"] == issue.id
-        assert kwargs["is_loop_mode"] is False
+        # The issue-sourced flow is a plain synchronous run (no worktree mode).
+        assert kwargs.get("is_worktree_mode", False) is False
 
     def test_from_issue_without_discover_keeps_default_type(self, tmp_path):
         """Without --discover the issue-sourced flow keeps the default type."""

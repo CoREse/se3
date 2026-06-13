@@ -143,42 +143,15 @@ def _read_multiline_input(
         return ""
 
 
-def _handle_list_loops(project_root) -> None:
-    """Display existing unmerged loop branches."""
-    from .engine.worktree import list_loop_branches
-
-    branches = list_loop_branches(project_root)
-    if not branches:
-        render_text("No loop branches found.", title="Loop Branches")
-        return
-
-    lines = []
-    for b in branches:
-        commit_info = f"{b['commit_count']} commit(s) ahead of {b['base_branch']}"
-        lines.append(f"  {b['branch']}  —  {commit_info}")
-
-    render_full(
-        "Existing loop branches:\n\n" + "\n".join(lines) + "\n\n"
-        "To merge:  se3 run --loop --merge <branch>\n"
-        "To discard: git branch -D <branch>",
-        title="Loop Branches"
-    )
-
-
 @app.command(name="run")
 def run_cmd(
     ctx: typer.Context,
     task: Optional[str] = typer.Argument(None, help="Task description"),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume interrupted flow"),
-    loop: bool = typer.Option(False, "--loop", "-l", help="Loop mode (continuous task execution)"),
-    max_iterations: int = typer.Option(10, "--max-iterations", "-n", help="Maximum iterations for loop mode"),
     type: str = typer.Option("feature", "--type", "-t", help="Task type (feature, bugfix, refactor, etc.)"),
     change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
     flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
     discover: bool = typer.Option(False, "--discover", "-d", help="Discovery mode - explore requirements with user before analyzing"),
-    no_worktree: bool = typer.Option(False, "--no-worktree", help="Disable branch isolation in loop mode"),
-    merge: Optional[str] = typer.Option(None, "--merge", help="Merge an existing loop branch (e.g. se3-loop/20260324-120000)"),
-    list_loops: bool = typer.Option(False, "--list-loops", help="List existing unmerged loop branches"),
     from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection). Combine with --discover to start the issue-sourced flow from the discovery step."),
     output_format: str = typer.Option("cli", "--output-format", help="Output sink: 'cli' (Rich rendering, default) or 'json' (structured NDJSON event stream)"),
     preset: Optional[str] = typer.Option(None, "--preset", help="Run a preset prompt task by name (mutually exclusive with --type; the preset carries its own type). Use '--preset list' to list available presets."),
@@ -189,10 +162,9 @@ def run_cmd(
         se3 run "Implement user authentication"
         se3 run "Fix login bug" --type=bugfix
         se3 run --resume
-        se3 run --loop
         se3 run --discover "I want to build something related to authentication"
     """
-    from .commands.run import run_flow, run_loop_mode, get_project_root, handle_resume_interactive, SE3_DIR
+    from .commands.run import run_flow, get_project_root, handle_resume_interactive, SE3_DIR
     from .engine.prompt_history import get_prompt_history
 
     # Validate the output-format sink selection (the outermost sink choice).
@@ -268,23 +240,6 @@ def run_cmd(
     if discover:
         type = "discovery"
 
-    if list_loops:
-        _handle_list_loops(project_root)
-        raise typer.Exit(0)
-
-    if loop or merge:
-        exit_code = run_loop_mode(
-            project_root=project_root,
-            initial_task=task,
-            task_type=type,
-            max_iterations=max_iterations,
-            prompt_history=prompt_history,
-            no_worktree=no_worktree,
-            merge_branch=merge,
-            output_format=output_format,
-        )
-        raise typer.Exit(exit_code)
-
     # Handle --from-issue mode
     if from_issue is not None:
         from .engine.issue_manager import IssueManager, IssueStatus
@@ -331,7 +286,6 @@ def run_cmd(
             task_description=issue.description,
             task_type=type,
             change_name=change,
-            is_loop_mode=False,
             prompt_history=prompt_history,
             source_issue_id=issue.id,
             output_format=output_format,
@@ -395,7 +349,6 @@ def run_cmd(
         task_description=task,
         task_type=type,
         change_name=change,
-        is_loop_mode=False,
         prompt_history=prompt_history,
         output_format=output_format,
     )
