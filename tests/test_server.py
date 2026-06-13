@@ -1093,6 +1093,321 @@ def test_reopen_issue_dispatches_command(client_and_app):
         resp = result["resp"]
         assert resp.status_code == 200
         assert resp.json()["status"] == "reopened"
+
+
+# --------------------------------------------------------------------------
+# Issue command timeout reconciliation (stop-the-bleeding)
+# --------------------------------------------------------------------------
+
+
+def _patch_reconcile_timeouts(
+    monkeypatch, *, ack=0.3, reconcile=3.0, interval=0.05
+):
+    """Shrink the issue-command ack / reconcile windows so tests run fast.
+
+    The constants are read from the module namespace at call time inside the
+    closures in ``create_app``, so patching the module attributes takes effect
+    for in-flight requests.
+    """
+    import se3.server.app as app_module
+
+    monkeypatch.setattr(app_module, "ISSUE_COMMAND_TIMEOUT", ack)
+    monkeypatch.setattr(app_module, "ISSUE_RECONCILE_TIMEOUT", reconcile)
+    monkeypatch.setattr(app_module, "ISSUE_RECONCILE_POLL_INTERVAL", interval)
+
+
+def test_create_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
+    """No ack, but the issue mirror later shows a new issue → 201 via reconcile."""
+    _patch_reconcile_timeouts(monkeypatch)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+
+        result: dict = {}
+
+        def do_post():
+            result["resp"] = client.post("/api/issues", json={
+                "machine_id": "m1",
+                "project_root": "/proj",
+                "description": "Something is broken",
+            })
+
+        worker = threading.Thread(target=do_post)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "create"
+            # Deliberately do NOT send MSG_ISSUE_RESULT. Instead the issue
+            # lands on disk and surfaces in the next STATUS_UPDATE.
+            ws.send_text(protocol.make_status_update(
+                _snapshot_with_issues(issues=[
+                    {
+                        "id": "007",
+                        "project_root": "/proj",
+                        "description": "Something is broken",
+                        "status": "open",
+                        "source": "human",
+                    },
+                ])
+            ).to_json())
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["status"] == "created"
+        # The reconcile recovered the daemon-assigned id from the mirror.
+        assert body["issue_id"] == "007"
+
+
+def test_create_issue_reconcile_ignores_preexisting_issue(client_and_app, monkeypatch):
+    """A pre-existing (baseline) issue must NOT be mistaken for the new one.
+
+    With the mirror already holding issue 005 before the request, a reconcile
+    that never sees a *new* id must still time out and fail (504) rather than
+    falsely matching the baseline issue.
+    """
+    _patch_reconcile_timeouts(monkeypatch, ack=0.2, reconcile=0.6)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        # Seed the mirror with a pre-existing issue (the baseline).
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {
+                    "id": "005",
+                    "project_root": "/proj",
+                    "description": "old one",
+                    "status": "open",
+                    "source": "human",
+                },
+            ])
+        ).to_json())
+        for _ in range(50):
+            if client.get("/api/issues/005").status_code == 200:
+                break
+
+        result: dict = {}
+
+        def do_post():
+            result["resp"] = client.post("/api/issues", json={
+                "machine_id": "m1",
+                "project_root": "/proj",
+                "description": "a different brand new issue",
+            })
+
+        worker = threading.Thread(target=do_post)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            # No ack and no new issue ever appears: only the baseline 005 is
+            # in the mirror, so reconcile must NOT match it.
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 504
+
+
+def test_edit_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
+    """No ack, but the mirror later reflects the edited field → 200 via reconcile."""
+    _patch_reconcile_timeouts(monkeypatch)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "open",
+                 "description": "old"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            if client.get("/api/issues/042").status_code == 200:
+                break
+
+        result: dict = {}
+
+        def do_patch():
+            result["resp"] = client.patch("/api/issues/042", json={
+                "description": "Updated text",
+            })
+
+        worker = threading.Thread(target=do_patch)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "edit"
+            # No ack; the edit lands and shows up in the next STATUS_UPDATE.
+            ws.send_text(protocol.make_status_update(
+                _snapshot_with_issues(issues=[
+                    {"id": "042", "project_root": "/proj", "status": "open",
+                     "description": "Updated text"},
+                ])
+            ).to_json())
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "updated"
+
+
+def test_close_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
+    """No ack, but the mirror later shows the issue closed → 200 via reconcile."""
+    _patch_reconcile_timeouts(monkeypatch)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "open"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            if client.get("/api/issues/042").status_code == 200:
+                break
+
+        result: dict = {}
+
+        def do_close():
+            result["resp"] = client.post(
+                "/api/issues/042/close", json={"reason": "Fixed"},
+            )
+
+        worker = threading.Thread(target=do_close)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "close"
+            ws.send_text(protocol.make_status_update(
+                _snapshot_with_issues(issues=[
+                    {"id": "042", "project_root": "/proj", "status": "resolved"},
+                ])
+            ).to_json())
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "closed"
+
+
+def test_reopen_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
+    """No ack, but the mirror later shows the issue open again → 200 via reconcile."""
+    _patch_reconcile_timeouts(monkeypatch)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+        ws.send_text(protocol.make_status_update(
+            _snapshot_with_issues(issues=[
+                {"id": "042", "project_root": "/proj", "status": "closed"},
+            ])
+        ).to_json())
+        for _ in range(50):
+            if client.get("/api/issues/042?include_closed=true").status_code == 200:
+                break
+
+        result: dict = {}
+
+        def do_reopen():
+            result["resp"] = client.post("/api/issues/042/reopen", json={})
+
+        worker = threading.Thread(target=do_reopen)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            assert msg.payload["operation"] == "reopen"
+            ws.send_text(protocol.make_status_update(
+                _snapshot_with_issues(issues=[
+                    {"id": "042", "project_root": "/proj", "status": "open"},
+                ])
+            ).to_json())
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "reopened"
+
+
+def test_create_issue_reconcile_fails_when_never_persisted(client_and_app, monkeypatch):
+    """Issue never lands → reconcile window elapses and the request fails (504).
+
+    The reconcile must be *bounded*: it does not block indefinitely waiting for
+    a STATUS_UPDATE that never reflects the issue.
+    """
+    _patch_reconcile_timeouts(monkeypatch, ack=0.2, reconcile=0.6)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+
+        result: dict = {}
+
+        def do_post():
+            result["resp"] = client.post("/api/issues", json={
+                "machine_id": "m1",
+                "project_root": "/proj",
+                "description": "never lands",
+            })
+
+        worker = threading.Thread(target=do_post)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            # No ack, and never push a STATUS_UPDATE reflecting the issue.
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 504
+
+
+def test_create_issue_normal_ack_path_skips_reconcile(client_and_app, monkeypatch):
+    """A prompt ack returns success without entering the reconcile window.
+
+    Reconcile windows are shrunk to near-zero; if the normal ack path were
+    broken the request would fall through to reconcile and fail, so a 201 here
+    proves the ack path is unaffected.
+    """
+    _patch_reconcile_timeouts(monkeypatch, ack=2.0, reconcile=0.01, interval=0.01)
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())
+
+        result: dict = {}
+
+        def do_post():
+            result["resp"] = client.post("/api/issues", json={
+                "machine_id": "m1",
+                "project_root": "/proj",
+                "description": "acked promptly",
+            })
+
+        worker = threading.Thread(target=do_post)
+        worker.start()
+        try:
+            msg = protocol.decode(ws.receive_text())
+            assert msg.type == protocol.MSG_ISSUE_COMMAND
+            ws.send_text(protocol.make_issue_result(
+                msg.payload.get("request_id", ""),
+                ok=True,
+                issue_id="099",
+            ).to_json())
+        finally:
+            worker.join(timeout=10)
+        resp = result["resp"]
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["issue_id"] == "099"
+
+
 # POST /api/flows/{flow_id}/resume
 # --------------------------------------------------------------------------
 
