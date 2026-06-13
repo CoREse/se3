@@ -335,6 +335,7 @@ def make_spawn_flow(
     project_root: str = "",
     task_type: str = "feature",
     discover: bool = False,
+    worktree: bool = False,
     resume_flow_id: str = "",
     from_issue_id: str = "",
 ) -> Message:
@@ -342,6 +343,12 @@ def make_spawn_flow(
 
     When *discover* is true the daemon's spawner appends ``--discover`` so the
     flow starts from the discovery step (see the spawner command assembly).
+
+    When *worktree* is true the daemon's spawner appends ``--worktree`` so the
+    flow runs in an isolated worktree and auto-merges back on success. The key
+    is omitted from the wire when false, so a plain (non-isolated) fresh-spawn
+    payload stays byte-for-byte backward compatible and ``PROTOCOL_VERSION`` is
+    not bumped.
 
     When *resume_flow_id* is non-empty, the daemon resumes the named flow
     (``se3 run --resume --flow-id <id>``) instead of starting a fresh one.
@@ -362,6 +369,8 @@ def make_spawn_flow(
         "task_type": task_type,
         "discover": bool(discover),
     }
+    if worktree:
+        payload["worktree"] = True
     if resume_flow_id:
         payload["resume_flow_id"] = resume_flow_id
     if from_issue_id:

@@ -427,6 +427,42 @@ def test_publish_flow_threads_discover_flag(client_and_app):
         assert spawn.payload["discover"] is True
 
 
+def test_publish_flow_threads_worktree_flag(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+
+        resp = client.post(
+            "/api/flows",
+            json={
+                "machine_id": "m1",
+                "task": "Isolate Y",
+                "worktree": True,
+                "project_root": "/p",
+            },
+        )
+        assert resp.status_code == 202
+        spawn = protocol.decode(ws.receive_text())
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert spawn.payload["worktree"] is True
+
+
+def test_publish_flow_omits_worktree_key_by_default(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+
+        resp = client.post(
+            "/api/flows",
+            json={"machine_id": "m1", "task": "Plain", "project_root": "/p"},
+        )
+        assert resp.status_code == 202
+        spawn = protocol.decode(ws.receive_text())
+        assert "worktree" not in spawn.payload
+
+
 def test_publish_flow_unknown_machine_404(client_and_app):
     client, app = client_and_app
     resp = client.post(

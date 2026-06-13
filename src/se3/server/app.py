@@ -135,6 +135,7 @@ class NewFlowRequest(BaseModel):
     task_type: str = "feature"
     project_root: str = ""
     discover: bool = False
+    worktree: bool = False
     from_issue_id: str = ""
 
 
@@ -536,6 +537,7 @@ def create_app(
             project_root=project_root,
             task_type=req.task_type,
             discover=req.discover,
+            worktree=req.worktree,
             from_issue_id=from_issue_id,
         )
         ok = await manager.send_to(machine_id, message)
@@ -598,6 +600,7 @@ def create_app(
             project_root=project_root,
             task_type=req.task_type,
             discover=req.discover,
+            worktree=req.worktree,
         )
         ok = await manager.send_to(machine_id, message)
         if not ok:

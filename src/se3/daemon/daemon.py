@@ -192,22 +192,25 @@ class Daemon:
         project_root: Optional[str] = None,
         task_type: str = "feature",
         discover: bool = False,
+        worktree: bool = False,
         from_issue_id: str = "",
     ) -> SpawnedProcess:
         """Spawn a new ``se3 run`` flow (entry point for remote requests).
 
         The spawned flow's project root is registered with the aggregator so
         the next poll picks up its state. When *discover* is true the flow
-        starts from the discovery step. When *from_issue_id* is non-empty the
-        flow is started from that issue (``se3 run --from-issue <id>``), in
-        which case the CLI sources the task from the issue and drives its
-        status lifecycle.
+        starts from the discovery step. When *worktree* is true the flow runs
+        in an isolated worktree (``se3 run --worktree``) and auto-merges back
+        on success. When *from_issue_id* is non-empty the flow is started from
+        that issue (``se3 run --from-issue <id>``), in which case the CLI
+        sources the task from the issue and drives its status lifecycle.
         """
         spawned = self.spawner.spawn(
             task_description,
             project_root=project_root,
             task_type=task_type,
             discover=discover,
+            worktree=worktree,
             from_issue_id=from_issue_id,
         )
         self.aggregator.add_project_root(spawned.project_root)
@@ -354,6 +357,8 @@ class Daemon:
         task_type: str,
         discover: bool = False,
         from_issue_id: str = "",
+        *,
+        worktree: bool = False,
     ) -> SpawnedProcess:
         """Adapt a server SPAWN_FLOW into a :meth:`request_spawn` call."""
         return self.request_spawn(
@@ -361,6 +366,7 @@ class Daemon:
             project_root=project_root or None,
             task_type=task_type or "feature",
             discover=discover,
+            worktree=worktree,
             from_issue_id=from_issue_id,
         )
 

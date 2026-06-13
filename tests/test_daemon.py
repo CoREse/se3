@@ -233,6 +233,32 @@ class TestSpawner:
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
+    def test_spawn_appends_worktree_flag(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "isolate me", project_root=str(tmp_path), worktree=True
+        )
+        assert "--worktree" in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_omits_worktree_flag_by_default(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn("plain task", project_root=str(tmp_path))
+        assert "--worktree" not in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_from_issue_appends_worktree(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "", project_root=str(tmp_path), from_issue_id="9", worktree=True
+        )
+        assert "--from-issue" in spawned.args
+        assert "--worktree" in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
     def test_spawn_from_issue_builds_from_issue_argv(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn(

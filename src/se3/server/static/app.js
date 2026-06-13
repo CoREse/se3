@@ -1105,6 +1105,21 @@ function buildIssueFlowBody(iss, discover) {
   };
 }
 
+// Build the ``POST /api/flows`` body for the New Task form.  ``discover``
+// starts the flow from the discovery step; ``worktree`` runs the flow in an
+// isolated worktree that auto-merges back on success (equivalent to the CLI
+// ``se3 run --worktree``).  Pure.
+function buildNewFlowBody({ machineId, task, taskType, discover, worktree, projectRoot }) {
+  return {
+    machine_id: machineId,
+    task: task,
+    task_type: taskType,
+    discover: Boolean(discover),
+    worktree: Boolean(worktree),
+    project_root: projectRoot,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Render: machine list
 // ---------------------------------------------------------------------------
@@ -9466,6 +9481,7 @@ function openNewTask() {
   }
   $("nt-task").value = "";
   $("nt-discover").checked = false;
+  $("nt-worktree").checked = false;
   $("nt-error").classList.add("hidden");
   $("nt-submit").disabled = false;
   const manualInput = $("nt-project-manual");
@@ -9584,6 +9600,7 @@ async function submitNewTask(event) {
   const task = $("nt-task").value.trim();
   const taskType = $("nt-type").value;
   const discover = $("nt-discover").checked;
+  const worktree = $("nt-worktree").checked;
   const projectSelectValue = $("nt-project").value.trim();
 
   if (!machineId) return showFormError(errBox, "Select a target machine.");
@@ -9614,13 +9631,16 @@ async function submitNewTask(event) {
     const resp = await authedFetch("/api/flows", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        machine_id: machineId,
-        task: task,
-        task_type: taskType,
-        discover: discover,
-        project_root: projectRoot,
-      }),
+      body: JSON.stringify(
+        buildNewFlowBody({
+          machineId,
+          task,
+          taskType,
+          discover,
+          worktree,
+          projectRoot,
+        }),
+      ),
     });
     if (resp.status === 202) {
       closeNewTask();
@@ -10530,6 +10550,7 @@ if (typeof module !== "undefined" && module.exports) {
     // in tests/frontend/issue_management.test.mjs.
     issueLaunchModel,
     buildIssueFlowBody,
+    buildNewFlowBody,
     ISSUE_LAUNCH_DISABLED_REASONS,
     parseTagsFromString,
     formatTagsForInput,

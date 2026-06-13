@@ -266,6 +266,52 @@ def test_dispatch_spawn_flow_threads_discover_flag():
     assert received == [("Explore Z", "", "feature", True)]
 
 
+def test_dispatch_spawn_flow_threads_worktree_flag():
+    """A worktree:true payload reaches the handler as a worktree= keyword."""
+    received = []
+    client = _make_client(
+        spawn_handler=lambda t, p, ty, d, *, worktree=False: received.append(
+            (t, p, ty, d, worktree)
+        )
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("Isolate W", worktree=True),
+        )
+
+    asyncio.run(scenario())
+    assert received == [("Isolate W", "", "feature", False, True)]
+
+
+def test_dispatch_spawn_flow_omits_worktree_keyword_when_false():
+    """A non-isolated spawn keeps the legacy 4-positional handler call shape."""
+    received = []
+    # A handler that does NOT accept a worktree keyword must still be callable
+    # for the default (worktree=False) path — proving backward compatibility.
+    client = _make_client(
+        spawn_handler=lambda t, p, ty, d: received.append((t, p, ty, d))
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("Plain", project_root="/p"),
+        )
+
+    asyncio.run(scenario())
+    assert received == [("Plain", "/p", "feature", False)]
+
+
+def test_make_spawn_flow_omits_worktree_key_when_false():
+    """The wire payload stays backward compatible when worktree is false."""
+    msg = protocol.make_spawn_flow("t", project_root="/p")
+    assert "worktree" not in msg.payload
+    msg2 = protocol.make_spawn_flow("t", project_root="/p", worktree=True)
+    assert msg2.payload["worktree"] is True
+
+
 def test_dispatch_spawn_flow_runs_ensure_handler_first():
     """ensure_handler is called before the spawn_handler with project_root."""
     ensure_calls = []

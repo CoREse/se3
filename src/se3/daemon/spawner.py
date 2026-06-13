@@ -359,6 +359,7 @@ class DaemonSpawner:
         project_root: Optional[str] = None,
         task_type: str = "feature",
         discover: bool = False,
+        worktree: bool = False,
         from_issue_id: str = "",
         extra_args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
@@ -373,6 +374,11 @@ class DaemonSpawner:
         from the discovery step (the web ``POST /api/flows`` "start from
         discovery" option threads its ``discover`` flag down to here via the
         SPAWN_FLOW payload).
+
+        When *worktree* is true, ``--worktree`` is appended so the flow runs in
+        an isolated worktree and auto-merges back on success (the web "Run in
+        isolation" option threads its ``worktree`` flag down to here the same
+        way as ``discover``).
 
         When *from_issue_id* is non-empty, the flow is started from an existing
         issue instead: the argv becomes
@@ -404,6 +410,8 @@ class DaemonSpawner:
             ]
             if discover:
                 args.append("--discover")
+            if worktree:
+                args.append("--worktree")
             if extra_args:
                 args.extend(extra_args)
             label = task_description or f"[from issue {from_issue_id}]"
@@ -418,6 +426,8 @@ class DaemonSpawner:
         ]
         if discover:
             args.append("--discover")
+        if worktree:
+            args.append("--worktree")
         if extra_args:
             args.extend(extra_args)
         return self._launch(args, cwd, task_description, env)

@@ -5669,4 +5669,42 @@ await checkAsync("history: exit then re-enter still walks delta on reconnect wit
   assert.ok(uniqueKeys(app.state.historyRecords));
 });
 
+// -- buildNewFlowBody: New Task POST body (worktree isolation flag) ----------
+check("buildNewFlowBody carries all fields and coerces booleans", () => {
+  const body = app.buildNewFlowBody({
+    machineId: "m1",
+    task: "do the thing",
+    taskType: "bugfix",
+    discover: true,
+    worktree: true,
+    projectRoot: "/abs/path",
+  });
+  assert.deepEqual(body, {
+    machine_id: "m1",
+    task: "do the thing",
+    task_type: "bugfix",
+    discover: true,
+    worktree: true,
+    project_root: "/abs/path",
+  });
+});
+check("buildNewFlowBody defaults worktree to false when unchecked", () => {
+  const body = app.buildNewFlowBody({
+    machineId: "m1",
+    task: "t",
+    taskType: "feature",
+    discover: false,
+    worktree: false,
+    projectRoot: "/p",
+  });
+  assert.equal(body.worktree, false);
+  assert.equal(body.discover, false);
+});
+check("buildNewFlowBody coerces truthy/falsy worktree to a real boolean", () => {
+  const on = app.buildNewFlowBody({ worktree: 1 });
+  assert.strictEqual(on.worktree, true);
+  const off = app.buildNewFlowBody({ worktree: undefined });
+  assert.strictEqual(off.worktree, false);
+});
+
 console.log(`\n${passed} checks passed.`);

@@ -699,6 +699,7 @@ class DaemonClient:
             return
         task_type = str(payload.get("task_type") or "feature")
         discover = bool(payload.get("discover", False))
+        worktree = bool(payload.get("worktree", False))
         if self._spawn_handler is None:
             logger.warning("Received SPAWN_FLOW but no spawn handler is configured")
             return
@@ -720,15 +721,21 @@ class DaemonClient:
                 )
                 return
         try:
-            # The from_issue_id 5th positional is passed only when present so
-            # legacy 4-argument spawn handlers stay backward compatible.
+            # The from_issue_id 5th positional and the worktree keyword are
+            # passed only when present/true so legacy 4-argument spawn handlers
+            # stay backward compatible (a non-isolated fresh spawn keeps the
+            # exact 4-positional call shape).
+            spawn_kwargs = {"worktree": True} if worktree else {}
             if from_issue_id:
                 self._spawn_handler(
-                    task, project_root, task_type, discover, from_issue_id
+                    task, project_root, task_type, discover, from_issue_id,
+                    **spawn_kwargs,
                 )
                 logger.info("SPAWN_FLOW handled from issue %s", from_issue_id)
             else:
-                self._spawn_handler(task, project_root, task_type, discover)
+                self._spawn_handler(
+                    task, project_root, task_type, discover, **spawn_kwargs
+                )
                 logger.info("SPAWN_FLOW handled: %s", task[:80])
         except Exception:
             logger.exception("SPAWN_FLOW handler failed")
