@@ -47,6 +47,14 @@
 
 
 
+
+## 10.0.1 - 2026-06-14
+
+- Render same-step conversation blocks with a continuous background band instead of isolated per-block islands
+- Fill inter-block gaps within a step region so the per-type step color reads as one unbroken lane
+- Preserve step-to-step boundary separation — the continuous band stops at each .history-step-header
+- Maintain block-level distinction (borders, cards, tool markers) within the continuous step background
+- Apply the continuous background consistently to both running-flow and history views
 ## 10.0.0 - 2026-06-14
 
 - Remove deprecated loop mode entirely, including --loop, --max-iterations, --no-worktree, --merge (loop), and --list-loops CLI options

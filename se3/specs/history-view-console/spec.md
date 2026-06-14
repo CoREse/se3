@@ -278,6 +278,27 @@ new CSS.
 - **AND** none of these shared affordances introduce horizontal overflow on the
   mobile breakpoint
 
+#### Scenario: Same-step records render one continuous step-type background band
+- **GIVEN** a step region in the History detail pane (rendered through the same
+  shared `.history-detail` / `renderConversation` engine as
+  `#flow-conversation`) holding two or more content records that share one
+  `step_id` — e.g. an `assistant` bubble, a tool marker, and a step report card
+  — laid out as sibling `.conv-record` blocks separated by the
+  `.history-detail` `gap` (`14px`)
+- **WHEN** the detail is rendered
+- **THEN** the low-saturation per-`step_type` background fills the whole step
+  region as one continuous band — covering the inter-block `gap` so adjacent
+  same-`step_id` records' background meets edge-to-edge rather than reading as
+  separate per-block islands — while each content block stays visually distinct
+  through its own border/background
+- **AND** the continuous band MUST NOT cross a `.history-step-header` into an
+  adjacent step region nor bleed past the conversation area's top/bottom edge,
+  so the step-to-step boundary is unchanged
+- **AND** the status / DAG markers (`.step-status-row` /
+  `.group-status-marker`) are excluded from the band, and the continuity is
+  achieved CSS-only with no horizontal overflow on the mobile breakpoint (the
+  band's overflow into the gap is vertical only)
+
 #### Scenario: Desktop History layout and identity stripe are unchanged
 - **WHEN** `#history-view` is rendered on a viewport wider than the
   narrow-screen breakpoint

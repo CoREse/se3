@@ -956,6 +956,18 @@ mobile (phone-portrait) layout. Step status (running / completed / failed /
 paused / retrying) MUST be conveyed with **explicit text or an icon**, never by
 colour alone, so the status stays legible under reduced-colour rendering.
 
+The per-`step_type` background MUST read as **one continuous band** spanning the
+whole step region: where a step region holds several content records (each an
+independent sibling block separated by the conversation layout `gap`), the
+low-saturation background MUST fill the gaps between adjacent same-`step_id`
+blocks so the region reads as a single grouped band rather than separate
+per-block islands — while each content block (assistant bubble, tool marker,
+step report card) stays visually distinct through its own border/background. The
+band MUST stay strictly within its step region: it MUST NOT cross a step-header
+separator into an adjacent step region nor bleed past the conversation area's
+top/bottom edge, so the step-to-step boundary is unchanged, and the status / DAG
+status markers are excluded from the band.
+
 #### Scenario: Same step_id records group into one step region
 - **GIVEN** a `step_started` anchor, one or more `assistant` / `step_output`
   records, and a terminal `step_completed` record that all carry the same
@@ -975,6 +987,21 @@ colour alone, so the status stays legible under reduced-colour rendering.
 - **THEN** each region's status is shown with explicit text or an icon (not
   colour alone), and the grouping style preserves text contrast and does not
   introduce horizontal overflow on the phone-portrait breakpoint
+
+#### Scenario: Multi-block step region reads as one continuous background band
+- **GIVEN** a single step region keyed by one `step_id` that contains two or
+  more content records — e.g. an `assistant` bubble, a tool marker, and a
+  terminal step report card — rendered as sibling blocks separated by the
+  conversation layout `gap`
+- **WHEN** the conversation is rendered (in `#flow-conversation` or, through the
+  same shared engine, in the History detail pane)
+- **THEN** the low-saturation per-`step_type` background fills the inter-block
+  gaps so the whole step region reads as one continuous band, while each block
+  remains visually distinct via its own border/background
+- **AND** the band does not cross a step-header separator into an adjacent step
+  region (step-to-step boundaries are unchanged), the status / DAG status
+  markers are excluded from it, and no horizontal overflow is introduced on the
+  phone-portrait breakpoint
 
 #### Scenario: Records sort by timestamp across role and step boundaries
 - **GIVEN** a conversation NDJSON containing, in this timestamp order:

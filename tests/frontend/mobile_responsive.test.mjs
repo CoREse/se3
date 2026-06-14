@@ -380,12 +380,15 @@ export function registerMobileResponsiveTests(ctx) {
       // Must be a DESKTOP (top-level) rule so running + history views share it.
       assert.ok(!insideMobile(idx),
         `${sel} must live at the top level (shared by both views), not inside the breakpoint`);
-      // Rule body must recolour the left rail to the step accent and tint the lane.
+      // Rule body must recolour the left rail to the step accent and tint the
+      // lane. The faint lane colour now rides the --step-lane custom property
+      // (rendered through the continuous ::before underlay — see the G2
+      // step_lane_continuity tests) rather than a per-record `background`.
       const body = CSS.slice(idx, CSS.indexOf("}", idx));
       assert.ok(body.includes(`border-left-color: var(--step-${t})`),
         `${sel} must set border-left-color to var(--step-${t})`);
-      assert.ok(/background:\s*rgba\(/.test(body),
-        `${sel} must set a faint rgba background lane`);
+      assert.ok(/--step-lane:\s*rgba\(/.test(body),
+        `${sel} must set a faint rgba lane colour via --step-lane`);
     }
   });
 

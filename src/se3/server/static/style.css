@@ -2011,56 +2011,128 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
  */
 .history-detail .conv-record.step-type-discovery:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-discovery);
-  background: rgba(91, 143, 214, 0.07);
+  --step-lane: rgba(91, 143, 214, 0.07);
 }
 .history-detail .conv-record.step-type-analyze:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-analyze);
-  background: rgba(63, 169, 191, 0.07);
+  --step-lane: rgba(63, 169, 191, 0.07);
 }
 .history-detail .conv-record.step-type-plan:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-plan);
-  background: rgba(138, 130, 224, 0.08);
+  --step-lane: rgba(138, 130, 224, 0.08);
 }
 .history-detail .conv-record.step-type-confirm:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-confirm);
-  background: rgba(111, 134, 201, 0.07);
+  --step-lane: rgba(111, 134, 201, 0.07);
 }
 .history-detail .conv-record.step-type-implement:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-implement);
-  background: rgba(87, 168, 106, 0.07);
+  --step-lane: rgba(87, 168, 106, 0.07);
 }
 .history-detail .conv-record.step-type-test:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-test);
-  background: rgba(63, 174, 154, 0.07);
+  --step-lane: rgba(63, 174, 154, 0.07);
 }
 .history-detail .conv-record.step-type-self_check:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-self_check);
-  background: rgba(200, 154, 70, 0.08);
+  --step-lane: rgba(200, 154, 70, 0.08);
 }
 .history-detail .conv-record.step-type-verify_spec:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-verify_spec);
-  background: rgba(208, 130, 78, 0.08);
+  --step-lane: rgba(208, 130, 78, 0.08);
 }
 .history-detail .conv-record.step-type-update_spec:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-update_spec);
-  background: rgba(84, 174, 196, 0.07);
+  --step-lane: rgba(84, 174, 196, 0.07);
 }
 .history-detail .conv-record.step-type-spec_gate:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-spec_gate);
-  background: rgba(194, 161, 63, 0.08);
+  --step-lane: rgba(194, 161, 63, 0.08);
 }
 .history-detail .conv-record.step-type-version_analyze:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-version_analyze);
-  background: rgba(168, 127, 196, 0.08);
+  --step-lane: rgba(168, 127, 196, 0.08);
 }
 .history-detail .conv-record.step-type-commit:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-commit);
-  background: rgba(121, 168, 63, 0.07);
+  --step-lane: rgba(121, 168, 63, 0.07);
 }
 .history-detail .conv-record.step-type-summarize:not(.step-status-row):not(.group-status-marker) {
   border-left-color: var(--step-summarize);
-  background: rgba(130, 139, 152, 0.09);
+  --step-lane: rgba(130, 139, 152, 0.09);
 }
+
+/*
+ * Continuous step "lane" background (方案A: 背景连续、块仍分明).
+ *
+ * Each content-type step-type record paints its --step-lane colour through a
+ * z-index:-1 ::before underlay that overflows ±7px vertically. Because
+ * .history-detail uses gap:14px between sibling records, two adjacent records
+ * of the SAME step each overflow 7px into the 14px gap and meet edge-to-edge
+ * at the gap mid-line, so the lane colour reads as one continuous band across
+ * the whole step region instead of a stack of disconnected islands. The
+ * records' own bubbles / cards / tool markers keep their borders and higher-
+ * alpha backgrounds untouched, so the blocks stay individually distinct.
+ *
+ * Status / DAG markers (.step-status-row / .group-status-marker) are excluded,
+ * exactly as the per-type colour rules above.
+ */
+.history-detail .conv-record[class*="step-type-"]:not(.step-status-row):not(.group-status-marker) {
+  position: relative;
+  /*
+   * Establish a stacking context on the record itself. Without this, the
+   * z-index:-1 ::before underlay below would NOT be contained by .conv-record
+   * (which is merely position:relative) and would instead resolve against the
+   * nearest ancestor that DOES form a stacking context (.history-view /
+   * #flow-view). The intervening panes (.history-detail-pane / .flow-main)
+   * carry an opaque `background: var(--bg)` that paints OVER a negative-z
+   * descendant pseudo, hiding the lane tint entirely. `isolation: isolate`
+   * forms a stacking context with no other side effects, so the underlay
+   * paints behind the record's own content but ABOVE the pane background,
+   * keeping the lane colour visible.
+   */
+  isolation: isolate;
+}
+.history-detail .conv-record[class*="step-type-"]:not(.step-status-row):not(.group-status-marker)::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -7px;
+  bottom: -7px;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--step-lane);
+}
+
+/*
+ * Boundary & container-edge suppression. The ±7px overflow must stay strictly
+ * INSIDE one step region: it must never cross a .history-step-header into a
+ * neighbouring step, nor bleed into the conversation area's top/bottom padding.
+ * This keeps the step-to-step boundary visually identical to before.
+ *
+ * - First block of a step (right after a header): no upward overflow.
+ * - Last block of a step (right before the next header): no downward overflow.
+ * - First / last child of the container: no overflow past the container edge.
+ *
+ * Degrades gracefully where :has() is unsupported: only a 7px same-step tail
+ * remains below a step's last block — still never crossing into the next step.
+ *
+ * Specificity note: the base ::before underlay rule above carries
+ * `[class*="step-type-"]:not(.step-status-row):not(.group-status-marker)`,
+ * giving it specificity (0,5,1). A naive boundary selector such as
+ * `.history-detail .history-step-header + .conv-record::before` is only
+ * (0,3,1), so its `top:0` / `bottom:0` would LOSE the cascade and the
+ * ±7px overflow would stand — bleeding the lane colour across the step
+ * boundary. We therefore repeat the `.history-detail` class (a no-op for
+ * matching — an element either has the class or not) to lift each boundary
+ * rule to (0,5,1), equal to the base rule; since these rules come later in
+ * source order, they win the tie and correctly reset the overflow to 0.
+ */
+.history-detail.history-detail.history-detail .history-step-header + .conv-record::before { top: 0; }
+.history-detail.history-detail.history-detail .conv-record:has(+ .history-step-header)::before { bottom: 0; }
+.history-detail.history-detail.history-detail > .conv-record:first-child::before { top: 0; }
+.history-detail.history-detail.history-detail > .conv-record:last-child::before { bottom: 0; }
 
 /* The step-header separator row is the explicit boundary between two step
  * regions. Give it a little extra breathing room above (never before the very
