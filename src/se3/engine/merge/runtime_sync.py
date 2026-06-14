@@ -461,6 +461,113 @@ class SyncReport:
     ambiguous_audit_records: list[BypassedCollision] = field(
         default_factory=list,
     )
+    # G6: worktree-created issues folded back into the main project during
+    # this sync, each renumbered to a fresh main-project ID to avoid
+    # colliding with the main project's existing issue numbers. Empty unless
+    # the source worktree contained issues absent (by content) from the main
+    # project.
+    issues_merged: list[IssueMergeRecord] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class IssueMergeRecord:
+    """Audit record for one worktree issue renumbered into the main project.
+
+    *old_id* is the ID the issue carried in the source worktree (whose
+    ``.next_id`` is independent of the main project's, so it may collide with
+    a main-project ID). *new_id* is the freshly-allocated main-project ID the
+    issue was written under. *status_dir* is ``"open"`` or ``"closed"``,
+    matching the directory the renumbered file landed in.
+    """
+
+    old_id: str
+    new_id: str
+    status_dir: str
+
+
+def _issue_content_signature(issue: "Issue") -> tuple[str, str, str]:
+    """Return a normalized content signature used for dedup during merge.
+
+    Two issues are considered the same content (pre-fork copies, or genuine
+    duplicates) when their normalized display title, description, and type
+    match. Whitespace is collapsed and case is folded so trivially-different
+    renderings of the same text do not defeat the dedup.
+    """
+
+    def _norm(text: str | None) -> str:
+        return " ".join((text or "").split()).strip().lower()
+
+    return (_norm(issue.display_title), _norm(issue.description), _norm(issue.type))
+
+
+def merge_worktree_issues(
+    project_root: Path,
+    source_worktree: Path,
+) -> list[IssueMergeRecord]:
+    """Fold worktree-created issues back into the main project, renumbering.
+
+    A ``--worktree`` run clones ``se3/issues/`` into its isolation worktree and
+    allocates new issue IDs from the worktree's own ``.next_id`` counter, which
+    is independent of the main project's. On merge-back those IDs may collide
+    with issue numbers the main project assigned independently. This function
+    loads the worktree's issues, skips any whose content already exists in the
+    main project (pre-fork copies and genuine duplicates), and adopts the rest
+    under fresh main-project IDs via :meth:`IssueManager.adopt_issue` (whose
+    ``_next_id`` allocation is fcntl-serialized against the main project's
+    ``.next_id``).
+
+    Content-based dedup makes this idempotent: a second run sees the
+    already-merged content present in the main project and adopts nothing.
+
+    Best-effort: callers (``sync_branch_runtime``) treat any failure here as
+    non-fatal so a stray issue-file problem never aborts the merge.
+
+    Args:
+        project_root: The main project's root (the merge target).
+        source_worktree: The merged branch's bound worktree root.
+
+    Returns:
+        One :class:`IssueMergeRecord` per renumbered issue (empty when the
+        worktree had no new issues).
+    """
+    # Local import to avoid any import-cycle risk at module load time.
+    from ..issue_manager import IssueManager, _CLOSED_DIR_STATUSES
+
+    source_issues_dir = source_worktree / "se3" / "issues"
+    if not source_issues_dir.exists():
+        return []
+
+    main_mgr = IssueManager(project_root)
+    wt_mgr = IssueManager(source_worktree)
+
+    existing_sigs = {
+        _issue_content_signature(i)
+        for i in main_mgr.list_issues(include_closed=True)
+    }
+
+    merged: list[IssueMergeRecord] = []
+    # list_issues sorts by ID, giving a deterministic adoption order.
+    for issue in wt_mgr.list_issues(include_closed=True):
+        sig = _issue_content_signature(issue)
+        if sig in existing_sigs:
+            # Pre-fork copy or duplicate content — already represented in the
+            # main project, so do not re-add it.
+            continue
+        adopted = main_mgr.adopt_issue(issue)
+        existing_sigs.add(sig)
+        status_dir = (
+            "closed"
+            if adopted.status in _CLOSED_DIR_STATUSES
+            else "open"
+        )
+        merged.append(
+            IssueMergeRecord(
+                old_id=issue.id,
+                new_id=adopted.id,
+                status_dir=status_dir,
+            )
+        )
+    return merged
 
 
 def _collect_files_under(path: Path, source_se3: Path | None = None) -> list[Path]:
@@ -2136,5 +2243,31 @@ def sync_branch_runtime(
                 continue
             rel_str = _rel_path_str(src_file, source_se3)
             report.discarded.append(rel_str)
+
+    # --- Issue renumbering (G6) ---
+    # Fold worktree-created issues back into the main project, renumbering
+    # them to fresh main-project IDs so a worktree's independent ``.next_id``
+    # cannot collide with main-project issue numbers. Runs here, inside the
+    # per-branch runtime sync, which is invoked after each branch's git merge
+    # but BEFORE ``--delete-merged`` cleanup archives/removes the worktree.
+    # Best-effort: a failure must never abort the merge sequence.
+    try:
+        report.issues_merged = merge_worktree_issues(project_root, source_wt)
+        if report.issues_merged:
+            logger.info(
+                "Runtime sync renumbered %d worktree issue(s) into main "
+                "project for branch '%s': %s",
+                len(report.issues_merged),
+                branch,
+                ", ".join(
+                    f"{r.old_id}->{r.new_id}" for r in report.issues_merged
+                ),
+            )
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Runtime sync failed to renumber worktree issues for branch "
+            "'%s': %s",
+            branch, exc,
+        )
 
     return report

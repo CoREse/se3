@@ -10,7 +10,7 @@ import fcntl
 import logging
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -321,6 +321,53 @@ class IssueManager:
 
         logger.info("Created issue %s: %s", issue_id, issue.display_title)
         return issue
+
+    def adopt_issue(self, issue: Issue) -> Issue:
+        """Adopt an externally-originated *issue* under a freshly-allocated ID.
+
+        Unlike :meth:`create`, this preserves every field of *issue* except the
+        ``id`` — status, timestamps, source, tags, priority, type — and writes
+        the YAML file into ``open/`` or ``closed/`` according to the issue's
+        status. It is used by ``se3 merge`` runtime-sync to fold a worktree-
+        created issue back into the main project without colliding with the
+        main project's existing IDs.
+
+        The new ID is allocated via :meth:`_next_id`, whose read-modify-write on
+        ``se3/issues/.next_id`` is serialized by ``fcntl.flock`` so concurrent
+        allocators never collide. The original ``issue.id`` is discarded.
+
+        Args:
+            issue: The source issue (e.g. loaded from a worktree's
+                ``se3/issues/``). Its ``description`` must be non-empty.
+
+        Returns:
+            The adopted :class:`Issue` with its new ID.
+
+        Raises:
+            ValueError: If *issue* has an empty/whitespace-only description.
+        """
+        if not issue.description or not issue.description.strip():
+            raise ValueError("Cannot adopt an issue with an empty description")
+
+        self._ensure_dirs()
+
+        new_id = self._next_id()
+        adopted = replace(issue, id=new_id)
+
+        target_dir = (
+            self.closed_dir
+            if adopted.status in _CLOSED_DIR_STATUSES
+            else self.open_dir
+        )
+        slug = _derive_slug_for_issue(adopted)
+        filepath = target_dir / f"{new_id}_{slug}.yaml"
+        self._write_issue(filepath, adopted)
+
+        logger.info(
+            "Adopted issue as %s (was %s): %s",
+            new_id, issue.id, adopted.display_title,
+        )
+        return adopted
 
     def load(self, issue_id: str) -> Optional[Issue]:
         """Load an issue by ID from open/ or closed/ directory."""
