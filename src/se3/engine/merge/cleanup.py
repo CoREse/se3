@@ -176,6 +176,16 @@ class CleanupReport:
     # destructive worktree-remove / branch-delete steps so a failure
     # there preserves the branch + worktree (see ``skipped_archive_failed``).
     archived: list[tuple[str, Path]] = field(default_factory=list)
+    # For each branch whose worktree carried a COMPLETED ``engine.json``,
+    # the path of the promoted terminal-state snapshot written into the
+    # *main* project's ``se3/state/archive/engine_<flow_id>.json`` BEFORE
+    # the worktree was deleted. This lets the daemon aggregator / history
+    # reader report the worktree flow as ``status=completed`` like a normal
+    # run, so the webui shows the unified active→completed→history lifecycle
+    # (a brief "Completed" before the session drops into history) instead of
+    # the flow vanishing straight into history when ``--delete-merged``
+    # removes the worktree's own ``engine.json``.
+    promoted_states: list[tuple[str, Path]] = field(default_factory=list)
     # When the archive step itself failed (e.g. disk full, permission
     # denied, ``shutil.copytree`` raised), the worktree-remove and
     # branch-delete steps are skipped to preserve operator data, and
@@ -442,6 +452,108 @@ def _archive_worktree(
     return dest
 
 
+def _promote_completed_engine_state(
+    project_root: Path,
+    wt_path: Path,
+) -> Optional[Path]:
+    """Promote a worktree's COMPLETED ``engine.json`` into the main archive.
+
+    A ``se3 run --worktree`` flow persists its terminal ``COMPLETED`` state
+    only inside the isolation worktree at
+    ``<wt_path>/se3/state/engine.json``. Once ``--delete-merged`` removes the
+    worktree, that file is gone and the main project never recorded the flow's
+    completion — so the daemon aggregator / history reader would only ever see
+    the flow as a history-only directory (after Tier A history sync), never as
+    a ``status=completed`` run, and the webui would skip the brief "Completed"
+    state and drop the session straight into history.
+
+    To restore the unified ``active → completed → history`` lifecycle this
+    copies the worktree's engine.json — only when it describes a genuinely
+    ``COMPLETED`` flow — into the *main* project's
+    ``se3/state/archive/engine_<flow_id>.json`` (atomic write), stamping the
+    main ``project_root`` so the history enumeration attributes it correctly.
+    The daemon then reports it exactly like an archived normal run.
+
+    This MUST be called BEFORE the destructive worktree-remove / branch-delete
+    step so the source engine.json still exists. Returns the promoted archive
+    path on success, or ``None`` when there is nothing to promote (no
+    engine.json, unreadable, missing flow_id, or status is not COMPLETED).
+
+    Failures are non-fatal: the caller treats a ``None`` / raised error as
+    "nothing promoted" and proceeds with cleanup — losing the brief Completed
+    chip is far less bad than blocking a merge-back cleanup.
+    """
+    engine_json = wt_path / "se3" / "state" / "engine.json"
+    try:
+        raw = engine_json.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "Worktree engine.json at %s is not valid JSON; skipping "
+            "completed-state promotion", engine_json,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    status = str(data.get("status") or "").strip().lower()
+    if status != "completed":
+        # Only a genuinely COMPLETED flow is promoted. A FAILED / PAUSED
+        # worktree run keeps its worktree (cleanup never reaches a non-merged
+        # branch), so there is nothing to promote here.
+        return None
+
+    flow_id = data.get("flow_id")
+    if not flow_id:
+        logger.warning(
+            "Worktree engine.json at %s has no flow_id; skipping "
+            "completed-state promotion", engine_json,
+        )
+        return None
+    flow_id_str = str(flow_id)
+
+    # Stamp the main project root so the daemon's historical-root enumeration
+    # (which reads engine_*.json's ``project_root`` field) attributes the
+    # promoted state to the main project, not the now-deleted worktree.
+    try:
+        data["project_root"] = os.path.realpath(str(project_root))
+    except OSError:  # pragma: no cover - defensive
+        data["project_root"] = str(project_root)
+
+    archive_dir = project_root / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", flow_id_str)
+    dest = archive_dir / f"engine_{slug}.json"
+
+    # Atomic write: write to a temp file in the same directory, then replace.
+    tmp = archive_dir / f".engine_{slug}.json.tmp"
+    try:
+        tmp.write_text(
+            json.dumps(data, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, dest)
+    except OSError as exc:
+        logger.warning(
+            "Failed to promote completed worktree state for flow %s to %s: %s",
+            flow_id_str, dest, exc,
+        )
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
+
+    logger.info(
+        "Promoted COMPLETED worktree flow %s to main archive %s",
+        flow_id_str, dest,
+    )
+    return dest
+
+
 def _is_worktree_clean(wt_path: Path) -> bool:
     """Return True when the worktree at *wt_path* has no uncommitted changes.
 
@@ -691,6 +803,25 @@ class CleanupManager:
                     )
                     report.skipped_archive_failed.append((branch, reason))
                     continue
+
+                # Promote the worktree's COMPLETED engine.json into the main
+                # project's archive BEFORE the destructive worktree-remove /
+                # branch-delete step below. This is what lets the daemon report
+                # the worktree flow as ``status=completed`` (the brief
+                # "Completed" state) instead of it vanishing straight into
+                # history once ``--delete-merged`` removes the worktree. A
+                # failure here is non-fatal — cleanup still proceeds.
+                try:
+                    promoted = _promote_completed_engine_state(
+                        self.project_root, wt_path,
+                    )
+                    if promoted is not None:
+                        report.promoted_states.append((branch, promoted))
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Completed-state promotion for branch '%s' raised "
+                        "(continuing cleanup): %s", branch, exc,
+                    )
 
             # Try deleting branch first (safe with lowercase -d).
             # If the branch is checked out in a worktree, git will refuse;

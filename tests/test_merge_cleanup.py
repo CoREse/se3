@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -498,6 +499,141 @@ class TestCleanupManagerDeleteMergedBranches:
         assert not wt_dir.exists()
         # Stale metadata must also be scrubbed
         assert not metadata_dir.exists()
+
+
+def _write_worktree_engine_json(
+    wt_path: Path, flow_id: str, status: str = "completed"
+) -> Path:
+    """Write a worktree-mode ``engine.json`` under *wt_path*."""
+    state_dir = wt_path / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    engine = state_dir / "engine.json"
+    engine.write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "status": status,
+                "task_description": "do the thing",
+                "task_type": "feature",
+                "is_worktree_mode": True,
+                "created_at": "2026-06-14T10:00:00",
+                "updated_at": "2026-06-14T10:30:00",
+                "state": {"selected_steps": ["analyze", "plan"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return engine
+
+
+class TestPromoteCompletedEngineState:
+    """G7: promote a worktree's COMPLETED engine.json into the main archive."""
+
+    def test_promotes_completed_state(self, tmp_path: Path) -> None:
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+        _write_worktree_engine_json(wt_path, "flow-abc", status="completed")
+
+        promoted = _promote_completed_engine_state(project_root, wt_path)
+
+        assert promoted is not None
+        assert promoted.name == "engine_flow-abc.json"
+        archive = project_root / "se3" / "state" / "archive" / "engine_flow-abc.json"
+        assert archive.exists()
+        data = json.loads(archive.read_text(encoding="utf-8"))
+        assert data["flow_id"] == "flow-abc"
+        assert data["status"] == "completed"
+        assert data["task_description"] == "do the thing"
+        # The promoted snapshot is re-stamped with the MAIN project root so
+        # the daemon's historical-root enumeration attributes it correctly.
+        assert Path(data["project_root"]).resolve() == project_root.resolve()
+
+    def test_skips_non_completed_status(self, tmp_path: Path) -> None:
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+        _write_worktree_engine_json(wt_path, "flow-abc", status="failed")
+
+        promoted = _promote_completed_engine_state(project_root, wt_path)
+
+        assert promoted is None
+        assert not (project_root / "se3" / "state" / "archive").exists()
+
+    def test_skips_missing_engine_json(self, tmp_path: Path) -> None:
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        assert _promote_completed_engine_state(project_root, wt_path) is None
+
+    def test_skips_missing_flow_id(self, tmp_path: Path) -> None:
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        wt_path = tmp_path / "wt"
+        state_dir = wt_path / "se3" / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "engine.json").write_text(
+            json.dumps({"status": "completed"}), encoding="utf-8"
+        )
+
+        assert _promote_completed_engine_state(project_root, wt_path) is None
+
+    def test_integration_promotes_before_worktree_deletion(
+        self, tmp_path: Path
+    ) -> None:
+        """``delete_merged_branches`` promotes the COMPLETED state, then deletes
+        the worktree, recording the promotion in the report."""
+        _init_repo(tmp_path)
+        # Gitignore se3/ so the worktree's engine.json does not count as dirty.
+        (tmp_path / ".gitignore").write_text("se3/\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", ".gitignore"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "ignore se3"],
+            check=True, capture_output=True,
+        )
+        default = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default],
+            check=True, capture_output=True,
+        )
+        wt_dir = tmp_path / "wt_feature"
+        _create_worktree(tmp_path, "feature", wt_dir)
+        # The worktree carries a COMPLETED worktree-mode engine.json.
+        _write_worktree_engine_json(wt_dir, "flow-xyz", status="completed")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
+            check=True, capture_output=True,
+        )
+
+        mgr = CleanupManager(tmp_path)
+        report = mgr.delete_merged_branches(["feature"])
+
+        assert report.deleted == ["feature"]
+        # Worktree is gone, but the promoted completed-state snapshot survives
+        # in the MAIN project's archive.
+        assert not wt_dir.exists()
+        archive = tmp_path / "se3" / "state" / "archive" / "engine_flow-xyz.json"
+        assert archive.exists()
+        data = json.loads(archive.read_text(encoding="utf-8"))
+        assert data["status"] == "completed"
+        assert [b for b, _ in report.promoted_states] == ["feature"]
 
 
 class TestParseWorktreePorcelain:
