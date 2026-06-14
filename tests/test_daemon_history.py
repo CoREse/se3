@@ -163,6 +163,8 @@ def test_session_meta_to_dict_round_trip():
     data = meta.to_dict()
     assert data["flow_id"] == "x"
     assert data["active"] is True
+    # Default is not-waiting; the field is always emitted for wire stability.
+    assert data["waiting_for_lock"] is False
     assert set(data) == {
         "flow_id",
         "project_root",
@@ -174,7 +176,63 @@ def test_session_meta_to_dict_round_trip():
         "active",
         "source",
         "step_count",
+        "waiting_for_lock",
     }
+
+
+def test_build_index_carries_waiting_for_lock_on_active_flow(tmp_path):
+    """An active engine.json with waiting_for_lock=True propagates the flag.
+
+    G2 (1b): a queued synchronous run stays RUNNING (hence active) and the
+    history index must carry waiting_for_lock so the web console can render the
+    running·waiting-for-lock sub-state — even before any step jsonl exists.
+    """
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "queued-1",
+                "task_description": "build the thing",
+                "task_type": "feature",
+                "status": "RUNNING",
+                "waiting_for_lock": True,
+                "updated_at": "2026-05-19T10:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    meta = _make_reader(tmp_path).build_index()[0]
+    assert meta.flow_id == "queued-1"
+    assert meta.active is True
+    assert meta.waiting_for_lock is True
+    assert meta.to_dict()["waiting_for_lock"] is True
+
+
+def test_archived_flow_never_waiting_for_lock(tmp_path):
+    """A terminal/archived snapshot is never reported as waiting, even if the
+    flag lingered in its persisted engine.json (defensive: waiting is only a
+    live, active-flow sub-state)."""
+    state_dir = tmp_path / "se3" / "state"
+    archive_dir = state_dir / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "archived-stale",
+                "status": "completed",
+                "waiting_for_lock": True,
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    meta = _make_reader(tmp_path).build_index()[0]
+    assert meta.flow_id == "archived-stale"
+    assert meta.active is False
+    assert meta.waiting_for_lock is False
 
 
 # --------------------------------------------------------------------------
@@ -1798,3 +1856,27 @@ def test_history_reader_indexes_active_worktree_run(tmp_path):
     read = reader.read_flow("wt-flow-1")
     assert read.records
     assert read.records[0]["step_type"] == "implement"
+
+
+def test_read_active_flows_includes_waiting_flow_with_no_step_records(tmp_path):
+    """A queued (waiting_for_lock) flow that has not yet written any step jsonl
+    is still recognized as active and returned by read_active_flows.
+
+    G2 acceptance: zero step records must not cause the waiting flow to be
+    dropped — it stays RUNNING and the daemon must keep reporting it so the web
+    console shows the running·waiting-for-lock state instead of "已发布".
+    """
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {"flow_id": "queued", "status": "RUNNING", "waiting_for_lock": True}
+        ),
+        encoding="utf-8",
+    )
+    # Deliberately NO se3/history/queued/*.jsonl — zero step records.
+
+    reader = _make_reader(tmp_path)
+    reads = reader.read_active_flows({})
+    assert [r.flow_id for r in reads] == ["queued"]
+    assert reads[0].records == []

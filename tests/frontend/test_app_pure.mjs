@@ -3708,6 +3708,12 @@ await replySendErrMod.registerReplySendErrorHandlingTests({ app, check, checkAsy
 const stepLaneMod = await import("./step_lane_continuity.test.mjs");
 stepLaneMod.registerStepLaneContinuityTests({ app, check, findOne, findAll });
 
+// Register the G2 waiting-for-lock running sub-state tests (isWaitingForLock /
+// flowStatusLabel) — the flag rides the existing flow snapshot, so a queued
+// flow must read as running·waiting-for-lock instead of appearing stalled.
+const waitingForLockMod = await import("./waiting_for_lock.test.mjs");
+waitingForLockMod.registerWaitingForLockTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

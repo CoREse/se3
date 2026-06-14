@@ -129,6 +129,46 @@ def test_state_update_status_replaces_flows():
     asyncio.run(scenario())
 
 
+def test_flow_snapshot_waiting_for_lock_round_trips():
+    """The server-side FlowSnapshot mirror preserves waiting_for_lock so the
+    daemon-reported running·waiting-for-lock sub-state reaches the frontend."""
+    snap = FlowSnapshot.from_payload(
+        {"flow_id": "f1", "status": "running", "waiting_for_lock": True}
+    )
+    assert snap.waiting_for_lock is True
+    assert snap.to_dict()["waiting_for_lock"] is True
+
+    # Absent flag defaults to False (the common, non-queued case).
+    plain = FlowSnapshot.from_payload({"flow_id": "f2", "status": "running"})
+    assert plain.waiting_for_lock is False
+    assert plain.to_dict()["waiting_for_lock"] is False
+
+
+def test_state_update_status_threads_waiting_for_lock():
+    """waiting_for_lock survives the full update_status → get_machine_flows path
+    that backs the /ws/ui push the frontend consumes."""
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1", "host-1", "6.4.0")
+        await state.update_status(
+            "m1",
+            _snapshot(
+                flows=[
+                    {
+                        "flow_id": "f1",
+                        "status": "running",
+                        "waiting_for_lock": True,
+                    }
+                ]
+            ),
+        )
+        flows = await state.get_machine_flows("m1")
+        assert flows[0]["waiting_for_lock"] is True
+
+    asyncio.run(scenario())
+
+
 def test_state_get_flow_across_machines():
     state = ServerState()
 

@@ -453,9 +453,19 @@ class FlowInstance:
     worktree_path: Optional[str] = None
     worktree_original_branch: Optional[str] = None
 
+    # Lock-acquisition wait state: True while this synchronous run is blocked
+    # acquiring the project's main-worktree mutex before its first
+    # code-touching (non-discovery) step. Surfaced to the daemon / web console
+    # as a running "waiting for lock" sub-state so a flow that has started but
+    # is queued behind another lock holder shows as RUNNING·waiting-for-lock
+    # rather than silently stalling on the "已发布" pseudo-success state. Never
+    # set on a --worktree flow body (which runs lock-free), so it is only ever
+    # written to engine.json when actually True.
+    waiting_for_lock: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize flow instance to dictionary."""
-        return {
+        data: Dict[str, Any] = {
             "flow_id": self.flow_id,
             "status": self.status.value,
             "task_description": self.task_description,
@@ -473,6 +483,13 @@ class FlowInstance:
             "worktree_path": self.worktree_path,
             "worktree_original_branch": self.worktree_original_branch,
         }
+        # Only emit waiting_for_lock when actually waiting: keeps engine.json
+        # backward-compatible (old readers ignore the absent key) and keeps a
+        # --worktree body's engine.json free of the field, while still
+        # round-tripping a True value for a synchronous run that is queued.
+        if self.waiting_for_lock:
+            data["waiting_for_lock"] = True
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> FlowInstance:
@@ -494,6 +511,9 @@ class FlowInstance:
             worktree_branch=data.get("worktree_branch"),
             worktree_path=data.get("worktree_path"),
             worktree_original_branch=data.get("worktree_original_branch"),
+            # Backward compatible: old engine.json files predate this field, so
+            # a missing key reads as False (not waiting).
+            waiting_for_lock=data.get("waiting_for_lock", False),
         )
 
     def get_progress(self) -> tuple[int, int]:

@@ -183,6 +183,19 @@ class MergeLock:
     _BREAK_STALE_BASE_BACKOFF_S = 0.05  # 50ms base
     _MAX_BREAK_STALE_BACKOFF_S = 0.5    # 500ms cap
 
+    @property
+    def held(self) -> bool:
+        """Return True when *this* instance currently holds the lock fd.
+
+        Unlike :func:`is_lock_held_in_process` (which consults the
+        process-wide held-paths registry by path), this reflects only
+        whether this specific :class:`MergeLock` object has an open,
+        acquired descriptor. Callers that lazily acquire a single lock
+        instance over the lifetime of a run use it to decide whether the
+        lock still needs to be taken.
+        """
+        return self._fd is not None
+
     def _read_holder_pid(self) -> Optional[int]:
         """Return the PID stored in the lock file, or None.
 

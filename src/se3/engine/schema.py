@@ -151,6 +151,9 @@ class FlowInstanceSchema(TypedDict, total=False):
     change_path: Optional[str]
     is_worktree_mode: bool
     worktree_branch: Optional[str]
+    # Present (and True) only while a synchronous run is queued acquiring the
+    # main-worktree mutex before its first non-discovery step; absent otherwise.
+    waiting_for_lock: bool
 
 
 ENGINE_JSON_SCHEMA: Dict[str, Any] = {

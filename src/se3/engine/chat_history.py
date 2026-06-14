@@ -376,6 +376,53 @@ def record_step_started(
         logger.warning("Failed to record step started for %s: %s", step_id, exc)
 
 
+def record_waiting_for_lock(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    message: str = "",
+    timestamp: Optional[float] = None,
+) -> None:
+    """Record a streaming ``waiting_for_lock`` event into the step's jsonl.
+
+    Written by ``run.py`` when a synchronous run, about to enter its first
+    code-touching (non-discovery) step, finds the project's main-worktree
+    mutex already held and must block to acquire it. Emitting this line the
+    moment the wait begins lets the daemon's incremental history reader push
+    a visible "waiting for lock" record to the web console, so a queued flow
+    shows as running-and-waiting rather than silently stalling on the
+    "已发布" pseudo-success state (the (1b) general fallback).
+
+    The line is intentionally NOT a :class:`ChatMessage` (it carries no
+    ``role``); like :func:`record_step_started` it rides the existing
+    ``history_data`` push channel without protocol changes, and
+    :func:`get_step_history` skips it so CLI history rendering and
+    retry-context construction never ingest it. Same write semantics —
+    ``mkdir`` + a single whole-line ``write`` wrapped in an ``OSError`` guard
+    so a write failure never breaks the running flow.
+    """
+    record = {
+        "type": "waiting_for_lock",
+        "step_id": step_id,
+        "step_type": step_type,
+        "status": "waiting_for_lock",
+        "message": message or "Waiting for the main-worktree lock (another run or merge is in progress)…",
+        "timestamp": (
+            datetime.fromtimestamp(timestamp).isoformat()
+            if timestamp is not None
+            else datetime.now().isoformat()
+        ),
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record waiting_for_lock for %s: %s", step_id, exc)
+
+
 def record_step_status(
     project_root: Path,
     flow_id: str,
@@ -839,6 +886,7 @@ def get_step_history(
                 "step_completed",
                 "step_failed",
                 "step_output",
+                "waiting_for_lock",
             ) and "role" not in data:
                 continue
             # Stream-progress records (written by record_stream_progress) carry

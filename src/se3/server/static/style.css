@@ -242,6 +242,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   cursor: pointer;
 }
 
+/* Running sub-state: flow has started but is queued behind the main-worktree
+   mutex. Distinct from terminal states — the flow is still running. */
+.badge-waiting-lock {
+  background: rgba(214,162,58,.18);
+  color: var(--yellow);
+  font-weight: 600;
+}
+
 /* Resume button — inline inside flow cards, history items, and the sidebar. */
 .btn-resume {
   background: var(--accent);

@@ -1838,6 +1838,106 @@ def _resolve_main_lock_root(project_root: Path) -> Path:
     return main_root if main_root is not None else project_root
 
 
+def _ensure_main_lock_for_step(
+    main_lock: Any,
+    flow: Any,
+    current_step: Any,
+    project_root: Path,
+    persistence: Any,
+) -> None:
+    """Lazily acquire the main-worktree mutex before a code-touching step.
+
+    Implements the lock-aware deferred acquisition for a synchronous run, the
+    engine side of the (1a)+(1b) lock-regression fix:
+
+    1. **No-op** when there is no lock to take (``main_lock is None`` — a
+       ``--worktree`` flow body runs lock-free), when this run already holds it
+       (acquired on an earlier step), or when ``current_step`` is the DISCOVERY
+       step. Discovery only clarifies requirements and never holds the global
+       lock (1a), so a long, human-paused exploration cannot stall other
+       synchronous runs / merges queued behind it.
+    2. **Non-blocking probe**: ``acquire(blocking=False)``. When the lock is
+       free this returns immediately and the run behaves identically to the
+       pre-regression up-front acquire — no visible wait state is produced. A
+       stale lock (dead holder PID) is reclaimed in place, also with no wait
+       state.
+    3. **On contention** (:class:`MergeLockBusy`): mark the flow
+       ``waiting_for_lock=True`` and persist engine.json (status stays RUNNING,
+       so the daemon sees a live, queued flow rather than a silent stall),
+       append a streaming ``waiting_for_lock`` event to the step's jsonl so the
+       web console surfaces it incrementally, then BLOCK on
+       ``acquire(blocking=True)`` until the current holder releases. This is the
+       (1b) general fallback: any lock wait is shown as running-and-waiting,
+       never as the "已发布" pseudo-success that silently never started.
+
+    After a successful acquisition (fast path, stale-reclaim, or post-block) any
+    set ``waiting_for_lock`` flag is cleared and persisted — including a stale
+    True left by a previously interrupted wait.
+    """
+    if main_lock is None or main_lock.held:
+        return
+    if current_step.step_type == StepType.DISCOVERY:
+        return
+
+    from .merge.merge_lock import MergeLockBusy, MergeLockStale
+
+    acquired = False
+    try:
+        main_lock.acquire(blocking=False)
+        acquired = True
+    except MergeLockStale:
+        # Holder PID is dead — reclaim the lock in place. No human-visible
+        # wait is warranted because this resolves immediately.
+        try:
+            main_lock.acquire(blocking=False, break_stale=True)
+            acquired = True
+        except (MergeLockBusy, MergeLockStale):
+            acquired = False
+    except MergeLockBusy:
+        acquired = False
+
+    if not acquired:
+        # Lock is genuinely held by another run/merge: surface a visible
+        # running "waiting for lock" state BEFORE blocking so the flow never
+        # appears to be a silent stall, then queue on the blocking acquire.
+        flow.waiting_for_lock = True
+        try:
+            persistence.save_flow(flow)
+        except Exception:
+            logger.debug(
+                "failed to persist waiting_for_lock=True for %s",
+                flow.flow_id, exc_info=True,
+            )
+        try:
+            from ..engine.chat_history import record_waiting_for_lock
+            record_waiting_for_lock(
+                project_root=project_root,
+                flow_id=flow.flow_id,
+                step_id=current_step.step_id,
+                step_type=current_step.step_type.value,
+            )
+        except Exception:
+            logger.debug(
+                "failed to record waiting_for_lock event for %s",
+                current_step.step_id, exc_info=True,
+            )
+        # Block until the holder releases. The kernel releases an flock when
+        # the holding process exits, so a crashed holder cannot wedge this.
+        main_lock.acquire(blocking=True)
+
+    # Acquired (one of the paths above). Clear any waiting flag — covers both
+    # the just-set flag and a stale True left by a previously interrupted wait.
+    if flow.waiting_for_lock:
+        flow.waiting_for_lock = False
+        try:
+            persistence.save_flow(flow)
+        except Exception:
+            logger.debug(
+                "failed to persist waiting_for_lock=False for %s",
+                flow.flow_id, exc_info=True,
+            )
+
+
 def run_flow(
     project_root: Path,
     flow_id: Optional[str] = None,
@@ -1897,25 +1997,24 @@ def run_flow(
     _interrupt_requested = False
     old_sigint_handler = signal.signal(signal.SIGINT, _sigint_handler)
 
-    # Acquire the project's main-worktree mutex for a synchronous run and hold
-    # it for the whole run. Acquisition is BLOCKING (queues behind a current
-    # holder), so a second synchronous run / a merge waits here rather than
-    # failing fast. Done inside the try so the finally reliably releases it.
+    # Build the project's main-worktree mutex for a synchronous run, but do NOT
+    # acquire it up front. Acquisition is DEFERRED to just before the first
+    # code-touching (non-discovery) step inside _run_flow_impl (see
+    # _ensure_main_lock_for_step): the discovery step only clarifies
+    # requirements and must not hold the global lock for the entire (possibly
+    # long, human-paused) exploration — doing so would silently stall every
+    # other synchronous run / merge queued behind it. Once acquired the lock is
+    # held for the remainder of the run; the finally below releases it on every
+    # exit path (release() is a no-op when it was never taken). When
+    # ``acquire_main_lock`` is False — the case for a ``--worktree`` run's
+    # isolated flow body — no lock object is created at all, so the body runs
+    # lock-free.
     main_lock = None
     try:
         if acquire_main_lock:
             from .merge.merge_lock import MergeLock
 
             main_lock = MergeLock(_resolve_main_lock_root(project_root))
-            try:
-                main_lock.acquire(blocking=True)
-            except KeyboardInterrupt:
-                main_lock = None
-                get_console().print(
-                    "[yellow]Interrupted while waiting for the main-worktree "
-                    "lock — exiting.[/yellow]"
-                )
-                return 130
 
         return _run_flow_impl(
             project_root, flow_id, task_description, task_type, change_name,
@@ -1924,6 +2023,7 @@ def run_flow(
             output_format=output_format,
             worktree_branch=worktree_branch,
             worktree_original_branch=worktree_original_branch,
+            main_lock=main_lock,
         )
     finally:
         # Restore original signal handler
@@ -1954,8 +2054,16 @@ def _run_flow_impl(
     output_format: str = "cli",
     worktree_branch: Optional[str] = None,
     worktree_original_branch: Optional[str] = None,
+    main_lock: Any = None,
 ) -> int:
-    """Internal implementation of flow execution."""
+    """Internal implementation of flow execution.
+
+    ``main_lock`` is an unacquired :class:`MergeLock` for a synchronous run
+    (``None`` for a ``--worktree`` flow body, which runs lock-free). It is
+    acquired lazily by :func:`_ensure_main_lock_for_step` immediately before
+    the first non-discovery step and held for the rest of the run; ``run_flow``
+    releases it on every exit path.
+    """
     # Register all step handlers
     for step_type, handler in STEP_HANDLERS.items():
         state_machine.register_handler(step_type, handler)
@@ -2194,6 +2302,28 @@ def _run_flow_impl(
             state_machine.transition_to_next(flow)
             persistence.save_flow(flow)
             continue
+
+        # Lazily acquire the main-worktree mutex before the first code-touching
+        # (non-discovery) step. Discovery steps run lock-free (1a); the first
+        # non-discovery step (analyze for a normal run) acquires here and holds
+        # the lock for the rest of the run. If the lock is contended this blocks
+        # AND surfaces a visible running "waiting for lock" state (1b). A Ctrl+C
+        # while queued exits cleanly to await --resume.
+        try:
+            _ensure_main_lock_for_step(
+                main_lock, flow, current_step, project_root, persistence)
+        except KeyboardInterrupt:
+            persistence.save_flow(flow)
+            emitter.emit(new_event(
+                EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                step_id=current_step.step_id,
+                step_type=current_step.step_type.value,
+            ))
+            get_console().print(
+                "[yellow]Interrupted while waiting for the main-worktree "
+                "lock — exiting (resume with `se3 run --resume`).[/yellow]"
+            )
+            return 130
 
         # Display compact step header — skip for CONFIRM steps (the prompt speaks for itself)
         step_type_value = current_step.step_type.value
