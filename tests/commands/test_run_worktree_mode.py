@@ -49,7 +49,7 @@ class TestRunFlowMainLock:
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.merge.merge_lock.MergeLock")
-    def test_sync_run_acquires_and_releases_blocking_lock(
+    def test_sync_run_defers_acquire_and_releases_lock(
         self, MockLock, _MockPersist, _MockSM, mock_impl, mock_resolve
     ):
         lock = MockLock.return_value
@@ -59,11 +59,16 @@ class TestRunFlowMainLock:
             acquire_main_lock=True,
         )
         assert rc == 0
-        # Lock targets the resolved MAIN repo root, blocking acquisition, and
-        # is released on exit.
+        # Lock targets the resolved MAIN repo root, but acquisition is DEFERRED
+        # to _run_flow_impl (mocked here), so run_flow itself does NOT acquire
+        # up front — it only builds the lock, threads it through, and releases
+        # it on exit (release is a no-op when never acquired).
         MockLock.assert_called_once_with(Path("/main"))
-        lock.acquire.assert_called_once_with(blocking=True)
+        lock.acquire.assert_not_called()
         lock.release.assert_called_once()
+        # The unacquired lock is handed to the impl for lazy, per-step acquire.
+        _, kwargs = mock_impl.call_args
+        assert kwargs["main_lock"] is lock
 
     @patch("se3.commands.run._run_flow_impl", return_value=0)
     @patch("se3.commands.run.StateMachine")
