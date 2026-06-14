@@ -164,6 +164,18 @@ def parse_step_type_from_step_id(stem: str) -> str:
         if not original:
             return ""
 
+        # Defensive: if a physical / sidecar file name slipped through (e.g.
+        # ``01_discovery_ab12.jsonl`` or
+        # ``01_discovery_ab12.jsonl.from-worktree__b``) instead of a logical
+        # step id, reduce it to the logical id by stripping the ``.jsonl``
+        # extension and any trailing ``.from-<branch>`` sidecar suffix first, so
+        # callers that pass a raw name still parse the right step type.
+        marker = original.find(".jsonl")
+        if marker >= 0:
+            original = original[:marker].strip()
+            if not original:
+                return ""
+
         s = original
 
         # 1. Strip a leading numeric sequence number ("NN_").
@@ -635,11 +647,17 @@ class DaemonHistoryReader:
         records: List[Dict[str, Any]] = []
         truncated = False
 
-        for jsonl in sorted(flow_dir.glob("*.jsonl")):
+        for jsonl in _iter_history_jsonl(flow_dir):
             if truncated:
                 break
-            step_id = jsonl.stem
+            # Merge a step's primary ``*.jsonl`` and its ``*.jsonl.from-<branch>``
+            # sidecars under one logical step id so a worktree merge-back's
+            # records group into the same step stream as the primary file.
+            step_id = _logical_step_id(jsonl.name)
             step_type = parse_step_type_from_step_id(step_id)
+            # Cursor / offset table stay keyed by the *physical* file name and
+            # absolute path, so each file (primary and each sidecar) advances
+            # independently and is never read twice.
             jsonl_key = str(jsonl)
 
             # --- Determine whether we can do an incremental read -----------
@@ -883,7 +901,10 @@ class DaemonHistoryReader:
             ]
             hist_dir = root / "se3" / "history" / flow_id
             if hist_dir.is_dir():
-                for jsonl in sorted(hist_dir.glob("*.jsonl")):
+                # Include ``*.jsonl.from-<branch>`` sidecars so a worktree
+                # merge-back that only appends sidecar records still moves the
+                # signature forward and triggers a history push.
+                for jsonl in _iter_history_jsonl(hist_dir):
                     mtime, size = _safe_stat(jsonl)
                     parts.append((jsonl.name, mtime, size))
             signature[flow_id] = tuple(parts)
@@ -947,11 +968,61 @@ def _safe_stat(path: Path) -> tuple:
         return (0.0, 0)
 
 
+def _logical_step_id(filename: str) -> str:
+    """Return the logical step id for a history file name.
+
+    Strips the ``.jsonl`` extension together with any trailing
+    ``.from-<branch>`` *sidecar* suffix, so a step's primary file and its
+    sidecars (written by ``se3 merge``'s runtime sync on a --worktree
+    merge-back) collapse to the same step id and merge into one step stream::
+
+        01_discovery_ab12.jsonl                        -> "01_discovery_ab12"
+        01_discovery_ab12.jsonl.from-worktree__b       -> "01_discovery_ab12"
+        01_discovery_ab12.jsonl.from-worktree__b.0a1b2c3d -> "01_discovery_ab12"
+
+    A name without ``.jsonl`` is returned unchanged.
+    """
+    idx = filename.find(".jsonl")
+    if idx < 0:
+        return filename
+    return filename[:idx]
+
+
+def _iter_history_jsonl(flow_dir: Path) -> List[Path]:
+    """Return a flow directory's per-step history files, sorted by name.
+
+    Includes both the primary ``*.jsonl`` files and the
+    ``*.jsonl.from-<branch>`` *sidecar* files that ``se3 merge``'s runtime sync
+    writes when a --worktree flow's per-step history collides with the main
+    project on merge-back (see the ``se3 merge`` *Runtime Data
+    Synchronization* requirement). The plain ``glob("*.jsonl")`` never matched
+    the sidecars, so a worktree session's conversation after its first record
+    was silently dropped — this helper restores it.
+
+    Sorting by name keeps a step's primary file ahead of its sidecars
+    (``foo.jsonl`` sorts before ``foo.jsonl.from-…``) and orders steps by their
+    ``NN_`` sequence prefix, so the merged stream stays in step / record order.
+    """
+    if not flow_dir.is_dir():
+        return []
+    files = list(flow_dir.glob("*.jsonl"))
+    files.extend(flow_dir.glob("*.jsonl.from-*"))
+    return sorted(files, key=lambda p: p.name)
+
+
 def _count_jsonl(history_dir: Path) -> int:
-    """Count the per-step ``jsonl`` files in a flow's history directory."""
+    """Count the distinct per-step history streams in a flow's directory.
+
+    Counts *logical* steps (see :func:`_logical_step_id`), not physical files,
+    so a step that exists only as a ``*.jsonl.from-<branch>`` sidecar still
+    counts, and a primary file together with its sidecars counts once.
+    """
     if not history_dir.is_dir():
         return 0
-    return sum(1 for _ in history_dir.glob("*.jsonl"))
+    steps: Set[str] = set()
+    for f in _iter_history_jsonl(history_dir):
+        steps.add(_logical_step_id(f.name))
+    return len(steps)
 
 
 def _clip(text: str) -> str:
@@ -1069,7 +1140,9 @@ def _extract_history_summary(flow_dir: Path) -> str:
     """
     from ..engine.prompt_markers import extract_user_content
 
-    jsonl_files = sorted(flow_dir.glob("*.jsonl"))
+    # Include ``*.jsonl.from-<branch>`` sidecars so a worktree session whose
+    # first step exists only as a merge-back sidecar still recovers a title.
+    jsonl_files = _iter_history_jsonl(flow_dir)
     if not jsonl_files:
         return "(no history data)"
     try:
