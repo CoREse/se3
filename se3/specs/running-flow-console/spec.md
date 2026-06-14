@@ -1374,6 +1374,28 @@ against one another.
   so calls of every other kind still drop the moment their step reaches a
   `failed` status
 
+#### Scenario: A --worktree session shows its full chat in #flow-view
+- **GIVEN** a `se3 run --worktree` flow whose per-step history was written
+  back to the main session directory as `*.jsonl.from-<branch>` sidecar files
+- **WHEN** the user opens that flow's `#flow-view` while it is running and
+  again after it has merged back and entered history
+- **THEN** the daemon reads and pushes both the primary `*.jsonl` and its
+  `*.jsonl.from-<branch>` sidecars, merged under the same logical step id, so
+  the running-flow live stream and the completed-flow history both display the
+  complete conversation
+- **AND** no message after the first renders as "(no readable content)"
+
+#### Scenario: A flow waiting for the main-worktree lock shows running · waiting for lock
+- **GIVEN** a flow that has started and is blocked waiting for the
+  main-worktree mutex (its `engine.json` is persisted with status RUNNING and
+  `waiting_for_lock` set; see the `flow-engine` *Waiting-for-Lock Visible
+  Running State* requirement)
+- **WHEN** the user views that flow in the web console
+- **THEN** `#flow-view` shows it as running and waiting for the lock rather
+  than silently stuck at the "published" state
+- **AND** once the flow acquires the lock the waiting indicator clears and the
+  flow continues as an ordinary running flow
+
 ### Requirement: Role-Based Message Collapse
 
 The conversation flow MUST default to highlighting the assistant's real output

@@ -48,6 +48,17 @@
 
 
 
+
+## 10.1.2 - 2026-06-14
+
+- Fix discovery step holding the main-worktree mutex for the entire flow duration, which blocked subsequent webui-initiated tasks from starting
+- Show flows waiting on the main-worktree lock as running with 'waiting for lock' status instead of silently stuck at 'published'
+- Display spawn and init failures as visible errors in the webui instead of leaving tasks stuck at 'published'
+- Restore complete chat history display for --worktree sessions by reading *.jsonl.from-<branch> sidecar files
+- Prevent duplicate issue display during worktree runs by skipping worktree-copy issue directories in the aggregator
+- Renumber worktree-created issues against the main project's .next_id during merge to avoid number conflicts
+- Promote worktree terminal COMPLETED engine.json to main project archive so completed worktree flows appear in the unified lifecycle
+- Stop registering worktree subdirectories as standalone projects in the daemon
 ## 10.1.0 - 2026-06-14
 
 - Add worktree isolation checkbox to the issue-launch modal, allowing flows started from issues to run in an isolated worktree

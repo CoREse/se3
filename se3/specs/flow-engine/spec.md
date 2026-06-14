@@ -3599,6 +3599,38 @@ still receive every terminal event.
 - **AND** `se3 run` itself does not branch on the caller — only the tail sink differs
 - **AND** an unrecognized `--output-format` value is rejected with a clear error and a non-zero exit
 
+### Requirement: Waiting-for-Lock Visible Running State
+
+Any flow that blocks waiting for the project's main-worktree mutex (`se3/state/merge.lock`) MUST first make itself observable as a *running* flow that is *waiting for the lock*, never a silent stall. A flow that goes straight into a blocking `flock(LOCK_EX)` before persisting any state writes no `engine.json`, emits no step event, and is therefore invisible to the daemon and stuck at "published" in the web console — this requirement forbids that failure mode and supplies the general safety net behind the lazy lock-acquisition behavior described in the `se3 merge` Concurrency Lock requirement (`se3-commands` spec).
+
+**Acquisition protocol.** Before acquiring the main-worktree mutex for a step, the flow MUST follow a three-phase sequence:
+1. **Non-blocking probe** — attempt the acquire non-blockingly first. When the lock is free it is taken immediately and **no** waiting state is produced (behavior is identical to the uncontended path, keeping the common case quiet).
+2. **Mark and persist on contention** — only when the probe finds the lock genuinely held, the flow SHALL set the `waiting_for_lock` flag on the `FlowInstance`, persist `engine.json` with `FlowStatus` remaining `RUNNING` (so the daemon discovers it as an active flow), and emit one streaming *waiting-for-lock* event into the current step's history so the surface can render "running · waiting for lock".
+3. **Blocking acquire** — then perform the blocking acquire and wait for the current holder to release.
+
+**Clearing.** Once the lock is acquired, the flow SHALL clear `waiting_for_lock` and persist `engine.json` again, so the flow leaves the waiting sub-state as soon as it makes progress. The flag is cleared even when the blocking acquire reclaims a stale lock.
+
+**Persistence and propagation.** `waiting_for_lock` is a boolean field on the `FlowInstance` (default `False`), persisted through `to_dict()` / `from_dict()` and mirrored in `engine.json`'s schema. It is emitted only while actually waiting (omitted from `engine.json` when `False`) to keep the persisted state minimal. The daemon aggregator surfaces it as a running sub-state on the flow snapshot, the server propagates it, and the frontend renders it as a visible *waiting for lock* indicator on the otherwise-running flow.
+
+This contract is a **general** guarantee, not specific to discovery: even if a future step still needs to briefly wait for the lock, the UI MUST faithfully show that the flow has started and is waiting, and MUST NOT silently freeze at the "published" state.
+
+#### Scenario: Uncontended acquire produces no waiting state
+- **GIVEN** the main-worktree mutex is free
+- **WHEN** a flow reaches a step that needs the lock and probes it non-blockingly
+- **THEN** the flow acquires the lock immediately
+- **AND** `waiting_for_lock` is never set and no waiting-for-lock event is emitted
+
+#### Scenario: Contended acquire persists a visible waiting state before blocking
+- **GIVEN** another holder currently owns the main-worktree mutex
+- **WHEN** a flow's non-blocking probe finds the lock held
+- **THEN** the flow sets `waiting_for_lock`, persists `engine.json` with status RUNNING, and emits a streaming waiting-for-lock event before it blocks on the acquire
+- **AND** the daemon, server, and web console show the flow as running and waiting for the lock rather than stuck at "published"
+
+#### Scenario: Flag is cleared once the lock is acquired
+- **GIVEN** a flow is in the waiting-for-lock sub-state, blocked on the acquire
+- **WHEN** the previous holder releases the lock and the flow acquires it
+- **THEN** the flow clears `waiting_for_lock` and persists `engine.json` again, leaving the waiting sub-state
+
 ## Architecture
 
 ### Core Components

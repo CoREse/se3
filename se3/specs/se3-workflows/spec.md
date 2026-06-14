@@ -368,6 +368,9 @@ The system SHALL support an isolated-execution mode invoked via `se3 run --workt
 
 **Completion and Merge-Back:**
 - On a genuinely COMPLETED flow, the system SHALL invoke the heavy `se3 merge` orchestrator from the main repository to merge the isolation branch back into the original branch, acquiring the main-worktree lock (blocking) for that step, with no additional diff-confirmation interaction.
+- **Issue renumbering / de-duplication.** A worktree clones its own `se3/issues/` and allocates new issue numbers from the worktree's independent `se3/issues/.next_id`, which may collide with numbers the main project has since assigned. When folding the worktree's newly created issues back into the main project, the merge-back SHALL re-number each such issue to a **fresh main-project ID** (allocated from the main project's `_next_id`, fcntl-serialized against the main project's `.next_id`), so no worktree issue lands on a number already used by the main project and the merged result contains no duplicate issue numbers.
+- **Terminal-state promotion.** A worktree's `COMPLETED` `engine.json` lives only inside the worktree, which `--delete-merged` archives/removes after a successful merge; the main project would otherwise never record the flow's COMPLETED state and the web console would show the session jumping straight to history with no "Completed" appearance. The merge-back SHALL therefore **promote** the worktree's terminal COMPLETED `engine.json` snapshot into the main project's `se3/state/archive/engine_<flow_id>.json` (atomic write) so the daemon aggregator reports `status=completed` exactly like an ordinary archived run, letting the flow traverse the unified `active → completed → history` lifecycle with no worktree special-case on the web side.
+- Both the issue renumbering and the terminal-state promotion SHALL complete **before** `--delete-merged` archives/deletes the worktree directory and its `engine.json`.
 - On failure or interruption, the system SHALL preserve the run state, the isolation worktree, and the branch for a later `se3 run --resume`, and SHALL NOT trigger the merge.
 
 **Interaction with Other Flags:**
@@ -390,6 +393,18 @@ The system SHALL support an isolated-execution mode invoked via `se3 run --workt
 - **GIVEN** two `se3 run --worktree` flows are launched in the same project
 - **THEN** their flow bodies execute concurrently in separate worktrees (neither holds the main-worktree lock)
 - **AND** they serialize only at their final merge step, which acquires the blocking main-worktree lock
+
+#### Scenario: Worktree-created issues are renumbered to avoid collisions
+- **GIVEN** a `se3 run --worktree` flow created a new issue numbered from the worktree's own `.next_id`, whose number already exists in the main project
+- **WHEN** the flow completes and the merge-back folds the worktree issue into the main project
+- **THEN** the issue is re-numbered to a fresh main-project ID allocated from the main project's `_next_id`
+- **AND** the merged main project contains no duplicate issue numbers
+
+#### Scenario: Completed worktree flow appears as Completed before entering history
+- **GIVEN** a `se3 run --worktree` flow reaches COMPLETED and is merged back successfully
+- **WHEN** the merge-back promotes the worktree's terminal COMPLETED `engine.json` into the main project's `se3/state/archive/engine_<flow_id>.json` before deleting the worktree
+- **THEN** the daemon reports the flow as `status=completed` like an ordinary archived run
+- **AND** the web console briefly shows it as Completed before it settles into history, with no worktree special-casing
 
 ### Requirement: Run From Existing Issue
 

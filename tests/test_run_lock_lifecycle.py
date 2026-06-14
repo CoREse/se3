@@ -18,6 +18,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -218,3 +219,69 @@ def test_stale_lock_reclaimed_without_waiting(project: Path) -> None:
         assert not _jsonl_path(project, flow.flow_id, step.step_id).exists()
     finally:
         main_lock.release()
+
+
+# --------------------------------------------------------------------------
+# Ctrl+C while queued on the blocking acquire — clear waiting_for_lock before
+# persisting, so a dead process is not surfaced as a live "running·waiting"
+# flow (the daemon/web reader keys "active waiting" off status=running +
+# waiting_for_lock=True).
+# --------------------------------------------------------------------------
+
+def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> None:
+    from se3.commands.run import run_flow
+
+    flow = FlowInstance(
+        flow_id="interrupt-wait-001",
+        task_description="t",
+        task_type="feature",
+        status=FlowStatus.RUNNING,
+    )
+    flow.state.selected_steps = [StepType.ANALYZE]
+    flow.state.current_step_index = 0
+    step = Step(
+        step_type=StepType.ANALYZE,
+        status=StepStatus.PENDING,
+        step_id="01_analyze_abc12345",
+        inputs={},
+        outputs={},
+    )
+    flow.state.add_step(step)
+    flow.state.current_step_id = step.step_id
+
+    saved_flags: list[bool] = []
+
+    def _ensure(main_lock, f, current_step, proot, persistence) -> None:
+        # Simulate the contended path: mark waiting + persist, then the operator
+        # presses Ctrl+C while blocked on acquire(blocking=True).
+        f.waiting_for_lock = True
+        persistence.save_flow(f)
+        raise KeyboardInterrupt
+
+    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "se3.commands.run.StateMachine"
+    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
+        "se3.commands.run.render_full"
+    ), patch(
+        "se3.commands.run._ensure_main_lock_for_step", side_effect=_ensure
+    ):
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = flow
+        mock_pm.save_flow.side_effect = lambda f: saved_flags.append(f.waiting_for_lock)
+
+        mock_sm_class.return_value = MagicMock()
+
+        exit_code = run_flow(
+            project_root=project,
+            flow_id=flow.flow_id,
+            output_format="cli",
+            acquire_main_lock=False,
+        )
+
+    assert exit_code == 130
+    # The interrupt handler cleared the flag before its persist, so the final
+    # persisted value is False and a dead process is never left as "waiting".
+    assert flow.waiting_for_lock is False
+    assert True in saved_flags  # the contended save recorded waiting=True
+    assert saved_flags[-1] is False  # the post-interrupt save recorded waiting=False

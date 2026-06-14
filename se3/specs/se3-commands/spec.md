@@ -1280,7 +1280,7 @@ The fast-strategy post-merge guardrail repair loop SHALL detect when the LLM is 
 
 The `MergeLock` at `se3/state/merge.lock` SHALL serve as the project's **main-worktree mutex** — at most one holder may exist at a time across the whole project — and acquisition SHALL be **blocking** (queue and wait for the current holder to release) rather than non-blocking fail-fast. Two classes of participant contend for this single lock:
 
-1. **Synchronous `se3 run`** — acquires the lock at run **startup**, blocking until it is free, and **holds it for the entire run** until the run ends.
+1. **Synchronous `se3 run`** — acquires the lock **lazily, just before the first code-touching (non-`discovery`) step**, not at run startup, and holds it for the remainder of the run. The `discovery` step — which only clarifies the requirement and never modifies code — MUST execute **without** holding this lock, accepting that another worktree may complete a merge and change the underlying content during discovery; a long interactive discovery that stalls waiting for human input therefore no longer keeps the global mutex and no longer silently blocks other ordinary runs from starting. A pure-discovery flow holds the lock only after discovery resolves; an ordinary `se3 run "task"` acquires it just before `analyze`, almost identical to acquiring at startup. Before the **blocking** acquire, the run MUST first probe the lock non-blockingly: if it is free the run takes it immediately with no visible wait; only when it is genuinely held does the run mark the flow `waiting_for_lock` and surface a visible *waiting-for-lock* RUNNING state (see the *Waiting-for-Lock Visible Running State* requirement in the `flow-engine` spec) before blocking, so contention is never a silent stall stuck at "published". The set `waiting_for_lock` flag is cleared once the lock is acquired.
 2. **`se3 merge`** — every merge (a standalone `se3 merge` invocation, and the automatic merge appended to the end of a `se3 run --worktree` run) acquires the lock before executing, blocking while it is held, and releases it when the merge completes.
 
 The lock therefore serializes naturally: synchronous runs are mutually exclusive, and a synchronous run is mutually exclusive with any merge (a merge waits for an in-flight synchronous run to finish). A `se3 run --worktree` flow body executes inside its isolation worktree **without** holding this lock, so multiple worktree flow bodies run concurrently and contend only at their final merge step. This lock governs **only** the main-worktree-level mutex; it is entirely unrelated to the DAG-parallel isolation worktrees used inside the `implement` step, which do not participate in it.
@@ -1299,10 +1299,23 @@ The lock therefore serializes naturally: synchronous runs are mutually exclusive
 - **AND** once the first invocation releases the lock, the second acquires it and proceeds
 
 #### Scenario: Merge waits for an in-flight synchronous run
-- **GIVEN** a synchronous `se3 run` holds the main-worktree lock for the duration of its run
+- **GIVEN** a synchronous `se3 run` has passed `discovery` and now holds the main-worktree lock for its code-touching steps
 - **WHEN** a `se3 merge` is launched in the same project root while that run is still executing
 - **THEN** the merge blocks until the synchronous run ends and releases the lock
 - **AND** then the merge acquires the lock and proceeds
+
+#### Scenario: Discovery does not block other runs from starting
+- **GIVEN** a synchronous `se3 run` is paused inside its `discovery` step waiting for human input, and does **not** hold the main-worktree lock
+- **WHEN** a second ordinary `se3 run` is started in the same project root
+- **THEN** the second run starts and proceeds through its own `discovery` without being stalled by the first run
+- **AND** when the second run reaches its first code-touching step while the lock is free, it acquires the lock immediately with no visible wait
+
+#### Scenario: Genuine lock contention shows a visible waiting-for-lock state
+- **GIVEN** one flow currently holds the main-worktree lock
+- **WHEN** another flow reaches its first code-touching step, probes the lock non-blockingly, and finds it held
+- **THEN** that flow persists `engine.json` with status RUNNING and `waiting_for_lock` set, emits a streaming waiting-for-lock event, and only then blocks on the acquire
+- **AND** the flow is visible in the web console as running · waiting for lock rather than silently stuck at "published"
+- **AND** once it acquires the lock the `waiting_for_lock` flag is cleared
 
 #### Scenario: Stale lock reclaimed
 - **GIVEN** `se3/state/merge.lock` records a holder PID that no longer exists in the OS process table

@@ -1980,6 +1980,11 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   border-left-color: var(--yellow);
   color: var(--fg-dim);
 }
+.conv-record.step-status-waiting_for_lock {
+  border-left-color: var(--yellow);
+  background: rgba(214, 162, 58, 0.10);
+  color: var(--fg);
+}
 .conv-record.step-status-completed {
   border-left-color: var(--green);
   background: rgba(76, 175, 106, 0.10);

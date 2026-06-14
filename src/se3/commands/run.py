@@ -2313,6 +2313,13 @@ def _run_flow_impl(
             _ensure_main_lock_for_step(
                 main_lock, flow, current_step, project_root, persistence)
         except KeyboardInterrupt:
+            # The flow is no longer actively queued for the lock once the
+            # process exits, so clear waiting_for_lock before persisting.
+            # Otherwise engine.json records status=running + waiting_for_lock=True
+            # for a dead process, and the daemon/web console would keep rendering
+            # it as a live "running · waiting for lock" flow until a manual
+            # `se3 run --resume` re-acquires and clears the flag.
+            flow.waiting_for_lock = False
             persistence.save_flow(flow)
             emitter.emit(new_event(
                 EventType.FLOW_PAUSED, flow_id=flow.flow_id,

@@ -1,0 +1,7 @@
+id: '195'
+description: webui上from issue启动没有--worktree的选项，加上。
+status: open
+tags: []
+source: human
+created_at: '2026-06-14T10:22:49.025387'
+updated_at: '2026-06-14T10:22:49.025387'

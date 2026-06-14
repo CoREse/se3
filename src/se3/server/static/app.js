@@ -4139,16 +4139,36 @@ function normalizeRecord(rec) {
   // region as the `step_started` running anchor; addConversationRecords then
   // supersedes the earlier anchor so the region shows only its CURRENT state
   // (进行中 → 已暂停) instead of stacking status rows.
-  if (eventType === "step_started" || eventType === "step_status") {
+  //
+  // `waiting_for_lock` (persisted by chat_history.record_waiting_for_lock) is
+  // the same affordance-free lifecycle anchor, emitted the moment a queued
+  // synchronous run begins blocking to acquire the main-worktree lock before
+  // its first code-touching step. It carries a human-readable `message` but no
+  // `role` / `content` / `raw_json`, so without this branch it would fall
+  // through to the generic path and render as an empty "(no readable content)"
+  // bubble. Treating it as a "等待锁" status anchor surfaces the flow as
+  // running-and-waiting-for-lock, and — sharing the step's `stepId` — it is
+  // superseded in place by the later `step_started` running anchor and the
+  // terminal report once the lock is acquired and the step proceeds.
+  if (
+    eventType === "step_started"
+    || eventType === "step_status"
+    || eventType === "waiting_for_lock"
+  ) {
     return {
       role: "step-event",
       kind: eventType,
-      content: "",
+      content: typeof pick("message") === "string" ? pick("message") : "",
       timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
       stepType: pickStepType(),
       stepId: pick("step_id") || "",
       status: String(
-        pick("status") || (eventType === "step_started" ? "running" : "paused"),
+        pick("status")
+          || (eventType === "step_started"
+            ? "running"
+            : eventType === "waiting_for_lock"
+              ? "waiting_for_lock"
+              : "paused"),
       ).toLowerCase(),
       stepReport: null,
       raw: { raw_json: [msg], raw_ndjson: null },
@@ -4791,6 +4811,7 @@ const STEP_STATUS_DISPLAY = {
   completed: { icon: "✓", text: "已完成" },
   failed: { icon: "✗", text: "失败" },
   partial: { icon: "◑", text: "部分完成" },
+  waiting_for_lock: { icon: "⏳", text: "等待锁" },
 };
 
 // Pure: resolve a step's status display ({icon, text}); unknown statuses fall
@@ -4970,12 +4991,16 @@ function addConversationRecords(container, st, records, startIndex) {
       bubble.classList.add("conv-partial");
       bubble.__convTurnKey = progressTurnKey(norm);
     }
-    // Tag the step lifecycle status anchors (step_started / step_status) so a
-    // later, more-current anchor for the SAME step region supersedes the
-    // earlier one — the region then shows only its current state (进行中 →
-    // 已暂停) rather than stacking redundant status rows.
+    // Tag the step lifecycle status anchors (step_started / step_status /
+    // waiting_for_lock) so a later, more-current anchor for the SAME step
+    // region supersedes the earlier one — the region then shows only its
+    // current state (等待锁 → 进行中 → 已暂停) rather than stacking redundant
+    // status rows.
     bubble.__convStatusRow = !!(
-      norm && (norm.kind === "step_started" || norm.kind === "step_status"));
+      norm
+      && (norm.kind === "step_started"
+        || norm.kind === "step_status"
+        || norm.kind === "waiting_for_lock"));
     // Tag the terminal report rows (step_completed / step_failed). Once a step
     // region has a terminal report, ITS non-terminal status anchors (进行中 /
     // 已暂停 / 重试中) are stale — the report card itself conveys the final
@@ -7723,7 +7748,11 @@ function renderConversationRecord(norm) {
   // non-terminal SETTLED state ("已暂停" / "重试中"). Both group under the same
   // stepKey as the step's other records, so the region appears the instant the
   // step starts (vital for non-LLM steps) and updates in place as it pauses.
-  if (norm.kind === "step_started" || norm.kind === "step_status") {
+  if (
+    norm.kind === "step_started"
+    || norm.kind === "step_status"
+    || norm.kind === "waiting_for_lock"
+  ) {
     return renderStepStartedRecord(norm);
   }
 
@@ -7917,7 +7946,11 @@ function renderStepStartedRecord(norm) {
     : "step";
   const status = String(norm.status || "running").toLowerCase();
   const display = stepStatusDisplay(status);
-  const kind = norm.kind === "step_status" ? "step_status" : "step_started";
+  const kind = norm.kind === "step_status"
+    ? "step_status"
+    : norm.kind === "waiting_for_lock"
+      ? "waiting_for_lock"
+      : "step_started";
   const row = el(
     "div",
     "history-record conv-record role-step-event kind-" + kind + " "
