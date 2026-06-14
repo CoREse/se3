@@ -250,3 +250,46 @@ def test_read_flow_multiple_sidecars_for_one_step(tmp_path):
     assert read.cursor["01_discovery_ab12.jsonl"] == 1
     assert read.cursor["01_discovery_ab12.jsonl.from-worktree__b"] == 1
     assert read.cursor["01_discovery_ab12.jsonl.from-worktree__b.0a1b2c3d"] == 1
+
+
+def test_read_flow_first_record_nonempty_with_midwrite_sidecar_tail(tmp_path):
+    """Symptom B: the first assistant body must read non-empty even when the
+    first snapshot lands while the worktree sidecar's tail is mid-write.
+
+    The primary file holds the user task; the worktree sidecar's first
+    assistant record is written only halfway (truncated JSON, no terminating
+    newline — streaming in progress).  The full read must surface the user
+    record and leave the half-written assistant record for the next round —
+    never consuming it half-formed, dropping it, and advancing the cursor past
+    it.  Once the sidecar line is completed it must be read in full.
+    """
+    flow_dir = _flow_dir(tmp_path, "wt-mid")
+    primary = flow_dir / "01_discovery_ab12.jsonl"
+    sidecar = flow_dir / "01_discovery_ab12.jsonl.from-worktree__b"
+    _write_jsonl(primary, [_msg("user", "the task")])
+    # Sidecar: first assistant record present only halfway (truncated/invalid).
+    full = json.dumps(_msg("assistant", "first reply body"))
+    split_at = len(full) // 2
+    head, rest = full[:split_at], full[split_at:]
+    with sidecar.open("wb") as fh:
+        fh.write(head.encode("utf-8"))
+
+    reader = _make_reader(tmp_path)
+    first = reader.read_flow("wt-mid", project_root=str(tmp_path))
+    assert first.mode == HISTORY_MODE_FULL
+    # The complete primary record reads; the truncated sidecar line is held.
+    assert [r["message"]["content"] for r in first.records] == ["the task"]
+    assert first.cursor["01_discovery_ab12.jsonl"] == 1
+    assert first.cursor.get("01_discovery_ab12.jsonl.from-worktree__b", 0) == 0
+
+    # The worktree finishes writing the assistant line.
+    with sidecar.open("ab") as fh:
+        fh.write((rest + "\n").encode("utf-8"))
+
+    second = reader.read_flow(
+        "wt-mid", project_root=str(tmp_path), cursor=first.cursor
+    )
+    # The first assistant body is now read in full — non-empty, no loss.
+    assert [r["message"]["content"] for r in second.records] == ["first reply body"]
+    assert all(r["message"]["content"] for r in second.records)
+    assert second.cursor["01_discovery_ab12.jsonl.from-worktree__b"] == 1

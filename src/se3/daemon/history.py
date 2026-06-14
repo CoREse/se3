@@ -765,43 +765,52 @@ class DaemonHistoryReader:
                 except OSError:
                     continue
                 raw_lines = raw.split("\n")
-                # For a full read we process ALL lines, including a last line
-                # without a trailing newline (a complete file written by
-                # write_text without "\n").  Unlike the incremental path,
-                # there is no concurrent writer risk here — the file was
-                # either just created or fully replaced.
+                # ``split("\n")`` always yields a trailing element after the
+                # final byte: ``""`` when the file ends with ``\n`` (every real
+                # line is newline-terminated), or the bytes of the last line
+                # when the file has NO trailing newline.  That un-terminated
+                # tail is ambiguous: it is either
+                #   (a) a COMPLETE record written atomically without a newline
+                #       (``write_text(json.dumps(record))`` — terminal step
+                #       files, sidecars), which MUST be read; or
+                #   (b) a record caught MID-WRITE while the agent streams (a
+                #       worktree / discovery first snapshot landing on a
+                #       half-flushed line), which must be left for the next
+                #       round.
+                # The two are told apart by parseability: a complete record is
+                # valid JSON, a half-written one is truncated and is not.  The
+                # previous code unconditionally consumed the tail — for case (b)
+                # the truncated JSON failed ``json.loads`` and was dropped, yet
+                # ``consumed``/the byte offset still advanced past it, so the
+                # record was never re-read once completed (the "first assistant
+                # body empty, no further records" symptom).  Now an unparseable
+                # tail is left intact; a parseable one is still consumed.
                 if raw_lines and raw_lines[-1] == "":
-                    # Trailing newline: drop the split artifact.
-                    all_lines = raw_lines[:-1]
+                    # File ends with a newline: the trailing "" is a split
+                    # artifact; every remaining element is a complete line.
+                    complete_lines = raw_lines[:-1]
+                    tail = None
                 else:
-                    # No trailing newline: every element is a real line.
-                    all_lines = raw_lines
+                    # No trailing newline: hold the last element aside and
+                    # decide whether to consume it by parseability below.
+                    complete_lines = raw_lines[:-1] if raw_lines else []
+                    tail = raw_lines[-1] if raw_lines else None
+
                 consumed = 0
                 offset = 0
                 start = cursor_lines
-                num_lines = len(all_lines)
-                for idx, line_text in enumerate(all_lines):
-                    consumed = idx + 1
-                    line_bytes = len(line_text.encode("utf-8"))
-                    # Add 1 for the \n delimiter — except for the very last
-                    # line when the file has no trailing newline (the writer
-                    # hasn't finished that line yet, or simply omitted \n).
-                    has_trailing_nl = (raw_lines[-1] == "" if raw_lines else False)
-                    if idx < num_lines - 1 or has_trailing_nl:
-                        offset += line_bytes + 1
-                    else:
-                        offset += line_bytes
-                    if idx < start:
-                        continue
+
+                def _emit(line_text: str) -> bool:
+                    """Append a parsed record for *line_text*; return truncation."""
                     stripped = line_text.strip()
                     if not stripped:
-                        continue
+                        return False
                     try:
                         message = json.loads(stripped)
                     except (ValueError, TypeError):
-                        continue
+                        return False
                     if not isinstance(message, dict):
-                        continue
+                        return False
                     records.append(
                         {
                             "step_id": step_id,
@@ -809,9 +818,41 @@ class DaemonHistoryReader:
                             "message": message,
                         }
                     )
-                    if len(records) >= MAX_RECORDS_PER_REPORT:
+                    return len(records) >= MAX_RECORDS_PER_REPORT
+
+                for idx, line_text in enumerate(complete_lines):
+                    consumed = idx + 1
+                    # Every complete line is newline-terminated, so the on-disk
+                    # span is its UTF-8 byte length plus the one ``\n`` delimiter.
+                    offset += len(line_text.encode("utf-8")) + 1
+                    if idx < start:
+                        continue
+                    if _emit(line_text):
                         truncated = True
                         break
+
+                if not truncated and tail is not None:
+                    # The un-terminated final line.  Consume it ONLY when it is
+                    # a parseable, complete record; an unparseable (mid-write)
+                    # tail is left untouched so the next read re-reads it once
+                    # the writer finishes the line.
+                    stripped_tail = tail.strip()
+                    parsed_tail = None
+                    if stripped_tail:
+                        try:
+                            parsed_tail = json.loads(stripped_tail)
+                        except (ValueError, TypeError):
+                            parsed_tail = None
+                    if not stripped_tail or isinstance(parsed_tail, dict):
+                        tail_idx = len(complete_lines)
+                        consumed = tail_idx + 1
+                        # No trailing newline for the tail line.
+                        offset += len(tail.encode("utf-8"))
+                        if tail_idx >= start and _emit(tail):
+                            truncated = True
+                    # else: leave consumed/offset at the last complete line so
+                    # the partial tail is re-read next round.
+
                 self._read_offsets[jsonl_key] = (
                     consumed, offset, cur_mtime, cur_size,
                 )
@@ -841,7 +882,16 @@ class DaemonHistoryReader:
         cursors = cursors or {}
         reads: List[FlowRead] = []
         active_ids: Set[str] = set()
-        for meta in self.build_index():
+        index = self.build_index()
+        # Map every indexed flow to its project root so the final-flush pass
+        # below can scope ``read_flow`` to the correct root.  Without this, the
+        # final flush fell back to scanning *every* tracked root, which for a
+        # ``--worktree`` / discovery flow (attributed to its main root, with its
+        # history under that root) could resolve to the wrong directory — or to
+        # ``None`` — and silently return no records, so the tail written just
+        # before a terminal transition never reached the web.
+        root_by_flow: Dict[str, str] = {m.flow_id: m.project_root for m in index}
+        for meta in index:
             # Re-check live status on disk: the build_index cache may carry
             # stale ``active`` flags for up to BUILD_INDEX_TTL seconds.
             if not self._is_still_active(meta):
@@ -866,7 +916,15 @@ class DaemonHistoryReader:
         for flow_id, cursor in cursors.items():
             if flow_id in active_ids:
                 continue
-            read = self.read_flow(flow_id, cursor=cursor)
+            # Scope the final flush to the flow's own project root when known
+            # (from the index above).  ``root_by_flow.get`` yields ``None`` for a
+            # flow no longer in the index, in which case ``read_flow`` keeps its
+            # backward-compatible behaviour of scanning every tracked root.
+            read = self.read_flow(
+                flow_id,
+                project_root=root_by_flow.get(flow_id),
+                cursor=cursor,
+            )
             if read.records:
                 reads.append(read)
         return reads

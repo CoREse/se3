@@ -786,7 +786,18 @@ class DaemonClient:
         if not call_id:
             logger.warning("Ignoring RESPOND_CALL with empty call_id")
             return
-        project_root = str(payload.get("project_root") or "")
+        project_root = str(payload.get("project_root") or "").strip()
+        if not project_root:
+            # The server omitted the root (or sent an empty one).  Resolve it
+            # from the history index — the SAME ``project_root`` the history
+            # reader scopes its reads to — so a ``--worktree`` / discovery
+            # session's ``.response`` lands under the root whose history is
+            # being read and pushed, rather than falling back to the daemon's
+            # own cwd (``_default_respond_handler``), which would never reach
+            # the running ``se3 run`` process.
+            flow_id = str(payload.get("flow_id") or "").strip()
+            if flow_id:
+                project_root = self._resolve_flow_root_from_index(flow_id)
         response = payload.get("response")
         try:
             self._respond_handler(call_id, project_root, response)
@@ -838,10 +849,41 @@ class DaemonClient:
             snapshot = await asyncio.to_thread(self._snapshot_provider)
         except Exception:
             logger.debug("Snapshot lookup for INTERJECT_FLOW failed", exc_info=True)
-            return ""
+            snapshot = None
         for flow in (snapshot or {}).get("flows") or []:
             if isinstance(flow, dict) and str(flow.get("flow_id") or "") == flow_id:
-                return str(flow.get("project_root") or "").strip()
+                root = str(flow.get("project_root") or "").strip()
+                if root:
+                    return root
+        # The snapshot may not yet list a just-started flow (the per-flow poll
+        # set lags a fresh spawn).  Fall back to the history index, which is the
+        # authoritative ``project_root`` the history reader itself uses, so an
+        # interjection on a ``--worktree`` / discovery session resolves to the
+        # same root its history is read from.
+        return self._resolve_flow_root_from_index(flow_id)
+
+    def _resolve_flow_root_from_index(self, flow_id: str) -> str:
+        """Resolve *flow_id*'s ``project_root`` from the history index.
+
+        Returns the ``project_root`` the :class:`~se3.daemon.history.DaemonHistoryReader`
+        associates with *flow_id* — the exact root its ``read_flow`` /
+        ``read_active_flows`` scope to — so the respond / interject write path
+        stays consistent with the history-read path for ``--worktree`` /
+        discovery sessions (whose root is the attributed main root, not the
+        worktree sandbox).  ``build_index`` is TTL-cached, so this is cheap.
+        Returns an empty string when the flow is unknown or no provider is set.
+        """
+        provider = self._history_provider
+        if provider is None or not hasattr(provider, "build_index"):
+            return ""
+        try:
+            for meta in provider.build_index():
+                if str(getattr(meta, "flow_id", "") or "") == flow_id:
+                    return str(getattr(meta, "project_root", "") or "").strip()
+        except Exception:  # pragma: no cover - defensive
+            logger.debug(
+                "History-index lookup for flow %s failed", flow_id, exc_info=True
+            )
         return ""
 
     async def _handle_issue_command(self, ws: Any, payload: Dict[str, Any]) -> None:
