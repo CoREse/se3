@@ -1123,6 +1123,67 @@ def test_on_demand_pull_reply_not_rebroadcast_to_ui(client_and_app):
             assert pushed["records"][0]["line"] == "live"
 
 
+def test_append_resolving_waiter_is_still_broadcast_to_ui():
+    """Symptom A regression: a live ``append`` that resolves a pull waiter
+    must still reach ``/ws/ui``.
+
+    After a ``respond`` / ``interject`` the daemon pushes the new records as a
+    ``mode: append`` increment. If a REST cache-miss pull is racing and parks a
+    waiter that the append happens to resolve, the OLD code suppressed the
+    broadcast (it suppressed *any* resolved frame), so the live view stopped
+    appending until a full re-enter. The fix suppresses only a resolved
+    ``mode: full`` reply; an ``append`` always broadcasts. Driven directly
+    through ``_handle_message`` so the resolved-waiter + append combination is
+    exact.
+    """
+    from se3.server.ws import UiHub, _handle_message
+
+    class _UiWS:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, data):
+            self.sent.append(json.loads(data))
+
+    async def scenario():
+        state = ServerState()
+        await state.register_machine("m1", "host", "6.4.0", owner_id="owner-A")
+        hub = UiHub()
+        ui = _UiWS()
+        await hub.register(ui, "owner-A")
+        registry = HistoryRequestRegistry()
+
+        # Authoritative full bundle so the later append applies.
+        await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [{"step": "s1", "line": 1}],
+            cursor={"s1": 1},
+            machine_id="m1",
+        )
+        # A racing REST pull parks a waiter for the same flow.
+        fut = registry.register("f1", machine_id="m1")
+
+        await _handle_message(
+            protocol.make_history_data(
+                "f1", protocol.HISTORY_MODE_APPEND, [{"step": "s1", "line": 2}]
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        return fut, ui
+
+    fut, ui = asyncio.run(scenario())
+    # The waiter is resolved (REST handler returns) AND the append broadcast.
+    assert fut.done()
+    frames = [m for m in ui.sent if m.get("type") == "history_data"]
+    assert len(frames) == 1
+    assert frames[0]["mode"] == protocol.HISTORY_MODE_APPEND
+    assert frames[0]["records"] == [{"step": "s1", "line": 2}]
+
+
 def test_history_detail_pull_ignores_racing_append_waits_for_full(client_and_app):
     """A cache-miss pull must not be resolved by a discarded racing append.
 

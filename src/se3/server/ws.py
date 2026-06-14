@@ -1084,17 +1084,33 @@ async def _handle_message(
                     await state.get_history(flow_id),
                     machine_id=machine_id,
                 )
-            # Suppress the UI broadcast for a frame that answered an on-demand
-            # cache-miss pull. The parked REST handler(s) re-read the populated
-            # cache and return the full records plus a fresh ``progress`` token
-            # to exactly the clients that requested them; re-broadcasting the
-            # same ``mode: full`` frame over ``/ws/ui`` would make every history
-            # consumer reset its progress to null (the WS full-frame path clears
-            # it), discarding the token the REST response just delivered and
-            # forcing the next reconnect into another full fetch + full DOM
-            # rebuild despite an unchanged cache generation. Live active-flow
-            # appends never resolve a waiter, so they still stream normally.
-            if not resolved_pull:
+            # Decide whether to broadcast this frame to ``/ws/ui``. The only
+            # frame that must be suppressed is a ``mode: full`` reply that
+            # answered an on-demand cache-miss pull: the parked REST handler(s)
+            # re-read the populated cache and return the full records plus a
+            # fresh ``progress`` token to exactly the clients that requested
+            # them; re-broadcasting the same ``mode: full`` frame over
+            # ``/ws/ui`` would make every history consumer reset its progress to
+            # null (the WS full-frame path clears it), discarding the token the
+            # REST response just delivered and forcing the next reconnect into
+            # another full fetch + full DOM rebuild despite an unchanged cache
+            # generation.
+            #
+            # A ``mode: append`` frame, by contrast, carries a real-time
+            # increment and MUST always be broadcast to already-subscribed
+            # ``/ws/ui`` clients — even when it happens to ``resolve`` a pull
+            # waiter. After a ``respond``/``interject`` the frontend may
+            # concurrently fire a REST pull whose waiter is resolved by the very
+            # ``append`` that also carries the new conversation records; if we
+            # suppressed that append, every *other* subscribed console (and the
+            # live view itself, until it re-enters and triggers a full snapshot)
+            # would silently stop receiving new records. The REST-initiating
+            # client de-duplicates the overlap via ``dedupeAppendRecords``, so
+            # broadcasting the append is safe. ``mode: append`` therefore always
+            # broadcasts; only a resolved ``mode: full`` pull reply is
+            # suppressed.
+            suppress_broadcast = resolved_pull and mode == protocol.HISTORY_MODE_FULL
+            if not suppress_broadcast:
                 await _push_history_data(
                     hub, state, machine_id, flow_id, mode, records
                 )
