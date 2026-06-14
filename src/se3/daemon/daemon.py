@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 from .aggregator import DaemonAggregator, MachineStatus
 from .history import DaemonHistoryReader
 from .spawner import DaemonSpawner, SpawnedProcess
-from .supervisor import DaemonSupervisor
+from .supervisor import DaemonSupervisor, resolve_worktree_main_root
 
 logger = logging.getLogger(__name__)
 
@@ -501,7 +501,15 @@ class Daemon:
         """
         flows = self.supervisor.discover_flows()
         for record in flows:
-            self.aggregator.add_project_root(record.project_root)
+            # Defense in depth: a flow whose root is a ``se3/worktrees/`` copy
+            # is attributed back to its main project root, so an isolation
+            # worktree never registers as a standalone project (which would
+            # double the WebUI project list / issue counts). ``_scan_external``
+            # already resolves discovered processes, but resolving here too
+            # covers any other registration path and is idempotent for an
+            # already-main root.
+            main_root = resolve_worktree_main_root(record.project_root)
+            self.aggregator.add_project_root(main_root or record.project_root)
         self.spawner.reap()
         snapshot = await asyncio.to_thread(self.aggregator.get_snapshot)
         self._write_status(snapshot, flows)

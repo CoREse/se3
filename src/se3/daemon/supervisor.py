@@ -93,6 +93,58 @@ def _is_alive(pid: int) -> bool:
     return True
 
 
+def resolve_worktree_main_root(path: object) -> Optional[str]:
+    """Return the main project root for an se3 *worktree isolation* directory.
+
+    A ``se3 run --worktree`` flow body executes inside
+    ``<main_root>/se3/worktrees/<name>/``. That directory is a transient
+    execution sandbox created and managed by the worktree-management flows — it
+    is gitignored and never a standalone project — so a process discovered
+    running there MUST be attributed back to ``<main_root>`` rather than
+    registered as its own project root (otherwise the worktree copy pollutes the
+    WebUI project list / registry).
+
+    The attribution strips exactly **one** ``/se3/worktrees/<name>`` suffix
+    level, so a *nested* worktree (``…/wt1/se3/worktrees/wt2``) resolves to its
+    immediate parent project (``…/wt1``) rather than over-collapsing to the
+    outermost root — this is what keeps a main project that itself lives under a
+    parent worktree from being mis-attributed.
+
+    Returns ``None`` when *path* is not such a worktree directory (an ordinary
+    run), so callers fall back to registering *path* unchanged.
+    """
+    if not path:
+        return None
+    try:
+        resolved = Path(os.path.realpath(str(path)))
+    except OSError:  # pragma: no cover - defensive
+        return None
+    parent = resolved.parent
+    # The worktree directory is a direct child of ``<main_root>/se3/worktrees``.
+    if parent.name != "worktrees" or parent.parent.name != "se3":
+        return None
+    main_root = parent.parent.parent
+    # Only attribute back when the resolved main root is itself a plausible se3
+    # project (carries an ``se3`` directory). Guards against an unrelated tree
+    # that merely happens to nest a ``se3/worktrees`` path component.
+    try:
+        if not (main_root / "se3").is_dir():
+            return None
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return str(main_root)
+
+
+def is_worktree_copy_root(path: object) -> bool:
+    """Return whether *path* is an se3 worktree isolation copy directory.
+
+    True exactly when :func:`resolve_worktree_main_root` can attribute *path*
+    back to a main project root — i.e. *path* is a ``<main>/se3/worktrees/<name>``
+    isolation sandbox rather than a standalone project root.
+    """
+    return resolve_worktree_main_root(path) is not None
+
+
 def _read_flow_id(project_root: str) -> Optional[str]:
     """Best-effort read of ``flow_id`` from a project's ``engine.json``."""
     engine_json = Path(project_root) / "se3" / "state" / "engine.json"
@@ -224,7 +276,14 @@ class DaemonSupervisor:
                         if pid in self._flows:
                             continue
                     cwd = info.get("cwd") or os.getcwd()
-                    self.register(pid, cwd, origin="discovered")
+                    # A ``se3 run --worktree`` flow body found running with its
+                    # cwd inside ``<main>/se3/worktrees/<name>`` is a transient
+                    # isolation sandbox, not a standalone project. Attribute it
+                    # back to its main project root so the worktree copy never
+                    # gets registered (and surfaced in the WebUI) as its own
+                    # project.
+                    main_root = resolve_worktree_main_root(cwd)
+                    self.register(pid, main_root or cwd, origin="discovered")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception:  # pragma: no cover - defensive
