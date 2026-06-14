@@ -47,6 +47,13 @@
 
 
 
+
+## 10.1.0 - 2026-06-14
+
+- Add worktree isolation checkbox to the issue-launch modal, allowing flows started from issues to run in an isolated worktree
+- Thread the worktree option through buildIssueFlowBody into the POST /api/flows request body for from-issue launches
+- Preserve backward compatibility — existing two-arg calls to buildIssueFlowBody default to worktree:false
+- Add unit tests covering worktree flag threading, boolean coercion, and legacy two-arg default behavior
 ## 10.0.0 - 2026-06-14
 
 - Remove deprecated loop mode entirely, including --loop, --max-iterations, --no-worktree, --merge (loop), and --list-loops CLI options

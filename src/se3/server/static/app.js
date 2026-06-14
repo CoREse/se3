@@ -1094,7 +1094,7 @@ function issueLaunchModel(iss) {
 // issue's machine/project are passed so the server can reject a target
 // mismatch; the server re-resolves them owner-scoped and ignores the task
 // content (the issue description becomes the task).  Pure.
-function buildIssueFlowBody(iss, discover) {
+function buildIssueFlowBody(iss, discover, worktree) {
   const id = iss && iss.id != null ? String(iss.id) : "";
   return {
     from_issue_id: id,
@@ -1102,6 +1102,7 @@ function buildIssueFlowBody(iss, discover) {
     project_root: iss && iss.project_root ? String(iss.project_root) : "",
     task: "",
     discover: Boolean(discover),
+    worktree: Boolean(worktree),
   };
 }
 
@@ -3807,6 +3808,7 @@ function openIssueLaunchModal(iss) {
   const titleNode = $("issue-launch-title");
   const msgNode = $("issue-launch-message");
   const discoverInput = $("issue-launch-discover");
+  const worktreeInput = $("issue-launch-worktree");
   const errBox = $("issue-launch-error");
   if (titleNode) titleNode.textContent = "从 Issue 启动 Flow";
   if (msgNode) {
@@ -3814,6 +3816,7 @@ function openIssueLaunchModal(iss) {
       "将从 Issue #" + (iss.id || "?") + "（" + issueDisplayTitle(iss) + "）启动一个新的 flow。";
   }
   if (discoverInput) discoverInput.checked = false;
+  if (worktreeInput) worktreeInput.checked = false;
   if (errBox) errBox.classList.add("hidden");
   modal.dataset.issueKey = issueCompositeKey(iss);
   modal.dataset.machineId = issueMachineId(iss);
@@ -3843,7 +3846,8 @@ async function confirmIssueLaunch() {
       project_root: modal.dataset.projectRoot,
     };
   const discover = Boolean($("issue-launch-discover") && $("issue-launch-discover").checked);
-  const body = buildIssueFlowBody(iss, discover);
+  const worktree = Boolean($("issue-launch-worktree") && $("issue-launch-worktree").checked);
+  const body = buildIssueFlowBody(iss, discover, worktree);
 
   const confirmBtn = $("issue-launch-confirm");
   if (confirmBtn) confirmBtn.disabled = true;

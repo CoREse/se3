@@ -815,4 +815,19 @@ export function registerIssueManagementTests(ctx) {
     assert.equal(body.machine_id, "");
     assert.equal(body.project_root, "");
   });
+
+  check("G1 buildIssueFlowBody: threads the worktree flag through", () => {
+    const iss = { id: "042", machine_id: "m1", project_root: "/proj" };
+    // Explicit true rides into the body as worktree:true.
+    assert.equal(app.buildIssueFlowBody(iss, false, true).worktree, true);
+    // Non-boolean worktree is coerced (parallel to discover's handling).
+    assert.equal(app.buildIssueFlowBody(iss, false, 1).worktree, true);
+    assert.equal(app.buildIssueFlowBody(iss, false, undefined).worktree, false);
+  });
+
+  check("G1 buildIssueFlowBody: omitting the worktree arg defaults to false", () => {
+    // Backward compatibility — the legacy two-arg call still yields worktree:false.
+    const iss = { id: "042", machine_id: "m1", project_root: "/proj" };
+    assert.equal(app.buildIssueFlowBody(iss, true).worktree, false);
+  });
 }
