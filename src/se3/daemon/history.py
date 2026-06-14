@@ -240,6 +240,12 @@ class SessionMeta:
     active: bool = False
     source: str = "history"  # "active" | "archived" | "history"
     step_count: int = 0
+    # Running sub-state mirrored from the active engine.json's top-level
+    # ``waiting_for_lock`` flag: True while a synchronous run is queued behind
+    # the main-worktree mutex before its first code-touching step. Only ever
+    # True for an active ("active" source) flow; history-only / archived flows
+    # are never waiting.
+    waiting_for_lock: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the JSON-friendly dict form of this metadata."""
@@ -254,6 +260,7 @@ class SessionMeta:
             "active": self.active,
             "source": self.source,
             "step_count": self.step_count,
+            "waiting_for_lock": self.waiting_for_lock,
         }
 
 
@@ -497,6 +504,10 @@ class DaemonHistoryReader:
             active=active,
             source=source,
             step_count=_count_jsonl(root / "se3" / "history" / flow_id),
+            # A flow is only meaningfully "waiting for lock" while it is the live
+            # active flow; an archived/terminal snapshot is never queued. Reading
+            # only on the active source also keeps a stale True out of history.
+            waiting_for_lock=bool(active and data.get("waiting_for_lock", False)),
         )
 
     @staticmethod

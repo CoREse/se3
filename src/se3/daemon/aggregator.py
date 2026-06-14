@@ -120,6 +120,12 @@ class FlowSnapshot:
     log_count: int = 0
     issue_count: int = 0
     summary: Optional[str] = None
+    # Running sub-state: True while a synchronous run is blocked acquiring the
+    # project's main-worktree mutex before its first code-touching step. Read
+    # from engine.json's top-level ``waiting_for_lock`` flag (only ever present
+    # and True for a queued synchronous run); surfaced so the web console shows
+    # the flow as RUNNING·waiting-for-lock rather than a silent "已发布" stall.
+    waiting_for_lock: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -137,6 +143,7 @@ class FlowSnapshot:
             "log_count": self.log_count,
             "issue_count": self.issue_count,
             "summary": self.summary,
+            "waiting_for_lock": self.waiting_for_lock,
         }
 
 
@@ -694,6 +701,9 @@ class DaemonAggregator:
             log_count=log_count,
             issue_count=issue_count,
             summary=self._read_summary(state_dir, flow_id_str),
+            # Surface the lock-wait sub-state; absent/false for every flow not
+            # currently queued behind the main-worktree mutex.
+            waiting_for_lock=bool(data.get("waiting_for_lock", False)),
         )
 
     def _enumerate_calls(self, root: Path) -> List[PendingCall]:

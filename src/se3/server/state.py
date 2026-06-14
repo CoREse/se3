@@ -167,6 +167,10 @@ class FlowSnapshot:
     summary: Optional[str] = None
     pending_calls: List[Dict[str, Any]] = field(default_factory=list)
     step_history: List[Dict[str, Any]] = field(default_factory=list)
+    # Running sub-state mirrored from the daemon aggregator's FlowSnapshot: True
+    # while a synchronous run is queued behind the main-worktree mutex. The flow
+    # stays RUNNING; the frontend renders it as RUNNING·waiting-for-lock.
+    waiting_for_lock: bool = False
 
     @classmethod
     def from_payload(cls, data: Dict[str, Any]) -> "FlowSnapshot":
@@ -186,6 +190,7 @@ class FlowSnapshot:
             summary=data.get("summary"),
             pending_calls=list(data.get("pending_calls") or []),
             step_history=list(data.get("step_history") or []),
+            waiting_for_lock=bool(data.get("waiting_for_lock", False)),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -203,6 +208,7 @@ class FlowSnapshot:
             "summary": self.summary,
             "pending_calls": self.pending_calls,
             "step_history": self.step_history,
+            "waiting_for_lock": self.waiting_for_lock,
         }
 
 

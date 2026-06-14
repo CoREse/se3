@@ -998,3 +998,69 @@ def test_worktree_run_observed_from_registry_without_active_root(tmp_path: Path)
     )
     # Note: main_root is NOT add_project_root'd — it lives only in the registry.
     assert os.path.realpath(str(wt_root)) in agg.all_observable_roots()
+
+
+# ---- waiting_for_lock running sub-state (G2) -------------------------------
+
+
+def test_snapshot_surfaces_waiting_for_lock_true(tmp_path: Path) -> None:
+    """A RUNNING engine.json with waiting_for_lock=True surfaces the flag.
+
+    G2 (1b): a synchronous run queued behind the main-worktree mutex stays
+    RUNNING but must report waiting_for_lock so the web console renders it as
+    running·waiting-for-lock rather than a silent "已发布" stall — even with
+    zero step records (no jsonl) the FlowSnapshot is still built from
+    engine.json alone.
+    """
+    _write(
+        tmp_path / "se3" / "state" / "engine.json",
+        {
+            "flow_id": "flow-queued",
+            "task_description": "t",
+            "task_type": "feature",
+            "status": "RUNNING",
+            "waiting_for_lock": True,
+            "state": {
+                "current_step_id": "s1",
+                "selected_steps": ["analyze", "plan"],
+                "current_step_index": 0,
+                "steps": {"s1": {"step_type": "analyze"}},
+            },
+        },
+    )
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(tmp_path)
+
+    snapshot = aggregator._snapshot_for_root(tmp_path)
+    assert snapshot is not None
+    assert snapshot.flow_id == "flow-queued"
+    assert snapshot.status == "RUNNING"
+    assert snapshot.waiting_for_lock is True
+    # The flag must survive the wire serialization that feeds STATUS_UPDATE.
+    assert snapshot.to_dict()["waiting_for_lock"] is True
+
+
+def test_snapshot_waiting_for_lock_defaults_false(tmp_path: Path) -> None:
+    """An engine.json without the flag (the common case) reads as not-waiting."""
+    _write(
+        tmp_path / "se3" / "state" / "engine.json",
+        {
+            "flow_id": "flow-normal",
+            "task_description": "t",
+            "task_type": "feature",
+            "status": "RUNNING",
+            "state": {
+                "current_step_id": "s1",
+                "selected_steps": ["analyze"],
+                "current_step_index": 0,
+                "steps": {"s1": {"step_type": "analyze"}},
+            },
+        },
+    )
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(tmp_path)
+
+    snapshot = aggregator._snapshot_for_root(tmp_path)
+    assert snapshot is not None
+    assert snapshot.waiting_for_lock is False
+    assert snapshot.to_dict()["waiting_for_lock"] is False

@@ -338,6 +338,24 @@ function statusClass(status) {
   return "unknown";
 }
 
+// Whether a flow has started but is blocked acquiring the project's
+// main-worktree mutex before its first code-touching step. The flow stays
+// RUNNING — this is purely a running sub-state so a queued flow reads as
+// running·等待锁 instead of appearing to silently stall on "已发布". Pure.
+function isWaitingForLock(flow) {
+  if (!flow || !flow.waiting_for_lock) return false;
+  // Defensive: only treat it as waiting while the flow is still running, so a
+  // stale flag on a since-terminal snapshot never mislabels the status.
+  return String(flow.status || "").toLowerCase() === "running";
+}
+
+// Human-facing status label that folds the waiting-for-lock running sub-state
+// into the displayed text (e.g. "running · waiting for lock"). Pure.
+function flowStatusLabel(flow) {
+  const base = (flow && flow.status) || "unknown";
+  return isWaitingForLock(flow) ? `${base} · waiting for lock` : base;
+}
+
 // A flow is "active" while it can still consume a human interaction — it is
 // either making progress (running/init/recovering) or parked awaiting one
 // (paused). Completed/failed flows are terminal and accept no further input.
@@ -1195,6 +1213,12 @@ function renderFlowCard(flow) {
   const badge = el("span", "badge badge-" + sc, flow.status || "unknown");
   head.append(task, badge);
 
+  if (isWaitingForLock(flow)) {
+    // Surface the running·waiting-for-lock sub-state so a queued flow reads as
+    // running rather than appearing stalled.
+    head.appendChild(el("span", "badge badge-waiting-lock", "⏳ waiting for lock"));
+  }
+
   if (hasPendingCall(flow)) {
     // The badge is purely an indicator — opening the flow view (below) is the
     // single entry point; there is no separate context-less call modal.
@@ -1667,7 +1691,7 @@ function renderFlowSidebar(flow, machineId) {
   // -- overview --
   const overview = el("div", "detail-section");
   overview.appendChild(el("h4", null, "Overview"));
-  overview.appendChild(kv("Status", flow.status || "unknown"));
+  overview.appendChild(kv("Status", flowStatusLabel(flow)));
   overview.appendChild(kv("Type", flow.task_type || "-"));
   overview.appendChild(kv(
     "Progress",
@@ -10518,6 +10542,10 @@ if (typeof module !== "undefined" && module.exports) {
     isFlowResumable,
     RESUMABLE_STATUSES,
     isResumeInProgress,
+    // Waiting-for-lock running sub-state (G2) — exposed for the DOM-free tests
+    // in tests/frontend/waiting_for_lock.test.mjs.
+    isWaitingForLock,
+    flowStatusLabel,
     // Local interjection lifecycle helpers (G4) — exposed for the DOM-free
     // tests in tests/frontend/test_app_pure.mjs.
     bindLocalInterjectionToCallId,
