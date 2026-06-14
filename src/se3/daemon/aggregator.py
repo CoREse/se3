@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from . import protocol
 from .history import enumerate_historical_project_roots
+from .supervisor import is_worktree_copy_root
 
 
 logger = logging.getLogger(__name__)
@@ -964,7 +965,19 @@ class DaemonAggregator:
         Scans both ``open/`` and ``closed/`` subdirectories.  Malformed or
         unreadable files are silently skipped so a corrupt issue never breaks
         the status snapshot.
+
+        An ``se3 run --worktree`` isolation directory clones the main project's
+        ``se3/issues/`` into ``<main>/se3/worktrees/<name>/se3/issues/``.
+        :meth:`all_observable_roots` includes those worktree roots so the flow
+        gets a live card / conversation, but their issue copy MUST NOT be
+        counted — otherwise every issue surfaces twice (once for the main root,
+        once for the worktree copy) for the duration of the run. Worktree copy
+        roots are therefore skipped here so only the main project's issues are
+        aggregated.
         """
+        if is_worktree_copy_root(str(root)):
+            return []
+
         import yaml  # deferred — the core CLI path never calls this
 
         issues_dir = root / "se3" / "issues"
