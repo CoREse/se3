@@ -158,6 +158,73 @@ def test_build_index_dedups_by_flow_id(tmp_path):
     assert metas[0].source == "active"
 
 
+def test_promoted_worktree_completed_state_reported_as_completed(tmp_path):
+    """G7: a promoted worktree COMPLETED engine.json in the main archive is
+    reported as ``status=completed`` (not a bare ``history`` directory)."""
+    main = tmp_path / "main"
+    archive_dir = main / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_wt-flow.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "wt-flow",
+                "status": "completed",
+                "task_description": "isolated work",
+                "project_root": str(main),
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Tier-A history sync also landed the flow's history directory in main.
+    _write_jsonl(
+        main / "se3" / "history" / "wt-flow" / "01_analyze.jsonl",
+        [_msg("user", "hi")],
+    )
+
+    metas = _make_reader(main).build_index()
+    by_id = {m.flow_id: m for m in metas}
+    assert "wt-flow" in by_id
+    assert by_id["wt-flow"].status == "completed"
+    assert by_id["wt-flow"].source == "archived"
+    assert by_id["wt-flow"].active is False
+
+
+def test_promoted_completed_not_double_counted_with_worktree_active(tmp_path):
+    """G7 task 2: during the completion window the SAME worktree flow exists as
+    both a worktree-root active engine.json (terminal) and a main-archive
+    promoted snapshot. It must collapse to a single completed entry and never be
+    reported as active."""
+    main = tmp_path / "main"
+    archive_dir = main / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_wt-flow.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "wt-flow",
+                "status": "completed",
+                "project_root": str(main),
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The worktree (not yet deleted) still carries its own COMPLETED engine.json.
+    worktree = main / "se3" / "worktrees" / "wt-flow-sandbox"
+    _write_engine(worktree, "wt-flow", "completed")
+
+    # The provider mirrors ``all_observable_roots`` during the window: the main
+    # root (with the promoted archive) plus the live worktree subdir.
+    reader = _make_reader(main, worktree)
+    metas = reader.build_index()
+    flow_metas = [m for m in metas if m.flow_id == "wt-flow"]
+    assert len(flow_metas) == 1
+    assert flow_metas[0].status == "completed"
+    assert flow_metas[0].active is False
+
+    # And it is never surfaced as an active flow.
+    active = reader.read_active_flows()
+    assert all(fr.flow_id != "wt-flow" for fr in active)
+
+
 def test_session_meta_to_dict_round_trip():
     meta = SessionMeta(flow_id="x", project_root="/p", active=True)
     data = meta.to_dict()
