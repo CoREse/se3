@@ -1517,3 +1517,72 @@ def test_session_connects_with_raised_ws_max_size():
     assert captured["kwargs"]["max_size"] == protocol.MAX_WS_MESSAGE_BYTES
     # Pre-existing connect parameters are untouched.
     assert captured["kwargs"]["open_timeout"] == 10
+
+
+# --------------------------------------------------------------------------
+# Group G2: worktree project_root resolution for respond / interject
+# --------------------------------------------------------------------------
+
+
+def _make_reader_root(tmp_path, flow_id, status="RUNNING"):
+    """Write a minimal active engine.json so build_index lists *flow_id*."""
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
+    )
+
+
+def test_resolve_flow_root_from_index_returns_attributed_root(tmp_path):
+    """``_resolve_flow_root_from_index`` returns the history reader's root.
+
+    This is the SAME ``project_root`` the history reader scopes ``read_flow`` /
+    ``read_active_flows`` to, so respond / interject writes line up with the
+    history-read path for a ``--worktree`` / discovery session.
+    """
+    from se3.daemon.history import DaemonHistoryReader
+
+    _make_reader_root(tmp_path, "wt-flow")
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+    client = _make_client(history_provider=reader)
+
+    assert client._resolve_flow_root_from_index("wt-flow") == str(tmp_path)
+    # Unknown flow yields empty string (not a crash).
+    assert client._resolve_flow_root_from_index("nope") == ""
+
+
+def test_resolve_flow_root_from_index_without_provider_is_empty():
+    """No history provider -> empty string, never an exception."""
+    client = _make_client()
+    assert client._resolve_flow_root_from_index("any") == ""
+
+
+def test_interject_falls_back_to_history_index_root(tmp_path):
+    """An interjection with no payload root and a snapshot that omits the flow
+    resolves the root from the history index and writes the call file there."""
+    from se3.daemon.history import DaemonHistoryReader
+
+    _make_reader_root(tmp_path, "wt-flow")
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+    # Snapshot deliberately does NOT list wt-flow (e.g. a just-started flow the
+    # per-flow poll set has not picked up yet), forcing the index fallback.
+    client = _make_client(
+        snapshot_provider=lambda: {"machine_id": "m1", "flows": []},
+        history_provider=reader,
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_interject_flow("wt-flow", "please stop"),
+        )
+
+    asyncio.run(scenario())
+
+    calls_dir = tmp_path / "se3" / "calls"
+    assert calls_dir.is_dir()
+    files = list(calls_dir.glob("*.json"))
+    assert files, "interjection call file must be written under the index root"
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload.get("kind") == "interjection"
+    assert (payload.get("context") or {}).get("flow_id") == "wt-flow"

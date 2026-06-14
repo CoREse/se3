@@ -49,6 +49,14 @@
 
 
 
+
+## 10.1.3 - 2026-06-14
+
+- Fix live chat view stopping new message display after pressing 1 to confirm (respond) in normal sessions
+- Fix worktree/discovery sessions showing empty first assistant reply and no subsequent messages
+- Ensure mode:append real-time increments are always broadcast to subscribed WebSocket clients even when serving a pending REST pull
+- Preserve project_root across worktree history read path so respond/interject land under the correct session root
+- Branch un-terminated trailing line handling on JSON parseability to correctly consume complete sidecar records without trailing newlines
 ## 10.1.2 - 2026-06-14
 
 - Fix discovery step holding the main-worktree mutex for the entire flow duration, which blocked subsequent webui-initiated tasks from starting

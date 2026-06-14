@@ -3701,6 +3701,15 @@ mobileResponsiveMod.registerMobileResponsiveTests({ app, check, findOne, findAll
 const replySendErrMod = await import("./reply_send_error_handling.test.mjs");
 await replySendErrMod.registerReplySendErrorHandlingTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the G3 live-append-after-respond tests (symptom A/B alignment).
+// These lock the #193 leftover "消息不显示" half: after a respond/interject the
+// daemon-pushed `mode: append` increments (re-broadcast by G1's ws.py fix) keep
+// streaming into the running-flow view through dedupeAppendRecords +
+// reconcileLocalEchoes — shown exactly once, none dropped, partials not falsely
+// deduped — and a worktree/discovery first assistant body normalizes non-empty.
+const liveAppendRespondMod = await import("./live_append_after_respond.test.mjs");
+liveAppendRespondMod.registerLiveAppendAfterRespondTests({ app, check, checkAsync, findOne, findAll });
+
 // Register the G2 continuous step-lane background tests (separate module — same
 // `check` reporter, reads style.css directly). These lock the CSS-only 方案A:
 // per-type rules moved to --step-lane, the ±7px ::before underlay that makes the

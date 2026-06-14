@@ -1947,3 +1947,175 @@ def test_read_active_flows_includes_waiting_flow_with_no_step_records(tmp_path):
     reads = reader.read_active_flows({})
     assert [r.flow_id for r in reads] == ["queued"]
     assert reads[0].records == []
+
+
+# --------------------------------------------------------------------------
+# Group G2: symptom B — full-read mid-write tail / final-flush project_root
+# --------------------------------------------------------------------------
+
+
+def test_full_read_consumes_complete_no_newline_tail(tmp_path):
+    """A FULL read consumes a COMPLETE final record written without a newline.
+
+    Terminal step files and merge-back sidecars are written atomically via
+    ``write_text(json.dumps(record))`` — a valid JSON record with no trailing
+    ``\\n``.  Such a tail MUST be read (it is complete), not mistaken for a
+    mid-write partial.
+    """
+    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir.mkdir(parents=True)
+    jsonl = hist_dir / "01_discovery_ab.jsonl"
+    user_line = json.dumps(_msg("user", "the task", step_type="discovery"))
+    assistant_line = json.dumps(_msg("assistant", "complete reply", step_type="discovery"))
+    with jsonl.open("wb") as fh:
+        fh.write((user_line + "\n").encode("utf-8"))
+        fh.write(assistant_line.encode("utf-8"))  # complete, valid, no newline
+
+    read = _make_reader(tmp_path).read_flow("f1", project_root=str(tmp_path))
+    assert read.mode == HISTORY_MODE_FULL
+    assert [r["message"]["content"] for r in read.records] == [
+        "the task",
+        "complete reply",
+    ]
+    assert read.cursor == {"01_discovery_ab.jsonl": 2}
+
+
+def test_full_read_does_not_consume_truncated_trailing_line(tmp_path):
+    """A FULL read must not consume a half-written (truncated) final line.
+
+    The worktree / discovery "first assistant body empty, no further records"
+    bug: the daemon's first snapshot of a live flow can land while the agent is
+    still flushing the latest record, so the last line is truncated JSON.  The
+    old full-read path consumed it, failed ``json.loads``, dropped the record,
+    *and* advanced the cursor past it — so the record was lost forever.  The
+    complete records before it must read fine, the truncated tail must be left,
+    and once it is completed it must be picked up with no loss.
+    """
+    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir.mkdir(parents=True)
+    jsonl = hist_dir / "01_discovery_ab.jsonl"
+    user_line = json.dumps(_msg("user", "the task", step_type="discovery"))
+    assistant_line = json.dumps(_msg("assistant", "first reply", step_type="discovery"))
+    # Write only the first half of the assistant record (truncated => invalid).
+    split_at = len(assistant_line) // 2
+    head, rest = assistant_line[:split_at], assistant_line[split_at:]
+    with jsonl.open("wb") as fh:
+        fh.write((user_line + "\n").encode("utf-8"))
+        fh.write(head.encode("utf-8"))  # truncated, no newline
+
+    reader = _make_reader(tmp_path)
+    first = reader.read_flow("f1", project_root=str(tmp_path))
+    assert first.mode == HISTORY_MODE_FULL
+    # Only the complete first record is read; the truncated tail is left.
+    assert [r["message"]["content"] for r in first.records] == ["the task"]
+    assert first.cursor == {"01_discovery_ab.jsonl": 1}
+
+    # The writer finishes the assistant line.
+    with jsonl.open("ab") as fh:
+        fh.write((rest + "\n").encode("utf-8"))
+
+    second = reader.read_flow(
+        "f1", project_root=str(tmp_path), cursor=first.cursor
+    )
+    assert second.mode == HISTORY_MODE_APPEND
+    # The previously-truncated record is now read in full — no loss.
+    assert [r["message"]["content"] for r in second.records] == ["first reply"]
+    assert second.cursor == {"01_discovery_ab.jsonl": 2}
+
+
+def test_full_read_truncated_tail_then_full_reread_recovers(tmp_path):
+    """A cold-cursor full re-read after the truncated line completes recovers it.
+
+    Models a daemon restart: the byte-offset table is cold, so the second read
+    also takes the full-read branch (with the line now complete).  The first
+    assistant body must be present and non-empty.
+    """
+    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir.mkdir(parents=True)
+    jsonl = hist_dir / "01_discovery_ab.jsonl"
+    user_line = json.dumps(_msg("user", "task", step_type="discovery"))
+    assistant_line = json.dumps(_msg("assistant", "body", step_type="discovery"))
+    split_at = len(assistant_line) // 2
+    head, rest = assistant_line[:split_at], assistant_line[split_at:]
+    with jsonl.open("wb") as fh:
+        fh.write((user_line + "\n").encode("utf-8"))
+        fh.write(head.encode("utf-8"))
+
+    first = _make_reader(tmp_path).read_flow("f1", project_root=str(tmp_path))
+    assert [r["message"]["content"] for r in first.records] == ["task"]
+
+    with jsonl.open("ab") as fh:
+        fh.write((rest + "\n").encode("utf-8"))
+
+    # Fresh reader (cold offset table) does a full read of the completed file.
+    fresh = _make_reader(tmp_path).read_flow("f1", project_root=str(tmp_path))
+    contents = [r["message"]["content"] for r in fresh.records]
+    assert contents == ["task", "body"]
+    # The first assistant body is non-empty — the symptom-B core assertion.
+    assert all(r["message"]["content"] for r in fresh.records)
+
+
+def test_final_flush_uses_flow_project_root_across_multiple_roots(tmp_path):
+    """The final-flush pass scopes ``read_flow`` to the flow's own root.
+
+    With two tracked roots that both happen to contain a ``se3/history/wt``
+    directory, the final flush of a terminal flow must read the root the index
+    attributes the flow to (root A), not whichever root a bare all-roots scan
+    happens to hit first.
+    """
+    root_a = tmp_path / "A"
+    root_b = tmp_path / "B"
+
+    # Root A: archived (terminal) flow "wt" whose meta records project_root=A,
+    # plus its real history with a tail appended after the first read.
+    a_archive = root_a / "se3" / "state" / "archive"
+    a_archive.mkdir(parents=True)
+    (a_archive / "engine_wt.json").write_text(
+        json.dumps(
+            {"flow_id": "wt", "status": "completed", "project_root": str(root_a)}
+        ),
+        encoding="utf-8",
+    )
+    a_hist = root_a / "se3" / "history" / "wt"
+    _write_jsonl(a_hist / "01_discovery_ab.jsonl", [_msg("user", "A-task", step_type="discovery")])
+
+    # Root B: a decoy history dir for the SAME flow id with different content.
+    b_hist = root_b / "se3" / "history" / "wt"
+    _write_jsonl(b_hist / "01_discovery_ab.jsonl", [_msg("user", "B-DECOY", step_type="discovery")])
+
+    reader = _make_reader(root_a, root_b)
+
+    # First read establishes a cursor for the (terminal) flow.
+    first = reader.read_flow("wt", project_root=str(root_a))
+    assert [r["message"]["content"] for r in first.records] == ["A-task"]
+    cursors = {"wt": first.cursor}
+
+    # The flow appends a tail to ROOT A's history just before/after going
+    # terminal; the final flush must read it from root A.
+    _append_jsonl(
+        a_hist / "01_discovery_ab.jsonl",
+        [_msg("assistant", "A-final", step_type="discovery")],
+    )
+
+    reads = reader.read_active_flows(cursors)
+    flushed = [r for r in reads if r.flow_id == "wt"]
+    assert len(flushed) == 1
+    # Read from root A (the attributed root), never the root-B decoy.
+    assert [r["message"]["content"] for r in flushed[0].records] == ["A-final"]
+
+
+def test_final_flush_unknown_flow_falls_back_to_all_roots(tmp_path):
+    """A flow absent from the index keeps the all-roots compat behaviour.
+
+    ``root_by_flow.get`` yields ``None`` for such a flow, so ``read_flow`` scans
+    every tracked root — the pre-fix fallback, preserved.
+    """
+    root_a = tmp_path / "A"
+    (root_a / "se3" / "state").mkdir(parents=True)
+    reader = _make_reader(root_a)
+
+    # A stale cursor for a flow that exists nowhere on disk and is not indexed:
+    # ``root_by_flow.get`` is None, ``read_flow`` scans all roots, finds nothing
+    # and returns no records — a safe no-op rather than a crash.
+    reads = reader.read_active_flows({"vanished": {"01_analyze.jsonl": 3}})
+    assert [r for r in reads if r.flow_id == "vanished"] == []
