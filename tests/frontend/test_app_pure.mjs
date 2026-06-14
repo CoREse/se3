@@ -3701,6 +3701,13 @@ mobileResponsiveMod.registerMobileResponsiveTests({ app, check, findOne, findAll
 const replySendErrMod = await import("./reply_send_error_handling.test.mjs");
 await replySendErrMod.registerReplySendErrorHandlingTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the G2 continuous step-lane background tests (separate module — same
+// `check` reporter, reads style.css directly). These lock the CSS-only 方案A:
+// per-type rules moved to --step-lane, the ±7px ::before underlay that makes the
+// lane continuous across the gap, and the boundary overflow suppression.
+const stepLaneMod = await import("./step_lane_continuity.test.mjs");
+stepLaneMod.registerStepLaneContinuityTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
