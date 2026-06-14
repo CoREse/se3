@@ -26,8 +26,10 @@ from .orchestrator import MergeOrchestrator, MergeReport
 from .runtime_sync import (
     DEST_HASH_UNAVAILABLE,
     BypassedCollision,
+    IssueMergeRecord,
     RuntimeSyncCollision,
     SyncReport,
+    merge_worktree_issues,
     sync_branch_runtime,
 )
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
@@ -63,6 +65,8 @@ __all__ = [
     "HunkResolution",
     "InferResult",
     "infer_branch_bump",
+    "IssueMergeRecord",
+    "merge_worktree_issues",
     "LLMResolution",
     "max_bump",
     "MergeGuardrailsCheck",
