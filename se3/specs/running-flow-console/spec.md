@@ -533,6 +533,23 @@ dedup — it replaces the held array wholesale and is left exactly as-is.
   record (its `recordKey` differs from the prior fragment) and does NOT suppress
   it
 
+#### Scenario: Live append after respond/interject keeps appending without re-entering the view
+- **GIVEN** a running flow is open in `#flow-view` with its `/ws/ui` subscription
+  live, and the user submits a `respond` (e.g. `按1确定`) or an `interject`
+- **AND** the server, per `server::Server Modules`, continues to broadcast the
+  subsequent `mode: append` real-time increments to `/ws/ui` even when one of
+  those frames also resolves a pending REST `GET /api/history/{flow_id}` pull
+  waiter (the suppression applies only to `mode: full` responses)
+- **WHEN** the post-respond records (the agent's next auto-produced output and any
+  later user-sent messages) arrive — possibly delivered both in the REST pull
+  response and over the WS broadcast for the overlapping batch — and
+  `applyHistoryData` runs its append branch
+- **THEN** `dedupeAppendRecords` holds each record by `recordKey` exactly once, so
+  the doubly-delivered overlap is rendered a single time
+- **AND** the conversation keeps appending the new records live, with no record
+  lost, so the operator does NOT have to leave and re-enter the view to trigger a
+  fresh full snapshot before seeing further conversation
+
 ### Requirement: Reconnect Incremental History Refresh
 
 When the `/ws/ui` channel drops and reconnects while a running flow is open in
