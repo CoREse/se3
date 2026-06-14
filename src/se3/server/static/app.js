@@ -558,6 +558,8 @@ function connect() {
       applyHistoryData(msg);
     } else if (msg.type === "interjection_event" && msg.call_id && msg.phase) {
       applyInterjectionEvent(msg);
+    } else if (msg.type === "spawn_failed") {
+      applySpawnFailed(msg);
     }
   };
 
@@ -712,6 +714,21 @@ function applyInterjectionEvent(msg) {
   if (isOpenFlow && state.flowDetail) {
     renderInterventions(state.flowDetail);
   }
+}
+
+// Handle a ws-pushed `spawn_failed`. The daemon reports that a task we just
+// published (`POST /api/flows` answered 202 "dispatched") could not actually
+// be launched — the project init failed, the `se3 run` subprocess could not
+// start, or a resume failed. Without this the task would stay stuck on the
+// optimistic "published" state forever. We surface the real reason as a
+// lingering error toast scoped to the project root so the user knows the
+// publish did not take effect and can retry.
+function applySpawnFailed(msg) {
+  if (!msg || typeof msg !== "object") return;
+  const projectRoot = String(msg.project_root || "");
+  const reason = String(msg.error || "unknown error");
+  const where = projectRoot ? ` (${projectRoot})` : "";
+  showToast("error", `启动任务失败${where}：${reason}`);
 }
 
 // Clear pending-Send bookkeeping and re-enable the Send button via a

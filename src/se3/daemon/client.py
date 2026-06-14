@@ -608,7 +608,7 @@ class DaemonClient:
         elif message.type == protocol.MSG_WELCOME:
             self._handle_welcome(message.payload)
         elif message.type == protocol.MSG_SPAWN_FLOW:
-            self._handle_spawn(message.payload)
+            await self._handle_spawn(ws, message.payload)
         elif message.type == protocol.MSG_RESPOND_CALL:
             self._handle_respond(message.payload)
         elif message.type == protocol.MSG_INTERJECT_FLOW:
@@ -645,7 +645,7 @@ class DaemonClient:
         if event is not None:
             event.set()
 
-    def _handle_spawn(self, payload: Dict[str, Any]) -> None:
+    async def _handle_spawn(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Route a SPAWN_FLOW instruction to the daemon's spawner.
 
         When a ``resume_flow_id`` is present in the payload, the message is
@@ -660,11 +660,37 @@ class DaemonClient:
         auto-runs ``se3 init`` there and registers it before the spawn
         proceeds. A truthy ``.error`` on the returned object aborts the spawn
         and is logged; nothing half-initialized leaks downstream.
+
+        A failure on any of the three execution paths (resume / project-init /
+        fresh spawn) does **not** silently return: the real error is sent back
+        to the server as a :data:`~se3.daemon.protocol.MSG_SPAWN_FAILED` so the
+        web UI can surface it instead of leaving the task stuck on the
+        "published" pseudo-success state. Pure *input-validation* drops (no
+        handler configured, empty task) still log-and-return because nothing
+        was ever genuinely launched.
         """
         project_root = str(payload.get("project_root") or "")
+        from_issue_id = str(payload.get("from_issue_id") or "").strip()
+        task = str(payload.get("task_description") or "").strip()
+        resume_flow_id = str(payload.get("resume_flow_id") or "").strip()
+
+        async def _report_failure(error: str) -> None:
+            """Send a SPAWN_FAILED back to the server (best effort)."""
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_spawn_failed(
+                        project_root,
+                        error,
+                        task_description=task,
+                        from_issue_id=from_issue_id,
+                        resume_flow_id=resume_flow_id,
+                    ),
+                )
+            except Exception:
+                logger.debug("SPAWN_FAILED send failed", exc_info=True)
 
         # -- resume path (resume_flow_id present) --------------------------
-        resume_flow_id = str(payload.get("resume_flow_id") or "").strip()
         if resume_flow_id:
             if self._resume_handler is None:
                 logger.warning(
@@ -678,8 +704,11 @@ class DaemonClient:
                 logger.info(
                     "SPAWN_FLOW resume handled: flow %s", resume_flow_id
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("SPAWN_FLOW resume handler failed")
+                await _report_failure(
+                    f"resume failed: {exc or type(exc).__name__}"
+                )
                 return
             invalidate = getattr(
                 self._history_provider, "invalidate_index_cache", None
@@ -692,8 +721,6 @@ class DaemonClient:
         # A ``from_issue_id`` selects the from-issue spawn variant: the CLI
         # sources the task from the issue itself, so an empty task_description
         # is allowed here (it would be ignored on the argv anyway).
-        from_issue_id = str(payload.get("from_issue_id") or "").strip()
-        task = str(payload.get("task_description") or "").strip()
         if not task and not from_issue_id:
             logger.warning("Ignoring SPAWN_FLOW with empty task_description")
             return
@@ -706,10 +733,13 @@ class DaemonClient:
         if self._ensure_handler is not None and project_root:
             try:
                 ensure = self._ensure_handler(project_root)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "SPAWN_FLOW ensure-project handler failed for %s; aborting spawn",
                     project_root,
+                )
+                await _report_failure(
+                    f"project init failed: {exc or type(exc).__name__}"
                 )
                 return
             error = getattr(ensure, "error", "") if ensure is not None else ""
@@ -719,6 +749,7 @@ class DaemonClient:
                     project_root,
                     error,
                 )
+                await _report_failure(f"project init failed: {error}")
                 return
         try:
             # The from_issue_id 5th positional and the worktree keyword are
@@ -737,8 +768,9 @@ class DaemonClient:
                     task, project_root, task_type, discover, **spawn_kwargs
                 )
                 logger.info("SPAWN_FLOW handled: %s", task[:80])
-        except Exception:
+        except Exception as exc:
             logger.exception("SPAWN_FLOW handler failed")
+            await _report_failure(f"spawn failed: {exc or type(exc).__name__}")
             return
         # The new flow's engine.json is now on disk.  Invalidate the history
         # index cache so the next _push_history call rebuilds from disk and

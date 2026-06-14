@@ -51,6 +51,26 @@ from se3.server.state import MachineRecord, ServerState
 # =========================================================================
 
 
+class _NullWS:
+    """An async WebSocket stand-in that swallows whatever the client sends.
+
+    ``DaemonClient._handle_spawn`` is an async coroutine taking ``(ws, payload)``
+    — it may send a ``SPAWN_FAILED`` frame on a failure path. These success-path
+    unit tests only need a socket whose ``send`` is awaitable and harmless.
+    """
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(data)
+
+
+def _run_handle_spawn(client, payload):
+    """Drive the now-async ``_handle_spawn(ws, payload)`` to completion."""
+    asyncio.run(client._handle_spawn(_NullWS(), payload))
+
+
 def _write_legacy_yaml(project_root: Path, issue_id: str = "001", **extra):
     """Write a minimal legacy issue YAML missing ``source`` and optional fields."""
     issues_dir = project_root / "se3" / "issues" / "open"
@@ -428,7 +448,7 @@ class TestResumeSpawnArgv:
             "", project_root="/p", resume_flow_id="flow-xyz"
         ).payload
 
-        client._handle_spawn(payload)
+        _run_handle_spawn(client, payload)
 
         assert len(resume_calls) == 1
         assert resume_calls[0] == ("flow-xyz", "/p")
@@ -450,7 +470,7 @@ class TestResumeSpawnArgv:
 
         payload = make_spawn_flow("Fix bug", project_root="/p").payload
 
-        client._handle_spawn(payload)
+        _run_handle_spawn(client, payload)
 
         assert len(spawn_calls) == 1
         assert spawn_calls[0] == ("Fix bug", "/p", "feature", False)
@@ -473,7 +493,7 @@ class TestResumeSpawnArgv:
             "", project_root="/p", resume_flow_id="f1"
         ).payload
 
-        client._handle_spawn(payload)
+        _run_handle_spawn(client, payload)
 
         assert len(ensure_calls) == 0
 
@@ -571,7 +591,7 @@ class TestFromIssueSpawnArgv:
             "", project_root="/p", from_issue_id="042", discover=True
         ).payload
 
-        client._handle_spawn(payload)
+        _run_handle_spawn(client, payload)
 
         assert len(spawn_calls) == 1
         # (task, project_root, task_type, discover, from_issue_id)
@@ -591,7 +611,7 @@ class TestFromIssueSpawnArgv:
         client._history_provider = MagicMock()
 
         payload = make_spawn_flow("", project_root="/p", from_issue_id="7").payload
-        client._handle_spawn(payload)
+        _run_handle_spawn(client, payload)
 
         assert len(spawn_calls) == 1
 
