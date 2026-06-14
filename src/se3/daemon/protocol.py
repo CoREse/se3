@@ -22,7 +22,8 @@ Message directions
 ------------------
 * daemon → server: :data:`MSG_HELLO`, :data:`MSG_STATUS_UPDATE`,
   :data:`MSG_CALL_NOTIFICATION`, :data:`MSG_PONG`,
-  :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_DATA`.
+  :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_DATA`,
+  :data:`MSG_SPAWN_FAILED`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
   :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`.
@@ -95,6 +96,16 @@ MSG_CALL_NOTIFICATION = "call_notification"
 MSG_PONG = "pong"
 MSG_HISTORY_INDEX = "history_index"
 MSG_HISTORY_DATA = "history_data"
+#: daemon → server: report that a server-requested spawn / resume / project
+#: init failed *after* the SPAWN_FLOW was dispatched. ``POST /api/flows``
+#: replies ``202 dispatched`` immediately (the daemon spawns asynchronously),
+#: so a failure that happens during ``ensure_se3_project`` / the fresh spawn /
+#: a resume would otherwise be silent and leave the web UI stuck on the
+#: "published" pseudo-success state. This frame carries the project root, the
+#: real error text, and the originating task / issue / resume id so the server
+#: can route it back to the UI as a visible error. Older servers that do not
+#: recognise the type simply ignore it (mixed-version compatibility).
+MSG_SPAWN_FAILED = "spawn_failed"
 
 # -- message types: server -> daemon --------------------------------------
 MSG_WELCOME = "welcome"
@@ -168,6 +179,7 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_HISTORY_INDEX,
         MSG_HISTORY_DATA,
         MSG_ISSUE_RESULT,
+        MSG_SPAWN_FAILED,
     }
 )
 #: Messages a server is allowed to send to a daemon.
@@ -376,6 +388,41 @@ def make_spawn_flow(
     if from_issue_id:
         payload["from_issue_id"] = from_issue_id
     return Message(type=MSG_SPAWN_FLOW, payload=payload)
+
+
+def make_spawn_failed(
+    project_root: str,
+    error: str,
+    *,
+    task_description: str = "",
+    from_issue_id: str = "",
+    resume_flow_id: str = "",
+) -> Message:
+    """daemon → server: report a failed spawn / resume / project-init.
+
+    Sent when a server-dispatched :data:`MSG_SPAWN_FLOW` could not be carried
+    out *after* the server already answered ``202 dispatched`` — e.g. the
+    ``ensure_se3_project`` init failed, the fresh ``se3 run`` could not be
+    launched, or a resume could not be started. *project_root* and *error*
+    locate and explain the failure; the optional *task_description* /
+    *from_issue_id* / *resume_flow_id* echo the originating request so the
+    server / web UI can correlate the failure with the task the user just
+    published instead of leaving it stuck on the "published" state.
+
+    Empty optional fields are omitted from the wire so the payload stays
+    compact; ``project_root`` and ``error`` are always present.
+    """
+    payload: Dict[str, Any] = {
+        "project_root": project_root,
+        "error": error,
+    }
+    if task_description:
+        payload["task_description"] = task_description
+    if from_issue_id:
+        payload["from_issue_id"] = from_issue_id
+    if resume_flow_id:
+        payload["resume_flow_id"] = resume_flow_id
+    return Message(type=MSG_SPAWN_FAILED, payload=payload)
 
 
 def make_respond_call(

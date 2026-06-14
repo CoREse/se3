@@ -34,6 +34,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: ``/ws/ui`` channel), so introducing the event is backward-compatible.
 UI_EVENT_INTERJECTION = "interjection_event"
 
+#: WS event type pushed to ``/ws/ui`` clients when a daemon reports that a
+#: server-dispatched spawn / resume / project-init failed (a
+#: :data:`~se3.daemon.protocol.MSG_SPAWN_FAILED`). The web console turns the
+#: published task's pseudo-success into a visible error showing the reason.
+#: Older frontends ignore the unknown ``type`` (backward-compatible).
+UI_EVENT_SPAWN_FAILED = "spawn_failed"
+
 #: Lifecycle phases emitted on :data:`UI_EVENT_INTERJECTION`. ``pending`` is
 #: the moment the interjection call file appears in ``se3/calls/`` (the
 #: server saw a brand-new interjection-kind ``call_id`` in a flow's
@@ -729,6 +736,37 @@ async def _push_history_data(
     )
 
 
+async def _push_spawn_failed(
+    hub: Optional["UiHub"],
+    state: ServerState,
+    machine_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Broadcast a spawn-failure event to *machine_id*'s owner UI clients.
+
+    A spawn failure belongs to the daemon that reported it (*machine_id*), so
+    it is visible only to that machine's owner (plus the admin view) — never to
+    another owner's console. The frame echoes the project root, the real error
+    and the originating task / issue / resume ids so the frontend can correlate
+    it with the task the user just published and flip it from "published" to a
+    visible error state.
+    """
+    if hub is None or hub.client_count == 0:
+        return
+    owner = await state.get_machine_owner(machine_id)
+    event: Dict[str, Any] = {
+        "type": UI_EVENT_SPAWN_FAILED,
+        "machine_id": machine_id,
+        "project_root": str(payload.get("project_root") or ""),
+        "error": str(payload.get("error") or ""),
+    }
+    for key in ("task_description", "from_issue_id", "resume_flow_id"):
+        val = payload.get(key)
+        if val:
+            event[key] = str(val)
+    await hub.broadcast_owned(event, owner)
+
+
 async def handle_ui_connection(
     websocket: Any,
     hub: "UiHub",
@@ -1060,6 +1098,19 @@ async def _handle_message(
                 await _push_history_data(
                     hub, state, machine_id, flow_id, mode, records
                 )
+    elif message.type == protocol.MSG_SPAWN_FAILED:
+        # The daemon could not carry out a server-dispatched spawn / resume /
+        # project-init *after* the REST handler already answered 202. Relay the
+        # failure to the owning console so the published task surfaces as a
+        # visible error instead of staying stuck on the "published" state.
+        await state.touch(machine_id)
+        logger.warning(
+            "SPAWN_FAILED from %s: %s (project_root=%s)",
+            machine_id,
+            message.payload.get("error"),
+            message.payload.get("project_root"),
+        )
+        await _push_spawn_failed(hub, state, machine_id, message.payload)
     elif message.type == protocol.MSG_ISSUE_RESULT:
         # Daemon acknowledges an issue write command. Resolve the parked
         # future so the originating REST endpoint can return the outcome.
