@@ -2163,8 +2163,22 @@ def _run_flow_impl(
                     flow.worktree_original_branch = worktree_original_branch
 
             # Store explicit_type if user provided --type flag
-            if task_type and task_type != "pending":
+            explicit_type = bool(task_type and task_type != "pending")
+            if explicit_type:
                 flow.state.context["explicit_type"] = task_type
+
+            # Persist engine.json eagerly when either an explicit --type was
+            # given OR this is a worktree-mode flow. For worktree mode this
+            # writes ``is_worktree_mode=True`` (plus ``worktree_path``) into the
+            # worktree's engine.json *before* discovery's first LLM call produces
+            # any history — closing the daemon observability blind spot where the
+            # strict ``is_worktree_mode`` gate in
+            # ``aggregator._active_worktree_run_roots`` would otherwise not yet
+            # admit the worktree's live history at the discovery startup window.
+            # A single save covers both cases, so an explicit-type worktree flow
+            # is not double-written; resume never reaches this new-flow branch,
+            # so the path stays idempotent for ``--resume``.
+            if explicit_type or is_worktree_mode:
                 persistence.save_flow(flow)
 
             # Display new flow info with full content
