@@ -53,6 +53,12 @@ se3 run --discover "I want to build a user management feature"
 - **AND** the flow body executes inside that worktree using **exactly the same** step sequence, state persistence, `--resume`, and `--type` handling as a synchronous run (`project_root` is the worktree path)
 - **AND** the worktree flow body does NOT hold the main-worktree lock, so multiple `--worktree` runs may execute their flow bodies concurrently (see the `se3 merge` Concurrency Lock requirement in the `se3-commands` spec)
 
+#### Scenario: Worktree flow persists engine.json at creation so the daemon can observe it immediately
+- **WHEN** `se3 run --worktree` creates a new flow and records its worktree metadata (`worktree_path` / branch) on the `FlowInstance`
+- **THEN** the engine SHALL immediately persist `engine.json` for that flow carrying `is_worktree_mode=True`, **before** the discovery step's first LLM call — rather than deferring the first save until a later explicit-type branch
+- **AND** because the daemon's runtime-observable set gates worktree inclusion on the persisted `is_worktree_mode` flag (`_active_worktree_run_roots()`), this eager write closes the startup-window blind spot in which the worktree flow's first discovery reply was not yet observable, so the worktree becomes live-observable from its first history write onward (see the `running-flow-console` live-stream scenario)
+- **AND** the persisted flag remains a strict gate: a DAG-isolation worktree that is not `is_worktree_mode` is still excluded, so this eager persistence does not register the worktree as a standalone project (the project-list exclusion is unaffected)
+
 #### Scenario: Worktree run auto-merges back on success
 - **WHEN** a `se3 run --worktree` flow reaches a genuinely COMPLETED status
 - **THEN** the run automatically invokes the heavy `se3 merge` orchestrator from the main repository to merge the isolation branch back into the original branch (version bump, postcondition assertions, typed `FailureReason`, and context-aware LLM conflict resolution all apply)

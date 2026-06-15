@@ -2492,6 +2492,25 @@ one bubble per fragment.
 - **THEN** those residual fragments merge into a single accumulating assistant
   bubble, not one bubble per fragment
 
+#### Scenario: Worktree flow's first discovery reply streams live in full
+- **GIVEN** a `se3 run --worktree` flow being watched live (not played back
+  after the fact), where the worktree flow's running history is written under
+  the worktree's own directory and its inclusion in the daemon's
+  runtime-observable set is gated by `_active_worktree_run_roots()` on the
+  `is_worktree_mode` flag of the flow's `engine.json`
+- **AND** the worktree flow's `engine.json` is created carrying
+  `is_worktree_mode=True` *before* the discovery step's first LLM call (so the
+  observability gate is already satisfied at the discovery startup window, with
+  no blind spot — see the `flow-engine` worktree-creation persistence scenario)
+- **WHEN** the discovery step publishes the task and its first assistant reply
+  arrives
+- **THEN** that first reply's full content — both the thinking fragments and the
+  final non-partial result — accumulates into one live bubble and is displayed
+  in real time, and every subsequent same-flow message continues to stream live
+- **AND** the live view matches what a post-merge read-back of the same flow
+  would show, with no "only thinking, never the result, and nothing after the
+  first reply" truncation
+
 ### Requirement: Tool Call Chip State Machine
 
 Every tool call observed in a running-flow conversation — whether it is being

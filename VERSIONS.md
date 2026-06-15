@@ -51,6 +51,14 @@
 
 
 
+
+## 10.2.2 - 2026-06-15
+
+- Fix incomplete real-time chat display for worktree flows during discovery step — first assistant reply (thinking + result) and all subsequent messages now stream live
+- Fix worktree directories appearing as independent projects in webui project list and New Task dropdown
+- Normalize worktree paths to main repository root at all project registration entry points
+- Clean up residual worktree entries from persisted project registry on daemon startup
+- Ensure worktree flows remain viewable through the observation-only channel without being registered as separate projects
 ## 10.2.0 - 2026-06-15
 
 - Add `se3 merge-unlock` command to manually release or clean up stale merge locks
