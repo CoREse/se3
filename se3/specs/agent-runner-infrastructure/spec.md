@@ -3,7 +3,7 @@
 
 ## Purpose
 
-The agent-runner-infrastructure subsystem is the subprocess execution layer that drives agent CLIs for every LLM call made by SE3. It defines an abstract `AgentRunner` interface (with a `RunResult` dataclass and `InfraErrorType` taxonomy) plus two concrete adapters: a `ClaudeCodeRunner` (Claude Code CLI) and a `CodexRunner` (OpenAI Codex CLI). The Claude adapter handles process spawning, real-time output streaming, stdout/stderr capture, hang detection via psutil resource probes, wall-clock and inactivity timeout enforcement, usage-limit keyword scanning, a large-prompt rerouting path that moves oversized `-p`/`--prompt` values to stdin to avoid Linux `execve()` `E2BIG` failures, and a conservative CLI-subprocess confirmation-prompt capture path that surfaces interactive child prompts (e.g. `按 1 确定` / `Press 1 to confirm`) to the engine via an optional `on_confirm` callback. The `CodexRunner` wraps a single `codex exec --json` command and normalizes Codex's JSONL event stream into Claude-compatible stream-json NDJSON so all upstream consumers are runner-agnostic. Each runner wraps exactly one CLI command per instance; multi-command rotation/fallback is owned by `LLMCaller` upstream.
+The agent-runner-infrastructure subsystem is the subprocess execution layer that drives agent CLIs for every LLM call made by SE3. It defines an abstract `AgentRunner` interface (with a `RunResult` dataclass and `InfraErrorType` taxonomy) plus three concrete adapters: a `ClaudeCodeRunner` (Claude Code CLI, `-p` print mode), a `CodexRunner` (OpenAI Codex CLI), and a `ClaudeInteractiveRunner` (interactive `claude` TUI driven inside a pseudo-terminal). The Claude adapter handles process spawning, real-time output streaming, stdout/stderr capture, hang detection via psutil resource probes, wall-clock and inactivity timeout enforcement, usage-limit keyword scanning, a large-prompt rerouting path that moves oversized `-p`/`--prompt` values to stdin to avoid Linux `execve()` `E2BIG` failures, and a conservative CLI-subprocess confirmation-prompt capture path that surfaces interactive child prompts (e.g. `按 1 确定` / `Press 1 to confirm`) to the engine via an optional `on_confirm` callback. The `CodexRunner` wraps a single `codex exec --json` command and normalizes Codex's JSONL event stream into Claude-compatible stream-json NDJSON so all upstream consumers are runner-agnostic. The `ClaudeInteractiveRunner` launches the interactive `claude` TUI in a PTY (via lazily-imported `pexpect`), feeds the effective prompt as simulated user input, and derives the same stream-json NDJSON from the on-disk session transcript JSONL rather than from screen output. Each runner wraps exactly one CLI command per instance; multi-command rotation/fallback is owned by `LLMCaller` upstream.
 
 LLM-agnostic concerns (the stream-json NDJSON contract, history recording, retry-context reconstruction, web-console rendering) are shared and taken from Claude's stream-json model; LLM-specific concerns (CLI argument construction and output-message parsing) are each runner's own responsibility, surfaced through the `build_call_args` intent-translation method.
 
@@ -11,7 +11,7 @@ LLM-agnostic concerns (the stream-json NDJSON contract, history recording, retry
 
 ### Requirement: Abstract AgentRunner Interface
 
-The subsystem MUST expose an `AgentRunner` abstract base class defining the contract that `LLMCaller` (and any other caller) uses to interact with agent implementations. The contract has four abstract methods — `run`, `run_with_monitor`, `detect_infra_error`, and `build_call_args` — and is implementation-agnostic so future runner types (API-based, other CLIs) can satisfy it. Two concrete implementations exist: `ClaudeCodeRunner` and `CodexRunner`.
+The subsystem MUST expose an `AgentRunner` abstract base class defining the contract that `LLMCaller` (and any other caller) uses to interact with agent implementations. The contract has four abstract methods — `run`, `run_with_monitor`, `detect_infra_error`, and `build_call_args` — and is implementation-agnostic so future runner types (API-based, other CLIs) can satisfy it. Three concrete implementations exist: `ClaudeCodeRunner`, `CodexRunner`, and `ClaudeInteractiveRunner`.
 
 `build_call_args` is the intent-translation seam that keeps `LLMCaller` free of any LLM-specific CLI knowledge: the caller passes the *intent* of a call (the effective prompt, whether the step is read-only, and the list of context files), and each runner translates that intent into its own concrete CLI flags. This is what lets a single centralized dispatch in `LLMCaller` serve every runner without per-runner branching.
 
@@ -140,6 +140,27 @@ The subsystem MUST define a `RunResult` dataclass that bundles the outcome of an
 - **WHEN** a Codex attempt is retried or continued
 - **THEN** the runner does NOT use Codex's native `codex exec resume`; retry context is reconstructed from the chat-history NDJSON by SE3's existing agent-agnostic retry-context mechanism
 - **AND** this guarantees a Claude attempt and a Codex attempt can hand off to each other within a single rotation chain
+
+### Requirement: Interactive PTY Claude Runner
+
+`ClaudeInteractiveRunner` (`src/se3/claude_interactive_runner.py`) MUST implement the `AgentRunner` ABC (`run`, `run_with_monitor`, `build_call_args`, `detect_infra_error`) to drive the **interactive** `claude` TUI inside a pseudo-terminal (PTY) rather than the `-p` print mode. It is registered for `type: claude-interactive` agents via `LLMCaller._create_runner` and is an explicit per-agent opt-in — the default runner stays `ClaudeCodeRunner` (`-p` print mode). Like the other adapters it wraps exactly one command per instance and performs no rotation/fallback internally. The `pexpect` PTY dependency is imported lazily so the core CLI is unaffected when this runner is not used (see the base spec *Runtime Dependencies*). Results are NOT scraped from the TUI screen: the runner watches the session transcript JSONL Claude writes to `~/.claude/projects/<munged-cwd>/<session>.jsonl`, strips each record's wrapper down to the same Claude-compatible stream-json NDJSON the print-mode runner emits, and reads token usage from the JSONL `usage` field, so all upstream consumers (`StreamJSONTracker`, chat-history, `_last_touched_files`, usage accounting) stay runner-agnostic.
+
+#### Scenario: Interactive argv translated from intent
+- **WHEN** `build_call_args(prompt, read_only, context_files)` is called
+- **THEN** it emits interactive-mode session flags (e.g. `--add-dir <path>` per context file) and stashes the prompt for PTY feeding rather than passing it as a `-p` value
+- **AND** the argv MUST NOT contain the print-only flags `--output-format` / `--input-format` / `-p`
+- **AND** when `read_only` is true it appends `--disallowedTools Write Edit NotebookEdit AskUserQuestion` (interactive-mode tool-layer read-only enforcement), leaving the read tools available
+- **AND** when `read_only` is false no `--disallowedTools` argument is added
+
+#### Scenario: Full PTY process lifecycle owned
+- **WHEN** `run_with_monitor` drives an interactive `claude` session
+- **THEN** it spawns the child in its own process session, enforces both the `wall_timeout` and the `inactivity_timeout` (default 1800s, whose activity signal is the composite of PTY output and JSONL-write activity), and on timeout/hang/exception/normal-exit force-kills the process group and reaps it under a `finally` guard so no orphan PTY, child, or I/O thread remains
+- **AND** a wall/inactivity breach returns a synthetic `returncode=124`
+
+#### Scenario: Interactive infra-error classification
+- **WHEN** `detect_infra_error(returncode, stdout, stderr)` is called for an interactive run
+- **THEN** the signal source is the PTY output + JSONL transcript state rather than print-mode stdout
+- **AND** `returncode == 0` is `NONE`, a usage-limit signal is `USAGE_LIMIT`, `returncode == 124` is `TIMEOUT`, and a startup failure (the session transcript was never created / the PTY child failed to start) is `STARTUP_FAILURE`
 
 ### Requirement: Setting-Sources Injection
 

@@ -53,6 +53,15 @@
 
 
 
+
+## 10.3.0 - 2026-06-15
+
+- Add ClaudeInteractiveRunner (type=claude-interactive) as the third AgentRunner adapter, driven by PTY with JSONL transcript watching
+- Support wall timeout and inactivity timeout with process-group kill and guaranteed resource reclamation for interactive Claude sessions
+- Normalize JSONL transcript output to stream-json NDJSON format compatible with existing upstream consumers
+- Register pexpect>=4.8.0 as a lazy-imported runtime dependency for PTY process management
+- Add LLMCaller dispatch for claude-interactive runner type with lazy pexpect import, keeping default claude-code -p mode unchanged
+- Add comprehensive test suite (126 tests) for ClaudeInteractiveRunner covering lifecycle, JSONL parsing, timeout, and infra-error detection
 ## 10.2.3 - 2026-06-15
 
 - Fix worktree backup archives landing in .se3/ (un-ignored) by redirecting to se3/worktrees/.archive/ under the sole ignored runtime root

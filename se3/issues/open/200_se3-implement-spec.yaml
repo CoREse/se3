@@ -1,0 +1,8 @@
+id: '200'
+description: 我发现se3在implement阶段在更改spec，我没记错的话这个不是只允许在update spec阶段修改吗？实现限制的方式是如果在implement阶段修改了，verify
+  spec阶段会不通过吗？还是说我记错了？
+status: open
+tags: []
+source: human
+created_at: '2026-06-15T16:55:46.238507'
+updated_at: '2026-06-15T16:55:46.238507'

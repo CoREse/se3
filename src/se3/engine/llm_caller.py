@@ -877,6 +877,14 @@ class LLMCaller:
                 project_root=self.project_root,
                 command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
             )
+        if agent_type == "claude-interactive":
+            # PTY-driven interactive Claude Code runner.  Lazily imported so the
+            # core CLI never requires pexpect unless this opt-in type is used.
+            from se3.claude_interactive_runner import ClaudeInteractiveRunner
+            return ClaudeInteractiveRunner(
+                project_root=self.project_root,
+                command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
+            )
         # Future: add other agent types here
         raise ValueError(f"Unknown agent type: {agent_type}")
 
