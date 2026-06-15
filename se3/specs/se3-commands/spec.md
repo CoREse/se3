@@ -1499,6 +1499,48 @@ se3 merge-respond <call-file-path>
 - **WHEN** user runs `se3 merge-respond <call-file-path>`
 - **THEN** the engine consumes the response and resumes the merge sequence (re-applying the resolved contents or skipping the merge per the user's decision)
 
+### Requirement: `se3 merge-unlock` Command
+
+The `se3 merge-unlock` command SHALL let an operator safely release or clean up the current project's merge lock (`se3/state/merge.lock`), and SHALL also report the lock's current status. It is registered as a top-level Typer command in `src/se3/cli.py` (`cli.py::merge_unlock_cmd`, `@app.command(name="merge-unlock")`), styled like `se3 merge` / `se3 merge-respond`. The command exists because the `MergeLock` previously had no operator-facing release path: an abnormally retained lock could only be cleared by manually deleting the lock file.
+
+**Scheme A release semantics:** the command decides what to do from the lock's staleness, mirroring the acquisition path's PID-based staleness check:
+- When the lock file records a holder PID that is **still alive**, release is refused by default: the command prints the current holder information and instructs the operator to add `--force`.
+- Only when `--force` (short flag `-f`) is explicitly passed SHALL a live-holder lock be forcibly cleared, accompanied by an explicit warning that doing so may break the merge mutual exclusion and should only be done when no active merge is in progress.
+- When the lock is **stale** — the holder PID is dead, no PID is recorded, or the record is corrupt — the lock SHALL be cleaned **without** requiring `--force`.
+
+**Release mechanism:** release SHALL reuse the same *unlink the lock file* path used for stale reclamation in `break_stale`. Because an `fcntl.flock` kernel lock is bound to the holding process's file descriptor, an external process cannot truly revoke it; deleting the lock file is the only available mechanism, leaving subsequent acquirers to recreate it.
+
+**Status reporting:** the command SHALL also serve as a lock-status inspector — on every invocation (including when there is no lock to release) it SHALL print the current holder PID, whether the holder is alive / whether the lock is stale, and the absolute path of the lock file. No separate read-only subcommand is added.
+
+**Exit codes:** a successful release, or the absence of any lock to release, SHALL exit `0`; a refused release because the holder is alive and `--force` was not given SHALL exit non-zero (the `1` General error code).
+
+**Interface:**
+```bash
+se3 merge-unlock              # inspect; release only if stale
+se3 merge-unlock --force      # force-clean even when the holder is alive
+se3 merge-unlock -f           # short form of --force
+```
+
+#### Scenario: Live holder refused without --force
+- **GIVEN** `se3/state/merge.lock` records a holder PID that is still alive
+- **WHEN** the operator runs `se3 merge-unlock` without `--force`
+- **THEN** release is refused, the current holder PID and lock file path are printed, the operator is told to add `--force`, and the command exits non-zero
+
+#### Scenario: --force overrides a live holder
+- **GIVEN** `se3/state/merge.lock` records a holder PID that is still alive
+- **WHEN** the operator runs `se3 merge-unlock --force`
+- **THEN** the lock file is unlinked, a warning is printed that this may break the merge mutual exclusion, and the command exits `0`
+
+#### Scenario: Stale lock cleaned automatically
+- **GIVEN** `se3/state/merge.lock` is stale (its holder PID is dead, no PID is recorded, or the record is corrupt)
+- **WHEN** the operator runs `se3 merge-unlock` without `--force`
+- **THEN** the stale lock file is unlinked, the status is reported, and the command exits `0`
+
+#### Scenario: No lock to release
+- **GIVEN** no `se3/state/merge.lock` exists in the current project
+- **WHEN** the operator runs `se3 merge-unlock`
+- **THEN** the command reports that there is no lock (including the lock file's absolute path), takes no action, and exits `0`
+
 ### Requirement: `se3 issue` Command
 
 The `se3 issue` command group SHALL provide subcommands for managing SE3 project issues. Invoking `se3 issue` without a subcommand SHALL default to listing open issues.

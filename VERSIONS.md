@@ -51,6 +51,12 @@
 
 
 
+## 10.2.0 - 2026-06-15
+
+- Add `se3 merge-unlock` command to manually release or clean up stale merge locks
+- Support `--force` / `-f` flag to override live-holder safety check when releasing a lock
+- Display lock status (holder PID, alive/stale/corrupt state, absolute path) on every invocation
+- Exit with non-zero code when a live holder is detected and `--force` is not specified
 ## 10.1.4 - 2026-06-15
 
 - Fix live-rendering stall in webui chat that occurred after responding to an interjection prompt
