@@ -136,6 +136,15 @@ const state = {
   // doCloseFlowView so switching or closing a flow returns to the default
   // collapsed state.
   flowReplyPromptExpanded: {},
+  // Session-level UI preference parallel to flowReplyPromptExpanded: records
+  // the most recent scrollTop of each reply-context collapsible prompt body,
+  // keyed by intervention id (e.g. 'call:<callId>'). Lets the docked reply
+  // panel's automatic re-renders (STATUS_UPDATE / ws push → renderInterventions
+  // → updateReplyBox, which rebuild the whole context block via innerHTML="")
+  // restore the user's reading position in a long, expanded 「消息详情」 body
+  // instead of snapping it back to the top. Reset on openFlowView /
+  // doCloseFlowView alongside flowReplyPromptExpanded.
+  flowReplyPromptScroll: {},
 
   // ---- Issue management ----
   issues: [],                  // [{id, title, description, status, priority, type, tags, source, ...}]
@@ -1303,6 +1312,7 @@ function openFlowView(flowId) {
   state.interjectionPhases = {};
   state.interjectionToastsSeen = {};
   state.flowReplyPromptExpanded = {};
+  state.flowReplyPromptScroll = {};
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
 
@@ -1367,6 +1377,7 @@ function doCloseFlowView() {
   state.interjectionPhases = {};
   state.interjectionToastsSeen = {};
   state.flowReplyPromptExpanded = {};
+  state.flowReplyPromptScroll = {};
   // Reset the mobile sidebar drawer so the next opened flow starts collapsed.
   closeFlowSidebar();
   $("flow-view").classList.add("hidden");
@@ -2170,9 +2181,21 @@ function safeStringify(value) {
 //   opts.expanded  — initial expanded state (default false);
 //   opts.onToggle  — callback invoked on every user click with the new
 //                    expanded boolean, so the caller can persist the choice.
+//   opts.scrollTop — when the block is built in the expanded state, the
+//                    scrollTop to restore on the body (via requestAnimationFrame,
+//                    after layout), so an automatic re-render that rebuilds the
+//                    block does not snap the user's reading position back to the
+//                    top. Ignored when collapsed (a hidden body cannot scroll)
+//                    and on the first user-click expand (that path keeps the
+//                    original scrollIntoView behaviour).
+//   opts.onScroll  — callback invoked with the body's current scrollTop whenever
+//                    the user scrolls the expanded body, so the caller can record
+//                    the latest reading position for the next rebuild.
 function buildCollapsiblePrompt(promptText, opts) {
   const initialExpanded = opts && opts.expanded;
   const onToggle = opts && opts.onToggle;
+  const onScroll = opts && opts.onScroll;
+  const restoreScrollTop = opts && opts.scrollTop;
   const wrap = el("div", "flow-reply-prompt-wrap");
   const collapsedLabel = "▸ 展开消息详情";
   const expandedLabel = "▾ 收起消息详情";
@@ -2184,6 +2207,18 @@ function buildCollapsiblePrompt(promptText, opts) {
   let expanded = !!initialExpanded;
   if (initialExpanded) {
     wrap.classList.add("expanded");
+  }
+  // Record the live reading position on every scroll so the captured scrollTop
+  // is decoupled from when (polling vs ws push) the next rebuild fires.
+  if (onScroll) {
+    body.addEventListener("scroll", () => { onScroll(body.scrollTop); });
+  }
+  // Rebuild restore: only meaningful when the block is mounted already-expanded
+  // (a hidden body has no usable scroll position). Deferred to a rAF so the new
+  // node has been laid out before we set scrollTop. This is independent of the
+  // click-to-expand path below, which keeps using scrollIntoView.
+  if (initialExpanded && restoreScrollTop) {
+    requestAnimationFrame(() => { body.scrollTop = restoreScrollTop; });
   }
   btn.addEventListener("click", (e) => {
     e.preventDefault();
@@ -2287,7 +2322,17 @@ function updateReplyBox(flow) {
   if (target.prompt) {
     ctx.appendChild(buildCollapsiblePrompt(target.prompt, {
       expanded: !!state.flowReplyPromptExpanded[target.id],
-      onToggle(v) { state.flowReplyPromptExpanded[target.id] = v; },
+      // Restore the last reading position so the 3s detail poll / ws push
+      // rebuild of this context block (ctx.innerHTML="") does not snap an
+      // expanded long 「消息详情」 body back to the top while the user reads.
+      scrollTop: state.flowReplyPromptScroll[target.id],
+      onToggle(v) {
+        state.flowReplyPromptExpanded[target.id] = v;
+        // Collapsing discards the saved position so a later re-expand starts
+        // from the top; harmless for the expand case (overwritten on scroll).
+        if (!v) state.flowReplyPromptScroll[target.id] = 0;
+      },
+      onScroll(top) { state.flowReplyPromptScroll[target.id] = top; },
     }));
   } else {
     ctx.appendChild(el("p", "flow-reply-hint", meta.hint));

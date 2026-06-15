@@ -347,4 +347,140 @@ export function registerReplyBoxPromptCollapseTests(ctx) {
     assert.equal(body.classList.contains("hidden"), false,
       "click still works without opts");
   });
+
+  // ---- (d) scroll-position persistence across re-render --------------------
+  // Regression: when the 「消息详情」 body is expanded and the user has scrolled
+  // down to read a long prompt, an automatic re-render (3s detail poll / ws
+  // STATUS_UPDATE push) that rebuilds the context block must NOT snap the
+  // reading position back to the top.
+
+  check("G1 buildCollapsiblePrompt restores scrollTop when built expanded", () => {
+    const savedRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => cb();
+    try {
+      const wrap = app.buildCollapsiblePrompt(LONG_PROMPT, {
+        expanded: true,
+        scrollTop: 420,
+      });
+      const body = findOne(wrap, "flow-reply-prompt");
+      assert.equal(body.scrollTop, 420,
+        "expanded body restores the provided scrollTop via rAF");
+    } finally {
+      globalThis.requestAnimationFrame = savedRaf;
+    }
+  });
+
+  check("G1 buildCollapsiblePrompt does not restore scrollTop when collapsed", () => {
+    const savedRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => cb();
+    try {
+      const wrap = app.buildCollapsiblePrompt(LONG_PROMPT, {
+        expanded: false,
+        scrollTop: 420,
+      });
+      const body = findOne(wrap, "flow-reply-prompt");
+      assert.equal(body.scrollTop, 0,
+        "collapsed (hidden) body must not have its scrollTop restored");
+    } finally {
+      globalThis.requestAnimationFrame = savedRaf;
+    }
+  });
+
+  check("G1 buildCollapsiblePrompt onScroll fires with the body scrollTop", () => {
+    let lastScroll = null;
+    const wrap = app.buildCollapsiblePrompt(LONG_PROMPT, {
+      expanded: true,
+      onScroll(top) { lastScroll = top; },
+    });
+    const body = findOne(wrap, "flow-reply-prompt");
+    body.scrollTop = 256;
+    body.dispatch("scroll");
+    assert.equal(lastScroll, 256,
+      "onScroll receives the body's current scrollTop on a scroll event");
+  });
+
+  check("G1 first-click expand still scrolls into view (not scrollTop restore)", () => {
+    const savedRaf = globalThis.requestAnimationFrame;
+    let scrolls = 0;
+    globalThis.requestAnimationFrame = (cb) => cb();
+    try {
+      // Built collapsed with a stale scrollTop present — the click-expand path
+      // must use scrollIntoView, NOT silently apply the restore value.
+      const wrap = app.buildCollapsiblePrompt(LONG_PROMPT, { scrollTop: 999 });
+      const toggle = findOne(wrap, "flow-reply-prompt-toggle");
+      const body = findOne(wrap, "flow-reply-prompt");
+      body.scrollIntoView = () => { scrolls += 1; };
+      toggle.dispatch("click"); // expand
+      assert.equal(scrolls, 1, "first-click expand scrolls into view once");
+      assert.equal(body.scrollTop, 0,
+        "click-expand does not apply the rebuild restore scrollTop");
+    } finally {
+      globalThis.requestAnimationFrame = savedRaf;
+    }
+  });
+
+  check("G1 scroll position survives an expanded re-render via updateReplyBox", () => {
+    const reply = document.getElementById("flow-reply-context");
+    app.state.flowInterjectRequested = false;
+    app.state.flowReplyPromptExpanded = {};
+    app.state.flowReplyPromptScroll = {};
+    const pendingCall = {
+      call_id: "scroll_keep",
+      kind: "discovery_confirm",
+      prompt: LONG_PROMPT,
+    };
+
+    // Render + expand the prompt.
+    app.renderInterventions({ status: "running", pending_calls: [pendingCall] });
+    const toggle = findOne(reply, "flow-reply-prompt-toggle");
+    toggle.dispatch("click");
+    assert.equal(app.state.flowReplyPromptExpanded["call:scroll_keep"], true);
+
+    // User scrolls down inside the expanded body.
+    const body1 = findOne(reply, "flow-reply-prompt");
+    body1.scrollTop = 333;
+    body1.dispatch("scroll");
+    assert.equal(app.state.flowReplyPromptScroll["call:scroll_keep"], 333,
+      "scroll position recorded into state");
+
+    // Automatic re-render (STATUS_UPDATE / poll) rebuilds the context block.
+    const savedRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => cb();
+    try {
+      app.renderInterventions({ status: "running", pending_calls: [pendingCall] });
+    } finally {
+      globalThis.requestAnimationFrame = savedRaf;
+    }
+    const body2 = findOne(reply, "flow-reply-prompt");
+    assert.equal(body2.classList.contains("hidden"), false,
+      "body stays expanded after re-render");
+    assert.equal(body2.scrollTop, 333,
+      "rebuilt expanded body restores the prior reading position");
+  });
+
+  check("G1 collapsing resets the saved scroll position", () => {
+    const reply = document.getElementById("flow-reply-context");
+    app.state.flowInterjectRequested = false;
+    app.state.flowReplyPromptExpanded = {};
+    app.state.flowReplyPromptScroll = {};
+    const pendingCall = {
+      call_id: "scroll_reset",
+      kind: "call",
+      prompt: LONG_PROMPT,
+    };
+
+    app.renderInterventions({ status: "running", pending_calls: [pendingCall] });
+    const toggle = findOne(reply, "flow-reply-prompt-toggle");
+    toggle.dispatch("click"); // expand
+    const body = findOne(reply, "flow-reply-prompt");
+    body.scrollTop = 120;
+    body.dispatch("scroll");
+    assert.equal(app.state.flowReplyPromptScroll["call:scroll_reset"], 120);
+
+    // Collapse — saved scroll position is cleared.
+    const toggle2 = findOne(reply, "flow-reply-prompt-toggle");
+    toggle2.dispatch("click");
+    assert.equal(app.state.flowReplyPromptScroll["call:scroll_reset"], 0,
+      "collapsing zeroes the recorded scroll position");
+  });
 }

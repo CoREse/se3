@@ -864,6 +864,24 @@ closing the view returns to the default collapsed state. The synthesized
 other `options` buttons remain outside the collapsible body so they are reachable
 without expanding the prompt.
 
+The expanded body's internal **scroll position** MUST likewise survive automatic
+re-renders. Because each refresh rebuilds the reply-context block wholesale
+(`ctx.innerHTML = ""`), a newly created `.flow-reply-prompt` body would reset its
+`scrollTop` to 0; left unguarded, the high-frequency 3s detail poll and ws
+`STATUS_UPDATE` pushes would repeatedly snap a user reading a long expanded body
+back to the top. To prevent this, the expanded body's `scrollTop` MUST be
+persisted as a second session-level UI preference keyed by the same intervention
+id (parallel to the expand-state map, e.g. `state.flowReplyPromptScroll`):
+`buildCollapsiblePrompt` registers a `scroll` listener on the body that records
+its live `scrollTop` into that map, and on each rebuild `updateReplyBox` feeds the
+last recorded `scrollTop` back to `buildCollapsiblePrompt`, which — only when the
+body is initially expanded — restores it (via `requestAnimationFrame`, after
+layout). This leaves the refresh mechanism and frequency unchanged and keeps the
+two restore paths independent: a fresh user expand still runs the
+`scrollIntoView` path, while a refresh rebuild runs only the `scrollTop` restore.
+The scroll-position map is reset alongside the expand-state map when opening or
+closing `#flow-view`.
+
 #### Scenario: Long prompt is collapsed by default and never pushes controls off-screen
 - **GIVEN** a selected intervention chip (e.g. `discovery_confirm`) whose
   `prompt` is very long (an embedded refined task description)
@@ -894,6 +912,23 @@ without expanding the prompt.
   re-renders (e.g. a new snapshot) keep the prompt collapsed
 - **AND** when `#flow-view` is closed or a different flow is opened, the
   expand state resets to the default collapsed
+
+#### Scenario: Scroll position of an expanded body survives automatic re-renders
+- **GIVEN** a selected chip whose `.flow-reply-prompt` body is expanded and the
+  user has scrolled down inside its height-capped (`max-height: 30vh`) region to
+  read long content
+- **WHEN** an automatic rebuild fires (a `STATUS_UPDATE` / ws push or the 3s
+  detail poll drives renderInterventions → updateReplyBox, which rebuilds the
+  reply-context block via `ctx.innerHTML = ""`)
+- **THEN** the freshly rebuilt body's internal `scrollTop` is restored to the
+  user's last recorded position (persisted per intervention id in
+  `state.flowReplyPromptScroll`) rather than snapping back to the top, so the
+  long content stays readable
+- **AND** the restore runs only for an initially-expanded body and does NOT
+  trigger the first-expand `scrollIntoView` path, leaving the refresh mechanism
+  and frequency unchanged
+- **AND** when `#flow-view` is closed or a different flow is opened, the
+  scroll-position state resets alongside the expand state to the default
 
 ### Requirement: Interjection Lifecycle Events
 
