@@ -469,13 +469,29 @@ identity function `recordKey`:
 
 1. **`dedupeAppendRecords(existing, incoming)`** — a new DOM-free, side-effect-free
    exported pure function (same export-block pattern as
-   `mergeSnapshotWithLiveAppends` / `historyListEmptyState`). It builds a
-   `Set(existing.map(recordKey))` and returns only those `incoming` records whose
-   `recordKey` is not already present in `existing`: an empty array when every
-   incoming record is already held, an array equivalent to `incoming` when all are
-   new, and the new-only subset otherwise. Because `partial` / `stream_progress`
-   segmented records' `recordKey` naturally varies as their content accumulates,
-   later fragments of the same streaming record are NOT falsely deduped.
+   `mergeSnapshotWithLiveAppends` / `historyListEmptyState`). It builds its `seen`
+   `Set` of `recordKey`s NOT from the entire `existing` array, but only from a
+   **bounded recent tail window** of `existing` (window length at least
+   `incoming.length` plus a safety margin — e.g. `max(incoming.length, 64) +
+   incoming.length`), and returns only those `incoming` records whose `recordKey`
+   is not already present in that tail window: an empty array when every incoming
+   record is already held in the tail, an array equivalent to `incoming` when all
+   are new, and the new-only subset otherwise. The bounding is load-bearing: both
+   duplication races this function guards (snapshot-vs-broadcast overlap,
+   reconnect delta re-pull) are physically confined to the **most recent**
+   records, so a true duplicate can only ever appear in the tail. Comparing
+   against the whole array instead would let a genuinely-new record be permanently
+   suppressed whenever its **coarse** `recordKey` (a second-granularity timestamp
+   plus truncated content, with no uniqueness guarantee) happens to **collide**
+   with some far-back old record — e.g. a repeated `1` / `按1确定` reply emitted at
+   the same wall-clock second under a reused discovery `step_id`. Restricting the
+   comparison to the recent tail keeps every real tail-overlap duplicate filtered
+   while ensuring no remote old record can ever shadow a new one. `recordKey`
+   itself is left **unchanged**, so the snapshot/append/usage identity shared with
+   `mergeSnapshotWithLiveAppends` and usage deduplication is unaffected. Because
+   `partial` / `stream_progress` segmented records' `recordKey` naturally varies as
+   their content accumulates, later fragments of the same streaming record are NOT
+   falsely deduped.
 2. **Both append consumers filtered** — `applyHistoryData`'s append branch MUST
    run `incoming` through `dedupeAppendRecords` against the *current* held array
    before merging, for **both** the running-flow view (`state.flowConversationRecords`)
@@ -549,6 +565,24 @@ dedup — it replaces the held array wholesale and is left exactly as-is.
 - **AND** the conversation keeps appending the new records live, with no record
   lost, so the operator does NOT have to leave and re-enter the view to trigger a
   fresh full snapshot before seeing further conversation
+
+#### Scenario: New post-respond record colliding with a far-back old record still renders live on a healthy connection
+- **GIVEN** a running flow is open in `#flow-view` with its `/ws/ui` subscription
+  live and reporting connected (no reconnect / no REST re-pull in flight), and the
+  user has submitted a `respond` (e.g. `按1确定`)
+- **AND** a subsequent genuinely-new `mode: append` record arrives whose **coarse**
+  `recordKey` happens to **collide** with some far-back old record already held in
+  `state.flowConversationRecords` — e.g. the same `1` reply content at the same
+  wall-clock second under a reused discovery `step_id`
+- **WHEN** `applyHistoryData` runs its append branch and filters the append through
+  `dedupeAppendRecords`
+- **THEN** because `dedupeAppendRecords` builds its `seen` set only from the bounded
+  recent tail window of the held array, the colliding far-back old record is NOT in
+  that window, so the new record is classified as fresh and is `concat`-ed
+- **AND** `applyHistoryData` does NOT short-circuit via `if (!fresh.length) return;`,
+  so the agent's later output and the user's subsequent messages keep rendering live
+  — the operator does NOT have to leave and re-enter the session to recover the
+  conversation through a fresh full snapshot
 
 ### Requirement: Reconnect Incremental History Refresh
 

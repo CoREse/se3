@@ -1833,6 +1833,40 @@ check("dedupeAppendRecords race regression: partial new records after snapshot",
   assert.equal(keys.length, new Set(keys).size);
 });
 
+check("dedupeAppendRecords: a fresh record colliding with a FAR-BACK existing record is NOT suppressed (bounded window)", () => {
+  // Regression (the "live render stalls after respond" bug): recordKey is coarse
+  // (stepId+role+second-ts+attempt+len+content[:96]), so a genuinely-new reply
+  // can coincidentally hash identically to an OLD record way back in the held
+  // array — e.g. a discovery continuation reuses its step_id and the operator
+  // sends the same short reply ("1") again at the same wall-clock second. The
+  // PRE-FIX dedupe built `seen` from the WHOLE array, so that distant collision
+  // permanently filtered the new record (fresh.length === 0) and every later
+  // append sharing the key stalled forever. The bounded tail window must let the
+  // fresh record through because the collision is far outside the recent tail.
+  const collide = asstRecord("1", 100, "s1", "discovery");
+  const existing = [collide];
+  // Pad well beyond the tail window so the colliding record sits far back.
+  for (let i = 0; i < 80; i++) existing.push(asstRecord("filler " + i, 200 + i, "s2", "analyze"));
+  // Same stepId/role/second-ts/attempt/content as `collide` → identical recordKey.
+  const incoming = [asstRecord("1", 100, "s1", "discovery")];
+  assert.equal(app.recordKey(incoming[0]), app.recordKey(collide),
+    "the incoming record genuinely collides on recordKey with the far-back one");
+  const fresh = app.dedupeAppendRecords(existing, incoming);
+  // PRE-FIX: fresh.length === 0 (the bug). POST-FIX (bounded window): 1.
+  assert.equal(fresh.length, 1,
+    "a collision with a far-back record beyond the tail window must not suppress the fresh record");
+});
+
+check("dedupeAppendRecords: a TRUE tail-overlap duplicate is still filtered (bounded window keeps real dedup)", () => {
+  // The bounded window must still catch the real snapshot/WS overlap, which lands
+  // at the tail. A short held array (within the window) dedups exactly as before.
+  const r1 = asstRecord("tail-1", 1, "s1", "discovery");
+  const r2 = asstRecord("tail-2", 2, "s1", "discovery");
+  const existing = [r1, r2];
+  const fresh = app.dedupeAppendRecords(existing, [r2]);
+  assert.equal(fresh.length, 0, "a real tail duplicate is still filtered");
+});
+
 // -- historySnapshotUrl: incremental fetch URL construction ------------------
 //
 // The reconnect loaders echo the held opaque progress token as `?after=` so

@@ -1,0 +1,9 @@
+id: '198'
+description: '1. worktree的webui聊天记录还是没法正常显示，还是第一条消息后就完全不显示消息了，并且第一条消息也是只有思考过程没有最后的结果。
+
+  2. worktree还是会被注册成独立的项目，显示在webui的项目列表里。'
+status: open
+tags: []
+source: human
+created_at: '2026-06-15T11:02:18.990313'
+updated_at: '2026-06-15T11:08:29.206581'

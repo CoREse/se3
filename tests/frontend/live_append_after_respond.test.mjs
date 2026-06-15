@@ -206,6 +206,86 @@ export function registerLiveAppendAfterRespondTests(ctx) {
   });
 
   // ----------------------------------------------------------------------- //
+  // Regression: respond → a fresh reply whose recordKey collides with a       //
+  // FAR-BACK old record must NOT be deduped away (the persistent live stall).  //
+  // ----------------------------------------------------------------------- //
+
+  check("G1 respond: fresh reply colliding on recordKey with a far-back record still appends (no stall)", () => {
+    const flowId = "flow-collision-G1";
+    // Seed a long conversation whose EARLY part holds an old "1" reply, then pad
+    // with enough later records to push it well out of the recent tail window.
+    const initial = [usr("1", 100, "s1", "discovery")];
+    for (let i = 0; i < 80; i++) initial.push(asst("filler " + i, 200 + i, "s2", "analyze"));
+    const c = freshFlow(flowId, initial);
+    const base = app.state.flowConversationRecords.length;
+    const domBase = bubbleNodes(c).length;
+
+    // A discovery continuation reuses step_id s1; the operator presses "1" again
+    // and the daemon's authoritative record lands at the SAME step/second, so its
+    // recordKey collides with the far-back old "1". Pre-fix the whole-array dedupe
+    // filtered it (fresh empty → applyHistoryData short-circuits) and the record
+    // never reached state or DOM — the user's "nothing shows after respond" bug.
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [usr("1", 100, "s1", "discovery")],
+    });
+    assert.equal(app.state.flowConversationRecords.length, base + 1,
+      "the colliding fresh reply must still append (regression: it was suppressed)");
+    assert.equal(bubbleNodes(c).length, domBase + 1,
+      "the colliding fresh reply must reach the DOM, not stall");
+
+    // And the agent's subsequent output keeps streaming, no re-entry needed.
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [asst("output after the reply", 300, "s1", "discovery")],
+    });
+    assert.equal(app.state.flowConversationRecords.length, base + 2,
+      "post-reply agent output keeps streaming live");
+    assert.equal(bubbleNodes(c).length, domBase + 2,
+      "post-reply agent output reaches the DOM");
+  });
+
+  check("G3 respond: post-respond agent output + a repeated user reply keep live-appending (collision-safe)", () => {
+    const flowId = "flow-respond-A5";
+    // Seed an earlier "1" reply far back so the later repeated "1" reply's
+    // recordKey could collide with it — the bounded window must still let it land.
+    const initial = [usr("1", 100, "s1", "discovery")];
+    for (let i = 0; i < 80; i++) initial.push(asst("filler " + i, 200 + i, "s2", "analyze"));
+    const c = freshFlow(flowId, initial);
+    const base = app.state.flowConversationRecords.length;
+
+    // respond: optimistic echo for a NEW "1" reply (rank 1 — one prior auth "1").
+    app.appendLocalReply(flowId, { kind: "call", callId: "c1" }, "1");
+    // The daemon's authoritative record for that reply collides with the old "1".
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [usr("1", 100, "s1", "discovery")],
+    });
+    // The agent keeps producing; then the user sends a free-form follow-up.
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [asst("agent continues", 300, "s1", "discovery")],
+    });
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [usr("please continue", 301, "s1", "discovery")],
+    });
+
+    const recs = app.state.flowConversationRecords;
+    // The reply's own optimistic echo is reconciled away by its authoritative copy.
+    assert.equal(recs.filter((r) => r.__localEcho).length, 0,
+      "the reply's own echo reconciled away once its authoritative copy landed");
+    // The tail carries the authoritative reply, the agent output, and the follow-up,
+    // all live, in chronological order, none dropped.
+    const tail = recs.slice(base).map(app.normalizeRecord).map((n) => n.content);
+    assert.deepEqual(tail, ["1", "agent continues", "please continue"],
+      "every post-respond record appended live in chronological order");
+    // The DOM grew by exactly the three new records (no freeze, no re-entry).
+    assert.equal(bubbleNodes(c).length, base + 3,
+      "live DOM kept appending the post-respond records without a view re-entry");
+  });
+
+  // ----------------------------------------------------------------------- //
   // Symptom B: worktree first assistant record body is not normalize-dropped. //
   // ----------------------------------------------------------------------- //
 

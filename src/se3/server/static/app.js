@@ -2691,6 +2691,12 @@ function applyHistoryData(msg) {
     let merged;
     if (append) {
       const fresh = dedupeAppendRecords(state.flowConversationRecords, records);
+      // `fresh` is empty only when the batch is a genuine tail-overlap duplicate
+      // (the bounded-window dedupe no longer mistakes a far-back recordKey
+      // collision for a duplicate, so a real post-respond append always yields a
+      // non-empty `fresh` and keeps streaming). The history consumer above has
+      // already run for this frame, so returning here short-circuits only this
+      // running-flow consumer.
       if (!fresh.length) return;            // all duplicates — skip entirely
       merged = state.flowConversationRecords.concat(fresh);
     } else {
@@ -4337,9 +4343,30 @@ function mergeSnapshotWithLiveAppends(snapshot, liveAppends) {
 // every record. Deduping here prevents that. Partial / stream_progress
 // records naturally have a different recordKey as their content accumulates,
 // so they are never incorrectly filtered out.
+//
+// Invariant — a TRUE duplicate can only overlap at the TAIL. The snapshot/WS
+// race and the reconnect-delta overlap both re-deliver the *most recent* batch;
+// a record that arrives now can never duplicate one the operator saw long ago.
+// So the `seen` set is built only from a bounded recent tail window of
+// `existing`, NOT the whole array. recordKey is deliberately coarse
+// (stepId+role+second-timestamp+attempt+len+content[:96]), so a genuinely-new
+// record can coincidentally collide with a FAR-BACK old record — e.g. a discovery
+// continuation reuses its step_id, and a repeated short reply ("1" / "按1确定")
+// at the same wall-clock second hashes identically to an earlier one. Comparing
+// against the whole array let that distant collision permanently suppress every
+// later append sharing the key — the observed "live render stalls after respond,
+// nothing shows until you leave and re-enter the view" regression. Bounding to
+// the tail keeps full coverage of the real overlap while ensuring a distant old
+// record can never压制 a new one. The window spans the incoming batch plus a
+// safety baseline; when `existing` is shorter than the window the whole array is
+// compared, identical to the prior behavior.
+const DEDUPE_TAIL_BASELINE = 64;
 function dedupeAppendRecords(existing, incoming) {
   if (!incoming.length || !existing.length) return incoming;
-  const seen = new Set(existing.map(recordKey));
+  const windowLen = Math.max(incoming.length, DEDUPE_TAIL_BASELINE) + incoming.length;
+  const start = existing.length > windowLen ? existing.length - windowLen : 0;
+  const seen = new Set();
+  for (let i = start; i < existing.length; i++) seen.add(recordKey(existing[i]));
   return incoming.filter((r) => !seen.has(recordKey(r)));
 }
 

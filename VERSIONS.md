@@ -50,6 +50,12 @@
 
 
 
+
+## 10.1.4 - 2026-06-15
+
+- Fix live-rendering stall in webui chat that occurred after responding to an interjection prompt
+- Bound dedupeAppendRecords comparison to recent tail window instead of entire held array to prevent false-positive record suppression
+- Ensure new append records are not incorrectly filtered by recordKey collisions with distant old records
 ## 10.1.3 - 2026-06-14
 
 - Fix live chat view stopping new message display after pressing 1 to confirm (respond) in normal sessions
