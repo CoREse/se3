@@ -652,6 +652,187 @@ class MergeLock:
         self.release()
 
 
+@dataclass
+class LockStatus:
+    """Read-only snapshot of the merge lock file's state.
+
+    Produced by :func:`inspect_lock` and shared by the release decision
+    logic and the CLI status display so a single probe drives both.
+
+    Attributes:
+        lock_file: Absolute path of the lock file (whether or not it exists).
+        exists: Whether the lock file is present on disk.
+        holder_pid: PID recorded in the lock file, or ``None`` when the
+            file is absent, empty, or carries an unparseable record.
+        alive: Whether ``holder_pid`` refers to a live process. Always
+            ``False`` when ``holder_pid`` is ``None``.
+        stale: Whether the lock can be cleaned up without ``--force`` —
+            true when the file is absent, the holder PID is dead, no PID
+            is recorded, or the record is corrupt.
+        corrupt: Whether a PID record was present but could not be parsed
+            as an integer.
+    """
+
+    lock_file: Path
+    exists: bool
+    holder_pid: Optional[int]
+    alive: bool
+    stale: bool
+    corrupt: bool
+
+
+@dataclass
+class ReleaseOutcome:
+    """Result of a :func:`release_merge_lock` decision.
+
+    Attributes:
+        exit_code: ``0`` on success (released, or nothing to release);
+            non-zero (``1``) when release was refused because the holder
+            is still alive and ``force`` was not given, or when the lock
+            file could not actually be removed (e.g. permission error).
+        status: The :class:`LockStatus` observed before any action, for
+            the caller to print.
+        action: One of ``'no_lock'``, ``'released_stale'``,
+            ``'released_force'``, ``'refused_alive'``, or ``'failed_remove'``.
+    """
+
+    exit_code: int
+    status: LockStatus
+    action: str
+
+
+def inspect_lock(
+    project_root: Path, lock_path: Path = _DEFAULT_LOCK_PATH
+) -> LockStatus:
+    """Read-only probe of the merge lock file's current state.
+
+    Performs no writes. Reuses :meth:`MergeLock._read_holder_pid` and
+    :meth:`MergeLock._is_pid_alive` so the staleness semantics match the
+    acquisition path exactly. A non-existent lock file is reported as
+    ``stale=True`` (nothing to hold means it is freely reclaimable).
+    """
+    probe = MergeLock(project_root, lock_path=lock_path)
+    resolved = probe._resolved_path
+    if not resolved.is_absolute():
+        resolved = (Path.cwd() / resolved)
+
+    if not resolved.exists():
+        return LockStatus(
+            lock_file=resolved,
+            exists=False,
+            holder_pid=None,
+            alive=False,
+            stale=True,
+            corrupt=False,
+        )
+
+    holder = probe._read_holder_pid()
+    corrupt = probe._last_read_corrupt
+    if holder is None:
+        # No PID recorded, or an unparseable (corrupt) record — both are
+        # treated as stale (reclaimable without --force).
+        return LockStatus(
+            lock_file=resolved,
+            exists=True,
+            holder_pid=None,
+            alive=False,
+            stale=True,
+            corrupt=corrupt,
+        )
+
+    alive = probe._is_pid_alive(holder)
+    return LockStatus(
+        lock_file=resolved,
+        exists=True,
+        holder_pid=holder,
+        alive=alive,
+        stale=not alive,
+        corrupt=False,
+    )
+
+
+def break_lock_file(
+    project_root: Path, lock_path: Path = _DEFAULT_LOCK_PATH
+) -> bool:
+    """Remove the lock file, the same way the stale-break path does.
+
+    flock's kernel lock is bound to the holding process's fd, so an
+    external process cannot truly revoke it — it can only unlink the lock
+    file so the next acquirer recreates it. This mirrors the unlink in
+    :meth:`MergeLock._try_break_stale_and_acquire`.
+
+    Returns:
+        ``True`` when a file was actually removed, ``False`` when there
+        was nothing to remove.
+    """
+    probe = MergeLock(project_root, lock_path=lock_path)
+    resolved = probe._resolved_path
+    existed = resolved.exists()
+    try:
+        resolved.unlink(missing_ok=True)
+    except OSError:
+        # A race (another process removed it first) or a permission issue;
+        # report removal as not-performed rather than raising.
+        return False
+    return existed
+
+
+def release_merge_lock(
+    project_root: Path, *, force: bool, lock_path: Path = _DEFAULT_LOCK_PATH
+) -> ReleaseOutcome:
+    """Decide and perform a manual merge-lock release (scheme A semantics).
+
+    Pure decision logic — does not print. Combines :func:`inspect_lock`
+    with :func:`break_lock_file`:
+
+    * No lock file → ``no_lock`` (exit 0, no unlink).
+    * Stale lock (dead holder / no PID / corrupt record) → ``released_stale``
+      (exit 0, lock file removed) without requiring ``force``.
+    * Live holder and ``force`` is False → ``refused_alive`` (exit 1, lock
+      preserved).
+    * Live holder and ``force`` is True → ``released_force`` (exit 0, lock
+      file removed).
+    """
+    status = inspect_lock(project_root, lock_path=lock_path)
+
+    if not status.exists:
+        return ReleaseOutcome(exit_code=0, status=status, action="no_lock")
+
+    if status.stale:
+        if _lock_file_removed(project_root, lock_path=lock_path):
+            return ReleaseOutcome(
+                exit_code=0, status=status, action="released_stale"
+            )
+        return ReleaseOutcome(
+            exit_code=1, status=status, action="failed_remove"
+        )
+
+    # Holder is alive from here on.
+    if not force:
+        return ReleaseOutcome(exit_code=1, status=status, action="refused_alive")
+
+    if _lock_file_removed(project_root, lock_path=lock_path):
+        return ReleaseOutcome(exit_code=0, status=status, action="released_force")
+    return ReleaseOutcome(exit_code=1, status=status, action="failed_remove")
+
+
+def _lock_file_removed(
+    project_root: Path, lock_path: Path = _DEFAULT_LOCK_PATH
+) -> bool:
+    """Attempt to remove the lock file and confirm it is actually gone.
+
+    :func:`break_lock_file` swallows ``OSError`` (e.g. ``PermissionError``,
+    which ``Path.unlink`` raises even with ``missing_ok=True`` since that flag
+    only suppresses ``FileNotFoundError``). Its boolean return alone cannot
+    distinguish "nothing to remove" from "could not remove", so we re-probe
+    the path afterwards: the release only succeeded if the file no longer
+    exists on disk.
+    """
+    break_lock_file(project_root, lock_path=lock_path)
+    probe = MergeLock(project_root, lock_path=lock_path)
+    return not probe._resolved_path.exists()
+
+
 def acquire_merge_lock(
     project_root: Path, *, break_stale: bool = False, blocking: bool = False
 ) -> MergeLock:

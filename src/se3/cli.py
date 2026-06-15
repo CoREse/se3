@@ -1064,6 +1064,97 @@ def merge_respond_cmd(
     raise typer.Exit(exit_code)
 
 
+@app.command(name="merge-unlock")
+def merge_unlock_cmd(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help=(
+            "Force-release a lock whose holder process is still alive. "
+            "This may break merge mutual exclusion — use only when you are "
+            "certain no active merge is running. A stale lock is cleaned up "
+            "without this flag."
+        ),
+    ),
+):
+    """Manually release (and inspect) the current project's merge lock.
+
+    Always reports the holder PID, whether it is alive / stale, and the
+    absolute lock-file path. A stale lock (holder process dead, no PID
+    recorded, or a corrupt record) is cleaned up automatically. A lock held
+    by a live process is refused (exit 1) unless --force is given.
+
+    flock binds the kernel lock to the holding process's fd, so this command
+    cannot truly revoke a foreign lock — it removes the lock file so the next
+    acquirer recreates it, matching how stale locks are reclaimed.
+
+    Examples:
+        se3 merge-unlock          # inspect + clean up a stale lock
+        se3 merge-unlock --force  # force-release even a live holder
+    """
+    from .commands.merge.merge_lock import release_merge_lock
+    from .commands.run import get_project_root
+
+    project_root = get_project_root()
+    outcome = release_merge_lock(project_root, force=force)
+    status = outcome.status
+
+    # Status report — always printed, including when there is no lock.
+    lines = [f"Merge lock file: {status.lock_file}"]
+    if not status.exists:
+        lines.append("Holder PID: (none — no lock file present)")
+        lines.append("State: no lock present")
+    else:
+        pid_str = (
+            str(status.holder_pid)
+            if status.holder_pid is not None
+            else "(none recorded)"
+        )
+        lines.append(f"Holder PID: {pid_str}")
+        if status.corrupt:
+            lines.append("State: stale (PID record corrupt / unparseable)")
+        elif status.stale:
+            if status.holder_pid is None:
+                lines.append("State: stale (no PID recorded)")
+            else:
+                lines.append("State: stale (holder process is not alive)")
+        else:
+            lines.append("State: alive (holder process is running)")
+
+    if outcome.action == "no_lock":
+        lines.append("No merge lock to release.")
+    elif outcome.action == "released_stale":
+        lines.append("Released stale merge lock (removed lock file).")
+    elif outcome.action == "released_force":
+        lines.append(
+            "WARNING: force-released a merge lock held by a live process."
+        )
+        lines.append(
+            "This may break merge mutual exclusion — only do this when you "
+            "are certain no active merge is running."
+        )
+    elif outcome.action == "refused_alive":
+        lines.append("Refused: the lock holder process is still alive.")
+        lines.append(
+            "Re-run with --force (-f) to force-release if you are certain "
+            "no merge is active."
+        )
+    elif outcome.action == "failed_remove":
+        lines.append(
+            "ERROR: could not remove the lock file — it is still present on "
+            "disk."
+        )
+        lines.append(
+            "This is usually a permission problem (e.g. the lock file is "
+            "owned by another user or root). The merge lock was NOT released; "
+            "remove the file manually with sufficient privileges."
+        )
+
+    render_text("\n".join(lines), title="Merge Unlock")
+    raise typer.Exit(outcome.exit_code)
+
+
 @app.command(name="salvage")
 def salvage_cmd(
     project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),
