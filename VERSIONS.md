@@ -50,6 +50,12 @@
 
 
 
+
+## 10.1.4 - 2026-06-15
+
+- Fix expanded message-details scroll position resetting to top on every automatic panel refresh
+- Persist reply-prompt scroll offset across 3-second polling and WebSocket status updates
+- Preserve scroll position only when the message-details section is expanded, respecting collapse state
 ## 10.1.3 - 2026-06-14
 
 - Fix live chat view stopping new message display after pressing 1 to confirm (respond) in normal sessions
