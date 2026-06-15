@@ -229,3 +229,110 @@ def test_worktree_root_excluded_from_project_roots(tmp_path: Path) -> None:
 
     assert str(wt.resolve()) not in snapshot.project_roots
     assert str(main.resolve()) in snapshot.project_roots
+
+
+# -- registration-seam normalization + registry sanitize (Bug2 / G3) -------
+#
+# The single write-through seam ``DaemonAggregator.add_project_root`` covers all
+# five registration entry points (``__init__`` / ``request_spawn`` /
+# ``request_resume`` / ``_handle_ensure_request`` / ``_resume_paused_flow``),
+# the ``_append_project_root`` disk write backstops it, and the one-time
+# ``_sanitize_project_roots`` startup pass purges historical pollution. These
+# cases lock the displayed project-root set worktree-free both for new
+# registrations and for an already-polluted on-disk registry.
+
+
+def test_entry_point_seam_keeps_worktree_out_of_active_and_registry(
+    tmp_path: Path,
+) -> None:
+    """A worktree path handed to any entry point lands only as its main root.
+
+    All five entry points delegate to ``aggregator.add_project_root``; driving a
+    worktree path straight through the live ``Daemon``'s aggregator exercises the
+    shared seam and asserts neither the in-memory active set nor the persisted
+    registry retains the ``/se3/worktrees/`` copy.
+    """
+    from se3.daemon.daemon import Daemon, DaemonConfig, _read_project_roots
+
+    main = _make_project(tmp_path / "main")
+    wt = main / "se3" / "worktrees" / "wt-1"
+    _make_project(wt)
+
+    config = DaemonConfig(pid_dir=tmp_path / "rt")
+    daemon = Daemon(config)
+    daemon.aggregator.add_project_root(str(wt))
+
+    active = [str(p) for p in daemon.aggregator.project_roots]
+    assert str(main.resolve()) in active
+    assert str(wt.resolve()) not in active
+    assert all("/se3/worktrees/" not in r for r in active)
+
+    persisted = _read_project_roots(config.project_roots_file)
+    assert str(main.resolve()) in persisted
+    assert str(wt.resolve()) not in persisted
+
+
+def test_append_project_root_defence_normalizes_worktree(tmp_path: Path) -> None:
+    """The disk write backstop folds a worktree path to its main root."""
+    from se3.daemon.daemon import _append_project_root, _read_project_roots
+
+    main = _make_project(tmp_path / "main")
+    wt = main / "se3" / "worktrees" / "wt-1"
+    _make_project(wt)
+    registry = tmp_path / "project_roots.json"
+
+    _append_project_root(registry, str(wt))
+
+    assert _read_project_roots(registry) == [str(main.resolve())]
+
+
+def test_startup_sanitize_cleans_polluted_registry_to_main_only(
+    tmp_path: Path,
+) -> None:
+    """A registry polluted with a worktree entry is rewritten to main-only.
+
+    Mirrors a registry persisted before normalization existed: the one-time
+    sanitize must atomically rewrite it dropping the worktree copy.
+    """
+    from se3.daemon.daemon import (
+        _atomic_write_json,
+        _read_project_roots,
+        _sanitize_project_roots,
+    )
+
+    main = _make_project(tmp_path / "main")
+    wt = main / "se3" / "worktrees" / "wt-1"
+    _make_project(wt)
+    registry = tmp_path / "project_roots.json"
+    _atomic_write_json(
+        registry,
+        {"project_roots": sorted([str(main.resolve()), str(wt.resolve())])},
+    )
+
+    _sanitize_project_roots(registry)
+
+    cleaned = _read_project_roots(registry)
+    assert cleaned == [str(main.resolve())]
+    assert all("/se3/worktrees/" not in r for r in cleaned)
+
+
+def test_startup_sanitize_clean_registry_not_rewritten(tmp_path: Path) -> None:
+    """A registry with no worktree pollution is left byte-for-byte untouched."""
+    import time
+
+    from se3.daemon.daemon import (
+        _append_project_root,
+        _read_project_roots,
+        _sanitize_project_roots,
+    )
+
+    main = _make_project(tmp_path / "main")
+    registry = tmp_path / "project_roots.json"
+    _append_project_root(registry, str(main))
+    mtime_before = registry.stat().st_mtime
+
+    time.sleep(0.01)
+    _sanitize_project_roots(registry)
+
+    assert registry.stat().st_mtime == mtime_before
+    assert _read_project_roots(registry) == [str(main.resolve())]

@@ -1064,3 +1064,74 @@ def test_snapshot_waiting_for_lock_defaults_false(tmp_path: Path) -> None:
     assert snapshot is not None
     assert snapshot.waiting_for_lock is False
     assert snapshot.to_dict()["waiting_for_lock"] is False
+
+
+# ---- worktree→main normalization seam (Bug2 / G3) -------------------------
+#
+# ``DaemonAggregator.add_project_root`` is the single write-through seam for the
+# displayed project-root set (both the in-memory active set and the persistent
+# registry callback). Every registration entry point routes through it, so
+# normalizing a worktree copy back to its owning main root *here* keeps the
+# transient ``<main>/se3/worktrees/<name>`` sandbox out of every displayed view
+# at once. These tests pin that normalization at the aggregator boundary.
+
+
+def _make_worktree_dir(main_root: Path, wt_name: str = "wt-1") -> Path:
+    """Create a worktree isolation copy dir under ``<main>/se3/worktrees/``."""
+    wt = main_root / "se3" / "worktrees" / wt_name
+    (wt / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    return wt
+
+
+def test_add_project_root_normalizes_worktree_into_active_set(tmp_path: Path) -> None:
+    """Feeding a worktree path registers only its main root in the active set."""
+    main = tmp_path / "main"
+    (main / "se3" / "state").mkdir(parents=True)
+    wt = _make_worktree_dir(main)
+
+    agg = DaemonAggregator(machine_id="m1")
+    agg.add_project_root(str(wt))
+
+    roots = [str(p) for p in agg.project_roots]
+    assert str(main.resolve()) in roots
+    assert str(wt.resolve()) not in roots
+
+
+def test_add_project_root_normalizes_worktree_into_registry_callback(
+    tmp_path: Path,
+) -> None:
+    """The registry_persist callback is fed the main root, never the worktree."""
+    main = tmp_path / "main"
+    (main / "se3" / "state").mkdir(parents=True)
+    wt = _make_worktree_dir(main)
+
+    persisted: list = []
+    agg = DaemonAggregator(machine_id="m1", registry_persist=persisted.append)
+    agg.add_project_root(str(wt))
+
+    assert persisted == [str(main.resolve())]
+
+
+def test_all_project_roots_never_lists_a_worktree_path(tmp_path: Path) -> None:
+    """No ``/se3/worktrees/`` path ever appears in the dropdown-facing view.
+
+    Even when the worktree path is fed in directly *and* lives in the persistent
+    registry, the merged ``all_project_roots`` view must contain only the main
+    root — the displayed project list / New Task dropdown is worktree-free.
+    """
+    main = tmp_path / "main"
+    (main / "se3" / "state").mkdir(parents=True)
+    wt = _make_worktree_dir(main)
+
+    agg = DaemonAggregator(
+        machine_id="m1",
+        # A registry that itself still spells the worktree path is normalized by
+        # the seam's main view, never re-surfaced as a standalone project.
+        registry_load=lambda: [str(main.resolve())],
+    )
+    agg.add_project_root(str(wt))
+    agg.add_project_root(str(main))
+
+    roots = agg.all_project_roots()
+    assert str(main.resolve()) in roots
+    assert all("/se3/worktrees/" not in r for r in roots)

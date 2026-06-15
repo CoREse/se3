@@ -185,3 +185,88 @@ def test_dag_isolation_worktree_stays_excluded(tmp_path):
     agg = DaemonAggregator()
     agg.add_project_root(main_root)
     assert os.path.realpath(str(wt_root)) not in agg.all_observable_roots()
+
+
+def test_seam_observable_and_readable_yet_never_registered(tmp_path):
+    """G3 bidirectional guard: both seam invariants asserted in ONE test.
+
+    A single simulated worktree flow must simultaneously satisfy:
+
+    * **observe-side (Bug1)** — the worktree is in the observable set from its
+      INIT engine.json and its discovery first reply (complete, unterminated)
+      reads live, then keeps appending; and
+    * **register-side (Bug2)** — the worktree never enters the active set, the
+      persistent registry, or the dropdown-facing ``all_project_roots`` view.
+
+    Reverting either fix breaks this test: drop the eager save and the worktree
+    is not observable / the first reply is empty; drop the normalization and the
+    worktree leaks into the registry / project list. This is the "fix one,
+    don't pop out the other" lock.
+    """
+    main_root = tmp_path / "proj"
+    wt_root = main_root / "se3" / "worktrees" / "feat-x"
+    wt_root.mkdir(parents=True)
+    flow = _eager_save_worktree_flow(wt_root)
+    flow_id = flow.flow_id
+
+    # Discovery's first reply flushed complete but without a trailing newline.
+    hist = wt_root / "se3" / "history" / flow_id / "01_discovery_ab.jsonl"
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    hist.write_text(
+        json.dumps(
+            {
+                "role": "assistant",
+                "content": "thinking… and the final result",
+                "raw_json": [],
+                "step_type": "discovery",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    persisted: list = []
+    agg = DaemonAggregator(registry_persist=persisted.append)
+    # A caller mistakenly handing the worktree path in must still normalize.
+    agg.add_project_root(main_root)
+    agg.add_project_root(str(wt_root))
+
+    wt_real = os.path.realpath(str(wt_root))
+    main_real = os.path.realpath(str(main_root))
+
+    # -- observe-side invariant (Bug1) -------------------------------------
+    assert wt_real in agg.all_observable_roots()
+    reader = DaemonHistoryReader(
+        project_roots_provider=lambda: agg.all_observable_roots()
+    )
+    metas = {m.flow_id: m for m in reader.build_index()}
+    assert flow_id in metas and metas[flow_id].active is True
+    first = {r.flow_id: r for r in reader.read_active_flows({})}[flow_id]
+    assert [r["message"]["content"] for r in first.records] == [
+        "thinking… and the final result"
+    ]
+    with hist.open("a", encoding="utf-8") as fh:
+        fh.write("\n")
+        fh.write(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "content": "second message",
+                    "raw_json": [],
+                    "step_type": "discovery",
+                }
+            )
+            + "\n"
+        )
+    second = {
+        r.flow_id: r for r in reader.read_active_flows({flow_id: first.cursor})
+    }[flow_id]
+    assert [r["message"]["content"] for r in second.records] == ["second message"]
+
+    # -- register-side invariant (Bug2) ------------------------------------
+    assert wt_real not in agg.all_project_roots()
+    assert main_real in agg.all_project_roots()
+    assert all("/se3/worktrees/" not in r for r in agg.all_project_roots())
+    assert wt_real not in [os.path.realpath(str(p)) for p in agg.project_roots]
+    # The registry callback only ever recorded the main root.
+    assert all("/se3/worktrees/" not in r for r in persisted)
+    assert main_real in [os.path.realpath(r) for r in persisted]

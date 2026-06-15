@@ -2119,3 +2119,134 @@ def test_final_flush_unknown_flow_falls_back_to_all_roots(tmp_path):
     # and returns no records — a safe no-op rather than a crash.
     reads = reader.read_active_flows({"vanished": {"01_analyze.jsonl": 3}})
     assert [r for r in reads if r.flow_id == "vanished"] == []
+
+
+# --------------------------------------------------------------------------
+# Group G3: discovery startup-window observability via the is_worktree_mode gate
+# --------------------------------------------------------------------------
+#
+# Bug1's blind spot: a worktree flow's live history is written under the worktree
+# itself, and it only enters the live-read set once
+# ``DaemonAggregator._active_worktree_run_roots`` admits it — which requires an
+# ``is_worktree_mode`` engine.json. The run-command fix lands that engine.json at
+# flow creation (status INIT), *before* discovery's first LLM call, so the very
+# first reply (thinking + result) is observable. These tests pin the
+# history-reader half of that cooperative fix from the engine.json gate.
+
+
+def _make_eager_worktree(main_root, *, wt_name, flow_id, status="INIT"):
+    """Worktree subdir with an is_worktree_mode engine.json but no history yet.
+
+    Models the run command's eager save: ``is_worktree_mode`` engine.json is on
+    disk at status INIT before any discovery record is written.
+    """
+    wt_root = main_root / "se3" / "worktrees" / wt_name
+    state_dir = wt_root / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "status": status,
+                "task_description": "isolated task",
+                "is_worktree_mode": True,
+                "worktree_path": str(wt_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return wt_root
+
+
+def test_active_worktree_run_root_admitted_at_init_engine_json(tmp_path):
+    """``_active_worktree_run_roots`` returns the worktree from its INIT engine.json.
+
+    The gate keys on ``is_worktree_mode`` (+ a ``flow_id``), not on RUNNING or on
+    any history existing yet, so the worktree is observable from the very first
+    write — closing Bug1's discovery startup-window blind spot.
+    """
+    import os
+
+    from se3.daemon.aggregator import DaemonAggregator
+
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = _make_eager_worktree(main_root, wt_name="feat-x", flow_id="wt-1")
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+
+    observable = agg.all_observable_roots()
+    assert os.path.realpath(str(wt_root)) in observable
+    # The transient sandbox stays out of the dropdown-facing view.
+    assert os.path.realpath(str(wt_root)) not in agg.all_project_roots()
+
+
+def test_worktree_first_reply_read_live_then_increments(tmp_path):
+    """The discovery first reply reads in full live, then later messages append.
+
+    With the worktree admitted by its INIT engine.json, the history reader
+    (wired to ``all_observable_roots`` as the daemon wires it) must read the
+    complete-but-unterminated first record in full and keep appending — the
+    end-to-end fix for "first body empty, then nothing further".
+    """
+    from se3.daemon.aggregator import DaemonAggregator
+
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = _make_eager_worktree(main_root, wt_name="feat-x", flow_id="wt-1")
+
+    # Discovery's first record flushed without a trailing newline (complete).
+    hist = wt_root / "se3" / "history" / "wt-1" / "01_discovery_ab.jsonl"
+    hist.parent.mkdir(parents=True)
+    hist.write_text(
+        json.dumps(_msg("assistant", "thinking… and result", step_type="discovery")),
+        encoding="utf-8",
+    )
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+    reader = DaemonHistoryReader(
+        project_roots_provider=lambda: agg.all_observable_roots()
+    )
+
+    metas = {m.flow_id: m for m in reader.build_index()}
+    assert "wt-1" in metas and metas["wt-1"].active is True
+
+    first = {r.flow_id: r for r in reader.read_active_flows({})}["wt-1"]
+    assert [r["message"]["content"] for r in first.records] == [
+        "thinking… and result"
+    ]
+
+    _append_jsonl(hist, [_msg("assistant", "second", step_type="discovery")])
+    second = {
+        r.flow_id: r
+        for r in reader.read_active_flows({"wt-1": first.cursor})
+    }["wt-1"]
+    assert [r["message"]["content"] for r in second.records] == ["second"]
+
+
+def test_dag_isolation_worktree_excluded_from_observable(tmp_path):
+    """A DAG-isolation worktree (no is_worktree_mode) is never observed.
+
+    It shares the ``se3/worktrees/`` parent but writes no top-level
+    ``is_worktree_mode`` record, so the strict gate keeps it out — confirming the
+    eager-save fix did not loosen the gate and regress Bug2.
+    """
+    import os
+
+    from se3.daemon.aggregator import DaemonAggregator
+
+    main_root = tmp_path / "proj"
+    main_root.mkdir()
+    wt_root = main_root / "se3" / "worktrees" / "impl-dag"
+    state_dir = wt_root / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "dag-flow", "status": "RUNNING"}),
+        encoding="utf-8",
+    )
+
+    agg = DaemonAggregator()
+    agg.add_project_root(main_root)
+    assert os.path.realpath(str(wt_root)) not in agg.all_observable_roots()
