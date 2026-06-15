@@ -52,6 +52,13 @@
 
 
 
+
+## 10.2.3 - 2026-06-15
+
+- Fix worktree backup archives landing in .se3/ (un-ignored) by redirecting to se3/worktrees/.archive/ under the sole ignored runtime root
+- Add denylist guard in the commit step to detect and unstage runtime artifacts that escape the se3/ runtime root before committing
+- Prevent se3 runtime products (cache, history, logs, state, worktrees, etc.) from leaking into git when they appear outside se3/
+- Harden commit step to be fault-tolerant: leaked-path unstage failures are logged as warnings and never block the commit
 ## 10.2.2 - 2026-06-15
 
 - Fix incomplete real-time chat display for worktree flows during discovery step — first assistant reply (thinking + result) and all subsequent messages now stream live

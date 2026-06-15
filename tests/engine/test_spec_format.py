@@ -489,7 +489,10 @@ class TestRealSpecFiles:
         # 49 after the "Waiting-for-Lock Visible Running State" Requirement was
         # added documenting the delayed lock acquisition + visible waiting-for-lock
         # running state for the worktree/webui lock-regression fix.
-        assert len(parsed.requirements) == 49
+        # 50 after the "Commit Step Runtime-Leak Denylist" Requirement was added
+        # documenting the commit step's closed-set runtime-leak soft-removal guard
+        # that unstages se3 runtime signatures landing outside the se3/ root.
+        assert len(parsed.requirements) == 50
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()
