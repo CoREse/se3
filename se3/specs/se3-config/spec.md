@@ -1189,9 +1189,12 @@ needs an agent (`llm_caller.defaults`, `llm_caller.steps.<step>`,
 values are `AgentDef` dicts. Each `AgentDef` has:
 
 - `type`: agent type identifier (default `"claude-code"`). Recognized
-  values are `"claude-code"` (constructs a `ClaudeCodeRunner`) and
+  values are `"claude-code"` (constructs a `ClaudeCodeRunner`),
   `"codex"` (constructs a `CodexRunner` for the OpenAI Codex CLI) — see
-  the agent-runner-infrastructure *Codex CLI Runner* requirement.
+  the agent-runner-infrastructure *Codex CLI Runner* requirement — and
+  `"claude-interactive"` (constructs a `ClaudeInteractiveRunner` that
+  drives the interactive `claude` TUI via a PTY; an explicit opt-in, the
+  default runner remains `"claude-code"`'s `-p` print mode).
   `LLMCaller._create_runner` dispatches on this value.
 - `cmd`: CLI command invoked when the agent is selected (required).
   Model selection and other extra parameters are expressed via flags
@@ -1319,6 +1322,22 @@ value is not looked up in the registry.
 - **AND** `LLMCaller._create_runner` constructs a `CodexRunner` for that
   agent, so it participates in the default chain, per-step override, and
   agent rotation exactly like a `claude-code` agent
+
+#### Scenario: claude-interactive agent registered and referenced in caller chains
+- **GIVEN** an `agents` entry declaring `type: claude-interactive` (with
+  its own `cmd` such as `claude` or `claude -m <model>`), e.g.
+  `agents: { ipty: { type: claude-interactive, cmd: claude } }`
+- **WHEN** the entry is referenced by name from `llm_caller.defaults`
+  or `llm_caller.steps.<step>`
+- **THEN** config loading/validation accepts the `claude-interactive`
+  type value and the reference resolves to the registry entry
+- **AND** `LLMCaller._create_runner` constructs a `ClaudeInteractiveRunner`
+  (a PTY-driven interactive `claude` runner) for that agent, so it
+  participates in the default chain, per-step override, and agent
+  rotation exactly like a `claude-code` agent
+- **AND** `claude-interactive` is an explicit opt-in: an agent that does
+  not set this `type` still defaults to the `claude-code` `-p` print mode,
+  so the framework's default runner behavior is unchanged
 
 #### Scenario: String shorthand expands to AgentDef with defaults
 - **GIVEN** `agents.primary: "claude"` in se3.yaml (a bare string value

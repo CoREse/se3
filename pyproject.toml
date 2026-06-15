@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "se3"
-version = "10.2.3"
+version = "10.3.0"
 description = "SE 3.0 framework - Pure CLI flow engine"
 requires-python = ">=3.8"
 dependencies = [
@@ -17,6 +17,14 @@ dependencies = [
     # supervisor (`daemon/supervisor.py`). Both import it defensively, but it
     # is a real runtime dependency of the core package and so is declared here.
     "psutil>=5.9.0",
+    # PTY process driver for the interactive Claude Code runner
+    # (`claude_interactive_runner.py`): spawns an interactive `claude` session
+    # in a pseudo-terminal and feeds the prompt as simulated user input. It is
+    # imported lazily — only when a `claude-interactive` agent is actually
+    # constructed — so a project that never opts into this runner pays nothing,
+    # but it is a real runtime dependency of the core package and so is
+    # declared here.
+    "pexpect>=4.8.0",
 ]
 
 [project.optional-dependencies]
