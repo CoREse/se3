@@ -36,7 +36,11 @@ from typing import Any, Dict, List, Optional
 from .aggregator import DaemonAggregator, MachineStatus
 from .history import DaemonHistoryReader
 from .spawner import DaemonSpawner, SpawnedProcess
-from .supervisor import DaemonSupervisor, resolve_worktree_main_root
+from .supervisor import (
+    DaemonSupervisor,
+    is_worktree_copy_root,
+    resolve_worktree_main_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +166,10 @@ class Daemon:
         # the history index and New Task dropdown stay populated with no live
         # ``se3 run`` process and across daemon restarts.
         registry_file = self.config.project_roots_file
+        # One-time cleanup of any worktree-copy entry that a pre-normalization
+        # daemon may have persisted into the registry, so historical pollution
+        # is eliminated across restarts (not merely prevented going forward).
+        _sanitize_project_roots(registry_file)
         self.aggregator = DaemonAggregator(
             machine_id=self.config.machine_id,
             poll_interval=self.config.poll_interval,
@@ -685,7 +693,17 @@ def _append_project_root(path: Path, root: object) -> None:
     once. The file is rewritten (atomically, with a sorted root list) only when
     a genuinely new root appears — an already-registered root is a no-op and
     leaves the file untouched.
+
+    A worktree isolation copy (``<main>/se3/worktrees/<name>``) is folded back
+    to its owning ``<main>`` here as a defence-in-depth backstop: the primary
+    normalization seam is :meth:`DaemonAggregator.add_project_root` (which feeds
+    this callback already-normalized), but normalizing again at the disk write
+    point guarantees no worktree path can ever land in the persistent registry
+    regardless of how a future caller reaches it.
     """
+    main_root = resolve_worktree_main_root(root)
+    if main_root is not None:
+        root = main_root
     try:
         resolved = os.path.realpath(str(root))
     except OSError:  # pragma: no cover - defensive
@@ -697,6 +715,46 @@ def _append_project_root(path: Path, root: object) -> None:
         return
     existing.append(resolved)
     _atomic_write_json(path, {"project_roots": sorted(set(existing))})
+
+
+def _sanitize_project_roots(path: Path) -> None:
+    """One-time cleanup of leaked worktree-copy entries from the registry file.
+
+    The worktree→main normalization now applied at every registration entry
+    point (see :meth:`DaemonAggregator.add_project_root` and
+    :func:`_append_project_root`) prevents *new* pollution, but a registry that
+    was written before the normalization existed may already hold persisted
+    ``<main>/se3/worktrees/<name>`` entries — and because the file survives
+    restarts, those stale entries would keep surfacing the worktree in the
+    WebUI project list / New Task dropdown indefinitely. This scans the
+    registry once at daemon startup, drops every entry that
+    :func:`~se3.daemon.supervisor.is_worktree_copy_root` identifies as a
+    worktree copy, and atomically rewrites the file **only** when something was
+    actually removed (a clean registry is left untouched).
+
+    Fully fault-tolerant: a missing / corrupt file reads as an empty registry
+    and a write failure is logged, never propagated — sanitation must never
+    block daemon startup.
+    """
+    try:
+        existing = _read_project_roots(path)
+    except Exception:  # pragma: no cover - defensive
+        return
+    if not existing:
+        return
+    cleaned = [r for r in existing if not is_worktree_copy_root(r)]
+    if len(cleaned) == len(existing):
+        # No worktree pollution — leave the file untouched (no needless write).
+        return
+    try:
+        _atomic_write_json(path, {"project_roots": sorted(set(cleaned))})
+        logger.info(
+            "Sanitized project-roots registry: removed %d worktree entr%s",
+            len(existing) - len(cleaned),
+            "y" if len(existing) - len(cleaned) == 1 else "ies",
+        )
+    except OSError:  # pragma: no cover - defensive
+        logger.debug("Failed to rewrite sanitized project roots", exc_info=True)
 
 
 def start_daemon(

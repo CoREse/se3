@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from . import protocol
 from .history import enumerate_historical_project_roots
-from .supervisor import is_worktree_copy_root
+from .supervisor import is_worktree_copy_root, resolve_worktree_main_root
 
 
 logger = logging.getLogger(__name__)
@@ -272,8 +272,21 @@ class DaemonAggregator:
         when no ``se3 run`` process is currently live. Persistence is
         best-effort: a failing callback is logged, never propagated, so a
         registry I/O hiccup can't break aggregation.
+
+        This is the single write-through seam for the displayed project-root
+        set (both the in-memory active set and the persistent registry), so the
+        worktree→main normalization is applied here once: an
+        ``<main>/se3/worktrees/<name>`` isolation sandbox is folded back to its
+        owning ``<main>`` before it can enter either path. Every registration
+        entry point (``__init__`` / ``request_spawn`` / ``request_resume`` /
+        ``_handle_ensure_request`` / ``_resume_paused_flow``, plus the poll
+        loop) routes through here, so none can leak a worktree copy into the
+        WebUI project list / New Task dropdown. A non-worktree path
+        (``resolve_worktree_main_root`` returns ``None``) is registered
+        unchanged.
         """
-        resolved = Path(path).resolve()
+        main_root = resolve_worktree_main_root(path)
+        resolved = Path(main_root if main_root is not None else path).resolve()
         # Only a *genuinely new* root needs to bust the historical-roots cache.
         # The daemon poll loop re-adds every active flow's already-known root on
         # every ~2s tick; invalidating unconditionally there would re-run the
