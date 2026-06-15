@@ -3637,6 +3637,42 @@ This contract is a **general** guarantee, not specific to discovery: even if a f
 - **WHEN** the previous holder releases the lock and the flow acquires it
 - **THEN** the flow clears `waiting_for_lock` and persists `engine.json` again, leaving the waiting sub-state
 
+### Requirement: Commit Step Runtime-Leak Denylist
+
+The `commit` step SHALL run a closed-set denylist guard between `git add -A` and `git commit` that soft-removes any staged path carrying an se3 runtime signature located outside the sole ignored runtime root `se3/`, then completes the commit normally — this guard is a regression backstop that MUST NEVER fail the step or block the flow.
+
+The guard rests on a fixed invariant: every se3 runtime artifact lands inside the single git-ignored runtime root `se3/` (no leading dot), specifically the closed set of subtrees under `se3/` that `/se3/*` ignores — `cache/`, `history/`, `logs/`, `state/`, `tmp/`, `worktrees/`, `calls/`, `collab/`. Because that set is finite and known, distinguishing a "runtime leak" from a real artifact degenerates to a **pure path judgement** — no content-based semantic classification is performed. Anything not in that closed set (`src/`, `tests/`, `pyproject.toml`, `README.md`, `VERSIONS.md`, and the whitelist-tracked `se3/specs/`, `se3/issues/`, `se3/scripts/`, `se3/prompts/`, `se3/version-rules.md` …) is normal working output and is committed as usual.
+
+**Detection (`_detect_runtime_leaks`, pure function):**
+- Input is the staged path list (repo-root-relative, posix-style, as emitted by `git diff --cached --name-only`); output is the subset that are leaks, returned verbatim and in input order.
+- A path whose **top-level** component is exactly `se3` is always exempt — it is either gitignored (`/se3/*`) or a whitelist-tracked artifact, hence normal output.
+- **Rule (A):** any path whose top-level component is `.se3` is a leak. The dotted runtime root is an illegitimate mistyped location covered by no gitignore rule and is never valid.
+- **Rule (B):** any path with a NON-top-level component equal to `se3` or `.se3` whose immediately following component is one of the closed-set runtime subtree names (`cache`, `history`, `logs`, `state`, `tmp`, `worktrees`, `calls`, `collab`) is a leak (e.g. `foo/se3/logs/x`, `.se3/archive/<slug>/se3/state/engine.json`).
+- Source code where `se3` is merely a package directory (`src/se3/engine/...`) is exempt because the component following `se3` is not a runtime subtree name.
+
+**Soft removal (scheme B):** the step takes the staged manifest (`git diff --cached --name-only`, `-z` preferred), feeds it to `_detect_runtime_leaks`, and for every hit runs `git restore --staged -- <paths>` (or an equivalent unstage) and logs the removed leak paths at WARNING level, then proceeds to `git commit` with the remaining legitimate staged content. The whole guard is fault-tolerant: any git-subprocess failure during detection or unstaging only warns and continues — it never returns `FAILED`.
+
+**Emptied-index edge case:** if soft-removal leaves nothing staged (the only working-tree change was a runtime leak outside `se3/`), the step treats this as a no-op success exactly like the upfront "no changes to commit" path — it rolls back any applied/staged version bump, sets `commit_hash` to `no-changes` and `committed` to `False`, and returns `COMPLETED` rather than letting `git commit` fail with "nothing to commit".
+
+#### Scenario: Stray `.se3/` runtime path is soft-removed before commit
+- **GIVEN** the working tree contains a legitimate change plus a stray runtime path under `.se3/archive/.../se3/state/engine.json`
+- **WHEN** the commit step runs after `git add -A`
+- **THEN** `_detect_runtime_leaks` flags the `.se3/...` path as a leak
+- **AND** the commit step unstages it via `git restore --staged` and logs a WARNING listing the removed path
+- **AND** the commit proceeds and includes the legitimate change but not the leaked runtime path
+- **AND** the step returns `COMPLETED` (it never fails or blocks the flow)
+
+#### Scenario: Whitelisted and top-level se3/ artifacts commit normally
+- **GIVEN** the staged set contains `se3/specs/foo/spec.md`, `se3/issues/open/x.yaml`, and `src/se3/engine/steps/commit.py`
+- **WHEN** the commit step runs the runtime-leak guard
+- **THEN** none of these paths is flagged as a leak (top-level `se3/` is exempt; `src/se3/...` is a package dir whose next component is not a runtime subtree name)
+- **AND** all of them are committed as usual
+
+#### Scenario: Index emptied by leak removal is treated as a no-op success
+- **GIVEN** the only working-tree change is a runtime leak located outside `se3/`
+- **WHEN** the commit step soft-removes it and the index becomes empty
+- **THEN** the step rolls back any applied version bump, sets `commit_hash` to `no-changes` and `committed` to `False`, and returns `COMPLETED` without invoking a failing `git commit`
+
 ## Architecture
 
 ### Core Components

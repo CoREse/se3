@@ -172,7 +172,7 @@ class CleanupReport:
     skipped_unknown_state: list[tuple[str, str]] = field(default_factory=list)
     # Archive metadata: for each branch successfully archived before
     # deletion, the path of the resulting archive directory under
-    # ``<project_root>/.se3/archive/``. The archive happens BEFORE the
+    # ``<project_root>/se3/worktrees/.archive/``. The archive happens BEFORE the
     # destructive worktree-remove / branch-delete steps so a failure
     # there preserves the branch + worktree (see ``skipped_archive_failed``).
     archived: list[tuple[str, Path]] = field(default_factory=list)
@@ -364,8 +364,15 @@ def _archive_worktree(
     branch: str,
     wt_path: Path,
 ) -> Path:
-    """Copy a worktree directory to ``.se3/archive/<slug>-<ts>/`` before
-    it is removed by ``delete_merged_branches``.
+    """Copy a worktree directory to ``se3/worktrees/.archive/<slug>-<ts>/``
+    before it is removed by ``delete_merged_branches``.
+
+    The archive lands inside the project's sole ignored runtime root,
+    ``se3/`` (no leading dot, covered by the ``/se3/*`` gitignore rule),
+    as a hidden ``.archive`` subdirectory of the existing
+    ``se3/worktrees/`` workspace — so a worktree archive can never leak
+    into git (the prior ``.se3/archive``落点 had no ignore rule covering
+    it and is the root cause this落点 change fixes).
 
     ``.git`` is intentionally excluded: in linked worktrees it is a
     file containing a gitdir pointer that would not be useful in the
@@ -376,7 +383,7 @@ def _archive_worktree(
 
     Args:
         project_root: The merge command's project root (parent of
-            ``.se3/archive/``).
+            ``se3/worktrees/.archive/``).
         branch: The branch whose worktree is being archived (used for
             the slug + recorded in ``.se3-archive-meta.json``).
         wt_path: Absolute path to the worktree directory on disk.
@@ -389,7 +396,7 @@ def _archive_worktree(
             MUST treat this as a hard archive failure and refuse to
             run the destructive worktree-remove / branch-delete step.
     """
-    archive_root = project_root / ".se3" / "archive"
+    archive_root = project_root / "se3" / "worktrees" / ".archive"
     archive_root.mkdir(parents=True, exist_ok=True)
 
     slug = re.sub(r"[^A-Za-z0-9._-]", "_", branch)
@@ -783,7 +790,7 @@ class CleanupManager:
             # here preserves the worktree + branch (the destructive ops
             # are skipped), so an operator can fix the underlying issue
             # (e.g. disk full) and re-run cleanup. The archive lives at
-            # ``<project_root>/.se3/archive/<slug>-<ts>/`` and includes
+            # ``<project_root>/se3/worktrees/.archive/<slug>-<ts>/`` and includes
             # tracked + untracked + ignored files (but not ``.git`` —
             # see ``_archive_worktree``).
             if has_wt and wt_path is not None and wt_path.exists():
@@ -794,7 +801,7 @@ class CleanupManager:
                     report.archived.append((branch, archive_path))
                 except (OSError, shutil.Error) as exc:
                     reason = (
-                        f"archive to .se3/archive/ failed: "
+                        f"archive to se3/worktrees/.archive/ failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
                     logger.warning(

@@ -5,8 +5,8 @@ When ``se3 merge`` is invoked without ``--delete-merged`` or
 
 * delete the merged branch (lowercase ``git branch -d``)
 * archive its bound worktree under
-  ``<project_root>/.se3/archive/<slug>-<ts>/`` before the destructive
-  removal.
+  ``<project_root>/se3/worktrees/.archive/<slug>-<ts>/`` before the
+  destructive removal.
 
 When ``--no-delete-merged`` is supplied, the branch and worktree are
 both preserved and no archive directory is created.
@@ -56,7 +56,7 @@ def _branch_exists(path: Path, name: str) -> bool:
 
 
 def _archive_dirs(path: Path) -> list[Path]:
-    archive_root = path / ".se3" / "archive"
+    archive_root = path / "se3" / "worktrees" / ".archive"
     if not archive_root.exists():
         return []
     return sorted(p for p in archive_root.iterdir() if p.is_dir())
@@ -72,7 +72,7 @@ def test_run_merge_default_deletes_branch_and_archives_worktree(
 ) -> None:
     """``run_merge`` without overriding ``delete_merged`` deletes the
     merged branch.  When the branch had a bound worktree, the worktree
-    is archived to ``.se3/archive/`` before deletion.
+    is archived to ``se3/worktrees/.archive/`` before deletion.
     """
     default = _init_repo(tmp_path)
     _make_feature_branch(tmp_path, "feature", "feat.txt")
@@ -101,12 +101,15 @@ def test_run_merge_default_deletes_branch_and_archives_worktree(
     assert exit_code == 0
     # Branch should be deleted by default now.
     assert _branch_exists(tmp_path, "feature") is False
-    # Archive should exist under .se3/archive/feature-<ts>/.
+    # Archive should exist under se3/worktrees/.archive/feature-<ts>/.
     archives = _archive_dirs(tmp_path)
-    assert archives, "expected an archive directory under .se3/archive/"
+    assert archives, (
+        "expected an archive directory under se3/worktrees/.archive/"
+    )
     archived_for_feature = [d for d in archives if d.name.startswith("feature-")]
     assert archived_for_feature, (
-        f"no feature-* archive found under .se3/archive/; saw: {archives}"
+        f"no feature-* archive found under se3/worktrees/.archive/; "
+        f"saw: {archives}"
     )
     # Worktree directory itself should be gone.
     assert not worktree_path.exists()

@@ -1,0 +1,74 @@
+se3.0/se3.local.yaml: 'agents.<name>.priority' is deprecated and ignored. Agent rotation order now follows the written order of 'llm_caller.defaults' / 'llm_caller.steps.<step>'. Remove the priority field(s) and order the name lists explicitly.
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[codex-runner] Running command: 'codex'
+2026-06-14T02:47:02.523060Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec406-861f-7092-ba66-f320d5689969.tmp-1781405222458646658: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'dclaude'
+[claude-runner] Command 'dclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+Self-check #1/2 entering fix with 1 issue(s) (fix iteration 0/100)
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[codex-runner] Running command: 'codex'
+2026-06-14T02:56:17.501299Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec40e-fe07-7521-aea8-b847f5181d93.tmp-1781405777436723682: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'dclaude'
+[claude-runner] Command 'dclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+Self-check #2/2 entering fix with 2 issue(s) (fix iteration 1/100)
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[codex-runner] Running command: 'codex'
+2026-06-14T03:09:38.943111Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec41b-38b2-7243-b2bd-17ac6ad14cd6.tmp-1781406578887355524: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'dclaude'
+[claude-runner] Command 'dclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+Self-check #2/2 entering fix with 1 issue(s) (fix iteration 2/100)
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[codex-runner] Running command: 'codex'
+2026-06-14T03:24:52.325260Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec429-2898-7af2-b1e8-0d1375611b73.tmp-1781407492272614796: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'dclaude'
+[claude-runner] Command 'dclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'miclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'miclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded

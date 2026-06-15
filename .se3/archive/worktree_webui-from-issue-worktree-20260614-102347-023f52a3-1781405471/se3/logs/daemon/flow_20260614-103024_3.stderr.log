@@ -1,0 +1,52 @@
+se3.0/se3.local.yaml: 'agents.<name>.priority' is deprecated and ignored. Agent rotation order now follows the written order of 'llm_caller.defaults' / 'llm_caller.steps.<step>'. Remove the priority field(s) and order the name lists explicitly.
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+Test timed out after 60s: /home/cre/.se3-stable/bin/python -m pytest -v
+primary test command timed out after 60s; retrying once in place before treating it as a failure (this retry does not count as a fix iteration).
+Test timed out after 60s: /home/cre/.se3-stable/bin/python -m pytest -v
+In-place retry of primary test command also timed out after 60s; treating it as a persistent timeout failure.
+Tests failed with new/introduced-regression failures
+Test timed out (timeout=60s, estimated=30.0, at_cap=False). Including timeout info in fix_context.
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[codex-runner] Running command: 'codex'
+Reading additional input from stdin...
+2026-06-14T02:43:16.110090Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec403-11b9-7d22-9ed5-cdab0862a415.tmp-1781404996052335821: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'dclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'dclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'miclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'miclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+Version aggregation no-op: current version 10.1.0 already matches target 10.1.0; aggregator did not run (pre_merge=10.0.0)

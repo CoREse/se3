@@ -1,0 +1,7 @@
+se3.0/se3.local.yaml: 'agents.<name>.priority' is deprecated and ignored. Agent rotation order now follows the written order of 'llm_caller.defaults' / 'llm_caller.steps.<step>'. Remove the priority field(s) and order the name lists explicitly.
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded

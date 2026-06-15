@@ -1,0 +1,45 @@
+se3.0/se3.local.yaml: 'agents.<name>.priority' is deprecated and ignored. Agent rotation order now follows the written order of 'llm_caller.defaults' / 'llm_caller.steps.<step>'. Remove the priority field(s) and order the name lists explicitly.
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[codex-runner] Running command: 'codex'
+2026-06-14T09:30:06.984774Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec577-8cb9-7e60-be4a-0ecc1209a5d4.tmp-1781429406926742016: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'dclaude'
+LLM call failed (other) on agent 'ds', attempting agent rotation...
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+[claude-runner] Command 'oclaude' succeeded
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'miclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'miclaude' succeeded
+se3.yaml version.bump_rules is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+se3.yaml version.smart_version_analysis is deprecated and ignored; remove it from your config (version decisions are now driven by version_analyze's suggested_version, optionally guided by se3/version-rules.md).
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded
+Version aggregation no-op: current version 10.1.3 already matches target 10.1.3; aggregator did not run (pre_merge=10.1.2)

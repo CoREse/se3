@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -15,6 +16,9 @@ from se3.engine.steps.commit import (
     _resolve_target_version,
     _collect_changes_from_flow,
     _collect_test_results_from_flow,
+    _detect_runtime_leaks,
+    _strip_runtime_leaks,
+    _index_has_staged_changes,
 )
 from se3.engine.version_bumper import BumpType, VersionBumper, VersionConfig
 
@@ -834,6 +838,260 @@ class TestCommitMessageBumpTypeDecoration:
         msg = _generate_commit_message(flow, step)
         subject = msg.split("\n", 1)[0]
         assert "bump)" not in subject
+
+
+def _init_git_repo(tmp_path: Path) -> Path:
+    """Initialise a minimal git repo with one commit; return its root."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "t@t"], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True,
+    )
+    (tmp_path / "README.md").write_text("init\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-q", "-m", "init"], check=True,
+    )
+    return tmp_path
+
+
+def _head_tree_files(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "show", "--name-only", "--pretty=format:", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+class TestDetectRuntimeLeaks:
+    """Pure-path table-driven tests for ``_detect_runtime_leaks``."""
+
+    @pytest.mark.parametrize(
+        "path,is_leak",
+        [
+            # Rule (A): top-level ``.se3`` is always a leak.
+            (".se3/archive/foo", True),
+            (".se3", True),
+            (".se3/tmp/scratch.json", True),
+            # Nested ``.se3`` carrying a runtime subtree (also rule A via top).
+            (".se3/archive/slug-123/se3/state/engine.json", True),
+            # Rule (B): non-top-level ``se3``/``.se3`` + runtime subtree child.
+            ("foo/se3/logs/x", True),
+            ("a/b/se3/cache/index", True),
+            ("a/b/.se3/tmp/scratch", True),
+            ("deep/nest/se3/worktrees/wt/file", True),
+            # Exempt: top-level ``se3/`` is the legitimate runtime root.
+            ("se3/state/x", False),
+            ("se3/specs/base/spec.md", False),
+            ("se3/issues/open/001.yaml", False),
+            ("se3/worktrees/.archive/x", False),
+            ("se3", False),
+            # Exempt: ``se3`` as a source package dir (child not a subtree).
+            ("src/se3/engine/steps/commit.py", False),
+            ("foo/se3/engine/x.py", False),
+            # Exempt: ordinary source / project files.
+            ("pyproject.toml", False),
+            ("README.md", False),
+            ("tests/test_commit.py", False),
+            # Exempt: a runtime-subtree name that is NOT preceded by se3/.se3.
+            ("logs/app.log", False),
+            ("foo/state/x", False),
+        ],
+    )
+    def test_detect(self, path: str, is_leak: bool) -> None:
+        result = _detect_runtime_leaks([path])
+        assert (result == [path]) is is_leak
+
+    def test_mixed_batch_filters_only_leaks(self) -> None:
+        paths = [
+            "src/se3/engine/steps/commit.py",  # exempt
+            ".se3/archive/x.json",             # leak
+            "se3/specs/base/spec.md",          # exempt
+            "foo/se3/logs/run.log",            # leak
+            "pyproject.toml",                  # exempt
+        ]
+        assert _detect_runtime_leaks(paths) == [
+            ".se3/archive/x.json",
+            "foo/se3/logs/run.log",
+        ]
+
+    def test_empty_and_blank_inputs(self) -> None:
+        assert _detect_runtime_leaks([]) == []
+        assert _detect_runtime_leaks(["", "  "]) == []
+
+    def test_no_subprocess_or_io(self) -> None:
+        """The detector must be a pure function — no subprocess use at all."""
+        with patch("se3.engine.steps.commit.subprocess") as mock_sub:
+            _detect_runtime_leaks([".se3/archive/x", "se3/state/y", "src/a.py"])
+        mock_sub.run.assert_not_called()
+
+
+class TestStripRuntimeLeaksFaultTolerance:
+    """``_strip_runtime_leaks`` is a backstop: it never raises."""
+
+    def test_non_git_directory_does_not_raise(self, tmp_path: Path) -> None:
+        # Not a git repo → ``git diff --cached`` returns non-zero → warn only.
+        _strip_runtime_leaks(tmp_path)  # must not raise
+
+    def test_list_subprocess_exception_swallowed(self, tmp_path: Path) -> None:
+        with patch(
+            "se3.engine.steps.commit.subprocess.run",
+            side_effect=OSError("boom"),
+        ):
+            _strip_runtime_leaks(tmp_path)  # must not raise
+
+    def test_unstage_subprocess_exception_swallowed(self, tmp_path: Path) -> None:
+        list_res = MagicMock(returncode=0, stdout=".se3/archive/x\0", stderr="")
+        with patch(
+            "se3.engine.steps.commit.subprocess.run",
+            side_effect=[list_res, OSError("restore boom")],
+        ):
+            _strip_runtime_leaks(tmp_path)  # must not raise
+
+
+class TestRuntimeLeakGuardIntegration:
+    """End-to-end commit_handler behaviour with the runtime-leak guard."""
+
+    def _run_commit(self, repo: Path, step: Step) -> StepStatus:
+        flow = _make_flow_with_state(
+            change_path=repo / "se3.yaml",
+            selected_steps=[
+                StepType.IMPLEMENT, StepType.COMMIT, StepType.SUMMARIZE,
+            ],
+        )
+        flow.baseline_commit = None
+        with patch(
+            "se3.engine.steps.commit._load_version_config",
+            return_value=_default_version_config(enabled=False),
+        ), patch(
+            "se3.engine.steps.commit._generate_commit_message",
+            return_value="feature: change",
+        ):
+            return commit_handler(step, flow)
+
+    def test_leak_unstaged_normal_artifact_committed(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        # A leaking runtime file outside se3/ (the .se3/ root-cause shape).
+        (repo / ".se3" / "archive").mkdir(parents=True)
+        (repo / ".se3" / "archive" / "x.json").write_text("{}\n")
+        # A normal source file and a legit whitelist-tracked se3/ artifact.
+        (repo / "src.py").write_text("print('x')\n")
+        (repo / "se3" / "specs" / "base").mkdir(parents=True)
+        (repo / "se3" / "specs" / "base" / "spec.md").write_text("# spec\n")
+
+        result = self._run_commit(repo, _make_step())
+        assert result == StepStatus.COMPLETED
+
+        tree = _head_tree_files(repo)
+        # Normal artifacts committed.
+        assert "src.py" in tree
+        assert "se3/specs/base/spec.md" in tree
+        # Leaked runtime path NOT committed.
+        assert ".se3/archive/x.json" not in tree
+        # Soft removal: the file stays on disk, just unstaged (untracked).
+        assert (repo / ".se3" / "archive" / "x.json").exists()
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain", "-uall"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        # The leaked file is untracked (git may report it as ?? .se3/ when
+        # collapsing the dir; -uall expands to the file).
+        assert ".se3/archive/x.json" in status
+
+    def test_no_leak_commits_everything(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        (repo / "src.py").write_text("print('ok')\n")
+        (repo / "se3" / "state").mkdir(parents=True)
+        (repo / "se3" / "state" / "engine.json").write_text("{}\n")
+
+        result = self._run_commit(repo, _make_step())
+        assert result == StepStatus.COMPLETED
+        tree = _head_tree_files(repo)
+        assert "src.py" in tree
+        # Top-level se3/ content is exempt from the guard (would normally be
+        # gitignored, but here we prove the guard does not strip it).
+        assert "se3/state/engine.json" in tree
+
+    def test_guard_git_failure_does_not_block_commit(self, tmp_path: Path) -> None:
+        """When the guard's git restore fails, the commit still completes."""
+        repo = _init_git_repo(tmp_path)
+        (repo / "src.py").write_text("x\n")
+
+        flow = _make_flow_with_state(
+            change_path=repo / "se3.yaml",
+            selected_steps=[StepType.COMMIT, StepType.SUMMARIZE],
+        )
+        flow.baseline_commit = None
+        with patch(
+            "se3.engine.steps.commit._load_version_config",
+            return_value=_default_version_config(enabled=False),
+        ), patch(
+            "se3.engine.steps.commit._generate_commit_message",
+            return_value="feature: change",
+        ), patch(
+            # Force the guard to target a path that is not actually staged so
+            # ``git restore --staged`` errors — the guard must only warn.
+            "se3.engine.steps.commit._detect_runtime_leaks",
+            return_value=["does/not/exist/se3/state/x"],
+        ):
+            result = commit_handler(_make_step(), flow)
+
+        assert result == StepStatus.COMPLETED
+        assert "src.py" in _head_tree_files(repo)
+
+    def test_only_leak_empties_index_no_op_success(self, tmp_path: Path) -> None:
+        """When the SOLE working-tree change is a runtime leak outside se3/,
+        stripping it empties the index. The commit step must treat this as a
+        clean no-op success, never failing the step (regression: stripping all
+        staged paths used to make ``git commit`` exit non-zero → FAILED)."""
+        repo = _init_git_repo(tmp_path)
+        # The only change is a stray runtime artifact leaking outside se3/.
+        (repo / ".se3" / "archive").mkdir(parents=True)
+        (repo / ".se3" / "archive" / "x.json").write_text("{}\n")
+
+        head_before = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        step = _make_step()
+        result = self._run_commit(repo, step)
+
+        # Soft backstop must not fail the step or abort the flow.
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["committed"] is False
+        assert step.outputs["commit_hash"] == "no-changes"
+        # No new commit was created.
+        head_after = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert head_after == head_before
+        # The leaked file stays on disk, just untracked.
+        assert (repo / ".se3" / "archive" / "x.json").exists()
+
+
+class TestIndexHasStagedChanges:
+    """``_index_has_staged_changes`` reports the post-strip index state."""
+
+    def test_empty_index_returns_false(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        assert _index_has_staged_changes(repo) is False
+
+    def test_staged_change_returns_true(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        (repo / "new.py").write_text("x\n")
+        subprocess.run(["git", "-C", str(repo), "add", "new.py"], check=True)
+        assert _index_has_staged_changes(repo) is True
+
+    def test_subprocess_error_assumes_changes(self, tmp_path: Path) -> None:
+        # Fault-tolerant: a git error must not short-circuit a real commit.
+        with patch(
+            "se3.engine.steps.commit.subprocess.run",
+            side_effect=OSError("boom"),
+        ):
+            assert _index_has_staged_changes(tmp_path) is True
 
 
 class TestCommitIdempotentVersionWrite:

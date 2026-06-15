@@ -18,6 +18,185 @@ from ..version_bumper import VersionBumper, VersionConfig
 
 logger = logging.getLogger(__name__)
 
+# The finite, known closed set of se3 runtime subtree names that live under
+# the project's sole ignored runtime root ``se3/`` (no leading dot) and are
+# covered by the ``/se3/*`` gitignore rule. Every se3 runtime artifact MUST
+# land inside ``se3/<subtree>/``; a path carrying one of these subtree names
+# but anchored OUTSIDE the top-level ``se3/`` root (e.g. under ``.se3/`` or a
+# nested ``foo/se3/logs/...``) is a runtime leak that should never be
+# committed. This is a pure-path signature — no content-based classification.
+_RUNTIME_SUBTREES = frozenset(
+    {"cache", "history", "logs", "state", "tmp", "worktrees", "calls", "collab"}
+)
+
+
+def _detect_runtime_leaks(staged_paths: list[str]) -> list[str]:
+    """Return staged paths that carry an se3 runtime signature outside ``se3/``.
+
+    Pure path判断, no IO. ``staged_paths`` are repo-root-relative, posix-style
+    paths (as emitted by ``git diff --cached --name-only``). A path is a leak
+    when:
+
+    * (A) its top-level component is ``.se3`` — the dotted runtime root is the
+      mistyped/illegitimate location that leaks (never gitignored), so any
+      path under it is a leak; OR
+    * (B) some NON-top-level component is ``se3`` or ``.se3`` and its
+      immediately following component is one of the closed-set runtime
+      subtree names in :data:`_RUNTIME_SUBTREES` (e.g. ``foo/se3/logs/x`` or
+      ``.se3/archive/<slug>/se3/state/engine.json``).
+
+    A path whose top-level component is exactly ``se3`` is always exempt —
+    it is either gitignored (``/se3/*``) or an explicitly whitelist-tracked
+    artifact (``se3/specs/``, ``se3/issues/`` …) and is normal working
+    output. Source code where ``se3`` is merely a package directory
+    (``src/se3/engine/...``) is also exempt because the component following
+    ``se3`` is not a runtime subtree name.
+
+    Args:
+        staged_paths: Repo-root-relative staged path strings.
+
+    Returns:
+        The subset of ``staged_paths`` identified as runtime leaks, in input
+        order (verbatim, so callers can pass them straight to ``git``).
+    """
+    leaks: list[str] = []
+    for raw in staged_paths:
+        path = raw.strip()
+        if not path:
+            continue
+        parts = [p for p in path.replace("\\", "/").split("/") if p and p != "."]
+        if not parts:
+            continue
+        top = parts[0]
+        # The legitimate runtime root is the top-level ``se3/`` — exempt.
+        if top == "se3":
+            continue
+        # Rule (A): a top-level ``.se3/`` is never legitimate.
+        if top == ".se3":
+            leaks.append(raw)
+            continue
+        # Rule (B): a non-top-level ``se3``/``.se3`` immediately followed by a
+        # known runtime subtree name.
+        for i in range(1, len(parts) - 1):
+            if parts[i] in ("se3", ".se3") and parts[i + 1] in _RUNTIME_SUBTREES:
+                leaks.append(raw)
+                break
+    return leaks
+
+
+def _strip_runtime_leaks(project_root: Path) -> bool:
+    """Soft-remove runtime-signature paths leaking outside ``se3/`` (scheme B).
+
+    Runs between ``git add -A`` and ``git commit``: reads the staged path
+    list, identifies leaks via :func:`_detect_runtime_leaks`, unstages them
+    (``git restore --staged``) and logs a WARNING. The commit then proceeds
+    with the remaining staged content.
+
+    This is a regression backstop, NOT a gate: every git subprocess here is
+    fault-tolerant — any failure (reading the staged list, unstaging) only
+    warns and lets the commit continue. It never raises and never causes the
+    commit step to fail.
+
+    Args:
+        project_root: Project root directory (git cwd).
+
+    Returns:
+        ``True`` if at least one leaked path was detected (and an unstage was
+        attempted), ``False`` otherwise. The caller uses this to decide
+        whether it needs to re-check for an emptied index (so that stripping
+        leaks never turns into a failed ``git commit``).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Runtime-leak guard: could not list staged paths (%s); "
+                "skipping leak check",
+                result.stderr.strip(),
+            )
+            return False
+        staged = [p for p in result.stdout.split("\0") if p]
+    except Exception as exc:
+        logger.warning(
+            "Runtime-leak guard: listing staged paths raised (%s); "
+            "skipping leak check",
+            exc,
+        )
+        return False
+
+    leaks = _detect_runtime_leaks(staged)
+    if not leaks:
+        return False
+
+    logger.warning(
+        "Runtime-leak guard: unstaging %d path(s) carrying an se3 runtime "
+        "signature outside the ignored se3/ root (soft-removed from this "
+        "commit): %s",
+        len(leaks),
+        ", ".join(sorted(leaks)),
+    )
+    try:
+        unstage = subprocess.run(
+            ["git", "restore", "--staged", "--", *leaks],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        if unstage.returncode != 0:
+            logger.warning(
+                "Runtime-leak guard: failed to unstage leaked paths (%s); "
+                "commit proceeds without removing them",
+                unstage.stderr.strip(),
+            )
+    except Exception as exc:
+        logger.warning(
+            "Runtime-leak guard: unstaging raised (%s); commit proceeds",
+            exc,
+        )
+    return True
+
+
+def _index_has_staged_changes(project_root: Path) -> bool:
+    """Return whether anything remains staged for the next commit.
+
+    Used after :func:`_strip_runtime_leaks` to detect the case where the only
+    staged content was runtime leaks — stripping them leaves an empty index,
+    which would otherwise make ``git commit`` fail with "nothing to commit".
+
+    Fault-tolerant: any subprocess error is treated as "assume there is
+    something to commit" (``True``) so the guard never short-circuits a
+    legitimate commit on a transient git error.
+
+    Args:
+        project_root: Project root directory (git cwd).
+
+    Returns:
+        ``True`` if the index has staged changes (or the check could not be
+        performed), ``False`` only when the index is confirmed empty.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        if result.returncode != 0:
+            return True
+        return any(p for p in result.stdout.split("\0") if p)
+    except Exception as exc:
+        logger.warning(
+            "Runtime-leak guard: post-strip index check raised (%s); "
+            "assuming there is something to commit",
+            exc,
+        )
+        return True
+
 
 def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the commit step.
@@ -176,6 +355,35 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 _rollback_version(version_bumper, version_file, original_version)
             step.error_message = f"Failed to stage changes: {result.stderr}"
             return StepStatus.FAILED
+
+        # Runtime-leak guard (scheme B, regression backstop): after staging
+        # the full tree, soft-remove any staged path that carries an se3
+        # runtime signature but lives OUTSIDE the sole ignored runtime root
+        # ``se3/`` (e.g. a stray ``.se3/archive/...``). Such paths are
+        # unstaged and a WARNING is logged; the commit then proceeds with the
+        # remaining (legitimate) staged content. Entirely fault-tolerant — it
+        # never blocks or fails the commit.
+        stripped_leaks = _strip_runtime_leaks(project_root)
+
+        # If stripping leaks emptied the index (the only working-tree change
+        # was a runtime leak outside se3/), there is nothing legitimate left
+        # to commit. The leak guard is a soft backstop — it must never turn a
+        # commit into a failure. Treat this exactly like the upfront "No
+        # changes to commit" no-op path rather than letting ``git commit`` fail
+        # with "nothing to commit".
+        if stripped_leaks and not _index_has_staged_changes(project_root):
+            logger.info(
+                "Runtime-leak guard: all staged changes were runtime leaks "
+                "outside se3/; nothing left to commit (treating as no-op "
+                "success)"
+            )
+            # Roll back any version bump that was applied/staged — it will not
+            # be committed, so the version file must not be left dirty.
+            if version_bumped and version_bumper and version_file and original_version:
+                _rollback_version(version_bumper, version_file, original_version)
+            step.outputs["commit_hash"] = "no-changes"
+            step.outputs["committed"] = False
+            return StepStatus.COMPLETED
 
         # Commit
         result = subprocess.run(

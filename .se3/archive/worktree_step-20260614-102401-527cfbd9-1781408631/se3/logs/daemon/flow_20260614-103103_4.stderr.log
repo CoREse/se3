@@ -1,0 +1,9 @@
+se3.0/se3.local.yaml: 'agents.<name>.priority' is deprecated and ignored. Agent rotation order now follows the written order of 'llm_caller.defaults' / 'llm_caller.steps.<step>'. Remove the priority field(s) and order the name lists explicitly.
+[codex-runner] Running command: 'codex'
+Reading additional input from stdin...
+2026-06-14T02:31:04.345215Z ERROR codex_core::shell_snapshot: Shell snapshot validation failed: Snapshot command exited with status exit status: 2: /home/cre/.codex/shell_snapshots/019ec3f7-e743-7e00-aa45-6d02bbd3cf78.tmp-1781404264289946977: line 614: syntax error near unexpected token `('
+
+LLM call failed (usage_limit) on agent 'codex', attempting agent rotation...
+[claude-runner] Running command: 'oclaude'
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+[claude-runner] Command 'oclaude' succeeded

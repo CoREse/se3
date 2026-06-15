@@ -1,9 +1,11 @@
 """Tests for ``--delete-merged`` archive-before-delete behavior.
 
 Commit 5 (this file): every successful deletion archives the worktree
-under ``<project_root>/.se3/archive/<slug>-<ts>/`` BEFORE running
+under ``<project_root>/se3/worktrees/.archive/<slug>-<ts>/`` BEFORE running
 ``git worktree remove`` + ``git branch -d``. Archive failures preserve
-the worktree + branch so an operator can recover.
+the worktree + branch so an operator can recover. The archive lands inside
+the sole ignored runtime root ``se3/`` (covered by ``/se3/*``) so it can
+never leak into git.
 
 Archive is strategy-agnostic — these tests use the default robust
 strategy but exercise the cleanup behavior directly via
@@ -110,7 +112,14 @@ class TestArchiveWorktreeHelper:
         )
         archive_path = _archive_worktree(tmp_path, branch, wt_path)
         assert archive_path.is_dir()
-        assert archive_path.parent.name == "archive"
+        # New落点: archive is the hidden ``.archive`` subdir of se3/worktrees/.
+        assert archive_path.parent.name == ".archive"
+        # The whole archive path is anchored inside the ignored runtime root
+        # ``se3/worktrees/.archive`` — never under a leaking ``.se3/``.
+        assert archive_path.parent == tmp_path / "se3" / "worktrees" / ".archive"
+        rel = archive_path.relative_to(tmp_path)
+        assert rel.parts[:3] == ("se3", "worktrees", ".archive")
+        assert ".se3" not in rel.parts
         # Tracked file present in archive
         assert (archive_path / "tracked.py").exists()
         # Untracked file present
@@ -166,6 +175,10 @@ class TestCleanupArchiveIntegration:
         archived_branch, archive_path = report.archived[0]
         assert archived_branch == branch
         assert archive_path.exists()
+        # Archive lands inside the ignored runtime root se3/worktrees/.archive,
+        # not a leaking .se3/.
+        assert archive_path.parent == tmp_path / "se3" / "worktrees" / ".archive"
+        assert ".se3" not in archive_path.relative_to(tmp_path).parts
         # Archive contains tracked content
         assert (archive_path / "tracked.py").exists()
         # Worktree is gone, branch is gone
