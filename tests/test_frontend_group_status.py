@@ -70,6 +70,15 @@ def test_frontend_group_status_node_suite_passes():
         "G4 normalizeRecord recognizes group_status",
         "G4 groupStatusLabel covers every status",
         "G4 group_status renders a .group-status-marker",
+        # The (step_id, group_id) composite convergence — the regression fix:
+        # one in-place card per group, distinct groups independent, terminal
+        # supersedes running, and incremental append stays a single card.
+        "G4 successive group states converge to one in-place card",
+        "G4 three running records of one (step_id, group_id) collapse to one card",
+        "G4 different group_ids keep independent cards",
+        "G4 same group_id under different step_ids does not fold across steps",
+        "G4 completed terminal card supersedes the group",
+        "G4 incremental append of further same-group records stays one card",
     ):
         assert needle in combined, (
             f"expected G4 check {needle!r} in node output:\n{combined}"

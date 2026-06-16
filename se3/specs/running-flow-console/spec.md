@@ -3230,6 +3230,24 @@ when a record carries no agent/model the marker shows no badge or placeholder,
 and the marker remains affordance-free and in strict chronological order
 regardless.
 
+**Single-card convergence per group.** "Reflected in place" is a hard
+single-card invariant, not a visual approximation: a group is uniquely
+identified by the composite key `(step_id, group_id)`, and over its entire
+lifecycle that group MUST render exactly **one** status marker. Because a
+single `implement` step contains several groups that all share one `step_id`,
+the console MUST converge markers on the composite `(step_id, group_id)` key —
+never on `step_id` alone, which would wrongly fold distinct groups into one
+card. As each later `group_status` record for the group arrives (group launch →
+agent selected → real model parsed → terminal), the marker is updated in place
+rather than stacked: the surviving card is the group's latest record, which
+already carries the accumulated `agent` / `model` identity, so retaining it is
+equivalent to upgrading the original card's badge to `agent · model` in place.
+A terminal record (`completed` / `failed` / `skipped`) supersedes that group's
+prior non-terminal `running` card. Distinct groups carry distinct composite
+keys and therefore keep independent cards that are never folded into one
+another, even though they share a `step_id` — and a `group_id` reused under a
+different `step_id` likewise stays independent.
+
 These markers MUST obey the existing *Conversation Strict Chronological Order*
 contract: they are placed by their `(timestamp, original-index)` key like every
 other in-stream record and MUST NOT shuffle other records out of timestamp
@@ -3269,6 +3287,32 @@ pre-empt that final content.
 - **AND** a `group_status` record carrying no agent/model renders its status
   marker with no badge or placeholder, and the marker stays affordance-free and
   in strict chronological order
+
+#### Scenario: Successive group_status records for one group converge to a single in-place-updated card
+- **GIVEN** an `implement` step whose jsonl emits, for a single group, the
+  natural sequence of `status: "running"` `group_status` records — first at
+  launch with no agent and no model, then with an `agent_name` only, then with
+  both `agent_name` and `model_name`
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** the group (identified by its `(step_id, group_id)` composite key)
+  renders exactly **one** status marker — not two or three stacked cards — and
+  the surviving card is the latest record, so it carries the accumulated
+  `agent · model` badge while the launch-only and agent-only cards are folded
+  away
+- **AND** when a terminal `completed` / `failed` / `skipped` record later
+  arrives for that group, the terminal card supersedes the group's prior
+  non-terminal `running` card, still leaving exactly one marker for the group
+
+#### Scenario: Distinct groups under one implement step keep independent cards
+- **GIVEN** an `implement` step in which several groups (e.g. G1, G2, G3) all
+  share the same `step_id` but carry different `group_id` values, each emitting
+  its own `group_status` records
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** each group keeps its own independent status marker keyed on the full
+  `(step_id, group_id)` composite key, and the convergence pass MUST NOT fold
+  distinct groups into one card merely because they share a `step_id`
+- **AND** a `group_id` reused under a different `step_id` is treated as a
+  separate group and likewise retains its own independent card
 
 #### Scenario: Status markers advance before the step ends
 - **GIVEN** a DAG-parallel implement step still in progress whose groups are

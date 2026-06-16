@@ -5092,6 +5092,25 @@ function addConversationRecords(container, st, records, startIndex) {
     // stale 已暂停) alongside its completed report.
     bubble.__convTerminalRow = !!(
       norm && (norm.kind === "step_completed" || norm.kind === "step_failed"));
+    // Tag per-group DAG status markers with a (step_id, group_id) composite
+    // identity. A group emits several `group_status` records over its lifetime
+    // (running w/o model → running w/ agent → running w/ agent·model →
+    // completed/failed), all sharing one (step_id, group_id); they must
+    // converge to a SINGLE card that updates in place. removeSupersededStatusRows
+    // can't do this — it keys on step_id alone, and many groups of one implement
+    // step share a step_id, so it would wrongly fold distinct groups together.
+    // removeSupersededGroupStatusRows reconciles per composite key instead, so
+    // each group keeps its own card while successive records for the SAME group
+    // (which carry the accumulated agent/model) supersede the older one in place.
+    if (norm && norm.kind === "group_status") {
+      const gStatus = String(norm.status || "").toLowerCase();
+      bubble.__convGroupStatusRow = true;
+      bubble.__convGroupId = norm.groupId || "";
+      bubble.__convGroupStatusKey =
+        String(norm.stepId || stepKey(norm)) + "#" + (norm.groupId || "");
+      bubble.__convGroupStatusTerminal =
+        ["completed", "failed", "skipped"].includes(gStatus);
+    }
     insertBubbleSorted(container, bubble);
   }
   // Advance the cursor before the (stateless) header rebuild so the count is
@@ -5105,7 +5124,62 @@ function addConversationRecords(container, st, records, startIndex) {
   // (folds / raw toggles / chips) on surviving bubbles are untouched.
   removeSupersededProgress(container, records);
   removeSupersededStatusRows(container);
+  removeSupersededGroupStatusRows(container);
   rebuildStepHeaders(container);
+}
+
+// Reconcile per-group DAG status markers so each group (uniquely identified by
+// its (step_id, group_id) composite key, `__convGroupStatusKey`) keeps exactly
+// ONE card that updates in place, while distinct groups stay independent.
+//
+// A group emits several `group_status` records as it advances (running w/o model
+// → running w/ agent → running w/ agent·model → completed/failed). Because each
+// later record carries the accumulated agent/model identity, keeping only the
+// LATEST record's card is visually equivalent to "upgrading the badge in place
+// from agent → agent · model" — the original stacking bug (a model-less running
+// card + an agent card + an agent·model card all piled up) disappears.
+//
+// This is deliberately a SEPARATE pass from removeSupersededStatusRows: that one
+// keys on step_id (`__convStepKey`) alone, but many groups of one implement step
+// share a single step_id, so folding by step_id would collapse different groups
+// into one card. Here we bucket by the (step_id, group_id) composite key so
+// different group_ids — and the same group_id under different step_ids — never
+// fold together. Within a bucket the terminal card (completed/failed/skipped) is
+// preferred (so a terminal report replaces the group's earlier running card even
+// if records arrive out of order); otherwise the latest by (__convTs, __convIdx)
+// wins. Only group_status markers are touched — every other record, step status
+// row and report card is left exactly as-is. Markers are affordance-free, so
+// removing them never disturbs surrounding fold / raw / chip state.
+function removeSupersededGroupStatusRows(container) {
+  const markers = Array.from(container.children).filter(
+    (c) => c.__convGroupStatusRow === true);
+  const byKey = new Map();
+  for (const c of markers) {
+    let arr = byKey.get(c.__convGroupStatusKey);
+    if (!arr) { arr = []; byKey.set(c.__convGroupStatusKey, arr); }
+    arr.push(c);
+  }
+  const newer = (a, b) =>
+    a.__convTs > b.__convTs
+    || (a.__convTs === b.__convTs && a.__convIdx > b.__convIdx);
+  const toRemove = [];
+  for (const arr of byKey.values()) {
+    if (arr.length < 2) continue;
+    let keep = null;
+    for (const c of arr) {
+      if (!keep) { keep = c; continue; }
+      const keepTerminal = !!keep.__convGroupStatusTerminal;
+      const cTerminal = !!c.__convGroupStatusTerminal;
+      // Prefer a terminal card; among equals (both terminal or both not), keep
+      // the latest by (ts, idx).
+      if (cTerminal && !keepTerminal) keep = c;
+      else if (cTerminal === keepTerminal && newer(c, keep)) keep = c;
+    }
+    for (const c of arr) {
+      if (c !== keep) toRemove.push(c);
+    }
+  }
+  for (const c of toRemove) container.removeChild(c);
 }
 
 // For each step region (keyed by `__convStepKey`), reconcile the lifecycle
@@ -8021,9 +8095,13 @@ function renderGroupStatusRecord(norm) {
   // shows the same `agent` / `agent · model` text as other LLM steps. Reuses
   // formatAgentBadgeText so the format never drifts from the chat-bubble badge,
   // and renders nothing for legacy records lacking these fields (no placeholder).
-  // As successive group_status records arrive for the same group, the marker is
-  // replaced in place by addConversationRecords, so the badge upgrades from
-  // agent → agent · model and across retries/rotations without reordering.
+  // Each group_status record renders its own marker; addConversationRecords'
+  // removeSupersededGroupStatusRows pass then folds all markers sharing one
+  // (step_id, group_id) composite key down to a single card — keeping the
+  // latest (terminal-preferred) one. Because later records carry the
+  // accumulated agent/model, that surviving card shows the upgraded
+  // agent → agent · model badge, achieving an in-place update across
+  // retries/rotations without stacking duplicate cards or reordering.
   const badgeText = formatAgentBadgeText(norm.agentName, norm.modelName);
   if (badgeText) {
     const badge = el("span", "agent-badge group-status-agent", badgeText);
