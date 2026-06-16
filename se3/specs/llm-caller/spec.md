@@ -127,6 +127,20 @@ The read-only decision uses the same `is_step_read_only(step_type)` classifier a
 - **THEN** no read-only restriction is added by either runner, so the step retains its full default tool set
 - **AND** `sync_resolve` in particular keeps `Edit` so its Way-A path can modify `se3/specs/<name>/spec.md` in place
 
+#### Scenario: Non-exempt step injects the spec-write PreToolUse hook via a controlled settings file
+- **GIVEN** a writable step whose `step_type` is not in `context_builder.SPEC_WRITE_ALLOWED_STEPS` (i.e., any step other than `update_spec` and the four sync steps `sync_scan` / `sync_analyze` / `sync_resolve` / `sync_respond`)
+- **AND** `config.spec_write_protection.hook_enabled` is set
+- **WHEN** the caller builds the agent-runner args
+- **THEN** the caller passes a `spec_guard_settings` intent — the path returned by `spec_write_hook.ensure_guard_settings(project_root)`, a controlled settings file carrying a single `PreToolUse` hook matching `Write|Edit|NotebookEdit` whose command is the `se3.engine.spec_write_hook` entry point — into `build_call_args`, causing `ClaudeCodeRunner` to append `--settings <controlled file>`
+- **AND** the hook denies any `Write` / `Edit` / `NotebookEdit` whose target resolves under `<cwd>/se3/specs/`, and (because a PreToolUse hook is NOT suppressed by `--dangerously-skip-permissions`) the denial cannot be bypassed
+- **AND** `setting_sources` keeps its isolated default (`user`); the protection is delivered additively via `--settings`, never by switching to `--setting-sources project`
+
+#### Scenario: update_spec and sync steps do not inject the spec-write hook
+- **GIVEN** a step in `SPEC_WRITE_ALLOWED_STEPS` — `update_spec` or any of `sync_scan` / `sync_analyze` / `sync_resolve` / `sync_respond`
+- **WHEN** the caller builds the agent-runner args
+- **THEN** no `spec_guard_settings` intent is passed and no spec-write hook is injected, so the step (in particular `sync_resolve` and `sync_respond`, which write spec back via Way-A `Edit`) can modify `se3/specs/<name>/spec.md` unimpeded
+- **AND** the enable decision reuses `context_builder.SPEC_WRITE_ALLOWED_STEPS` so the hook layer can never diverge from the soft and fallback layers
+
 ### Requirement: JSON Mode Resolution and Dispatch
 
 `call()` accepts both legacy boolean flags (`require_json`, `two_phase_json`) and an explicit `json_mode` string. Resolution priority is: explicit `json_mode` > `two_phase_json` > `require_json` > `"off"`. Unknown explicit modes fall back to `"off"` with a warning.

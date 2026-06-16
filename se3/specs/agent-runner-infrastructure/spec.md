@@ -89,6 +89,13 @@ The subsystem MUST define a `RunResult` dataclass that bundles the outcome of an
 - **AND** when `read_only` is true it appends `--disallowedTools Write Edit NotebookEdit AskUserQuestion` (tool-layer read-only enforcement), leaving the read tools `Read` / `Grep` / `Glob` / `Bash` available
 - **AND** when `read_only` is false no `--disallowedTools` argument is added
 
+#### Scenario: spec_guard_settings intent appends `--settings`
+- **GIVEN** `build_call_args` additionally accepts a `spec_guard_settings` intent (the controlled settings-file path requested by the caller for spec-write protection)
+- **WHEN** `spec_guard_settings` is non-empty
+- **THEN** `ClaudeCodeRunner` appends `--settings <path>` to the argv, additively loading the PreToolUse hook that denies writes under `se3/specs/**` — a denial NOT suppressed by `--dangerously-skip-permissions`
+- **AND** when `spec_guard_settings` is empty the argv is byte-for-byte identical to the prior form (no `--settings` added)
+- **AND** `CodexRunner` ignores the `spec_guard_settings` intent (its sandboxing is handled separately)
+
 ### Requirement: Codex CLI Runner
 
 `CodexRunner` (`src/se3/codex_runner.py`) MUST implement the `AgentRunner` ABC (`run`, `run_with_monitor`, `build_call_args`, `detect_infra_error`) to wrap a single OpenAI Codex CLI command, registered for `type: codex` agents via `LLMCaller._create_runner`. Like `ClaudeCodeRunner` it wraps exactly one command per instance and performs no rotation/fallback internally. The runner's design split mirrors the subsystem's principle: the LLM-agnostic transport (stream-json NDJSON, history, retry-context) is shared, while the Codex-specific argv construction and event parsing live entirely inside this runner. Authentication is out of scope — the `codex` command is assumed to be runnable in the environment, the same assumption made for `claude`.

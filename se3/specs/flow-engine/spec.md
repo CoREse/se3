@@ -799,6 +799,61 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 - **THEN** `get_spec_names_injection(step_type, project_root, relevant_specs)` returns an empty string
 - **AND** even when `se3.yaml` explicitly lists the step in `spec_names_injection.steps`, the FORBIDDEN set takes precedence and the return remains empty
 
+### Requirement: Spec File Write Protection (Soft Injection + Within-Flow Diff Guard)
+
+The flow engine SHALL prevent any step other than `update_spec` and the `se3 sync` steps from creating, modifying, or deleting files under `se3/specs/`, closing the governance gap whereby a non-`update_spec` step could write spec files and thereby inject undrafted, ungoverned content into the spec index that this flow's later steps consume. This protection governs **only who may write spec files** — it deliberately does NOT constrain **whether implementation may change existing behavior**. Changing behavior and writing a spec file are two different things: the former is allowed and is handled by the existing lenient mechanism (`plan` declares structured `spec_changes`, `verify_spec` classifies deviations matching a planned `spec_change` as `out_of_scope`/`low` rather than a regression, and `update_spec` writes the new behavior back into the spec); the write protection added here MUST NOT alter or weaken that lenient mechanism.
+
+**Single derived exemption set.** All layers of this protection consult one authoritative constant in `context_builder.py`, `SPEC_WRITE_ALLOWED_STEPS`, which is *derived* from the authoritative sync-step constants rather than hand-enumerated, so the exemption set cannot drift:
+
+```
+_READ_ONLY_SYNC_STEPS = {"sync_scan", "sync_analyze"}        # existing read-path sync steps
+_WRITABLE_SYNC_STEPS  = {"sync_resolve", "sync_respond"}     # sync steps that write spec via llm_caller (Way-A Edit)
+_ALL_SYNC_STEPS       = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
+SPEC_WRITE_ALLOWED_STEPS = {"update_spec"} | _ALL_SYNC_STEPS
+```
+
+Any future sync step that writes spec MUST be registered in `_WRITABLE_SYNC_STEPS` (alongside the read-path set it already belongs next to), which automatically enrolls it in every layer's exemption. This derivation roots out the prior class of defect where a hand-listed exemption set silently omitted `sync_respond`.
+
+**Soft layer — reusable prompt injection.** `context_builder.get_spec_write_protection_injection(step_type)` returns a non-empty constraint fragment for every step that is, per `STEP_POOL`, `uses_llm=True` and `read_only=False` and whose `step_type` is not in `SPEC_WRITE_ALLOWED_STEPS`; otherwise it returns an empty string. It is appended by `LLMCaller.call()` at the same site as `get_read_only_injection`, mirroring the existing injection call sites. By construction it currently covers `implement` (all three of `IMPLEMENT_PROMPT` / `IMPLEMENT_GROUP_PROMPT` / `FIX_PROMPT`), `plan_tasks`, `propose`, and `design`, and auto-covers any future non-read-only LLM step across the `feature` / `discovery` / `bugfix` / `small` / `directive` flows. The sync steps are not in `STEP_POOL` at all, so the soft layer never injects into them regardless of the constant; the `SPEC_WRITE_ALLOWED_STEPS` exclusion is a redundant double-guard at the soft layer (the constant is *consumed* decisively only by the hook and diff layers). The injected wording SHALL:
+- explicitly state that the step MAY change existing behavior;
+- mark `se3/specs/**` as read-only and writing spec files as the sole responsibility of `update_spec` / `se3 sync`;
+- forbid creating / modifying / deleting spec files via `Write` / `Edit` / `NotebookEdit` or via `Bash` (`>`, `sed`, `tee`, etc.);
+- instruct that if this change alters existing behavior or needs a spec change, the step only notes it in its `summary`, leaving the `plan.spec_changes` → `verify_spec` → `update_spec` channel to handle it;
+- avoid any rejected spec-driven framing (it MUST NOT say "must comply with the spec" or "must not change recorded behavior").
+
+**Plan-specific constraint.** `plan` is itself `read_only: true` (so it cannot write spec files), but it is the upstream culprit because it can bake a "write spec files" intent into the implementation tasks it produces. `plan.py` therefore carries a dedicated section (alongside `SPEC_CHANGES_SECTION`) stating that the generated implementation tasks / groups MUST NOT instruct any downstream step (especially `implement`) to create / modify / delete files under `se3/specs/`, while simultaneously continuing to (and being encouraged to) declare expected spec/behavior changes through the structured `spec_changes` output — which is consumed only by `update_spec` and feeds `verify_spec`'s lenient classification. The constraint forbids "instructing downstream to write spec files"; it MUST NOT suppress "declaring `spec_changes` intent". Its wording also avoids the rejected anti-regression framing.
+
+**Within-flow spec-diff fallback guard.** In `state_machine.run_step`, for every step whose `step_type` is not in `SPEC_WRITE_ALLOWED_STEPS` (and when `spec_write_protection.diff_fallback_enabled` is set), the engine snapshots the content hashes of all `se3/specs/**` files before the handler runs and compares them afterward; if any spec file changed (in particular a change that bypassed the PreToolUse hook via `Bash`), the step is marked `FAILED` with an error message naming the offending step and the changed files. This guard reuses the spec enumeration / hashing capability of `spec_gate` but is computed per-step (not the flow-level `spec_requirement_baseline`). It tests **only whether a spec file was written** — it is orthogonal to and does NOT perceive or change `verify_spec`'s `in_scope` / `out_of_scope` classification; `update_spec` and all sync steps are skipped because they are in `SPEC_WRITE_ALLOWED_STEPS`.
+
+The hard layer's runtime enforcement (the PreToolUse hook injected via a controlled `--settings` file, and the `--settings` argv wiring) is specified by the llm-caller spec (*Tool-Layer Read-Only Enforcement*) and the agent-runner-infrastructure spec (*ClaudeCodeRunner Argument Construction*); its enable decision reuses the same `SPEC_WRITE_ALLOWED_STEPS`. Both hard sub-layers default on and are gated by `spec_write_protection` (see the se3-config spec).
+
+#### Scenario: Non-read-only LLM step receives the spec-write-protection injection
+- **WHEN** `LLMCaller` builds the prompt for a step that is `uses_llm=True`, `read_only=False`, and not in `SPEC_WRITE_ALLOWED_STEPS` (e.g., `implement`, `plan_tasks`, `propose`, `design`)
+- **THEN** `get_spec_write_protection_injection(step_type)` returns a non-empty fragment and it is appended to the prompt
+- **AND** the fragment allows changing existing behavior while marking `se3/specs/**` read-only and writing spec files the responsibility of `update_spec` / `se3 sync`
+- **AND** the fragment contains no rejected spec-driven framing phrase
+
+#### Scenario: update_spec and sync steps receive no spec-write-protection injection
+- **WHEN** the step is `update_spec` or any step in `SPEC_WRITE_ALLOWED_STEPS`
+- **THEN** `get_spec_write_protection_injection(step_type)` returns an empty string and the step may write `se3/specs/**` files
+
+#### Scenario: Plan forbids routing spec writes downstream but keeps spec_changes
+- **WHEN** the `plan` step builds its prompt at any depth
+- **THEN** the prompt instructs that generated implementation tasks/groups MUST NOT direct any downstream step to create/modify/delete `se3/specs/` files
+- **AND** the prompt continues to require the structured `spec_changes` declaration of expected spec/behavior changes
+
+#### Scenario: Within-flow spec-diff fails a non-exempt step that wrote a spec file
+- **GIVEN** a step not in `SPEC_WRITE_ALLOWED_STEPS` runs with `diff_fallback_enabled` set
+- **WHEN** the step's handler changes any file under `se3/specs/**` (for example via a `Bash` redirect that bypassed the PreToolUse hook)
+- **THEN** the engine detects the change by per-step content-hash comparison and marks the step `FAILED`, naming the step and the changed files
+- **AND** this verdict is independent of `verify_spec`'s `in_scope` / `out_of_scope` classification
+
+#### Scenario: Behavior-change channel is not impeded by the write protection
+- **GIVEN** a flow that intentionally changes existing behavior and whose `plan` declared the corresponding `spec_changes`
+- **WHEN** the flow runs through `implement` → `verify_spec` → `update_spec`
+- **THEN** `verify_spec` still classifies the planned deviation as `out_of_scope` (not an `in_scope` failure) and the flow passes
+- **AND** `update_spec` writes the new behavior back into the spec without being blocked by any soft or hard guard added here
+
 ### Requirement: Runtime Environment Capabilities Injection
 
 The flow engine SHALL inject a fixed `## se3 Runtime Environment` section into the LLM sub-process prompt of designated downstream steps, advertising the se3-tool-provided **read-only capabilities the LLM MAY proactively invoke** (history / issue inspection) and a **write-operation guardrail blacklist** of commands the LLM MUST NOT proactively invoke. This makes downstream LLM sub-processes aware of the se3 capabilities available in the host project so they can (a) inspect prior session history when the user references "the previous session / last run / history", (b) consult related issue context when the task touches an existing issue, and (c) refrain from accidentally invoking destructive write operations (`merge` / `salvage` / `sync` / etc.) merely because those commands exist.

@@ -56,6 +56,16 @@
 
 
 
+
+## 10.4.0 - 2026-06-16
+
+- Add PreToolUse hook that blocks Write/Edit/NotebookEdit on se3/specs/** for non-exempt steps (update_spec and sync steps exempt)
+- Add within-flow spec-diff fallback guard that detects Bash-bypassed spec writes and fails the step
+- Add reusable spec-write-protection prompt injection auto-applied to all non-read-only LLM steps except update_spec and sync
+- Add plan-specific constraint preventing downstream tasks from writing spec files while preserving spec_changes declarations
+- Add spec_write_protection config section with hook_enabled and diff_fallback_enabled options (both default True)
+- Preserve behavior-change channel: plan.spec_changes → verify_spec lenient judgment → update_spec write remains fully operational
+- Add comprehensive test coverage for all guard layers and behavior-change channel regression
 ## 10.3.2 - 2026-06-16
 
 - Fix implement step group_status cards stacking 2–3 duplicates per group in the WebUI live console

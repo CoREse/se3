@@ -515,12 +515,16 @@ class StateMachine:
         # verify_spec's in_scope/out_of_scope judgement and never inspects spec
         # content semantics. ``update_spec`` and every sync step are exempt via
         # the shared SPEC_WRITE_ALLOWED_STEPS set (see _spec_diff_guard_enabled).
-        spec_guard_before: Optional[Dict[str, str]] = None
+        # We capture full byte content (not just hashes) so the post-step guard
+        # can REVERT an illegal write, not merely flag it — a left-on-disk spec
+        # change would otherwise survive a later `se3 run --resume` and leak
+        # through to commit.
+        spec_guard_before: Optional[Dict[str, bytes]] = None
         if self._spec_diff_guard_enabled(step):
             try:
-                from .spec_write_hook import snapshot_spec_files
+                from .spec_write_hook import capture_spec_contents
 
-                spec_guard_before = snapshot_spec_files(self.project_root)
+                spec_guard_before = capture_spec_contents(self.project_root)
             except Exception:
                 logger.debug(
                     "Failed to snapshot specs before step '%s'",
@@ -575,14 +579,35 @@ class StateMachine:
             if spec_guard_before is not None and step.status != StepStatus.FAILED:
                 try:
                     from .spec_write_hook import (
-                        snapshot_spec_files,
+                        capture_spec_contents,
                         diff_spec_files,
+                        restore_spec_files,
                     )
 
-                    spec_guard_after = snapshot_spec_files(self.project_root)
+                    spec_guard_after = capture_spec_contents(self.project_root)
                     changed = diff_spec_files(spec_guard_before, spec_guard_after)
                     if changed:
                         step.status = StepStatus.FAILED
+                        # Revert the illegal write so it cannot persist on disk:
+                        # restore each touched file to its pre-step content (or
+                        # delete a newly-created one). Without this, a left-on-disk
+                        # spec change survives a later `se3 run --resume` (the
+                        # resumed pre-step snapshot already holds the tampered
+                        # content, the re-run diffs clean, and the change reaches
+                        # commit).
+                        revert_failed = restore_spec_files(
+                            self.project_root, spec_guard_before, changed
+                        )
+                        revert_note = (
+                            " The illegal spec change has been reverted to its "
+                            "pre-step state."
+                            if not revert_failed
+                            else (
+                                " WARNING: could not revert spec file(s): "
+                                f"{', '.join(revert_failed)}; remove the change "
+                                "manually before continuing."
+                            )
+                        )
                         step.error_message = (
                             f"Step '{step.step_type.value}' illegally modified "
                             f"spec file(s) under se3/specs/: "
@@ -593,7 +618,7 @@ class StateMachine:
                             f"behavior IS allowed — declare any needed spec "
                             f"change through the plan spec_changes channel "
                             f"(handled by verify_spec / update_spec) rather than "
-                            f"editing spec files in this step."
+                            f"editing spec files in this step." + revert_note
                         )
                         logger.error(step.error_message)
                 except Exception:

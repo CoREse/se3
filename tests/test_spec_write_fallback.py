@@ -92,6 +92,12 @@ class TestBashBypassCaught:
 
         assert status == StepStatus.FAILED
         assert "se3/specs/base/spec.md" in (step.error_message or "")
+        # The illegal write must be reverted on disk, not just flagged — else it
+        # survives a later `se3 run --resume`.
+        assert spec.read_text(encoding="utf-8") == (
+            "# base Specification\n\n## Purpose\nx\n"
+        )
+        assert "reverted" in (step.error_message or "")
 
     def test_error_message_explains_channel(self, tmp_path):
         spec = _make_project(tmp_path)
@@ -130,6 +136,8 @@ class TestBashBypassCaught:
 
         assert step.status == StepStatus.FAILED
         assert "se3/specs/new/spec.md" in step.error_message
+        # The newly-created illegal spec file must be removed, not left on disk.
+        assert not new_spec.exists()
 
     def test_non_writing_step_passes(self, tmp_path):
         _make_project(tmp_path)

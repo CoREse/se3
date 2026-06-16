@@ -210,6 +210,26 @@ class TestEnsureGuardSettings:
         # Identical content => no rewrite => mtime unchanged.
         assert path.stat().st_mtime == before
 
+    def test_interpreter_path_with_space_is_shell_quoted(
+        self, tmp_path, monkeypatch
+    ):
+        # Claude CLI runs the hook command through a shell. An interpreter path
+        # containing a space (a venv under "/home/user/my env/bin/python") must
+        # be shell-quoted or the shell splits it and the hook never launches,
+        # silently degrading the primary hard guard.
+        import shlex
+
+        spaced = "/home/user/my env/bin/python"
+        monkeypatch.setattr(spec_write_hook.sys, "executable", spaced)
+        path = spec_write_hook.ensure_guard_settings(tmp_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        # The path is quoted, and the shell would parse the first token back to
+        # the original interpreter path.
+        assert shlex.quote(spaced) in command
+        assert shlex.split(command)[0] == spaced
+        assert command.endswith("-m se3.engine.spec_write_hook")
+
 
 # ---------------------------------------------------------------------------
 # snapshot_spec_files / diff_spec_files
@@ -258,6 +278,64 @@ class TestSnapshotDiff:
 
     def test_snapshot_missing_specs_dir(self, tmp_path):
         assert spec_write_hook.snapshot_spec_files(tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# capture_spec_contents / restore_spec_files
+# ---------------------------------------------------------------------------
+
+class TestCaptureRestore:
+    def _seed(self, tmp_path):
+        spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("original\n", encoding="utf-8")
+        return spec
+
+    def test_capture_returns_bytes(self, tmp_path):
+        spec = self._seed(tmp_path)
+        captured = spec_write_hook.capture_spec_contents(tmp_path)
+        assert captured == {"se3/specs/base/spec.md": b"original\n"}
+        # diff_spec_files works directly on byte maps too.
+        spec.write_text("changed\n", encoding="utf-8")
+        after = spec_write_hook.capture_spec_contents(tmp_path)
+        assert spec_write_hook.diff_spec_files(captured, after) == [
+            "se3/specs/base/spec.md"
+        ]
+
+    def test_capture_missing_specs_dir(self, tmp_path):
+        assert spec_write_hook.capture_spec_contents(tmp_path) == {}
+
+    def test_restore_reverts_modified_file(self, tmp_path):
+        spec = self._seed(tmp_path)
+        before = spec_write_hook.capture_spec_contents(tmp_path)
+        spec.write_text("tampered\n", encoding="utf-8")
+        failed = spec_write_hook.restore_spec_files(
+            tmp_path, before, ["se3/specs/base/spec.md"]
+        )
+        assert failed == []
+        assert spec.read_text(encoding="utf-8") == "original\n"
+
+    def test_restore_deletes_newly_created_file(self, tmp_path):
+        self._seed(tmp_path)
+        before = spec_write_hook.capture_spec_contents(tmp_path)
+        new_spec = tmp_path / "se3" / "specs" / "new" / "spec.md"
+        new_spec.parent.mkdir(parents=True, exist_ok=True)
+        new_spec.write_text("injected\n", encoding="utf-8")
+        failed = spec_write_hook.restore_spec_files(
+            tmp_path, before, ["se3/specs/new/spec.md"]
+        )
+        assert failed == []
+        assert not new_spec.exists()
+
+    def test_restore_recreates_deleted_file(self, tmp_path):
+        spec = self._seed(tmp_path)
+        before = spec_write_hook.capture_spec_contents(tmp_path)
+        spec.unlink()
+        failed = spec_write_hook.restore_spec_files(
+            tmp_path, before, ["se3/specs/base/spec.md"]
+        )
+        assert failed == []
+        assert spec.read_text(encoding="utf-8") == "original\n"
 
 
 # ---------------------------------------------------------------------------

@@ -74,6 +74,12 @@ Steps that present specs to an LLM SHALL inject the code-first / spec-assistant 
 - **WHEN** the `plan` step builds its prompt
 - **THEN** its "Relevant Specifications" section states the specs are a read-only reference to how the code currently behaves and that the code is authoritative
 
+#### Scenario: Protected non-read-only step is told spec files are write-protected, not behavior
+- **GIVEN** a step that is `uses_llm` and not `read_only` and whose `step_type` is not in `SPEC_WRITE_ALLOWED_STEPS` (i.e., `update_spec` and the four sync steps are excluded)
+- **WHEN** the step builds its prompt
+- **THEN** the injected spec-write-protection wording explicitly permits changing existing behavior, while marking `se3/specs/**` read-only and writing spec files the responsibility of `update_spec` / `se3 sync`
+- **AND** the wording passes `find_spec_driven_framing` with no match — it carries no rejected spec-driven framing phrase and never says the step must comply with the spec or must not change recorded behavior
+
 ### Requirement: Anti-Regression Spec-Driven Framing Guardrail
 
 The system SHALL maintain a curated set of phrases, exported as `SPEC_DRIVEN_FRAMING_PHRASES` from `src/se3/engine/spec_role.py`, that unambiguously express the rejected "spec drives / overrides the code" framing, plus a `find_spec_driven_framing(text)` matching helper (case-insensitive) that is the single matching helper used by the guardrail. A repository-level pytest regression test SHALL scan prompt and documentation source files for these phrases and FAIL — pinpointing `file:line` — when any occurs, so that spec-driven residuals cannot regress into the codebase.

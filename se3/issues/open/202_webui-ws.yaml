@@ -1,0 +1,7 @@
+id: '202'
+description: webui输入框输入文字太多的时候会非常卡顿。是不是ws不停刷新导致的？能不能不刷新输入框？
+status: open
+tags: []
+source: human
+created_at: '2026-06-16T13:57:01.143938'
+updated_at: '2026-06-16T13:57:01.143938'

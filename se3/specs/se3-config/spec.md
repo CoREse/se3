@@ -1925,6 +1925,46 @@ file access. Recommended alternatives:
 - **AND** the error message lists the allowed values
   (`user`, `project`, `local`)
 
+### Requirement: Spec Write Protection Configuration
+
+The system SHALL support a top-level `spec_write_protection` section in
+`se3.yaml` (or `se3.local.yaml`) that toggles the two hard-layer guards
+preventing non-`update_spec` / non-`sync` steps from writing files under
+`se3/specs/`. Both guards default on, so an absent section yields the
+fully protected behavior; the keys exist to let an operator disable a
+guard for debugging.
+
+**Keys and defaults:**
+
+- `spec_write_protection.hook_enabled` (`bool`, default `True`) — when
+  set, non-exempt steps inject the PreToolUse spec-write hook via a
+  controlled `--settings` file (the real-time blocking layer; see the
+  llm-caller spec *Tool-Layer Read-Only Enforcement*). When `False`, the
+  hook is not injected.
+- `spec_write_protection.diff_fallback_enabled` (`bool`, default `True`)
+  — when set, `state_machine.run_step` performs the within-flow per-step
+  spec-diff backstop that fails any non-exempt step which changed a
+  `se3/specs/**` file (catching `Bash` bypasses; see the flow-engine spec
+  *Spec File Write Protection*). When `False`, the backstop is skipped.
+
+Both guards consult the single derived exemption set
+`context_builder.SPEC_WRITE_ALLOWED_STEPS` (`{"update_spec"}` plus all
+sync steps) to decide which steps are exempt, so `update_spec` and the
+sync steps are never affected regardless of these toggles.
+
+#### Scenario: Absent section yields both guards on
+- **GIVEN** `se3.yaml` declares no `spec_write_protection` section
+- **WHEN** SE3 loads project configuration
+- **THEN** `spec_write_protection.hook_enabled` and
+  `spec_write_protection.diff_fallback_enabled` both resolve to `True`
+
+#### Scenario: Operator disables a guard for debugging
+- **GIVEN** `se3.yaml` declares `spec_write_protection.hook_enabled: false`
+- **WHEN** SE3 builds a non-exempt step's agent-runner args
+- **THEN** the PreToolUse spec-write hook is not injected
+- **AND** the `diff_fallback_enabled` backstop remains in effect unless it
+  too is explicitly disabled
+
 ### Requirement: Daemon and Server Configuration
 
 The SE3 daemon (`se3 daemon`) and the central server (`se3-server`) each

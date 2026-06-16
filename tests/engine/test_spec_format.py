@@ -492,7 +492,13 @@ class TestRealSpecFiles:
         # 50 after the "Commit Step Runtime-Leak Denylist" Requirement was added
         # documenting the commit step's closed-set runtime-leak soft-removal guard
         # that unstages se3 runtime signatures landing outside the se3/ root.
-        assert len(parsed.requirements) == 50
+        # 51 after the "Spec File Write Protection (Soft Injection + Within-Flow
+        # Diff Guard)" Requirement was added documenting the spec-write governance
+        # closure: the reusable spec-write-protection soft injection, the plan
+        # downstream-task constraint, the PreToolUse hook hard guard, and the
+        # within-flow spec-diff fallback that together restrict spec writes to
+        # update_spec / sync.
+        assert len(parsed.requirements) == 51
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()

@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -174,7 +175,12 @@ def main() -> None:
 
 def _guard_settings_payload() -> dict:
     """Return the controlled settings dict carrying ONLY the PreToolUse hook."""
-    command = f"{sys.executable} -m se3.engine.spec_write_hook"
+    # Claude CLI runs hook commands through a shell, so the interpreter path MUST
+    # be shell-quoted: a venv whose path contains a space (e.g.
+    # ``/home/user/my env/bin/python``) would otherwise be split by the shell and
+    # the hook subprocess would silently fail to launch — degrading the primary,
+    # unbypassable hard guard down to only the post-step diff fallback.
+    command = f"{shlex.quote(sys.executable)} -m se3.engine.spec_write_hook"
     return {
         "hooks": {
             "PreToolUse": [
@@ -253,8 +259,10 @@ def snapshot_spec_files(project_root) -> Dict[str, str]:
 def diff_spec_files(before: Dict[str, str], after: Dict[str, str]) -> List[str]:
     """Return the sorted list of spec paths that were added, removed, or modified.
 
-    Compares two :func:`snapshot_spec_files` maps. A path appears in the result
-    when its hash changed, or when it is present in exactly one of the snapshots.
+    Compares two :func:`snapshot_spec_files` maps (or, equivalently, two
+    :func:`capture_spec_contents` byte maps — only value equality is tested). A
+    path appears in the result when its value changed, or when it is present in
+    exactly one of the snapshots.
     """
     before = before or {}
     after = after or {}
@@ -264,6 +272,66 @@ def diff_spec_files(before: Dict[str, str], after: Dict[str, str]) -> List[str]:
         if before.get(key) != after.get(key)
     }
     return sorted(changed)
+
+
+def capture_spec_contents(project_root) -> Dict[str, bytes]:
+    """Return a ``{project-relative path: raw bytes}`` map of every spec file.
+
+    The byte-level counterpart of :func:`snapshot_spec_files`. The post-step diff
+    fallback guard captures this before a non-exempt step so that, on detecting an
+    illegal spec write, it can *revert* each touched file to its pre-step content
+    (or delete a newly-created one) — not merely fail the step. Reverting is
+    essential: a left-on-disk illegal write would otherwise survive a later
+    ``se3 run --resume`` (the resumed run's fresh pre-step snapshot already
+    contains the tampered content, so the re-run sees no diff and the change
+    leaks through to commit). Returns an empty map when the specs dir is absent.
+    """
+    root = Path(project_root)
+    specs_dir = root.joinpath(*_SPECS_RELPATH)
+    contents: Dict[str, bytes] = {}
+    if not specs_dir.is_dir():
+        return contents
+    for path in sorted(specs_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+            rel = str(path.relative_to(root))
+        except Exception:
+            continue
+        contents[rel] = data
+    return contents
+
+
+def restore_spec_files(
+    project_root, before: Dict[str, bytes], changed: List[str]
+) -> List[str]:
+    """Revert each *changed* spec path to its pre-step content.
+
+    For every project-relative path in *changed*: if it existed in *before*
+    (captured via :func:`capture_spec_contents`), its original bytes are written
+    back; otherwise the path was newly created by the illegal write and is
+    deleted. This guarantees a non-``update_spec``/``sync`` step can never get its
+    spec modification accepted into the flow, even across a ``--resume``.
+
+    Returns the sorted list of paths that could NOT be restored (best-effort: a
+    fault on one path never aborts restoring the rest).
+    """
+    root = Path(project_root)
+    before = before or {}
+    failed: List[str] = []
+    for rel in changed:
+        target = root / rel
+        try:
+            if rel in before:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(before[rel])
+            elif target.exists():
+                # Newly created by the illegal write — remove it.
+                target.unlink()
+        except Exception:
+            failed.append(rel)
+    return sorted(failed)
 
 
 if __name__ == "__main__":
