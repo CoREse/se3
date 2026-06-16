@@ -821,6 +821,12 @@ class LLMCaller:
         # build per-spec dependency sets.
         self._last_touched_files: Set[str] = set()
 
+        # Cached resolution of the spec-write guard settings path for this step.
+        # Computed once (config read + settings-file generation), then reused
+        # across this instance's internal attempts. ``_UNSET`` until first use.
+        self._spec_guard_settings_computed = False
+        self._spec_guard_settings_value: Optional[Path] = None
+
         # Agent management
         # Resolution order when ``agents`` is not explicitly provided:
         #   1. Per-step override from ``llm_caller.steps.<step_type>`` — if
@@ -1278,6 +1284,57 @@ class LLMCaller:
 
         return None
 
+    def _resolve_spec_guard_settings(self) -> Optional[Path]:
+        """Resolve the spec-write guard ``--settings`` path for this step.
+
+        Returns the controlled settings file (installing the PreToolUse
+        spec-write hook) when this step must be barred from writing
+        ``se3/specs/``, else ``None``.
+
+        The enable decision references ONLY the shared exemption set
+        :data:`context_builder.SPEC_WRITE_ALLOWED_STEPS` — never a local literal
+        list — so ``update_spec`` and ALL sync steps (``sync_scan`` /
+        ``sync_analyze`` / ``sync_resolve`` / ``sync_respond``) are exempt and
+        keep writing specs unimpeded. This is the exact site where a missing
+        ``sync_respond`` in the exemption set would (wrongly) install the hook
+        and have its legitimate Way-A ``Edit`` denied; deriving the set upstream
+        prevents that drift.
+
+        The result is computed once and cached on the instance (config read +
+        idempotent settings-file generation), then reused across internal
+        attempts. Any failure degrades safely to ``None`` (no hook) — the
+        post-step diff fallback remains as the second line of defense.
+        """
+        if self._spec_guard_settings_computed:
+            return self._spec_guard_settings_value
+
+        self._spec_guard_settings_computed = True
+        self._spec_guard_settings_value = None
+        try:
+            from .context_builder import SPEC_WRITE_ALLOWED_STEPS
+
+            if self.step_type in SPEC_WRITE_ALLOWED_STEPS:
+                return None
+
+            from ..config import load_spec_write_protection_config
+
+            cfg = load_spec_write_protection_config(self.project_root)
+            if not cfg.hook_enabled:
+                return None
+
+            from .spec_write_hook import ensure_guard_settings
+
+            self._spec_guard_settings_value = ensure_guard_settings(self.project_root)
+        except Exception:
+            logger.debug(
+                "Failed to prepare spec-write guard settings for step '%s'",
+                self.step_type,
+                exc_info=True,
+            )
+            self._spec_guard_settings_value = None
+
+        return self._spec_guard_settings_value
+
     def _get_phase1_cache_path(self) -> Optional[Path]:
         """Return the Phase 1 cache file path for this step, or None if no context."""
         if not self.flow_id or not self.step_id:
@@ -1569,6 +1626,7 @@ class LLMCaller:
                     prompt=effective_prompt,
                     read_only=is_step_read_only(self.step_type),
                     context_files=context_files,
+                    spec_guard_settings=self._resolve_spec_guard_settings(),
                 )
                 logger.debug(
                     f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, "

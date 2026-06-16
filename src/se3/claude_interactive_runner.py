@@ -868,8 +868,13 @@ class ClaudeInteractiveRunner(AgentRunner):
         prompt: str,
         read_only: bool,
         context_files: Optional[List[Path]] = None,
+        spec_guard_settings: Optional[Path] = None,
     ) -> List[str]:
         """Translate call intent into interactive-mode launch CLI flags.
+
+        ``spec_guard_settings`` is accepted for interface parity but currently
+        ignored by this runner (the PreToolUse spec-write hook is wired through
+        the print-mode ``ClaudeCodeRunner``).
 
         Unlike the print-mode runner, the prompt is NOT placed in argv (no
         ``-p`` / ``--output-format`` / ``--input-format`` — those are

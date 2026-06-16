@@ -194,7 +194,9 @@ class _ArgsCapturingRunner:
     def __init__(self) -> None:
         self.captured_args = None
 
-    def build_call_args(self, prompt, read_only, context_files=None):
+    def build_call_args(
+        self, prompt, read_only, context_files=None, spec_guard_settings=None
+    ):
         args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
         if read_only:
             args += [
@@ -204,6 +206,8 @@ class _ArgsCapturingRunner:
                 "NotebookEdit",
                 "AskUserQuestion",
             ]
+        if spec_guard_settings is not None:
+            args += ["--settings", str(spec_guard_settings)]
         if context_files:
             for f in context_files:
                 if f.exists():
