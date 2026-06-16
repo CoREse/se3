@@ -8,8 +8,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
+from se3.engine.spec_role import find_spec_driven_framing
 from se3.engine.steps.plan import (
     SPEC_CHANGES_SECTION,
+    SPEC_WRITE_PROTECTION_SECTION,
     FULL_JSON_SCHEMA,
     MEDIUM_JSON_SCHEMA,
     SHALLOW_JSON_SCHEMA,
@@ -246,6 +248,76 @@ class TestVersionFileGuardrail:
         )
         assert "Do Not Bump Version Files" in prompt
         assert "pyproject.toml" in prompt
+
+
+class TestSpecWriteProtectionSection:
+    """G2: plan-specific guardrail forbidding downstream spec-file writes,
+    while preserving (and encouraging) the spec_changes declaration channel."""
+
+    def test_section_exists(self):
+        assert isinstance(SPEC_WRITE_PROTECTION_SECTION, str)
+        assert len(SPEC_WRITE_PROTECTION_SECTION) > 0
+
+    def test_section_forbids_instructing_downstream_spec_writes(self):
+        text = SPEC_WRITE_PROTECTION_SECTION
+        # Two-layer semantics: forbid spec-file writes ...
+        assert "se3/specs/" in text
+        assert "MUST NOT" in text
+        assert "implement" in text
+        # ... but preserve the spec_changes declaration channel.
+        assert "spec_changes" in text
+        assert "update_spec" in text
+        assert "verify_spec" in text
+
+    def test_section_allows_behavior_change(self):
+        """Wording must allow changing existing behavior; it only restricts
+        who writes spec files."""
+        lowered = SPEC_WRITE_PROTECTION_SECTION.lower()
+        assert "behavior" in lowered
+
+    def test_section_avoids_anti_regression_framing(self):
+        """find_spec_driven_framing must be empty — the new wording must not
+        reintroduce spec-driven framing."""
+        assert find_spec_driven_framing(SPEC_WRITE_PROTECTION_SECTION) == []
+
+    def test_full_depth_includes_section_and_keeps_spec_changes(self):
+        prompt = _build_prompt(
+            task_description="Add feature X",
+            task_type="feature",
+            scope="m",
+            spec_content="s",
+            project_summary="p",
+            revision_section="",
+            depth="full",
+        )
+        assert SPEC_WRITE_PROTECTION_SECTION in prompt
+        # full depth still keeps the spec_changes declaration channel intact
+        assert "Spec Changes Declaration" in prompt
+        assert "spec_changes" in prompt
+
+    def test_medium_depth_includes_section(self):
+        prompt = _build_prompt(
+            task_description="Fix bug Y",
+            task_type="bugfix",
+            scope="m",
+            spec_content="s",
+            project_summary="p",
+            revision_section="",
+            depth="medium",
+        )
+        assert SPEC_WRITE_PROTECTION_SECTION in prompt
+
+    def test_shallow_depth_includes_section(self):
+        prompt = _build_prompt(
+            task_description="Directive Z",
+            task_type="directive",
+            scope="m",
+            spec_content="s",
+            project_summary="p",
+            revision_section="",
+            depth="shallow",
+        )
+        assert SPEC_WRITE_PROTECTION_SECTION in prompt
 
 
 class TestStepPoolSpecChanges:

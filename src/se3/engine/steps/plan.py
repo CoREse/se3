@@ -315,6 +315,31 @@ the plan and explain in the proposal summary that the version bump will be
 handled automatically by the engine.
 """
 
+SPEC_WRITE_PROTECTION_SECTION = """
+## Guardrail: Implementation Tasks Must Not Write Spec Files
+The implementation is free to change the code's existing behavior — that is a
+normal outcome of a task. Changing behavior and writing a spec file under
+`se3/specs/` are two different things, and only the second is restricted here.
+
+Writing spec files is the exclusive job of the `update_spec` step and `se3 sync`;
+the implementation steps that consume your task groups (especially `implement`)
+are downstream of you and MUST NOT touch the spec corpus.
+
+Therefore:
+- The task groups and task descriptions you produce MUST NOT instruct any
+  downstream step to create, modify, or delete any file under `se3/specs/`
+  (no `spec.md` edits, no new spec directories, no spec deletions). Do not list
+  any `se3/specs/**` path in a task's `files`, and do not phrase any task as
+  "update the spec to ...". The recorded behavior may change freely; the spec
+  *files* are simply not the implementer's to write.
+- You SHALL still declare the spec/behavior changes you expect through the
+  structured `spec_changes` array described below. That declaration is the
+  correct channel: it is consumed only by `update_spec` (which writes the spec)
+  and is used by `verify_spec` to treat the matching deviations as intended
+  rather than regressions. Declaring `spec_changes` is encouraged; routing spec
+  *writes* into implementation tasks is forbidden.
+"""
+
 
 def _get_prompt_depth(task_type: str) -> str:
     """Determine prompt depth based on task_type.
@@ -356,6 +381,7 @@ def _build_prompt(
         parts.append(DESIGN_SECTION)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
         parts.append(VERSION_FILE_GUARDRAIL)
+        parts.append(SPEC_WRITE_PROTECTION_SECTION)
         parts.append(SPEC_CHANGES_SECTION)
         parts.append(FULL_JSON_SCHEMA)
     elif depth == "medium":
@@ -363,10 +389,12 @@ def _build_prompt(
         parts.append(DESIGN_SECTION_BUGFIX)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
         parts.append(VERSION_FILE_GUARDRAIL)
+        parts.append(SPEC_WRITE_PROTECTION_SECTION)
         parts.append(MEDIUM_JSON_SCHEMA)
     else:  # shallow
         parts.append(TASKS_SECTION.format(part_label="Instructions"))
         parts.append(VERSION_FILE_GUARDRAIL)
+        parts.append(SPEC_WRITE_PROTECTION_SECTION)
         parts.append(SHALLOW_JSON_SCHEMA)
 
     return "\n".join(parts)
