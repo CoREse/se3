@@ -55,6 +55,14 @@
 
 
 
+
+## 10.3.2 - 2026-06-16
+
+- Fix implement step group_status cards stacking 2–3 duplicates per group in the WebUI live console
+- Converge group_status rendering to a single card per group keyed on (step_id, group_id), updating in place as agent and model names arrive
+- Ensure terminal cards (completed/failed) supersede prior non-terminal running cards without leaving stale duplicates
+- Keep distinct groups under the same implement step as independent cards, preventing incorrect cross-group folding
+- Preserve card sort order and surrounding fold/raw/chip state unaffected by the deduplication pass
 ## 10.3.1 - 2026-06-16
 
 - Fix discovery structured fields (content, refined_description, questions) being silently dropped when assistant responses contain bare JSON followed by trailing text
