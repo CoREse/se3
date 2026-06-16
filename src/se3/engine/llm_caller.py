@@ -1009,11 +1009,24 @@ class LLMCaller:
             prompt = f"{prompt}\n\n[Additional user instruction]: {chr(10).join(injected_parts)}"
 
         # Inject read-only constraint for read-only steps
-        from .context_builder import get_read_only_injection
+        from .context_builder import (
+            get_read_only_injection,
+            get_spec_write_protection_injection,
+        )
         read_only_constraint = get_read_only_injection(self.step_type)
         if read_only_constraint:
             prompt = f"{prompt}{read_only_constraint}"
             logger.debug(f"Injected read-only constraint for step '{self.step_type}'")
+
+        # Inject spec-write protection for non-read-only LLM steps (except
+        # update_spec / sync). Appended in the same style as the read-only
+        # constraint (no [Additional user instruction] header).
+        spec_write_constraint = get_spec_write_protection_injection(self.step_type)
+        if spec_write_constraint:
+            prompt = f"{prompt}{spec_write_constraint}"
+            logger.debug(
+                f"Injected spec-write protection for step '{self.step_type}'"
+            )
 
         # Dispatch to appropriate handler based on mode
         if mode == "two_phase":
