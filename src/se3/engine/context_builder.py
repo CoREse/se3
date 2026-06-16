@@ -382,6 +382,33 @@ def get_spec_names_injection(
 # must remain writable.
 _READ_ONLY_SYNC_STEPS = frozenset({"sync_scan", "sync_analyze"})
 
+# Sync-engine pseudo-steps that legitimately WRITE spec files via the LLM
+# (the Way-A in-place ``Edit`` of ``se3/specs/<name>/spec.md``). Listed here
+# in parallel with the read-only sync steps above so the two sync write paths
+# are registered side by side:
+#   - ``sync_resolve``  — drift resolution write-back (sync_engine.py:669)
+#   - ``sync_respond``  — high-risk spec drift update applied on human respond
+#                         (sync_engine.py:2104 → _apply_spec_drift_update →
+#                          _update_spec_via_llm:912 → llm_caller.call())
+# Any future sync step that writes spec MUST be registered here so it is
+# automatically exempted from all three spec-write guards (see
+# ``SPEC_WRITE_ALLOWED_STEPS``), preventing exemption-set drift.
+_WRITABLE_SYNC_STEPS = frozenset({"sync_resolve", "sync_respond"})
+
+# All sync-engine pseudo-steps (read + write paths), derived from the two
+# authoritative sets above.
+_ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
+
+# The single authoritative set of steps allowed to write ``se3/specs/`` and
+# therefore exempted from the three-layer spec-write protection (soft
+# prompt injection, the PreToolUse hook, and the post-step diff fallback).
+# Derived — never hand-enumerated — so registering a new writable sync step in
+# ``_WRITABLE_SYNC_STEPS`` automatically propagates the exemption everywhere and
+# the set cannot silently drift (e.g. forgetting ``sync_respond``). Writing spec
+# files is the sole responsibility of ``update_spec`` (which consumes plan's
+# ``spec_changes`` declaration) and ``se3 sync``.
+SPEC_WRITE_ALLOWED_STEPS = frozenset({"update_spec"}) | _ALL_SYNC_STEPS
+
 
 def is_step_read_only(step_type: str) -> bool:
     """Return True if ``step_type`` runs under read-only constraints.
@@ -441,6 +468,72 @@ def get_read_only_injection(step_type: str) -> str:
         "- Use Bash for read-only commands (e.g., git log, git diff, ls, cat)\n\n"
         "Your sole purpose in this step is analysis and reasoning. "
         "Output your findings as structured data only."
+    )
+
+
+def _is_spec_write_protected_step(step_type: str) -> bool:
+    """Return True if ``step_type`` must be barred from writing spec files.
+
+    A step is spec-write-protected when it is a non-read-only LLM step (a
+    STEP_POOL step with ``uses_llm=True`` and ``read_only=False``) that is NOT
+    in :data:`SPEC_WRITE_ALLOWED_STEPS`. This currently covers ``implement``
+    (its three templates), ``propose``, ``design``, and ``plan_tasks``, and
+    auto-extends to any future non-read-only LLM step.
+
+    The sync pseudo-steps are exempt without needing the explicit
+    ``SPEC_WRITE_ALLOWED_STEPS`` check, because they are absent from STEP_POOL
+    and so never match the lookup below; keeping the membership test is a
+    harmless, more-explicit double safeguard.
+    """
+    from .models import STEP_POOL
+
+    if step_type in SPEC_WRITE_ALLOWED_STEPS:
+        return False
+
+    for _st, info in STEP_POOL.items():
+        if info.get("name") == step_type:
+            return bool(info.get("uses_llm", False)) and not bool(
+                info.get("read_only", False)
+            )
+
+    return False
+
+
+def get_spec_write_protection_injection(step_type: str) -> str:
+    """Get the spec-write-protection constraint injection for a step.
+
+    Returns a prompt fragment, for every non-read-only LLM step except those in
+    :data:`SPEC_WRITE_ALLOWED_STEPS` (``update_spec`` + all sync steps), that
+    forbids the step from creating/modifying/deleting any spec file under
+    ``se3/specs/`` while explicitly leaving it free to change existing code
+    behavior. Writing spec files is the dedicated responsibility of
+    ``update_spec`` / ``se3 sync``; a step that changes behavior or believes a
+    spec needs updating notes that in its summary and lets the
+    plan ``spec_changes`` → ``verify_spec`` → ``update_spec`` channel handle it.
+
+    Returns an empty string for steps that are not spec-write-protected.
+    """
+    if not _is_spec_write_protected_step(step_type):
+        return ""
+
+    return (
+        "\n\n## SPEC FILE WRITE PROTECTION\n"
+        "You are free to change existing code behavior as the task requires — "
+        "this constraint does NOT restrict what behavior you may implement.\n\n"
+        "It restricts only one thing: the spec files under `se3/specs/**` are "
+        "read-only for this step. Recording code into spec files is the "
+        "dedicated job of the `update_spec` step and `se3 sync`, not of this "
+        "step.\n\n"
+        "Forbidden actions:\n"
+        "- Do NOT use Write, Edit, or NotebookEdit to create, modify, or delete "
+        "any file under `se3/specs/`\n"
+        "- Do NOT use Bash to write spec files either (e.g., `>`/`>>` redirects, "
+        "`sed -i`, `tee`, `cp`/`mv` into `se3/specs/`)\n\n"
+        "If your change alters existing behavior or you think a spec needs "
+        "updating, do NOT edit the spec yourself — just note it in your summary. "
+        "The plan's `spec_changes` declaration, the `verify_spec` step, and the "
+        "`update_spec` step are the channel that records such changes into the "
+        "specs afterward."
     )
 
 

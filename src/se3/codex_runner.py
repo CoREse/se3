@@ -606,8 +606,13 @@ class CodexRunner(AgentRunner):
         prompt: str,
         read_only: bool,
         context_files: Optional[List[Path]] = None,
+        spec_guard_settings: Optional[Path] = None,
     ) -> List[str]:
         """Build codex CLI arguments from intent-level parameters.
+
+        ``spec_guard_settings`` is accepted for interface parity but ignored:
+        the spec-write PreToolUse hook is a Claude-CLI concept, and codex
+        sandboxing is handled separately via ``--sandbox``.
 
         Produces the argv for ``codex exec --json``:
 

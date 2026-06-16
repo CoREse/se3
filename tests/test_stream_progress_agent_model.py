@@ -280,7 +280,7 @@ def test_call_emits_identity_seed_before_result(monkeypatch, tmp_path):
     class _ResultOnlyRunner:
         """Streams nothing intermediate — returns only the final result line."""
 
-        def build_call_args(self, prompt, read_only, context_files=None):
+        def build_call_args(self, prompt, read_only, context_files=None, spec_guard_settings=None):
             return ["-p", prompt]
 
         def detect_infra_error(self, returncode, output, stderr_tail):
@@ -460,7 +460,7 @@ class _RotationRunner:
     def __init__(self, succeed):
         self._succeed = succeed
 
-    def build_call_args(self, prompt, read_only, context_files=None):
+    def build_call_args(self, prompt, read_only, context_files=None, spec_guard_settings=None):
         return ["-p", prompt]
 
     def detect_infra_error(self, returncode, output, stderr_tail):

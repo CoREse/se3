@@ -406,6 +406,43 @@ class StateMachine:
 
         return self.create_flow(task_description, **kwargs), False
 
+    def _spec_diff_guard_enabled(self, step: Step) -> bool:
+        """Return True when the post-step spec-diff fallback guard applies to *step*.
+
+        The guard (the second hard layer of the spec-write protection) catches a
+        write to ``se3/specs/**`` that a step performed by going *around* the
+        PreToolUse hook — most notably a ``Bash`` redirect / ``sed`` / ``tee``,
+        which the tool-matcher hook (Write|Edit|NotebookEdit) never observes. It
+        applies to every step NOT in the shared exemption set
+        :data:`context_builder.SPEC_WRITE_ALLOWED_STEPS` (``update_spec`` + all
+        sync steps ``sync_scan`` / ``sync_analyze`` / ``sync_resolve`` /
+        ``sync_respond``), and only when
+        ``spec_write_protection.diff_fallback_enabled`` is on.
+
+        The exemption decision references the shared constant — never a bare
+        ``step.step_type != UPDATE_SPEC`` literal — so the diff layer can never
+        disagree with the soft-injection and PreToolUse-hook layers about which
+        steps may legitimately write specs. Any config-loading fault degrades
+        safely to *disabled* (the PreToolUse hook remains the primary guard).
+        """
+        try:
+            from .context_builder import SPEC_WRITE_ALLOWED_STEPS
+
+            if step.step_type.value in SPEC_WRITE_ALLOWED_STEPS:
+                return False
+
+            from ..config import load_spec_write_protection_config
+
+            cfg = load_spec_write_protection_config(self.project_root)
+            return bool(cfg.diff_fallback_enabled)
+        except Exception:
+            logger.debug(
+                "Failed to resolve spec-diff guard for step '%s'",
+                step.step_type.value,
+                exc_info=True,
+            )
+            return False
+
     def run_step(
         self,
         flow: FlowInstance,
@@ -469,6 +506,29 @@ class StateMachine:
 
         logger.info(f"Running step: {step.step_type.value}")
 
+        # Hard fallback layer (the second, post-hoc guard): snapshot every
+        # se3/specs/** file's content hash before a non-exempt step runs, so a
+        # within-step spec write that slipped past the PreToolUse hook (most
+        # notably a Bash redirect / sed / tee, which the tool-matcher hook never
+        # sees) can be detected after the handler returns. This guard only asks
+        # "did this step touch a spec file at all" — it is wholly orthogonal to
+        # verify_spec's in_scope/out_of_scope judgement and never inspects spec
+        # content semantics. ``update_spec`` and every sync step are exempt via
+        # the shared SPEC_WRITE_ALLOWED_STEPS set (see _spec_diff_guard_enabled).
+        spec_guard_before: Optional[Dict[str, str]] = None
+        if self._spec_diff_guard_enabled(step):
+            try:
+                from .spec_write_hook import snapshot_spec_files
+
+                spec_guard_before = snapshot_spec_files(self.project_root)
+            except Exception:
+                logger.debug(
+                    "Failed to snapshot specs before step '%s'",
+                    step.step_type.value,
+                    exc_info=True,
+                )
+                spec_guard_before = None
+
         # Step-scoped token-usage accumulator. Opened before the handler runs so
         # every LLM subprocess call made during this step (main call, retry,
         # rotation, two-phase JSON extraction) folds into one per-step total via
@@ -501,6 +561,48 @@ class StateMachine:
 
         finally:
             step.completed_at = datetime.now()
+
+            # Hard fallback layer: if a non-exempt step wrote any se3/specs/**
+            # file (detected by content-hash diff against the pre-step snapshot),
+            # fail the step. This backstops the PreToolUse hook against a Bash
+            # redirect / sed / tee that the tool-matcher hook never observes. We
+            # only override a non-FAILED status: a handler that already failed
+            # for some other reason keeps its own error (and on that path the
+            # spec write, if any, was already a side effect of a failing step).
+            # The exemption decision routes through SPEC_WRITE_ALLOWED_STEPS, so
+            # update_spec / all sync steps are never flagged. Best-effort: a
+            # fault in the check must never break the step.
+            if spec_guard_before is not None and step.status != StepStatus.FAILED:
+                try:
+                    from .spec_write_hook import (
+                        snapshot_spec_files,
+                        diff_spec_files,
+                    )
+
+                    spec_guard_after = snapshot_spec_files(self.project_root)
+                    changed = diff_spec_files(spec_guard_before, spec_guard_after)
+                    if changed:
+                        step.status = StepStatus.FAILED
+                        step.error_message = (
+                            f"Step '{step.step_type.value}' illegally modified "
+                            f"spec file(s) under se3/specs/: "
+                            f"{', '.join(changed)}. Writing spec files is the "
+                            f"dedicated responsibility of the update_spec step "
+                            f"and `se3 sync`; no other step may create, modify, "
+                            f"or delete spec files. Changing existing code "
+                            f"behavior IS allowed — declare any needed spec "
+                            f"change through the plan spec_changes channel "
+                            f"(handled by verify_spec / update_spec) rather than "
+                            f"editing spec files in this step."
+                        )
+                        logger.error(step.error_message)
+                except Exception:
+                    logger.debug(
+                        "Spec-diff fallback guard check failed for step '%s'",
+                        step.step_type.value,
+                        exc_info=True,
+                    )
+
             # Aggregate this step's token usage before persisting. Best-effort:
             # a fault here must never break the step / flow.
             #

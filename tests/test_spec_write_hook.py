@@ -1,0 +1,397 @@
+"""Tests for the hard primary layer of spec-write protection (G3).
+
+Covers:
+  * ``spec_write_hook.main()`` — PreToolUse deny/allow decisions
+  * ``spec_write_hook.ensure_guard_settings`` — controlled settings generator
+  * ``spec_write_hook.snapshot_spec_files`` / ``diff_spec_files`` helpers
+  * ``ClaudeCodeRunner.build_call_args`` ``--settings`` wiring
+  * ``LLMCaller._resolve_spec_guard_settings`` enable decision via the shared
+    ``SPEC_WRITE_ALLOWED_STEPS`` exemption set (esp. sync_respond not enabled)
+  * ``SpecWriteProtectionConfig`` defaults / explicit-off / invalid-value
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from se3.engine import spec_write_hook
+from se3.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
+from se3.config import (
+    ConfigError,
+    SpecWriteProtectionConfig,
+    load_spec_write_protection_config,
+)
+from se3.claude_runner import ClaudeCodeRunner
+from se3.engine.llm_caller import LLMCaller
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _run_main(raw, monkeypatch, capsys):
+    """Run ``spec_write_hook.main()`` feeding *raw* (str) as stdin.
+
+    Returns ``(exit_code, stdout, stderr)``.
+    """
+    if not isinstance(raw, str):
+        raw = json.dumps(raw)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
+    with pytest.raises(SystemExit) as exc:
+        spec_write_hook.main()
+    captured = capsys.readouterr()
+    return exc.value.code, captured.out, captured.err
+
+
+def _claude_runner(tmp_path):
+    return ClaudeCodeRunner(
+        project_root=tmp_path,
+        command={"cmd": "claude", "priority": 0},
+        setting_sources=["user"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# main() — deny path
+# ---------------------------------------------------------------------------
+
+class TestHookDeny:
+    @pytest.mark.parametrize("tool_name", ["Write", "Edit"])
+    def test_deny_spec_write_via_file_path(self, tmp_path, monkeypatch, capsys, tool_name):
+        spec_file = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        payload = {
+            "tool_name": tool_name,
+            "tool_input": {"file_path": str(spec_file)},
+            "cwd": str(tmp_path),
+        }
+        code, out, err = _run_main(payload, monkeypatch, capsys)
+        assert code == 2
+        decision = json.loads(out)
+        assert (
+            decision["hookSpecificOutput"]["permissionDecision"] == "deny"
+        )
+        assert decision["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert decision["hookSpecificOutput"]["permissionDecisionReason"]
+        # Reason also surfaced on stderr (exit-2 blocking protocol).
+        assert "se3/specs" in err
+
+    def test_deny_notebookedit_via_notebook_path(self, tmp_path, monkeypatch, capsys):
+        spec_file = tmp_path / "se3" / "specs" / "flow-engine" / "spec.md"
+        payload = {
+            "tool_name": "NotebookEdit",
+            "tool_input": {"notebook_path": str(spec_file)},
+            "cwd": str(tmp_path),
+        }
+        code, out, _err = _run_main(payload, monkeypatch, capsys)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_deny_relative_file_path(self, tmp_path, monkeypatch, capsys):
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "se3/specs/base/spec.md"},
+            "cwd": str(tmp_path),
+        }
+        code, _out, _err = _run_main(payload, monkeypatch, capsys)
+        assert code == 2
+
+    def test_deny_nested_spec_subdir(self, tmp_path, monkeypatch, capsys):
+        spec_file = tmp_path / "se3" / "specs" / "a" / "b" / "spec.md"
+        payload = {
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(spec_file)},
+            "cwd": str(tmp_path),
+        }
+        code, _out, _err = _run_main(payload, monkeypatch, capsys)
+        assert code == 2
+
+
+# ---------------------------------------------------------------------------
+# main() — allow path
+# ---------------------------------------------------------------------------
+
+class TestHookAllow:
+    def test_allow_src_write(self, tmp_path, monkeypatch, capsys):
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp_path / "src" / "se3" / "foo.py")},
+            "cwd": str(tmp_path),
+        }
+        code, out, err = _run_main(payload, monkeypatch, capsys)
+        assert code == 0
+        assert out == ""
+        assert err == ""
+
+    def test_allow_se3_state_write(self, tmp_path, monkeypatch, capsys):
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp_path / "se3" / "state" / "engine.json")},
+            "cwd": str(tmp_path),
+        }
+        code, _out, _err = _run_main(payload, monkeypatch, capsys)
+        assert code == 0
+
+    def test_allow_specs_lookalike_outside_se3(self, tmp_path, monkeypatch, capsys):
+        # A top-level ``specs/`` (legacy fallback path) is NOT the protected
+        # ``se3/specs/`` directory, so a write there is allowed by the hook.
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp_path / "specs" / "base" / "spec.md")},
+            "cwd": str(tmp_path),
+        }
+        code, _out, _err = _run_main(payload, monkeypatch, capsys)
+        assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# main() — defensive / malformed inputs always allow (never crash)
+# ---------------------------------------------------------------------------
+
+class TestHookDefensive:
+    def test_empty_stdin_allows(self, tmp_path, monkeypatch, capsys):
+        code, _out, _err = _run_main("", monkeypatch, capsys)
+        assert code == 0
+
+    def test_malformed_json_allows(self, tmp_path, monkeypatch, capsys):
+        code, _out, _err = _run_main("not json {", monkeypatch, capsys)
+        assert code == 0
+
+    def test_missing_tool_input_allows(self, tmp_path, monkeypatch, capsys):
+        code, _out, _err = _run_main({"tool_name": "Write"}, monkeypatch, capsys)
+        assert code == 0
+
+    def test_missing_file_path_allows(self, tmp_path, monkeypatch, capsys):
+        code, _out, _err = _run_main(
+            {"tool_name": "Write", "tool_input": {}}, monkeypatch, capsys
+        )
+        assert code == 0
+
+    def test_non_dict_payload_allows(self, tmp_path, monkeypatch, capsys):
+        code, _out, _err = _run_main("[1, 2, 3]", monkeypatch, capsys)
+        assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# ensure_guard_settings
+# ---------------------------------------------------------------------------
+
+class TestEnsureGuardSettings:
+    def test_structure(self, tmp_path):
+        path = spec_write_hook.ensure_guard_settings(tmp_path)
+        assert path == tmp_path / "se3" / "tmp" / "spec_write_guard_settings.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        pre = data["hooks"]["PreToolUse"]
+        assert isinstance(pre, list) and len(pre) == 1
+        assert pre[0]["matcher"] == "Write|Edit|NotebookEdit"
+        inner = pre[0]["hooks"][0]
+        assert inner["type"] == "command"
+        assert inner["command"].endswith("-m se3.engine.spec_write_hook")
+        assert sys.executable in inner["command"]
+        # Carries ONLY the hook — no permissions.deny re-introduced.
+        assert "permissions" not in data
+
+    def test_idempotent_returns_same_path(self, tmp_path):
+        p1 = spec_write_hook.ensure_guard_settings(tmp_path)
+        p2 = spec_write_hook.ensure_guard_settings(tmp_path)
+        assert p1 == p2
+        assert p1.read_text() == p2.read_text()
+
+    def test_idempotent_no_rewrite_when_identical(self, tmp_path):
+        path = spec_write_hook.ensure_guard_settings(tmp_path)
+        os.utime(path, (1_000_000, 1_000_000))
+        before = path.stat().st_mtime
+        spec_write_hook.ensure_guard_settings(tmp_path)
+        # Identical content => no rewrite => mtime unchanged.
+        assert path.stat().st_mtime == before
+
+
+# ---------------------------------------------------------------------------
+# snapshot_spec_files / diff_spec_files
+# ---------------------------------------------------------------------------
+
+class TestSnapshotDiff:
+    def test_snapshot_and_diff_lifecycle(self, tmp_path):
+        specs = tmp_path / "se3" / "specs" / "base"
+        specs.mkdir(parents=True)
+        f = specs / "spec.md"
+        f.write_text("hello")
+
+        before = spec_write_hook.snapshot_spec_files(tmp_path)
+        assert "se3/specs/base/spec.md" in before
+
+        # No change => empty diff.
+        same = spec_write_hook.snapshot_spec_files(tmp_path)
+        assert spec_write_hook.diff_spec_files(before, same) == []
+
+        # Modify => detected.
+        f.write_text("changed")
+        after = spec_write_hook.snapshot_spec_files(tmp_path)
+        assert spec_write_hook.diff_spec_files(before, after) == [
+            "se3/specs/base/spec.md"
+        ]
+
+    def test_diff_detects_add_and_remove(self, tmp_path):
+        specs = tmp_path / "se3" / "specs" / "base"
+        specs.mkdir(parents=True)
+        (specs / "spec.md").write_text("x")
+        before = spec_write_hook.snapshot_spec_files(tmp_path)
+
+        # Add a file.
+        (specs / "extra.md").write_text("y")
+        after_add = spec_write_hook.snapshot_spec_files(tmp_path)
+        assert "se3/specs/base/extra.md" in spec_write_hook.diff_spec_files(
+            before, after_add
+        )
+
+        # Remove the original.
+        (specs / "spec.md").unlink()
+        after_rm = spec_write_hook.snapshot_spec_files(tmp_path)
+        assert "se3/specs/base/spec.md" in spec_write_hook.diff_spec_files(
+            before, after_rm
+        )
+
+    def test_snapshot_missing_specs_dir(self, tmp_path):
+        assert spec_write_hook.snapshot_spec_files(tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeRunner.build_call_args — --settings wiring
+# ---------------------------------------------------------------------------
+
+class TestBuildCallArgs:
+    def test_settings_appended_when_provided(self, tmp_path):
+        runner = _claude_runner(tmp_path)
+        settings = tmp_path / "se3" / "tmp" / "guard.json"
+        args = runner.build_call_args(
+            "the prompt", read_only=False, spec_guard_settings=settings
+        )
+        assert "--settings" in args
+        idx = args.index("--settings")
+        assert args[idx + 1] == str(settings)
+
+    def test_argv_byte_identical_when_none(self, tmp_path):
+        runner = _claude_runner(tmp_path)
+        base = runner.build_call_args("the prompt", read_only=False)
+        explicit_none = runner.build_call_args(
+            "the prompt", read_only=False, spec_guard_settings=None
+        )
+        assert base == explicit_none
+        assert "--settings" not in base
+
+    def test_settings_composes_with_read_only(self, tmp_path):
+        runner = _claude_runner(tmp_path)
+        settings = tmp_path / "guard.json"
+        args = runner.build_call_args(
+            "p", read_only=True, spec_guard_settings=settings
+        )
+        assert "--disallowedTools" in args
+        assert "--settings" in args
+
+
+# ---------------------------------------------------------------------------
+# LLMCaller._resolve_spec_guard_settings — enable decision
+# ---------------------------------------------------------------------------
+
+def _caller(tmp_path, step_type):
+    return LLMCaller(
+        project_root=tmp_path,
+        step_type=step_type,
+        agents=[{"cmd": "claude", "name": "claude", "priority": 0}],
+    )
+
+
+class TestResolveSpecGuardSettings:
+    def test_protected_step_enables_hook(self, tmp_path):
+        caller = _caller(tmp_path, "implement")
+        path = caller._resolve_spec_guard_settings()
+        assert path is not None
+        assert path.exists()
+        assert path.name == "spec_write_guard_settings.json"
+
+    @pytest.mark.parametrize(
+        "step",
+        ["update_spec", "sync_scan", "sync_analyze", "sync_resolve", "sync_respond"],
+    )
+    def test_exempt_steps_do_not_enable_hook(self, tmp_path, step):
+        # All steps in the shared exemption set return None — most importantly
+        # sync_respond, whose omission would have its Way-A Edit denied.
+        assert step in SPEC_WRITE_ALLOWED_STEPS
+        caller = _caller(tmp_path, step)
+        assert caller._resolve_spec_guard_settings() is None
+
+    def test_decision_uses_shared_exemption_set_only(self, tmp_path):
+        # Every exempt step must resolve to None; no literal list is re-derived.
+        for step in SPEC_WRITE_ALLOWED_STEPS:
+            caller = _caller(tmp_path, step)
+            assert caller._resolve_spec_guard_settings() is None
+
+    def test_hook_disabled_via_config(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            "spec_write_protection:\n  hook_enabled: false\n"
+        )
+        caller = _caller(tmp_path, "implement")
+        assert caller._resolve_spec_guard_settings() is None
+
+    def test_result_is_cached(self, tmp_path):
+        caller = _caller(tmp_path, "implement")
+        first = caller._resolve_spec_guard_settings()
+        second = caller._resolve_spec_guard_settings()
+        assert first == second
+        assert caller._spec_guard_settings_computed is True
+
+
+# ---------------------------------------------------------------------------
+# SpecWriteProtectionConfig
+# ---------------------------------------------------------------------------
+
+class TestSpecWriteProtectionConfig:
+    def test_defaults_all_on(self, tmp_path):
+        cfg = load_spec_write_protection_config(tmp_path)
+        assert cfg.hook_enabled is True
+        assert cfg.diff_fallback_enabled is True
+
+    def test_none_project_root_defaults(self):
+        cfg = load_spec_write_protection_config(None)
+        assert cfg.hook_enabled is True
+        assert cfg.diff_fallback_enabled is True
+
+    def test_absent_section_defaults(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text("workflow:\n  max_fix_iterations: 5\n")
+        cfg = load_spec_write_protection_config(tmp_path)
+        assert cfg.hook_enabled is True
+        assert cfg.diff_fallback_enabled is True
+
+    def test_explicit_off(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            "spec_write_protection:\n"
+            "  hook_enabled: false\n"
+            "  diff_fallback_enabled: false\n"
+        )
+        cfg = load_spec_write_protection_config(tmp_path)
+        assert cfg.hook_enabled is False
+        assert cfg.diff_fallback_enabled is False
+
+    def test_invalid_value_raises(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            "spec_write_protection:\n  hook_enabled: maybe\n"
+        )
+        with pytest.raises(ConfigError) as exc:
+            load_spec_write_protection_config(tmp_path)
+        assert "hook_enabled" in str(exc.value)
+
+    def test_non_mapping_section_raises(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text("spec_write_protection: [1, 2]\n")
+        with pytest.raises(ConfigError):
+            load_spec_write_protection_config(tmp_path)
+
+    def test_from_dict_partial(self):
+        cfg = SpecWriteProtectionConfig.from_dict({"hook_enabled": False})
+        assert cfg.hook_enabled is False
+        # Unspecified key keeps its default.
+        assert cfg.diff_fallback_enabled is True
