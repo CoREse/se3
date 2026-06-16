@@ -4569,6 +4569,165 @@ check("collectJsonRegions: real fixture from new bug session (record 36 shape)",
   assert.equal(got.narrative.startsWith("[Read:"), true);
 });
 
+// -- collectJsonRegions: BARE JSON + trailing non-whitespace text ----------
+// G1 regression: the dropped shape pinned by reproducing a post-10.0
+// ClaudeRunner discovery record. A BARE JSON object (NO outer ```json fence)
+// followed by further non-whitespace text — a trailing prose tail, a second
+// narrative paragraph, or another payload block — matched none of the old
+// registration gate's beforeMatch / afterMatch / isTrailing conditions, so
+// the region was never registered: collectJsonRegions returned [],
+// extractResultJson returned null, renderDiscoveryAssistant returned null,
+// and content/refined_description/questions vanished (only the thinking
+// narrative survived via renderAssistantProcessInline). The fix relaxes the
+// gate with a "substantive object" criterion (non-array object with >=1 key).
+
+check("collectJsonRegions: bare JSON + trailing prose tail registers and extracts", () => {
+  const text = [
+    "Here is my proposed task description.",
+    '{"content": "do x", "refined_description": "fix the bug", "questions": ["q1"]}',
+    "Let me know if this works for you.",
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1, "bare JSON + trailing non-whitespace must register");
+  assert.equal(regions[0].value.refined_description, "fix the bug");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "extractResultJson must select the bare result, not null");
+  assert.equal(got.value.refined_description, "fix the bug");
+  // Narrative keeps the surrounding prose (head AND trailing tail) but excises
+  // the JSON region so it never leaks into the Layer-1 view.
+  assert.equal(got.narrative.includes("refined_description"), false);
+  assert.equal(got.narrative.includes("Here is my proposed task description."), true);
+  assert.equal(got.narrative.includes("Let me know if this works for you."), true);
+});
+
+check("collectJsonRegions: bare JSON followed by a second narrative paragraph", () => {
+  // Multi-paragraph trailing prose after the bare result (no fence anywhere).
+  const text = [
+    "Investigation complete; here is the proposal.",
+    '{"content": "summary", "refined_description": "do the thing", "questions": []}',
+    "",
+    "I considered alternatives but settled on this.",
+    "Ready to proceed when you confirm.",
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1);
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "do the thing");
+  assert.equal(got.narrative.includes("Investigation complete"), true);
+  assert.equal(got.narrative.includes("considered alternatives"), true);
+  assert.equal(got.narrative.includes("Ready to proceed"), true);
+  assert.equal(got.narrative.includes("refined_description"), false);
+});
+
+check("collectJsonRegions: stray bare array / empty object + trailing text stays unregistered", () => {
+  // The substantive-object criterion must NOT pull stray prose fragments into
+  // the region set, or they would be wrongly excised from the narrative.
+  assert.equal(app.collectJsonRegions("See item [0] then continue reading.").length, 0,
+    "stray [0] must not register");
+  assert.equal(app.collectJsonRegions("nums " + JSON.stringify([1, 2, 3]) + " more").length, 0,
+    "bare array + trailing text must not register");
+  assert.equal(app.collectJsonRegions("an empty {} placeholder follows.").length, 0,
+    "empty object + trailing text must not register");
+});
+
+check("collectJsonRegions: multi-block + interleaved tool_use/tool_result + trailing bare result", () => {
+  // The post-10.0 streaming shape: a multi-block assistant message whose text
+  // blocks interleave tool_use / tool_result, ending in a text block that
+  // carries a BARE result JSON followed by a trailing prose line. The pipeline
+  // (extractAssistantText assembly -> collectJsonRegions -> extractResultJson)
+  // must surface the result and keep every tool marker + prose in the
+  // narrative while excising the JSON.
+  const raw = [
+    { type: "assistant", message: { role: "assistant", content: [
+      { type: "text", text: "Let me read the file first." },
+      { type: "tool_use", id: "tu1", name: "Read", input: { file_path: "/tmp/x" } },
+    ] } },
+    { type: "user", message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "tu1", content: "file body" },
+    ] } },
+    { type: "assistant", message: { role: "assistant", content: [
+      { type: "text", text: "Checking git history too." },
+      { type: "tool_use", id: "tu2", name: "Bash", input: { command: "git log" } },
+    ] } },
+    { type: "user", message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "tu2", content: "abc123 commit" },
+    ] } },
+    { type: "assistant", message: { role: "assistant", content: [
+      { type: "text", text: "Now drafting the proposal:\n" +
+        '{"content": "draft", "refined_description": "do many things", "questions": ["q1"]}' +
+        "\nThanks for your patience." },
+    ] } },
+  ];
+  const text = app.extractAssistantText(raw);
+  // Multi-block assembly: tool_use markers present, tool_result NOT re-emitted
+  // as a zombie bracket (paired by the chip state machine downstream).
+  assert.equal(text.includes("[Read"), true);
+  assert.equal(text.includes("[Bash"), true);
+  assert.equal(text.includes("file body"), false);
+  assert.equal(text.includes("abc123 commit"), false);
+
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1, "the trailing bare result must register");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "extractResultJson must pick the final result region");
+  assert.equal(got.value.refined_description, "do many things");
+  // Narrative retains both text fragments and both tool markers, JSON excised.
+  assert.equal(got.narrative.includes("Let me read the file first."), true);
+  assert.equal(got.narrative.includes("Checking git history too."), true);
+  assert.equal(got.narrative.includes("Now drafting the proposal:"), true);
+  assert.equal(got.narrative.includes("Thanks for your patience."), true);
+  assert.equal(got.narrative.includes("[Read"), true);
+  assert.equal(got.narrative.includes("[Bash"), true);
+  assert.equal(got.narrative.includes("refined_description"), false);
+});
+
+check("collectJsonRegions: inline tool-marker JSON is NOT registered (block-start guard)", () => {
+  // The substantive-object relaxation must not register JSON embedded INLINE
+  // inside a tool marker (`[Read: {"file_path": "…"}]`), whose `{` is preceded
+  // by `[Read: ` mid-line — registering it would excise the marker detail from
+  // the narrative. Only the block-level trailing bare result registers.
+  const text = "Reading the file.\n[Read: " +
+    '{"file_path": "/tmp/x", "offset": 0}' + "]\nProposal follows.\n" +
+    '{"content": "c", "refined_description": "do X", "questions": []}' +
+    "\nThat is all.";
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1, "only the block-level bare result registers");
+  assert.equal(regions[0].value.refined_description, "do X");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "do X");
+  // The inline tool-marker JSON stays intact in the narrative.
+  assert.equal(got.narrative.includes('[Read: {"file_path": "/tmp/x", "offset": 0}]'), true);
+  assert.equal(got.narrative.includes("refined_description"), false);
+});
+
+check("collectJsonRegions: tool-call JSON (bare) before bare result picks the result", () => {
+  // A bare tool-call JSON object (no result fields) precedes the bare result,
+  // both followed by trailing prose. The tool-call object now registers too
+  // (substantive object) and is excised from the narrative, while the result
+  // predicate selects the keyed result object.
+  const text = [
+    "Plan: inspect then propose.",
+    '{"command": "ls -la", "description": "list files"}',
+    "Having looked, here is the result:",
+    '{"content": "c", "refined_description": "do X", "questions": []}',
+    "End of message.",
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 2, "both bare objects register");
+  assert.equal(isDiscoveryResultLike(regions[0].value), false);
+  assert.equal(isDiscoveryResultLike(regions[1].value), true);
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "do X");
+  // BOTH JSON regions excised — no intermediate tool-call JSON leaks.
+  assert.equal(got.narrative.includes('"command"'), false);
+  assert.equal(got.narrative.includes("refined_description"), false);
+  assert.equal(got.narrative.includes("Plan: inspect then propose."), true);
+  assert.equal(got.narrative.includes("End of message."), true);
+});
+
 // ---------------------------------------------------------------------------
 // G4: dedicated test coverage for the three webui rendering fixes
 // ---------------------------------------------------------------------------
