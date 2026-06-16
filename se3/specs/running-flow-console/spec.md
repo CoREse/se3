@@ -1156,6 +1156,27 @@ produces a second same-named region.
 - **THEN** the terminal report card supersedes the running anchor inside the
   same step region, and no new same-named step region is created
 
+#### Scenario: Live channel resumes after switching out of the paused-wait state
+- **GIVEN** a `discovery` (or any step that pauses each round to await user
+  input) whose step region shows the design-intended *paused* status row (the
+  engine recorded `step_status: paused` when the step returned `PAUSED` to await
+  the operator's answer)
+- **WHEN** the operator submits their answer, the main loop sets the step back
+  to `PENDING` and re-runs it — emitting a fresh `step_started` running anchor
+  plus the subsequent running / append records (including, under the
+  daemon-resume shape, the records produced by the second `--resume` process
+  spawned after the first process wrote `paused` and exited)
+- **THEN** the live (append / broadcast) channel carries those post-answer
+  `step_started` / append records through the existing subscription, cache
+  generation, and append cursor without dropping them, and the post-answer
+  running anchor survives `dedupeAppendRecords` so that `removeSupersededStatusRows`
+  supersedes the frozen *paused* status row in place and real-time appending
+  resumes
+- **AND** the operator sees the new and subsequent messages live, without
+  having to exit and re-enter the flow to force a full re-entry / rebuild
+- **AND** this fix targets only the switch-**out** of the paused-wait state; the
+  design-intended *paused* status shown while a round awaits input is unchanged
+
 ### Requirement: Viewport-Driven Sticky Step Header
 
 The conversation scroll region MUST present a **viewport-driven sticky step
@@ -2118,7 +2139,30 @@ code fences whose bodies are non-JSON; (4) prose containing inline backticks or
 unpaired ```` ``` ```` triple-backtick runs; (5) a JSON string field value that
 literally contains a ```` ``` ```` triple-backtick or other fence-like
 substring; (6) a single turn carrying multiple JSON regions (e.g. several
-tool-call JSON segments followed by a final result JSON). When the assistant
+tool-call JSON segments followed by a final result JSON); (7) a bare
+(unfenced) substantive JSON **object** that stands at block-start but is
+**followed by non-whitespace text** — trailing prose, a second narrative
+paragraph, or a further trailing payload — rather than sitting at the end of
+the body (the only previously-collected bare shape). Shape (7) was the
+historical blind spot: the region-registration gate previously admitted a bare
+JSON region only when it was fence-wrapped, immediately followed by a ```` ``` ````
+fence, or positioned at the body's tail (followed only by whitespace), so a
+bare result object trailed by any non-whitespace text went unregistered →
+`extractResultJson` returned null → the structured fields (`content`,
+`refined_description`, `questions`, and their per-step equivalents) were
+silently dropped from the Layer-1 view and survived only behind "View raw". The
+gate MUST therefore register a bare JSON region that stands at block-start even
+when followed by non-whitespace text, **provided** the region is a substantive
+object (a non-empty dict carrying at least one key); the block-start +
+substantive-object guard keeps the gate from admitting inline tool-marker JSON
+or stray fragments (`[0]`, a bare array, `{}`) that prose may contain, so those
+are still left unregistered and never wrongly stripped from the narrative.
+This shape — and the broader case of a multi-block assistant message that
+interleaves `tool_use` / `tool_result` blocks before finally emitting the
+structured result — became frequent only after the v10.0–v10.3 agent-runner /
+live-append rework reshaped how `discovery` assistant content is assembled and
+streamed; the shared rendering pipeline must recognise it for every step type
+in `STEP_RESULT_FIELDS`, not `discovery` alone. When the assistant
 text contains no JSON region at all (pure prose), the entire body MUST render
 as markdown without raising and without producing an empty result card.
 
@@ -2143,6 +2187,30 @@ as markdown without raising and without producing an empty result card.
 - **AND** the Layer-1 narrative has every JSON region (the tool calls and the
   result literal) removed, while the unmodified body remains reachable behind
   the assistant's single "View raw" fold
+
+#### Scenario: Bare JSON followed by trailing non-whitespace text still renders structured fields
+- **GIVEN** an assistant turn whose body carries a bare (unfenced) substantive
+  JSON object at block-start — a non-empty dict carrying at least one of its
+  step type's result fields (e.g. a `discovery` `{"content", "refined_description",
+  "questions"}`) — that is **followed by non-whitespace text** rather than
+  sitting at the body's tail (trailing prose, a second narrative paragraph, or a
+  further trailing payload), optionally produced by a multi-block message that
+  interleaved `tool_use` / `tool_result` blocks before emitting the result
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** the region-registration gate registers the bare object even though
+  non-whitespace text follows it, `extractResultJson` selects it as the turn's
+  result, and the default view renders the structured fields (`content` markdown,
+  the Proposed Task Description card, the `questions` list — and the per-step
+  equivalents) in full rather than dropping them and surfacing them only behind
+  "View raw"
+- **AND** the Layer-1 narrative has every JSON region removed, with the trailing
+  non-whitespace text preserved as narrative around the stripped region
+- **AND** the same block-start + substantive-object guard leaves inline
+  tool-marker JSON and stray non-result fragments (`[0]`, a bare array, `{}`)
+  unregistered, so they are never wrongly stripped from the narrative
+- **AND** this behavior holds uniformly for every step type whose assistant
+  message flows through the shared `STEP_RESULT_FIELDS` collection path, not for
+  `discovery` alone
 
 #### Scenario: Bare JSON with embedded markdown fence still renders structured fields
 - **GIVEN** an assistant turn whose body is a bare JSON object (no outer

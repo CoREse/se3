@@ -4362,8 +4362,19 @@ function normalizeRecord(rec) {
 function recordKey(rec) {
   const n = normalizeRecord(rec);
   const content = typeof n.content === "string" ? n.content : "";
+  // Include the lifecycle `status` so two status anchors of the SAME step
+  // region — e.g. a `paused` step_status followed by a resumed `running`
+  // step_started — never collide on recordKey. They share stepId / role
+  // (step-event) / attempt (null) / content ("") and, when the resume happens
+  // within the same wall-clock second as the pause (the daemon-resume answer
+  // path), the same second-granularity timestamp too; without `status` in the
+  // key the post-answer `running` anchor hashes identically to the frozen
+  // `paused` anchor and dedupeAppendRecords drops it, so the live append never
+  // supersedes the 已暂停 row and the view stays frozen until a full re-entry.
+  // Generic chat records (user / assistant / system) carry no `status`, so this
+  // adds a constant "undefined" to their key and never changes their identity.
   return [
-    n.stepId, n.role, String(n.timestamp), String(n.attempt),
+    n.stepId, n.role, String(n.status), String(n.timestamp), String(n.attempt),
     content.length, content.slice(0, 96),
   ].join("");
 }
@@ -7002,7 +7013,34 @@ function collectJsonRegions(text) {
             .slice(end + 1)
             .match(/^[ \t]*\n?[ \t]*```/);
           const isTrailing = text.slice(end + 1).trim() === "";
-          if (beforeMatch || afterMatch || isTrailing) {
+          // Historical blind spot: a BARE JSON object (no fence) followed by
+          // further non-whitespace text — a trailing prose tail, a second
+          // narrative paragraph, or another trailing payload block — matches
+          // none of beforeMatch / afterMatch / isTrailing, so the region was
+          // dropped, extractResultJson returned null, and the discovery (and
+          // every other STEP_RESULT_FIELDS) renderer lost content /
+          // refined_description / questions, falling back to thinking-only.
+          // Register such a region when the parsed value is a *substantive
+          // object* — a non-array object carrying at least one key — that
+          // also stands as its own BLOCK (the `{` is preceded only by
+          // horizontal whitespace back to a line break or the start of the
+          // text). A real step result is always a keyed object
+          // ({content, ...}) emitted on its own block, so this captures the
+          // new bare shapes while leaving unregistered: stray prose fragments
+          // (`[0]`, a bare array, or an empty `{}`), and — crucially — JSON
+          // embedded INLINE inside a tool marker such as
+          // `[Read: {"file_path": "…"}]`, whose `{` is preceded by `[Read: `
+          // mid-line. Registering an inline tool-marker object would excise
+          // it from the narrative and gut the marker's detail. The block-start
+          // guard is what keeps tool markers intact. The result predicate
+          // downstream still decides which registered region is the result.
+          const beforeBare = text.slice(0, i).replace(/[ \t]*$/, "");
+          const atBlockStart = beforeBare === "" || beforeBare.endsWith("\n");
+          const isSubstantiveObject =
+            value && typeof value === "object" && !Array.isArray(value) &&
+            Object.keys(value).length > 0;
+          if (beforeMatch || afterMatch || isTrailing ||
+              (isSubstantiveObject && atBlockStart)) {
             let startIndex = i;
             let endIndex = end + 1;
             if (beforeMatch) startIndex -= beforeMatch[0].length;

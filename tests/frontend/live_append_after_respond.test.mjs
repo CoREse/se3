@@ -346,4 +346,175 @@ export function registerLiveAppendAfterRespondTests(ctx) {
     assert.ok(bodies.every((b) => b !== ""), "no empty worktree body");
     assert.ok(allUnique(app.state.flowConversationRecords));
   });
+
+  // ----------------------------------------------------------------------- //
+  // Regression two (G2): answering a DISCOVERY pause must un-freeze the live  //
+  // view — the post-answer `running` step_started anchor (and the records     //
+  // that follow it) must reach the live append channel and supersede the      //
+  // frozen "已暂停" row, without exit/re-entry forcing a full rebuild.         //
+  //                                                                           //
+  // Root cause: recordKey omitted the lifecycle `status`, so a `paused`       //
+  // step_status and the resumed `running` step_started for the SAME step at   //
+  // the SAME wall-clock second hashed identically. dedupeAppendRecords then   //
+  // dropped the running anchor as a "duplicate", so the live append never     //
+  // delivered the anchor that removeSupersededStatusRows needs to顶掉 the      //
+  // paused row — the view stayed frozen on 已暂停 until a full re-entry.        //
+  // ----------------------------------------------------------------------- //
+
+  // Envelope-less lifecycle anchors, matching chat_history's on-disk shape
+  // (record_step_started / record_step_status write flat `type`-tagged dicts
+  // with NO role/content, exactly like the waiting_for_lock record builder).
+  const startedRow = (stepId, stepType, ts) => ({
+    type: "step_started", step_id: stepId, step_type: stepType,
+    status: "running", timestamp: ts,
+  });
+  const pausedRow = (stepId, stepType, ts) => ({
+    type: "step_status", step_id: stepId, step_type: stepType,
+    status: "paused", timestamp: ts,
+  });
+  const statusRows = (c) => c.children.filter((x) => x.__convStatusRow);
+
+  check("G2 recordKey distinguishes paused vs running anchors at the same second", () => {
+    // The exact collision that froze the view: same stepId / step-event role /
+    // null attempt / empty content / same second-granularity timestamp, differing
+    // ONLY in status. They must hash to distinct keys so the resumed running
+    // anchor is never deduped against the frozen paused anchor.
+    const paused = pausedRow("01_discovery_ab12", "discovery", 5);
+    const running = startedRow("01_discovery_ab12", "discovery", 5);
+    assert.notEqual(app.recordKey(paused), app.recordKey(running),
+      "paused and running anchors of the same step/second must not collide");
+    // And a true duplicate (same status) still collides, so genuine dedupe holds.
+    assert.equal(app.recordKey(paused), app.recordKey(pausedRow("01_discovery_ab12", "discovery", 5)),
+      "two identical paused anchors still share one key (dedupe preserved)");
+  });
+
+  check("G2 dedupeAppendRecords does not mask the running anchor colliding with a frozen paused row", () => {
+    const paused = pausedRow("01_discovery_ab12", "discovery", 5);
+    const running = startedRow("01_discovery_ab12", "discovery", 5);
+    // Pre-fix the whole-window dedupe (status-blind key) filtered `running` out
+    // entirely; it must now survive as a genuinely new record.
+    const fresh = app.dedupeAppendRecords([paused], [running]);
+    assert.equal(fresh.length, 1, "the resumed running anchor must not be deduped away");
+    assert.equal(app.normalizeRecord(fresh[0]).status, "running");
+  });
+
+  check("G2 post-answer running anchor supersedes the frozen 已暂停 row via the live append", () => {
+    const flowId = "flow-g2-resume";
+    // The live view is frozen on the discovery pause: an assistant question plus
+    // the paused lifecycle anchor are the last things rendered.
+    const c = freshFlow(flowId, [
+      asst("Which framework should I use?", 4, "01_discovery_ab12", "discovery"),
+      pausedRow("01_discovery_ab12", "discovery", 5),
+    ]);
+    // Exactly one status row, reading 已暂停.
+    let rows = statusRows(c);
+    assert.equal(rows.length, 1, "starts frozen on a single paused anchor");
+    assert.ok(rows[0].classList.contains("step-status-paused"));
+
+    // The operator answers; the daemon-resumed second process re-runs discovery
+    // and the daemon pushes (mode:append) the resumed running anchor at the SAME
+    // second as the pause, followed by the next assistant turn.
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [
+        startedRow("01_discovery_ab12", "discovery", 5),
+        asst("Great, proceeding with the chosen framework.", 6, "01_discovery_ab12", "discovery"),
+      ],
+    });
+
+    // The paused row is superseded by the running anchor (one truthful status),
+    // and the post-answer assistant turn streamed in — no re-entry needed.
+    rows = statusRows(c);
+    assert.equal(rows.length, 1, "the 已暂停 row is superseded, not stacked");
+    assert.ok(rows[0].classList.contains("step-status-running"),
+      "the surviving anchor reads 进行中 after the resume");
+    const asstBodies = app.state.flowConversationRecords
+      .map(app.normalizeRecord).filter((n) => n.role === "assistant").map((n) => n.content);
+    assert.deepEqual(asstBodies,
+      ["Which framework should I use?", "Great, proceeding with the chosen framework."],
+      "the post-answer assistant turn kept streaming live");
+    assert.ok(allUnique(app.state.flowConversationRecords));
+  });
+
+  check("G2 multi-round discovery: each round's paused/running anchors stay distinct, latest wins", () => {
+    const flowId = "flow-g2-multiround";
+    const stepId = "01_discovery_ab12";
+    const c = freshFlow(flowId, [
+      asst("Round 1 question?", 4, stepId, "discovery"),
+      pausedRow(stepId, "discovery", 5),
+    ]);
+    // Operator answers round 1; resume re-runs discovery which asks ANOTHER
+    // clarifying question and pauses again. The resumed `running` anchor lands at
+    // the SAME second as round-1's pause (the daemon-resume collision the fix
+    // targets); round-2's pause arrives a few seconds later, all on the reused
+    // discovery step_id.
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [
+        startedRow(stepId, "discovery", 5),
+        asst("Round 2 question?", 6, stepId, "discovery"),
+        pausedRow(stepId, "discovery", 8),
+      ],
+    });
+    // Round-2 paused is a genuinely-new record (not masked by round-1 paused),
+    // and the region collapses to ONE current status anchor (the latest paused).
+    const rows = statusRows(c);
+    assert.equal(rows.length, 1, "still exactly one status anchor for the region");
+    assert.ok(rows[0].classList.contains("step-status-paused"),
+      "the region settles on the latest (round-2) paused anchor");
+    const asstBodies = app.state.flowConversationRecords
+      .map(app.normalizeRecord).filter((n) => n.role === "assistant").map((n) => n.content);
+    assert.deepEqual(asstBodies, ["Round 1 question?", "Round 2 question?"],
+      "both rounds' questions are visible, none dropped");
+    assert.ok(allUnique(app.state.flowConversationRecords));
+  });
+
+  check("G2 a running-anchor-only post-answer batch is applied (not short-circuited as all-duplicate)", () => {
+    const flowId = "flow-g2-anchor-only";
+    const stepId = "01_discovery_ab12";
+    const c = freshFlow(flowId, [pausedRow(stepId, "discovery", 5)]);
+    assert.equal(statusRows(c).length, 1);
+    // The daemon's first post-answer tick may carry ONLY the running anchor
+    // (the assistant output is still streaming). Pre-fix this batch was entirely
+    // a recordKey duplicate of the paused row, so applyHistoryData short-circuited
+    // (`if (!fresh.length) return;`) and the supersede never ran. It must now
+    // apply and flip 已暂停 → 进行中 on this very tick.
+    app.applyHistoryData({
+      flow_id: flowId, mode: "append",
+      records: [startedRow(stepId, "discovery", 5)],
+    });
+    const rows = statusRows(c);
+    assert.equal(rows.length, 1, "still one status anchor");
+    assert.ok(rows[0].classList.contains("step-status-running"),
+      "the running anchor alone is enough to un-freeze the paused row");
+  });
+
+  check("G2 full-rebuild and live-append converge on the same superseded result", () => {
+    const stepId = "01_discovery_ab12";
+    const records = [
+      asst("Q?", 4, stepId, "discovery"),
+      pausedRow(stepId, "discovery", 5),
+      startedRow(stepId, "discovery", 5),
+      asst("A.", 6, stepId, "discovery"),
+    ];
+    // Full rebuild (exit/re-enter): all records in one render pass.
+    const full = freshFlow("flow-g2-full", records.slice());
+    const fullRows = statusRows(full);
+    // Live append: paused first, then the rest as a delta.
+    const live = freshFlow("flow-g2-live", records.slice(0, 2));
+    app.state.selectedFlowId = "flow-g2-live";
+    app.state.flowConversationRecords = records.slice(0, 2);
+    app.applyHistoryData({
+      flow_id: "flow-g2-live", mode: "append", records: records.slice(2),
+    });
+    const liveRows = statusRows(live);
+    assert.equal(fullRows.length, 1);
+    assert.equal(liveRows.length, 1,
+      "live append converges to the same single anchor as the full rebuild");
+    assert.ok(fullRows[0].classList.contains("step-status-running"));
+    assert.ok(liveRows[0].classList.contains("step-status-running"),
+      "both paths settle on 进行中, never frozen on 已暂停");
+  });
 }
+
+

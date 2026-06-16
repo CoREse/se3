@@ -54,6 +54,13 @@
 
 
 
+
+## 10.3.1 - 2026-06-16
+
+- Fix discovery structured fields (content, refined_description, questions) being silently dropped when assistant responses contain bare JSON followed by trailing text
+- Fix webui freezing on 'paused' state after answering a discovery prompt, requiring exit and re-entry to recover
+- Extend collectJsonRegions to recognize unfenced JSON objects at block-start as valid result regions
+- Include lifecycle status in append record key to prevent paused/running collision in live-append deduplication
 ## 10.3.0 - 2026-06-15
 
 - Add ClaudeInteractiveRunner (type=claude-interactive) as the third AgentRunner adapter, driven by PTY with JSONL transcript watching
