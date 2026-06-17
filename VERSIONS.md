@@ -58,6 +58,14 @@
 
 
 
+
+## 10.4.2 - 2026-06-17
+
+- Fix typing lag in reply textarea caused by unnecessary DOM rebuilds on frequent WebSocket status updates
+- Add diff-aware rebuild skipping for renderMachines, renderFlows, renderFlowSidebar, and renderInterventions
+- Skip conversation re-render when no new records arrive via polling or WebSocket push
+- Preserve real-time responsiveness: genuine data changes still trigger immediate DOM updates
+- Preserve textarea draft text, focus, auto-grow height, and scroll position during no-change updates
 ## 10.4.1 - 2026-06-17
 
 - Fix Available Specifications injection to guide sub-agents through `se3 spec index`/`se3 spec show` instead of reading whole spec.md files that exceed the Read tool size limit

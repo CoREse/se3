@@ -1907,6 +1907,7 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
     task_description: f.task_description ?? null,
     flow_id: f.flow_id ?? null,
     status: f.status ?? null,
+    waiting_lock: isWaitingForLock(f),
     task_type: f.task_type ?? null,
     current_step_index: f.current_step_index ?? null,
     total_steps: f.total_steps ?? null,

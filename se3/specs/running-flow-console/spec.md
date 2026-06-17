@@ -865,21 +865,28 @@ other `options` buttons remain outside the collapsible body so they are reachabl
 without expanding the prompt.
 
 The expanded body's internal **scroll position** MUST likewise survive automatic
-re-renders. Because each refresh rebuilds the reply-context block wholesale
+re-renders. The reply-context block is now guarded by the *Diff-Aware Rebuild
+Skipping* requirement: when an incoming `STATUS_UPDATE` / ws push or the 3s
+detail poll carries no change to the reply region's visible-dependency
+signature, `renderInterventions` / `updateReplyBox` skip the rebuild entirely —
+`ctx.innerHTML = ""` is NOT executed — so the existing `.flow-reply-prompt` body
+is never destroyed and its `scrollTop`, expand state, and focus are preserved
+intrinsically because the DOM is not touched. The active `scrollTop`-restore
+path therefore only runs on a rebuild that the signature judges to be a *real*
+data change. On such a rebuild, because the block is rebuilt wholesale
 (`ctx.innerHTML = ""`), a newly created `.flow-reply-prompt` body would reset its
-`scrollTop` to 0; left unguarded, the high-frequency 3s detail poll and ws
-`STATUS_UPDATE` pushes would repeatedly snap a user reading a long expanded body
-back to the top. To prevent this, the expanded body's `scrollTop` MUST be
-persisted as a second session-level UI preference keyed by the same intervention
-id (parallel to the expand-state map, e.g. `state.flowReplyPromptScroll`):
-`buildCollapsiblePrompt` registers a `scroll` listener on the body that records
-its live `scrollTop` into that map, and on each rebuild `updateReplyBox` feeds the
-last recorded `scrollTop` back to `buildCollapsiblePrompt`, which — only when the
-body is initially expanded — restores it (via `requestAnimationFrame`, after
-layout). This leaves the refresh mechanism and frequency unchanged and keeps the
-two restore paths independent: a fresh user expand still runs the
-`scrollIntoView` path, while a refresh rebuild runs only the `scrollTop` restore.
-The scroll-position map is reset alongside the expand-state map when opening or
+`scrollTop` to 0; left unguarded, that change-driven rebuild would snap a user
+reading a long expanded body back to the top. To prevent this, the expanded
+body's `scrollTop` MUST be persisted as a second session-level UI preference
+keyed by the same intervention id (parallel to the expand-state map, e.g.
+`state.flowReplyPromptScroll`): `buildCollapsiblePrompt` registers a `scroll`
+listener on the body that records its live `scrollTop` into that map, and on each
+rebuild `updateReplyBox` feeds the last recorded `scrollTop` back to
+`buildCollapsiblePrompt`, which — only when the body is initially expanded —
+restores it (via `requestAnimationFrame`, after layout). This keeps the two
+restore paths independent: a fresh user expand still runs the `scrollIntoView`
+path, while a change-driven rebuild runs only the `scrollTop` restore. The
+scroll-position map is reset alongside the expand-state map when opening or
 closing `#flow-view`.
 
 #### Scenario: Long prompt is collapsed by default and never pushes controls off-screen
@@ -913,22 +920,134 @@ closing `#flow-view`.
 - **AND** when `#flow-view` is closed or a different flow is opened, the
   expand state resets to the default collapsed
 
-#### Scenario: Scroll position of an expanded body survives automatic re-renders
+#### Scenario: Scroll position of an expanded body survives a change-driven rebuild
 - **GIVEN** a selected chip whose `.flow-reply-prompt` body is expanded and the
   user has scrolled down inside its height-capped (`max-height: 30vh`) region to
   read long content
-- **WHEN** an automatic rebuild fires (a `STATUS_UPDATE` / ws push or the 3s
-  detail poll drives renderInterventions → updateReplyBox, which rebuilds the
-  reply-context block via `ctx.innerHTML = ""`)
+- **WHEN** an automatic rebuild fires *because the reply region's signature
+  changed* (a `STATUS_UPDATE` / ws push or the 3s detail poll drives
+  renderInterventions → updateReplyBox, which rebuilds the reply-context block
+  via `ctx.innerHTML = ""`)
 - **THEN** the freshly rebuilt body's internal `scrollTop` is restored to the
   user's last recorded position (persisted per intervention id in
   `state.flowReplyPromptScroll`) rather than snapping back to the top, so the
   long content stays readable
 - **AND** the restore runs only for an initially-expanded body and does NOT
-  trigger the first-expand `scrollIntoView` path, leaving the refresh mechanism
-  and frequency unchanged
+  trigger the first-expand `scrollIntoView` path
 - **AND** when `#flow-view` is closed or a different flow is opened, the
   scroll-position state resets alongside the expand state to the default
+
+#### Scenario: No-change refresh does not touch the expanded body at all
+- **GIVEN** a selected chip whose `.flow-reply-prompt` body is expanded and the
+  user has scrolled down inside it
+- **WHEN** a `STATUS_UPDATE` / ws push or the 3s detail poll arrives whose
+  payload leaves the reply region's visible-dependency signature unchanged
+- **THEN** per *Diff-Aware Rebuild Skipping*, renderInterventions / updateReplyBox
+  skip the rebuild and `ctx.innerHTML = ""` is NOT executed
+- **AND** the existing body is never destroyed, so its `scrollTop`, expand state,
+  and focus are preserved without invoking the `scrollTop`-restore path
+
+### Requirement: Diff-Aware Rebuild Skipping
+
+Every full-DOM rebuild path in `app.js` that is driven periodically by a ws push
+(`status_update`) or by the 3s detail poll (`refreshFlowDetail`) MUST first
+compare the region's current visible-dependency data against the data it last
+rendered, and MUST skip the rebuild — performing **zero DOM mutation** — when the
+two are equal; it MUST rebuild only when the data has genuinely changed. This
+eliminates the "empty rebuild" reflow that, before this requirement, fired on
+*every* `status_update` (most of which carry no change) and repeatedly re-laid
+out the layout containing the large reply `<textarea>`, causing typing lag while
+a user composed a long reply. Real-time fidelity is non-negotiable: a genuine
+data change (a new pending call, a new interjection request, a status / phase /
+progress transition, a selection or Send-in-flight change) MUST still render
+immediately with no perceptible delay. This requirement deliberately adopts the
+diff-aware approach (Plan B) and MUST NOT layer on a "freeze rebuilds while the
+textarea is focused or holds a draft" strategy (Plan A).
+
+The mechanism is a small, test-covered signature infrastructure:
+
+1. **Pure serializer + central cache** — a pure function `renderSignature(parts)`
+   stably serializes an explicitly chosen subset of fields into a string, and a
+   central `state.renderSig` object caches the last signature per region key
+   (e.g. `'machines'`, `'flows'`, `'sidebar'`, `'interventions'`). A
+   `resetRenderSignatures()` helper clears the cache. The cache lives on
+   `state`, NOT on the container element, because flow-view containers are reused
+   across flows and a per-element signature would wrongly suppress the first
+   frame of a newly opened flow.
+2. **Per-region signature extractors** — each guarded rebuild has a pure
+   `*Signature` function that plucks exactly the fields affecting its visible
+   output: `machinesSignature` / `flowsSignature` (machine and flow-card list
+   dependencies + resume requests), `flowSidebarSignature` (sidebar Overview
+   dependencies, including the `waiting_lock` sub-state folded into
+   `flowStatusLabel` even while raw `status` stays `RUNNING`, plus step-history,
+   resumability, and resume-in-progress), and `interventionsSignature` (the
+   `computeInterventions(flow)` entries, the reconciled `flowReplyTargetId`,
+   `pendingSendSettleKey`, `flowInterjectRequested`, active-flow status, and
+   whether a real interjection exists). Explicit field subsets keep "which
+   changes must trigger a rebuild" auditable; stable key ordering prevents
+   spurious mismatches.
+3. **Entry-guarded early return** — at the top of each guarded rebuild, the
+   function computes its signature, compares it to `state.renderSig[key]`, and on
+   a match returns WITHOUT touching the DOM. The skip branch still syncs any pure
+   state the rest of the app reads (e.g. `state.flowInterventions` and the
+   reconciled `flowReplyTargetId`) so non-DOM state stays consistent with the
+   already-rendered DOM, but performs no DOM write. On a mismatch it runs the
+   original full rebuild and writes the new signature back.
+
+The guarded rebuilds are at least `renderInterventions` (with `updateReplyBox` /
+`syncInterjectButton`), `renderFlowSidebar`, `renderMachines`, and
+`renderFlows`. The conversation path (`renderConversation`) keeps its existing
+incremental-append mechanism unchanged; it is NOT converted to signature
+gating, but it MUST short-circuit (no `renderConversation` call, hence no reflow)
+when an incoming history batch contributes no new records — i.e. when
+`dedupeAppendRecords` filters the batch empty (`if (!fresh.length) return;`).
+`refreshFlowDetail` MUST NOT re-render the conversation at all.
+
+The signature cache MUST be invalidated (`resetRenderSignatures()`) at flow-view
+lifecycle boundaries — opening a flow (`openFlowView`) and closing it
+(`closeFlowView`), which also covers switching between flows — so a reused
+container always rebuilds the first frame of the flow now shown and never
+inherits a stale signature from the previously displayed flow. All `*Signature`
+extractors and `renderSignature` are exported (`module.exports`) so the Node
+DOM-stub test suite can cover the equality logic without a browser.
+
+#### Scenario: No-change status_update produces zero DOM mutation in the reply region
+- **GIVEN** a flow open in `#flow-view` with the reply `<textarea>` focused and a
+  user actively typing a long draft
+- **WHEN** a ws `status_update` push (or a 3s `refreshFlowDetail` poll) arrives
+  whose payload leaves the interventions region's signature unchanged
+- **THEN** `renderInterventions` / `updateReplyBox` return without executing any
+  DOM mutation (no `ctx.innerHTML = ""`, no node insertion/removal), so the
+  layout containing the textarea is not re-laid out and typing does not stutter
+- **AND** the draft text, textarea auto-grow height, focus, and scroll/expand
+  state are all preserved because the DOM was not touched
+
+#### Scenario: A genuine change still rebuilds immediately
+- **GIVEN** a flow open in `#flow-view`
+- **WHEN** a `status_update` introduces a real change — a new pending call, a new
+  interjection request, an interjection phase flip, a status / progress
+  transition, or a selection / Send-in-flight change — that alters the relevant
+  region's signature
+- **THEN** the corresponding guarded rebuild (`renderInterventions`,
+  `renderFlowSidebar`, `renderMachines`, or `renderFlows`) runs its full DOM
+  rebuild without perceptible delay and writes back the new signature
+
+#### Scenario: Reused container rebuilds the first frame after switching flows
+- **GIVEN** flow A has been rendered into `#flow-view` and its region signatures
+  are cached in `state.renderSig`
+- **WHEN** the user closes flow A and opens flow B (which reuses the same
+  containers)
+- **THEN** `resetRenderSignatures()` runs at the `openFlowView` / `closeFlowView`
+  boundary, clearing the cache so flow B's first frame rebuilds fully rather than
+  being wrongly skipped against flow A's stale signature
+
+#### Scenario: Empty history batch skips the conversation reflow
+- **GIVEN** a running flow whose conversation is up to date
+- **WHEN** a history batch arrives whose records are all already present, so
+  `dedupeAppendRecords` filters it empty
+- **THEN** the append path short-circuits (`if (!fresh.length) return;`) and
+  `renderConversation` is not called, so no conversation reflow occurs
+- **AND** the conversation's incremental-append mechanism is otherwise unchanged
 
 ### Requirement: Interjection Lifecycle Events
 

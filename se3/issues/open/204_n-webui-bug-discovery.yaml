@@ -1,0 +1,9 @@
+id: '204'
+description: 修了n遍的一个webui的回归bug：discovery确定方案后不会显示下文，虽然se3 run的流程是正常往下走的，但是webui里不会有任何下文，只有退出重进这个session才会正常往下走。这个bug修了n次了，还是依旧。明明discovery内部那么多次交互都没问题，其它步骤步骤间的转换也没问题，就是discovery到analyze这个转换，就是会不显示了。不过我刚才发现一个新的实事：在update
+  spec阶段（可能其它阶段也一样），如果出现错误，手动选择重试后，也会出现一样的情况，卡住不显示，然后退出重进后才正常显示。run的过程中出错是不是会释放merge
+  锁？我还是有点怀疑是merge锁的问题（当然不排除是其它可能）。
+status: open
+tags: []
+source: human
+created_at: '2026-06-17T17:01:25.380771'
+updated_at: '2026-06-17T17:01:25.380771'
