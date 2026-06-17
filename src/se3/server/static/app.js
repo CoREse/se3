@@ -4631,9 +4631,24 @@ function recordKey(rec) {
   // supersedes the 已暂停 row and the view stays frozen until a full re-entry.
   // Generic chat records (user / assistant / system) carry no `status`, so this
   // adds a constant "undefined" to their key and never changes their identity.
+  //
+  // Include the event `kind` for the same reason in the OTHER step-event family:
+  // the terminal `step_completed` / `step_failed` reports and the non-terminal
+  // `step_output` usage record all normalize to role `step-event` with NO
+  // top-level lifecycle `status` and empty content. A step emits a step_output
+  // on each PAUSED / REVISION / RETRYING round and a terminal report when it
+  // finishes; a status-only key hashes the same-step/same-second step_output and
+  // step_completed identically, so dedupeAppendRecords would drop the terminal
+  // report — the discovery region would never show completion and its status
+  // anchors would never be superseded (a transition/retry-time freeze of that
+  // region). Keying on `kind` keeps each event-type distinct while a TRUE
+  // duplicate (the literal same record re-delivered) shares its kind and still
+  // collapses. Generic chat records carry no `kind` → a constant "undefined",
+  // so their identity (shared with mergeSnapshotWithLiveAppends / usage dedup)
+  // is unchanged and backward-compatible.
   return [
-    n.stepId, n.role, String(n.status), String(n.timestamp), String(n.attempt),
-    content.length, content.slice(0, 96),
+    n.stepId, n.role, String(n.kind), String(n.status), String(n.timestamp),
+    String(n.attempt), content.length, content.slice(0, 96),
   ].join("");
 }
 

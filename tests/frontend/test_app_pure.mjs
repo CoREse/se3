@@ -3757,6 +3757,25 @@ stepLaneMod.registerStepLaneContinuityTests({ app, check, findOne, findAll });
 const waitingForLockMod = await import("./waiting_for_lock.test.mjs");
 waitingForLockMod.registerWaitingForLockTests({ app, check, findOne, findAll });
 
+// Register the G1 discovery→analyze step-transition tests. These pin the
+// long-standing freeze: after the operator confirms discovery the engine steps
+// into analyze, and the daemon-pushed `mode: append` increments (the discovery
+// step_completed terminal, the analyze step_started anchor, analyze's first
+// turns) must keep rendering live — the incremental path converging on the same
+// conversation a full `mode: full` reload would show, with no loss, no dup, and
+// no cursor stall after a duplicate short-circuit.
+const stepTransitionMod = await import("./live_append_step_transition.test.mjs");
+stepTransitionMod.registerLiveAppendStepTransitionTests({ app, check, findOne, findAll });
+
+// Register the G1 retry-after-error step-transition tests. After a later step
+// (e.g. update_spec) FAILS and the operator retries, the daemon re-runs the
+// step reusing its step_id: step_failed terminal → step_status=retrying →
+// step_started=running → fresh assistant turns (with content similar to the
+// failed attempt). The live view must keep streaming the retry through the
+// supersede anchors without dropping the resumed records.
+const retryAfterErrorMod = await import("./live_append_retry_after_error.test.mjs");
+retryAfterErrorMod.registerLiveAppendRetryAfterErrorTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
