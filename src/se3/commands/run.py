@@ -1872,7 +1872,12 @@ def _ensure_main_lock_for_step(
 
     After a successful acquisition (fast path, stale-reclaim, or post-block) any
     set ``waiting_for_lock`` flag is cleared and persisted — including a stale
-    True left by a previously interrupted wait.
+    True left by a previously interrupted wait. When this call had written a
+    streaming ``waiting_for_lock`` jsonl anchor (the contended path), it also
+    emits a matching ``chat_history.record_lock_acquired`` clearing anchor so the
+    web console's live transcript does not stay frozen on "等待锁" — persisting
+    ``waiting_for_lock=False`` to engine.json alone never supersedes the streamed
+    row; only a later same-step lifecycle anchor does.
     """
     if main_lock is None or main_lock.held:
         return
@@ -1896,6 +1901,7 @@ def _ensure_main_lock_for_step(
     except MergeLockBusy:
         acquired = False
 
+    wrote_waiting_event = False
     if not acquired:
         # Lock is genuinely held by another run/merge: surface a visible
         # running "waiting for lock" state BEFORE blocking so the flow never
@@ -1916,6 +1922,7 @@ def _ensure_main_lock_for_step(
                 step_id=current_step.step_id,
                 step_type=current_step.step_type.value,
             )
+            wrote_waiting_event = True
         except Exception:
             logger.debug(
                 "failed to record waiting_for_lock event for %s",
@@ -1935,6 +1942,31 @@ def _ensure_main_lock_for_step(
             logger.debug(
                 "failed to persist waiting_for_lock=False for %s",
                 flow.flow_id, exc_info=True,
+            )
+
+    # If a "等待锁" jsonl anchor was emitted this call, emit the matching clear
+    # event the moment the lock is acquired. Persisting waiting_for_lock=False to
+    # engine.json alone does NOT supersede the streaming "等待锁" row the web
+    # console already rendered — only a later same-step lifecycle anchor does.
+    # The step's own ``step_started`` running anchor would eventually supersede
+    # it, but a window (and, under contention, an unstable ordering) exists
+    # between the acquire and that anchor, leaving the live transcript frozen on
+    # "等待锁". record_lock_acquired closes that window with an explicit,
+    # idempotent clearing anchor. Gated on wrote_waiting_event so a free/stale
+    # acquire (no "等待锁" anchor was written) produces no spurious event.
+    if wrote_waiting_event:
+        try:
+            from ..engine.chat_history import record_lock_acquired
+            record_lock_acquired(
+                project_root=project_root,
+                flow_id=flow.flow_id,
+                step_id=current_step.step_id,
+                step_type=current_step.step_type.value,
+            )
+        except Exception:
+            logger.debug(
+                "failed to record lock-acquired clear event for %s",
+                current_step.step_id, exc_info=True,
             )
 
 
