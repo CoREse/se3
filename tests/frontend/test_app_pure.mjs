@@ -5964,4 +5964,176 @@ check("resetRenderSignatures clears all cached keys", () => {
   assert.deepEqual(Object.keys(app.state.renderSig), []);
 });
 
+// -- machinesSignature / flowsSignature: per-field distinguishing (G2) -------
+
+function sampleMachines() {
+  return [
+    {
+      machine_id: "m1",
+      hostname: "host-a",
+      online: true,
+      flows: [
+        {
+          flow_id: "f1",
+          status: "running",
+          task_description: "do the thing",
+          task_type: "feature",
+          progress: 0.5,
+          current_step: "implement",
+          current_step_index: 3,
+          total_steps: 6,
+          pending_calls: [],
+        },
+      ],
+    },
+    { machine_id: "m2", hostname: "host-b", online: false, flows: [] },
+  ];
+}
+
+check("machinesSignature is stable for equal input", () => {
+  const a = app.machinesSignature(sampleMachines(), "m1");
+  const b = app.machinesSignature(sampleMachines(), "m1");
+  assert.equal(a, b);
+});
+
+check("machinesSignature changes per visible field", () => {
+  const base = app.machinesSignature(sampleMachines(), "m1");
+  // selected machine change
+  assert.notEqual(base, app.machinesSignature(sampleMachines(), "m2"));
+  // online flip
+  const offline = sampleMachines();
+  offline[0].online = false;
+  assert.notEqual(base, app.machinesSignature(offline, "m1"));
+  // hostname change
+  const renamed = sampleMachines();
+  renamed[0].hostname = "host-z";
+  assert.notEqual(base, app.machinesSignature(renamed, "m1"));
+  // flow count change
+  const moreFlows = sampleMachines();
+  moreFlows[0].flows.push({ flow_id: "f2", status: "init" });
+  assert.notEqual(base, app.machinesSignature(moreFlows, "m1"));
+  // machine added / removed
+  assert.notEqual(base, app.machinesSignature(sampleMachines().slice(0, 1), "m1"));
+});
+
+check("machinesSignature ignores fields the list does not paint", () => {
+  const base = app.machinesSignature(sampleMachines(), "m1");
+  const noisy = sampleMachines();
+  noisy[0].some_internal_counter = 99;
+  noisy[0].flows[0].progress = 0.9; // not part of the machine-list view
+  assert.equal(base, app.machinesSignature(noisy, "m1"));
+});
+
+check("flowsSignature is stable for equal input", () => {
+  const m = sampleMachines()[0];
+  const a = app.flowsSignature(m, "m1", new Set());
+  const b = app.flowsSignature(sampleMachines()[0], "m1", new Set());
+  assert.equal(a, b);
+});
+
+check("flowsSignature changes per visible flow field", () => {
+  const m = sampleMachines()[0];
+  const base = app.flowsSignature(m, "m1", new Set());
+  const mut = (fn) => {
+    const x = sampleMachines()[0];
+    fn(x.flows[0]);
+    return app.flowsSignature(x, "m1", new Set());
+  };
+  assert.notEqual(base, mut((f) => (f.status = "paused")));      // status
+  assert.notEqual(base, mut((f) => (f.progress = 0.9)));          // progress
+  assert.notEqual(base, mut((f) => (f.current_step = "verify"))); // current_step
+  assert.notEqual(base, mut((f) => (f.current_step_index = 4)));  // index
+  assert.notEqual(base, mut((f) => (f.total_steps = 8)));         // total
+  assert.notEqual(base, mut((f) => (f.task_type = "bugfix")));    // task_type
+  assert.notEqual(base, mut((f) => (f.task_description = "new"))); // task
+});
+
+check("flowsSignature changes when a pending call appears", () => {
+  const base = app.flowsSignature(sampleMachines()[0], "m1", new Set());
+  const withCall = sampleMachines()[0];
+  withCall.flows[0].pending_calls = [
+    { call_id: "c1", context: { flow_id: "f1" } },
+  ];
+  assert.notEqual(base, app.flowsSignature(withCall, "m1", new Set()));
+});
+
+check("flowsSignature changes with resumability and in-flight resume", () => {
+  const failed = sampleMachines()[0];
+  failed.flows[0].status = "failed";
+  const base = app.flowsSignature(failed, "m1", new Set());
+  // The same flow with an in-flight resume request must differ so the Resume
+  // button can flip to its disabled "Resuming…" state.
+  const resuming = app.flowsSignature(failed, "m1", new Set(["f1"]));
+  assert.notEqual(base, resuming);
+  // Array form (used in some tests) is accepted equivalently.
+  assert.equal(resuming, app.flowsSignature(failed, "m1", ["f1"]));
+});
+
+check("flowsSignature changes when the selected machine changes", () => {
+  const m = sampleMachines()[0];
+  assert.notEqual(
+    app.flowsSignature(m, "m1", new Set()),
+    app.flowsSignature(m, "m2", new Set())
+  );
+});
+
+check("flowsSignature handles a missing machine (empty state)", () => {
+  const a = app.flowsSignature(null, "m1", new Set());
+  assert.equal(typeof a, "string");
+  // Different selection -> different empty-state signature.
+  assert.notEqual(a, app.flowsSignature(null, "m2", new Set()));
+});
+
+// -- renderMachines / renderFlows: skip DOM rebuild when data is unchanged ---
+
+check("renderMachines does not rebuild DOM when data is unchanged", () => {
+  app.state.machines = sampleMachines();
+  app.state.selectedMachineId = "m1";
+  app.resetRenderSignatures();
+
+  app.renderMachines();
+  const list = document.getElementById("machine-list");
+  const firstChildren = list.children.slice();
+  assert.ok(firstChildren.length >= 2, "machines should have rendered");
+
+  // Same data again -> the signature matches and the DOM is untouched: the same
+  // child node objects survive (no innerHTML="" rebuild).
+  app.renderMachines();
+  const secondChildren = list.children.slice();
+  assert.equal(secondChildren.length, firstChildren.length);
+  for (let i = 0; i < firstChildren.length; i++) {
+    assert.equal(secondChildren[i], firstChildren[i]);
+  }
+
+  // A real change (online flip) -> rebuild, new node objects.
+  app.state.machines[0].online = false;
+  app.renderMachines();
+  const thirdChildren = list.children.slice();
+  assert.notEqual(thirdChildren[0], firstChildren[0]);
+});
+
+check("renderFlows does not rebuild DOM when data is unchanged", () => {
+  app.state.machines = sampleMachines();
+  app.state.selectedMachineId = "m1";
+  app.resetRenderSignatures();
+
+  app.renderFlows();
+  const panel = document.getElementById("flow-list");
+  const firstChildren = panel.children.slice();
+  assert.ok(firstChildren.length >= 1, "flows should have rendered");
+
+  app.renderFlows();
+  const secondChildren = panel.children.slice();
+  assert.equal(secondChildren.length, firstChildren.length);
+  for (let i = 0; i < firstChildren.length; i++) {
+    assert.equal(secondChildren[i], firstChildren[i]);
+  }
+
+  // A real change (status) -> rebuild, new node objects.
+  app.state.machines[0].flows[0].status = "paused";
+  app.renderFlows();
+  const thirdChildren = panel.children.slice();
+  assert.notEqual(thirdChildren[0], firstChildren[0]);
+});
+
 console.log(`\n${passed} checks passed.`);

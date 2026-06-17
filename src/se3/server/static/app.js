@@ -229,6 +229,70 @@ function resetRenderSignatures() {
   state.renderSig = {};
 }
 
+// Pure signature of the machine-list's visible dependencies. renderMachines
+// paints one <li> per machine carrying only: the online/offline dot, the name
+// (hostname || machine_id), the flow count, and the selected highlight. The
+// signature plucks exactly those fields plus the selected id, so an unrelated
+// snapshot field changing (internal counters, per-flow detail, etc.) does NOT
+// force a list rebuild, while any visible change — a machine added/removed, an
+// online flip, a renamed host, a flow-count change, or a selection change —
+// yields a different string. DOM-free; exported for the pure tests.
+function machinesSignature(machines, selectedId) {
+  const list = Array.isArray(machines) ? machines : [];
+  return renderSignature(
+    list.map((m) => ({
+      id: (m && m.machine_id) || null,
+      hostname: (m && m.hostname) || "",
+      online: !!(m && m.online),
+      flows: m && Array.isArray(m.flows) ? m.flows.length : 0,
+      selected: !!(m && m.machine_id === selectedId),
+    }))
+  );
+}
+
+// Pure signature of the flow-list's visible dependencies for the selected
+// machine. renderFlows paints the heading (host name) and one card per flow;
+// each card surfaces status, the waiting-for-lock and pending-call badges, the
+// progress bar, the current step / index / total / task_type meta, the task
+// description, and a Resume button gated by isFlowResumable + an in-flight
+// resume request. The signature plucks exactly those visible inputs so any of
+// them changing rebuilds the list, while an unrelated field change skips it.
+// `resumeRequests` is the in-flight resume set (a Set, or an array in tests).
+// DOM-free; exported for the pure tests.
+function flowsSignature(machine, selectedId, resumeRequests) {
+  if (!machine || typeof machine !== "object") {
+    // No selected machine -> the "select a machine" empty state. Keyed by the
+    // selected id so switching selection still differs from a real machine.
+    return renderSignature({ machine: null, selected: selectedId || null });
+  }
+  const resuming = (id) => {
+    if (!id) return false;
+    if (resumeRequests instanceof Set) return resumeRequests.has(id);
+    if (Array.isArray(resumeRequests)) return resumeRequests.indexOf(id) !== -1;
+    return false;
+  };
+  const flows = Array.isArray(machine.flows) ? machine.flows : [];
+  return renderSignature({
+    machine: machine.machine_id || null,
+    hostname: machine.hostname || "",
+    selected: !!(machine.machine_id === selectedId),
+    flows: flows.map((f) => ({
+      id: (f && f.flow_id) || null,
+      status: (f && f.status) || "",
+      task: (f && f.task_description) || "",
+      task_type: (f && f.task_type) || "",
+      progress: (f && f.progress) || 0,
+      current_step: (f && f.current_step) || "",
+      step_index: (f && f.current_step_index) || 0,
+      total_steps: (f && f.total_steps) || 0,
+      waiting_lock: isWaitingForLock(f),
+      pending: hasPendingCall(f),
+      resumable: isFlowResumable(f),
+      resuming: resuming(f && f.flow_id),
+    })),
+  });
+}
+
 let ws = null;
 let reconnectAttempts = 0;
 let detailPollTimer = null;
@@ -1225,6 +1289,14 @@ function buildNewFlowBody({ machineId, task, taskType, discover, worktree, proje
 // ---------------------------------------------------------------------------
 
 function renderMachines() {
+  // Diff-aware skip: a ws status push re-runs this unconditionally, but most
+  // pushes carry unchanged machine data. Rebuilding the list reflows the page
+  // (and, with the flow view open, contributes to reply-textarea typing jank),
+  // so when the visible-dependency signature is unchanged we touch no DOM.
+  const sig = machinesSignature(state.machines, state.selectedMachineId);
+  if (state.renderSig.machines === sig) return;
+  state.renderSig.machines = sig;
+
   const list = $("machine-list");
   list.innerHTML = "";
 
@@ -1260,11 +1332,20 @@ function renderMachines() {
 // ---------------------------------------------------------------------------
 
 function renderFlows() {
+  const machine = state.machines.find((m) => m.machine_id === state.selectedMachineId);
+
+  // Diff-aware skip (same rationale as renderMachines): when the selected
+  // machine's flow-list visible-dependency signature is unchanged, rebuild
+  // nothing so an unchanged ws push reflows neither this panel nor (via the
+  // shared layout) the docked reply textarea.
+  const sig = flowsSignature(machine, state.selectedMachineId, state.resumeFlowRequests);
+  if (state.renderSig.flows === sig) return;
+  state.renderSig.flows = sig;
+
   const panel = $("flow-list");
   const heading = $("flows-heading");
   panel.innerHTML = "";
 
-  const machine = state.machines.find((m) => m.machine_id === state.selectedMachineId);
   if (!machine) {
     heading.textContent = "Flows";
     panel.appendChild(el("p", "empty", "Select a machine to view its flows."));
@@ -10921,6 +11002,11 @@ if (typeof module !== "undefined" && module.exports) {
     // DOM-free tests in tests/frontend/test_app_pure.mjs.
     renderSignature,
     resetRenderSignatures,
+    // Machine/flow list signatures (G2) — exposed for the DOM-free tests.
+    machinesSignature,
+    flowsSignature,
+    renderMachines,
+    renderFlows,
     state,
   };
 }
