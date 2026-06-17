@@ -5964,4 +5964,159 @@ check("resetRenderSignatures clears all cached keys", () => {
   assert.deepEqual(Object.keys(app.state.renderSig), []);
 });
 
+// -- interventionsSignature: per-field distinguishing (G4) -------------------
+// The reply-panel diff-aware equality function must change its output whenever
+// ANY visible dependency of the chip bar / reply-context panel / Interject
+// button changes, and stay stable when nothing does. Each assertion below flips
+// exactly one field and asserts the signature differs, plus one stability
+// assertion for an unchanged repeat.
+check("interventionsSignature is stable for identical input", () => {
+  const entries = [
+    { id: "call:c1", kind: "call", synthetic: false, prompt: "approve?",
+      options: ["1"], callId: "c1", phase: null, afterimage: false },
+  ];
+  const rs = { targetId: "call:c1", pendingSendSettleKey: null,
+    flowInterjectRequested: false, isActiveFlow: true, hasRealInterjection: false };
+  assert.equal(
+    app.interventionsSignature(entries, rs),
+    app.interventionsSignature(entries.map((e) => ({ ...e })), { ...rs }),
+  );
+});
+check("interventionsSignature distinguishes every visible entry field", () => {
+  const base = [
+    { id: "call:c1", kind: "call", synthetic: false, prompt: "approve?",
+      options: ["1"], callId: "c1", phase: null, afterimage: false },
+  ];
+  const rs = { targetId: "call:c1", pendingSendSettleKey: null,
+    flowInterjectRequested: false, isActiveFlow: true, hasRealInterjection: false };
+  const baseSig = app.interventionsSignature(base, rs);
+  const vary = (patch) =>
+    app.interventionsSignature([{ ...base[0], ...patch }], rs);
+  assert.notEqual(baseSig, vary({ id: "call:c2" }), "id");
+  assert.notEqual(baseSig, vary({ kind: "interjection" }), "kind (→label/icon)");
+  assert.notEqual(baseSig, vary({ synthetic: true }), "synthetic");
+  assert.notEqual(baseSig, vary({ prompt: "deny?" }), "prompt");
+  assert.notEqual(baseSig, vary({ options: ["1", "2"] }), "options");
+  assert.notEqual(baseSig, vary({ callId: "c9" }), "callId");
+  assert.notEqual(baseSig, vary({ phase: "pending" }), "phase");
+  assert.notEqual(baseSig, vary({ afterimage: true }), "afterimage");
+  // Adding / removing a pending call changes the entries list length.
+  assert.notEqual(baseSig, app.interventionsSignature(
+    [base[0], { ...base[0], id: "call:c2", callId: "c2" }], rs), "new pending call");
+});
+check("interventionsSignature distinguishes every reply-state field", () => {
+  const entries = [
+    { id: "call:c1", kind: "call", synthetic: false, prompt: "approve?",
+      options: [], callId: "c1", phase: null, afterimage: false },
+  ];
+  const rs = { targetId: "call:c1", pendingSendSettleKey: null,
+    flowInterjectRequested: false, isActiveFlow: true, hasRealInterjection: false };
+  const baseSig = app.interventionsSignature(entries, rs);
+  const vary = (patch) => app.interventionsSignature(entries, { ...rs, ...patch });
+  // Selected target change (e.g. user picks a different chip).
+  assert.notEqual(baseSig, vary({ targetId: "call:c2" }), "targetId");
+  // Send going in-flight (pendingSendSettleKey set) must re-disable Send.
+  assert.notEqual(baseSig, vary({ pendingSendSettleKey: "c1" }), "pendingSendSettleKey");
+  assert.notEqual(baseSig, vary({ flowInterjectRequested: true }), "flowInterjectRequested");
+  assert.notEqual(baseSig, vary({ isActiveFlow: false }), "isActiveFlow");
+  assert.notEqual(baseSig, vary({ hasRealInterjection: true }), "hasRealInterjection");
+});
+
+// -- renderInterventions (DOM): no-change status_update is a zero-DOM skip ----
+// The core of the textarea-jank fix: a repeated render with identical data must
+// NOT rebuild the chip bar or the reply-context panel, so the large reply
+// textarea never reflows. A real data change must still rebuild immediately.
+check("renderInterventions: identical data skips DOM rebuild, real change rebuilds", () => {
+  // Clean reply-panel state so computeInterventions is deterministic.
+  app.state.localInterjections = [];
+  app.state.interjectionPhases = {};
+  app.state.interjectionConsumedAfterimages = [];
+  app.state.flowInterjectRequested = false;
+  app.state.flowSyntheticInterjectPending = false;
+  app.state.flowReplyTargetId = null;
+  app.state.pendingSendSettleKey = null;
+  app.resetRenderSignatures();
+
+  const region = document.getElementById("flow-interventions");
+  const ctx = document.getElementById("flow-reply-context");
+  const flow = (calls) => ({ status: "running", pending_calls: calls });
+  const calls = [{ call_id: "c1", kind: "call", prompt: "approve?" }];
+
+  // First render builds the chip + reply-context block from scratch.
+  app.renderInterventions(flow(calls));
+  assert.equal(region.children.length, 1, "first render builds one chip");
+  const chipBefore = region.children[0];
+  const ctxChildrenBefore = ctx.childNodes.slice();
+  assert.ok(ctxChildrenBefore.length > 0, "reply-context populated on first render");
+
+  // Second render with logically-identical data (a fresh flow object + fresh
+  // pending_calls array, mimicking an empty ws status_update) must skip: the
+  // chip node and every reply-context child node keep their object identity,
+  // proving zero DOM mutation.
+  app.renderInterventions(flow([{ call_id: "c1", kind: "call", prompt: "approve?" }]));
+  assert.equal(region.children.length, 1, "chip count unchanged on skip");
+  assert.strictEqual(region.children[0], chipBefore,
+    "chip node identity preserved — chip bar not rebuilt on no-change render");
+  const ctxChildrenAfter = ctx.childNodes.slice();
+  assert.equal(ctxChildrenAfter.length, ctxChildrenBefore.length,
+    "reply-context child count unchanged on skip");
+  for (let i = 0; i < ctxChildrenBefore.length; i++) {
+    assert.strictEqual(ctxChildrenAfter[i], ctxChildrenBefore[i],
+      "reply-context node identity preserved on no-change render (no textarea reflow)");
+  }
+
+  // A genuine change — a new pending call arrives — must rebuild immediately.
+  app.renderInterventions(flow([
+    { call_id: "c1", kind: "call", prompt: "approve?" },
+    { call_id: "c2", kind: "cli_confirm", prompt: "press 1", options: ["1"] },
+  ]));
+  assert.equal(region.children.length, 2, "new pending call rebuilds the chip bar");
+  assert.notStrictEqual(region.children[0], chipBefore,
+    "rebuild replaces the chip nodes (fresh DOM)");
+});
+
+// Each kind of real change individually forces a rebuild from a skipped state.
+check("renderInterventions: phase / target / pendingSend changes each rebuild", () => {
+  app.state.localInterjections = [];
+  app.state.interjectionPhases = {};
+  app.state.interjectionConsumedAfterimages = [];
+  app.state.flowInterjectRequested = false;
+  app.state.flowSyntheticInterjectPending = false;
+  app.state.flowReplyTargetId = null;
+  app.state.pendingSendSettleKey = null;
+  app.resetRenderSignatures();
+
+  const region = document.getElementById("flow-interventions");
+  const flow = () => ({
+    status: "running",
+    pending_calls: [
+      { call_id: "c1", kind: "call", prompt: "approve?" },
+      { call_id: "c2", kind: "call", prompt: "continue?" },
+    ],
+  });
+
+  app.renderInterventions(flow());
+  let chip0 = region.children[0];
+  // Re-render identical → skip (identity preserved).
+  app.renderInterventions(flow());
+  assert.strictEqual(region.children[0], chip0, "no-change re-render skips");
+
+  // Selected target change rebuilds (a different chip becomes .selected).
+  app.state.flowReplyTargetId = "call:c2";
+  app.renderInterventions(flow());
+  assert.notStrictEqual(region.children[0], chip0, "target change rebuilds");
+  chip0 = region.children[0];
+
+  // Re-render identical again → skip.
+  app.renderInterventions(flow());
+  assert.strictEqual(region.children[0], chip0, "no-change re-render skips again");
+
+  // Send going in-flight (pendingSendSettleKey set) rebuilds so Send disables.
+  app.state.pendingSendSettleKey = "c2";
+  app.renderInterventions(flow());
+  assert.notStrictEqual(region.children[0], chip0, "pendingSendSettleKey change rebuilds");
+  assert.equal(document.getElementById("flow-reply-submit").disabled, true,
+    "Send disabled while a submission is in flight");
+});
+
 console.log(`\n${passed} checks passed.`);

@@ -229,6 +229,56 @@ function resetRenderSignatures() {
   state.renderSig = {};
 }
 
+// Pure signature over everything that affects the docked reply region's
+// rendered output — the chip bar (`#flow-interventions`), the reply-context
+// panel (`#flow-reply-context`, built by updateReplyBox), and the inline
+// Interject button state (syncInterjectButton). renderInterventions feeds the
+// freshly-computed `entries` and the reconciled reply state through this and
+// compares it against `state.renderSig.interventions`: an empty status_update
+// (data unchanged) yields the same string, so the whole region is left
+// untouched and the large reply textarea — with the user's in-progress draft,
+// focus, scroll position, and auto-grow height — never reflows. A real change
+// (a new/withdrawn pending call, an interjection phase flip, a different
+// selected target, or a Send going in-flight) yields a different string and
+// triggers the rebuild, so real-time feedback is unaffected.
+//
+// `entries` — the computeInterventions(flow) output; the per-chip visible
+//   dependencies are id, kind (which fully determines the chip icon + label
+//   via KIND_META and the `kind-<kind>` class), synthetic, prompt, options,
+//   callId, phase, and afterimage (an afterimage chip renders disabled).
+// `replyState` — the reconciled reply-box dependencies: the selected target
+//   id, the in-flight Send gate key (`pendingSendSettleKey`, which disables
+//   Send), the Interject opt-in flag, whether the flow is active (drives the
+//   placeholder + the Interject button visibility), and whether a real
+//   interjection is pending (also drives the Interject button visibility).
+//
+// The expand/collapse + scroll-position persistent UI state (keyed per
+// intervention id) is deliberately NOT part of the signature: on a skip the
+// reply-context block is not rebuilt at all, so those states are inherently
+// preserved — there is nothing to restore.
+function interventionsSignature(entries, replyState) {
+  const rs = replyState || {};
+  const list = Array.isArray(entries) ? entries : [];
+  return renderSignature({
+    entries: list.map((e) => ({
+      id: e.id,
+      kind: e.kind,
+      synthetic: !!e.synthetic,
+      prompt: e.prompt != null ? String(e.prompt) : "",
+      options: Array.isArray(e.options) ? e.options : [],
+      callId: e.callId != null ? String(e.callId) : "",
+      phase: e.phase != null ? e.phase : null,
+      afterimage: !!e.afterimage,
+    })),
+    targetId: rs.targetId != null ? rs.targetId : null,
+    pendingSendSettleKey:
+      rs.pendingSendSettleKey != null ? rs.pendingSendSettleKey : null,
+    flowInterjectRequested: !!rs.flowInterjectRequested,
+    isActiveFlow: !!rs.isActiveFlow,
+    hasRealInterjection: !!rs.hasRealInterjection,
+  });
+}
+
 let ws = null;
 let reconnectAttempts = 0;
 let detailPollTimer = null;
@@ -2101,13 +2151,37 @@ function reconcileReplyTarget(entries, currentTargetId) {
 // intervention's prompt/context/options — that lives in `updateReplyBox`'s
 // reply-context panel for the currently selected chip only.
 function renderInterventions(flow) {
+  const entries = computeInterventions(flow);
+  const targetId = reconcileReplyTarget(entries, state.flowReplyTargetId);
+  const hasRealInterjection = entries.some(
+    (e) => e.kind === "interjection" && !e.synthetic,
+  );
+  const sig = interventionsSignature(entries, {
+    targetId,
+    pendingSendSettleKey: state.pendingSendSettleKey,
+    flowInterjectRequested: state.flowInterjectRequested,
+    isActiveFlow: isActiveFlow(flow),
+    hasRealInterjection,
+  });
+
+  // Always sync the pure state the rest of the app reads (the entries list and
+  // the reconciled reply target), so the skip path leaves no stale data behind
+  // even though it touches no DOM. The expand/scroll persistent UI state is
+  // intentionally left alone — on a skip the reply-context block is not rebuilt,
+  // so the user's collapse/scroll choices survive automatically.
+  state.flowInterventions = entries;
+  state.flowReplyTargetId = targetId;
+
+  // Diff-aware skip (plan B): when the visible-dependency signature is
+  // unchanged since the last render, produce ZERO DOM mutations. This is the
+  // core of the textarea-jank fix — an empty status_update (the common case)
+  // must not innerHTML="" the chip bar nor rebuild #flow-reply-context, so the
+  // large reply textarea never reflows mid-typing.
+  if (state.renderSig.interventions === sig) return;
+  state.renderSig.interventions = sig;
+
   const region = $("flow-interventions");
   region.innerHTML = "";
-  const entries = computeInterventions(flow);
-  state.flowInterventions = entries;
-
-  state.flowReplyTargetId = reconcileReplyTarget(entries, state.flowReplyTargetId);
-
   for (const entry of entries) {
     region.appendChild(renderInterventionChip(entry));
   }
@@ -10921,6 +10995,9 @@ if (typeof module !== "undefined" && module.exports) {
     // DOM-free tests in tests/frontend/test_app_pure.mjs.
     renderSignature,
     resetRenderSignatures,
+    // Reply-panel diff-aware equality (G4) — exposed for the DOM-free tests in
+    // tests/frontend/test_app_pure.mjs.
+    interventionsSignature,
     state,
   };
 }
