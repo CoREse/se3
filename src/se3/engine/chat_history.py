@@ -423,6 +423,60 @@ def record_waiting_for_lock(
         logger.warning("Failed to record waiting_for_lock for %s: %s", step_id, exc)
 
 
+def record_lock_acquired(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    timestamp: Optional[float] = None,
+) -> None:
+    """Record a lifecycle anchor clearing a prior ``waiting_for_lock`` state.
+
+    Written by ``run.py`` the instant a *contended* main-worktree lock is
+    finally acquired — i.e. only on the path that previously emitted a
+    :func:`record_waiting_for_lock` "等待锁" anchor. Without this, the only thing
+    that supersedes the "等待锁" row is the step's later ``step_started`` running
+    anchor; but there is a window between the lock release/acquire and that
+    anchor (and under contention the ordering is not stable), so the live web
+    transcript can stay frozen on "等待锁" until the step actually starts.
+    Emitting an explicit clearing anchor the moment the lock is acquired closes
+    that window.
+
+    The record reuses the ``step_status`` shape with ``status="running"`` so it
+    rides the existing ``history_data`` push channel with no protocol change and
+    is collected by the frontend's ``removeSupersededStatusRows`` exactly like
+    any other lifecycle anchor sharing this ``step_id`` — it supersedes the
+    "等待锁" anchor in place and shows "进行中" (the step is about to run). Like
+    its siblings it carries no ``role``, so :func:`get_step_history` skips it
+    (``step_status`` is in its skip set) and CLI history / retry context never
+    ingest it.
+
+    Idempotent and best-effort: it does not append a second ``running``
+    ``step_status`` when one is already present for the step, and any write
+    failure is swallowed so a transient I/O error never breaks the running flow.
+    """
+    if has_step_status_event(project_root, flow_id, step_id, "running"):
+        return
+    record = {
+        "type": "step_status",
+        "step_id": step_id,
+        "step_type": step_type,
+        "status": "running",
+        "timestamp": (
+            datetime.fromtimestamp(timestamp).isoformat()
+            if timestamp is not None
+            else datetime.now().isoformat()
+        ),
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record lock-acquired for %s: %s", step_id, exc)
+
+
 def record_step_status(
     project_root: Path,
     flow_id: str,
