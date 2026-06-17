@@ -292,7 +292,9 @@ def get_spec_names_injection(
 
     Lists all available specs under ``se3/specs/`` and declares which are already
     loaded into the prompt (from ``relevant_specs``), so the LLM can optionally
-    read additional specs via the Read tool if the analyze step missed them.
+    consult additional specs on demand via the read-only ``se3 spec`` index
+    commands (``se3 spec index`` / ``se3 spec show``) if the analyze step missed
+    them — never by reading a whole ``spec.md`` file.
 
     Args:
         step_type: Current step type name (e.g., "plan", "implement").
@@ -338,12 +340,8 @@ def get_spec_names_injection(
 
     # Scan the resolved specs dir (se3/specs preferred, specs/ fallback,
     # openspec/specs legacy) so projects using the fallback layout get the
-    # correct listing and the prompt points at a real path.
+    # correct listing.
     specs_dir = ContextBuilder._resolve_specs_dir(project_root)
-    try:
-        specs_rel = specs_dir.relative_to(project_root).as_posix()
-    except ValueError:
-        specs_rel = specs_dir.as_posix()
     all_spec_names: list[str] = []
     if specs_dir.exists():
         for entry in specs_dir.iterdir():
@@ -368,9 +366,19 @@ def get_spec_names_injection(
         f"All available specs in this project: {all_display}.\n\n"
         f"Specs already loaded above: {loaded_display}.\n\n"
         "If a spec above is not yet included but you believe it is relevant to "
-        "the current task, you MAY read it using the Read tool at "
-        f"`{specs_rel}/<name>/spec.md`. Only consult specs that directly help "
-        "the task — avoid reading broadly."
+        "the current task, you MAY consult it on demand through the read-only "
+        "`se3 spec` index commands (run them via Bash):\n"
+        "- `se3 spec index` — root view: every spec's name, a one-sentence "
+        "locator, and item count. Start here.\n"
+        "- `se3 spec index <spec> [<group>...]` — drill into one spec's "
+        "Requirement index; trailing group-path components open a folded domain "
+        "group or a `pN` page.\n"
+        "- `se3 spec show <spec>::<requirement>` — read the authoritative body of "
+        "ONE Requirement (plus its physical location).\n"
+        "Do NOT read an entire `spec.md` file with the Read tool (large specs "
+        "exceed the Read size limit); navigate with `se3 spec index` and fetch "
+        "only the specific Requirement bodies you need with `se3 spec show`. "
+        "Only consult specs that directly help the task — avoid reading broadly."
     )
 
 

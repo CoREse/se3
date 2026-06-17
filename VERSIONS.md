@@ -57,6 +57,13 @@
 
 
 
+
+## 10.4.1 - 2026-06-17
+
+- Fix Available Specifications injection to guide sub-agents through `se3 spec index`/`se3 spec show` instead of reading whole spec.md files that exceed the Read tool size limit
+- Fix discovery step question and synthesis templates to use bounded spec consultation protocol consistent with analyze/update_spec/verify_spec steps
+- Eliminate contradictory guidance in verify_spec and update_spec steps that simultaneously instructed using `se3 spec` commands and reading entire spec files with the Read tool
+- Update flow-engine spec documentation to describe the bounded index-first spec consultation protocol for discovery and downstream steps
 ## 10.4.0 - 2026-06-16
 
 - Add PreToolUse hook that blocks Write/Edit/NotebookEdit on se3/specs/** for non-exempt steps (update_spec and sync steps exempt)

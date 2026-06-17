@@ -96,6 +96,13 @@ The `discovery` step SHALL implement a multi-turn dialogue mechanism that helps 
 - `synthesis` mode: summarizes understanding and generates a refined description
 - `confirmation` mode: the LLM determines the requirement is clear, returns the refined description, and then pauses, waiting for the programmatic gate
 
+**Context consultation (read-only):**
+
+`discovery` is a read-only step. Both the `question` (`INITIAL_DISCOVERY_PROMPT`) and `synthesis` (`CONTINUE_DISCOVERY_PROMPT`) templates SHALL instruct the LLM that, to ask better, more informed questions, it MAY consult specs and source code on demand, distinguishing the two surfaces:
+
+- **Specs** — consulted through the bounded, read-only `se3 spec` index commands run via Bash: `se3 spec index` (root view; drill in with `se3 spec index <spec> [<group>...]`) to navigate, then `se3 spec show <spec>::<requirement>` to read one Requirement's body. The templates SHALL NOT instruct the LLM to read an entire `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
+- **Source code** — consulted with `Read` / `Grep` / `Glob` as usual.
+
 **Handling of evaluation/inquiry-type initial descriptions:**
 
 When the user's initial description manifests as an evaluation, judgment, review, or inquiry about existing code/solutions/changes (e.g., "Is this the right way to do it", "Judge whether X is reasonable", "Is there a problem with the Y solution", "Carefully evaluate this change", "Is this correct?", "Evaluate X", "Review this change", or a question with embedded references to specific code/files/commits), `INITIAL_DISCOVERY_PROMPT` and `CONTINUE_DISCOVERY_PROMPT` SHALL instruct the LLM to avoid asking clarifying questions about the task definition itself such as "what is the task / what is the task scope / what do you want to do", and instead to:
@@ -734,7 +741,7 @@ The injected prompt SHALL:
 
 ### Requirement: Spec Names Injection for Downstream Steps
 
-The flow engine SHALL extend spec awareness beyond the `analyze` step's predetermined selection by injecting "the list of all available specs + a soft hint to read on demand" into designated downstream LLM sub-process steps. This gives those steps whole-spec-set awareness and lets them supplement their context via the Read/Glob tools (reading `se3/specs/<name>/spec.md`) when `analyze` missed a relevant spec.
+The flow engine SHALL extend spec awareness beyond the `analyze` step's predetermined selection by injecting "the list of all available specs + a soft hint to consult on demand via the bounded index-first protocol" into designated downstream LLM sub-process steps. This gives those steps whole-spec-set awareness and lets them supplement their context through the read-only `se3 spec` index commands (`se3 spec index` to navigate, `se3 spec show <spec>::<requirement>` to read one Requirement's body) when `analyze` missed a relevant spec — never by reading a whole `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
 
 **Helper API:**
 
@@ -761,7 +768,7 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 | `plan`, `plan_tasks` | yes | Task decomposition benefits from whole-spec-set awareness |
 | `implement` | yes | Implementation may discover need for additional specs (e.g., versioning) |
 | `verify_spec` | yes | Verification needs full spec set to judge compliance |
-| `update_spec` | yes | Already prompted to use Read; spec-names list makes it more reliable |
+| `update_spec` | yes | Already uses the `se3 spec` index-first protocol; spec-names list makes it more reliable |
 | `self_check` | yes | Self-review may touch unpreselected specs |
 | `design`, `propose` (deprecated) | yes, via forwarding | Deprecated stub handlers forward to `plan_handler`, which looks up the injection under `"plan"`. They are therefore covered transitively and are **not** listed in `SPEC_NAMES_INJECTION_DEFAULT_STEPS` themselves. |
 | `analyze`, `discovery` | no | Already natively list specs via their own prompt templates |
@@ -773,8 +780,8 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 - Begins with heading `## Available Specifications`.
 - Line `All available specs in this project: <sorted names>.` — sourced by scanning `project_root/se3/specs/*/spec.md`, sorted alphabetically.
 - Line `Specs already loaded above: <loaded names or "none">.` — derived from `relevant_specs` argument so the LLM does not re-read specs already embedded in the prompt.
-- Soft guidance: the LLM **MAY** (not MUST) read additional specs via `Read` at path pattern `se3/specs/<name>/spec.md`.
-- Anti-abuse wording: "Only consult specs that directly help the task — avoid reading broadly."
+- Soft guidance: the LLM **MAY** (not MUST) consult additional specs on demand through the read-only `se3 spec` index commands (run via Bash) — `se3 spec index` for the root view, `se3 spec index <spec> [<group>...]` to drill into one spec's Requirement index, and `se3 spec show <spec>::<requirement>` to read the authoritative body of ONE Requirement plus its physical location.
+- Anti-abuse wording: an explicit prohibition on reading an entire `spec.md` file with the Read tool (large specs exceed the Read size limit) — navigate with `se3 spec index` and fetch only the specific Requirement bodies needed with `se3 spec show` — plus "Only consult specs that directly help the task — avoid reading broadly."
 
 **Abuse prevention:**
 

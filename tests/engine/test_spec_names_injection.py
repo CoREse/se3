@@ -41,7 +41,11 @@ def test_default_whitelist_returns_non_empty(tmp_path):
     assert "## Available Specifications" in result
     assert "base" in result
     assert "flow-engine" in result
-    assert "se3/specs/<name>/spec.md" in result
+    assert "se3 spec index" in result
+    assert "se3 spec show <spec>::<requirement>" in result
+    # The bounded index-first protocol must NOT direct the LLM to Read whole
+    # spec.md files (large specs exceed the Read size limit).
+    assert "se3/specs/<name>/spec.md" not in result
     assert "MAY" in result
     assert "avoid reading broadly" in result
 

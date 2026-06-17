@@ -93,7 +93,9 @@ You MUST NOT:
 - Propose creating or rewriting spec files — recording code into specs is the job of the `update_spec` step and `se3 sync`, not of discovery
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
-You MAY read spec files under `se3/specs/` and source code to ask better, more informed questions.
+Discovery is a read-only step. To ask better, more informed questions you MAY consult specs and source code:
+- For specs, run the read-only `se3 spec` commands via Bash — `se3 spec index` (root view: every spec + locator + item count; drill in with `se3 spec index <spec> [<group>...]`) to navigate, then `se3 spec show <spec>::<requirement>` to read one Requirement's body. Do NOT read an entire `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
+- For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
 
@@ -206,7 +208,9 @@ You MUST NOT:
 - Propose creating or rewriting spec files — recording code into specs is the job of the `update_spec` step and `se3 sync`, not of discovery
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
-You MAY read spec files under `se3/specs/` and source code to ask better, more informed questions.
+Discovery is a read-only step. To ask better, more informed questions you MAY consult specs and source code:
+- For specs, run the read-only `se3 spec` commands via Bash — `se3 spec index` (root view: every spec + locator + item count; drill in with `se3 spec index <spec> [<group>...]`) to navigate, then `se3 spec show <spec>::<requirement>` to read one Requirement's body. Do NOT read an entire `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
+- For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
 

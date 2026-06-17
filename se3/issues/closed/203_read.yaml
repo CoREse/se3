@@ -16,8 +16,8 @@ description: 'Read
 
 
   是不是在discovery的prompt里忘了说用se3 spec来查阅spec？你看看其它步骤是不是也有类似的问题。'
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-06-16T13:58:10.413284'
-updated_at: '2026-06-16T13:58:10.413284'
+updated_at: '2026-06-17T11:10:50.031696'
