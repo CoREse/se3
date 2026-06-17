@@ -5964,4 +5964,84 @@ check("resetRenderSignatures clears all cached keys", () => {
   assert.deepEqual(Object.keys(app.state.renderSig), []);
 });
 
+// -- flowSidebarSignature: diff-aware sidebar render guard (G3) --------------
+const baseSidebarFlow = () => ({
+  task_description: "Do a thing",
+  flow_id: "f1",
+  status: "running",
+  task_type: "feature",
+  current_step_index: 2,
+  total_steps: 5,
+  progress: 0.4,
+  current_step: "implement",
+  updated_at: 1700000000,
+  step_history: [
+    { step_type: "analyze", status: "completed", duration: 12 },
+    { step_type: "implement", status: "running" },
+  ],
+});
+
+check("flowSidebarSignature returns a string", () => {
+  assert.equal(typeof app.flowSidebarSignature(baseSidebarFlow(), "m1", false), "string");
+});
+check("flowSidebarSignature is stable for identical inputs", () => {
+  const a = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  const b = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  assert.equal(a, b);
+});
+check("flowSidebarSignature changes when status changes", () => {
+  const base = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  const f = baseSidebarFlow(); f.status = "paused"; // also flips resumable
+  assert.notEqual(base, app.flowSidebarSignature(f, "m1", false));
+});
+check("flowSidebarSignature changes when progress changes", () => {
+  const base = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  const f = baseSidebarFlow(); f.progress = 0.8; f.current_step_index = 4;
+  assert.notEqual(base, app.flowSidebarSignature(f, "m1", false));
+});
+check("flowSidebarSignature changes when step_history status changes", () => {
+  const base = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  const f = baseSidebarFlow(); f.step_history[1].status = "completed";
+  assert.notEqual(base, app.flowSidebarSignature(f, "m1", false));
+});
+check("flowSidebarSignature changes when a step duration changes", () => {
+  const base = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  const f = baseSidebarFlow(); f.step_history[0].duration = 99;
+  assert.notEqual(base, app.flowSidebarSignature(f, "m1", false));
+});
+check("flowSidebarSignature reads elapsed when duration is absent", () => {
+  const f1 = baseSidebarFlow(); f1.step_history[1].elapsed = 7;
+  const f2 = baseSidebarFlow(); // step_history[1] has neither duration nor elapsed
+  assert.notEqual(
+    app.flowSidebarSignature(f1, "m1", false),
+    app.flowSidebarSignature(f2, "m1", false),
+  );
+});
+check("flowSidebarSignature changes when resumability changes", () => {
+  // failed status is resumable, running is not — flip resumable independently.
+  const running = baseSidebarFlow();              // running → not resumable
+  const failed = baseSidebarFlow(); failed.status = "failed"; // → resumable
+  assert.notEqual(
+    app.flowSidebarSignature(running, "m1", false),
+    app.flowSidebarSignature(failed, "m1", false),
+  );
+});
+check("flowSidebarSignature changes when resumeInProgress toggles", () => {
+  const f = baseSidebarFlow(); f.status = "failed";
+  assert.notEqual(
+    app.flowSidebarSignature(f, "m1", false),
+    app.flowSidebarSignature(f, "m1", true),
+  );
+});
+check("flowSidebarSignature changes when machineId changes", () => {
+  assert.notEqual(
+    app.flowSidebarSignature(baseSidebarFlow(), "m1", false),
+    app.flowSidebarSignature(baseSidebarFlow(), "m2", false),
+  );
+});
+check("flowSidebarSignature tolerates missing/empty flow", () => {
+  assert.equal(typeof app.flowSidebarSignature(null, null, false), "string");
+  assert.equal(typeof app.flowSidebarSignature({}, "m1", false), "string");
+});
+
 console.log(`\n${passed} checks passed.`);

@@ -1762,9 +1762,51 @@ async function refreshFlowDetail() {
   }
 }
 
+// Pure, DOM-free extraction of the sidebar's visible-dependency field subset
+// into a value the diff-aware `renderSignature` can serialize. Every field that
+// affects the rendered Overview / Steps / Machine / Resume output is included
+// so any real change forces a rebuild, while an unchanged 3s poll / ws push
+// produces an identical signature and skips the DOM. The step history is
+// reduced to just the per-row visible bits (step_type + status + the duration
+// the row prints), and the resume affordance is captured via both the static
+// resumability predicate and the in-flight `resumeInProgress` flag (so the
+// button's pending state toggle still rebuilds the sidebar).
+function flowSidebarSignature(flow, machineId, resumeInProgress) {
+  const f = flow && typeof flow === "object" ? flow : {};
+  const steps = Array.isArray(f.step_history) ? f.step_history : [];
+  return renderSignature({
+    task_description: f.task_description ?? null,
+    flow_id: f.flow_id ?? null,
+    status: f.status ?? null,
+    task_type: f.task_type ?? null,
+    current_step_index: f.current_step_index ?? null,
+    total_steps: f.total_steps ?? null,
+    progress: f.progress ?? null,
+    current_step: f.current_step ?? null,
+    updated_at: f.updated_at ?? null,
+    steps: steps.map((s) => ({
+      step_type: s.step_type ?? s.step_id ?? null,
+      status: s.status ?? null,
+      duration: s.duration != null ? s.duration : (s.elapsed ?? null),
+    })),
+    machineId: machineId ?? null,
+    resumable: isFlowResumable(f),
+    resumeInProgress: Boolean(resumeInProgress),
+  });
+}
+
 // Render the sidebar: Overview, Steps, and Machine. Rebuilt wholesale on each
 // 3s poll — the panel is small, so a full rebuild does not visibly flicker.
+// Guarded by a diff-aware signature: an unchanged poll / ws push computes the
+// same `flowSidebarSignature` as last time and returns without touching the
+// DOM, so the reply textarea's layout is never reflowed by an empty rebuild.
 function renderFlowSidebar(flow, machineId) {
+  const sig = flowSidebarSignature(
+    flow, machineId, isResumeInProgress(flow && flow.flow_id),
+  );
+  if (state.renderSig.sidebar === sig) return;
+  state.renderSig.sidebar = sig;
+
   $("flow-view-title").textContent =
     flow.task_description || flow.flow_id || "Flow";
 
@@ -10921,6 +10963,8 @@ if (typeof module !== "undefined" && module.exports) {
     // DOM-free tests in tests/frontend/test_app_pure.mjs.
     renderSignature,
     resetRenderSignatures,
+    // Sidebar diff-aware signature (G3) — exposed for DOM-free tests.
+    flowSidebarSignature,
     state,
   };
 }
