@@ -5922,4 +5922,46 @@ check("buildNewFlowBody coerces truthy/falsy worktree to a real boolean", () => 
   assert.strictEqual(off.worktree, false);
 });
 
+// -- renderSignature: stable / distinguishing diff-aware render hashing ------
+check("renderSignature returns a string", () => {
+  assert.equal(typeof app.renderSignature([1, "a", { x: 1 }]), "string");
+});
+check("renderSignature is stable for the same input", () => {
+  const a = app.renderSignature(["flow1", "running", 3]);
+  const b = app.renderSignature(["flow1", "running", 3]);
+  assert.equal(a, b);
+});
+check("renderSignature is stable across object key insertion order", () => {
+  // Logically-equal objects with different key order must hash identically so
+  // key-order jitter never triggers a spurious DOM rebuild.
+  const a = app.renderSignature({ status: "running", id: "f1", n: 2 });
+  const b = app.renderSignature({ n: 2, id: "f1", status: "running" });
+  assert.equal(a, b);
+});
+check("renderSignature differs when any field changes", () => {
+  const base = app.renderSignature(["f1", "running", 3]);
+  assert.notEqual(base, app.renderSignature(["f1", "paused", 3]));   // status
+  assert.notEqual(base, app.renderSignature(["f1", "running", 4]));  // count
+  assert.notEqual(base, app.renderSignature(["f2", "running", 3]));  // id
+});
+check("renderSignature distinguishes nested-field changes", () => {
+  const a = app.renderSignature({ steps: [{ t: "analyze", s: "done" }] });
+  const b = app.renderSignature({ steps: [{ t: "analyze", s: "running" }] });
+  assert.notEqual(a, b);
+});
+check("renderSignature distinguishes null / undefined / missing", () => {
+  assert.notEqual(app.renderSignature([null]), app.renderSignature([0]));
+  assert.notEqual(app.renderSignature([null]), app.renderSignature([]));
+  // Tolerates an undefined top-level input without throwing.
+  assert.equal(typeof app.renderSignature(undefined), "string");
+});
+
+// -- resetRenderSignatures: clears the diff-aware cache ----------------------
+check("resetRenderSignatures clears all cached keys", () => {
+  app.state.renderSig.machines = "x";
+  app.state.renderSig.flows = "y";
+  app.resetRenderSignatures();
+  assert.deepEqual(Object.keys(app.state.renderSig), []);
+});
+
 console.log(`\n${passed} checks passed.`);

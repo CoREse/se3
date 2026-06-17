@@ -146,6 +146,19 @@ const state = {
   // doCloseFlowView alongside flowReplyPromptExpanded.
   flowReplyPromptScroll: {},
 
+  // ---- Diff-aware render signatures (plan B: skip empty rebuilds) ----
+  // Per-region cache of the last rendered data's signature, keyed by region
+  // (e.g. 'machines' / 'flows' / 'sidebar' / 'interventions'). A ws push or the
+  // 3s detail poll re-runs each full-rebuild render unconditionally; most of
+  // those carry unchanged data, and rebuilding a panel that contains the large
+  // reply textarea reflows the layout and causes typing jank. Each guarded
+  // render computes a `renderSignature(...)` over the field subset that affects
+  // its visible output, compares it against the cached value here, and skips the
+  // DOM rebuild (touching no DOM) when it matches. Reset at flow-view lifecycle
+  // points (open / close / switch) via resetRenderSignatures() so a reused
+  // container is never wrongly skipped on its first frame.
+  renderSig: {},
+
   // ---- Issue management ----
   issues: [],                  // [{id, title, description, status, priority, type, tags, source, ...}]
   issuesShowClosed: false,     // include closed/resolved/won't-fix issues
@@ -173,6 +186,48 @@ const state = {
 
 // Lifetime of a consumed-state afterimage chip in milliseconds.
 const INTERJECTION_CONSUMED_AFTERIMAGE_MS = 3000;
+
+// ---------------------------------------------------------------------------
+// Diff-aware render signatures (plan B: skip empty rebuilds)
+// ---------------------------------------------------------------------------
+
+// Pure, deterministic serialization of a hand-picked field subset into a
+// comparable string. Object keys are sorted recursively so logically-equal
+// inputs always hash to the same string regardless of key insertion order, and
+// any visible-field change yields a different string. The guarded full-rebuild
+// render paths (renderMachines / renderFlows / renderFlowSidebar /
+// renderInterventions) feed their region's visible-dependency subset through
+// this and compare against `state.renderSig[key]` to decide whether the
+// underlying data actually changed before touching the DOM.
+function renderSignature(parts) {
+  const seen = new Set();
+  const norm = (v) => {
+    if (v === null || typeof v !== "object") return v;
+    if (seen.has(v)) return "[Circular]";
+    seen.add(v);
+    let out;
+    if (Array.isArray(v)) {
+      out = v.map(norm);
+    } else {
+      out = {};
+      for (const k of Object.keys(v).sort()) out[k] = norm(v[k]);
+    }
+    seen.delete(v);
+    return out;
+  };
+  const json = JSON.stringify(norm(parts));
+  return json === undefined ? "undefined" : json;
+}
+
+// Drop every cached render signature so the next render of each guarded region
+// is forced to rebuild its DOM. Called at flow-view lifecycle points (open /
+// close / switch): the flow-view containers are reused across flows, so a stale
+// signature left over from a prior flow could otherwise make the first frame of
+// a freshly-opened (or switched-to) flow wrongly skip its rebuild and show the
+// previous flow's panels.
+function resetRenderSignatures() {
+  state.renderSig = {};
+}
 
 let ws = null;
 let reconnectAttempts = 0;
@@ -1313,6 +1368,10 @@ function openFlowView(flowId) {
   state.interjectionToastsSeen = {};
   state.flowReplyPromptExpanded = {};
   state.flowReplyPromptScroll = {};
+  // Force the next frame of every diff-aware render region to rebuild: this is
+  // both first-open and the flow-switch path (the containers are reused), so a
+  // signature cached against the prior flow must not skip this flow's rebuild.
+  resetRenderSignatures();
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
 
@@ -1378,6 +1437,9 @@ function doCloseFlowView() {
   state.interjectionToastsSeen = {};
   state.flowReplyPromptExpanded = {};
   state.flowReplyPromptScroll = {};
+  // Clear the diff-aware render-signature cache so a later openFlowView starts
+  // with no stale signatures pinning a closed flow's panels.
+  resetRenderSignatures();
   // Reset the mobile sidebar drawer so the next opened flow starts collapsed.
   closeFlowSidebar();
   $("flow-view").classList.add("hidden");
@@ -10855,6 +10917,10 @@ if (typeof module !== "undefined" && module.exports) {
     // tests/frontend/test_app_pure.mjs.
     formatAgentBadgeText,
     renderAgentBadge,
+    // Diff-aware render-signature infrastructure (G1) — exposed for the
+    // DOM-free tests in tests/frontend/test_app_pure.mjs.
+    renderSignature,
+    resetRenderSignatures,
     state,
   };
 }
