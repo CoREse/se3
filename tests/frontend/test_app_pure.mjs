@@ -3776,6 +3776,16 @@ stepTransitionMod.registerLiveAppendStepTransitionTests({ app, check, findOne, f
 const retryAfterErrorMod = await import("./live_append_retry_after_error.test.mjs");
 retryAfterErrorMod.registerLiveAppendRetryAfterErrorTests({ app, check, findOne, findAll });
 
+// Register the G4 end-to-end console-consistency capstone. Unlike the G1
+// hand-authored scenarios above, this replays a GOLDEN FIXTURE produced by the
+// Python test (tests/test_server_history_live_append_broadcast.py) — the exact
+// /ws/ui broadcast frames the REAL daemon reader + REAL server emit for the
+// discovery→analyze transition and the update_spec failure→retry scenarios. It
+// proves the live incremental render path converges on the full-reload snapshot
+// across the whole daemon→server→frontend pipeline (no loss, no dup, no freeze).
+const e2eConsistencyMod = await import("./live_append_e2e_consistency.test.mjs");
+e2eConsistencyMod.registerConsoleE2EConsistencyTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

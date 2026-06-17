@@ -1,0 +1,513 @@
+{
+  "transition": {
+    "flow_id": "live",
+    "frames": [
+      {
+        "mode": "full",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "type": "step_started",
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "status": "running",
+              "timestamp": 1
+            }
+          },
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "role": "assistant",
+              "content": "Round 1 — which option?",
+              "timestamp": 2
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "type": "step_status",
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "status": "paused",
+              "timestamp": 3
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "role": "user",
+              "content": "1",
+              "timestamp": 3
+            }
+          },
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "type": "step_started",
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "status": "running",
+              "timestamp": 3
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "role": "assistant",
+              "content": "Round 2 — confirm the plan?",
+              "timestamp": 4
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "type": "step_status",
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "status": "paused",
+              "timestamp": 5
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "role": "user",
+              "content": "按1确定",
+              "timestamp": 5
+            }
+          },
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "type": "step_started",
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "status": "running",
+              "timestamp": 5
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "01_discovery_ab12",
+            "step_type": "discovery",
+            "message": {
+              "type": "step_completed",
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "data": {
+                "step": {
+                  "step_id": "01_discovery_ab12",
+                  "step_type": "discovery",
+                  "status": "completed",
+                  "outputs": {}
+                }
+              },
+              "timestamp": 6
+            }
+          },
+          {
+            "step_id": "02_analyze_cd34",
+            "step_type": "analyze",
+            "message": {
+              "type": "step_started",
+              "step_id": "02_analyze_cd34",
+              "step_type": "analyze",
+              "status": "running",
+              "timestamp": 7
+            }
+          },
+          {
+            "step_id": "02_analyze_cd34",
+            "step_type": "analyze",
+            "message": {
+              "role": "assistant",
+              "content": "Analyzing the spec…",
+              "timestamp": 8
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "02_analyze_cd34",
+            "step_type": "analyze",
+            "message": {
+              "role": "assistant",
+              "content": "Analysis complete.",
+              "timestamp": 9
+            }
+          }
+        ]
+      }
+    ],
+    "snapshot": [
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "type": "step_started",
+          "step_id": "01_discovery_ab12",
+          "step_type": "discovery",
+          "status": "running",
+          "timestamp": 1
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "role": "assistant",
+          "content": "Round 1 — which option?",
+          "timestamp": 2
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "type": "step_status",
+          "step_id": "01_discovery_ab12",
+          "step_type": "discovery",
+          "status": "paused",
+          "timestamp": 3
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "role": "user",
+          "content": "1",
+          "timestamp": 3
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "type": "step_started",
+          "step_id": "01_discovery_ab12",
+          "step_type": "discovery",
+          "status": "running",
+          "timestamp": 3
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "role": "assistant",
+          "content": "Round 2 — confirm the plan?",
+          "timestamp": 4
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "type": "step_status",
+          "step_id": "01_discovery_ab12",
+          "step_type": "discovery",
+          "status": "paused",
+          "timestamp": 5
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "role": "user",
+          "content": "按1确定",
+          "timestamp": 5
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "type": "step_started",
+          "step_id": "01_discovery_ab12",
+          "step_type": "discovery",
+          "status": "running",
+          "timestamp": 5
+        }
+      },
+      {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "message": {
+          "type": "step_completed",
+          "step_id": "01_discovery_ab12",
+          "step_type": "discovery",
+          "data": {
+            "step": {
+              "step_id": "01_discovery_ab12",
+              "step_type": "discovery",
+              "status": "completed",
+              "outputs": {}
+            }
+          },
+          "timestamp": 6
+        }
+      },
+      {
+        "step_id": "02_analyze_cd34",
+        "step_type": "analyze",
+        "message": {
+          "type": "step_started",
+          "step_id": "02_analyze_cd34",
+          "step_type": "analyze",
+          "status": "running",
+          "timestamp": 7
+        }
+      },
+      {
+        "step_id": "02_analyze_cd34",
+        "step_type": "analyze",
+        "message": {
+          "role": "assistant",
+          "content": "Analyzing the spec…",
+          "timestamp": 8
+        }
+      },
+      {
+        "step_id": "02_analyze_cd34",
+        "step_type": "analyze",
+        "message": {
+          "role": "assistant",
+          "content": "Analysis complete.",
+          "timestamp": 9
+        }
+      }
+    ]
+  },
+  "retry": {
+    "flow_id": "live",
+    "frames": [
+      {
+        "mode": "full",
+        "records": [
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "type": "step_started",
+              "step_id": "06_update_spec_9f3a",
+              "step_type": "update_spec",
+              "status": "running",
+              "timestamp": 1
+            }
+          },
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "role": "assistant",
+              "content": "Drafting the spec update…",
+              "timestamp": 2
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "type": "step_failed",
+              "step_id": "06_update_spec_9f3a",
+              "step_type": "update_spec",
+              "data": {
+                "step": {
+                  "step_id": "06_update_spec_9f3a",
+                  "step_type": "update_spec",
+                  "status": "failed",
+                  "error_message": "spec gate failed"
+                }
+              },
+              "timestamp": 3
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "type": "step_status",
+              "step_id": "06_update_spec_9f3a",
+              "step_type": "update_spec",
+              "status": "retrying",
+              "timestamp": 4
+            }
+          },
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "type": "step_started",
+              "step_id": "06_update_spec_9f3a",
+              "step_type": "update_spec",
+              "status": "running",
+              "timestamp": 4
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "role": "assistant",
+              "content": "Drafting the spec update…",
+              "timestamp": 5
+            }
+          }
+        ]
+      },
+      {
+        "mode": "append",
+        "records": [
+          {
+            "step_id": "06_update_spec_9f3a",
+            "step_type": "update_spec",
+            "message": {
+              "role": "assistant",
+              "content": "Spec update applied.",
+              "timestamp": 6
+            }
+          }
+        ]
+      }
+    ],
+    "snapshot": [
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "type": "step_started",
+          "step_id": "06_update_spec_9f3a",
+          "step_type": "update_spec",
+          "status": "running",
+          "timestamp": 1
+        }
+      },
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "role": "assistant",
+          "content": "Drafting the spec update…",
+          "timestamp": 2
+        }
+      },
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "type": "step_failed",
+          "step_id": "06_update_spec_9f3a",
+          "step_type": "update_spec",
+          "data": {
+            "step": {
+              "step_id": "06_update_spec_9f3a",
+              "step_type": "update_spec",
+              "status": "failed",
+              "error_message": "spec gate failed"
+            }
+          },
+          "timestamp": 3
+        }
+      },
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "type": "step_status",
+          "step_id": "06_update_spec_9f3a",
+          "step_type": "update_spec",
+          "status": "retrying",
+          "timestamp": 4
+        }
+      },
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "type": "step_started",
+          "step_id": "06_update_spec_9f3a",
+          "step_type": "update_spec",
+          "status": "running",
+          "timestamp": 4
+        }
+      },
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "role": "assistant",
+          "content": "Drafting the spec update…",
+          "timestamp": 5
+        }
+      },
+      {
+        "step_id": "06_update_spec_9f3a",
+        "step_type": "update_spec",
+        "message": {
+          "role": "assistant",
+          "content": "Spec update applied.",
+          "timestamp": 6
+        }
+      }
+    ]
+  }
+}

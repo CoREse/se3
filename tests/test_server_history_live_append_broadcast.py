@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
 
 import pytest
 
 from se3.daemon import protocol
+from se3.daemon.history import DaemonHistoryReader
 from se3.server.state import ServerState
 from se3.server.ws import HistoryRequestRegistry, UiHub, _handle_message
 
@@ -342,3 +345,362 @@ def test_appends_after_bundle_keep_applied_and_stable_generation():
     assert snap is not None
     assert snap["delivery"] == "full"
     assert [r["line"] for r in snap["records"]] == [1, 2]
+
+
+# ==========================================================================
+# G4 — end-to-end console-consistency bridge:
+#       daemon incremental read  →  server cache + /ws/ui broadcast
+#       →  (golden fixture)  →  frontend node-stub consume
+#
+# This locks the long-standing running-flow *freeze* regression end-to-end, for
+# BOTH triggering scenarios (discovery→analyze confirmation transition, and a
+# step failure → manual retry). It exercises the REAL daemon ``DaemonHistoryReader``
+# over a REAL on-disk ``se3/history/<flow>/<step>.jsonl`` + ``engine.json``
+# evolution, feeds every incremental ``FlowRead`` delta through the REAL server
+# ``_handle_message`` (cache write + ``/ws/ui`` broadcast), and asserts that the
+# records broadcast to a subscribed live console — with NO ``mode: full`` reload —
+# equal the authoritative full ``GET /api/history`` snapshot (no loss / no dup /
+# no freeze).
+#
+# The exact broadcast frame sequence and the full snapshot are then frozen into a
+# committed golden fixture (``tests/frontend/fixtures/console_e2e_frames.json``)
+# that the frontend node-stub test (``live_append_e2e_consistency.test.mjs``)
+# replays through the production ``app.js`` ``applyHistoryData`` consumer, so the
+# SAME daemon-produced bytes prove the incremental render path converges on the
+# full-reload render path. Regenerate the golden file with
+# ``SE3_REGEN_GOLDEN=1 pytest tests/test_server_history_live_append_broadcast.py``.
+# --------------------------------------------------------------------------
+
+_GOLDEN_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "frontend"
+    / "fixtures"
+    / "console_e2e_frames.json"
+)
+
+
+def _write_jsonl(path: Path, lines: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+    )
+
+
+def _append_jsonl(path: Path, lines: list) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(json.dumps(line) + "\n")
+
+
+def _write_engine(root: Path, flow_id: str, status: str) -> None:
+    state_dir = root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
+    )
+
+
+def _hist(root: Path, flow_id: str) -> Path:
+    return root / "se3" / "history" / flow_id
+
+
+# ---- on-disk jsonl line builders (mirror what chat_history writes) ---------
+
+
+def _chat(role: str, content: str, ts: int) -> dict:
+    return {"role": role, "content": content, "timestamp": ts}
+
+
+def _started(step_id: str, step_type: str, ts: int) -> dict:
+    return {
+        "type": "step_started",
+        "step_id": step_id,
+        "step_type": step_type,
+        "status": "running",
+        "timestamp": ts,
+    }
+
+
+def _status(step_id: str, step_type: str, status: str, ts: int) -> dict:
+    return {
+        "type": "step_status",
+        "step_id": step_id,
+        "step_type": step_type,
+        "status": status,
+        "timestamp": ts,
+    }
+
+
+def _completed(step_id: str, step_type: str, ts: int) -> dict:
+    return {
+        "type": "step_completed",
+        "step_id": step_id,
+        "step_type": step_type,
+        "data": {
+            "step": {
+                "step_id": step_id,
+                "step_type": step_type,
+                "status": "completed",
+                "outputs": {},
+            }
+        },
+        "timestamp": ts,
+    }
+
+
+def _failed(step_id: str, step_type: str, ts: int, err: str = "spec gate failed") -> dict:
+    return {
+        "type": "step_failed",
+        "step_id": step_id,
+        "step_type": step_type,
+        "data": {
+            "step": {
+                "step_id": step_id,
+                "step_type": step_type,
+                "status": "failed",
+                "error_message": err,
+            }
+        },
+        "timestamp": ts,
+    }
+
+
+# ---- scenario scripts: a list of disk mutations, one read per mutation -----
+
+
+def _transition_mutations(root: Path, flow_id: str):
+    """discovery runs multiple confirm rounds, COMPLETES, then analyze starts."""
+    disc = _hist(root, flow_id) / "01_discovery_ab12.jsonl"
+    anal = _hist(root, flow_id) / "02_analyze_cd34.jsonl"
+    D = "01_discovery_ab12"
+    A = "02_analyze_cd34"
+
+    def m0():
+        _write_engine(root, flow_id, "RUNNING")
+        _write_jsonl(
+            disc,
+            [
+                _started(D, "discovery", 1),
+                _chat("assistant", "Round 1 — which option?", 2),
+            ],
+        )
+
+    def m1():  # pause to await the round-1 answer
+        _append_jsonl(disc, [_status(D, "discovery", "paused", 3)])
+        _write_engine(root, flow_id, "PAUSED")
+
+    def m2():  # operator answers "1"; resume (same wall-clock second)
+        _append_jsonl(disc, [_chat("user", "1", 3), _started(D, "discovery", 3)])
+        _write_engine(root, flow_id, "RUNNING")
+
+    def m3():
+        _append_jsonl(disc, [_chat("assistant", "Round 2 — confirm the plan?", 4)])
+
+    def m4():  # pause again
+        _append_jsonl(disc, [_status(D, "discovery", "paused", 5)])
+        _write_engine(root, flow_id, "PAUSED")
+
+    def m5():  # operator confirms "按1确定"; resume (same second, distinct text)
+        _append_jsonl(disc, [_chat("user", "按1确定", 5), _started(D, "discovery", 5)])
+        _write_engine(root, flow_id, "RUNNING")
+
+    def m6():  # *** THE TRANSITION: discovery COMPLETES + analyze starts ***
+        _append_jsonl(disc, [_completed(D, "discovery", 6)])
+        _write_jsonl(
+            anal,
+            [
+                _started(A, "analyze", 7),
+                _chat("assistant", "Analyzing the spec…", 8),
+            ],
+        )
+
+    def m7():  # analyze keeps producing
+        _append_jsonl(anal, [_chat("assistant", "Analysis complete.", 9)])
+
+    return [m0, m1, m2, m3, m4, m5, m6, m7]
+
+
+def _retry_mutations(root: Path, flow_id: str):
+    """update_spec runs, FAILS, the operator retries, and it re-runs to success."""
+    step = _hist(root, flow_id) / "06_update_spec_9f3a.jsonl"
+    S = "06_update_spec_9f3a"
+
+    def m0():
+        _write_engine(root, flow_id, "RUNNING")
+        _write_jsonl(
+            step,
+            [
+                _started(S, "update_spec", 1),
+                _chat("assistant", "Drafting the spec update…", 2),
+            ],
+        )
+
+    def m1():  # the attempt FAILS
+        _append_jsonl(step, [_failed(S, "update_spec", 3)])
+
+    def m2():  # operator retries → retrying status + re-run running (same second)
+        _append_jsonl(
+            step,
+            [_status(S, "update_spec", "retrying", 4), _started(S, "update_spec", 4)],
+        )
+
+    def m3():  # the retry re-emits SIMILAR content (later ts → distinct)
+        _append_jsonl(step, [_chat("assistant", "Drafting the spec update…", 5)])
+
+    def m4():  # the retry succeeds
+        _append_jsonl(step, [_chat("assistant", "Spec update applied.", 6)])
+
+    return [m0, m1, m2, m3, m4]
+
+
+async def _drive_scenario(root: Path, flow_id: str, mutations) -> dict:
+    """Drive the real daemon reader → real server broadcast; capture frames.
+
+    Returns ``{"flow_id", "frames": [{mode, records}], "snapshot": [records]}``
+    where ``frames`` are exactly what reaches a subscribed ``/ws/ui`` client and
+    ``snapshot`` is the authoritative full ``GET /api/history`` record list.
+    """
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(root)])
+    state = ServerState()
+    await state.register_machine("m1", "host", "1.0", owner_id="owner-A")
+    hub = UiHub()
+    ui = _UiWS()
+    await hub.register(ui, "owner-A")
+    registry = HistoryRequestRegistry()
+
+    cursors: dict = {}
+    for mutate in mutations:
+        mutate()
+        reads = reader.read_active_flows(cursors)
+        cursors = {r.flow_id: r.cursor for r in reads}
+        for r in reads:
+            if not r.records:
+                continue
+            msg = protocol.make_history_data(
+                r.flow_id, r.mode, r.records, cursor=r.cursor
+            )
+            await _handle_message(msg, state, "m1", hub, registry)
+
+    snap = await state.get_history_snapshot(flow_id, expected_machine_id="m1")
+    frames = [
+        {"mode": f["mode"], "records": f["records"]}
+        for f in ui.history_frames(flow_id)
+    ]
+    return {"flow_id": flow_id, "frames": frames, "snapshot": snap["records"]}
+
+
+def _generate_all(tmp_path: Path) -> dict:
+    transition = asyncio.run(
+        _drive_scenario(
+            tmp_path / "transition", "live", _transition_mutations(tmp_path / "transition", "live")
+        )
+    )
+    retry = asyncio.run(
+        _drive_scenario(
+            tmp_path / "retry", "live", _retry_mutations(tmp_path / "retry", "live")
+        )
+    )
+    return {"transition": transition, "retry": retry}
+
+
+def _flat_records(frames: list) -> list:
+    out: list = []
+    for f in frames:
+        out.extend(f["records"])
+    return out
+
+
+# --------------------------------------------------------------------------
+# daemon → server invariants (the back half of the e2e bridge)
+# --------------------------------------------------------------------------
+
+
+def test_transition_broadcast_equals_full_snapshot_no_loss_no_dup(tmp_path):
+    scenario = asyncio.run(
+        _drive_scenario(
+            tmp_path, "live", _transition_mutations(tmp_path, "live")
+        )
+    )
+    # First broadcast is the initial full snapshot; the rest are live appends.
+    assert scenario["frames"][0]["mode"] == protocol.HISTORY_MODE_FULL
+    assert all(
+        f["mode"] == protocol.HISTORY_MODE_APPEND for f in scenario["frames"][1:]
+    )
+    # The concatenation of every broadcast frame == the authoritative full
+    # snapshot, in order, with nothing lost and nothing delivered twice.
+    streamed = _flat_records(scenario["frames"])
+    assert streamed == scenario["snapshot"]
+    # No record body appears twice across the live stream (no dup).
+    keyed = [
+        (r["step_id"], json.dumps(r["message"], sort_keys=True, ensure_ascii=False))
+        for r in streamed
+    ]
+    assert len(keyed) == len(set(keyed)), "a record was broadcast twice"
+
+
+def test_transition_analyze_arrives_as_live_delta_not_swallowed(tmp_path):
+    """The freeze symptom would be: nothing post-confirmation reaches /ws/ui.
+
+    Prove the analyze (post-transition) records arrive in a LIVE append frame
+    AFTER the discovery rounds — the daemon→server side never swallows the
+    transition batch.
+    """
+    scenario = asyncio.run(
+        _drive_scenario(
+            tmp_path, "live", _transition_mutations(tmp_path, "live")
+        )
+    )
+    append_records = _flat_records(scenario["frames"][1:])  # live deltas only
+    bodies = [r["message"].get("content") for r in append_records]
+    assert "Analyzing the spec…" in bodies
+    assert "Analysis complete." in bodies
+    # The analyze records carry the file-name-derived authoritative step_type.
+    analyze = [r for r in append_records if r["step_type"] == "analyze"]
+    assert analyze, "analyze step records reached the live broadcast"
+
+
+def test_retry_broadcast_equals_full_snapshot_no_loss_no_dup(tmp_path):
+    scenario = asyncio.run(
+        _drive_scenario(tmp_path, "live", _retry_mutations(tmp_path, "live"))
+    )
+    assert scenario["frames"][0]["mode"] == protocol.HISTORY_MODE_FULL
+    streamed = _flat_records(scenario["frames"])
+    assert streamed == scenario["snapshot"]
+    # The retry success turn arrives as a live delta (no reload needed).
+    append_bodies = [
+        r["message"].get("content") for r in _flat_records(scenario["frames"][1:])
+    ]
+    assert "Spec update applied." in append_bodies
+    # The similar-looking retry draft is delivered too — not mistaken for a dup.
+    assert append_bodies.count("Drafting the spec update…") >= 1
+
+
+# --------------------------------------------------------------------------
+# golden fixture: the wire between this daemon→server test and the frontend
+# node-stub consumer test (live_append_e2e_consistency.test.mjs)
+# --------------------------------------------------------------------------
+
+
+def test_e2e_frames_match_committed_golden_fixture(tmp_path):
+    """The committed golden fixture stays in lock-step with the real reader/server.
+
+    Set ``SE3_REGEN_GOLDEN=1`` to regenerate the fixture after an intentional
+    change to the daemon record shape or the scenario scripts.
+    """
+    generated = _generate_all(tmp_path)
+
+    if os.environ.get("SE3_REGEN_GOLDEN"):
+        _GOLDEN_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+        _GOLDEN_FIXTURE.write_text(
+            json.dumps(generated, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    assert _GOLDEN_FIXTURE.exists(), (
+        "golden fixture missing — regenerate with SE3_REGEN_GOLDEN=1"
+    )
+    committed = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
+    assert generated == committed, (
+        "daemon→server e2e frames drifted from the committed golden fixture; "
+        "regenerate with SE3_REGEN_GOLDEN=1 and re-run the frontend node-stub test"
+    )

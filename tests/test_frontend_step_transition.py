@@ -31,6 +31,8 @@ FRONTEND_DIR = REPO_ROOT / "tests" / "frontend"
 HARNESS = FRONTEND_DIR / "test_app_pure.mjs"
 TRANSITION_TEST = FRONTEND_DIR / "live_append_step_transition.test.mjs"
 RETRY_TEST = FRONTEND_DIR / "live_append_retry_after_error.test.mjs"
+E2E_TEST = FRONTEND_DIR / "live_append_e2e_consistency.test.mjs"
+E2E_FIXTURE = FRONTEND_DIR / "fixtures" / "console_e2e_frames.json"
 
 
 def test_transition_modules_present_and_registered():
@@ -43,6 +45,19 @@ def test_transition_modules_present_and_registered():
     )
     assert "registerLiveAppendRetryAfterErrorTests" in harness, (
         "live_append_retry_after_error.test.mjs is not registered in test_app_pure.mjs"
+    )
+
+
+def test_e2e_consistency_module_present_and_registered():
+    """The G4 end-to-end capstone module + its golden fixture exist and are wired."""
+    assert E2E_TEST.is_file(), f"missing {E2E_TEST}"
+    assert E2E_FIXTURE.is_file(), (
+        f"missing golden fixture {E2E_FIXTURE} — regenerate with "
+        "SE3_REGEN_GOLDEN=1 pytest tests/test_server_history_live_append_broadcast.py"
+    )
+    harness = HARNESS.read_text(encoding="utf-8")
+    assert "registerConsoleE2EConsistencyTests" in harness, (
+        "live_append_e2e_consistency.test.mjs is not registered in test_app_pure.mjs"
     )
 
 
@@ -77,8 +92,14 @@ def test_frontend_step_transition_node_suite_passes():
         "G1 retry: recordKey distinguishes retrying vs running anchors at the same second",
         "G1 retry: live append keeps streaming the retry; region settles on the re-run running anchor",
         "G1 retry: incremental append converges on the same result as a full reload",
+        # G4 end-to-end capstone — the golden-fixture daemon→server→frontend
+        # bridge for both freeze scenarios.
+        "G4 e2e (transition): live daemon→server→frontend stream converges with the full snapshot",
+        "G4 e2e (retry): live daemon→server→frontend stream converges with the full snapshot",
+        "G4 e2e (transition): post-confirmation analyze output renders live in the DOM",
+        "G4 e2e (retry): post-failure retry output renders live in the DOM",
     ):
         assert needle in combined, (
-            f"expected G1 check {needle!r} in node output:\n{combined}"
+            f"expected check {needle!r} in node output:\n{combined}"
         )
     assert "checks passed" in combined, combined
