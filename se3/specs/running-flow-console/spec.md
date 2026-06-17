@@ -487,11 +487,29 @@ identity function `recordKey`:
    the same wall-clock second under a reused discovery `step_id`. Restricting the
    comparison to the recent tail keeps every real tail-overlap duplicate filtered
    while ensuring no remote old record can ever shadow a new one. `recordKey`
-   itself is left **unchanged**, so the snapshot/append/usage identity shared with
-   `mergeSnapshotWithLiveAppends` and usage deduplication is unaffected. Because
-   `partial` / `stream_progress` segmented records' `recordKey` naturally varies as
-   their content accumulates, later fragments of the same streaming record are NOT
-   falsely deduped.
+   MUST also incorporate, for **step-event** records, two intra-region
+   discriminators so that distinct anchors / event-types of the **same**
+   `step_id` (which share `stepId` / role `step-event` / `attempt` and, within a
+   single wall-clock second, the same second-granularity timestamp and empty
+   content) never collapse onto one key: the lifecycle `status` (so a `paused`
+   `step_status` and a resumed `running` `step_started` stay distinct) **and**
+   the event `kind` (so the non-terminal `step_output` usage record — emitted on
+   each `PAUSED` / `REVISION` / `RETRYING` round — and the terminal
+   `step_completed` / `step_failed` report stay distinct, since all of the
+   step-event family normalize to role `step-event` with NO top-level `status`
+   and empty content). Without `kind` in the key a same-step/same-second
+   `step_output` and the terminal report hash identically, so
+   `dedupeAppendRecords` drops the terminal report and the region's status
+   anchors are never superseded — the discovery→analyze transition and the
+   post-error retry batch freeze in place. Keying on `kind` keeps each
+   event-type distinct while a TRUE literal duplicate (the same record
+   re-delivered, same `kind`) still collapses. Generic chat records (`user` /
+   `assistant` / `system`) carry no `status` and no `kind`, so each contributes a
+   constant `"undefined"` to the key and their identity — shared with
+   `mergeSnapshotWithLiveAppends` and usage deduplication — is unchanged and
+   backward-compatible. Because `partial` / `stream_progress` segmented records'
+   `recordKey` naturally varies as their content accumulates, later fragments of
+   the same streaming record are NOT falsely deduped.
 2. **Both append consumers filtered** — `applyHistoryData`'s append branch MUST
    run `incoming` through `dedupeAppendRecords` against the *current* held array
    before merging, for **both** the running-flow view (`state.flowConversationRecords`)
@@ -583,6 +601,26 @@ dedup — it replaces the held array wholesale and is left exactly as-is.
   so the agent's later output and the user's subsequent messages keep rendering live
   — the operator does NOT have to leave and re-enter the session to recover the
   conversation through a fresh full snapshot
+
+#### Scenario: Retry-after-error batch keeps appending while true duplicates still dedup
+- **GIVEN** a later step (e.g. `update_spec`) has failed and the operator manually
+  chooses to retry it, so the live channel pushes the retry batch — a
+  `step_status: retrying` anchor, a fresh `step_started: running` anchor, and the
+  step's re-emitted (similar-looking) conversation / `step_output` records — all
+  carrying the same reused `step_id`
+- **WHEN** `applyHistoryData` runs its append branch and filters the retry batch
+  through `dedupeAppendRecords`
+- **THEN** because `recordKey` discriminates step-event records by `status` and
+  `kind`, the genuinely-new retry-batch records (the `retrying` / `running`
+  anchors and the re-emitted `step_output` / terminal report) do NOT collapse
+  onto the previously-held `paused` / failed anchors or onto each other, so they
+  are classified as fresh and `concat`-ed, the `st.count` cursor advances, and
+  the conversation keeps rendering the retry and all subsequent content live
+- **AND** the operator does NOT have to exit and re-enter the session to see the
+  retried step proceed
+- **AND** a true duplicate (the snapshot-vs-broadcast overlap or a reconnect
+  re-pull re-delivering the literal same record, same `kind` and `status`) is
+  still filtered out, so no record is rendered twice
 
 ### Requirement: Reconnect Incremental History Refresh
 
@@ -1235,6 +1273,22 @@ status markers are excluded from the band.
 - **AND** existing records' fold state, raw toggles, and chip selections
   are preserved across the rebuild
 
+#### Scenario: A contended lock's "waiting for lock" anchor is superseded once acquired
+- **GIVEN** a step that, on entering its work, found the main worktree lock held
+  by another flow and emitted a `waiting_for_lock` status anchor (tagged
+  `__convStatusRow` under its `step_id`), so the live transcript shows a *waiting
+  for lock* status row
+- **WHEN** the step subsequently acquires the lock and the engine emits a
+  matching `step_status: running` clearing anchor for the **same** `step_id`
+  (`record_lock_acquired`, gated on having actually written the waiting event so a
+  free / stale acquire emits nothing)
+- **THEN** `removeSupersededStatusRows` supersedes the *waiting for lock* row in
+  place with the `running` anchor (both share the `__convStatusRow` tag and the
+  step's `step_id`), so the live transcript no longer stays pinned at the
+  *waiting for lock* anchor and real-time appending continues
+- **AND** the rendered order stays strictly chronological and no second
+  same-named step region is opened
+
 ### Requirement: Step Region Appears at RUNNING
 
 A step's region MUST appear in the running flow's conversation the moment the
@@ -1295,6 +1349,22 @@ produces a second same-named region.
   having to exit and re-enter the flow to force a full re-entry / rebuild
 - **AND** this fix targets only the switch-**out** of the paused-wait state; the
   design-intended *paused* status shown while a round awaits input is unchanged
+
+#### Scenario: discovery→analyze transition keeps appending without re-entry
+- **GIVEN** a running flow whose `discovery` step has paused awaiting the
+  operator's plan confirmation, with the live `/ws/ui` subscription connected
+- **WHEN** the operator confirms the plan, `discovery` returns and the engine
+  transitions into `analyze` — emitting, over the live (append / broadcast)
+  channel, `analyze`'s `step_started` running anchor and its subsequent
+  conversation / `step_output` records
+- **THEN** the transition batch survives `dedupeAppendRecords` (its step-event
+  records do not collide on `recordKey` with the prior `discovery` region's
+  anchors, because `recordKey` discriminates by `status` and `kind`), the
+  `st.count` append cursor advances rather than stalling, and the `analyze` step
+  region and all subsequent content render live in `#flow-view`
+- **AND** the operator does NOT have to exit and re-enter the session to see
+  `analyze` and the steps that follow it — the incremental-append path now
+  behaves identically to a full re-entry / reload
 
 ### Requirement: Viewport-Driven Sticky Step Header
 

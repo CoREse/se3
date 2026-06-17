@@ -59,6 +59,14 @@
 
 
 
+
+## 10.4.3 - 2026-06-17
+
+- Fix WebUI running-flow console freezing on the discovery→analyze transition so live transcript keeps streaming without a full-page reload
+- Fix the same console freeze after a step error when the user manually retries, keeping subsequent content visible in real time
+- Make the live incremental-append render path consistent with the full-snapshot reload path so step-event records no longer collapse onto a single dedup key
+- Clear the streamed 'waiting for lock' anchor once a contended merge lock is acquired, preventing the transcript from sticking on that row
+- Add regression tests covering the step-transition freeze, retry-after-error freeze, and the lock-acquired clearing event
 ## 10.4.2 - 2026-06-17
 
 - Fix typing lag in reply textarea caused by unnecessary DOM rebuilds on frequent WebSocket status updates
