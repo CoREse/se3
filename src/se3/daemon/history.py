@@ -36,10 +36,12 @@ way and the remainder is picked up by the next request.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -78,6 +80,56 @@ def _warn_once_unreadable(path: Path, kind: str) -> None:
 #: and the returned cursor advances only as far as the truncation point, so the
 #: caller picks the rest up incrementally on its next request.
 MAX_RECORDS_PER_REPORT = 2000
+
+#: Rewrite detection must satisfy the hard correctness guarantee — catch ANY
+#: change to the already-consumed prefix no matter which part the rewrite
+#: preserved — while staying far cheaper than the whole-file
+#: ``read_text().splitlines()`` re-read the byte-offset incremental path replaced.
+#:
+#: A **running full-prefix** hash over the WHOLE consumed region ``[0, offset)`` is
+#: the only complete rewrite signal, so it is used uniformly whenever the file has
+#: NOT shrunk (both the grow and the equal-size cases).  The hash is maintained
+#: *incrementally from the bytes already read* as records are consumed (so the
+#: append path never re-reads the prefix to advance it) and is verified against a
+#: fresh disk hash whenever a read could be incremental: a genuine append leaves
+#: the entire consumed prefix byte-for-byte identical, so the two hashes match,
+#: whereas an in-place retry that re-runs the step changes at least one prefix byte
+#: — the leading prompt/status head, the trailing terminal record, or any record
+#: in the MIDDLE of a large prefix — so they diverge and the stale offset/cursor is
+#: discarded.  Earlier iterations used bounded sampled windows (a head window
+#: ``[0, W)`` and a boundary window ``[offset - W, offset)``, each
+#: ``W = HEAD_SIGNATURE_BYTES`` bytes) as a cheaper grow-case guard, but together
+#: they only cover a consumed prefix up to ``2·W`` bytes: a retry that preserved
+#: both the head and the boundary while changing a record between them (and grew
+#: the file) slipped through, trusted the stale offset, and delivered only the
+#: replacement suffix — dropping the start of the retry batch until a full reload
+#: (issue #209, fix iterations 6–8).  The whole-prefix hash closes that gap for
+#: every prefix size.  The disk verification is bounded by the consumed offset
+#: (it reads at most ``offset`` bytes even after the file has grown) and streams
+#: raw bytes through a fast C digest with no Python-level UTF-8 decode /
+#: splitlines / record construction, so it never reintroduces the decode-bound
+#: whole-file re-read on the append path, and the genuinely new appended tail is
+#: still read only once.
+#:
+#: A ``stat``-identical (same size AND mtime) result is deliberately NOT treated
+#: as a zero-read "untouched" fast path: under a coarse mtime granularity an
+#: equal-size in-place rewrite landing within the same mtime tick is
+#: indistinguishable from "untouched" by ``stat`` alone, so the content hash runs
+#: regardless of mtime.
+HEAD_SIGNATURE_BYTES = 128
+
+#: Chunk size (bytes) for streaming the consumed region through the full-prefix
+#: disk hash, so a multi-megabyte prefix is hashed without loading it all into
+#: memory at once.
+SIGNATURE_CHUNK_BYTES = 1 << 20  # 1 MiB
+
+#: Size of the bounded **boundary** window (the last bytes ending at the consumed
+#: offset).  Rewrite detection no longer relies on bounded windows — it hashes the
+#: whole consumed prefix (see above), which is the only signal that catches a
+#: middle-of-prefix change — but the head/boundary fingerprints are still recorded
+#: in the offset table (and this constant is still referenced by callers/tests),
+#: so the size is retained as a stable alias.
+BOUNDARY_SIGNATURE_BYTES = HEAD_SIGNATURE_BYTES
 
 #: Flow statuses that mean a flow is no longer running. Anything else on the
 #: *active* (``engine.json``) source is treated as an in-progress session.
@@ -335,18 +387,40 @@ class DaemonHistoryReader:
 
         # Per-file byte-offset table for incremental reads in :meth:`read_flow`.
         # Key: absolute path of the jsonl file (str).
-        # Value: ``(consumed_lines, byte_offset, mtime, size)`` where
+        # Value: ``(consumed_lines, byte_offset, mtime, size, head_sig)`` where
         # *consumed_lines* is the count of fully consumed newline-terminated
         # lines, *byte_offset* is the file position after the last consumed
-        # newline, and *mtime*/*size* are the file stat at the time of the last
-        # read (used to detect truncation / replacement).
+        # newline, *mtime*/*size* are the file stat at the time of the last
+        # read, *head_sig* is the bounded HEAD fingerprint (the first
+        # ``min(byte_offset, HEAD_SIGNATURE_BYTES)`` bytes) and *boundary_sig* is
+        # the bounded BOUNDARY fingerprint (the last
+        # ``min(byte_offset, HEAD_SIGNATURE_BYTES)`` bytes, ending at
+        # *byte_offset*) — together the two constant-cost grow-case rewrite guards
+        # (see :meth:`_head_signature` / :meth:`_boundary_signature`).
         #
-        # When the caller's cursor line-count matches *consumed_lines* and the
-        # current file size is >= *byte_offset*, only the new bytes past the
+        # When the caller's cursor line-count matches *consumed_lines*, the
+        # current file size is >= *byte_offset*, AND the rewrite check passes
+        # (the file was appended-to, not rewritten), only the new bytes past the
         # offset are read (seek + incremental parse).  Otherwise (first read,
-        # cursor rollback, file shrunk) a full read from the start is performed
-        # and the entry is rebuilt.
-        self._read_offsets: Dict[str, Tuple[int, int, float, int]] = {}
+        # cursor rollback, file shrunk, or file truncated/replaced in place even
+        # at an equal-or-larger size) a full read from the start is performed and
+        # the entry is rebuilt.
+        self._read_offsets: Dict[
+            str, Tuple[int, int, float, int, Optional[bytes], Optional[bytes]]
+        ] = {}
+
+        # Per-file running full-prefix hasher, parallel to ``_read_offsets`` and
+        # keyed by the same absolute path.  Each entry is a live ``blake2b`` whose
+        # digest covers exactly the consumed region ``[0, byte_offset)`` of the
+        # file, extended *incrementally from the bytes already read* on every
+        # read (never by re-reading the prefix from disk).  Used only in the
+        # equal-size, no-new-bytes case to detect an in-place rewrite that
+        # preserves the bounded head window but changes a later record (issue
+        # #209, fix iteration 6): there the stored digest is compared against a
+        # fresh whole-prefix disk hash.  Kept out of ``_read_offsets`` because a
+        # hasher object is not part of the wire/cursor contract — it is purely
+        # reader-internal optimization state and cold-starts after a restart.
+        self._prefix_hashers: Dict[str, "hashlib._Hash"] = {}
 
     def invalidate_index_cache(self) -> None:
         """Drop the cached index, forcing the next ``build_index`` to rebuild.
@@ -431,7 +505,7 @@ class DaemonHistoryReader:
         if meta.source != "active":
             return False
         engine_json = Path(meta.project_root) / "se3" / "state" / "engine.json"
-        data = _read_json(engine_json)
+        data = _read_engine_cached(engine_json)
         if not isinstance(data, dict):
             return False
         # Confirm the engine.json still describes *this* flow.  Without this
@@ -451,7 +525,7 @@ class DaemonHistoryReader:
         state_dir = root / "se3" / "state"
 
         # 1. Active flow from engine.json.
-        data = _read_json(state_dir / "engine.json")
+        data = _read_engine_cached(state_dir / "engine.json")
         if isinstance(data, dict) and data.get("flow_id"):
             flow_id = str(data["flow_id"])
             if flow_id not in seen:
@@ -614,6 +688,148 @@ class DaemonHistoryReader:
                 return candidate
         return None
 
+    @staticmethod
+    def _head_signature(path: Path, offset: int) -> Optional[bytes]:
+        """Bounded fingerprint of the file *head* — the first bytes of the prefix.
+
+        Hashes the first ``min(offset, HEAD_SIGNATURE_BYTES)`` bytes (anchored at
+        byte 0), a single small constant-cost read regardless of file size.  Used
+        as the cheap grow-case rewrite guard: a genuine append never touches the
+        head, while a typical in-place retry re-runs the step from the start and
+        rewrites its leading records, so the head changes.  This guard is the half
+        that keeps the incremental-append read bounded; the equal-size,
+        head-preserving rewrite the head window cannot see is covered separately by
+        the running full-prefix hash (see :meth:`_consumed_signature` and the class
+        ``_prefix_hashers``).  Returns ``b""`` for an empty prefix and ``None``
+        when the file cannot be read (caller then falls back to a safe full read).
+        """
+        window = min(offset, HEAD_SIGNATURE_BYTES)
+        if window <= 0:
+            return b""
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(window)
+        except OSError:
+            return None
+        return hashlib.blake2b(data, digest_size=16).digest()
+
+    @staticmethod
+    def _boundary_signature(path: Path, offset: int) -> Optional[bytes]:
+        """Bounded fingerprint of the consumed *boundary* — the last bytes ending
+        at *offset*.
+
+        Hashes the ``min(offset, HEAD_SIGNATURE_BYTES)`` bytes immediately before
+        *offset* (the window ``[offset - W, offset)``), a single small
+        constant-cost read regardless of file size.  Paired with the head window
+        as the second cheap grow-case rewrite guard: a genuine append never
+        touches any byte before the consumed offset, so the bytes ending at the
+        offset are stable; an in-place retry that re-runs the step from the start
+        rewrites the records that fall before the old offset, so the boundary
+        window changes even when the leading head window happens to be preserved
+        (issue #209, fix iteration 7, larger prefix-preserving retry rewrite).
+        Together the head window ``[0, W)`` and this boundary window cover the
+        whole consumed prefix for any region up to ``2·W`` bytes, so a small
+        consumed prefix is fully verified.  Returns ``b""`` for an empty prefix
+        and ``None`` when the file cannot be read (caller then falls back to a safe
+        full read).
+        """
+        window = min(offset, HEAD_SIGNATURE_BYTES)
+        if window <= 0:
+            return b""
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(offset - window)
+                data = fh.read(window)
+        except OSError:
+            return None
+        return hashlib.blake2b(data, digest_size=16).digest()
+
+    @staticmethod
+    def _consumed_signature(path: Path, offset: int) -> Optional[bytes]:
+        """Fingerprint the **whole consumed region** ``[0, offset)`` of the file.
+
+        Streams the first *offset* bytes of the file (anchored at byte 0) through
+        a fast C digest in :data:`SIGNATURE_CHUNK_BYTES` chunks, so a
+        multi-megabyte prefix is hashed without loading it all into memory and
+        without any Python-level UTF-8 decode / splitlines / record
+        construction.  Because a genuine append never mutates any byte before the
+        consumed offset — and this fingerprint covers exactly that
+        already-consumed region — the signature is stable across appends.  It
+        changes whenever the file is truncated / rewritten in place: a step
+        retried in place re-runs from the start and rewrites its records, so at
+        least one byte in the prefix differs — **regardless of which part of the
+        prefix the rewrite happened to preserve** (the leading prompt/status
+        head, the trailing terminal/status record, or any sampled window).  A
+        bounded sampled window (head- or boundary-anchored) cannot guarantee this:
+        an equal-size replacement that keeps the sampled bytes identical but
+        mutates content elsewhere in the consumed prefix kept the windowed
+        fingerprint unchanged and was misclassified as a safe append, so the
+        whole replacement batch was silently skipped until a full reload (issue
+        #209, equal-size / prefix-preserving retry rewrite).  Hashing the whole
+        prefix is the reliable rewrite signal :meth:`read_flow` uses to
+        invalidate a stale offset and deliver the replacement from the start.
+        Reads only up to *offset* bytes even if the file has since grown, so the
+        cost tracks the consumed region, not the (possibly much larger) appended
+        tail.  Returns ``b""`` for an empty prefix (compares equal to another
+        empty prefix) and ``None`` when the file cannot be read (so the caller
+        falls back to a safe full read).
+        """
+        if offset <= 0:
+            return b""
+        digest = hashlib.blake2b(digest_size=16)
+        remaining = offset
+        try:
+            with open(path, "rb") as fh:
+                while remaining > 0:
+                    chunk = fh.read(min(remaining, SIGNATURE_CHUNK_BYTES))
+                    if not chunk:
+                        # File is now shorter than the consumed offset — it was
+                        # truncated / replaced.  The hash covers fewer bytes than
+                        # the stored signature did, so it cannot compare equal,
+                        # forcing a safe full re-read.
+                        break
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+        except OSError:
+            return None
+        return digest.digest()
+
+    def _record_offset(
+        self,
+        jsonl_key: str,
+        jsonl: Path,
+        consumed: int,
+        offset: int,
+        mtime: float,
+        size: int,
+        base_hasher: Optional["hashlib._Hash"],
+        new_consumed_bytes: bytes,
+    ) -> None:
+        """Persist the per-file read position plus all rewrite fingerprints.
+
+        Updates :attr:`_read_offsets` with the bounded head and boundary
+        signatures (the two cheap grow-case guards) and advances the running
+        full-prefix hash in :attr:`_prefix_hashers` by *new_consumed_bytes* — the
+        raw bytes consumed in this read, taken from the bytes already in memory so
+        the running hash is maintained WITHOUT any extra disk read.  *base_hasher*
+        is the prior running hasher to extend (for an incremental read) or ``None``
+        to start a fresh hash over a from-scratch full read.
+        """
+        self._read_offsets[jsonl_key] = (
+            consumed,
+            offset,
+            mtime,
+            size,
+            self._head_signature(jsonl, offset),
+            self._boundary_signature(jsonl, offset),
+        )
+        hasher = base_hasher.copy() if base_hasher is not None else hashlib.blake2b(
+            digest_size=16
+        )
+        if new_consumed_bytes:
+            hasher.update(new_consumed_bytes)
+        self._prefix_hashers[jsonl_key] = hasher
+
     def read_flow(
         self,
         flow_id: str,
@@ -684,11 +900,89 @@ class DaemonHistoryReader:
                 continue
 
             prev = self._read_offsets.get(jsonl_key)
+
+            # Detect an in-place truncation / rewrite that a size/offset
+            # comparison alone cannot see.  A genuine append never mutates any
+            # byte before the consumed offset, so the recorded offset still points
+            # into the *same* content and an incremental seek-read is safe; a
+            # rewrite makes the recorded offset/cursor stale and MUST trigger a
+            # full read from the start (delivering the replacement content from the
+            # beginning as the next append delta).  The discriminator MUST catch a
+            # consumed-content change *regardless of which part of the prefix the
+            # rewrite happened to preserve*:
+            #   1. shrank below the consumed offset → definitely replaced, no read
+            #      needed (the whole-prefix hash would also diverge, but the size
+            #      shortcut spares even that read).
+            #   2. otherwise (grew past, or equal to, the consumed offset) →
+            #      re-hash the WHOLE consumed prefix ``[0, offset)`` from disk and
+            #      compare it against the running full-prefix hash maintained from
+            #      the bytes already read.  A genuine append leaves the entire
+            #      consumed prefix byte-for-byte identical, so the two hashes match;
+            #      an in-place retry that re-runs the step rewrites at least one
+            #      byte of the prefix, so they diverge — whether the changed record
+            #      is the leading prompt/status head, the trailing terminal/status
+            #      record, or any record in the MIDDLE of a large prefix.
+            #
+            # Bounded sampled windows (a head window ``[0, W)`` and/or a boundary
+            # window ``[offset - W, offset)``) were tried as a cheaper grow-case
+            # guard but are NOT sufficient: together they only cover a consumed
+            # prefix up to ``2·W`` bytes, so a retry that preserves both the leading
+            # head and the boundary tail while changing a record between them — and
+            # appends additional records so the file grows — kept both windows equal,
+            # left ``rewritten`` false, trusted the stale offset, and delivered only
+            # the replacement suffix, dropping the beginning of the retry batch until
+            # a full reload (issue #209, fix iteration 8, middle-of-prefix retry
+            # rewrite).  Only a hash over the *entire* consumed prefix is a complete
+            # rewrite signal, so it is used uniformly for both the grow and the
+            # equal-size cases.  The disk read is bounded by the consumed offset
+            # (``_consumed_signature`` reads at most ``offset`` bytes even after the
+            # file has grown) and streams raw bytes through a fast C digest with no
+            # Python-level UTF-8 decode / splitlines / record construction, so it is
+            # dramatically cheaper than the whole-file ``read_text().splitlines()``
+            # re-read the byte-offset incremental path replaced, and the genuinely
+            # new appended tail is still read only once via the seek below.
+            #
+            # A ``stat``-identical (same size AND mtime) result is deliberately
+            # NOT treated as a zero-read "untouched" fast path: under a coarse
+            # mtime granularity an equal-size in-place rewrite landing within the
+            # same mtime tick is indistinguishable from "untouched" by ``stat``
+            # alone, so the recorded offset/cursor would be wrongly trusted and the
+            # whole replacement batch silently skipped as "no new bytes" (issue
+            # #209, equal-size retry rewrite).  Hence the content check above runs
+            # regardless of mtime.
+            rewritten = False
+            if prev is not None:
+                prev_offset = prev[1]
+                if cur_size < prev_offset:
+                    # File is now smaller than what we already consumed →
+                    # definitely truncated / replaced.
+                    rewritten = True
+                else:
+                    # File grew past, or is equal in size to, the consumed offset.
+                    # Neither proves an append: an in-place retry can rewrite the
+                    # step from the start and end up the same size as, or larger
+                    # than, the old consumed offset.  Verify the WHOLE consumed
+                    # prefix against the running full-prefix hash; any divergence
+                    # means a consumed record changed (head, middle, or boundary)
+                    # and the stale offset/cursor must be discarded.
+                    cur_consumed_sig = self._consumed_signature(jsonl, prev_offset)
+                    prev_hasher = self._prefix_hashers.get(jsonl_key)
+                    prev_consumed_sig = (
+                        prev_hasher.digest() if prev_hasher is not None else None
+                    )
+                    if (
+                        cur_consumed_sig is None
+                        or prev_consumed_sig is None
+                        or cur_consumed_sig != prev_consumed_sig
+                    ):
+                        rewritten = True
+
             can_incremental = (
                 prev is not None
                 and cursor_lines == prev[0]       # cursor matches consumed lines
                 and cur_size >= prev[1]            # file has not shrunk
                 and prev[1] >= 0                   # offset is valid
+                and not rewritten                  # rewrite check passed
             )
 
             if can_incremental and cur_size == prev[1]:
@@ -708,6 +1002,12 @@ class DaemonHistoryReader:
                 # consumed_lines so far from prior reads.
                 consumed = prev[0]
                 offset = prev[1]
+                # The running full-prefix hash is extended from the bytes we just
+                # read (no extra disk read): the bytes consumed THIS round are the
+                # leading ``offset - prev_offset_start`` bytes of ``new_bytes``.
+                prev_offset_start = prev[1]
+                prev_hasher = self._prefix_hashers.get(jsonl_key)
+                new_bytes_encoded = new_bytes.encode("utf-8")
                 raw_lines = new_bytes.split("\n")
                 # The last element may be a partial line (no trailing \n).
                 # Only process elements that end with a newline — i.e. all
@@ -746,15 +1046,29 @@ class DaemonHistoryReader:
                         # Only advance the offset table to the truncation
                         # point.  The caller's cursor will match consumed
                         # and the next read continues from here.
-                        self._read_offsets[jsonl_key] = (
-                            consumed, offset, cur_mtime, cur_size,
+                        self._record_offset(
+                            jsonl_key,
+                            jsonl,
+                            consumed,
+                            offset,
+                            cur_mtime,
+                            cur_size,
+                            prev_hasher,
+                            new_bytes_encoded[: offset - prev_offset_start],
                         )
                         new_cursor[jsonl.name] = consumed
                         break
                 else:
                     # No truncation — update offset table with full state.
-                    self._read_offsets[jsonl_key] = (
-                        consumed, offset, cur_mtime, cur_size,
+                    self._record_offset(
+                        jsonl_key,
+                        jsonl,
+                        consumed,
+                        offset,
+                        cur_mtime,
+                        cur_size,
+                        prev_hasher,
+                        new_bytes_encoded[: offset - prev_offset_start],
                     )
                     new_cursor[jsonl.name] = consumed
             else:
@@ -799,6 +1113,37 @@ class DaemonHistoryReader:
                 consumed = 0
                 offset = 0
                 start = cursor_lines
+
+                # Detect a truncated / replaced file.  The full-read fallback is
+                # entered (among other reasons) when the file has shrunk below
+                # its recorded byte offset, which happens when a step's jsonl is
+                # rewritten in place — e.g. a FAILED step retried, replacing the
+                # old records with a fresh, shorter batch.  In that case the
+                # caller's line-count cursor refers to lines of the *old* file
+                # and is meaningless against the replacement: honouring it as
+                # ``start`` would skip every replacement line whose index is
+                # below it (old cursor 20, replacement of 5 records → all 5
+                # skipped, an empty append recorded, the cursor advanced to 5),
+                # silently dropping the retry batch from the live conversation
+                # until a separate full reload runs.  Two independent signals
+                # mark a stale cursor: (a) the file was rewritten in place — its
+                # bounded head fingerprint changed (grow case), its whole-prefix
+                # hash diverged (equal-size case), or it shrank below the size we
+                # last saw — even when the replacement is the same size as, or larger
+                # than, the old consumed byte offset (``rewritten``, computed
+                # above; a pure size/offset comparison cannot detect this and the
+                # incremental path would otherwise either record no new bytes or
+                # read only the suffix past the stale offset); and (b) the cursor
+                # points past the end of the file's current content (covers the
+                # daemon cold-start case where ``prev`` is ``None`` but the
+                # on-disk file was already replaced while the daemon was down).
+                # Either way reset ``start`` to 0 so the full replacement content
+                # is delivered from the beginning rather than skipped.
+                total_physical_lines = len(complete_lines) + (
+                    1 if tail is not None else 0
+                )
+                if rewritten or start > total_physical_lines:
+                    start = 0
 
                 def _emit(line_text: str) -> bool:
                     """Append a parsed record for *line_text*; return truncation."""
@@ -853,8 +1198,22 @@ class DaemonHistoryReader:
                     # else: leave consumed/offset at the last complete line so
                     # the partial tail is re-read next round.
 
-                self._read_offsets[jsonl_key] = (
-                    consumed, offset, cur_mtime, cur_size,
+                # Record a fresh bounded head fingerprint and start a fresh
+                # running full-prefix hash over the newly consumed prefix (this
+                # was a from-scratch full read, so the prior hash — if any — is
+                # discarded).  The consumed prefix is exactly ``raw[:offset]``
+                # in bytes, taken from the bytes already read (no extra disk
+                # read).  The next round can then tell an append (prefix
+                # unchanged) from another rewrite (prefix changed).
+                self._record_offset(
+                    jsonl_key,
+                    jsonl,
+                    consumed,
+                    offset,
+                    cur_mtime,
+                    cur_size,
+                    None,
+                    raw.encode("utf-8")[:offset],
                 )
                 new_cursor[jsonl.name] = consumed
 
@@ -955,7 +1314,7 @@ class DaemonHistoryReader:
         signature: Dict[str, Any] = {}
         for root in self._iter_roots():
             engine_json = root / "se3" / "state" / "engine.json"
-            data = _read_json(engine_json)
+            data = _read_engine_cached(engine_json)
             if not isinstance(data, dict):
                 continue
             flow_id = str(data.get("flow_id") or "")
@@ -998,7 +1357,7 @@ class DaemonHistoryReader:
         """
         ids: Set[str] = set()
         for root in self._iter_roots():
-            data = _read_json(root / "se3" / "state" / "engine.json")
+            data = _read_engine_cached(root / "se3" / "state" / "engine.json")
             if isinstance(data, dict) and data.get("flow_id"):
                 ids.add(str(data["flow_id"]))
         return ids
@@ -1013,6 +1372,59 @@ def _read_json(path: Path) -> Optional[dict]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+# -- active engine.json parse cache ---------------------------------------
+#
+# The daemon's per-tick push loop / aggregator touches the *active*
+# ``engine.json`` through several readers every tick
+# (``active_flow_signature`` + ``build_index`` → ``_index_root`` +
+# ``read_active_flows`` → ``_is_still_active`` + ``live_flow_ids``).  Reading
+# the file is cheap, but ``json.loads`` on a multi-MB ``engine.json`` is a
+# GIL-bound parse that, repeated tick × reader, starves the event loop and was
+# a root cause of the #209 WebUI freeze (the live-append frame never got
+# pushed).  Collapse the repeated parses to *one per actual content change* by
+# keying the parsed result on the raw file content.
+
+_ENGINE_PARSE_CACHE: Dict[str, Tuple[str, Optional[dict]]] = {}
+_ENGINE_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _parse_engine_json(raw: str) -> Optional[dict]:
+    """Parse the raw text of an ``engine.json`` into a dict (or ``None``).
+
+    This is the single GIL-bound ``json.loads`` seam the #209 fix collapses;
+    it is patched by the regression tests to count active-engine.json parses.
+    """
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_engine_cached(path: Path) -> Optional[dict]:
+    """Read an active ``engine.json`` and parse it at most once per change.
+
+    Always *reads* the file (cheap), but only *parses* (``_parse_engine_json``)
+    when the raw content differs from the last parse cached for *path*.  The
+    cache is module-level (shared across reader instances) and keyed by the raw
+    file content, so a genuine rewrite — a step transition or a retry — is
+    re-parsed while an unchanged file across many ticks parses only once.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    key = str(path)
+    with _ENGINE_PARSE_CACHE_LOCK:
+        cached = _ENGINE_PARSE_CACHE.get(key)
+        if cached is not None and cached[0] == raw:
+            return cached[1]
+    parsed = _parse_engine_json(raw)
+    with _ENGINE_PARSE_CACHE_LOCK:
+        _ENGINE_PARSE_CACHE[key] = (raw, parsed)
+    return parsed
 
 
 def _safe_mtime(path: Path) -> Optional[float]:

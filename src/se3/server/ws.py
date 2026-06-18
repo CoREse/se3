@@ -51,6 +51,7 @@ INTERJECTION_PHASE_CONSUMED = "consumed"
 
 logger = logging.getLogger(__name__)
 
+
 # Heartbeat tuning (seconds).
 PING_INTERVAL = 15.0
 #: A daemon is dropped if no PONG (or any frame) arrives within this window.

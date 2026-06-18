@@ -1336,6 +1336,72 @@ def test_push_history_force_index_does_not_block_event_loop():
     asyncio.run(scenario())
 
 
+class _SlowSignatureHistoryProvider:
+    """Provider whose ``active_flow_signature`` blocks synchronously.
+
+    Mimics the issue-#209 condition: a large active ``engine.json`` whose parse
+    inside ``active_flow_signature`` (called via ``_history_changed`` on every
+    push tick) is CPU-bound. A correct client offloads ``_history_changed`` with
+    ``asyncio.to_thread`` so this cost never stalls the event loop; a regression
+    that ran it inline on the loop would block for ``block_seconds`` each tick.
+    """
+
+    def __init__(self, block_seconds: float = 0.6):
+        self.block_seconds = block_seconds
+        self._sig = 0
+
+    def active_flow_signature(self):
+        time.sleep(self.block_seconds)
+        self._sig += 1
+        return {"f": self._sig}
+
+    def build_index(self):
+        return []
+
+    def read_active_flows(self, cursors):
+        return []
+
+
+def test_push_loop_history_change_check_does_not_block_event_loop():
+    """A slow ``active_flow_signature`` must not stall the event loop.
+
+    Regression lock for issue #209: ``_push_loop`` checks ``_history_changed``
+    every fast tick, which reads/parses each active flow's (potentially ~1 MB)
+    ``engine.json``. That check must be offloaded to a worker thread so the
+    push loop keeps ticking — otherwise the discovery→analyze / retry
+    live-append frame is never produced under load.
+    """
+    provider = _SlowSignatureHistoryProvider(block_seconds=0.6)
+    client = _make_client(
+        history_provider=provider,
+        status_interval=5.0,
+        history_poll_interval=0.1,
+    )
+    ws = _FakeWS()
+
+    async def scenario():
+        client._fast_push_event = asyncio.Event()
+        stop = asyncio.Event()
+        samples: list = []
+        probe = _loop_responsiveness(stop, samples)
+        loop_task = asyncio.create_task(client._push_loop(ws, stop))
+        # Let the loop run through a couple of ticks (each does a 0.6 s
+        # signature check). With the check offloaded the probe keeps waking on
+        # its 0.02 s cadence; inline it would see ~0.6 s gaps.
+        await asyncio.sleep(0.9)
+        stop.set()
+        client._fast_push_event.set()
+        await loop_task
+        await probe
+        assert samples, "probe never ran"
+        assert max(samples) < 0.25, (
+            f"event loop was blocked: max gap {max(samples):.3f}s — "
+            "_history_changed was not offloaded"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_client_reconnects_after_server_drop():
     """The client must re-establish the connection (with backoff) after the
     server goes away and comes back."""

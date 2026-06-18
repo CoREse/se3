@@ -3786,6 +3786,16 @@ retryAfterErrorMod.registerLiveAppendRetryAfterErrorTests({ app, check, findOne,
 const e2eConsistencyMod = await import("./live_append_e2e_consistency.test.mjs");
 e2eConsistencyMod.registerConsoleE2EConsistencyTests({ app, check, findOne, findAll });
 
+// Register the issue-#209 frontend real-frame replay guard (G3 task 2). Replays
+// the EXACT real frame sequence G1 captured
+// (tests/frontend/fixtures/issue_209/daemon_frames.json) through the production
+// applyHistoryData / dedupeAppendRecords, proving the live incremental path
+// converges on the full reload — pinning that the frontend stays correct on the
+// real #209 frames (the root-cause fail-before/pass-after lock is at the daemon
+// layer in tests/test_issue209_live_append_regression.py).
+const issue209ReplayMod = await import("./issue209_real_frame_replay.test.mjs");
+issue209ReplayMod.registerIssue209RealFrameReplayTests({ app, check, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

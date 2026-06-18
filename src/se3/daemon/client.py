@@ -477,7 +477,14 @@ class DaemonClient:
                 last_status = now
                 await self._push_status(ws)
             # Push history on a real disk change, or on the status tick (backstop).
-            history_changed = self._history_changed()
+            # The change check reads each active flow's engine.json + stats its
+            # jsonl files; even with the reader's stat-keyed parse cache a cold
+            # re-parse of a ~1 MB engine.json is CPU-bound, so it is offloaded to
+            # a worker thread (the issue-#209 starvation fix) instead of running
+            # synchronously on the event loop. The reader is the push loop's sole
+            # caller of this method, so the off-thread mutation of its signature
+            # state is race-free.
+            history_changed = await asyncio.to_thread(self._history_changed)
             if status_due or history_changed:
                 # A real disk change (engine.json rewrite / jsonl append) means
                 # the on-disk state diverged from the cached index.  Invalidate

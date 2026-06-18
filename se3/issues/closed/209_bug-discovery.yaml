@@ -4,8 +4,8 @@ description: '我服了，这个修了一万年的bug还在：：discovery确定
 
 
   我看你是修不好了，要不用workaround吧？左边的状态明明已经转到了analyze，说明这个界面是能知道现在实际上已经往下走了的，要不检测到往下走了就进行一次刷新（模拟退出重进）吧。我真的服了，一个回归，修了不下十次修不好。'
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-06-18T10:58:11.219390'
-updated_at: '2026-06-18T10:58:11.219390'
+updated_at: '2026-06-18T11:53:26.112036'

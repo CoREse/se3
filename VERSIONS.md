@@ -61,6 +61,14 @@
 
 
 
+
+## 10.5.1 - 2026-06-18
+
+- Fix WebUI conversation pane freezing after a discovery→analyze step transition, so new step content now appears within seconds without re-entering the session
+- Fix the same conversation-pane freeze after manually retrying a failed step (e.g. update_spec), which rewrites a step's jsonl file in place
+- Detect in-place per-step jsonl rewrites in the daemon incremental reader via a full-prefix blake2b digest, forcing a clean re-read instead of trusting a stale byte offset
+- Preserve the existing {jsonl-filename: line-count} cursor contract and all dedupe/reconnect/render mechanisms while fixing the dropped-frame root cause in the daemon layer
+- Add deterministic regression tests (daemon step-transition/truncation unit tests and frontend node-stub frame-replay) that lock down issue #209 against future recurrence
 ## 10.5.0 - 2026-06-18
 
 - Add a user-directed issue_operations channel to the discovery step contract, letting users create, edit, or delete issues only when they explicitly instruct it

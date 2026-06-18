@@ -1392,8 +1392,23 @@ def _tracking_open_factory():
 
 
 def test_read_flow_incremental_reads_only_new_bytes(tmp_path, monkeypatch):
-    """After a full read, appending N records and reading again should read
-    only the new bytes, not the entire file."""
+    """After a full read, appending N records and reading again parses only the
+    new records and makes at most a SINGLE pass over the file's bytes.
+
+    Rewrite detection must catch a change anywhere in the already-consumed prefix
+    — including the MIDDLE of a large prefix that bounded head/boundary windows
+    miss (issue #209, fix iteration 8) — so the grow case hashes the whole
+    consumed prefix ``[0, offset)`` from disk and compares it against the running
+    full-prefix hash.  That raw-byte hash streams through a fast C digest with no
+    Python-level UTF-8 decode / ``json.loads`` / record construction, so the
+    EXPENSIVE parse work stays O(new records) (only the appended tail is parsed)
+    while the raw bytes read are bounded by a single pass over the file (the
+    consumed prefix hashed once + the new tail read once + a small constant for
+    re-stamping the bounded fingerprints).  The assertion therefore bounds the
+    read at ``current_file_size + constant`` — proving it never DOUBLE-reads or
+    re-parses the whole file — rather than the unsound ``new-bytes + window``
+    bound a bounded-window-only detector implied (that bound is exactly what let
+    a middle-of-prefix retry rewrite slip through)."""
     import builtins
 
     tracking_open, get_bytes = _tracking_open_factory()
@@ -1418,16 +1433,28 @@ def test_read_flow_incremental_reads_only_new_bytes(tmp_path, monkeypatch):
     _append_jsonl(jsonl, new_records)
     added_size = jsonl.stat().st_size - full_size
 
-    # Second read — incremental, expect only ~added_size bytes read.
+    # Second read — incremental: parses only the 5 new records, and reads the
+    # file's bytes at most once (consumed prefix hashed once for rewrite
+    # detection + the new tail read once + a small constant for re-stamping the
+    # bounded fingerprints).  It must NOT double-read the file.
+    grown_size = jsonl.stat().st_size
     second = reader.read_flow("f1", cursor=first.cursor)
     second_bytes = get_bytes()
     assert len(second.records) == 5
-    assert second_bytes < added_size * 2, (
-        f"Expected < {added_size * 2} bytes for incremental read, got {second_bytes}"
+    # Single-pass bound: the whole-prefix rewrite hash reads ``offset`` bytes, the
+    # seek-read reads the appended tail, and ``_record_offset`` re-stamps the two
+    # bounded ≤ HEAD_SIGNATURE_BYTES windows.  Their sum is one pass over the
+    # current file plus a fixed constant — never two passes / a full re-decode.
+    max_overhead = 4 * history_mod.HEAD_SIGNATURE_BYTES + 64
+    assert second_bytes <= grown_size + max_overhead, (
+        f"Expected <= {grown_size + max_overhead} bytes (single pass over the "
+        f"file + constant) for incremental read, got {second_bytes}"
     )
-    # The incremental read should be dramatically less than a full re-read.
-    assert second_bytes < first_bytes, (
-        f"Incremental read ({second_bytes}) should be less than full read ({first_bytes})"
+    # And it must not read MORE than the first full read did by any meaningful
+    # margin — i.e. no double pass over the prefix.
+    assert second_bytes < first_bytes + added_size + max_overhead, (
+        f"Incremental read ({second_bytes}) must be a single pass, not a "
+        f"double read (full={first_bytes}, added={added_size})"
     )
 
 
@@ -1633,9 +1660,21 @@ def test_read_flow_truncation_offset_table_consistency(tmp_path, monkeypatch):
 
 
 def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
-    """When the file has not changed since the last read, zero bytes are read
-    (the early-exit path for ``can_incremental and cur_size == prev[1]``)."""
+    """When the file has not changed since the last read, the idle re-read
+    delivers no records and reads at most the bounded boundary-fingerprint
+    window — never the whole file.
+
+    The reader can NOT skip the file with a zero-byte ``stat``-only fast path:
+    under a coarse-mtime filesystem (e.g. tmpfs / overlayfs, whose timestamps
+    only advance every jiffy) an in-place rewrite of the *same byte size* that
+    lands within the same mtime tick is indistinguishable from "untouched" by
+    ``stat`` alone.  Trusting ``stat`` there silently drops the rewrite batch
+    (issue #209's equal-size retry-rewrite regression).  The reader therefore
+    always confirms the consumed boundary via the cheap (≤
+    ``BOUNDARY_SIGNATURE_BYTES``) fingerprint, which is what keeps the idle
+    re-read off the full-file path while staying rewrite-safe."""
     import builtins
+    from se3.daemon import history as history_mod
 
     tracking_open, get_bytes = _tracking_open_factory()
     monkeypatch.setattr(builtins, "open", tracking_open)
@@ -1648,12 +1687,18 @@ def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
     full_bytes = get_bytes()
     assert full_bytes > 0
 
-    # Read again with same cursor — no new bytes.
+    # Read again with same cursor — no new records, and at most the small
+    # bounded boundary window is read (NOT the whole file again).
     second = reader.read_flow("f1", cursor=first.cursor)
     delta_bytes = get_bytes()
     assert len(second.records) == 0
-    assert delta_bytes == 0, (
-        f"Expected 0 bytes read when nothing changed, got {delta_bytes}"
+    assert delta_bytes <= history_mod.BOUNDARY_SIGNATURE_BYTES, (
+        f"Idle re-read must stay within the bounded boundary window "
+        f"(≤{history_mod.BOUNDARY_SIGNATURE_BYTES}), got {delta_bytes}"
+    )
+    assert delta_bytes < full_bytes, (
+        f"Idle re-read must not re-read the whole file: "
+        f"delta={delta_bytes} full={full_bytes}"
     )
 
 
@@ -1766,8 +1811,19 @@ def test_read_flow_incremental_empty_lines_between_records(tmp_path):
 
 def test_read_flow_incremental_large_file_small_delta(tmp_path, monkeypatch):
     """Construct a large initial file (1000 records) + a small append (5
-    records).  The incremental read must read << the full file size."""
+    records).  The incremental read must PARSE only the 5 new records and make a
+    single pass over the file's bytes — never a double read / full re-parse.
+
+    Correctness requires catching a rewrite anywhere in the consumed prefix
+    (issue #209, fix iteration 8), so the consumed prefix is hashed from disk for
+    rewrite detection; that raw-byte hash skips the expensive UTF-8 decode /
+    ``json.loads`` / record construction, which still runs only over the appended
+    tail.  The read therefore touches at most one pass over the current file
+    (prefix hashed once + new tail read once + a small fingerprint constant), not
+    the ``~new-bytes`` a bounded-window detector implied — that very implication
+    is what let a middle-of-prefix retry rewrite slip through."""
     import builtins
+    from se3.daemon import history as history_mod
 
     tracking_open, get_bytes = _tracking_open_factory()
     monkeypatch.setattr(builtins, "open", tracking_open)
@@ -1785,19 +1841,25 @@ def test_read_flow_incremental_large_file_small_delta(tmp_path, monkeypatch):
 
     # Small append.
     _append_jsonl(jsonl, [_msg("assistant", f"reply{i}") for i in range(5)])
-    added = jsonl.stat().st_size - full_size
+    grown_size = jsonl.stat().st_size
+    added = grown_size - full_size
 
     # Incremental read.
     second = reader.read_flow("f1", cursor=first.cursor)
     inc_bytes = get_bytes()
+    # Only the 5 new records are parsed/constructed (the proof the prefix is NOT
+    # re-decoded — the actual cost the byte-offset path was built to avoid).
     assert len(second.records) == 5
-    # Must read much less than the full file.
-    assert inc_bytes < full_bytes, (
-        f"Incremental ({inc_bytes}) should be less than full ({full_bytes})"
+    # Single pass over the current file + a fixed fingerprint constant — never a
+    # double read of the prefix.
+    max_overhead = 4 * history_mod.HEAD_SIGNATURE_BYTES + 64
+    assert inc_bytes <= grown_size + max_overhead, (
+        f"Incremental ({inc_bytes}) must be a single pass over the file "
+        f"(<= {grown_size + max_overhead}), not a double read"
     )
-    # And roughly proportional to the added bytes.
-    assert inc_bytes < added * 3, (
-        f"Incremental ({inc_bytes}) should be ~{added} bytes (new content)"
+    assert inc_bytes < full_bytes + added + max_overhead, (
+        f"Incremental ({inc_bytes}) must not double-read the prefix "
+        f"(full={full_bytes}, added={added})"
     )
 
 

@@ -357,6 +357,423 @@ def test_retry_resend_same_step_jsonl_records_arrive_as_delta(tmp_path):
     assert reads[0].records == []
 
 
+def test_retry_truncate_replace_same_step_jsonl_delivers_new_records(tmp_path):
+    """A FAILED step retried *in place* rewrites (truncates/replaces) the same
+    step jsonl with a fresh, SHORTER batch.  The stale line-count cursor refers
+    to the old (longer) file; ``read_flow`` must NOT honour it as the read start
+    against the replacement — otherwise every replacement line whose index is
+    below the stale cursor is skipped, an empty append is recorded, and the live
+    conversation loses the retry batch (issue #209).
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # Old attempt: 5 records — cursor advances to 5.
+    _write_jsonl(
+        step,
+        [_msg("assistant", f"old line {i}", step_type="update_spec") for i in range(5)],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 5
+
+    # Retry replaces the whole file with a fresh, SHORTER batch (3 records).
+    # ``_write_jsonl`` truncates + rewrites, so the file shrinks below the
+    # recorded byte offset and below the old line-count cursor (5 > 3).
+    _write_jsonl(
+        step,
+        [
+            _msg("assistant", "retry r0", step_type="update_spec"),
+            _msg("assistant", "retry r1", step_type="update_spec"),
+            {
+                "type": "step_completed",
+                "step_id": "07_update_spec_ef56",
+                "step_type": "update_spec",
+                "data": {"step": {"outputs": {"updated_specs": []}}},
+            },
+        ],
+    )
+
+    reads = reader.read_active_flows(cursors)
+    # All 3 replacement records must be delivered, not skipped by start=5.
+    assert len(reads[0].records) == 3
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    types = [r["message"].get("type") for r in reads[0].records]
+    assert bodies[:2] == ["retry r0", "retry r1"]
+    assert "step_completed" in types
+    # Cursor re-anchors to the replacement file's line count.
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 3
+
+    # No re-push afterwards (no duplicate delivery).
+    cursors = {r.flow_id: r.cursor for r in reads}
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_retry_rewrite_equal_size_delivers_new_records(tmp_path):
+    """A FAILED step retried *in place* rewrites the same step jsonl with a fresh
+    batch whose byte size is the SAME as the old consumed byte offset (the file
+    did NOT shrink).  A size/offset comparison alone cannot see this rewrite, so
+    a byte-offset reader would record *no new bytes* (``cur_size == prev_offset``)
+    and silently skip the whole replacement — the WebUI would miss the retry
+    batch until a full reload (issue #209, second trigger).  ``read_flow`` must
+    detect the rewrite via the head fingerprint, discard the stale offset/cursor,
+    and deliver the replacement content from the beginning.
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # Old attempt: 3 records, each content a fixed 5-char string.
+    _write_jsonl(
+        step,
+        [_msg("assistant", f"old-{i}", step_type="update_spec") for i in range(3)],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 3
+    old_size = step.stat().st_size
+
+    # Retry rewrites the file with 3 *different* records of the SAME length, so
+    # the replacement is byte-for-byte the same SIZE as the old file (== the old
+    # consumed offset) but different CONTENT.
+    _write_jsonl(
+        step,
+        [_msg("assistant", f"new-{i}", step_type="update_spec") for i in range(3)],
+    )
+    assert step.stat().st_size == old_size, "test setup: sizes must match exactly"
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    # All 3 replacement records delivered from the start — not skipped as
+    # "no new bytes".
+    assert bodies == ["new-0", "new-1", "new-2"]
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 3
+
+    # No duplicate delivery on the next idle poll.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_retry_rewrite_equal_size_preserved_boundary_delivers_new_records(tmp_path):
+    """A FAILED step retried *in place* rewrites the same step jsonl with a fresh
+    batch whose byte size is the SAME as the old consumed offset AND whose trailing
+    record (the last bytes before the old offset — the terminal / status line) is
+    left byte-for-byte identical, while only an *earlier* record changes.
+
+    This is the exact case a boundary-only rewrite detector (hashing just the last
+    N bytes before the offset) cannot see: the boundary fingerprint stays equal,
+    ``rewritten`` would be left false, the ``cur_size == prev_offset`` early return
+    fires, and the whole replacement batch is silently skipped as "no new bytes" —
+    so the WebUI receives no retry batch until a full reload (issue #209, fix
+    iteration 5).  ``read_flow`` must fingerprint the WHOLE consumed prefix, detect
+    that an earlier record changed, discard the stale offset/cursor, and deliver
+    the replacement content from the beginning.
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # A long, fixed terminal record (>128 bytes serialized) that the retry leaves
+    # untouched, so the bytes near the old offset are identical across the rewrite.
+    terminal = _msg("assistant", "T" * 256, step_type="update_spec")
+    _write_jsonl(
+        step,
+        [_msg("assistant", "old-0", step_type="update_spec"), dict(terminal)],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 2
+    old_size = step.stat().st_size
+
+    # Retry rewrites the file changing ONLY the earlier record (same length, so the
+    # total byte size is unchanged) while keeping the terminal record identical.
+    _write_jsonl(
+        step,
+        [_msg("assistant", "new-0", step_type="update_spec"), dict(terminal)],
+    )
+    assert step.stat().st_size == old_size, "test setup: sizes must match exactly"
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    # Both replacement records delivered from the start — the changed earlier
+    # record is not masked by the unchanged boundary tail.
+    assert bodies == ["new-0", "T" * 256]
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 2
+
+    # No duplicate delivery on the next idle poll.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_retry_rewrite_equal_size_preserved_head_delivers_new_records(tmp_path):
+    """A FAILED step retried *in place* rewrites the same step jsonl with a fresh
+    batch whose byte size is the SAME as the old consumed offset AND whose
+    *leading* record (the first bytes of the file — a stable prompt / status
+    prefix) is left byte-for-byte identical, while only a *later* record within
+    the consumed prefix changes.
+
+    This is the exact case a *head*-only rewrite detector (hashing just the first
+    ``HEAD_SIGNATURE_BYTES`` bytes anchored at byte 0) cannot see: the head
+    fingerprint stays equal, ``rewritten`` would be left false, the
+    ``cur_size == prev_offset`` early return fires, and the whole replacement
+    batch is silently skipped as "no new bytes" — so the WebUI receives no retry
+    batch until a full reload (issue #209, fix iteration 6).  ``read_flow`` must
+    fingerprint the WHOLE consumed prefix, detect that a later record changed,
+    discard the stale offset/cursor, and deliver the replacement content from the
+    beginning.
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # A long, fixed LEADING record (>128 bytes serialized, so it spans well past
+    # any small head window) that the retry leaves untouched, so the first bytes
+    # of the file are identical across the rewrite.
+    head = _msg("assistant", "H" * 256, step_type="update_spec")
+    _write_jsonl(
+        step,
+        [dict(head), _msg("assistant", "old-tail", step_type="update_spec")],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 2
+    old_size = step.stat().st_size
+
+    # Retry rewrites the file changing ONLY the later record (same length, so the
+    # total byte size is unchanged) while keeping the leading record identical.
+    _write_jsonl(
+        step,
+        [dict(head), _msg("assistant", "new-tail", step_type="update_spec")],
+    )
+    assert step.stat().st_size == old_size, "test setup: sizes must match exactly"
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    # Both replacement records delivered from the start — the changed later
+    # record is not masked by the unchanged leading head.
+    assert bodies == ["H" * 256, "new-tail"]
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 2
+
+    # No duplicate delivery on the next idle poll.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_retry_rewrite_larger_size_delivers_full_replacement(tmp_path):
+    """A FAILED step retried *in place* rewrites the same step jsonl with a fresh
+    batch whose byte size is LARGER than the old consumed byte offset.  Because
+    the file did not shrink, a byte-offset reader would treat it as an append and
+    seek to the STALE offset, reading only the suffix of the new file (a broken,
+    partial slice) instead of the whole replacement.  ``read_flow`` must detect
+    the rewrite and deliver the full replacement content from the beginning.
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # Old attempt: 3 short records.
+    _write_jsonl(
+        step,
+        [_msg("assistant", f"old line {i}", step_type="update_spec") for i in range(3)],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    old_size = step.stat().st_size
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 3
+
+    # Retry rewrites with a LONGER, larger batch (4 records, longer bodies +
+    # a terminal report) so the new file is strictly bigger than the old offset.
+    _write_jsonl(
+        step,
+        [
+            _msg("assistant", "retry body number zero is long", step_type="update_spec"),
+            _msg("assistant", "retry body number one is long", step_type="update_spec"),
+            _msg("assistant", "retry body number two is long", step_type="update_spec"),
+            {
+                "type": "step_completed",
+                "step_id": "07_update_spec_ef56",
+                "step_type": "update_spec",
+                "data": {"step": {"outputs": {"updated_specs": []}}},
+            },
+        ],
+    )
+    assert step.stat().st_size > old_size, "test setup: replacement must be larger"
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    types = [r["message"].get("type") for r in reads[0].records]
+    # Full replacement delivered from the start, not a truncated suffix.
+    assert bodies[:3] == [
+        "retry body number zero is long",
+        "retry body number one is long",
+        "retry body number two is long",
+    ]
+    assert "step_completed" in types
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 4
+
+    # No duplicate delivery afterwards.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_retry_rewrite_larger_size_preserved_head_delivers_full_replacement(tmp_path):
+    """A FAILED step retried *in place* rewrites the same step jsonl with a fresh
+    batch that is LARGER than the old consumed byte offset AND whose *leading*
+    record (the first bytes of the file — a stable prompt / status prefix that
+    spans well past the bounded head window) is left byte-for-byte identical,
+    while the rest of the batch is fresh.
+
+    This is the exact case a *head*-only grow-case rewrite detector cannot see:
+    the file grew (``cur_size > prev_offset``) so the equal-size whole-prefix
+    check is never reached, and the bounded head fingerprint is unchanged, so a
+    head-only check would leave ``rewritten`` false, trust the stale offset, seek
+    past it, and deliver only the SUFFIX of the replacement — dropping the head
+    record and the first fresh record(s) until a full reload (issue #209, fix
+    iteration 7).  ``read_flow`` must, when the head is preserved on a grow,
+    fall through to fingerprinting the WHOLE consumed prefix, detect that a later
+    consumed record changed, discard the stale offset/cursor, and deliver the
+    full replacement content from the beginning.
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # A long, fixed LEADING record (>128 bytes serialized, well past the bounded
+    # head window) the retry leaves untouched, so the file head is identical
+    # across the rewrite.
+    head = _msg("assistant", "H" * 256, step_type="update_spec")
+    _write_jsonl(
+        step,
+        [dict(head), _msg("assistant", "old-tail", step_type="update_spec")],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 2
+    old_size = step.stat().st_size
+
+    # Retry rewrites the file keeping the leading head record identical but
+    # producing MORE, fresh records, so the replacement is strictly LARGER than
+    # the old consumed offset while the head window is unchanged.
+    _write_jsonl(
+        step,
+        [
+            dict(head),
+            _msg("assistant", "new-tail-one", step_type="update_spec"),
+            _msg("assistant", "new-tail-two", step_type="update_spec"),
+            {
+                "type": "step_completed",
+                "step_id": "07_update_spec_ef56",
+                "step_type": "update_spec",
+                "data": {"step": {"outputs": {"updated_specs": []}}},
+            },
+        ],
+    )
+    assert step.stat().st_size > old_size, "test setup: replacement must be larger"
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    types = [r["message"].get("type") for r in reads[0].records]
+    # Full replacement delivered from the start — the unchanged leading head does
+    # NOT mask the rewrite, and the suffix-only slice (dropping the head record
+    # and "new-tail-one") does not happen.
+    assert bodies[:3] == ["H" * 256, "new-tail-one", "new-tail-two"]
+    assert "step_completed" in types
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 4
+
+    # No duplicate delivery on the next idle poll.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_retry_rewrite_larger_size_preserved_head_and_boundary_delivers_full_replacement(
+    tmp_path,
+):
+    """A FAILED step retried *in place* rewrites the same step jsonl with a fresh
+    batch that GREW past the old consumed byte offset AND preserved BOTH bounded
+    windows of the consumed prefix — the leading prompt/status record (the head
+    window ``[0, W)``) and the last consumed record ending at the old offset (the
+    boundary window ``[offset - W, offset)``) — while changing a record in the
+    MIDDLE of the consumed prefix and appending additional records.
+
+    This is the exact case TWO bounded sampled windows cannot see: together they
+    cover only a consumed prefix up to ``2·W`` bytes, so a middle record between a
+    >W-byte head and a >W-byte boundary lies outside both windows.  A
+    bounded-window-only grow-case detector would find both windows unchanged,
+    leave ``rewritten`` false, trust the stale offset, seek past it, and deliver
+    only the appended SUFFIX — dropping the changed middle record and the start of
+    the retry batch until a full reload (issue #209, fix iteration 8).
+    ``read_flow`` must fingerprint the WHOLE consumed prefix, detect the
+    middle-of-prefix change, discard the stale offset/cursor, and deliver the full
+    replacement content from the beginning.
+    """
+    _write_engine(tmp_path, "live", "RUNNING")
+    step = _hist(tmp_path, "live") / "07_update_spec_ef56.jsonl"
+    # A >W-byte leading head record and a >W-byte trailing boundary record that
+    # the retry leaves byte-for-byte identical, with a small record between them
+    # that the retry changes (kept the SAME length so the head/boundary bytes stay
+    # at identical positions and both bounded windows compare equal).
+    head = _msg("assistant", "H" * 256, step_type="update_spec")
+    boundary = _msg("assistant", "B" * 256, step_type="update_spec")
+    _write_jsonl(
+        step,
+        [
+            dict(head),
+            _msg("assistant", "mid-A", step_type="update_spec"),
+            dict(boundary),
+        ],
+    )
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert cursors["live"]["07_update_spec_ef56.jsonl"] == 3
+    old_size = step.stat().st_size
+
+    # Retry rewrites the file: head and boundary records identical (and at the
+    # same byte positions because the middle record kept its length), only the
+    # MIDDLE record's content changes, and extra records are appended so the file
+    # grows strictly past the old consumed offset.
+    _write_jsonl(
+        step,
+        [
+            dict(head),
+            _msg("assistant", "mid-B", step_type="update_spec"),
+            dict(boundary),
+            _msg("assistant", "extra one is fresh", step_type="update_spec"),
+            {
+                "type": "step_completed",
+                "step_id": "07_update_spec_ef56",
+                "step_type": "update_spec",
+                "data": {"step": {"outputs": {"updated_specs": []}}},
+            },
+        ],
+    )
+    assert step.stat().st_size > old_size, "test setup: replacement must be larger"
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    bodies = [r.get("message", {}).get("content") for r in reads[0].records]
+    types = [r["message"].get("type") for r in reads[0].records]
+    # Full replacement delivered from the start — the unchanged head AND boundary
+    # windows do NOT mask the middle-of-prefix change, and the suffix-only slice
+    # (dropping the head, the changed middle "mid-B", and the boundary) does not
+    # happen.
+    assert bodies[:4] == ["H" * 256, "mid-B", "B" * 256, "extra one is fresh"]
+    assert "step_completed" in types
+    assert reads[0].cursor["07_update_spec_ef56.jsonl"] == 5
+
+    # No duplicate delivery on the next idle poll.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
 def test_retry_new_attempt_file_picked_up_as_delta(tmp_path):
     """When a retry writes a brand-new attempt jsonl (rather than appending to
     the failed step's file), the new file is still picked up incrementally."""
