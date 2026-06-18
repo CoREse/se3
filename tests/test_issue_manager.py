@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from se3.engine.issue_discovery import apply_discovery_issue_operations
 from se3.engine.issue_manager import (
     KNOWN_TYPES,
     Issue,
@@ -884,3 +885,223 @@ class TestReopenIssue:
         mgr._ensure_dirs()
         with pytest.raises(ValueError, match="not found"):
             mgr.reopen_issue("999")
+
+
+class TestDeleteIssue:
+    """Tests for IssueManager.delete_issue direct-deletion primitive."""
+
+    def test_delete_open_issue(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        issue = mgr.create("desc", title="To Delete")
+        assert len(list(mgr.open_dir.glob(f"{issue.id}_*"))) == 1
+
+        deleted = mgr.delete_issue(issue.id)
+        assert deleted.id == issue.id
+        assert deleted.title == "To Delete"
+
+        # File is gone and load returns None
+        assert len(list(mgr.open_dir.glob(f"{issue.id}_*"))) == 0
+        assert mgr.load(issue.id) is None
+
+    def test_delete_closed_issue(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr._ensure_dirs()
+
+        closed_file = mgr.closed_dir / "010_closed-one.yaml"
+        issue = Issue(id="010", title="Closed One", description="d", status=IssueStatus.CLOSED)
+        closed_file.write_text(
+            yaml.dump(issue.to_dict(), allow_unicode=True), encoding="utf-8"
+        )
+
+        deleted = mgr.delete_issue("010")
+        assert deleted.id == "010"
+        assert not closed_file.exists()
+        assert mgr.load("010") is None
+
+    def test_delete_does_not_write_to_closed(self, tmp_path):
+        """delete_issue is a pure unlink — it never moves the file to closed/."""
+        mgr = IssueManager(tmp_path)
+        issue = mgr.create("desc", title="Open Issue")
+
+        mgr.delete_issue(issue.id)
+
+        # Nothing should appear in closed/ (no status transition / move)
+        assert len(list(mgr.closed_dir.glob("*.yaml"))) == 0
+        assert len(list(mgr.open_dir.glob("*.yaml"))) == 0
+
+    def test_delete_tolerates_zero_padding(self, tmp_path):
+        """An unpadded ID like '5' deletes the zero-padded '005' file."""
+        mgr = IssueManager(tmp_path)
+        for _ in range(5):
+            mgr.create("desc")
+        assert mgr.load("005") is not None
+
+        deleted = mgr.delete_issue("5")
+        assert deleted.id == "005"
+        assert mgr.load("005") is None
+        # Other issues are untouched
+        assert mgr.load("004") is not None
+
+    def test_delete_nonexistent_raises(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr._ensure_dirs()
+        with pytest.raises(ValueError, match="not found"):
+            mgr.delete_issue("999")
+
+
+class TestApplyDiscoveryIssueOperations:
+    """Tests for the scoped discovery issue-operation executor."""
+
+    def test_create_marks_source_human_and_tracks_id(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        ops = [{
+            "action": "create",
+            "title": "From discovery",
+            "description": "Split this out into an issue",
+            "priority": "high",
+            "type": "feature",
+            "tags": ["from-chat"],
+        }]
+
+        tracked, results = apply_discovery_issue_operations(mgr, ops, [])
+
+        assert len(tracked) == 1
+        new_id = tracked[0]
+        created = mgr.load(new_id)
+        assert created is not None
+        assert created.source == "human"
+        assert created.title == "From discovery"
+        assert created.priority == "high"
+        assert created.type == "feature"
+        assert created.tags == ["from-chat"]
+
+        assert len(results) == 1
+        assert results[0]["status"] == "created"
+        assert results[0]["id"] == new_id
+
+    def test_update_within_scope_applies(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        tracked, _ = apply_discovery_issue_operations(
+            mgr, [{"action": "create", "description": "orig", "title": "Orig"}], []
+        )
+        created_id = tracked[0]
+
+        new_tracked, results = apply_discovery_issue_operations(
+            mgr,
+            [{"action": "update", "id": created_id, "title": "Updated", "priority": "low"}],
+            tracked,
+        )
+
+        updated = mgr.load(created_id)
+        assert updated.title == "Updated"
+        assert updated.priority == "low"
+        assert new_tracked == [created_id]
+        assert results[0]["status"] == "updated"
+
+    def test_update_out_of_scope_rejected_without_calling_backend(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        # A pre-existing / historical issue NOT created via this discovery step
+        historical = mgr.create("historical", title="Historical")
+
+        with patch.object(mgr, "update_fields") as mock_update:
+            new_tracked, results = apply_discovery_issue_operations(
+                mgr,
+                [{"action": "update", "id": historical.id, "title": "Hijacked"}],
+                [],  # empty scope
+            )
+
+        mock_update.assert_not_called()
+        assert results[0]["status"] == "rejected"
+        assert new_tracked == []
+        # Historical issue is untouched
+        assert mgr.load(historical.id).title == "Historical"
+
+    def test_delete_within_scope_removes_and_untracks(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        tracked, _ = apply_discovery_issue_operations(
+            mgr, [{"action": "create", "description": "to delete"}], []
+        )
+        created_id = tracked[0]
+
+        new_tracked, results = apply_discovery_issue_operations(
+            mgr, [{"action": "delete", "id": created_id}], tracked
+        )
+
+        assert mgr.load(created_id) is None
+        assert created_id not in new_tracked
+        assert new_tracked == []
+        assert results[0]["status"] == "deleted"
+
+    def test_delete_out_of_scope_rejected_without_calling_backend(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        historical = mgr.create("historical")
+
+        with patch.object(mgr, "delete_issue") as mock_delete:
+            new_tracked, results = apply_discovery_issue_operations(
+                mgr,
+                [{"action": "delete", "id": historical.id}],
+                [],
+            )
+
+        mock_delete.assert_not_called()
+        assert results[0]["status"] == "rejected"
+        assert mgr.load(historical.id) is not None
+
+    def test_single_op_exception_is_isolated(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        # First op: create with empty description -> IssueManager.create raises
+        # Second op: a valid create -> must still succeed.
+        ops = [
+            {"action": "create", "description": "   "},  # raises ValueError
+            {"action": "create", "description": "valid one", "title": "Valid"},
+        ]
+
+        tracked, results = apply_discovery_issue_operations(mgr, ops, [])
+
+        assert results[0]["status"] == "error"
+        assert results[1]["status"] == "created"
+        assert len(tracked) == 1
+        assert mgr.load(tracked[0]).title == "Valid"
+
+    def test_unknown_action_skipped(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        tracked, results = apply_discovery_issue_operations(
+            mgr, [{"action": "close", "id": "001"}], []
+        )
+
+        assert tracked == []
+        assert results[0]["status"] == "skipped"
+        assert "unknown action" in results[0]["reason"]
+
+    def test_non_string_action_does_not_abort_batch(self, tmp_path):
+        """A non-string (truthy) action must be skipped per-op, not raise and
+        discard the whole batch — the following valid create still runs."""
+        mgr = IssueManager(tmp_path)
+        ops = [
+            {"action": 123},  # non-string action: must not raise AttributeError
+            {"action": "create", "description": "valid", "title": "Valid"},
+        ]
+
+        tracked, results = apply_discovery_issue_operations(mgr, ops, [])
+
+        assert results[0]["status"] == "skipped"
+        assert results[1]["status"] == "created"
+        assert len(tracked) == 1
+        assert mgr.load(tracked[0]).title == "Valid"
+
+    def test_zero_padding_tolerant_scope(self, tmp_path):
+        """An unpadded ID in an op matches a zero-padded tracked ID."""
+        mgr = IssueManager(tmp_path)
+        tracked, _ = apply_discovery_issue_operations(
+            mgr, [{"action": "create", "description": "x"}], []
+        )
+        created_id = tracked[0]  # e.g. "001"
+        unpadded = created_id.lstrip("0") or "0"
+
+        new_tracked, results = apply_discovery_issue_operations(
+            mgr, [{"action": "delete", "id": unpadded}], tracked
+        )
+
+        assert results[0]["status"] == "deleted"
+        assert new_tracked == []
+        assert mgr.load(created_id) is None

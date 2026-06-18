@@ -1,0 +1,7 @@
+id: '206'
+description: 给discovery步骤增加直接创建和修改issue的接口。
+status: resolved
+tags: []
+source: human
+created_at: '2026-06-18T10:42:00.609357'
+updated_at: '2026-06-18T10:43:59.292312'

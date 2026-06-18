@@ -9,12 +9,216 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .issue_manager import Issue, IssueManager
 from .models import FlowInstance, Step, StepType
 
 logger = logging.getLogger(__name__)
+
+# Fields the discovery issue-operation executor is permitted to pass through
+# when updating an issue. Deliberately excludes status / source so this path
+# can never perform a state transition or change origin.
+_DISCOVERY_UPDATE_FIELDS = ("title", "description", "priority", "type", "tags")
+
+
+def _normalize_issue_id(issue_id: Any) -> str:
+    """Normalize an issue ID for zero-padding-tolerant membership checks.
+
+    Mirrors ``IssueManager._find_issue_file``: strips leading zeros so that
+    ``"5"`` and ``"005"`` compare equal.
+    """
+    return str(issue_id).lstrip("0") or "0"
+
+
+def apply_discovery_issue_operations(
+    issue_manager: IssueManager,
+    operations: List[Dict[str, Any]],
+    tracked_ids: List[str],
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Execute scoped create/update/delete issue operations for a discovery step.
+
+    This is the engine-side executor behind the discovery step's
+    ``issue_operations`` response contract. The LLM only emits *intent*; the
+    engine owns execution and the scope guarantee. Three actions are supported:
+
+    - ``create``: always creates with ``source="human"`` (distinguishing it from
+      fully-automatic ``source="system"`` discovered issues), and adds the new
+      issue ID to the tracking set.
+    - ``update``: only honored when the target ID is already in the tracking set
+      (i.e. it was created earlier within *this* discovery step). Only the
+      ``title`` / ``description`` / ``priority`` / ``type`` / ``tags`` fields are
+      passed through — never status or source. Out-of-scope IDs (historical
+      issues, issues from other sessions, in-progress issues) are rejected
+      without touching the underlying issue.
+    - ``delete``: only honored when the target ID is in the tracking set; the
+      issue file is deleted and the ID is removed from the tracking set.
+      Out-of-scope IDs are rejected.
+
+    Each operation is isolated with try/except: a single failing op records a
+    result and does not abort the remaining ops. Unknown actions are skipped
+    with a留痕 (recorded) result. This method NEVER performs close / reopen /
+    reset / status transitions.
+
+    Args:
+        issue_manager: The :class:`IssueManager` used for the writes.
+        operations: List of operation dicts. Each carries an ``action`` key
+            (``"create"`` / ``"update"`` / ``"delete"``) plus the relevant
+            fields (``id`` for update/delete; ``title`` / ``description`` /
+            ``priority`` / ``type`` / ``tags`` for create/update).
+        tracked_ids: The IDs created by this discovery step so far (the legal
+            scope for update/delete).
+
+    Returns:
+        A ``(new_tracked_ids, results)`` tuple where ``new_tracked_ids`` is the
+        updated tracking set (deduplicated, order-preserving) and ``results`` is
+        a per-operation record list, each a dict with at least ``action`` and
+        ``status`` keys.
+    """
+    # Working copy preserving order, deduplicated by normalized form.
+    tracked: List[str] = []
+    seen_norm = set()
+    for tid in tracked_ids or []:
+        norm = _normalize_issue_id(tid)
+        if norm not in seen_norm:
+            seen_norm.add(norm)
+            tracked.append(str(tid))
+
+    results: List[Dict[str, Any]] = []
+
+    for op in operations or []:
+        if not isinstance(op, dict):
+            logger.debug("Skipping non-dict issue operation: %r", op)
+            results.append({"action": None, "status": "skipped", "reason": "not a dict"})
+            continue
+
+        action = None
+
+        try:
+            # Compute action inside the try so a non-string (or otherwise
+            # malformed) action value is recorded as a per-op error rather than
+            # raising before the loop can record it and aborting the whole batch.
+            raw_action = op.get("action")
+            action = (raw_action or "").strip().lower() if isinstance(raw_action, str) else None
+            if action == "create":
+                results.append(_apply_create(issue_manager, op, tracked, seen_norm))
+            elif action == "update":
+                results.append(_apply_update(issue_manager, op, tracked, seen_norm))
+            elif action == "delete":
+                results.append(_apply_delete(issue_manager, op, tracked, seen_norm))
+            else:
+                logger.debug("Skipping unknown issue operation action: %r", action)
+                results.append({
+                    "action": action or None,
+                    "status": "skipped",
+                    "reason": f"unknown action: {action!r}",
+                })
+        except Exception as e:  # isolate one failing op from the rest
+            logger.warning("Issue operation %r failed: %s", action, e)
+            results.append({
+                "action": action or None,
+                "id": op.get("id"),
+                "status": "error",
+                "reason": str(e),
+            })
+
+    return tracked, results
+
+
+def _apply_create(
+    issue_manager: IssueManager,
+    op: Dict[str, Any],
+    tracked: List[str],
+    seen_norm: set,
+) -> Dict[str, Any]:
+    """Create an issue with ``source="human"`` and track its new ID."""
+    description = op.get("description") or ""
+    tags = op.get("tags")
+    if tags is not None and not isinstance(tags, list):
+        tags = None
+    issue = issue_manager.create(
+        description=description,
+        title=op.get("title"),
+        priority=op.get("priority"),
+        tags=tags,
+        type=op.get("type"),
+        source="human",
+    )
+    norm = _normalize_issue_id(issue.id)
+    if norm not in seen_norm:
+        seen_norm.add(norm)
+        tracked.append(issue.id)
+    logger.info("Discovery created issue %s (source=human)", issue.id)
+    return {"action": "create", "status": "created", "id": issue.id}
+
+
+def _apply_update(
+    issue_manager: IssueManager,
+    op: Dict[str, Any],
+    tracked: List[str],
+    seen_norm: set,
+) -> Dict[str, Any]:
+    """Update a tracked issue's editable fields; reject out-of-scope IDs."""
+    issue_id = op.get("id")
+    if issue_id is None or _normalize_issue_id(issue_id) not in seen_norm:
+        logger.warning(
+            "Rejected out-of-scope update for issue %r (not created in this discovery step)",
+            issue_id,
+        )
+        return {
+            "action": "update",
+            "id": issue_id,
+            "status": "rejected",
+            "reason": "id not in this discovery step's scope",
+        }
+
+    # Only pass through the explicitly permitted, present fields. Absent fields
+    # stay None so update_fields leaves them unchanged.
+    kwargs = {f: op[f] for f in _DISCOVERY_UPDATE_FIELDS if f in op}
+    # A scalar tags value (the LLM emitted a string instead of a list) would be
+    # stored verbatim by update_fields and silently corrupt the issue record
+    # (downstream ", ".join(issue.tags) would iterate over characters). Drop a
+    # non-list tags so the field is left unchanged, mirroring _apply_create's
+    # coercion of a malformed tags to None.
+    if "tags" in kwargs and not isinstance(kwargs["tags"], list):
+        logger.warning(
+            "Discovery update for issue %r dropped a non-list tags value %r",
+            issue_id,
+            kwargs["tags"],
+        )
+        kwargs.pop("tags")
+    issue = issue_manager.update_fields(str(issue_id), **kwargs)
+    logger.info("Discovery updated issue %s", issue.id)
+    return {"action": "update", "status": "updated", "id": issue.id}
+
+
+def _apply_delete(
+    issue_manager: IssueManager,
+    op: Dict[str, Any],
+    tracked: List[str],
+    seen_norm: set,
+) -> Dict[str, Any]:
+    """Delete a tracked issue and drop it from the tracking set."""
+    issue_id = op.get("id")
+    norm = _normalize_issue_id(issue_id) if issue_id is not None else None
+    if norm is None or norm not in seen_norm:
+        logger.warning(
+            "Rejected out-of-scope delete for issue %r (not created in this discovery step)",
+            issue_id,
+        )
+        return {
+            "action": "delete",
+            "id": issue_id,
+            "status": "rejected",
+            "reason": "id not in this discovery step's scope",
+        }
+
+    issue = issue_manager.delete_issue(str(issue_id))
+    # Drop from tracking (by normalized form, preserving the others' order).
+    seen_norm.discard(norm)
+    tracked[:] = [t for t in tracked if _normalize_issue_id(t) != norm]
+    logger.info("Discovery deleted issue %s", issue.id)
+    return {"action": "delete", "status": "deleted", "id": issue.id}
 
 # Steps that receive issue-discovery prompt injection and collection
 ISSUE_DISCOVERY_STEPS = {"summarize"}

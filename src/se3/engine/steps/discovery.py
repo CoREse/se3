@@ -130,8 +130,22 @@ Respond in JSON format:
     "content": "Your message to the user - ask questions, summarize understanding, or present refined description. MAY also carry meta-notes such as 'this is a default I picked on your behalf and you can change it'",
     "questions": ["question1", "question2"],  // If mode is "question". ONLY for true blockers — see below
     "refined_description": "If mode is 'synthesis' or 'confirmation', the refined task description. MUST be clean and final — see hard invariant below",
+    "issue_operations": [  // OPTIONAL — only when the user explicitly directs an issue create/update/delete this turn. See "Issue Operations" below. Omit (or use []) otherwise.
+        {{"action": "create", "title": "Short title", "description": "Details", "priority": "critical|high|medium|low", "type": "bug|feature|...", "tags": ["tag1"]}},
+        {{"action": "update", "id": "<id of an issue created earlier in THIS discovery session>", "title": "...", "description": "...", "priority": "...", "type": "...", "tags": ["..."]}},
+        {{"action": "delete", "id": "<id of an issue created earlier in THIS discovery session>"}}
+    ],
     "thinking": "Brief explanation of your approach and what you've learned so far"
 }}
+
+Issue Operations (`issue_operations`) — strictly user-directed, scope-limited:
+- Emit `issue_operations` ONLY when the user explicitly instructs you in the conversation to create, modify, or delete an issue (e.g. "把这个拆成一个 issue", "更新刚才那个 issue 的描述", "把刚建的那个删掉"). By default you MUST NOT initiate any issue operation on your own — the existing "do not self-initiate issue operations" contract is unchanged.
+- `action: "create"` — a new issue. Only `description` is required; `title` / `priority` / `type` / `tags` are optional. Newly created issues are recorded as belonging to this discovery session.
+- `action: "update"` — edit the fields of an issue. The `id` MUST be an issue that was created earlier within THIS discovery session via `issue_operations`. You may change only `title` / `description` / `priority` / `type` / `tags`.
+- `action: "delete"` — delete an issue. The `id` MUST likewise be one created earlier within THIS discovery session.
+- update/delete MUST NEVER target any pre-existing / historical / in-progress issue, or one from another session — those are out of scope and will be rejected.
+- These operations NEVER include status transitions such as close / reopen / reset.
+- Do NOT attempt issue writes via Bash (e.g. `se3 issue create/edit`); discovery remains read-only for the shell and the engine performs these operations from `issue_operations`.
 
 HARD INVARIANT — `refined_description` must be clean, final, and zero open items:
 - `refined_description` MUST be a clean, finalized, directly-executable task description with ZERO open items.
@@ -242,9 +256,23 @@ Respond in JSON format:
     "content": "Your message to the user. MAY also carry meta-notes such as 'this is a default I picked on your behalf and you can change it'",
     "questions": ["question1", "question2"],  // If mode is "question". ONLY for true blockers — see below
     "refined_description": "If mode is 'synthesis' or 'confirmation', the refined task description. MUST be clean and final — see hard invariant below",
+    "issue_operations": [  // OPTIONAL — only when the user explicitly directs an issue create/update/delete this turn. See "Issue Operations" below. Omit (or use []) otherwise.
+        {{"action": "create", "title": "Short title", "description": "Details", "priority": "critical|high|medium|low", "type": "bug|feature|...", "tags": ["tag1"]}},
+        {{"action": "update", "id": "<id of an issue created earlier in THIS discovery session>", "title": "...", "description": "...", "priority": "...", "type": "...", "tags": ["..."]}},
+        {{"action": "delete", "id": "<id of an issue created earlier in THIS discovery session>"}}
+    ],
     "ready_to_proceed": false,  // Set to true when you have enough information to proceed
     "thinking": "Brief explanation of your current understanding"
 }}
+
+Issue Operations (`issue_operations`) — strictly user-directed, scope-limited:
+- Emit `issue_operations` ONLY when the user explicitly instructs you in the conversation to create, modify, or delete an issue (e.g. "把这个拆成一个 issue", "更新刚才那个 issue 的描述", "把刚建的那个删掉"). By default you MUST NOT initiate any issue operation on your own — the existing "do not self-initiate issue operations" contract is unchanged.
+- `action: "create"` — a new issue. Only `description` is required; `title` / `priority` / `type` / `tags` are optional. Newly created issues are recorded as belonging to this discovery session.
+- `action: "update"` — edit the fields of an issue. The `id` MUST be an issue that was created earlier within THIS discovery session via `issue_operations`. You may change only `title` / `description` / `priority` / `type` / `tags`.
+- `action: "delete"` — delete an issue. The `id` MUST likewise be one created earlier within THIS discovery session.
+- update/delete MUST NEVER target any pre-existing / historical / in-progress issue, or one from another session — those are out of scope and will be rejected.
+- These operations NEVER include status transitions such as close / reopen / reset.
+- Do NOT attempt issue writes via Bash (e.g. `se3 issue create/edit`); discovery remains read-only for the shell and the engine performs these operations from `issue_operations`.
 
 HARD INVARIANT — `refined_description` must be clean, final, and zero open items:
 - `refined_description` MUST be a clean, finalized, directly-executable task description with ZERO open items.
@@ -513,6 +541,50 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "mode": mode,
         }
 
+        # Execute any user-directed issue operations emitted this round. The LLM
+        # only produces *intent* (``issue_operations``); the engine owns
+        # execution and the scope guarantee — create always uses source=human,
+        # while update/delete are honored only on issues created within THIS
+        # discovery step. The tracking set lives in step.inputs so it survives
+        # across rounds and ``--resume`` (step.outputs is cleared every round).
+        # The whole block is best-effort: any failure is logged and never
+        # changes the step's PAUSED/FAILED semantics. The programmatic-confirm
+        # early return above never reaches here, so a confirmation turn triggers
+        # no issue operations.
+        op_results: List[Dict[str, Any]] = []
+        issue_operations = result.get("issue_operations")
+        if issue_operations:
+            try:
+                from ..issue_discovery import apply_discovery_issue_operations
+                from ..issue_manager import IssueManager
+
+                tracked_ids = step.inputs.get("discovery_created_issue_ids", [])
+                issue_manager = IssueManager(project_root)
+                new_tracked_ids, op_results = apply_discovery_issue_operations(
+                    issue_manager, issue_operations, tracked_ids
+                )
+                step.inputs["discovery_created_issue_ids"] = new_tracked_ids
+
+                # Surface the engine-assigned IDs back into the LLM's context.
+                # The LLM emits create ops WITHOUT an id (the engine allocates
+                # it), so without this note a later "delete the one just created"
+                # turn has no concrete id to reference and the op silently
+                # no-ops. Appending an engine note to the conversation history
+                # (which is the same list object stored in discovery_state and
+                # fed into the next round's prompt) lets the LLM resolve such
+                # back-references to a real id. The currently-tracked set is the
+                # authoritative scope for update/delete.
+                engine_note = _format_issue_op_engine_note(op_results, new_tracked_ids)
+                if engine_note:
+                    conversation_history.append({
+                        "role": "system",
+                        "content": engine_note,
+                        "round": round_number,
+                    })
+            except Exception as e:
+                logger.warning("Discovery issue operations failed: %s", e)
+                op_results = []
+
         # Store mode-specific outputs for user-facing display
         # Clear previous outputs to avoid confusion. The cross-round token-usage
         # carry (`carried_token_usage`, written by run_step's finally block on a
@@ -563,6 +635,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 raw_result_text=raw_result_text,
                 round_usage=round_usage,
                 cumulative_usage=cumulative_usage,
+                op_results=op_results,
             )
 
             return StepStatus.PAUSED
@@ -579,6 +652,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 raw_result_text=raw_result_text,
                 round_usage=round_usage,
                 cumulative_usage=cumulative_usage,
+                op_results=op_results,
             )
             return StepStatus.PAUSED
 
@@ -696,6 +770,9 @@ def _run_discovery_round(
         '"content": "Your message to the user", '
         '"questions": ["question1", "question2"], '
         '"refined_description": "The refined task description", '
+        '"issue_operations": [{"action": "create|update|delete", "id": "for update/delete", '
+        '"title": "for create/update", "description": "for create/update", '
+        '"priority": "for create/update", "type": "for create/update", "tags": ["for create/update"]}], '
         '"thinking": "Brief explanation of your approach"}'
     )
     response = caller.call(
@@ -752,6 +829,61 @@ def _format_conversation_history(history: List[Dict[str, str]]) -> str:
         lines.append(f"{role.upper()}: {content}")
 
     return "\n\n".join(lines)
+
+
+def _format_issue_op_engine_note(
+    op_results: List[Dict[str, Any]],
+    tracked_ids: List[str],
+) -> str:
+    """Build an engine note describing this round's issue operations.
+
+    The note is appended to the discovery conversation history so the LLM sees
+    the concrete engine-assigned IDs (create ops are emitted without an id) and
+    the current set of tracked IDs, which is the authoritative scope for any
+    subsequent update/delete the user requests (e.g. "delete the one I just
+    created"). Returns an empty string when there is nothing meaningful to
+    surface.
+
+    Args:
+        op_results: Per-operation result records from
+            ``apply_discovery_issue_operations``.
+        tracked_ids: The updated set of issue IDs created within this discovery
+            step (the legal scope for update/delete).
+
+    Returns:
+        A human/LLM-readable note string, or "" when there is nothing to report.
+    """
+    if not op_results:
+        return ""
+
+    lines: List[str] = []
+    for r in op_results:
+        action = r.get("action")
+        status = r.get("status")
+        issue_id = r.get("id")
+        if status in ("created", "updated", "deleted") and issue_id:
+            lines.append(f"- {action} issue {issue_id}")
+        elif status in ("rejected", "error"):
+            reason = r.get("reason", "")
+            lines.append(
+                f"- {action} {issue_id if issue_id else ''} {status}: {reason}".strip()
+            )
+
+    if not lines:
+        return ""
+
+    note = "[engine] Issue operations executed this round:\n" + "\n".join(lines)
+    if tracked_ids:
+        note += (
+            "\nIssue IDs created in this discovery session (the only IDs you may "
+            "update or delete): " + ", ".join(str(i) for i in tracked_ids) + "."
+        )
+    else:
+        note += (
+            "\nNo issues created in this discovery session remain; there are no "
+            "IDs eligible for update or delete."
+        )
+    return note
 
 
 def _generate_summary(history: List[Dict[str, str]]) -> str:
@@ -925,6 +1057,7 @@ def _display_discovery_message(
     raw_result_text: Optional[str] = None,
     round_usage: Optional["UsageTotals"] = None,
     cumulative_usage: Optional["UsageTotals"] = None,
+    op_results: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Display discovery message to user.
 
@@ -934,6 +1067,12 @@ def _display_discovery_message(
         questions: List of questions (if in question mode)
         is_confirmation: If True, this is a final confirmation display (not asking for input)
         raw_result_text: The raw LLM result text (may contain narrative outside JSON)
+        op_results: Per-operation result records from the issue-operation
+            executor for this round (created / updated / deleted / rejected).
+            When non-empty, a compact summary section is appended so the user
+            can see what was created/modified/deleted and which ops were
+            rejected for being out of this discovery step's scope. ``None`` /
+            empty renders nothing extra (the no-operation case).
         round_usage: This round's incremental token usage. When non-empty, a
             compact dim footer (``本轮 … · 累计 …``) is appended at the tail of
             the Discovery block (inside it, before the closing blue footer). When
@@ -996,6 +1135,35 @@ def _display_discovery_message(
         # General message mode
         renderables.append(Markdown(content))
         renderables.append(Text(""))
+
+    # Issue-operation result summary: a compact section listing what this round
+    # created / updated / deleted by user direction, plus any rejected ops
+    # (out-of-scope IDs, unknown actions, errors). Only rendered when at least
+    # one operation was attempted; the common no-operation round renders nothing.
+    if op_results:
+        created = [r.get("id") for r in op_results if r.get("status") == "created"]
+        updated = [r.get("id") for r in op_results if r.get("status") == "updated"]
+        deleted = [r.get("id") for r in op_results if r.get("status") == "deleted"]
+        rejected = [
+            r for r in op_results
+            if r.get("status") in ("rejected", "error", "skipped")
+        ]
+        if created or updated or deleted or rejected:
+            renderables.append(Text("Issue operations:", style="bold green"))
+            if created:
+                renderables.append(Text(f"  created: {', '.join(str(i) for i in created)}"))
+            if updated:
+                renderables.append(Text(f"  updated: {', '.join(str(i) for i in updated)}"))
+            if deleted:
+                renderables.append(Text(f"  deleted: {', '.join(str(i) for i in deleted)}"))
+            for r in rejected:
+                rid = r.get("id")
+                id_part = f" {rid}" if rid is not None else ""
+                reason = r.get("reason", "")
+                renderables.append(
+                    Text(f"  {r.get('status')}{id_part}: {reason}", style="yellow")
+                )
+            renderables.append(Text(""))
 
     # Per-round token-usage footer: a single dim line tying off the message
     # block. Only rendered when this round actually invoked the LLM (round_usage

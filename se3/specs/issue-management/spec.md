@@ -265,6 +265,24 @@ Issues are stored as YAML files under `<project_root>/se3/issues/`, split into `
 - **WHEN** `reopen_issue(id)` is called and no issue file with that ID exists
 - **THEN** a `ValueError` is raised
 
+### Requirement: Issue Deletion
+
+`IssueManager.delete_issue(issue_id)` permanently removes an issue's YAML file by ID and returns the deleted `Issue`. It is a *direct* deletion primitive: it locates the file in `open/` or `closed/` (tolerating zero-padding differences via `_find_issue_file`), reads the `Issue`, unlinks the file from disk, and returns it. Unlike `close_issue`, it performs **no** status transition and does **not** move the file into `closed/` — the record is simply removed. It therefore sits outside the close/reopen/reset state-transition family. The business-level scope guarantee (e.g. "only issues created within the current discovery step may be deleted") is enforced by callers, not by this primitive, keeping `delete_issue` a general, discovery-agnostic CRUD operation.
+
+#### Scenario: Delete an existing issue
+- **WHEN** `delete_issue(id)` is called for an issue that exists in `open/` or `closed/`
+- **THEN** the issue's YAML file is unlinked from disk
+- **AND** the deleted `Issue` is returned
+- **AND** no status transition occurs and no file is moved into `closed/`
+
+#### Scenario: Delete tolerates zero-padding
+- **WHEN** `delete_issue("5")` is called and the stored ID is `"005"`
+- **THEN** the matching file is located and deleted
+
+#### Scenario: Delete missing issue
+- **WHEN** `delete_issue(id)` is called and no issue file with that ID exists
+- **THEN** a `ValueError` is raised
+
 ### Requirement: YAML Persistence Format
 
 Issue files are written with `yaml.dump(..., default_flow_style=False, allow_unicode=True, sort_keys=False)` so fields appear in dataclass declaration order, unicode is preserved, and block style is used. Files are read and written as UTF-8.

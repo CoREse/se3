@@ -103,6 +103,14 @@ The `discovery` step SHALL implement a multi-turn dialogue mechanism that helps 
 - **Specs** — consulted through the bounded, read-only `se3 spec` index commands run via Bash: `se3 spec index` (root view; drill in with `se3 spec index <spec> [<group>...]`) to navigate, then `se3 spec show <spec>::<requirement>` to read one Requirement's body. The templates SHALL NOT instruct the LLM to read an entire `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
 - **Source code** — consulted with `Read` / `Grep` / `Glob` as usual.
 
+**User-directed issue operations (`issue_operations`):**
+
+The discovery step's JSON response contract is extended with an optional structured `issue_operations` field, reusing the existing `discovered_issues` paradigm so that the LLM emits only *intent* while the engine owns execution. This does NOT relax discovery's read-only constraint: the LLM is still forbidden from performing issue writes via Bash (e.g. `se3 issue create/edit`); the engine performs each operation. The field is described in both `INITIAL_DISCOVERY_PROMPT` and `CONTINUE_DISCOVERY_PROMPT` (and mirrored in `DISCOVERY_SCHEMA_HINT`), and SHALL be produced by the LLM ONLY when the user explicitly instructs a create / modify / delete in the conversation; by default the LLM does not self-initiate issue operations.
+
+After `_run_discovery_round` returns, the discovery handler SHALL collect `issue_operations` from the LLM result and execute them via `apply_discovery_issue_operations` (see the issue-discovery *Human-directed Discovery Issue Operations* requirement) — `create` is filed with `source="human"`; `update` is limited to `title` / `description` / `priority` / `type` / `tags`; `update` / `delete` are honored only for issue IDs created earlier within *this* discovery step. No status transitions occur. The `programmatic_confirmed` early-return path executes no operations. The engine echoes a per-operation execution summary back to the user.
+
+The set of issue IDs created by this channel within the step is tracked across the multi-turn dialogue in `step.inputs["discovery_created_issue_ids"]` (a JSON-serializable list). It is stored in `step.inputs` — not `step.outputs`, which is cleared each round — so that it persists with `engine.json` on each `PAUSED` round and is restored on `se3 run --resume`, providing the legal scope for subsequent `update` / `delete` operations. After each round the handler writes the updated tracking set back to `step.inputs`.
+
 **Handling of evaluation/inquiry-type initial descriptions:**
 
 When the user's initial description manifests as an evaluation, judgment, review, or inquiry about existing code/solutions/changes (e.g., "Is this the right way to do it", "Judge whether X is reasonable", "Is there a problem with the Y solution", "Carefully evaluate this change", "Is this correct?", "Evaluate X", "Review this change", or a question with embedded references to specific code/files/commits), `INITIAL_DISCOVERY_PROMPT` and `CONTINUE_DISCOVERY_PROMPT` SHALL instruct the LLM to avoid asking clarifying questions about the task definition itself such as "what is the task / what is the task scope / what do you want to do", and instead to:
@@ -152,6 +160,20 @@ This ensures that the LLM's confirmation judgment does not unilaterally advance 
 - **WHEN** the user executes `se3 run --resume`
 - **THEN** it resumes to the discovery step
 - **AND** continues the 3rd turn of dialogue
+
+#### Scenario: User-directed issue operation executed mid-dialogue
+- **GIVEN** the user explicitly instructs the discovery dialogue to create / modify / delete an issue
+- **WHEN** `_run_discovery_round` returns a result containing `issue_operations`
+- **THEN** the discovery handler reads `step.inputs["discovery_created_issue_ids"]`, runs `apply_discovery_issue_operations`, and writes the updated tracking set back to `step.inputs`
+- **AND** `create` issues are filed with `source="human"` and `update` / `delete` are honored only for IDs created earlier within this discovery step
+- **AND** a per-operation execution summary is echoed to the user
+- **AND** the `programmatic_confirmed` early-return path executes no issue operations
+
+#### Scenario: Discovery created-issue tracking survives resume
+- **GIVEN** an issue was created via `issue_operations` earlier in the discovery step, so its ID is in `step.inputs["discovery_created_issue_ids"]`
+- **WHEN** the step is interrupted and the user executes `se3 run --resume`
+- **THEN** the tracking set is restored from `step.inputs` (persisted with `engine.json`)
+- **AND** a later `update` / `delete` targeting that ID is still within legal scope
 
 #### Scenario: Discovery confirmation phase recovery display
 - **GIVEN** the discovery step is paused in confirmation mode

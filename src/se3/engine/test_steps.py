@@ -1135,5 +1135,260 @@ class TestCliSinkUsageRendering:
         full_report.assert_called_once_with(step)
 
 
+class TestDiscoveryIssueOperations:
+    """discovery_handler executes scoped, user-directed issue_operations (G3).
+
+    A round whose LLM result carries ``issue_operations`` is run through
+    ``apply_discovery_issue_operations``: create issues are filed with
+    ``source="human"`` and their IDs recorded in
+    ``step.inputs['discovery_created_issue_ids']`` (which persists across rounds
+    and ``--resume``); cross-round update/delete are honored only for IDs in
+    that tracking set and rejected for out-of-scope IDs; a round without
+    ``issue_operations`` behaves exactly as before; and the
+    ``programmatic_confirmed`` early-return triggers no issue operations.
+    """
+
+    def _make_flow(self, tmpdir):
+        from .state_machine import StateMachine
+        from .steps import discovery as discovery_mod
+
+        sm = StateMachine(Path(tmpdir))
+        sm.register_handler(StepType.DISCOVERY, discovery_mod.discovery_handler)
+        flow = sm.create_flow("discover issues", task_type="discovery")
+        # discovery_handler derives project_root from change_path.parent; point
+        # it at tmpdir so the IssueManager writes under tmpdir/se3/issues/.
+        flow.change_path = Path(tmpdir) / "change"
+        step = flow.state.get_current_step()
+        assert step.step_type == StepType.DISCOVERY
+        step.inputs["task_description"] = "do a thing"
+        return sm, flow, step
+
+    def _round_with(self, result):
+        def fake_round(*args, **kwargs):
+            return result, "raw"
+        return fake_round
+
+    def test_create_op_files_issue_and_tracks_id(self):
+        from .issue_manager import IssueManager
+        from .steps import discovery as discovery_mod
+
+        result = {
+            "mode": "question",
+            "content": "filed it",
+            "questions": ["anything else?"],
+            "issue_operations": [
+                {"action": "create", "title": "Split out X", "description": "details"}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow, step = self._make_flow(tmpdir)
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            assert step.status == StepStatus.PAUSED
+            tracked = step.inputs.get("discovery_created_issue_ids")
+            assert tracked and len(tracked) == 1
+            new_id = tracked[0]
+
+            mgr = IssueManager(Path(tmpdir))
+            issue = mgr.load(new_id)
+            assert issue is not None
+            assert issue.source == "human"
+            assert issue.display_title == "Split out X"
+
+    def test_cross_round_update_and_delete_scope(self):
+        from .issue_manager import IssueManager
+        from .steps import discovery as discovery_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow, step = self._make_flow(tmpdir)
+            mgr = IssueManager(Path(tmpdir))
+
+            # Round 1: create.
+            create_result = {
+                "mode": "question",
+                "content": "created",
+                "questions": ["q?"],
+                "issue_operations": [
+                    {"action": "create", "title": "Orig", "description": "d"}
+                ],
+            }
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(create_result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+            tracked_id = step.inputs["discovery_created_issue_ids"][0]
+
+            # A pre-existing issue NOT created by this discovery step (out of scope).
+            foreign = mgr.create(description="foreign issue", title="Foreign")
+
+            # Round 2: in-scope update succeeds; out-of-scope update rejected.
+            update_result = {
+                "mode": "question",
+                "content": "updated",
+                "questions": ["q?"],
+                "issue_operations": [
+                    {"action": "update", "id": tracked_id, "title": "Renamed"},
+                    {"action": "update", "id": foreign.id, "title": "Hijacked"},
+                ],
+            }
+            step.status = StepStatus.PENDING
+            step.inputs["resumed"] = True
+            step.inputs["user_response"] = "update them"
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(update_result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            assert mgr.load(tracked_id).display_title == "Renamed"
+            # The out-of-scope issue was not touched.
+            assert mgr.load(foreign.id).display_title == "Foreign"
+
+            # Round 3: in-scope delete removes it and drops it from tracking;
+            # out-of-scope delete rejected (foreign issue survives).
+            delete_result = {
+                "mode": "question",
+                "content": "deleted",
+                "questions": ["q?"],
+                "issue_operations": [
+                    {"action": "delete", "id": tracked_id},
+                    {"action": "delete", "id": foreign.id},
+                ],
+            }
+            step.status = StepStatus.PENDING
+            step.inputs["user_response"] = "delete them"
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(delete_result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            assert mgr.load(tracked_id) is None
+            assert tracked_id not in step.inputs["discovery_created_issue_ids"]
+            # Out-of-scope delete was rejected — the foreign issue still exists.
+            assert mgr.load(foreign.id) is not None
+
+    def test_no_issue_operations_is_unchanged(self):
+        from .issue_manager import IssueManager
+        from .steps import discovery as discovery_mod
+
+        result = {
+            "mode": "question",
+            "content": "just a question",
+            "questions": ["what scope?"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow, step = self._make_flow(tmpdir)
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            assert step.status == StepStatus.PAUSED
+            assert step.outputs.get("questions") == ["what scope?"]
+            # No tracking key is created when no issue_operations were emitted.
+            assert "discovery_created_issue_ids" not in step.inputs
+            mgr = IssueManager(Path(tmpdir))
+            assert mgr.list_issues() == []
+
+    def test_created_id_surfaced_into_conversation_history(self):
+        """The engine-assigned ID is fed back into the LLM context so a later
+        'delete the one I just created' turn can resolve to a concrete id."""
+        from .steps import discovery as discovery_mod
+
+        result = {
+            "mode": "question",
+            "content": "filed it",
+            "questions": ["anything else?"],
+            "issue_operations": [
+                {"action": "create", "title": "Split out X", "description": "d"}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow, step = self._make_flow(tmpdir)
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            new_id = step.inputs["discovery_created_issue_ids"][0]
+            history = step.inputs["discovery_state"]["history"]
+            engine_notes = [e for e in history if e.get("role") == "system"]
+            assert len(engine_notes) == 1
+            note = engine_notes[0]["content"]
+            # The concrete assigned id and the tracked-scope list are surfaced.
+            assert new_id in note
+            assert "create issue" in note
+            # The formatted history that feeds the next prompt includes it.
+            rendered = discovery_mod._format_conversation_history(history)
+            assert new_id in rendered
+
+    def test_update_drops_non_list_tags(self):
+        """A scalar tags value on an update op must not corrupt the issue."""
+        from .issue_manager import IssueManager
+        from .steps import discovery as discovery_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow, step = self._make_flow(tmpdir)
+            mgr = IssueManager(Path(tmpdir))
+
+            create_result = {
+                "mode": "question",
+                "content": "created",
+                "questions": ["q?"],
+                "issue_operations": [
+                    {"action": "create", "title": "Orig", "description": "d",
+                     "tags": ["keep"]}
+                ],
+            }
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(create_result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+            tracked_id = step.inputs["discovery_created_issue_ids"][0]
+
+            update_result = {
+                "mode": "question",
+                "content": "updated",
+                "questions": ["q?"],
+                "issue_operations": [
+                    {"action": "update", "id": tracked_id, "tags": "urgent"},
+                ],
+            }
+            step.status = StepStatus.PENDING
+            step.inputs["resumed"] = True
+            step.inputs["user_response"] = "tag it"
+            with patch.object(discovery_mod, "_run_discovery_round",
+                              side_effect=self._round_with(update_result)), \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            issue = mgr.load(tracked_id)
+            # The scalar tags was dropped (not stored as the string "urgent"),
+            # leaving the prior list intact rather than a char-iterable string.
+            assert isinstance(issue.tags, list)
+            assert issue.tags == ["keep"]
+
+    def test_programmatic_confirmed_triggers_no_ops(self):
+        from .issue_manager import IssueManager
+        from .steps import discovery as discovery_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow, step = self._make_flow(tmpdir)
+            step.inputs["programmatic_confirmed"] = True
+            # Even if a stale issue_operations payload existed, the early return
+            # never runs _run_discovery_round, so nothing is executed.
+            with patch.object(discovery_mod, "_run_discovery_round") as mock_round, \
+                 patch.object(discovery_mod, "_display_discovery_message"):
+                sm.run_step(flow, step)
+
+            assert step.status == StepStatus.COMPLETED
+            mock_round.assert_not_called()
+            assert "discovery_created_issue_ids" not in step.inputs
+            mgr = IssueManager(Path(tmpdir))
+            assert mgr.list_issues() == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -217,6 +217,51 @@ The map exists to give specific step types a non-default tag spelling (e.g., the
 - **WHEN** a `verify_spec` step completes with `discovered_issues` in its outputs
 - **THEN** `collect_issues_from_output` returns an empty list without consulting `_SOURCE_TAG_MAP`, so the `verify_spec` entry has no observable effect
 
+### Requirement: Human-directed Discovery Issue Operations
+
+The system SHALL provide a controlled, user-directed issue operations channel inside the `discovery` step that is distinct from the fully-automatic B-class discovery path. Unlike B-class discovery — which is probabilistic, machine-initiated, and always creates issues with `source="system"` (see *Two-class Discovery Model*) — this channel acts only on explicit user instruction in the dialogue (e.g. "把这个拆成一个 issue", "更新刚才那个 issue 的描述", "把刚建的那个删掉"), produces issues with `source="human"`, and is enforced engine-side by `apply_discovery_issue_operations(issue_manager, operations, tracked_ids)` in `src/se3/engine/issue_discovery.py`.
+
+**Response contract.** The channel is realized by extending the discovery step's JSON response contract with a structured `issue_operations` field, reusing the existing `discovered_issues` paradigm: the LLM emits only *intent* (a list of operation dicts), and the engine owns execution. The discovery read-only constraint is NOT relaxed — the LLM SHALL NOT perform issue writes via Bash (e.g. `se3 issue create/edit`); the engine performs every operation from `issue_operations`.
+
+**Trigger model.** The LLM SHALL emit `issue_operations` ONLY when the user explicitly directs a create / modify / delete in the conversation. By default the LLM MUST NOT initiate any issue operation on its own; the existing "do not self-initiate issue operations" default contract is unchanged.
+
+**Supported actions and scope.** Three actions are supported:
+
+- `create` — always creates with `source="human"` and adds the new issue ID to the discovery step's tracking set.
+- `update` — edits an existing issue's fields, restricted to `title` / `description` / `priority` / `type` / `tags` (never status or source, delegating to `IssueManager.update_fields`). Honored ONLY when the target ID is already in the tracking set.
+- `delete` — removes an issue via `IssueManager.delete_issue` and drops the ID from the tracking set. Honored ONLY when the target ID is in the tracking set.
+
+`update` and `delete` SHALL act exclusively on issues created earlier within *this* discovery step (across its multi-turn dialogue) via this same channel — tracked by the engine. Any out-of-scope ID — historical issues, issues from other sessions, in-progress issues — SHALL be rejected without touching the underlying issue. The channel performs NO close / reopen / reset / status transitions.
+
+**Isolation and result accounting.** Each operation is isolated with try/except — a single failing op records a result (a `warning` is logged) and does not abort the remaining ops; unknown actions are skipped with a recorded result. The executor returns a `(new_tracked_ids, results)` tuple: `new_tracked_ids` is the updated, deduplicated, order-preserving tracking set, and `results` is a per-operation record list (each with at least `action` and `status` keys) used to echo an execution summary back to the user.
+
+#### Scenario: User-directed create is filed with source=human
+- **GIVEN** the user explicitly asks the discovery dialogue to split something into an issue
+- **WHEN** the LLM emits an `issue_operations` entry with `action: "create"` and the engine runs `apply_discovery_issue_operations`
+- **THEN** `IssueManager.create(..., source="human")` is called
+- **AND** the new issue's ID is added to the discovery step's tracking set
+
+#### Scenario: Update is limited to tracked issues and editable fields
+- **GIVEN** an issue was created earlier in this discovery step via `issue_operations` and is in the tracking set
+- **WHEN** an `action: "update"` operation targets that ID
+- **THEN** only `title` / `description` / `priority` / `type` / `tags` are applied via `IssueManager.update_fields`
+- **AND** no status transition occurs
+
+#### Scenario: Out-of-scope update/delete is rejected without side effects
+- **WHEN** an `action: "update"` or `action: "delete"` operation targets an ID that is not in the discovery step's tracking set (a historical issue, an issue from another session, or an in-progress issue)
+- **THEN** the operation is rejected and the underlying issue is left untouched
+- **AND** a recorded result captures the rejection
+
+#### Scenario: Delete removes a tracked issue and untracks it
+- **GIVEN** an issue created earlier in this discovery step is in the tracking set
+- **WHEN** an `action: "delete"` operation targets that ID
+- **THEN** `IssueManager.delete_issue` removes the file and the ID is dropped from the tracking set
+
+#### Scenario: Per-operation failures are isolated
+- **WHEN** a batch of `issue_operations` contains one operation that raises
+- **THEN** that operation records an `error` result and a warning is logged
+- **AND** the remaining operations are still executed
+
 ## Architecture
 
 ```

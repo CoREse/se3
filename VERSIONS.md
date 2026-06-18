@@ -60,6 +60,16 @@
 
 
 
+
+## 10.5.0 - 2026-06-18
+
+- Add a user-directed issue_operations channel to the discovery step contract, letting users create, edit, or delete issues only when they explicitly instruct it
+- Restrict discovery update/delete operations to issues created within the same discovery step, rejecting any write to historical or out-of-scope issues
+- Limit discovery issue edits to title, description, priority, type, and tags, with no status transitions (no close/reopen/reset)
+- Mark issues created through the discovery interface with source=human to distinguish them from automatic source=system discovered issues
+- Add IssueManager.delete_issue as a pure file-unlink primitive that removes the issue YAML (zero-padding tolerant) and raises when missing
+- Persist the discovery_created_issue_ids tracking set in step inputs so operation scope survives across dialogue rounds and --resume
+- Preserve the discovery step's read-only and no-Bash-CLI guarantees; the LLM still cannot initiate issue operations on its own
 ## 10.4.3 - 2026-06-17
 
 - Fix WebUI running-flow console freezing on the discovery→analyze transition so live transcript keeps streaming without a full-page reload

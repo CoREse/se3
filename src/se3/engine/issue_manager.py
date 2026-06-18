@@ -541,6 +541,38 @@ class IssueManager:
 
         return issue
 
+    def delete_issue(self, issue_id: str) -> Issue:
+        """Permanently delete an issue's YAML file by ID.
+
+        This is a *direct* deletion primitive: it locates the issue file in
+        ``open/`` or ``closed/`` (tolerating zero-padding differences via
+        ``_find_issue_file``), reads the :class:`Issue`, unlinks the file, and
+        returns the deleted issue. Unlike :meth:`close_issue` it performs **no**
+        status transition and does **not** move the file into ``closed/`` — the
+        record is simply removed from disk.
+
+        Args:
+            issue_id: ID of the issue to delete (zero-padding tolerant).
+
+        Returns:
+            The :class:`Issue` that was deleted.
+
+        Raises:
+            ValueError: If no issue with the given ID exists, or its file
+                could not be read.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            raise ValueError(f"Issue '{issue_id}' not found")
+
+        issue = self._read_issue(filepath)
+        if not issue:
+            raise ValueError(f"Issue '{issue_id}' could not be read")
+
+        filepath.unlink()
+        logger.info("Deleted issue %s: %s", issue.id, issue.display_title)
+        return issue
+
     def list_by_tags(self, tags: List[str], include_closed: bool = False) -> List[Issue]:
         """List issues that contain all specified tags.
 
