@@ -6003,6 +6003,31 @@ check("resetRenderSignatures clears all cached keys", () => {
   assert.deepEqual(Object.keys(app.state.renderSig), []);
 });
 
+// -- projectBasename: readable project name from project_root ----------------
+check("projectBasename returns the last path segment", () => {
+  assert.equal(app.projectBasename("/data/cre/workspace/se3.0"), "se3.0");
+  assert.equal(app.projectBasename("/srv/projects/my-app"), "my-app");
+});
+check("projectBasename strips trailing slashes", () => {
+  assert.equal(app.projectBasename("/a/b/"), "b");
+  assert.equal(app.projectBasename("/a/b///"), "b");
+});
+check("projectBasename handles the root path without throwing", () => {
+  assert.equal(app.projectBasename("/"), "");
+  assert.equal(app.projectBasename("///"), "");
+});
+check("projectBasename tolerates Windows-style separators", () => {
+  assert.equal(app.projectBasename("C:\\work\\proj"), "proj");
+  assert.equal(app.projectBasename("C:\\work\\proj\\"), "proj");
+});
+check("projectBasename returns '' for empty / non-string input", () => {
+  assert.equal(app.projectBasename(""), "");
+  assert.equal(app.projectBasename(null), "");
+  assert.equal(app.projectBasename(undefined), "");
+  assert.equal(app.projectBasename(123), "");
+  assert.equal(app.projectBasename({}), "");
+});
+
 // -- machinesSignature / flowsSignature: per-field distinguishing (G2) -------
 
 function sampleMachines() {
@@ -6085,6 +6110,16 @@ check("flowsSignature changes per visible flow field", () => {
   assert.notEqual(base, mut((f) => (f.total_steps = 8)));         // total
   assert.notEqual(base, mut((f) => (f.task_type = "bugfix")));    // task_type
   assert.notEqual(base, mut((f) => (f.task_description = "new"))); // task
+});
+
+check("flowsSignature changes when only project_root changes", () => {
+  // The flow card paints the project_root basename; a change to it (with all
+  // other visible fields held constant) must re-key the signature so the card
+  // rebuilds with the new project annotation.
+  const base = app.flowsSignature(sampleMachines()[0], "m1", new Set());
+  const moved = sampleMachines()[0];
+  moved.flows[0].project_root = "/data/cre/other-project";
+  assert.notEqual(base, app.flowsSignature(moved, "m1", new Set()));
 });
 
 check("flowsSignature changes when a pending call appears", () => {
@@ -6253,6 +6288,13 @@ check("flowSidebarSignature changes when machineId changes", () => {
 check("flowSidebarSignature tolerates missing/empty flow", () => {
   assert.equal(typeof app.flowSidebarSignature(null, null, false), "string");
   assert.equal(typeof app.flowSidebarSignature({}, "m1", false), "string");
+});
+check("flowSidebarSignature changes when only project_root changes", () => {
+  // The sidebar Overview now prints a Project row derived from project_root, so
+  // a change to it (all else held constant) must re-key the signature.
+  const base = app.flowSidebarSignature(baseSidebarFlow(), "m1", false);
+  const f = baseSidebarFlow(); f.project_root = "/data/cre/workspace/se3.0";
+  assert.notEqual(base, app.flowSidebarSignature(f, "m1", false));
 });
 
 // -- interventionsSignature: per-field distinguishing (G4) -------------------

@@ -221,6 +221,23 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   white-space: nowrap;
 }
 
+/* Project annotation on a running-flow card: the project_root basename, so
+   flows from different projects are distinguishable at a glance. Hover shows
+   the full path (title). Quiet, meta-like styling to stay subordinate to the
+   task text and status badge. */
+.flow-card-project {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: var(--bg-raised);
+  padding: 2px 7px;
+  border-radius: 9px;
+}
+
 .badge {
   font-size: 11px;
   padding: 2px 7px;

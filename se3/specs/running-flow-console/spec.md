@@ -1019,8 +1019,10 @@ The mechanism is a small, test-covered signature infrastructure:
 2. **Per-region signature extractors** — each guarded rebuild has a pure
    `*Signature` function that plucks exactly the fields affecting its visible
    output: `machinesSignature` / `flowsSignature` (machine and flow-card list
-   dependencies + resume requests), `flowSidebarSignature` (sidebar Overview
-   dependencies, including the `waiting_lock` sub-state folded into
+   dependencies — including each flow's `project_root`, which drives the
+   per-card project label — plus resume requests), `flowSidebarSignature`
+   (sidebar Overview dependencies, including the flow's `project_root` shown as
+   the Overview `Project` row, the `waiting_lock` sub-state folded into
    `flowStatusLabel` even while raw `status` stays `RUNNING`, plus step-history,
    resumability, and resume-in-progress), and `interventionsSignature` (the
    `computeInterventions(flow)` entries, the reconciled `flowReplyTargetId`,
@@ -1090,6 +1092,24 @@ DOM-stub test suite can cover the equality logic without a browser.
 - **THEN** the append path short-circuits (`if (!fresh.length) return;`) and
   `renderConversation` is not called, so no conversation reflow occurs
 - **AND** the conversation's incremental-append mechanism is otherwise unchanged
+
+#### Scenario: Running-flow card and sidebar surface the owning project
+- **GIVEN** two running flows whose `project_root` values resolve to different
+  last-path-component directory names (e.g. `/home/me/proj-a` and
+  `/srv/work/proj-b`)
+- **WHEN** the Flows panel renders each flow's card and the user opens one flow's
+  session view
+- **THEN** each flow card displays a project label equal to the basename of its
+  `project_root` (a pure `projectBasename` helper derived from
+  `flowsSignature`'s `project_root` field), so the two flows are visually
+  distinguishable by owning project, and that label element's hover `title`
+  carries the full `project_root` path
+- **AND** the opened flow's sidebar Overview includes a `Project` row whose value
+  is the same `projectBasename(project_root)` (placeholder `-` when absent) and
+  whose `title` carries the full `project_root` path
+- **AND** when a flow's `project_root` is empty or missing, the card omits the
+  project label and the sidebar `Project` row shows the placeholder, with no
+  error in either path
 
 ### Requirement: Interjection Lifecycle Events
 

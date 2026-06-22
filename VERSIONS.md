@@ -71,6 +71,11 @@
 - Surface persisted paused/interrupted/failed flows as resumable across the daemon index, server, and frontend via an authoritative resumable flag, while keeping completed flows free of any resume entry
 - Fix empty task descriptions for history-only sessions by forward-scanning past content-less event records (e.g. step_started) to the first real user prompt when extracting titles
 - Keep history display and archival of normally completed flows unchanged
+- Show each running flow card's owning project as the project_root basename, with the full path available on hover
+- Add a 'Project' row to the session view sidebar Overview displaying the same project label and full-path title
+- Gracefully omit the project annotation (or show a placeholder) when a flow has no project_root, avoiding render errors
+- Include project_root in the flow card and sidebar diff-aware signatures so project changes correctly trigger rerender
+- Add minor CSS styling for the new project badge consistent with existing card meta elements
 ## 10.5.1 - 2026-06-18
 
 - Fix WebUI conversation pane freezing after a discovery→analyze step transition, so new step content now appears within seconds without re-entering the session
