@@ -37,7 +37,8 @@ existing whole-message chip behavior in that case.
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import Iterable, Optional
 
 TEMPLATE_PREFIX_END = "<!--SE3:TEMPLATE_END-->"
 USER_CONTENT_BEGIN = "<!--SE3:USER_CONTENT-->"
@@ -103,6 +104,70 @@ def extract_user_content(content: str) -> Optional[str]:
     if not middle:
         return None
     return middle
+
+
+# Record ``type`` values that are flow *events* rather than a user prompt; a
+# per-step jsonl frequently opens with one of these (e.g. ``step_started``)
+# followed by the real user-content record on a later line.
+SUMMARY_EVENT_TYPES = frozenset(
+    {"step_started", "step_completed", "step_failed", "stream_progress"}
+)
+
+# Upper bound on how many leading jsonl records the title scan inspects before
+# giving up, so a pathologically large per-step file (tens of MB / many
+# thousands of lines) is never fully read just to recover a title. In practice
+# the user-content record is the first or second line, so the scan stops almost
+# immediately; this bound only matters for a (malformed) file with no user
+# record at all.
+SUMMARY_MAX_SCAN_LINES = 200
+
+
+def first_user_content(
+    lines: Iterable[str], max_scan_lines: int = SUMMARY_MAX_SCAN_LINES
+) -> Optional[str]:
+    """Return the ``content`` of the first user-content record in a jsonl stream.
+
+    Scans the line stream forward, skipping records that do not carry user
+    content — event records (``type`` in :data:`SUMMARY_EVENT_TYPES`), records
+    whose ``role`` is not ``user``, and records with empty content — and returns
+    the ``content`` of the first record that does. Returns ``None`` when no such
+    record is found within ``max_scan_lines``.
+
+    A list-valued ``content`` (block array) is reduced to its first ``text``
+    block, mirroring the title extractors that consume this helper. The scan is
+    bounded so it never reads an entire large file; in the common case it stops
+    at the first or second line. This is a pure function: no disk access beyond
+    iterating the caller-supplied ``lines``, no third-party dependency.
+    """
+    for index, line in enumerate(lines):
+        if index >= max_scan_lines:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("type") in SUMMARY_EVENT_TYPES:
+            continue
+        if data.get("role") != "user":
+            continue
+        content = data.get("content", "")
+        if isinstance(content, list):
+            text = ""
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    break
+            content = text or str(content)
+        if not isinstance(content, str):
+            content = str(content)
+        if content.strip():
+            return content
+    return None
 
 
 def _marker_pair_present(text: str) -> bool:

@@ -1618,8 +1618,15 @@ def _extract_history_summary(flow_dir: Path) -> str:
     2. otherwise the embedded ``Task description: --- ... ---`` block;
     3. otherwise the raw content (untruncated — clipping is applied by the
        caller via :func:`_clip`).
+
+    The first jsonl line is frequently a ``step_started`` (or other) *event*
+    record that carries no user content, with the real user prompt on a later
+    line. The extractor therefore scans forward — skipping event records — to
+    the first record actually carrying user content (see
+    :func:`~se3.engine.prompt_markers.first_user_content`), and the scan is
+    bounded so a large file is never fully read.
     """
-    from ..engine.prompt_markers import extract_user_content
+    from ..engine.prompt_markers import extract_user_content, first_user_content
 
     # Include ``*.jsonl.from-<branch>`` sidecars so a worktree session whose
     # first step exists only as a merge-back sidecar still recovers a title.
@@ -1627,20 +1634,13 @@ def _extract_history_summary(flow_dir: Path) -> str:
     if not jsonl_files:
         return "(no history data)"
     try:
-        # Stream-read only the first line instead of reading the entire file.
-        # Previously ``read_text().split("\\n")[0]`` loaded the whole jsonl
-        # (which can be tens of MB) just to extract the title from line 1.
+        # Stream the leading records (bounded) rather than reading the whole
+        # file: ``first_user_content`` skips ``step_started`` / progress events
+        # and stops at the first record carrying user content.
         with open(jsonl_files[0], "r", encoding="utf-8", errors="replace") as fh:
-            first_line = fh.readline().rstrip("\n").rstrip("\r")
-        data = json.loads(first_line)
-        content = data.get("content", "")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    content = block.get("text", "")
-                    break
-            else:
-                content = str(content)
+            content = first_user_content(fh)
+        if content is None:
+            return "(no state data)"
         # 1. Prefer the user's literal input delimited by USER_CONTENT markers.
         user_content = extract_user_content(content)
         if user_content is not None:

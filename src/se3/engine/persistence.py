@@ -419,11 +419,17 @@ class PersistenceManager:
            first-step-not-discovery ``se3 run "task"`` flow);
         3. otherwise the truncated raw content.
 
-        The CLI clips the result to 100 characters with an ellipsis.
+        The first jsonl line is frequently a ``step_started`` (or other) *event*
+        record carrying no user content, with the real user prompt on a later
+        line; the extractor scans forward — skipping event records — to the
+        first record actually carrying user content (see
+        :func:`~se3.engine.prompt_markers.first_user_content`), bounded so a
+        large file is never fully read. The CLI clips the result to 100
+        characters with an ellipsis.
         """
         import re
 
-        from .prompt_markers import extract_user_content
+        from .prompt_markers import extract_user_content, first_user_content
 
         def _clip(text: str) -> str:
             return text[:100] + "..." if len(text) > 100 else text
@@ -432,16 +438,15 @@ class PersistenceManager:
         if not jsonl_files:
             return "(no history data)"
         try:
-            first_line = jsonl_files[0].read_text(encoding="utf-8").split("\n")[0]
-            data = json.loads(first_line)
-            content = data.get("content", "")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        content = block.get("text", "")
-                        break
-                else:
-                    content = str(content)
+            # Stream the leading records (bounded) rather than loading the whole
+            # file: ``first_user_content`` skips ``step_started`` / progress
+            # events and stops at the first record carrying user content.
+            with open(
+                jsonl_files[0], "r", encoding="utf-8", errors="replace"
+            ) as fh:
+                content = first_user_content(fh)
+            if content is None:
+                return "(no state data)"
             # 1. Prefer the user's literal input delimited by USER_CONTENT markers.
             user_content = extract_user_content(content)
             if user_content is not None:
