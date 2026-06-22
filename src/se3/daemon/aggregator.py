@@ -127,6 +127,15 @@ class FlowSnapshot:
     # and True for a queued synchronous run); surfaced so the web console shows
     # the flow as RUNNING·waiting-for-lock rather than a silent "已发布" stall.
     waiting_for_lock: bool = False
+    # Authoritative "can this flow be resumed" signal computed by the daemon
+    # from the flow's semantic status (see :func:`_is_resumable_status`): True
+    # for any flow that has NOT completed normally and still has recoverable
+    # state. Set on a non-completed active engine.json flow and on every per-flow
+    # ``se3/state/resumable/<flow_id>.json`` snapshot that has been superseded by
+    # a later run (status preserved, ``resumable=True``). The server / frontend
+    # read this flag as the primary resume-eligibility signal, falling back to
+    # the legacy status/source heuristic only when it is absent/false.
+    resumable: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -145,6 +154,7 @@ class FlowSnapshot:
             "issue_count": self.issue_count,
             "summary": self.summary,
             "waiting_for_lock": self.waiting_for_lock,
+            "resumable": self.resumable,
         }
 
 
@@ -386,11 +396,18 @@ class DaemonAggregator:
         # trailing merge. The dropdown-facing ``project_roots`` field stays on
         # ``all_project_roots`` (via ``_merge_project_roots``), so a transient
         # worktree sandbox never appears as a New Task target.
-        for root_str in self.all_observable_roots():
+        observable_roots = self.all_observable_roots()
+        # Track the flow_ids carried by the *active* engine.json snapshots so a
+        # resumable per-flow snapshot for the same flow is de-duplicated (the
+        # active engine.json copy wins) in the supplement pass below.
+        active_flow_ids: Set[str] = set()
+        for root_str in observable_roots:
             root = Path(root_str)
             snapshot = self._snapshot_for_root(root)
             if snapshot is not None:
                 flows.append(snapshot)
+                if snapshot.flow_id:
+                    active_flow_ids.add(snapshot.flow_id)
             # Calls and issues are collected independently of whether an
             # active engine.json exists.  After a flow completes and
             # engine.json is archived, the project root still holds its
@@ -399,6 +416,21 @@ class DaemonAggregator:
             # issues invisible in the webui.
             all_calls.extend(self._enumerate_calls(root))
             all_issues.extend(self._collect_issues(root))
+        # Supplement: per-flow resumable snapshots that no longer have a live
+        # engine.json entry. A paused/interrupted/failed flow writes
+        # ``se3/state/resumable/<flow_id>.json`` (see PersistenceManager); a
+        # later ``se3 run`` overwrites the single-slot engine.json but leaves
+        # that snapshot intact. Without this pass such a flow would be invisible
+        # in ``MachineStatus.flows``, so a webui resume click would 404 because
+        # ServerState.record.flows has no entry for it. Run this *after* the
+        # active pass so ``active_flow_ids`` is fully populated and an active
+        # flow always wins over its own (still-present) resumable snapshot.
+        seen_resumable: Set[str] = set(active_flow_ids)
+        for root_str in observable_roots:
+            root = Path(root_str)
+            flows.extend(
+                self._enumerate_resumable_snapshots(root, seen_resumable)
+            )
         return MachineStatus(
             machine_id=self.machine_id,
             hostname=self.hostname,
@@ -700,12 +732,13 @@ class DaemonAggregator:
         flow_calls = self._filter_calls_for_flow(pending_calls, flow_id_str)
         flow_calls = self._filter_stale_calls(flow_calls, state)
         flow_calls = self._dedup_calls_by_step(flow_calls)
+        status = str(data.get("status") or "unknown")
         return FlowSnapshot(
             project_root=str(root),
             flow_id=flow_id_str,
             task_description=str(data.get("task_description") or ""),
             task_type=str(data.get("task_type") or ""),
-            status=str(data.get("status") or "unknown"),
+            status=status,
             current_step=_current_step(state),
             current_step_index=index,
             total_steps=total,
@@ -718,6 +751,85 @@ class DaemonAggregator:
             # Surface the lock-wait sub-state; absent/false for every flow not
             # currently queued behind the main-worktree mutex.
             waiting_for_lock=bool(data.get("waiting_for_lock", False)),
+            # A still-active flow that has not completed normally is resumable
+            # (covers the interrupted-but-still-current-engine.json case, where
+            # status may be running/paused/failed). A COMPLETED active flow that
+            # has not yet been archived is not resumable.
+            resumable=_is_resumable_status(status),
+        )
+
+    def _enumerate_resumable_snapshots(
+        self, root: Path, seen_flow_ids: Set[str]
+    ) -> List[FlowSnapshot]:
+        """Build supplemental :class:`FlowSnapshot`s for resumable snapshots.
+
+        Enumerates ``<root>/se3/state/resumable/*.json`` — the per-flow
+        snapshots PersistenceManager writes for every flow that has NOT
+        completed normally — and emits one ``resumable=True`` FlowSnapshot per
+        snapshot whose ``flow_id`` is not already represented by an active
+        engine.json flow (tracked in *seen_flow_ids*, mutated in place so the
+        same flow is never emitted twice across roots).
+
+        Each emitted snapshot preserves the flow's *original* status
+        (running / paused / failed) so the webui can show why it stalled while
+        still offering a resume entry. A normally COMPLETED flow has no snapshot
+        here (it is cleared on completion), so it never gains ``resumable``.
+        """
+        resumable_dir = root / "se3" / "state" / "resumable"
+        if not resumable_dir.is_dir():
+            return []
+        try:
+            snapshot_files = sorted(resumable_dir.glob("*.json"))
+        except OSError:
+            return []
+        results: List[FlowSnapshot] = []
+        for snap_file in snapshot_files:
+            data = _read_json(snap_file)
+            if not isinstance(data, dict):
+                continue
+            flow_id = data.get("flow_id")
+            flow_id_str = str(flow_id) if flow_id else None
+            if not flow_id_str or flow_id_str in seen_flow_ids:
+                continue
+            seen_flow_ids.add(flow_id_str)
+            results.append(self._snapshot_from_resumable(root, data))
+        return results
+
+    @staticmethod
+    def _snapshot_from_resumable(root: Path, data: Dict[str, Any]) -> FlowSnapshot:
+        """Build a ``resumable=True`` FlowSnapshot from a resumable snapshot dict.
+
+        The dict has the same shape as ``engine.json`` (it is
+        ``FlowInstance.to_dict()``), so progress / step metadata is derived the
+        same way as :meth:`_snapshot_for_root`. ``pending_calls`` / ``log_count``
+        / ``issue_count`` / ``summary`` are intentionally left empty: those
+        belong to the *live* flow that currently owns the project root's
+        ``se3/calls`` & ``se3/issues``, not to this superseded snapshot.
+        """
+        state = data.get("state") or {}
+        selected = state.get("selected_steps") or []
+        total = len(selected)
+        index = int(state.get("current_step_index") or 0)
+        progress = (index / total) if total else 0.0
+        flow_id = data.get("flow_id")
+        flow_id_str = str(flow_id) if flow_id else None
+        return FlowSnapshot(
+            project_root=str(root),
+            flow_id=flow_id_str,
+            task_description=str(data.get("task_description") or ""),
+            task_type=str(data.get("task_type") or ""),
+            status=str(data.get("status") or "unknown"),
+            current_step=_current_step(state),
+            current_step_index=index,
+            total_steps=total,
+            progress=round(progress, 4),
+            updated_at=data.get("updated_at"),
+            pending_calls=[],
+            log_count=0,
+            issue_count=0,
+            summary=None,
+            waiting_for_lock=False,
+            resumable=True,
         )
 
     def _enumerate_calls(self, root: Path) -> List[PendingCall]:
@@ -1052,6 +1164,19 @@ class DaemonAggregator:
 
 
 # -- module-level file helpers --------------------------------------------
+
+
+def _is_resumable_status(status: str) -> bool:
+    """Return whether *status* names a resumable flow.
+
+    Every flow that has NOT completed normally is resumable — running
+    (interrupted), paused (awaiting input), failed (recoverable error) and the
+    transient init/recovering states all qualify. Only ``completed`` is
+    terminal-and-done, so it is the single non-resumable status. The comparison
+    is case-insensitive because engine.json / the resumable snapshot store the
+    FlowStatus value verbatim.
+    """
+    return status.strip().lower() != "completed"
 
 
 def _safe_mtime(path: Path) -> Optional[float]:

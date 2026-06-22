@@ -27,6 +27,7 @@ class PersistenceManager:
     STATE_FILENAME = "engine.json"
     CONTEXT_FILENAME = "context.json"
     BACKUP_EXTENSION = ".bak"
+    RESUMABLE_DIRNAME = "resumable"
 
     def __init__(self, project_root: Path):
         """Initialize with project root.
@@ -38,6 +39,13 @@ class PersistenceManager:
         self.state_dir = self.project_root / "se3" / "state"
         self.state_file = self.state_dir / self.STATE_FILENAME
         self.context_file = self.state_dir / self.CONTEXT_FILENAME
+        # Per-flow resumable snapshots: se3/state/resumable/<flow_id>.json.
+        # Unlike the single-slot engine.json (overwritten by the next run) and
+        # the archive/ dir (terminal/completed snapshots only), this directory
+        # holds the full FlowInstance of every flow that has NOT yet completed
+        # normally, so a paused/interrupted/recoverable-failed flow stays
+        # resumable even after a later run overwrites engine.json.
+        self.resumable_dir = self.state_dir / self.RESUMABLE_DIRNAME
 
     def ensure_directories(self) -> None:
         """Ensure state directories exist."""
@@ -74,7 +82,125 @@ class PersistenceManager:
                 temp_file.unlink(missing_ok=True)
             raise
 
+        # Per-flow resumable snapshot bookkeeping. save_flow is the single
+        # convergence point for every pause/interrupt/failure/step-advance
+        # persist, so hooking here guarantees "snapshot written the moment a
+        # flow pauses/is interrupted" with no need to scatter writes across
+        # run.py's exception branches. A normally COMPLETED flow needs no
+        # resume, so its snapshot is removed; any other status keeps a fresh
+        # snapshot. Best-effort: a snapshot I/O failure must never break the
+        # primary engine.json write.
+        try:
+            if flow.status == FlowStatus.COMPLETED:
+                self.clear_resumable_snapshot(flow.flow_id)
+            else:
+                self.save_resumable_snapshot(flow)
+        except Exception:
+            logger.debug(
+                "Failed to update resumable snapshot for flow %s",
+                getattr(flow, "flow_id", "?"),
+                exc_info=True,
+            )
+
         return self.state_file
+
+    def save_resumable_snapshot(self, flow: FlowInstance) -> Path:
+        """Persist a per-flow resumable snapshot to resumable/<flow_id>.json.
+
+        The snapshot format is identical to engine.json (``FlowInstance.to_dict``)
+        and is written atomically (temp file + rename). It is the durable,
+        per-flow copy that survives a later ``se3 run`` overwriting the
+        single-slot engine.json, so an interrupted/paused/failed flow can still
+        be located and resumed by flow_id.
+
+        Args:
+            flow: Flow instance to snapshot
+
+        Returns:
+            Path to the snapshot file.
+        """
+        self.resumable_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_file = self.resumable_dir / f"{flow.flow_id}.json"
+
+        data = flow.to_dict()
+        json_content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+
+        temp_file = snapshot_file.with_suffix(".tmp")
+        try:
+            temp_file.write_text(json_content, encoding="utf-8")
+            temp_file.replace(snapshot_file)
+        except Exception:
+            if temp_file.exists():
+                temp_file.unlink(missing_ok=True)
+            raise
+
+        return snapshot_file
+
+    def load_resumable_snapshot(self, flow_id: str) -> Optional[FlowInstance]:
+        """Load the per-flow resumable snapshot for ``flow_id``.
+
+        Returns:
+            The reconstructed FlowInstance, or None when no (readable) snapshot
+            exists. Corruption is tolerated by returning None rather than
+            raising.
+        """
+        snapshot_file = self.resumable_dir / f"{flow_id}.json"
+        if not snapshot_file.exists():
+            return None
+        try:
+            content = snapshot_file.read_text(encoding="utf-8")
+            data = json.loads(content)
+            return FlowInstance.from_dict(data)
+        except (json.JSONDecodeError, KeyError, ValueError, OSError):
+            return None
+
+    def clear_resumable_snapshot(self, flow_id: str) -> None:
+        """Remove the per-flow resumable snapshot for ``flow_id`` (best effort)."""
+        snapshot_file = self.resumable_dir / f"{flow_id}.json"
+        try:
+            snapshot_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def list_resumable_snapshots(self) -> List[FlowInstance]:
+        """List all per-flow resumable snapshots.
+
+        Returns:
+            A list of reconstructed FlowInstance objects, one per readable
+            snapshot file under resumable/. Corrupt/unreadable snapshots are
+            skipped silently.
+        """
+        flows: List[FlowInstance] = []
+        if not self.resumable_dir.is_dir():
+            return flows
+        for snapshot_file in sorted(self.resumable_dir.glob("*.json")):
+            try:
+                data = json.loads(snapshot_file.read_text(encoding="utf-8"))
+                flows.append(FlowInstance.from_dict(data))
+            except (json.JSONDecodeError, KeyError, ValueError, OSError):
+                continue
+        return flows
+
+    def load_flow_by_id(self, flow_id: str) -> Optional[FlowInstance]:
+        """Locate and load a flow by id, preferring the active engine.json.
+
+        Resolution order:
+
+        1. The active engine.json, when it currently holds ``flow_id``.
+        2. Otherwise the per-flow resumable snapshot (resumable/<flow_id>.json),
+           which survives a later run overwriting engine.json.
+
+        A normally COMPLETED flow has no resumable snapshot (it is cleared on
+        completion by :meth:`save_flow`), so it is never resurrected through the
+        snapshot path; only the still-active engine.json can return it.
+
+        Returns:
+            The matching FlowInstance, or None when neither source holds it.
+        """
+        active = self.load_flow()
+        if active is not None and active.flow_id == flow_id:
+            return active
+        return self.load_resumable_snapshot(flow_id)
 
     def load_flow(self) -> Optional[FlowInstance]:
         """Load flow instance from state file.

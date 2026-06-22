@@ -357,6 +357,32 @@ def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
     return flows
 
 
+def find_resumable_snapshot_flows(project_root: Path) -> List[Dict[str, Any]]:
+    """Find resumable flows that exist only as per-flow snapshots.
+
+    The single-slot engine.json is overwritten by the next ``se3 run``, so a
+    paused/interrupted/failed flow's recoverable state would otherwise be lost.
+    :class:`PersistenceManager` mirrors every non-COMPLETED save into
+    ``se3/state/resumable/<flow_id>.json``; this surfaces those snapshots in the
+    resume picker shaped like :func:`find_existing_flows` entries. COMPLETED
+    flows never have a snapshot (it is cleared on completion), so they cannot
+    appear here.
+    """
+    flows: List[Dict[str, Any]] = []
+    persistence = PersistenceManager(project_root)
+    for flow in persistence.list_resumable_snapshots():
+        if flow.status == FlowStatus.COMPLETED:
+            continue
+        flows.append({
+            "id": flow.flow_id,
+            "status": flow.status.value,
+            "description": flow.task_description or "No description",
+            "current_step": flow.state.current_step_id,
+            "file": str(persistence.resumable_dir / f"{flow.flow_id}.json"),
+        })
+    return flows
+
+
 def prompt_user_choice(message: str, options: List[str]) -> int:
     """Prompt user to select an option."""
     print(f"\n{message}")
@@ -888,12 +914,23 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     # and folded into the same picker. Each carries enough metadata for
     # resume_run to re-dispatch it inside its worktree and merge it back.
     worktree_runs = find_resumable_worktree_runs(project_root)
+    # Flows whose recoverable state survives only as a per-flow snapshot (their
+    # engine.json was overwritten by a later run). These keep paused/interrupted
+    # flows resumable from the picker even after a subsequent flow ran.
+    snapshot_runs = find_resumable_snapshot_flows(project_root)
 
     # Filter to resumable flows (exclude only COMPLETED). worktree_runs are
-    # already filtered to non-COMPLETED by find_resumable_worktree_runs.
+    # already filtered to non-COMPLETED by find_resumable_worktree_runs, and
+    # snapshot_runs by find_resumable_snapshot_flows.
     terminal_statuses = {FlowStatus.COMPLETED.value}
     active_flows = [f for f in flows if f["status"] not in terminal_statuses]
     active_flows = active_flows + worktree_runs
+    # De-duplicate snapshot-only flows against the live engine.json / worktree
+    # flows already listed (those are the authoritative live copy).
+    seen_ids = {f.get("id") for f in active_flows}
+    active_flows = active_flows + [
+        f for f in snapshot_runs if f.get("id") not in seen_ids
+    ]
 
     if not active_flows:
         if not flows and not worktree_runs:
@@ -2122,10 +2159,23 @@ def _run_flow_impl(
     # Load or create flow
     try:
         if flow_id:
-            flow = persistence.load_flow()
-            if not flow or flow.flow_id != flow_id:
+            # Prefer the active engine.json; fall back to the per-flow
+            # resumable snapshot (resumable/<flow_id>.json) when engine.json has
+            # since been overwritten by a later ``se3 run``. A normally
+            # COMPLETED flow has no snapshot (cleared on completion), so it is
+            # never resurrected through the snapshot path.
+            flow = persistence.load_flow_by_id(flow_id)
+            if not flow:
                 display_error(f"Flow '{flow_id}' not found")
                 return 1
+
+            # When the flow was recovered from its resumable snapshot (the
+            # active engine.json no longer holds it), write it back as the live
+            # engine.json so the resume bookkeeping below, and the daemon's
+            # single-slot observability, both see a live flow again.
+            active = persistence.load_flow()
+            if active is None or active.flow_id != flow.flow_id:
+                persistence.save_flow(flow)
 
             # Detect and handle resume of a RUNNING or FAILED step
             current_step = flow.state.get_current_step()

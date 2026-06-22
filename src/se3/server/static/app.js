@@ -540,10 +540,14 @@ function isActiveFlow(flow) {
   return ["running", "paused", "init", "recovering"].includes(s);
 }
 
-// A flow is "resumable" when it is in a non-terminal state that the daemon can
-// pick back up via `se3 run --resume --flow-id <id>`.  Only FAILED and PAUSED
-// qualify: RUNNING/INIT/RECOVERING are already in-progress (no resume needed),
-// COMPLETED is terminal (nothing to resume), and archived/history-only flows
+// A flow is "resumable" when the daemon can pick it back up via
+// `se3 run --resume --flow-id <id>`.  The authoritative signal is the daemon's
+// `resumable` flag, computed from the flow's semantic state and surfaced even
+// for a per-flow snapshot that was superseded in engine.json (such a snapshot
+// may carry source `history`/`resumable` and a raw status that still reads
+// `running`).  When the flag is present and true we short-circuit to true.
+// Otherwise we fall back — for an older daemon that omits the flag — to the
+// legacy heuristic: only FAILED/PAUSED qualify, and archived/history-only flows
 // are excluded (they lack a live engine.json).  The backend
 // `POST /api/flows/{id}/resume` performs the authoritative check; this pure
 // function is a UI gate that hides the button when it would certainly fail.
@@ -552,6 +556,9 @@ const RESUMABLE_STATUSES = ["failed", "paused"];
 function isFlowResumable(flow) {
   if (!flow || typeof flow !== "object") return false;
   if (!flow.flow_id) return false;
+  // Primary signal: the daemon's authoritative resumable flag.
+  if (flow.resumable === true) return true;
+  // Backward-compatible fallback for daemons that don't supply the flag.
   // Archived/history-only sessions cannot be resumed — they lack a live
   // engine.json and the server would return 404.
   const src = String(flow.source || "").toLowerCase();

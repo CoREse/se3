@@ -149,6 +149,17 @@ def _is_active_status(status: str) -> bool:
     return status.strip().lower() not in _TERMINAL_STATUSES
 
 
+def _is_resumable_status(status: str) -> bool:
+    """Return whether *status* names a resumable flow.
+
+    Mirrors :func:`se3.daemon.aggregator._is_resumable_status`: every flow that
+    has NOT completed normally is resumable — running (interrupted), paused
+    (awaiting input), failed (recoverable error) and the transient
+    init/recovering states all qualify. Only ``completed`` is terminal-and-done.
+    """
+    return status.strip().lower() != "completed"
+
+
 #: The authoritative set of step types, mirroring ``StepType`` values in
 #: ``se3.engine.models``. Hard-coded (not imported) on purpose: importing
 #: ``se3.engine.models`` would execute ``se3.engine.__init__`` and drag the
@@ -302,7 +313,7 @@ class SessionMeta:
     created_at: str = ""
     updated_at: str = ""
     active: bool = False
-    source: str = "history"  # "active" | "archived" | "history"
+    source: str = "history"  # "active" | "archived" | "resumable" | "history"
     step_count: int = 0
     # Running sub-state mirrored from the active engine.json's top-level
     # ``waiting_for_lock`` flag: True while a synchronous run is queued behind
@@ -310,6 +321,14 @@ class SessionMeta:
     # True for an active ("active" source) flow; history-only / archived flows
     # are never waiting.
     waiting_for_lock: bool = False
+    # Authoritative "can this flow be resumed" signal, mirroring the daemon
+    # aggregator's ``FlowSnapshot.resumable``. True for a non-completed active
+    # flow and for every per-flow resumable snapshot (source ``"resumable"``)
+    # that survived its engine.json being overwritten by a later run. The server
+    # / frontend read this as the primary resume-eligibility signal so a
+    # superseded paused/interrupted flow keeps its resume entry instead of
+    # degrading to a non-resumable history-only row.
+    resumable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the JSON-friendly dict form of this metadata."""
@@ -325,6 +344,7 @@ class SessionMeta:
             "source": self.source,
             "step_count": self.step_count,
             "waiting_for_lock": self.waiting_for_lock,
+            "resumable": self.resumable,
         }
 
 
@@ -552,7 +572,35 @@ class DaemonHistoryReader:
                     )
                 )
 
-        # 3. History-only flows (may have no engine.json at all).
+        # 3. Resumable per-flow snapshots (se3/state/resumable/<flow_id>.json).
+        # A paused/interrupted/failed flow writes a snapshot here; a later
+        # ``se3 run`` overwrites the single-slot engine.json but leaves the
+        # snapshot intact, so the flow survives only here (plus possibly a
+        # history dir). Indexed *before* the history-only source so such a flow
+        # keeps its original status + ``resumable=True`` rather than degrading
+        # to a non-resumable ``source="history"`` row. Deduped against
+        # active/archived (which win) via ``seen``.
+        resumable_dir = state_dir / "resumable"
+        if resumable_dir.is_dir():
+            for snap_file in sorted(resumable_dir.glob("*.json")):
+                sdata = _read_json(snap_file)
+                if not isinstance(sdata, dict):
+                    continue
+                flow_id = str(sdata.get("flow_id") or "")
+                if not flow_id or flow_id in seen:
+                    continue
+                seen.add(flow_id)
+                metas.append(
+                    self._meta_from_engine(
+                        root,
+                        sdata,
+                        source="resumable",
+                        fallback_mtime=_safe_mtime(snap_file),
+                        resumable=True,
+                    )
+                )
+
+        # 4. History-only flows (may have no engine.json at all).
         history_root = root / "se3" / "history"
         if history_root.is_dir():
             for flow_dir in sorted(history_root.iterdir()):
@@ -571,14 +619,25 @@ class DaemonHistoryReader:
         *,
         source: str,
         fallback_mtime: Optional[float] = None,
+        resumable: Optional[bool] = None,
     ) -> SessionMeta:
-        """Build a :class:`SessionMeta` from an ``engine.json``-shaped dict."""
+        """Build a :class:`SessionMeta` from an ``engine.json``-shaped dict.
+
+        *resumable* overrides the computed resume-eligibility flag — used by the
+        ``"resumable"`` source to force ``True`` for a per-flow snapshot whose
+        stored status (often ``running`` for an interrupted flow) would not by
+        itself imply resumability. When left ``None`` it is derived from the
+        status: a non-completed *active* flow is resumable, while archived /
+        history-only snapshots default to non-resumable.
+        """
         status = str(data.get("status") or "unknown")
         active = source == "active" and _is_active_status(status)
         updated = str(data.get("updated_at") or "")
         if not updated and fallback_mtime:
             updated = datetime.fromtimestamp(fallback_mtime).isoformat()
         flow_id = str(data.get("flow_id"))
+        if resumable is None:
+            resumable = source == "active" and _is_resumable_status(status)
         return SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
@@ -594,6 +653,7 @@ class DaemonHistoryReader:
             # active flow; an archived/terminal snapshot is never queued. Reading
             # only on the active source also keeps a stale True out of history.
             waiting_for_lock=bool(active and data.get("waiting_for_lock", False)),
+            resumable=bool(resumable),
         )
 
     @staticmethod
