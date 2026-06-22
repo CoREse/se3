@@ -229,6 +229,21 @@ function resetRenderSignatures() {
   state.renderSig = {};
 }
 
+// Derive a short, human-readable project name from an absolute project_root
+// path: the last path segment (basename) after stripping any trailing
+// slashes. Tolerant of both POSIX ('/') and Windows ('\\') separators. A
+// non-string, empty, or root-only ('/') input yields '' so callers can treat
+// "no readable name" uniformly (the card skips the badge, the sidebar shows a
+// placeholder). DOM-free; exported for the pure tests.
+function projectBasename(projectRoot) {
+  if (typeof projectRoot !== "string") return "";
+  // Strip trailing separators so '/a/b/' yields 'b', not ''.
+  const trimmed = projectRoot.replace(/[\\/]+$/, "");
+  if (!trimmed) return "";
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || "";
+}
+
 // Pure signature of the machine-list's visible dependencies. renderMachines
 // paints one <li> per machine carrying only: the online/offline dot, the name
 // (hostname || machine_id), the flow count, and the selected highlight. The
@@ -280,6 +295,7 @@ function flowsSignature(machine, selectedId, resumeRequests) {
       id: (f && f.flow_id) || null,
       status: (f && f.status) || "",
       task: (f && f.task_description) || "",
+      project_root: (f && f.project_root) || "",
       task_type: (f && f.task_type) || "",
       progress: (f && f.progress) || 0,
       current_step: (f && f.current_step) || "",
@@ -1423,6 +1439,17 @@ function renderFlowCard(flow) {
   const badge = el("span", "badge badge-" + sc, flow.status || "unknown");
   head.append(task, badge);
 
+  // Annotate which project this running flow belongs to so flows from
+  // different project roots are distinguishable at a glance. Show the basename
+  // as the readable label; the full project_root is the hover title. Skip the
+  // badge entirely when project_root is missing to avoid empty-label noise.
+  const projectName = projectBasename(flow.project_root);
+  if (projectName) {
+    const project = el("span", "flow-card-project", projectName);
+    project.title = flow.project_root;
+    head.appendChild(project);
+  }
+
   if (isWaitingForLock(flow)) {
     // Surface the running·waiting-for-lock sub-state so a queued flow reads as
     // running rather than appearing stalled.
@@ -1906,6 +1933,7 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
   return renderSignature({
     task_description: f.task_description ?? null,
     flow_id: f.flow_id ?? null,
+    project_root: f.project_root ?? null,
     status: f.status ?? null,
     waiting_lock: isWaitingForLock(f),
     task_type: f.task_type ?? null,
@@ -1943,9 +1971,11 @@ function renderFlowSidebar(flow, machineId) {
   const body = $("flow-sidebar-body");
   body.innerHTML = "";
 
-  const kv = (k, v) => {
+  const kv = (k, v, title) => {
     const row = el("div", "kv");
-    row.append(el("span", "k", k), el("span", "v", String(v)));
+    const valEl = el("span", "v", String(v));
+    if (title) valEl.title = title;
+    row.append(el("span", "k", k), valEl);
     return row;
   };
   const sc = statusClass(flow.status);
@@ -1955,6 +1985,9 @@ function renderFlowSidebar(flow, machineId) {
   overview.appendChild(el("h4", null, "Overview"));
   overview.appendChild(kv("Status", flowStatusLabel(flow)));
   overview.appendChild(kv("Type", flow.task_type || "-"));
+  overview.appendChild(kv(
+    "Project", projectBasename(flow.project_root) || "-", flow.project_root || "",
+  ));
   overview.appendChild(kv(
     "Progress",
     `${flow.current_step_index || 0}/${flow.total_steps || 0} ` +
@@ -11132,6 +11165,9 @@ if (typeof module !== "undefined" && module.exports) {
     // DOM-free tests in tests/frontend/test_app_pure.mjs.
     renderSignature,
     resetRenderSignatures,
+    // Project-root basename label for running flows (exposed for the DOM-free
+    // tests in tests/frontend/test_app_pure.mjs).
+    projectBasename,
     // Machine/flow list signatures (G2) — exposed for the DOM-free tests.
     machinesSignature,
     flowsSignature,
