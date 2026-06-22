@@ -773,7 +773,12 @@ class DaemonAggregator:
         Each emitted snapshot preserves the flow's *original* status
         (running / paused / failed) so the webui can show why it stalled while
         still offering a resume entry. A normally COMPLETED flow has no snapshot
-        here (it is cleared on completion), so it never gains ``resumable``.
+        here (it is cleared on completion); should a stale ``completed``
+        snapshot survive — e.g. ``save_flow``'s best-effort
+        ``clear_resumable_snapshot`` failed, or an operator/test artifact
+        remains — it is skipped here rather than surfaced as resumable, so the
+        aggregator agrees with the daemon resume validator (which rejects a
+        COMPLETED flow) and the webui never shows a dead resume entry.
         """
         resumable_dir = root / "se3" / "state" / "resumable"
         if not resumable_dir.is_dir():
@@ -791,6 +796,18 @@ class DaemonAggregator:
             flow_id_str = str(flow_id) if flow_id else None
             if not flow_id_str or flow_id_str in seen_flow_ids:
                 continue
+            # The embedded flow_id MUST match the snapshot filename
+            # (resumable/<flow_id>.json); otherwise the load/resume path
+            # (PersistenceManager.load_resumable_snapshot, keyed by filename)
+            # would reject it, so advertising it here offers a resume entry
+            # that can never actually resume. Skip mismatched/misnamed files.
+            if flow_id_str != snap_file.stem:
+                continue
+            # A stale completed snapshot must never be surfaced as resumable;
+            # ignore it entirely (do not claim the flow_id) so it cannot mask a
+            # genuinely resumable source elsewhere.
+            if not _is_resumable_status(str(data.get("status") or "")):
+                continue
             seen_flow_ids.add(flow_id_str)
             results.append(self._snapshot_from_resumable(root, data))
         return results
@@ -805,6 +822,13 @@ class DaemonAggregator:
         / ``issue_count`` / ``summary`` are intentionally left empty: those
         belong to the *live* flow that currently owns the project root's
         ``se3/calls`` & ``se3/issues``, not to this superseded snapshot.
+
+        ``resumable`` is derived from the snapshot's own status via
+        :func:`_is_resumable_status` (rather than hard-coded ``True``) so a
+        stale ``completed`` snapshot is never advertised as resumable; callers
+        that build these from a resumable directory already pre-filter
+        completed snapshots, but deriving it here keeps the flag honest at the
+        single source of truth.
         """
         state = data.get("state") or {}
         selected = state.get("selected_steps") or []
@@ -813,12 +837,13 @@ class DaemonAggregator:
         progress = (index / total) if total else 0.0
         flow_id = data.get("flow_id")
         flow_id_str = str(flow_id) if flow_id else None
+        status = str(data.get("status") or "unknown")
         return FlowSnapshot(
             project_root=str(root),
             flow_id=flow_id_str,
             task_description=str(data.get("task_description") or ""),
             task_type=str(data.get("task_type") or ""),
-            status=str(data.get("status") or "unknown"),
+            status=status,
             current_step=_current_step(state),
             current_step_index=index,
             total_steps=total,
@@ -829,7 +854,7 @@ class DaemonAggregator:
             issue_count=0,
             summary=None,
             waiting_for_lock=False,
-            resumable=True,
+            resumable=_is_resumable_status(status),
         )
 
     def _enumerate_calls(self, root: Path) -> List[PendingCall]:

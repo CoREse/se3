@@ -227,6 +227,28 @@ class TestArchiveSession:
         result = _archive_session(project_root)
         assert result is False
 
+    def test_clears_resumable_snapshot(self, project_root, valid_flow):
+        """A salvaged/archived flow must not leave a resumable snapshot behind.
+
+        The per-flow se3/state/resumable/<flow_id>.json written while the flow
+        ran would otherwise be advertised as resumable by the daemon
+        STATUS_UPDATE channel (whose dedup seeds only from active engine.json
+        flow_ids) while hidden in the history index (which dedups against the
+        archived entry), and a Resume click would re-run the already
+        dispositioned flow.
+        """
+        from se3.engine.persistence import PersistenceManager
+
+        _write_flow_state(project_root, valid_flow)
+        pm = PersistenceManager(project_root)
+        snapshot_file = pm.save_resumable_snapshot(valid_flow)
+        assert snapshot_file.exists()
+
+        result = _archive_session(project_root)
+
+        assert result is True
+        assert not snapshot_file.exists()
+
 
 class TestSalvageFullPipeline:
     """Tests for the full salvage pipeline."""

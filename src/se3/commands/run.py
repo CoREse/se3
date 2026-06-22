@@ -2164,18 +2164,33 @@ def _run_flow_impl(
             # since been overwritten by a later ``se3 run``. A normally
             # COMPLETED flow has no snapshot (cleared on completion), so it is
             # never resurrected through the snapshot path.
-            flow = persistence.load_flow_by_id(flow_id)
-            if not flow:
-                display_error(f"Flow '{flow_id}' not found")
-                return 1
+            flow = persistence.load_flow()
+            if not flow or flow.flow_id != flow_id:
+                # engine.json does not hold the requested flow (e.g. it was
+                # overwritten by a later run). Recover it from its per-flow
+                # resumable snapshot, then write it back as the live
+                # engine.json so the resume bookkeeping below, and the daemon's
+                # single-slot observability, both see a live flow again.
+                flow = persistence.load_resumable_snapshot(flow_id)
+                if not flow:
+                    display_error(f"Flow '{flow_id}' not found")
+                    return 1
+                # Do not write a stale snapshot back as the live engine.json
+                # before the completed-flow guard below has a chance to reject
+                # it — guard first, then persist.
+                if flow.status != FlowStatus.COMPLETED:
+                    persistence.save_flow(flow)
 
-            # When the flow was recovered from its resumable snapshot (the
-            # active engine.json no longer holds it), write it back as the live
-            # engine.json so the resume bookkeeping below, and the daemon's
-            # single-slot observability, both see a live flow again.
-            active = persistence.load_flow()
-            if active is None or active.flow_id != flow.flow_id:
-                persistence.save_flow(flow)
+            # A COMPLETED flow is terminal and must not be resumed, regardless of
+            # whether it came from the active engine.json or a stale per-flow
+            # snapshot under se3/state/resumable/. This mirrors the
+            # daemon/server/frontend completed-flow guard so the CLI resume path
+            # agrees with the rest of the stack.
+            if flow.status == FlowStatus.COMPLETED:
+                display_error(
+                    f"Flow '{flow_id}' is already completed and cannot be resumed"
+                )
+                return 1
 
             # Detect and handle resume of a RUNNING or FAILED step
             current_step = flow.state.get_current_step()

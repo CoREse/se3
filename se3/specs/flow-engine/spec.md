@@ -1362,6 +1362,34 @@ The flow engine SHALL persist the run state to a JSON file (`se3/state/engine.js
 - **AND** enum values (e.g. `StepStatus`) MUST be converted to their string `.value` before storing
 - **AND** `json.dumps` calls that serialize step outputs SHOULD use `default=str` as a defensive fallback, consistent with `persistence.py`
 
+### Requirement: Per-Flow Resumable State Persistence
+
+The flow engine SHALL persist a **per-`flow_id` resumable snapshot** alongside the single-slot `se3/state/engine.json`, so that a paused/interrupted/failed flow's recoverable state is not lost when a subsequent `se3 run` overwrites the single engine slot. The snapshot is the durable backing for resuming any flow that meets the flow-semantic resumable criterion (see the session-protocol *Resumption of Failed Flows* requirement) even after another flow has run.
+
+**Storage and lifecycle:**
+- The snapshot is written to `se3/state/resumable/<flow_id>.json` (a directory dedicated to recoverable, not-yet-completed flows — deliberately separate from `se3/state/archive/`, whose `archived` semantics mean "terminal / completed snapshot" and which the frontend and server treat as non-resumable). Existence of a `se3/state/resumable/<flow_id>.json` file means "this flow has not completed normally and is resumable".
+- Snapshot writes and removals converge at the single `PersistenceManager.save_flow` point — the sole sink through which every pause / interruption / failure / step-advance persist passes — so a snapshot is written at every non-`COMPLETED` save and no exception branch in `run.py` needs to write it piecemeal; when a process is killed mid-flow, the last `save_flow` has already left a snapshot.
+- On a `save_flow` whose `FlowStatus` is `COMPLETED`, the per-flow snapshot is **deleted**; otherwise it is written/updated. A normally completed flow therefore leaves no resumable snapshot and never surfaces a Resume entry.
+- The snapshot stores the complete `FlowInstance` (the same serialized form as `engine.json`) and is written atomically (temp file + rename) like the engine state.
+- The `PersistenceManager` exposes `save_resumable_snapshot` / `load_resumable_snapshot` / `clear_resumable_snapshot` / `list_resumable_snapshots` for the resume-by-`flow_id` path (loaded back and written into the active `engine.json`) and for the daemon aggregator / history index enumeration.
+
+#### Scenario: Snapshot is written when a flow pauses or is interrupted
+- **GIVEN** a flow that pauses (user interjection / awaiting input), is interrupted mid-step, or fails
+- **WHEN** `PersistenceManager.save_flow` persists the non-`COMPLETED` state
+- **THEN** `se3/state/resumable/<flow_id>.json` is written/updated atomically with the full `FlowInstance`
+- **AND** it survives a later `se3 run` that overwrites the single-slot `engine.json`
+
+#### Scenario: Snapshot is cleared on normal completion
+- **GIVEN** a flow that reaches `FlowStatus.COMPLETED`
+- **WHEN** `save_flow` persists the completed state
+- **THEN** any `se3/state/resumable/<flow_id>.json` for that flow is removed
+- **AND** the completed flow exposes no Resume entry in the CLI or web console
+
+#### Scenario: Resume loads the per-flow snapshot when the engine slot was overwritten
+- **GIVEN** `se3/state/engine.json` describes a different flow than the requested `<flow_id>` but `se3/state/resumable/<flow_id>.json` exists
+- **WHEN** `se3 run --resume --flow-id <flow_id>` runs
+- **THEN** the snapshot is loaded, written back as the active `engine.json`, and execution resumes from the existing breakpoint
+
 ### Requirement: Inter-Step Input Passing
 
 The flow engine SHALL automatically construct step inputs, passing the outputs of preceding steps to subsequent steps.

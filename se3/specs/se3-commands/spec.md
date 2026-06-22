@@ -523,9 +523,18 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 only from `se3/history/{flow_id}/` (no engine/archive record carrying an explicit
 `task_description`), the displayed title is recomputed from the flow's first
 `*.jsonl` file by `PersistenceManager.extract_history_summary`. The extractor
-recovers the **user's original input** rather than the raw system-prompt opener,
-following a three-tier priority that mirrors the web console's chat-history user
-bubble (`splitUserPromptByMarker`):
+first performs a **bounded forward scan** over the leading records of that
+`*.jsonl`, skipping records that carry no user content — `step_started` /
+`step_completed` / `step_failed` / `stream_progress` and other event-record
+envelopes, plus any record whose `role` is not `user` or whose `content` is empty
+— to locate the **first record that actually carries user content**, because the
+genuine task text frequently sits not on the literal first line (which may be a
+`step_started` event) but a few records later. Reading only the first line
+returned an empty title whenever the opener was an event record; the forward scan
+recovers the title for **all** such sessions, not just interrupted ones. Onto the
+located user-content record the extractor then recovers the **user's original
+input** rather than the raw system-prompt opener, following a three-tier priority
+that mirrors the web console's chat-history user bubble (`splitUserPromptByMarker`):
 
 1. The user's literal input delimited by the shared `USER_CONTENT` sentinel
    markers, extracted via `prompt_markers.extract_user_content` (which reuses the
@@ -534,10 +543,10 @@ bubble (`splitUserPromptByMarker`):
    layout, is treated as "no user content" and falls through to the next tier.
 2. Otherwise the embedded `Task description:\s*-+\s*(.*?)\s*-+` block (covering the
    first-step-not-discovery `se3 run "task"` flow).
-3. Otherwise the raw first-line content as a final fallback.
+3. Otherwise the located record's raw content as a final fallback.
 
 The CLI clips the resulting title to 100 characters with an ellipsis. The same
-three-tier priority is shared with the daemon→web console title extractor
+forward-scan + three-tier priority is shared with the daemon→web console title extractor
 (`history.py::_extract_history_summary`, see the base spec), so the CLI and the web
 history list show consistent titles. Because the title is computed live at
 index-build time and `task_description` is not persisted to `_meta.json`, existing
@@ -556,6 +565,16 @@ history flows pick up the corrected title with no data migration.
 - **THEN** the row's task-description title is the user's original input (the
   marker-delimited middle segment), NOT the truncated system-prompt opener
 - **AND** the title is clipped to 100 characters with an ellipsis when longer
+
+#### Scenario: History-only title skips leading event records to the user's prompt
+- **GIVEN** a history-only flow whose first `*.jsonl` opens with one or more
+  content-less event records (e.g. a `step_started` envelope) and carries the
+  user's prompt on a later record
+- **WHEN** the user runs `se3 history` (or `se3 history list`)
+- **THEN** the bounded forward scan skips the leading event records and the row's
+  task-description title is recovered from the first user-content record (via the
+  three-tier priority), NOT left empty
+- **AND** this holds for any such session regardless of whether it was interrupted
 
 #### Scenario: History-only title falls back to Task description block then raw content
 - **GIVEN** a history-only flow whose first-line prompt has no `USER_CONTENT`
@@ -609,7 +628,8 @@ history flows pick up the corrected title with no data migration.
 #### Scenario: Restore a flow
 - **WHEN** user runs `se3 history restore <flow_id>`
 - **THEN** delegates to `se3 run --resume --flow-id <flow_id>`
-- **AND** the supplied `<flow_id>` is validated against the union of active, archived, and history-only flows; an exact match wins, otherwise prefix matching is attempted
+- **AND** the supplied `<flow_id>` is validated against the union of active, archived, history-only, and per-flow resumable-snapshot (`se3/state/resumable/<flow_id>.json`) flows; an exact match wins, otherwise prefix matching is attempted
+- **AND** a flow that exists *only* as a resumable snapshot (its `engine.json` having been overwritten by a later `se3 run`) is therefore a valid restore/resume candidate, so a paused/interrupted flow can still be resumed by `flow_id` after another flow has run
 - **AND** when the prefix matches multiple flows the command lists the candidates and exits non-zero without delegating
 - **AND** when no exact or unambiguous prefix match exists the command prints `Flow '<flow_id>' not found.` to stderr and exits non-zero
 

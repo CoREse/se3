@@ -546,6 +546,11 @@ The interactive resume flow SHALL treat FAILED flows as resumable in addition to
 - The resume picker (`_select_flow_to_resume` in `src/se3/commands/run.py`) filters out only flows with `FlowStatus.COMPLETED`. Any other status — including `FAILED` and interrupted states — is included in the list of resumable flows.
 - When exactly one resumable flow is found and it is FAILED, the picker labels it as "failed" and offers a "Retry failed flow" action instead of the usual "Resume this flow" action.
 - When multiple resumable flows are listed, FAILED flows are tagged with a `[FAILED]` marker in the choice list so the user can distinguish them from interrupted flows.
+- The picker candidates also include flows that exist **only** as a per-flow resumable snapshot (`se3/state/resumable/<flow_id>.json`, see the flow-engine *Per-Flow Resumable State Persistence* requirement) whose single-slot `engine.json` was overwritten by a later `se3 run`, so a paused/interrupted flow is not silently dropped from the resume list once another flow has run.
+
+**Resumable Criterion (flow-semantic):** A flow SHALL be treated as resumable whenever it has **not** reached a normal `COMPLETED` and a valid intermediate state still exists for it, independent of any particular storage slot. This covers three classes: (a) a flow **paused** for a user interjection / awaiting input (`PAUSED`); (b) a flow that **exited mid-flow / was interrupted** (a non-normal termination — including a process killed while in the `discovery` or any other step — whose persisted status is typically `RUNNING`); and (c) a flow **aborted on error** whose state is still recoverable (`FAILED`). Only a normally `COMPLETED` flow is non-resumable. The judgement is by flow semantics, not by which on-disk artifact happens to hold the state.
+
+**Resume-by-`flow_id` via per-flow snapshot:** `se3 run --resume --flow-id <id>` SHALL NOT depend solely on the single-slot `se3/state/engine.json` (which a subsequent `se3 run` overwrites). When `engine.json` is absent or describes a different `flow_id` than the requested one, the resume path SHALL fall back to the per-flow resumable snapshot at `se3/state/resumable/<flow_id>.json`: it locates and loads that snapshot, writes it back as the active `engine.json`, and then resumes from the existing breakpoint via the same `RUNNING` / `FAILED` / `PAUSED` retry logic below. A request that resolves to neither a matching `engine.json` nor a snapshot, or that resolves to a normally `COMPLETED` flow, is rejected by the uniform completed-only guard. This makes every flow meeting the **Resumable Criterion** above resumable by `flow_id` even after another flow has run and overwritten the single engine slot. The web-console Resume entry (`POST /api/flows/{flow_id}/resume` → daemon `spawner.resume`) drives this same `--resume --flow-id` path.
 
 **Retry-from-Breakpoint Logic:**
 - On resume, if the current step has `StepStatus.FAILED`, the step is reset to `StepStatus.PENDING` and the flow status is reset to `FlowStatus.RUNNING`.
@@ -589,6 +594,13 @@ This mirrors the analogous logic for resuming an interrupted step (same `inputs[
 - **AND** the step model's `retry_count` is reset to `0`
 - **AND** `flow.status` is NOT modified (it was already `RUNNING`)
 - **AND** the prepared state is persisted before the step re-runs
+
+#### Scenario: Resume an overwritten flow by flow_id from its per-flow snapshot
+- **GIVEN** a flow was paused or interrupted (not `COMPLETED`), then another `se3 run` overwrote `se3/state/engine.json`
+- **AND** the original flow's state survives only as `se3/state/resumable/<flow_id>.json`
+- **WHEN** the user (or the web-console Resume entry) invokes `se3 run --resume --flow-id <flow_id>`
+- **THEN** the resume path loads the per-flow snapshot, writes it back as the active `engine.json`, and resumes from the existing breakpoint via the `RUNNING` / `FAILED` / `PAUSED` retry logic
+- **AND** a `flow_id` that resolves to a normally `COMPLETED` flow is rejected by the completed-only guard
 
 ### Requirement: Loop Mode
 

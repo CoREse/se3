@@ -139,10 +139,15 @@ class PersistenceManager:
     def load_resumable_snapshot(self, flow_id: str) -> Optional[FlowInstance]:
         """Load the per-flow resumable snapshot for ``flow_id``.
 
+        The snapshot's embedded ``flow_id`` MUST match the requested ``flow_id``;
+        a snapshot whose payload describes a different flow (a stale, misnamed,
+        or operator-created artifact) is rejected and treated as not found,
+        rather than silently resuming the wrong flow as the live engine.json.
+
         Returns:
-            The reconstructed FlowInstance, or None when no (readable) snapshot
-            exists. Corruption is tolerated by returning None rather than
-            raising.
+            The reconstructed FlowInstance, or None when no (readable, matching)
+            snapshot exists. Corruption is tolerated by returning None rather
+            than raising.
         """
         snapshot_file = self.resumable_dir / f"{flow_id}.json"
         if not snapshot_file.exists():
@@ -150,9 +155,19 @@ class PersistenceManager:
         try:
             content = snapshot_file.read_text(encoding="utf-8")
             data = json.loads(content)
-            return FlowInstance.from_dict(data)
+            flow = FlowInstance.from_dict(data)
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             return None
+        if flow.flow_id != flow_id:
+            logger.warning(
+                "Resumable snapshot %s contains mismatched flow_id %r (requested %r); "
+                "treating as not found",
+                snapshot_file,
+                flow.flow_id,
+                flow_id,
+            )
+            return None
+        return flow
 
     def clear_resumable_snapshot(self, flow_id: str) -> None:
         """Remove the per-flow resumable snapshot for ``flow_id`` (best effort)."""
@@ -176,9 +191,23 @@ class PersistenceManager:
         for snapshot_file in sorted(self.resumable_dir.glob("*.json")):
             try:
                 data = json.loads(snapshot_file.read_text(encoding="utf-8"))
-                flows.append(FlowInstance.from_dict(data))
+                flow = FlowInstance.from_dict(data)
             except (json.JSONDecodeError, KeyError, ValueError, OSError):
                 continue
+            # Only surface a snapshot whose embedded flow_id matches its
+            # filename (resumable/<flow_id>.json). A mismatched payload is a
+            # stale/misnamed/operator-created artifact that the load/resume
+            # path (load_resumable_snapshot) would reject, so advertising it
+            # here would offer a resume entry that can never actually resume.
+            if flow.flow_id != snapshot_file.stem:
+                logger.warning(
+                    "Resumable snapshot %s contains mismatched flow_id %r; "
+                    "skipping (cannot be resumed by filename)",
+                    snapshot_file,
+                    flow.flow_id,
+                )
+                continue
+            flows.append(flow)
         return flows
 
     def load_flow_by_id(self, flow_id: str) -> Optional[FlowInstance]:

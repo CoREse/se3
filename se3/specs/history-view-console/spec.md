@@ -36,10 +36,17 @@ user can recover a stalled run straight from the history list or a session's
 detail without dropping to the CLI. The entry's visibility is governed by the
 pure `isFlowResumable(flow)` predicate, which is the frontend mirror of the
 server's authoritative `ServerState.is_flow_resumable` check (see the `base`
-spec's *Server Modules* requirement): a flow qualifies **only** when its status
-is `FAILED` or `PAUSED` and it is **not** archived/history-only (a `source` of
-`archived` or `history` disqualifies it, because such snapshots have no live
-`engine.json` to resume against). `RUNNING` / `INIT` / `RECOVERING` (already
+spec's *Server Modules* requirement). The predicate's **primary signal is the
+authoritative `flow.resumable` flag** computed by the daemon/server from the
+flow's semantic state (see the daemon *Daemon Modules* `FlowSnapshot.resumable`
+and the flow-engine *Per-Flow Resumable State Persistence* requirements): when
+`flow.resumable === true` the flow qualifies regardless of its `source`, so a
+paused/interrupted flow that is persisted as a per-flow resumable snapshot — and
+would otherwise have degraded to a `history`-only entry — is no longer hidden.
+As a backward-compatible **fallback** for payloads lacking the flag, the prior
+rule still applies: a flow qualifies when its status is `FAILED` or `PAUSED` and
+it is **not** archived/history-only (a `source` of `archived` or `history`
+disqualifies it under the fallback). `RUNNING` / `INIT` / `RECOVERING` (already
 in-progress) and `COMPLETED` (terminal) flows show no Resume entry.
 
 Activating the entry POSTs `POST /api/flows/{flow_id}/resume`; the server
@@ -55,10 +62,19 @@ live flow, never overwrites an active flow by restoring an archived snapshot.
 #### Scenario: Resume entry shown only for directly-resumable flows
 - **GIVEN** the history surface lists flows in assorted statuses
 - **WHEN** the list / detail is rendered
-- **THEN** a Resume entry appears only for flows that are `FAILED` or `PAUSED`
-  and not archived/history-only (`isFlowResumable` returns true)
-- **AND** no Resume entry appears for `RUNNING`, `INIT`, `RECOVERING`,
-  `COMPLETED`, or archived/history-only flows
+- **THEN** a Resume entry appears for any flow whose authoritative `resumable`
+  flag is true (`isFlowResumable` returns true), and — under the fallback for
+  flag-less payloads — for `FAILED` or `PAUSED` flows that are not
+  archived/history-only
+- **AND** no Resume entry appears for `RUNNING`, `INIT`, `RECOVERING`, or
+  `COMPLETED` flows
+
+#### Scenario: Resume entry shown for a persisted paused/interrupted flow degraded to history
+- **GIVEN** a paused or interrupted flow that is persisted as a per-flow
+  resumable snapshot and arrives in the history list carrying `resumable: true`
+- **WHEN** the history list / detail is rendered
+- **THEN** the Resume entry appears even though the flow's `source` is `history`,
+  because `isFlowResumable` honors the authoritative `resumable` flag
 
 #### Scenario: Activating Resume dispatches a resume request and is debounced
 - **GIVEN** a resumable flow's Resume entry is visible

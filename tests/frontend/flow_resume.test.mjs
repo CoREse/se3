@@ -108,6 +108,16 @@ check("resumable=true wins over archived/history source exclusion", () => {
   );
 });
 
+check("completed flow is never resumable even with resumable=true flag", () => {
+  // A stale completed snapshot may carry resumable=true; the completed guard
+  // takes precedence (mirrors ServerState.is_flow_resumable + the daemon
+  // resume validator, which rejects a COMPLETED flow).
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "completed", resumable: true }),
+    false,
+  );
+});
+
 check("resumable not strictly true falls back to legacy heuristic", () => {
   // completed + resumable falsy -> not resumable
   assert.equal(

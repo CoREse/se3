@@ -141,6 +141,25 @@ def test_aggregator_completed_active_flow_not_resumable(tmp_path: Path) -> None:
     assert len(status.flows) == 1
 
 
+def test_aggregator_stale_completed_snapshot_not_resumable(tmp_path: Path) -> None:
+    """A stale completed resumable snapshot is ignored, not surfaced resumable.
+
+    If ``clear_resumable_snapshot`` failed (or an operator/test artifact
+    remains), a ``completed`` snapshot can linger under ``se3/state/resumable/``.
+    The aggregator must NOT advertise it as resumable — the daemon resume
+    validator rejects a COMPLETED flow — so it is dropped entirely.
+    """
+    _write_engine(tmp_path, "flow_new", "running")
+    _write_resumable(tmp_path, "flow_old_done", "completed")
+
+    status = _aggregator_for(tmp_path).get_snapshot()
+    flows = {f.flow_id: f for f in status.flows}
+
+    # The stale completed snapshot produced no phantom resumable flow.
+    assert "flow_old_done" not in flows
+    assert set(flows) == {"flow_new"}
+
+
 def test_aggregator_resumable_snapshot_to_dict_carries_flag(tmp_path: Path) -> None:
     """The resumable flag round-trips through FlowSnapshot.to_dict."""
     _write_engine(tmp_path, "flow_new", "running")
@@ -219,6 +238,25 @@ def test_history_index_completed_not_resumable(tmp_path: Path) -> None:
     assert by_id["flow_done"].source == "active"
 
 
+def test_history_index_stale_completed_snapshot_not_resumable(
+    tmp_path: Path,
+) -> None:
+    """A stale completed snapshot does not index as a resumable source.
+
+    With only a completed snapshot and a history dir, the flow degrades to a
+    plain non-resumable history-only row rather than a phantom resumable one.
+    """
+    _write_resumable(tmp_path, "flow_old_done", "completed")
+    _write_history_dir(tmp_path, "flow_old_done")
+
+    metas = _reader_for(tmp_path).build_index()
+    by_id = {m.flow_id: m for m in metas}
+
+    assert "flow_old_done" in by_id
+    assert by_id["flow_old_done"].source == "history"
+    assert by_id["flow_old_done"].resumable is False
+
+
 def test_history_index_active_wins_over_resumable_snapshot(tmp_path: Path) -> None:
     """When engine.json still points at the flow, the active meta wins (deduped)."""
     _write_engine(tmp_path, "flow_a", "paused")
@@ -295,6 +333,26 @@ def test_server_is_flow_resumable_flag_completed_not_resumable() -> None:
         await state.update_status(
             "m1",
             _server_snapshot([{"flow_id": "f1", "status": "completed"}]),
+        )
+        assert await state.is_flow_resumable("f1") is None
+
+    asyncio.run(scenario())
+
+
+def test_server_is_flow_resumable_completed_flag_ignored() -> None:
+    """A completed flow is non-resumable even if a stale resumable=True leaks in.
+
+    The completed guard takes precedence over the authoritative flag, mirroring
+    the daemon resume validator which rejects a COMPLETED flow.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            _server_snapshot(
+                [{"flow_id": "f1", "status": "completed", "resumable": True}]
+            ),
         )
         assert await state.is_flow_resumable("f1") is None
 

@@ -589,6 +589,20 @@ class DaemonHistoryReader:
                 flow_id = str(sdata.get("flow_id") or "")
                 if not flow_id or flow_id in seen:
                     continue
+                # The embedded flow_id MUST match the snapshot filename
+                # (resumable/<flow_id>.json); the load/resume path is keyed by
+                # filename, so a mismatched/misnamed payload would advertise a
+                # resume entry that can never actually resume. Skip it without
+                # claiming the flow_id so its real history-only row can surface.
+                if flow_id != snap_file.stem:
+                    continue
+                # A stale ``completed`` snapshot (e.g. clear_resumable_snapshot
+                # failed, or an operator/test artifact) must not be advertised
+                # as resumable — the daemon resume validator rejects a COMPLETED
+                # flow. Skip it without claiming the flow_id, so the flow can
+                # still degrade to a normal history-only row below.
+                if not _is_resumable_status(str(sdata.get("status") or "")):
+                    continue
                 seen.add(flow_id)
                 metas.append(
                     self._meta_from_engine(

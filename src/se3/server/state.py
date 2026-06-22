@@ -557,14 +557,22 @@ class ServerState:
         ``running``) or, as a backward-compatible fallback for an older daemon
         that omits the flag, its status is in :data:`RESUMABLE_STATUSES`.
         Returns ``None`` when neither holds — the caller maps ``None`` to 404.
+
+        A ``completed`` status is terminal-and-done and is never resumable,
+        even if a stale snapshot mistakenly carries ``resumable=True``: the
+        daemon resume validator rejects a COMPLETED flow, so honoring the flag
+        here would let the UI dispatch a resume the daemon then bounces. The
+        completed guard therefore takes precedence over the flag.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
             return None
         machine_id, flow = result
+        status = str(flow.get("status") or "").lower()
+        if status == "completed":
+            return None
         if flow.get("resumable"):
             return machine_id, flow
-        status = str(flow.get("status") or "").lower()
         if status not in self.RESUMABLE_STATUSES:
             return None
         return machine_id, flow

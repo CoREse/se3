@@ -341,7 +341,25 @@ def _archive_session(project_root: Path) -> bool:
 
     pm = PersistenceManager(project_root)
     if pm.state_file.exists():
+        # Capture the flow_id before archiving so we can also drop the per-flow
+        # resumable snapshot. A salvaged flow has been dispositioned (changes
+        # committed, unfinished work turned into issues, session archived) and
+        # MUST NOT remain resumable; mirroring save_flow's clear-on-completion
+        # keeps the daemon STATUS_UPDATE channel (which seeds its dedup set only
+        # from active engine.json flow_ids) and the history-index channel
+        # consistent — otherwise the archived flow would still carry a lingering
+        # resumable/<flow_id>.json and surface a Resume button in one view but
+        # not the other.
+        flow_id = None
+        try:
+            flow = pm.load_flow()
+            if flow is not None:
+                flow_id = flow.flow_id
+        except Exception:
+            flow_id = None
         pm.clear_state()
+        if flow_id:
+            pm.clear_resumable_snapshot(flow_id)
         return True
     return False
 

@@ -235,51 +235,93 @@ class Daemon:
     ) -> SpawnedProcess:
         """Resume a paused/interrupted flow (entry point for remote requests).
 
-        The daemon validates that the local ``engine.json`` describes the
-        requested *flow_id* and that the flow is in a directly-resumable
-        status (FAILED or PAUSED). A live ``se3 run`` process for the same
-        project root blocks the resume to avoid double-spawn.
+        The daemon locates the requested *flow_id* by the same per-flow lookup
+        the CLI ``se3 run --resume --flow-id`` path uses: it prefers the active
+        ``engine.json`` when it still describes the flow, and otherwise falls
+        back to the per-flow resumable snapshot
+        (``se3/state/resumable/<flow_id>.json``), which survives a later run
+        overwriting the single-slot ``engine.json``. Any flow that did not
+        finish normally is resumable — COMPLETED is the only terminal status
+        that is rejected; FAILED / PAUSED / RUNNING-interrupted / RECOVERING /
+        INIT snapshots are all permitted. A double-spawn is blocked only when a
+        live process is actually running *this* flow (a later flow B running in
+        the same project root must not block resuming an earlier interrupted
+        flow A).
 
         Raises :class:`ValueError` when the resume is not permitted (the
         caller surfaces the message as a protocol error).
         """
         root = Path(project_root).resolve() if project_root else Path.cwd()
-        engine_json = root / "se3" / "state" / "engine.json"
-        try:
-            data = json.loads(engine_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise ValueError(
-                f"Cannot read engine.json under {root}: {exc}"
-            ) from exc
+        state_dir = root / "se3" / "state"
+        engine_json = state_dir / "engine.json"
 
-        local_flow_id = str(data.get("flow_id") or "")
-        if not local_flow_id:
-            raise ValueError(f"No flow_id in engine.json under {root}")
-        if local_flow_id != flow_id:
+        # Locate the flow by id. Prefer the active engine.json when it holds
+        # the requested flow; otherwise fall back to the resumable snapshot so
+        # a flow whose engine.json slot was overwritten by a later run can
+        # still be resumed.
+        data: Optional[Dict[str, Any]] = None
+        try:
+            engine_data = json.loads(engine_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            engine_data = None
+        if engine_data is not None and str(engine_data.get("flow_id") or "") == flow_id:
+            data = engine_data
+        else:
+            snapshot_file = state_dir / "resumable" / f"{flow_id}.json"
+            try:
+                snapshot_data = json.loads(snapshot_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                snapshot_data = None
+            # The snapshot's embedded flow_id MUST match the requested id; a
+            # snapshot whose payload describes a different flow (stale, misnamed,
+            # or operator-created artifact) is rejected so the resume preflight
+            # never authorizes resuming the wrong flow.
+            if (
+                snapshot_data is not None
+                and str(snapshot_data.get("flow_id") or "") == flow_id
+            ):
+                data = snapshot_data
+            elif snapshot_data is not None:
+                logger.warning(
+                    "Resumable snapshot %s contains mismatched flow_id %r "
+                    "(requested %r); treating as not found",
+                    snapshot_file,
+                    snapshot_data.get("flow_id"),
+                    flow_id,
+                )
+
+        if data is None:
             raise ValueError(
-                f"Flow ID mismatch: requested {flow_id!r} but engine.json "
-                f"describes {local_flow_id!r}"
+                f"Flow {flow_id!r} not found in engine.json or resumable "
+                f"snapshots under {root}"
             )
 
         status = str(data.get("status") or "").upper()
-        # Only FAILED and PAUSED flows are directly resumable.  RUNNING
-        # flows already have a live process; COMPLETED flows are done;
-        # INIT/RECOVERING are transient and not meaningful to resume remotely.
-        _DIRECTLY_RESUMABLE = {"FAILED", "PAUSED"}
-        if status not in _DIRECTLY_RESUMABLE:
+        # COMPLETED is the only terminal status that is never resumable. Every
+        # other status represents a flow that did not finish normally and
+        # retains valid intermediate state, including a RUNNING flow that was
+        # interrupted (its saved status never advanced past running).
+        if status == "COMPLETED":
             raise ValueError(
-                f"Flow {flow_id} is {status}; only "
-                f"{sorted(_DIRECTLY_RESUMABLE)} flows can be resumed"
+                f"Flow {flow_id} is COMPLETED and cannot be resumed"
             )
 
-        # Guard against double-spawn.
+        # Guard against double-spawn: refuse to resume into a project root that
+        # already has ANY live ``se3 run`` process. The flow engine persists to
+        # a single-slot ``se3/state/engine.json`` per project, so resuming flow
+        # A while a different live process B is writing that file would race two
+        # writers on the same engine.json (B's archival/attribution would read
+        # A's data). Matching by project_root — not flow_id — mirrors the
+        # sibling ``_resume_paused_flow`` guard. Resuming an earlier interrupted
+        # flow after the later flow has finished is still permitted, because no
+        # live process remains in the root.
         for record in self.supervisor.flows:
             if record.project_root == str(root) and DaemonSupervisor.is_alive(
                 record.pid
             ):
                 raise ValueError(
-                    f"Flow {flow_id} already has a live process "
-                    f"(pid={record.pid}); cannot resume"
+                    f"Project {root} already has a live process "
+                    f"(pid={record.pid}); cannot resume flow {flow_id}"
                 )
 
         spawned = self.spawner.resume(str(flow_id), project_root=str(root))

@@ -1,0 +1,7 @@
+id: '211'
+description: worktree的run在webui里不显示discovery之后的步骤。并且，当卡在merge回步骤的时候，也显示COMPLETED，而实际上并没有merge回去，也不显示在等待merge中。
+status: open
+tags: []
+source: human
+created_at: '2026-06-22T16:11:04.483867'
+updated_at: '2026-06-22T16:11:04.483867'

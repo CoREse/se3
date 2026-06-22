@@ -63,6 +63,27 @@ def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
     return payload
 
 
+def _make_resumable_snapshot(root, *, flow_id, status="running", index=2):
+    """Write a per-flow resumable snapshot under se3/state/resumable/."""
+    snap_dir = root / "se3" / "state" / "resumable"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "flow_id": flow_id,
+        "task_description": "Implement feature X",
+        "task_type": "feature",
+        "status": status,
+        "updated_at": "2026-05-18T12:00:00",
+        "state": {
+            "current_step_id": "step-3",
+            "current_step_index": index,
+            "selected_steps": ["analyze", "plan", "implement", "test"],
+            "steps": {"step-3": {"step_type": "implement"}},
+        },
+    }
+    (snap_dir / f"{flow_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
 class _FakeClient:
     """Minimal stand-in for DaemonClient exposing connected/last_error."""
 
@@ -634,28 +655,67 @@ class TestDaemonLifecycle:
         with pytest.raises(ValueError, match="COMPLETED"):
             daemon.request_resume("flow-done", project_root=str(proj))
 
-    def test_request_resume_rejects_running_flow(self, fake_se3, tmp_path):
-        """request_resume raises ValueError for RUNNING flows."""
+    def test_request_resume_resumes_interrupted_running_flow(self, fake_se3, tmp_path):
+        """An interrupted flow whose saved status is RUNNING is resumable.
+
+        The flow was interrupted mid-step (e.g. in discovery) so its persisted
+        status never advanced past ``running``; with no live process it must
+        still be resumable from its breakpoint.
+        """
         proj = tmp_path / "proj"
         _make_engine_json(proj, flow_id="flow-run", status="running")
         daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
-        with pytest.raises(ValueError, match="RUNNING"):
-            daemon.request_resume("flow-run", project_root=str(proj))
+        spawned = daemon.request_resume("flow-run", project_root=str(proj))
+        assert "--resume" in spawned.args
+        assert "flow-run" in spawned.args
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
 
-    def test_request_resume_rejects_flow_id_mismatch(self, fake_se3, tmp_path):
-        """request_resume raises ValueError when flow_id doesn't match engine.json."""
+    def test_request_resume_loads_snapshot_when_engine_overwritten(
+        self, fake_se3, tmp_path
+    ):
+        """A flow whose engine.json slot was overwritten resumes via snapshot.
+
+        Flow A is interrupted while running, then flow B starts and overwrites
+        engine.json. Resuming A must fall back to the per-flow resumable
+        snapshot rather than rejecting on a flow-id mismatch.
+        """
+        proj = tmp_path / "proj"
+        # engine.json now describes flow B (the later run).
+        _make_engine_json(proj, flow_id="flow-b", status="running")
+        # flow A's resumable snapshot survives, saved while it was running.
+        _make_resumable_snapshot(proj, flow_id="flow-a", status="running")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        spawned = daemon.request_resume("flow-a", project_root=str(proj))
+        assert "--resume" in spawned.args
+        assert "flow-a" in spawned.args
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_request_resume_rejects_completed_snapshot(self, fake_se3, tmp_path):
+        """A COMPLETED snapshot flow is never resumable."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="running")
+        _make_resumable_snapshot(proj, flow_id="flow-a", status="completed")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        with pytest.raises(ValueError, match="COMPLETED"):
+            daemon.request_resume("flow-a", project_root=str(proj))
+
+    def test_request_resume_rejects_unknown_flow(self, fake_se3, tmp_path):
+        """request_resume raises ValueError when the flow is found nowhere."""
         proj = tmp_path / "proj"
         _make_engine_json(proj, flow_id="flow-real", status="paused")
         daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
-        with pytest.raises(ValueError, match="mismatch"):
+        with pytest.raises(ValueError, match="not found"):
             daemon.request_resume("flow-wrong", project_root=str(proj))
 
-    def test_request_resume_rejects_missing_engine_json(self, fake_se3, tmp_path):
-        """request_resume raises ValueError when engine.json is absent."""
+    def test_request_resume_rejects_missing_state(self, fake_se3, tmp_path):
+        """request_resume raises ValueError when neither engine.json nor a
+        snapshot exists for the flow."""
         proj = tmp_path / "proj"
         proj.mkdir()
         daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
-        with pytest.raises(ValueError, match="Cannot read engine.json"):
+        with pytest.raises(ValueError, match="not found"):
             daemon.request_resume("flow-x", project_root=str(proj))
 
     def test_request_resume_rejects_live_process(self, fake_se3, tmp_path):
@@ -668,6 +728,30 @@ class TestDaemonLifecycle:
             daemon.supervisor.register(sleeper.pid, str(proj))
             with pytest.raises(ValueError, match="live process"):
                 daemon.request_resume("flow-live", project_root=str(proj))
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=10)
+
+    def test_request_resume_rejects_when_other_flow_live_in_root(
+        self, fake_se3, tmp_path
+    ):
+        """A live process for a *different* flow in the same root blocks resume.
+
+        Flow B runs live in project root R (engine.json holds B). Flow A was
+        interrupted and survives only as a resumable snapshot. Resuming A would
+        race two writers on the single-slot engine.json, so request_resume must
+        refuse — matching by project_root rather than flow_id.
+        """
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="running")
+        _make_resumable_snapshot(proj, flow_id="flow-a", status="running")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        sleeper = _spawn_sleeper(30)
+        try:
+            # Register the live process as flow B in the same root.
+            daemon.supervisor.register(sleeper.pid, str(proj))
+            with pytest.raises(ValueError, match="live process"):
+                daemon.request_resume("flow-a", project_root=str(proj))
         finally:
             sleeper.terminate()
             sleeper.wait(timeout=10)

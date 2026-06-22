@@ -137,6 +137,65 @@ class TestResumeDetection:
     @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_rejects_completed_active_flow(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """A COMPLETED flow in engine.json must not be resumed."""
+        self.flow.status = FlowStatus.COMPLETED
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+
+        with patch("se3.engine.step_renderers.render_step_output"):
+            with patch("se3.commands.run.render_full"):
+                rc = run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-001",
+                )
+
+        assert rc == 1
+        # The completed flow is never dispatched to the state machine.
+        mock_sm.run_step.assert_not_called()
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_rejects_completed_snapshot_flow(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """A stale COMPLETED per-flow snapshot must not be resurrected."""
+        self.flow.status = FlowStatus.COMPLETED
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        # engine.json no longer holds this flow (overwritten by a later run).
+        mock_pm.load_flow.return_value = None
+        # ...but a stale completed snapshot survives under se3/state/resumable/.
+        mock_pm.load_resumable_snapshot.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+
+        with patch("se3.engine.step_renderers.render_step_output"):
+            with patch("se3.commands.run.render_full"):
+                rc = run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-001",
+                )
+
+        assert rc == 1
+        # The stale completed snapshot is never written back as the live flow
+        # and never dispatched.
+        mock_pm.save_flow.assert_not_called()
+        mock_sm.run_step.assert_not_called()
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
     def test_resume_injects_resumed_flag_into_step_inputs(
         self, mock_sm_class, mock_pm_class
     ):

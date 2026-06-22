@@ -556,6 +556,11 @@ const RESUMABLE_STATUSES = ["failed", "paused"];
 function isFlowResumable(flow) {
   if (!flow || typeof flow !== "object") return false;
   if (!flow.flow_id) return false;
+  // A completed flow is terminal-and-done and is never resumable, even if a
+  // stale snapshot mistakenly carries resumable=true: the daemon resume
+  // validator rejects a COMPLETED flow, so the completed guard takes
+  // precedence over the flag (mirrors ServerState.is_flow_resumable).
+  if (String(flow.status || "").toLowerCase() === "completed") return false;
   // Primary signal: the daemon's authoritative resumable flag.
   if (flow.resumable === true) return true;
   // Backward-compatible fallback for daemons that don't supply the flag.

@@ -124,9 +124,12 @@ MUST present a **Resume** control in the flow's detail sidebar so the operator
 can continue the run without leaving the console. Resumability is decided by the
 same pure `isFlowResumable(flow)` predicate used by the history surface (see the
 `history-view-console` *Direct Resume Entry* requirement and the `base` spec's
-*Server Modules* requirement): the Resume control appears **only** for a flow
-whose status is `FAILED` or `PAUSED` and that is not archived/history-only, and
-it is absent for `RUNNING` / `INIT` / `RECOVERING` / `COMPLETED` flows. The
+*Server Modules* requirement): the control appears whenever the authoritative
+`flow.resumable` flag is true (the primary signal, so a persisted
+paused/interrupted/recoverable-error flow is recognized regardless of `source`),
+falling back for flag-less payloads to a flow whose status is `FAILED` or
+`PAUSED` and that is not archived/history-only; it is absent for `RUNNING` /
+`INIT` / `RECOVERING` / `COMPLETED` flows. The
 control reuses the shared `makeResumeButton(flow)` helper, so when the flow is
 not resumable the helper returns nothing and the sidebar renders no Resume
 control at all.
@@ -141,8 +144,9 @@ stalled flow rather than answering a pending interaction.
 #### Scenario: Sidebar shows Resume only for a FAILED or PAUSED resumable flow
 - **GIVEN** a flow is open in `#flow-view`
 - **WHEN** the detail sidebar is rendered
-- **THEN** a Resume control appears only when `isFlowResumable(flow)` is true
-  (status `FAILED` or `PAUSED`, not archived/history-only)
+- **THEN** a Resume control appears whenever `isFlowResumable(flow)` is true —
+  the authoritative `resumable` flag being true, or (fallback) status `FAILED` /
+  `PAUSED` and not archived/history-only
 - **AND** no Resume control is rendered for `RUNNING`, `INIT`, `RECOVERING`, or
   `COMPLETED` flows
 

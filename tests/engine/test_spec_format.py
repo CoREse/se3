@@ -498,7 +498,11 @@ class TestRealSpecFiles:
         # downstream-task constraint, the PreToolUse hook hard guard, and the
         # within-flow spec-diff fallback that together restrict spec writes to
         # update_spec / sync.
-        assert len(parsed.requirements) == 51
+        # 52 after the "Per-Flow Resumable State Persistence" Requirement was
+        # added documenting the se3/state/resumable/<flow_id>.json per-flow
+        # snapshot that keeps a paused/interrupted/failed flow resumable after a
+        # later se3 run overwrites the single-slot engine.json.
+        assert len(parsed.requirements) == 52
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()

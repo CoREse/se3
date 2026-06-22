@@ -62,6 +62,15 @@
 
 
 
+
+## 10.6.0 - 2026-06-22
+
+- Persist a per-flow resumable snapshot at se3/state/resumable/<flow_id>.json on every non-completed save and remove it on completion, so paused, interrupted, or recoverable-error flows survive a later run overwriting the single-slot engine.json
+- Show a Resume button in the webui for any flow that is not normally completed but has recoverable state (paused for user interjection, mid-step exit including discovery, or recoverable error)
+- Support se3 run --resume --flow-id locating and loading the per-flow snapshot back into engine.json to resume an overwritten flow
+- Surface persisted paused/interrupted/failed flows as resumable across the daemon index, server, and frontend via an authoritative resumable flag, while keeping completed flows free of any resume entry
+- Fix empty task descriptions for history-only sessions by forward-scanning past content-less event records (e.g. step_started) to the first real user prompt when extracting titles
+- Keep history display and archival of normally completed flows unchanged
 ## 10.5.1 - 2026-06-18
 
 - Fix WebUI conversation pane freezing after a discovery→analyze step transition, so new step content now appears within seconds without re-entering the session
