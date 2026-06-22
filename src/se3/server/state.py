@@ -171,6 +171,14 @@ class FlowSnapshot:
     # while a synchronous run is queued behind the main-worktree mutex. The flow
     # stays RUNNING; the frontend renders it as RUNNING·waiting-for-lock.
     waiting_for_lock: bool = False
+    # Authoritative resumability signal computed by the daemon aggregator from
+    # the flow's semantic state (a non-completed flow with a valid intermediate
+    # state — including a per-flow snapshot superseded in engine.json). When the
+    # daemon supplies this (the daemon→server protocol carries it), it is the
+    # primary signal both the server's ``is_flow_resumable`` and the frontend's
+    # ``isFlowResumable`` honour; an older daemon that omits it defaults to
+    # ``False`` and the consumers fall back to their legacy status-based logic.
+    resumable: bool = False
 
     @classmethod
     def from_payload(cls, data: Dict[str, Any]) -> "FlowSnapshot":
@@ -191,6 +199,7 @@ class FlowSnapshot:
             pending_calls=list(data.get("pending_calls") or []),
             step_history=list(data.get("step_history") or []),
             waiting_for_lock=bool(data.get("waiting_for_lock", False)),
+            resumable=bool(data.get("resumable", False)),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -209,6 +218,7 @@ class FlowSnapshot:
             "pending_calls": self.pending_calls,
             "step_history": self.step_history,
             "waiting_for_lock": self.waiting_for_lock,
+            "resumable": self.resumable,
         }
 
 
@@ -541,14 +551,19 @@ class ServerState:
         """Return ``(machine_id, flow_dict)`` when *flow_id* is resumable.
 
         A flow is resumable when it is owned by *owner* (or the unscoped
-        admin view), its status is in :data:`RESUMABLE_STATUSES`, and the
-        owning machine is currently connected.  Returns ``None`` when any of
-        these conditions fails — the caller maps ``None`` to 404.
+        admin view) and either the daemon's authoritative ``resumable`` flag is
+        set (the primary signal — covers paused / interrupted / recoverable-error
+        flows surfaced from a per-flow snapshot, whose raw status may still read
+        ``running``) or, as a backward-compatible fallback for an older daemon
+        that omits the flag, its status is in :data:`RESUMABLE_STATUSES`.
+        Returns ``None`` when neither holds — the caller maps ``None`` to 404.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
             return None
         machine_id, flow = result
+        if flow.get("resumable"):
+            return machine_id, flow
         status = str(flow.get("status") or "").lower()
         if status not in self.RESUMABLE_STATUSES:
             return None

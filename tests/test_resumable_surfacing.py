@@ -18,11 +18,13 @@ The negative case — a normally COMPLETED flow has no snapshot and never gains
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from se3.daemon.aggregator import DaemonAggregator
 from se3.daemon.history import DaemonHistoryReader
+from se3.server.state import FlowSnapshot, ServerState
 
 
 # --------------------------------------------------------------------------
@@ -241,3 +243,81 @@ def test_session_meta_to_dict_includes_resumable(tmp_path: Path) -> None:
 
     assert dicts["flow_paused"]["resumable"] is True
     assert dicts["flow_paused"]["source"] == "resumable"
+
+
+# --------------------------------------------------------------------------
+# server.state.FlowSnapshot / ServerState.is_flow_resumable (group G4)
+# --------------------------------------------------------------------------
+
+
+def _server_snapshot(flows: list) -> dict:
+    """Minimal MachineStatus-shaped dict for ServerState.update_status."""
+    return {"hostname": "h", "flows": flows, "issues": []}
+
+
+def test_server_flow_snapshot_resumable_round_trips() -> None:
+    """The resumable flag survives from_payload -> to_dict, defaulting False."""
+    on = FlowSnapshot.from_payload({"flow_id": "f1", "resumable": True})
+    assert on.resumable is True
+    assert on.to_dict()["resumable"] is True
+
+    # Absent flag (older daemon payload) defaults to False.
+    off = FlowSnapshot.from_payload({"flow_id": "f2"})
+    assert off.resumable is False
+    assert off.to_dict()["resumable"] is False
+
+
+def test_server_is_flow_resumable_via_flag_overrides_status() -> None:
+    """resumable=True passes even when raw status is running (interrupted flow)."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            _server_snapshot(
+                [{"flow_id": "f1", "status": "running", "resumable": True}]
+            ),
+        )
+        result = await state.is_flow_resumable("f1")
+        assert result is not None
+        machine_id, flow = result
+        assert machine_id == "m1"
+        assert flow["flow_id"] == "f1"
+
+    asyncio.run(scenario())
+
+
+def test_server_is_flow_resumable_flag_completed_not_resumable() -> None:
+    """A completed flow stays non-resumable even though the flag defaults False."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            _server_snapshot([{"flow_id": "f1", "status": "completed"}]),
+        )
+        assert await state.is_flow_resumable("f1") is None
+
+    asyncio.run(scenario())
+
+
+def test_server_is_flow_resumable_legacy_status_fallback() -> None:
+    """Without the flag, the legacy status∈{failed,paused} fallback still works."""
+    state = ServerState()
+
+    async def scenario():
+        # paused without resumable flag -> resumable via fallback
+        await state.update_status(
+            "m1",
+            _server_snapshot([{"flow_id": "f1", "status": "paused"}]),
+        )
+        assert await state.is_flow_resumable("f1") is not None
+
+        # running without flag -> NOT resumable
+        await state.update_status(
+            "m1",
+            _server_snapshot([{"flow_id": "f2", "status": "running"}]),
+        )
+        assert await state.is_flow_resumable("f2") is None
+
+    asyncio.run(scenario())

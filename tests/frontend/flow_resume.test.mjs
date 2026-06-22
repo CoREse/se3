@@ -88,6 +88,42 @@ check("archived paused flow is not resumable", () => {
 });
 
 // ---------------------------------------------------------------------------
+// isFlowResumable — authoritative `resumable` flag (group G4)
+// ---------------------------------------------------------------------------
+check("resumable=true short-circuits to true even when status is running", () => {
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "running", resumable: true }),
+    true,
+  );
+});
+
+check("resumable=true wins over archived/history source exclusion", () => {
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "running", source: "history", resumable: true }),
+    true,
+  );
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "paused", source: "resumable", resumable: true }),
+    true,
+  );
+});
+
+check("resumable not strictly true falls back to legacy heuristic", () => {
+  // completed + resumable falsy -> not resumable
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "completed", resumable: false }),
+    false,
+  );
+  // truthy-but-not-true values do not short-circuit; legacy logic decides
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "running", resumable: 1 }),
+    false,
+  );
+  // failed + resumable absent -> resumable via legacy fallback
+  assert.equal(app.isFlowResumable({ flow_id: "x", status: "failed" }), true);
+});
+
+// ---------------------------------------------------------------------------
 // isFlowResumable — missing / invalid inputs
 // ---------------------------------------------------------------------------
 check("null flow is not resumable", () => {
