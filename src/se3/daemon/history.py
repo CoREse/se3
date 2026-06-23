@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from .supervisor import resolve_worktree_main_root
 
 logger = logging.getLogger(__name__)
 
@@ -762,6 +763,130 @@ class DaemonHistoryReader:
                 return candidate
         return None
 
+    def _resolve_flow_dirs(
+        self, flow_id: str, project_root: Optional[str]
+    ) -> List[Path]:
+        """Locate *every* ``se3/history/<flow_id>`` directory for *flow_id*.
+
+        Unlike :meth:`_resolve_flow_dir` (which returns a single first-match),
+        this returns an ordered, de-duplicated list of candidate directories so
+        the reader can merge a flow whose history is split across two roots — the
+        classic ``se3 run --worktree`` case where the discovery step ran in the
+        main repo before the fork (writing ``<main>/se3/history/<flow_id>/``) and
+        every later step ran in the worktree (writing
+        ``<worktree>/se3/history/<flow_id>/``, which usually also carries a clone
+        of the discovery file).
+
+        With an authoritative *project_root* — the flow's recorded
+        ``SessionMeta.project_root``, the single source of truth threaded down by
+        the server — the candidate order is:
+
+          1. the authoritative root's directory (highest priority);
+          2. the owning main-repo root reverse-resolved by
+             :func:`resolve_worktree_main_root` (so a worktree flow still picks
+             up the pre-fork discovery written to the main repo).
+
+        Each candidate is admitted only when its directory exists (``is_dir``);
+        a missing / non-worktree root is silently skipped, so a non-worktree or
+        main-repo *project_root* simply yields ``[its own dir]``. Only the
+        genuine worktree↔owning-main-repo pair is merged — an unrelated tracked
+        root that merely happens to carry the same ``flow_id`` (a coincidental
+        decoy) is NOT pulled in, so the authoritative root governs the read
+        rather than whichever root a bare registry scan would hit first.
+
+        When *project_root* is empty the method degrades to the legacy
+        registry-walk heuristic (:meth:`_resolve_flow_dir`), returning the single
+        first-matching directory (or an empty list) for backward compatibility.
+        """
+        if not project_root:
+            legacy = self._resolve_flow_dir(flow_id, None)
+            return [legacy] if legacy is not None else []
+
+        ordered: List[Path] = []
+        seen: Set[Path] = set()
+
+        def _add(root: Optional[Path]) -> None:
+            if root is None:
+                return
+            candidate = root / "se3" / "history" / flow_id
+            try:
+                if not candidate.is_dir():
+                    return
+                resolved = candidate.resolve()
+            except OSError:  # pragma: no cover - defensive
+                return
+            if resolved in seen:
+                return
+            seen.add(resolved)
+            ordered.append(resolved)
+
+        # 1. Authoritative root (single source of truth).
+        try:
+            _add(Path(project_root).resolve())
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        # 2. Owning main-repo root (worktree → main attribution).
+        try:
+            main = resolve_worktree_main_root(project_root)
+        except Exception:  # pragma: no cover - defensive
+            main = None
+        if main:
+            try:
+                _add(Path(main).resolve())
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        return ordered
+
+    @staticmethod
+    def _merge_flow_jsonl(flow_dirs: List[Path]) -> List[Path]:
+        """Merge the per-step history files across *flow_dirs* into one ordered,
+        de-duplicated physical-file list.
+
+        Several candidate ``se3/history/<flow_id>`` directories may hold the
+        *same* physical step filename — most commonly a worktree flow whose
+        pre-fork discovery file was written to the main repo and then cloned into
+        the worktree, so ``01_discovery_xx.jsonl`` exists under both roots. The
+        incremental cursor is keyed by filename, so each filename MUST resolve to
+        exactly ONE physical file or the two copies would collide on the same
+        cursor key. The chosen copy is the most complete one (largest byte
+        size), with ties broken by directory priority (the authoritative root
+        comes first in *flow_dirs*); this keeps the result stable (a given step
+        file is only ever *written* by one root, so the other root's copy is a
+        static pre-fork clone) and loses no records.
+
+        A filename unique to a single root is always included, so a split
+        history — discovery only in the main repo, later steps only in the
+        worktree — is merged in full with no missing step and no duplicate
+        discovery.
+
+        The result is sorted by filename so a step's primary file sorts ahead of
+        its ``*.jsonl.from-<branch>`` sidecars and steps stay in ``NN_`` order,
+        matching :func:`_iter_history_jsonl`'s single-root ordering.
+        """
+        # name -> (priority, size, path); priority = index in flow_dirs (lower
+        # index = higher priority = authoritative root first).
+        chosen: Dict[str, Tuple[int, int, Path]] = {}
+        for priority, flow_dir in enumerate(flow_dirs):
+            for jsonl in _iter_history_jsonl(flow_dir):
+                try:
+                    size = jsonl.stat().st_size
+                except OSError:  # pragma: no cover - defensive
+                    continue
+                prev = chosen.get(jsonl.name)
+                if prev is None:
+                    chosen[jsonl.name] = (priority, size, jsonl)
+                    continue
+                prev_priority, prev_size, _prev_path = prev
+                # More complete (larger) wins; on an exact tie the
+                # higher-priority (authoritative) root's copy wins.
+                if size > prev_size or (
+                    size == prev_size and priority < prev_priority
+                ):
+                    chosen[jsonl.name] = (priority, size, jsonl)
+        return [entry[2] for entry in sorted(chosen.values(), key=lambda e: e[2].name)]
+
     @staticmethod
     def _head_signature(path: Path, offset: int) -> Optional[bytes]:
         """Bounded fingerprint of the file *head* — the first bytes of the prefix.
@@ -925,8 +1050,12 @@ class DaemonHistoryReader:
 
         Args:
             flow_id: The flow whose ``se3/history/<flow_id>`` is read.
-            project_root: Optional root to scope the lookup; when omitted every
-                tracked root is searched.
+            project_root: The flow's authoritative ``SessionMeta.project_root``.
+                Used as the single source of truth for locating the history: the
+                authoritative root plus its owning main repo (and any other
+                registered root carrying this flow) are merged, so a worktree
+                flow split across two roots reads in full. When omitted, the
+                legacy registry-walk first-match heuristic is used.
             cursor: A ``{jsonl-filename: line-count}`` dict. An empty / ``None``
                 cursor yields a ``full`` snapshot; a populated one yields an
                 ``append`` delta of only the lines past the cursor.
@@ -940,15 +1069,21 @@ class DaemonHistoryReader:
         cursor = dict(cursor) if cursor else {}
         mode = HISTORY_MODE_FULL if not cursor else HISTORY_MODE_APPEND
 
-        flow_dir = self._resolve_flow_dir(flow_id, project_root)
-        if flow_dir is None:
+        # Resolve EVERY candidate root for this flow (authoritative root first,
+        # then the owning main repo, then any other registered root) and merge
+        # their per-step files so a worktree flow whose discovery ran in the main
+        # repo before the fork displays in full. ``_merge_flow_jsonl`` de-dups by
+        # physical filename (largest/most-complete copy wins) so the by-filename
+        # cursor never collides between a root's clone of the same step file.
+        flow_dirs = self._resolve_flow_dirs(flow_id, project_root)
+        if not flow_dirs:
             return FlowRead(flow_id=flow_id, mode=mode, records=[], cursor=cursor)
 
         new_cursor: Dict[str, int] = dict(cursor)
         records: List[Dict[str, Any]] = []
         truncated = False
 
-        for jsonl in _iter_history_jsonl(flow_dir):
+        for jsonl in self._merge_flow_jsonl(flow_dirs):
             if truncated:
                 break
             # Merge a step's primary ``*.jsonl`` and its ``*.jsonl.from-<branch>``
