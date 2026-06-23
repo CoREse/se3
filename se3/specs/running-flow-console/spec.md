@@ -672,6 +672,36 @@ dedup — it replaces the held array wholesale and is left exactly as-is.
   re-pull re-delivering the literal same record, same `kind` and `status`) is
   still filtered out, so no record is rendered twice
 
+**Full-snapshot worktree discovery de-dup guard.** The `dedupeAppendRecords`
+path above covers only the **append** branch; a `mode: full` snapshot is adopted
+wholesale by `mergeHistoryResponse` and is NOT routed through it. For a
+worktree-mode flow whose history is split across the main-repo root (where
+discovery ran before the worktree fork) and the worktree root (the later steps
+plus the worktree's OWN clone of discovery), the daemon already merges the two
+roots and de-dups at the physical step-file layer (see the `daemon`
+*Daemon Modules* multi-root merge read resolution), so a correctly-merged
+snapshot carries discovery once. As a **belt-and-suspenders** frontend guard
+against a doubled discovery bubble surviving into a full-snapshot render, the
+view applies the new DOM-free, side-effect-free exported pure function
+`dedupeSnapshotDiscovery(records)` inside `mergeHistoryResponse`'s `mode: full`
+adoption. The guard is scoped **strictly to discovery records** keyed by
+`recordKey`: a second occurrence of a discovery record whose `recordKey` already
+appeared is dropped, while every non-discovery record and the `recordKey`
+identity of the rest of the conversation are passed through untouched, so it can
+never drop a legitimate later-step record. This guard is purely defensive and
+additive — it does not change `dedupeAppendRecords`, `mergeSnapshotWithLiveAppends`,
+the daemon merge, or the WS protocol.
+
+#### Scenario: Merged full snapshot does not render a doubled discovery bubble
+- **GIVEN** a worktree-mode flow whose `GET /api/history/{flow_id}` `mode: full`
+  snapshot — merged by the daemon across the main-repo and worktree roots —
+  nonetheless contains two discovery records sharing the same `recordKey`
+- **WHEN** `mergeHistoryResponse` adopts the full snapshot and runs it through
+  `dedupeSnapshotDiscovery`
+- **THEN** the duplicate discovery record is dropped so discovery renders exactly
+  once, while every later-step record (analyze / plan / implement, etc.) and the
+  rest of the conversation's `recordKey` identity are preserved unchanged
+
 ### Requirement: Reconnect Incremental History Refresh
 
 When the `/ws/ui` channel drops and reconnects while a running flow is open in
