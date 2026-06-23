@@ -5011,6 +5011,44 @@ function dedupeAppendRecords(existing, incoming) {
   return incoming.filter((r) => !seen.has(recordKey(r)));
 }
 
+// Defensive guard against a merged history snapshot that carries the SAME
+// discovery step's records twice. The worktree-mode read path can surface a
+// flow whose history is split across the main-repo root (where discovery ran
+// before the worktree fork) and the worktree root (the later steps plus its own
+// copy of discovery). The daemon merges the two roots and de-dups at the
+// physical step-file layer (see daemon/history.py), so in the normal case no
+// duplicate ever reaches the client. This is a belt-and-suspenders frontend
+// backstop: if a duplicate discovery record nonetheless arrives in a `mode:
+// full` snapshot — which the `mergeHistoryResponse` full path adopts wholesale
+// and which `dedupeAppendRecords` (append-only) does NOT cover — it would
+// render as a doubled discovery bubble. This pass drops a discovery record
+// whose `recordKey` was already seen EARLIER in the same snapshot, keeping the
+// first occurrence and preserving order. It is scoped strictly to discovery
+// records: every non-discovery record passes through untouched (so the later
+// analyze/plan/implement steps and the recordKey identity / incremental cursor
+// of the rest of the conversation are unchanged), and when nothing is dropped
+// the original array reference is returned so the common path is a no-op.
+function dedupeSnapshotDiscovery(records) {
+  if (!Array.isArray(records) || records.length < 2) return records;
+  const seen = new Set();
+  let dropped = false;
+  const out = [];
+  for (const rec of records) {
+    let isDiscovery = false;
+    try {
+      isDiscovery =
+        String((normalizeRecord(rec).stepType) || "").toLowerCase() === "discovery";
+    } catch (_) { isDiscovery = false; }
+    if (isDiscovery) {
+      const key = recordKey(rec);
+      if (seen.has(key)) { dropped = true; continue; }
+      seen.add(key);
+    }
+    out.push(rec);
+  }
+  return dropped ? out : records;
+}
+
 // Build the `GET /api/history/{flow_id}` URL, appending the opaque progress
 // token as the `after` query parameter when one is held so the server can
 // serve an incremental delta. With no progress (first open / after an
@@ -5187,7 +5225,11 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
     ? liveAppends.concat(pendingEchoes)
     : liveAppends;
   return {
-    records: mergeSnapshotWithLiveAppends(records, preserved),
+    // Collapse any duplicate discovery record the merged worktree+main snapshot
+    // may carry (defensive backstop — the daemon already de-dups at the file
+    // layer) before folding in preserved live appends, so a split-root flow
+    // never shows a doubled discovery bubble on the full-replace path.
+    records: mergeSnapshotWithLiveAppends(dedupeSnapshotDiscovery(records), preserved),
     progress,
     render: "full",
   };
@@ -11332,6 +11374,7 @@ if (typeof module !== "undefined" && module.exports) {
     recordKey,
     mergeSnapshotWithLiveAppends,
     dedupeAppendRecords,
+    dedupeSnapshotDiscovery,
     recordSortTs,
     stableMergeByTimestamp,
     historySnapshotUrl,
