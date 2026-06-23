@@ -73,6 +73,11 @@
 - Apply the fix at the core LLMCaller layer so all callers (se3 run, se3 sync, merge) benefit uniformly
 - Clarify the llm-caller spec's rotation-state lifecycle and add scenarios for cross-call/cross-round reset, JSON-continuation non-reset, and independent reset per two-phase phase
 - Add unit tests covering cross-sequence reset, tail-on-last termination, two-phase independent rotation, and JSON-continuation context retention
+- Hide the Resume button for a RUNNING flow whose process is still alive, while keeping it visible for interrupted RUNNING-but-dead flows
+- Return an explicit rejection ('该 flow 仍在运行，无法 resume') instead of a misleading resume_dispatched when resuming a still-running flow
+- Pre-validate POST /api/flows/{id}/resume so unknown or cross-owner flows return 404 and completed flows return 409 ('已完成，无法 resume')
+- Align Resume-button visibility with the daemon's double-spawn guard so the UI never offers a resume that the backend would reject
+- Preserve existing PAUSED, FAILED, and interrupted-RUNNING resume behavior with no regressions
 ## 10.6.0 - 2026-06-22
 
 - Persist a per-flow resumable snapshot at se3/state/resumable/<flow_id>.json on every non-completed save and remove it on completion, so paused, interrupted, or recoverable-error flows survive a later run overwriting the single-slot engine.json

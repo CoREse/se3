@@ -31,7 +31,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .aggregator import DaemonAggregator, MachineStatus
 from .history import DaemonHistoryReader
@@ -175,6 +175,12 @@ class Daemon:
             poll_interval=self.config.poll_interval,
             registry_load=lambda: _read_project_roots(registry_file),
             registry_persist=lambda root: _append_project_root(registry_file, root),
+            # Live-process roots for the RUNNING-flow resumable gate. Computed
+            # from the same ``supervisor.flows`` + ``is_alive`` view that
+            # ``request_resume`` uses for its double-spawn refusal, so the Resume
+            # button's visibility and "can this actually resume right now"
+            # decision stay in lockstep.
+            live_roots_provider=self._live_project_roots,
         )
         for root in self.config.project_roots:
             self.aggregator.add_project_root(root)
@@ -328,6 +334,36 @@ class Daemon:
         self.aggregator.add_project_root(str(root))
         logger.info("Resumed flow %s in %s", flow_id, root)
         return spawned
+
+    def _live_project_roots(self) -> Set[str]:
+        """Return the set of project roots with a live ``se3 run`` process.
+
+        Injected into :class:`DaemonAggregator` as its ``live_roots_provider``
+        so the aggregator can gate the ``resumable`` flag of a ``RUNNING`` flow
+        whose process is still alive (a Resume button that would only be refused
+        by :meth:`request_resume` must not appear).
+
+        The computation is deliberately **the same source** as
+        :meth:`request_resume`'s double-spawn guard: it walks
+        ``supervisor.flows`` and keeps each record whose ``pid`` passes
+        :meth:`DaemonSupervisor.is_alive`, collecting its ``project_root``
+        normalized via :func:`resolve_worktree_main_root` (a worktree-copy root
+        folds back to its owning ``<main>``) so the key space matches the
+        aggregator's normalized flow ``project_root``. It is fully fault
+        tolerant — any unexpected error degrades to an empty set rather than
+        blocking the daemon poll loop (which would stall ``STATUS_UPDATE``).
+        """
+        roots: Set[str] = set()
+        try:
+            for record in self.supervisor.flows:
+                if not DaemonSupervisor.is_alive(record.pid):
+                    continue
+                main_root = resolve_worktree_main_root(record.project_root)
+                roots.add(str(main_root if main_root is not None else record.project_root))
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("daemon: _live_project_roots failed")
+            return set()
+        return roots
 
     def snapshot(self) -> MachineStatus:
         """Return a fresh :class:`MachineStatus` aggregation snapshot."""

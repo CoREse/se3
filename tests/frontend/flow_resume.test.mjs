@@ -118,6 +118,22 @@ check("completed flow is never resumable even with resumable=true flag", () => {
   );
 });
 
+check("running flow with resumable=false is not resumable (group G2)", () => {
+  // A genuinely-running flow whose live-process gate (group G1) forced
+  // resumable=False must hide the Resume entry: the flag is the primary
+  // signal and the legacy fallback never treats RUNNING as resumable, so the
+  // button is hidden and clicking is impossible — consistent with the server
+  // returning 409 for such a flow.
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "running", resumable: false }),
+    false,
+  );
+  assert.equal(
+    app.isFlowResumable({ flow_id: "x", status: "RUNNING", resumable: false, source: "active" }),
+    false,
+  );
+});
+
 check("resumable not strictly true falls back to legacy heuristic", () => {
   // completed + resumable falsy -> not resumable
   assert.equal(

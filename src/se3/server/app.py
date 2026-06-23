@@ -696,20 +696,52 @@ def create_app(
     ) -> JSONResponse:
         """Resume a paused or failed flow.
 
-        The flow must be in a directly-resumable status (FAILED or PAUSED),
-        must not be archived/history-only, and must belong to the requesting
-        owner. The owning daemon receives a ``MSG_SPAWN_FLOW`` carrying the
+        The flow must be in a directly-resumable status (FAILED or PAUSED, or
+        carry the daemon's authoritative ``resumable`` flag), must not be
+        archived/history-only, and must belong to the requesting owner. The
+        owning daemon receives a ``MSG_SPAWN_FLOW`` carrying the
         ``resume_flow_id`` field; the daemon validates the local
         ``engine.json`` and spawns ``se3 run --resume --flow-id <id>``.
+
+        Validation mirrors ``daemon.request_resume()`` so the endpoint's
+        receipt is honest about what actually happens:
+
+        * unknown flow / cross-owner → 404 (the caller can neither see nor
+          control it);
+        * existing but still running (a live process holds it, so its
+          ``resumable`` flag is ``False`` after the live-process gate) → 409
+          with an explicit "still running, cannot resume" message rather than
+          a misleading ``resume_dispatched``;
+        * completed → 409 (terminal, nothing to resume);
+        * resumable → dispatch and return 202 ``resume_dispatched``.
         """
         scope = _scope_for(identity_)
-        result = await state.is_flow_resumable(flow_id, owner=scope)
-        if result is None:
-            # Covers: unknown flow, cross-owner, non-resumable status, or
-            # archived/history-only (not in the live flow set at all).
+        existing = await state.get_flow(flow_id, owner=scope)
+        if existing is None:
+            # Unknown flow or owned by a different owner — leak nothing.
             raise HTTPException(
                 status_code=404,
-                detail=f"flow '{flow_id}' not found or not resumable",
+                detail=f"flow '{flow_id}' not found",
+            )
+        result = await state.is_flow_resumable(flow_id, owner=scope)
+        if result is None:
+            # The flow exists and belongs to the caller but is not resumable.
+            # Distinguish the two reasons so the user gets an honest receipt
+            # instead of an optimistic dispatched.
+            _, existing_flow = existing
+            status = str(existing_flow.get("status") or "").lower()
+            if status == "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail="该 flow 已完成，无法 resume",
+                )
+            # running / init / recovering (or any other in-progress state):
+            # there is a live process for this flow, so resuming would be a
+            # no-op double-spawn that the daemon's request_resume() guard
+            # bounces anyway.
+            raise HTTPException(
+                status_code=409,
+                detail="该 flow 仍在运行，无法 resume",
             )
         machine_id, flow = result
         if not manager.is_connected(machine_id):

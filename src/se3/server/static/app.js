@@ -2089,6 +2089,13 @@ async function resumeFlow(flowId) {
       showToast("success", `Resume dispatched for ${flowId.slice(0, 8)}…`);
     } else if (resp.status === 404) {
       showToast("error", "Flow not found or not resumable.");
+    } else if (resp.status === 409) {
+      // The flow exists but is not resumable right now — typically it is still
+      // running (a live process holds it). Surface the backend's explicit
+      // rejection detail rather than a misleading "dispatched" success.
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch (_) {}
+      showToast("error", detail || "该 flow 仍在运行，无法 resume");
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
