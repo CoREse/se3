@@ -63,6 +63,15 @@
 
 
 
+
+## 10.7.1 - 2026-06-23
+
+- Fix the recurring WebUI bug where the main conversation area stopped updating after a flow step switch or in-step retry, requiring a manual session exit/re-entry to recover
+- Auto-recover the conversation view when a flow advances (current_step/current_step_index change or a FAILED/PAUSED→RUNNING retry resume) by performing a one-time full /api/history rebuild for the flow currently being viewed
+- Perform the recovery refresh silently — fetch history in the background and swap the DOM only once data arrives, eliminating the blank 'Loading conversation…' flash at each step boundary
+- Preserve the reader's scroll position across the refresh via isNearBottom(), so users scrolled up in history are no longer yanked back to the bottom
+- Isolate the refresh to the conversation area, leaving the reply region (#flow-interventions / #flow-reply-context) untouched so in-progress draft text, focus, and textbox height are never disturbed
+- Cover all step transitions and in-step retries (e.g. update_spec failure → manual retry), not just the discovery→analyze boundary, with single-fire-per-advance and zero-refresh-when-no-advance semantics
 ## 10.6.0 - 2026-06-22
 
 - Persist a per-flow resumable snapshot at se3/state/resumable/<flow_id>.json on every non-completed save and remove it on completion, so paused, interrupted, or recoverable-error flows survive a later run overwriting the single-slot engine.json

@@ -934,8 +934,10 @@ def test_reconnect_passes_incremental_to_both_loaders():
 def test_incremental_loaders_guard_container_clear_behind_first_open():
     """On the incremental (reconnect) path the loaders MUST NOT clear the
     container or reset ``__convState`` — those resets belong only to the first
-    open. The guard is encoded as ``if (!incremental) { … innerHTML = "" … }``
-    in both loaders, and each echoes the held progress token via
+    open. The guard is encoded as ``if (!incremental …) { … innerHTML = "" … }``
+    in both loaders (``loadFlowConversation`` widens it to
+    ``if (!incremental && !silent)`` so the silent progression refresh also skips
+    the destructive pre-clear), and each echoes the held progress token via
     ``historySnapshotUrl`` when refreshing incrementally."""
     src = _read_app_js()
     for fn, progress_state in (
@@ -944,9 +946,11 @@ def test_incremental_loaders_guard_container_clear_behind_first_open():
     ):
         body = _extract_js_function_body(src, fn)
         assert "incremental" in body, f"{fn} must accept an incremental option"
-        # The destructive resets are gated behind the first-open branch.
-        assert "if (!incremental)" in body, (
-            f"{fn} must guard its container reset behind `if (!incremental)`"
+        # The destructive resets are gated behind the first-open branch (the
+        # incremental — and, for loadFlowConversation, the silent — paths skip
+        # them). Match the open-paren prefix so the `&& !silent` widening passes.
+        assert "if (!incremental" in body, (
+            f"{fn} must guard its container reset behind `if (!incremental …)`"
         )
         assert 'innerHTML = ""' in body, f"{fn} should still clear on first open"
         # The reconnect path echoes the held progress token to request a delta.

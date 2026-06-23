@@ -53,6 +53,40 @@ const state = {
   // Monotonic view-local epoch used to invalidate an in-flight REST snapshot
   // when a WS `mode: full` push replaces the authoritative bundle.
   flowConversationEpoch: 0,
+  // Progression baseline for the cause-immune fallback refresh (see
+  // maybeRefreshConversationOnProgression). Holds the last observed
+  // { flowId, currentStep, currentStepIndex, status } so each new
+  // /api/flows/{id} snapshot can be compared against it: a changed
+  // current_step / current_step_index (step-to-step switch) OR a changed
+  // status (e.g. an in-step retry, where the flow flips FAILED/PAUSED→RUNNING
+  // while current_step stays the same — see the daemon FlowSnapshot fields)
+  // means the flow advanced, which triggers exactly one silent full rebuild of
+  // the open conversation. null = no baseline yet (the first snapshot only
+  // establishes the baseline and never counts as progression).
+  // Bound to a single flowId because the console shows one flow at a time;
+  // reset to null on openFlowView / doCloseFlowView so a prior flow's baseline
+  // can never misjudge a freshly-opened flow.
+  flowProgressionMarker: null,
+  // Monotonic request-sequence guard for refreshFlowDetail. Each /api/flows/{id}
+  // fetch claims the next `flowDetailReqSeq`; a response is applied only when its
+  // claimed seq is strictly greater than `flowDetailAppliedSeq` (the highest seq
+  // already applied). Concurrent detail fetches (the 3s poll racing a
+  // STATUS_UPDATE-triggered refresh) can resolve out of order, so a late older
+  // response carrying a stale current_step must NOT overwrite state.flowDetail or
+  // move the progression marker backward — without this guard it would re-trigger
+  // a redundant silent refresh and let the next genuine snapshot fire yet another.
+  flowDetailReqSeq: 0,
+  flowDetailAppliedSeq: 0,
+  // Flow-view lifecycle generation. Incremented on every openFlowView so each
+  // open/close cycle has a distinct id. Each refreshFlowDetail fetch captures
+  // the generation in-flight and is dropped on resolution if the view has since
+  // been closed/reopened — without this, an in-flight high-seq fetch from a
+  // prior lifecycle of the SAME flow would survive the selectedFlowId check
+  // (same flowId), apply its stale snapshot, and bump flowDetailAppliedSeq to a
+  // high value that suppresses the fresh post-reopen fetches (which restart at
+  // seq 1). The seq guard only orders fetches WITHIN one lifecycle; the
+  // generation guard scopes freshness ACROSS lifecycles.
+  flowDetailViewGen: 0,
   flowInterventions: [],  // intervention entries derived from pending_calls
   flowReplyTargetId: null,// id of the intervention the reply box targets
   flowInterjectRequested: false, // user clicked Interject — synth chip on
@@ -1521,6 +1555,20 @@ function openFlowView(flowId) {
   // A different flow is opening: drop any progress token held for the prior
   // flow so its delta cursor can never be echoed against this flow's bundle.
   state.flowConversationProgress = null;
+  // Reset the progression baseline so this flow's first detail snapshot only
+  // establishes a baseline (the full first-open load already shows everything);
+  // a prior flow's current_step/status must never trigger a refresh here.
+  state.flowProgressionMarker = null;
+  // Reset the detail request-sequence guard so this flow's fetches start fresh.
+  // A still-in-flight fetch from a PRIOR lifecycle — including a prior open of
+  // this same flow — is dropped on resolution by the flowDetailViewGen check
+  // below, so resetting the seq counters here cannot let a stale high-seq
+  // response apply or suppress this lifecycle's fresh low-seq responses.
+  state.flowDetailReqSeq = 0;
+  state.flowDetailAppliedSeq = 0;
+  // Bump the lifecycle generation so any fetch claimed by a previous open/close
+  // cycle resolves into a mismatched generation and is discarded.
+  state.flowDetailViewGen += 1;
   state.flowInterventions = [];
   state.flowReplyTargetId = null;
   state.flowInterjectRequested = false;
@@ -1587,6 +1635,11 @@ function doCloseFlowView() {
   state.flowMachineId = null;
   state.flowConversationRecords = [];
   state.flowConversationProgress = null;
+  // Clear the progression baseline so a later openFlowView starts fresh.
+  state.flowProgressionMarker = null;
+  // Reset the detail request-sequence guard alongside the marker.
+  state.flowDetailReqSeq = 0;
+  state.flowDetailAppliedSeq = 0;
   state.flowInterventions = [];
   state.flowReplyTargetId = null;
   state.flowInterjectRequested = false;
@@ -1776,22 +1829,62 @@ function autoGrowReplyTextarea() {
 //     (token stale / cache replaced / cache miss) — that falls back to a full
 //     authoritative rebuild. A failed request leaves the existing conversation
 //     untouched (no error placeholder, no clear).
+//
+//   opts.silent === true: a SILENT full rebuild — the bottom-line "step
+//     progressed, recover the main conversation" workaround (see
+//     maybeRefreshConversationOnProgression). It does the same non-incremental,
+//     no-`after`-token full `/api/history` pull and `delivery: "full"` whole-tree
+//     rebuild as a first open (so the rendered result equals what an exit/re-enter
+//     would produce), but WITHOUT the destructive pre-clear: it does NOT empty the
+//     container or show a "Loading conversation…" placeholder before the fetch, so
+//     no blank flash is visible — the DOM is replaced in one synchronous render
+//     only AFTER the data has arrived. Scroll anchoring is relaxed from the
+//     first-open's forced stick-to-bottom to `isNearBottom(container)`, so a user
+//     scrolled up reading history is not yanked to the bottom. Like the reconnect
+//     refresh it never wipes the conversation on a transient failure. This path
+//     touches ONLY the conversation area (#flow-conversation) and its state — it
+//     never reads or writes the reply region (#flow-interventions /
+//     #flow-reply-context), so a draft, focus, or textarea height in flight is
+//     untouched. silent and incremental are mutually exclusive; silent always
+//     forces the full (non-`after`) pull.
 async function loadFlowConversation(flowId, opts) {
   const incremental = !!(opts && opts.incremental);
+  const silent = !!(opts && opts.silent);
   const container = $("flow-conversation");
   // Every new request supersedes every older request for this view. This is
   // required on reconnect too: unstable connectivity can start overlapping
   // refreshes, and a late full fallback from an older cache generation must
   // not overwrite the newer result or regress its progress token.
-  state.flowConversationEpoch += 1;
-  if (!incremental) {
+  //
+  // EXCEPTION — a silent progression refresh defers its epoch bump until it
+  // actually holds replacement data (just before committing, below). Bumping
+  // up-front would invalidate an in-flight first-open full load; if the silent
+  // fetch then fails transiently it returns early without rendering, and the
+  // already-superseded first-open response is discarded too, freezing the view
+  // on the Loading/empty DOM until the user re-enters. Deferring the bump lets
+  // the first-open complete normally whenever the silent refresh fails, and the
+  // silent path still claims the epoch once it can paint fresh data.
+  if (!silent) {
+    state.flowConversationEpoch += 1;
+  }
+  if (!incremental && !silent) {
     container.innerHTML = "";
     // Drop any reconciliation state left by a previously-open flow so a stray
     // append for this flow can't merge into the prior flow's detached sections.
     container.__convState = null;
     container.appendChild(el("p", "empty", "Loading conversation…"));
+  } else if (silent) {
+    // SILENT full rebuild: no destructive pre-clear and no placeholder, so the
+    // user sees no blank flash — the existing DOM stays put until the new data
+    // arrives and replaces it in one synchronous render below. Reset only the
+    // held progress token (a stale `mode: full` reload no longer pins a bundle);
+    // the fresh token is written back from the response. The records array and
+    // `__convState` are NOT emptied here — the `delivery: "full"` merge below
+    // discards the baseline and the append=false render rebuilds `__convState`,
+    // so any live append that lands during the await is still preserved.
+    state.flowConversationProgress = null;
   }
-  const requestEpoch = state.flowConversationEpoch;
+  let requestEpoch = state.flowConversationEpoch;
   // Capture the records that belong to the snapshot generation represented by
   // the outgoing progress token. If the server falls back to a full response,
   // only records added after this point are proven live appends worth carrying
@@ -1817,9 +1910,10 @@ async function loadFlowConversation(flowId, opts) {
       state.flowConversationEpoch !== requestEpoch
     ) return;
     if (!resp.ok) {
-      // On a reconnect refresh keep the existing conversation rather than
-      // wiping it for a transient failure; first-open still surfaces the error.
-      if (incremental) return;
+      // On a reconnect refresh OR a silent progression refresh keep the existing
+      // conversation rather than wiping it for a transient failure; first-open
+      // still surfaces the error.
+      if (incremental || silent) return;
       container.innerHTML = "";
       container.appendChild(el("p", "empty",
         `Could not load conversation for this flow (${resp.status}).`));
@@ -1830,10 +1924,24 @@ async function loadFlowConversation(flowId, opts) {
       state.selectedFlowId !== flowId ||
       state.flowConversationEpoch !== requestEpoch
     ) return;
+    if (silent) {
+      // We now hold replacement data, so it is finally safe to supersede any
+      // older in-flight first-open / reconnect load (which the deferred bump
+      // left untouched). Claim the epoch and adopt it; the rest of the commit
+      // path is synchronous, so no other request can interleave before render.
+      state.flowConversationEpoch += 1;
+      requestEpoch = state.flowConversationEpoch;
+    }
     // Measure stickiness BEFORE the render mutates scrollHeight. A first-open
-    // always scrolls to bottom; a reconnect only follows if already near it,
-    // preserving the reader's position.
-    const stick = incremental ? isNearBottom(container) : true;
+    // always scrolls to bottom; a reconnect OR a silent progression refresh only
+    // follows if already near it, preserving the reader's scroll position.
+    const stick = (incremental || silent) ? isNearBottom(container) : true;
+    // A silent refresh does a from-scratch `append=false` rebuild that clears
+    // `container.innerHTML`, which clamps scrollTop back to 0. When the reader
+    // is NOT stuck to the bottom, capture the pre-rebuild offset so it can be
+    // restored after the new DOM lands — otherwise the user is silently yanked
+    // to the top instead of keeping their reading position.
+    const preserveScrollTop = (silent && !stick) ? container.scrollTop : null;
     // Fold the response in through the shared decision helper, which picks
     // delta-append vs full-replace from the server's `delivery` tag and keeps
     // live appends that arrived during the await. Record the fresh progress
@@ -1860,16 +1968,30 @@ async function loadFlowConversation(flowId, opts) {
     // Delta delivery → incremental append render (preserves DOM/fold state);
     // full fallback, or any echo removal, → authoritative full rebuild.
     const appendRender = result.render === "delta" && !echoRemoved;
+    if (silent) {
+      // Force a from-scratch rebuild of the conversation DOM: drop any
+      // incremental reconciliation state so renderConversation repaints the
+      // whole tree in one synchronous pass (no per-record flash) and rebuilds
+      // `__convState` from zero. A silent refresh always serves `delivery:
+      // "full"` (no `after` token), so appendRender is already false here.
+      container.__convState = null;
+    }
     renderConversation(container, state.flowConversationRecords, appendRender);
     refreshFlowStickyHeader();
     updateFlowUsageBadge(state.flowConversationRecords);
-    if (stick) scrollFlowConversationToBottom();
+    if (stick) {
+      scrollFlowConversationToBottom();
+    } else if (preserveScrollTop !== null) {
+      // Restore the reader's pre-rebuild offset clamped to the new content
+      // height, so a silent full rebuild does not reset them to the top.
+      container.scrollTop = Math.min(preserveScrollTop, container.scrollHeight);
+    }
   } catch (_) {
     if (
       state.selectedFlowId !== flowId ||
       state.flowConversationEpoch !== requestEpoch
     ) return;
-    if (incremental) return;            // keep the existing conversation
+    if (incremental || silent) return;  // keep the existing conversation
     container.innerHTML = "";
     container.appendChild(el("p", "empty", "Network error loading conversation."));
   }
@@ -1899,33 +2021,140 @@ function noteDetailFetchFailure(message) {
   }
 }
 
+// Cause-immune fallback: detect that a flow advanced and silently rebuild the
+// open conversation. This does NOT fix the underlying incremental-push freeze
+// (step-switch / retry boundaries where the WS history_data append channel goes
+// quiet); it leans on two reliably-observable facts instead — the sidebar's
+// current_step always updates when the flow really moves forward, and a full
+// non-incremental /api/history reload (the silent path) always restores the
+// display. So we use the former as the trigger and the latter as the remedy.
+//
+// Compares `flow`'s current_step / current_step_index / status against the held
+// baseline (`state.flowProgressionMarker`). The first observation of a flow
+// (no baseline, or a baseline bound to a different flowId) only establishes the
+// baseline and never triggers. Afterwards the flow is judged to have advanced
+// when ANY of these reliably-observable, real-payload signals changes:
+//   * current_step      — a step-to-step switch (discovery→analyze, …);
+//   * current_step_index — the same switch viewed positionally (belt-and-braces
+//                          for a step whose type label happens to repeat);
+//   * status            — an in-step retry/resume, where current_step / index
+//                          stay the same (the engine reuses the step_id) but the
+//                          flow flips FAILED/PAUSED→RUNNING when the operator
+//                          chooses Retry and the step re-runs (see run.py's
+//                          resume path). Only this forward-motion transition (a
+//                          dead/paused flow coming back to RUNNING) counts —
+//                          NOT every status change. A RUNNING→FAILED or
+//                          RUNNING→PAUSED transition is the flow stopping, not
+//                          advancing, so it must NOT trigger a refresh; otherwise
+//                          a step failure on the open flow would fire a spurious
+//                          full /api/history reload on a non-progression snapshot.
+// NOTE: the daemon's FlowSnapshot.to_dict() never emits a `step_history` field
+// (the server back-fills it to an empty list), so a step_history-length signal
+// is permanently dead and is deliberately NOT used here; the constrained
+// retry/resume status transition is the real signal that captures the same-step
+// retry case.
+// If the advanced flow is the one currently open (`state.selectedFlowId`
+// matches), a single silent full rebuild is fired. The baseline is updated on
+// every call regardless, so the same snapshot delivered twice (3s poll + WS)
+// triggers at most once per advance, and a steady-state flow with no advance
+// triggers zero refreshes. Only the conversation region and its state are
+// touched — the reply region (draft / focus / textarea height) is never read or
+// written here.
+function maybeRefreshConversationOnProgression(flow) {
+  if (!flow || typeof flow !== "object") return;
+  const flowId = flow.flow_id;
+  if (!flowId) return;
+  const currentStep = flow.current_step != null ? flow.current_step : null;
+  const currentStepIndex = Number.isFinite(flow.current_step_index)
+    ? flow.current_step_index : null;
+  const status = flow.status != null ? flow.status : null;
+  const marker = state.flowProgressionMarker;
+  // First observation of this flow: only establish the baseline, never trigger
+  // (the first-open full load already shows the whole conversation).
+  if (!marker || marker.flowId !== flowId) {
+    state.flowProgressionMarker = { flowId, currentStep, currentStepIndex, status };
+    return;
+  }
+  // A status change only counts as advancement when it is a forward-motion
+  // retry/resume transition — a previously FAILED/PAUSED flow flipping back to
+  // RUNNING. A RUNNING→FAILED / RUNNING→PAUSED transition is the flow stopping,
+  // not advancing, so it must NOT fire a refresh.
+  //
+  // The comparison MUST be case-insensitive: production flow.status arrives
+  // LOWERCASE (FlowStatus enum values are "running"/"failed"/"paused",
+  // serialized via .value and passed through the server unchanged), so an
+  // uppercase-literal compare would make resumedFromHalt permanently false and
+  // the same-step retry case (the ONLY trigger for in-step retry) dead. Mirror
+  // the rest of app.js (e.g. `String(flow.status||"").toLowerCase()`).
+  const statusUpper = String(status || "").toUpperCase();
+  const markerStatusUpper = String(marker.status || "").toUpperCase();
+  const resumedFromHalt =
+    statusUpper === "RUNNING" &&
+    (markerStatusUpper === "FAILED" || markerStatusUpper === "PAUSED");
+  const advanced =
+    currentStep !== marker.currentStep ||
+    currentStepIndex !== marker.currentStepIndex ||
+    resumedFromHalt;
+  // Always refresh the baseline so a duplicate snapshot of the same advance
+  // (e.g. the 3s poll re-delivering what the WS push already carried) triggers
+  // at most once.
+  state.flowProgressionMarker = { flowId, currentStep, currentStepIndex, status };
+  if (advanced && state.selectedFlowId === flowId) {
+    loadFlowConversation(flowId, { silent: true });
+  }
+}
+
 async function refreshFlowDetail() {
   const flowId = state.selectedFlowId;
   if (!flowId) return;
+  // Claim a monotonic sequence number for this fetch. Detail fetches can run
+  // concurrently (3s poll vs STATUS_UPDATE refresh) and resolve out of order, so
+  // every applied result must be the freshest one observed — a late older
+  // response is dropped below rather than allowed to regress state/marker.
+  const reqSeq = ++state.flowDetailReqSeq;
+  // Snapshot the lifecycle generation this fetch belongs to. If the view is
+  // closed/reopened while the fetch is in flight, the generation advances and
+  // this response is discarded on resolution — even when the same flow is
+  // reopened (where the selectedFlowId check alone would let it through).
+  const reqGen = state.flowDetailViewGen;
   try {
     const resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}`);
-    if (state.selectedFlowId !== flowId) return;
+    if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     if (!resp.ok) {
       noteDetailFetchFailure(`Could not load flow details (${resp.status}).`);
       return;
     }
     const data = await resp.json();
-    if (state.selectedFlowId !== flowId) return;
+    if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     if (!data || !data.flow) {
       noteDetailFetchFailure("This flow is not available on the server yet.");
       return;
     }
+    // Drop a stale response that lost the race to a newer detail fetch already
+    // applied. Applying it would overwrite the fresher snapshot and rewind the
+    // progression marker, spuriously re-triggering the silent refresh.
+    if (reqSeq <= state.flowDetailAppliedSeq) return;
+    state.flowDetailAppliedSeq = reqSeq;
     state.detailFetchFailures = 0;
     state.detailLoaded = true;
     state.flowDetail = data.flow;
     state.flowMachineId = data.machine_id || null;
+    // Cause-immune fallback trigger: refreshFlowDetail is the single converging
+    // point for every flow-detail update (3s poll, STATUS_UPDATE→applyMachines,
+    // openFlowView, ws reconnect), and each call carries the authoritative
+    // /api/flows/{id} snapshot — so checking for progression here covers all
+    // those paths from one site. On a detected advance of the currently-open
+    // flow it silently rebuilds the conversation, working around the recurring
+    // "step-switch/retry freezes the main conversation" bug without touching the
+    // incremental-push / dedupe / progress-token machinery.
+    maybeRefreshConversationOnProgression(data.flow);
     // Settle a Send waiting on ws confirmation BEFORE rendering, so the
     // chip-bar rebuild reflects the unlocked state in one pass.
     maybeSettleViaPendingCallsDiff(data.flow);
     renderFlowSidebar(data.flow, data.machine_id);
     renderInterventions(data.flow);
   } catch (_) {
-    if (state.selectedFlowId !== flowId) return;
+    if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     noteDetailFetchFailure("Network error loading flow details.");
   }
 }
@@ -11082,6 +11311,10 @@ if (typeof module !== "undefined" && module.exports) {
     // Reconnect incremental load paths (G4) — exposed for the DOM-stub load
     // path tests in tests/frontend/test_app_pure.mjs.
     loadFlowConversation,
+    // Cause-immune progression-refresh fallback (G2) — exposed for the DOM-stub
+    // tests in tests/frontend/progression_refresh.test.mjs.
+    maybeRefreshConversationOnProgression,
+    refreshFlowDetail,
     openHistorySession,
     applyHistoryData,
     // History list rendering + shared mutable state (exposed for the DOM-stub

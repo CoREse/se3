@@ -3796,6 +3796,14 @@ e2eConsistencyMod.registerConsoleE2EConsistencyTests({ app, check, findOne, find
 const issue209ReplayMod = await import("./issue209_real_frame_replay.test.mjs");
 issue209ReplayMod.registerIssue209RealFrameReplayTests({ app, check, findOne, findAll });
 
+// Register the cause-immune progression-refresh fallback tests (G2): a detected
+// advance of the open flow (current_step / current_step_index change, or a
+// status flip on an in-step retry) fires one silent full /api/history rebuild,
+// equivalent to exit-and-re-enter but without the blank flash or scroll jump,
+// and never touching the reply region.
+const progressionRefreshMod = await import("./progression_refresh.test.mjs");
+await progressionRefreshMod.registerProgressionRefreshTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
@@ -5651,6 +5659,170 @@ await checkAsync("flow: pending local echo survives a reconnect full fallback", 
     (r) => app.normalizeRecord(r).role === "user"
       && app.comparableUserText(app.normalizeRecord(r).content) === "yes");
   assert.equal(yes.length, 1, "the just-sent reply is still shown once");
+});
+
+// -- silent progression refresh (G1) -----------------------------------------
+//
+// The bottom-line "step progressed → silently rebuild the main conversation"
+// workaround. loadFlowConversation(flowId, { silent:true }) does a full,
+// no-`after` pull and a whole-tree rebuild equivalent to an exit/re-enter, but
+// WITHOUT the destructive pre-clear (no blank flash, no "Loading…" placeholder)
+// and WITHOUT forcing stick-to-bottom (scroll position preserved unless the
+// reader was already near the bottom). It touches only #flow-conversation and
+// never the reply region.
+
+await checkAsync("flow silent: no pre-clear / no Loading placeholder before data arrives", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  // First open the flow with two records so there is existing rendered DOM.
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "tokA", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+  const firstBubble = bubbleNodes(c)[0];
+  assert.ok(firstBubble, "existing conversation rendered");
+
+  // A silent refresh starts; the response is deferred so we can inspect the DOM
+  // in the window between fetch start and data arrival.
+  const resolve = setDeferredFetch();
+  const pending = app.loadFlowConversation("F1", { silent: true });
+  // The container must NOT have been cleared and must NOT show a placeholder.
+  assert.ok(bubbleNodes(c).includes(firstBubble),
+    "silent refresh must not clear the container before data arrives");
+  assert.ok(!c.textContent.includes("Loading conversation"),
+    "silent refresh must not insert a Loading placeholder");
+  // The silent pull is a full pull: no `after` token in the URL.
+  assert.ok(!String(__lastFetchUrl).includes("after="),
+    "silent refresh issues a full (no-after) pull: " + __lastFetchUrl);
+
+  resolve({
+    records: [
+      asstRecord("A", 1, "s1", "discovery"),
+      asstRecord("B", 2, "s1", "discovery"),
+      asstRecord("C", 3, "s1", "discovery"),
+    ],
+    progress: "tokB", delivery: "full",
+  });
+  await pending;
+  // Data arrived → whole-tree rebuild, fresh __convState, progress written back.
+  assert.equal(app.state.flowConversationRecords.length, 3);
+  assert.equal(app.state.flowConversationProgress, "tokB");
+  assert.ok(!bubbleNodes(c).includes(firstBubble),
+    "silent refresh rebuilds the DOM once data arrives (append=false)");
+  assert.ok(c.__convState && c.__convState.count === 3,
+    "__convState rebuilt from scratch");
+  assert.ok(uniqueKeys(app.state.flowConversationRecords));
+});
+
+await checkAsync("flow silent: preserves scroll position when not near the bottom", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery")],
+    progress: "p0", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+
+  // Simulate the reader scrolled UP, far from the bottom.
+  c.scrollHeight = 1000; c.clientHeight = 100; c.scrollTop = 0;
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "p1", delivery: "full",
+  });
+  await app.loadFlowConversation("F1", { silent: true });
+  // isNearBottom was false → must NOT yank to the bottom.
+  assert.equal(c.scrollTop, 0,
+    "silent refresh must not scroll a scrolled-up reader to the bottom");
+  assert.equal(app.state.flowConversationRecords.length, 2);
+});
+
+await checkAsync("flow silent: scrolls to bottom when already near the bottom", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery")],
+    progress: "p0", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+
+  // Reader is at (near) the bottom: scrollHeight - scrollTop - clientHeight <= 80.
+  c.scrollHeight = 500; c.clientHeight = 500; c.scrollTop = 0;
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "p1", delivery: "full",
+  });
+  await app.loadFlowConversation("F1", { silent: true });
+  // scrollFlowConversationToBottom sets scrollTop = scrollHeight.
+  assert.equal(c.scrollTop, c.scrollHeight,
+    "silent refresh sticks to the bottom when the reader was already there");
+});
+
+await checkAsync("flow silent: failed request keeps the existing conversation untouched", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "ok0", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+  const recsBefore = app.state.flowConversationRecords;
+  const stBefore = c.__convState;
+  const bubblesBefore = bubbleNodes(c).slice();
+
+  setFetch({}, false, 503);
+  await app.loadFlowConversation("F1", { silent: true });
+  // A transient failure must NOT wipe the conversation or insert an error.
+  assert.equal(app.state.flowConversationRecords, recsBefore,
+    "records untouched on a failed silent refresh");
+  assert.equal(c.__convState, stBefore, "__convState untouched on failure");
+  assert.deepEqual(bubbleNodes(c), bubblesBefore, "DOM untouched on failure");
+  assert.ok(!c.textContent.includes("Could not load"),
+    "no error placeholder on a silent refresh failure");
+});
+
+await checkAsync("flow silent: never touches reply-region state", async () => {
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  // Seed reply-region state with sentinel values.
+  app.state.flowReplyTargetId = "chip-7";
+  app.state.flowInterjectRequested = true;
+  app.state.flowReplyPromptExpanded = { "chip-7": true };
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery")],
+    progress: "q0", delivery: "full",
+  });
+  await app.loadFlowConversation("F1");
+
+  setFetch({
+    records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+    progress: "q1", delivery: "full",
+  });
+  await app.loadFlowConversation("F1", { silent: true });
+  // Reply-region state is unchanged by the conversation-only refresh.
+  assert.equal(app.state.flowReplyTargetId, "chip-7");
+  assert.equal(app.state.flowInterjectRequested, true);
+  assert.deepEqual(app.state.flowReplyPromptExpanded, { "chip-7": true });
 });
 
 // -- history detail view -----------------------------------------------------
