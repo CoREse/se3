@@ -84,6 +84,18 @@ live flow, never overwrites an active flow by restoring an archived snapshot.
   suppressed until the request settles
 - **AND** the user is shown the dispatched / not-resumable / error outcome
 
+#### Scenario: A live-process RUNNING flow shows no Resume entry, an interrupted one does
+- **GIVEN** a flow with status `RUNNING` whose `project_root` currently holds a
+  live `se3 run` process, so the daemon/server gated its authoritative
+  `resumable` flag to `false` (see the `daemon` *Daemon Modules* live-process
+  resumable gate)
+- **WHEN** the History list / detail is rendered
+- **THEN** `isFlowResumable` returns false and **no** Resume entry appears for
+  that still-running flow, because its authoritative `resumable` flag is false
+- **AND** a separate flow whose status is `RUNNING` but whose process has died
+  (interrupted) carries `resumable: true` and DOES show a clickable Resume entry,
+  so only the genuinely-live flow loses the entry
+
 ### Requirement: Reconnect Incremental History Refresh
 
 When the `/ws/ui` channel drops and reconnects while a history session is open in

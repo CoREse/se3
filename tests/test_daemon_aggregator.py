@@ -385,13 +385,13 @@ def test_get_snapshot_copies_root_set_before_iterating(tmp_path: Path) -> None:
     original = agg._snapshot_for_root
     state = {"added": False}
 
-    def _mutate_then_snapshot(root: Path):
+    def _mutate_then_snapshot(root: Path, live_roots=None):
         # Mutate the underlying set while the snapshot build is mid-flight; a
         # build that iterated the live set rather than a copy would be at risk.
         if not state["added"]:
             agg.add_project_root(extra)
             state["added"] = True
-        return original(root)
+        return original(root, live_roots)
 
     agg._snapshot_for_root = _mutate_then_snapshot  # type: ignore[assignment]
 

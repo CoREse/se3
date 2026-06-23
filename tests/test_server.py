@@ -1552,8 +1552,9 @@ def test_resume_flow_failed_is_resumable(client_and_app):
         assert resp.status_code == 202
 
 
-def test_resume_flow_completed_returns_404(client_and_app):
-    """A COMPLETED flow is not resumable — returns 404."""
+def test_resume_flow_completed_returns_409(client_and_app):
+    """A COMPLETED flow exists but is terminal — returns 409, not a
+    misleading resume_dispatched, and not 404 (it does exist)."""
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -1577,11 +1578,19 @@ def test_resume_flow_completed_returns_404(client_and_app):
                 break
 
         resp = client.post("/api/flows/f-done/resume")
-        assert resp.status_code == 404
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body.get("detail") != "resume_dispatched"
+        assert "无法 resume" in body.get("detail", "")
 
 
-def test_resume_flow_running_returns_404(client_and_app):
-    """A RUNNING flow is not resumable — returns 404."""
+def test_resume_flow_running_returns_409_with_still_running_detail(client_and_app):
+    """A RUNNING flow (live process holds it) is rejected with an explicit
+    409 'still running' detail, NOT a misleading resume_dispatched.
+
+    Acceptance point (3): calling resume on a running flow yields a clear
+    rejection rather than an optimistic dispatched receipt.
+    """
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -1595,6 +1604,9 @@ def test_resume_flow_running_returns_404(client_and_app):
                             "flow_id": "f-run",
                             "project_root": "/proj",
                             "status": "running",
+                            # The G1 live-process gate forces resumable=False
+                            # for a running flow whose process is still alive.
+                            "resumable": False,
                         }
                     ],
                 )
@@ -1605,7 +1617,43 @@ def test_resume_flow_running_returns_404(client_and_app):
                 break
 
         resp = client.post("/api/flows/f-run/resume")
-        assert resp.status_code == 404
+        assert resp.status_code == 409
+        body = resp.json()
+        # The receipt must be an explicit rejection, never resume_dispatched.
+        assert body.get("status") != "resume_dispatched"
+        assert "该 flow 仍在运行，无法 resume" == body.get("detail")
+
+
+def test_resume_flow_running_but_dead_is_resumable(client_and_app):
+    """A flow whose status is RUNNING but which the daemon marked
+    resumable=True (process actually died / was interrupted) is still
+    resumable — acceptance point (2) must not regress."""
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        protocol.decode(ws.receive_text())  # WELCOME
+        ws.send_text(
+            protocol.make_status_update(
+                _snapshot(
+                    "m1",
+                    [
+                        {
+                            "flow_id": "f-dead",
+                            "project_root": "/proj",
+                            "status": "running",
+                            "resumable": True,
+                        }
+                    ],
+                )
+            ).to_json()
+        )
+        for _ in range(50):
+            if client.get("/api/flows/f-dead").status_code == 200:
+                break
+
+        resp = client.post("/api/flows/f-dead/resume")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "resume_dispatched"
 
 
 def test_resume_flow_unknown_returns_404(client_and_app):

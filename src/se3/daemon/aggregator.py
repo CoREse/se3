@@ -237,6 +237,7 @@ class DaemonAggregator:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         registry_load: Optional[Callable[[], Iterable[str]]] = None,
         registry_persist: Optional[Callable[[str], None]] = None,
+        live_roots_provider: Optional[Callable[[], Iterable[str]]] = None,
     ) -> None:
         """Create the aggregator.
 
@@ -251,6 +252,16 @@ class DaemonAggregator:
                 one project root. Wired together with *registry_load* it makes
                 :meth:`add_project_root` write through to disk so the history
                 index and New Task dropdown survive a daemon with no live flow.
+            live_roots_provider: Optional zero-arg callable returning the set of
+                project roots that currently have a *live* ``se3 run`` process,
+                as seen by the daemon supervisor. When supplied it is consulted
+                once per :meth:`get_snapshot` to gate the ``resumable`` flag of a
+                ``RUNNING`` flow: a flow whose process is still alive must not
+                advertise a Resume entry (see :func:`_resumable_with_live_gate`),
+                keeping the button's visibility in lockstep with
+                ``Daemon.request_resume``'s live-process double-spawn refusal.
+                When ``None`` (the default) the aggregator keeps its legacy
+                status-only resumable behavior.
         """
         self.machine_id = machine_id or _stable_machine_id()
         self.hostname = socket.gethostname()
@@ -258,6 +269,7 @@ class DaemonAggregator:
         self._project_roots: Set[Path] = set()
         self._registry_load = registry_load
         self._registry_persist = registry_persist
+        self._live_roots_provider = live_roots_provider
         # engine.json mtime per project root, for change detection.
         self._mtimes: Dict[str, float] = {}
         # TTL cache for the expensive on-disk historical-root enumeration used by
@@ -397,13 +409,20 @@ class DaemonAggregator:
         # ``all_project_roots`` (via ``_merge_project_roots``), so a transient
         # worktree sandbox never appears as a New Task target.
         observable_roots = self.all_observable_roots()
+        # Resolve the live-process root set *once* per snapshot round so the
+        # ``RUNNING``-flow resumable gate (see ``_resumable_with_live_gate``) is
+        # computed against a single, internally-consistent view — both the
+        # active engine.json path (``_snapshot_for_root``) and the resumable
+        # snapshot path (``_snapshot_from_resumable``) share it, avoiding any
+        # intra-round drift from re-querying the supervisor per root.
+        live_roots = self._live_roots()
         # Track the flow_ids carried by the *active* engine.json snapshots so a
         # resumable per-flow snapshot for the same flow is de-duplicated (the
         # active engine.json copy wins) in the supplement pass below.
         active_flow_ids: Set[str] = set()
         for root_str in observable_roots:
             root = Path(root_str)
-            snapshot = self._snapshot_for_root(root)
+            snapshot = self._snapshot_for_root(root, live_roots)
             if snapshot is not None:
                 flows.append(snapshot)
                 if snapshot.flow_id:
@@ -429,7 +448,9 @@ class DaemonAggregator:
         for root_str in observable_roots:
             root = Path(root_str)
             flows.extend(
-                self._enumerate_resumable_snapshots(root, seen_resumable)
+                self._enumerate_resumable_snapshots(
+                    root, seen_resumable, live_roots
+                )
             )
         return MachineStatus(
             machine_id=self.machine_id,
@@ -439,6 +460,35 @@ class DaemonAggregator:
             project_roots=self._merge_project_roots(),
             issues=all_issues,
         )
+
+    def _live_roots(self) -> Optional[Set[str]]:
+        """Resolve the live-process root set for the resumable gate.
+
+        Calls the injected ``live_roots_provider`` (the daemon's
+        ``supervisor.flows`` + ``is_alive`` view) and normalizes every returned
+        root to the same canonical key the flow snapshots compare against (see
+        :func:`_normalize_root`), so a worktree-attributed live root matches a
+        worktree-copy flow's ``project_root`` and a symlinked path lines up.
+
+        Returns ``None`` when no provider was injected (legacy behavior: the
+        gate is a no-op and ``_is_resumable_status`` stands alone). Returns a
+        possibly-empty set otherwise — an *empty* set means "no live process",
+        so every ``RUNNING`` flow stays resumable. The provider is best-effort:
+        an exception is swallowed (logged) and degrades to ``None`` so a
+        supervisor hiccup can never block the snapshot.
+        """
+        if self._live_roots_provider is None:
+            return None
+        try:
+            roots = self._live_roots_provider()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("aggregator: live_roots_provider failed")
+            return None
+        result: Set[str] = set()
+        for entry in roots or []:
+            if entry:
+                result.add(_normalize_root(entry))
+        return result
 
     def all_project_roots(self) -> List[str]:
         """Return the union view used for reporting and the history index.
@@ -693,11 +743,18 @@ class DaemonAggregator:
 
     # -- internals ---------------------------------------------------------
 
-    def _snapshot_for_root(self, root: Path) -> Optional[FlowSnapshot]:
+    def _snapshot_for_root(
+        self, root: Path, live_roots: Optional[Set[str]] = None
+    ) -> Optional[FlowSnapshot]:
         """Build a :class:`FlowSnapshot` for one project root.
 
         Returns ``None`` only when the root has neither an ``engine.json`` nor
         any other readable SE3 artifact (nothing to report).
+
+        *live_roots* (when supplied) is the normalized set of roots with a live
+        ``se3 run`` process; it gates the ``resumable`` flag of a ``RUNNING``
+        flow whose process is still alive (see
+        :func:`_resumable_with_live_gate`).
         """
         state_dir = root / "se3" / "state"
         engine_json = state_dir / "engine.json"
@@ -754,12 +811,20 @@ class DaemonAggregator:
             # A still-active flow that has not completed normally is resumable
             # (covers the interrupted-but-still-current-engine.json case, where
             # status may be running/paused/failed). A COMPLETED active flow that
-            # has not yet been archived is not resumable.
-            resumable=_is_resumable_status(status),
+            # has not yet been archived is not resumable. A ``RUNNING`` flow whose
+            # process is *still alive* (its root is in ``live_roots``) is gated
+            # back to non-resumable: clicking Resume would only be refused by
+            # ``request_resume``'s live-process double-spawn guard, so the button
+            # must not appear. A RUNNING flow whose process has died (root absent
+            # from ``live_roots``) stays resumable.
+            resumable=_resumable_with_live_gate(status, root, live_roots),
         )
 
     def _enumerate_resumable_snapshots(
-        self, root: Path, seen_flow_ids: Set[str]
+        self,
+        root: Path,
+        seen_flow_ids: Set[str],
+        live_roots: Optional[Set[str]] = None,
     ) -> List[FlowSnapshot]:
         """Build supplemental :class:`FlowSnapshot`s for resumable snapshots.
 
@@ -805,15 +870,27 @@ class DaemonAggregator:
                 continue
             # A stale completed snapshot must never be surfaced as resumable;
             # ignore it entirely (do not claim the flow_id) so it cannot mask a
-            # genuinely resumable source elsewhere.
+            # genuinely resumable source elsewhere. This surfacing filter is
+            # deliberately the bare status check (not the live-process gate): a
+            # ``RUNNING`` snapshot whose root has a live process is still
+            # *surfaced* as a flow card, only with ``resumable=False`` computed
+            # by ``_snapshot_from_resumable`` below — so its presence (and a 409
+            # rather than a 404 on a resume attempt) is preserved while the
+            # Resume button is hidden.
             if not _is_resumable_status(str(data.get("status") or "")):
                 continue
             seen_flow_ids.add(flow_id_str)
-            results.append(self._snapshot_from_resumable(root, data))
+            results.append(
+                self._snapshot_from_resumable(root, data, live_roots)
+            )
         return results
 
     @staticmethod
-    def _snapshot_from_resumable(root: Path, data: Dict[str, Any]) -> FlowSnapshot:
+    def _snapshot_from_resumable(
+        root: Path,
+        data: Dict[str, Any],
+        live_roots: Optional[Set[str]] = None,
+    ) -> FlowSnapshot:
         """Build a ``resumable=True`` FlowSnapshot from a resumable snapshot dict.
 
         The dict has the same shape as ``engine.json`` (it is
@@ -824,9 +901,11 @@ class DaemonAggregator:
         ``se3/calls`` & ``se3/issues``, not to this superseded snapshot.
 
         ``resumable`` is derived from the snapshot's own status via
-        :func:`_is_resumable_status` (rather than hard-coded ``True``) so a
-        stale ``completed`` snapshot is never advertised as resumable; callers
-        that build these from a resumable directory already pre-filter
+        :func:`_resumable_with_live_gate` (rather than hard-coded ``True``) so a
+        stale ``completed`` snapshot is never advertised as resumable, and a
+        ``RUNNING`` snapshot whose root still has a live ``se3 run`` process is
+        gated back to non-resumable in lockstep with the active-flow path;
+        callers that build these from a resumable directory already pre-filter
         completed snapshots, but deriving it here keeps the flag honest at the
         single source of truth.
         """
@@ -854,7 +933,7 @@ class DaemonAggregator:
             issue_count=0,
             summary=None,
             waiting_for_lock=False,
-            resumable=_is_resumable_status(status),
+            resumable=_resumable_with_live_gate(status, root, live_roots),
         )
 
     def _enumerate_calls(self, root: Path) -> List[PendingCall]:
@@ -1202,6 +1281,62 @@ def _is_resumable_status(status: str) -> bool:
     FlowStatus value verbatim.
     """
     return status.strip().lower() != "completed"
+
+
+def _normalize_root(path: object) -> str:
+    """Normalize a project root to the canonical live-process-gate key.
+
+    Folds a worktree-copy sandbox (``<main>/se3/worktrees/<name>``) back to its
+    owning ``<main>`` via :func:`resolve_worktree_main_root` — mirroring the
+    registry write-through seam (:meth:`DaemonAggregator.add_project_root`) and
+    the supervisor's worktree attribution — then resolves symlinks with
+    ``realpath`` so the aggregator's flow ``project_root`` and the daemon's
+    supervisor-derived live-root set compare on identical keys. A non-worktree
+    path is kept verbatim (then realpath'd).
+    """
+    main = resolve_worktree_main_root(path)
+    base = main if main is not None else str(path)
+    try:
+        return os.path.realpath(base)
+    except OSError:  # pragma: no cover - defensive
+        return str(base)
+
+
+def _resumable_with_live_gate(
+    status: str, project_root: object, live_roots: Optional[Set[str]]
+) -> bool:
+    """Compute ``resumable`` for a flow, gating a live ``RUNNING`` process.
+
+    The base decision is :func:`_is_resumable_status`. The live-process gate
+    only ever *tightens* it, and only for a ``RUNNING`` flow: when *status*
+    normalizes to ``running`` **and** the flow's (normalized) *project_root* is
+    present in *live_roots* — i.e. the daemon supervisor still sees a live
+    ``se3 run`` process for that root — the flow is reported NOT resumable, so
+    the WebUI hides its Resume button (clicking it would only hit
+    ``request_resume``'s live-process double-spawn refusal anyway).
+
+    Every other case keeps the base decision unchanged:
+
+    * a ``RUNNING`` flow whose process has died (root absent from *live_roots*)
+      stays resumable — the interrupted-but-recoverable case the task
+      deliberately preserves;
+    * ``PAUSED`` / ``FAILED`` / ``INIT`` / ``RECOVERING`` flows are never gated
+      by live processes (a ``PAUSED`` flow normally still has a live process
+      blocked on input — gating it would wrongly hide a legitimate Resume),
+      matching the task boundary that only ``RUNNING`` is tightened;
+    * when *live_roots* is ``None`` (no provider injected) the gate is a no-op
+      and the bare status decision stands, preserving legacy behavior.
+
+    *live_roots* is expected to already be normalized via
+    :func:`_normalize_root` (the aggregator's ``_live_roots`` does this); the
+    flow's *project_root* is normalized here so both sides share one key space.
+    """
+    base = _is_resumable_status(status)
+    if not base or not live_roots:
+        return base
+    if status.strip().lower() != "running":
+        return base
+    return _normalize_root(project_root) not in live_roots
 
 
 def _safe_mtime(path: Path) -> Optional[float]:
