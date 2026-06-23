@@ -586,15 +586,25 @@ def _archive_main_session(
         pm = PersistenceManager(project_root)
         if pm.state_file.exists():
             main_flow_id = _read_main_flow_id(project_root)
-            if flow_id and main_flow_id and str(main_flow_id) != str(flow_id):
-                results.append(
-                    (
-                        "Archive session",
-                        "SKIP",
+            # When a specific flow_id was requested, the destructive clear is
+            # only safe once we have POSITIVELY confirmed the main engine.json
+            # belongs to that same flow. An absent / unreadable flow_id (a
+            # different flow's engine.json that is mid-write, in INIT, or
+            # corrupt) counts as NOT confirmed — clearing it would archive the
+            # wrong, unrelated session. Only with no specific flow_id requested
+            # do we fall back to the unconditional clear.
+            if flow_id and str(main_flow_id) != str(flow_id):
+                if main_flow_id:
+                    detail = (
                         f"Main engine.json is flow {main_flow_id}, "
-                        f"not {flow_id}",
+                        f"not {flow_id}"
                     )
-                )
+                else:
+                    detail = (
+                        "Main engine.json flow_id absent/unreadable; "
+                        f"cannot confirm it is {flow_id}"
+                    )
+                results.append(("Archive session", "SKIP", detail))
             else:
                 pm.clear_state()
                 results.append(("Archive session", "OK", "Session archived"))

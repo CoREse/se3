@@ -368,6 +368,33 @@ def test_mismatched_main_flow_is_not_archived(tmp_path: Path) -> None:
     assert not list(archive_dir.glob("engine_*.json")) if archive_dir.exists() else True
 
 
+def test_unreadable_main_flow_is_not_archived(tmp_path: Path) -> None:
+    """Ending flow A when the main engine.json has no readable flow_id.
+
+    A different flow B may be mid-write / INIT / corrupt so its engine.json
+    carries no usable flow_id. Without a positive match to the requested
+    flow_id, the destructive clear must be skipped — otherwise we archive the
+    wrong, unrelated session.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+
+    state_dir = main / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "engine.json"
+    # engine.json belongs to an active flow B but its flow_id is absent/corrupt.
+    state_file.write_text(json.dumps({"status": "INIT", "state": {}}))
+
+    rc = end_session(project_root=main, flow_id="flow-A")
+    assert rc == 0
+
+    # The unconfirmed main session is left intact — not archived/cleared.
+    assert state_file.exists()
+    archive_dir = state_dir / "archive"
+    assert not list(archive_dir.glob("engine_*.json")) if archive_dir.exists() else True
+
+
 def test_archive_failure_preserves_worktree_and_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

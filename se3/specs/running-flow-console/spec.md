@@ -4265,12 +4265,41 @@ The mechanism:
    replaces the DOM in one pass only after the data arrives, eliminating the
    blank flash at each step boundary. `silent` and `incremental` are mutually
    exclusive.
-5. **Scroll preservation.** The silent refresh MUST anchor scrolling via
-   `isNearBottom(container)` (the same as the reconnect path) rather than forcing
-   `stick = true` to the bottom: it scrolls to the bottom only when the view was
-   already near the bottom before the refresh, otherwise it preserves the user's
-   current reading position so an operator scrolled up through history is not
-   yanked down.
+5. **Scroll preservation via element anchoring.** The silent refresh MUST anchor
+   scrolling via `isNearBottom(container)` (the same as the reconnect path)
+   rather than forcing `stick = true` to the bottom: it scrolls to the bottom
+   only when the view was already near the bottom before the refresh, otherwise
+   it preserves the user's current reading position so an operator scrolled up
+   through history is not yanked down. Because the silent path performs a
+   from-scratch `renderConversation(append=false)` that can re-lay-out the same
+   batch of records at a *different* total height, the reader's position MUST be
+   preserved by **anchoring to a DOM element**, not by restoring an absolute
+   pixel `scrollTop`: restoring the same numeric `scrollTop` after a full rebuild
+   visibly jumps the conversation up a large stretch whenever content above the
+   viewport re-lays-out taller or shorter (the defect introduced by the issue
+   #209 workaround and reported as issue #217). The mechanism is:
+   - **Before** the merge/rebuild, when the view is NOT near the bottom, capture
+     a scroll anchor (`captureScrollAnchor`): identify the topmost bubble still
+     visible in the viewport (its `rect.bottom` past the container's viewport
+     top) and record that bubble's record identity `recordKey` (resolved from the
+     bubble's `__convIdx` into the pre-rebuild records) together with its
+     `viewportOffset` (the bubble `rect.top` minus the container `rect.top`).
+   - **After** the rebuild, restore the anchor (`restoreScrollAnchor`): re-locate
+     the same record by `recordKey` in the *new* records array (so the match
+     survives index shifts caused by `reconcileLocalEchoes` removing echoed
+     records mid-array), find its bubble in the rebuilt DOM, and set
+     `container.scrollTop` so that bubble returns to the same `viewportOffset` —
+     absorbing any height change introduced above it. The restore reads geometry
+     synchronously (the read forces the layout) and sets `scrollTop` immediately;
+     it MUST NOT depend on `requestAnimationFrame`.
+   - The anchor identity MUST be the record `recordKey` (stable across the
+     old/new arrays), while `__convIdx` is used only to locate a bubble within
+     one DOM tree, never as the cross-rebuild identity.
+   - When the anchor is unusable — no visible bubble, missing geometry, the
+     `recordKey` not found in the new array, or a DOM-free test environment — the
+     restore MUST fall back to the prior behavior of setting the captured
+     absolute `scrollTop` (clamped to the new scroll height). The near-bottom
+     stick-to-bottom semantics are unchanged.
 6. **Reply-region isolation.** The silent refresh MUST act only on the
    conversation region `#flow-conversation` and its state
    (`state.flowConversationRecords`, `state.flowConversationProgress`, the
@@ -4323,7 +4352,14 @@ a prior flow's progression can never be attributed to a newly opened flow.
   background and the DOM is replaced in a single pass after it arrives
 - **AND** scrolling is anchored via `isNearBottom(container)`: the view scrolls
   to the bottom only if it was already near the bottom, otherwise the user's
-  current reading position is preserved
+  current reading position is preserved by **element anchoring** — the topmost
+  visible bubble's `recordKey` and `viewportOffset` are captured before the
+  rebuild and the same bubble is restored to the same viewport offset afterward,
+  so a taller/shorter re-layout of content above it does NOT scroll the
+  conversation up a large stretch (the issue #209 / #217 jump)
+- **AND** when the anchor is unusable (no visible bubble, missing geometry, the
+  `recordKey` absent from the new records, or a DOM-free test), the restore falls
+  back to setting the captured absolute `scrollTop` clamped to the new height
 
 #### Scenario: Silent refresh never disturbs the reply draft
 - **GIVEN** a user is composing a reply in the docked reply area with focus and
