@@ -49,15 +49,81 @@ check("status comparison is case-insensitive (RUNNING endable)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// isFlowEndable — completed is never endable
+// isFlowEndable — an ordinary completed flow is not endable
 // ---------------------------------------------------------------------------
-check("completed flow is not endable", () => {
+check("completed flow (no worktree path) is not endable", () => {
   assert.equal(app.isFlowEndable({ flow_id: "abc", status: "completed" }), false);
 });
 
-check("completed guard is case-insensitive", () => {
+check("completed flow with a plain main-branch project_root is not endable", () => {
+  assert.equal(
+    app.isFlowEndable({
+      flow_id: "abc",
+      status: "completed",
+      project_root: "/home/u/proj",
+    }),
+    false,
+  );
+});
+
+check("completed guard is case-insensitive (no worktree path)", () => {
   assert.equal(app.isFlowEndable({ flow_id: "abc", status: "COMPLETED" }), false);
   assert.equal(app.isFlowEndable({ flow_id: "abc", status: "Completed" }), false);
+});
+
+// ---------------------------------------------------------------------------
+// isFlowEndable — a completed worktree session with a dangling worktree IS
+// endable (the orphan-cleanup case this feature exists for)
+// ---------------------------------------------------------------------------
+check("completed worktree session (dangling worktree) is endable", () => {
+  assert.equal(
+    app.isFlowEndable({
+      flow_id: "abc",
+      status: "completed",
+      project_root: "/home/u/proj/se3/worktrees/wt_abc",
+    }),
+    true,
+  );
+});
+
+check("completed worktree session endable even with trailing slash", () => {
+  assert.equal(
+    app.isFlowEndable({
+      flow_id: "abc",
+      status: "COMPLETED",
+      project_root: "/home/u/proj/se3/worktrees/wt_abc/",
+    }),
+    true,
+  );
+});
+
+check("completed worktree session that is archived/history is still NOT endable", () => {
+  // An already-archived worktree snapshot has nothing live to clean up.
+  assert.equal(
+    app.isFlowEndable({
+      flow_id: "abc",
+      status: "completed",
+      source: "history",
+      project_root: "/home/u/proj/se3/worktrees/wt_abc",
+    }),
+    false,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// isWorktreeSessionPath — pure structural check
+// ---------------------------------------------------------------------------
+check("isWorktreeSessionPath recognises a worktree dir", () => {
+  assert.equal(app.isWorktreeSessionPath("/a/b/se3/worktrees/wt1"), true);
+  assert.equal(app.isWorktreeSessionPath("/a/b/se3/worktrees/wt1/"), true);
+});
+
+check("isWorktreeSessionPath rejects a plain project root", () => {
+  assert.equal(app.isWorktreeSessionPath("/a/b/proj"), false);
+  assert.equal(app.isWorktreeSessionPath("/a/se3/specs"), false);
+  assert.equal(app.isWorktreeSessionPath(""), false);
+  assert.equal(app.isWorktreeSessionPath(null), false);
+  assert.equal(app.isWorktreeSessionPath(undefined), false);
 });
 
 // ---------------------------------------------------------------------------

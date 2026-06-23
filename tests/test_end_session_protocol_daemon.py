@@ -168,6 +168,29 @@ def test_request_end_session_prefers_supplied_root(tmp_path):
     assert root == str(other.resolve())
 
 
+def test_request_end_session_folds_worktree_root_to_main(tmp_path):
+    """A server-supplied *worktree* project_root is normalized to its <main>.
+
+    The server reports a worktree session's ``project_root`` as the
+    ``<main>/se3/worktrees/<name>`` sandbox itself. ``request_end_session`` must
+    fold it back to ``<main>`` so ``se3 end-session -p`` runs against the main
+    repo and can locate/archive the worktree.
+    """
+    main = tmp_path / "main"
+    (main / "se3").mkdir(parents=True)
+    wt = main / "se3" / "worktrees" / "wt_x"
+    wt.mkdir(parents=True)
+    daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+    daemon.spawner = _StubSpawner()  # type: ignore[assignment]
+
+    daemon.request_end_session("dangling-wt", project_root=str(wt))
+
+    assert len(daemon.spawner.calls) == 1
+    _, root, pid = daemon.spawner.calls[0]
+    assert root == str(main.resolve())
+    assert pid is None
+
+
 def test_request_end_session_unknown_flow_raises(tmp_path):
     daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
     daemon.spawner = _StubSpawner()  # type: ignore[assignment]

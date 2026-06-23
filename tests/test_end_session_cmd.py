@@ -276,6 +276,262 @@ def test_terminate_sigkill_escalation(tmp_path: Path) -> None:
         proc.wait(timeout=5)
 
 
+def test_terminate_kills_child_subprocess(tmp_path: Path) -> None:
+    """Ending a session must terminate the whole process tree, not just parent.
+
+    A ``se3 run`` parent typically has a live agent (Claude/Codex) child writing
+    into the worktree; killing only the parent would orphan that child. Here the
+    parent spawns a long-lived child and we verify ``end-session --pid <parent>``
+    kills both.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    _make_main_session(main, "tree-flow")
+
+    pidfile = tmp_path / "child.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(120)'])\n"
+        f"open(r'{pidfile}', 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code])
+    child_pid = None
+    try:
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                child_pid = int(pidfile.read_text().strip())
+                break
+            time.sleep(0.1)
+        assert child_pid is not None
+        assert end_session_cmd._proc_alive(child_pid)
+
+        rc = end_session(
+            project_root=main, flow_id="tree-flow", pid=proc.pid,
+            grace_seconds=2.0,
+        )
+        assert rc == 0
+
+        for _ in range(50):
+            if not end_session_cmd._proc_alive(proc.pid) and not (
+                end_session_cmd._proc_alive(child_pid)
+            ):
+                break
+            time.sleep(0.1)
+        assert not end_session_cmd._proc_alive(proc.pid)
+        assert not end_session_cmd._proc_alive(child_pid)
+    finally:
+        for p in (proc.pid, child_pid):
+            if p:
+                try:
+                    end_session_cmd.os.kill(p, 9)
+                except Exception:
+                    pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def test_worktree_without_branch_is_still_cleaned_up(tmp_path: Path) -> None:
+    """A worktree session whose engine.json lacks worktree_branch is still cleaned.
+
+    The branch is inferred from git's worktree metadata so the worktree
+    directory + registration are removed rather than left hanging.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+
+    flow_id = "wt-no-branch"
+    branch = "worktree/no-branch-1"
+    wt_path = _make_worktree_session(main, flow_id, branch)
+
+    # Strip worktree_branch from the worktree engine.json (older/corrupt state).
+    engine_file = wt_path / "se3" / "state" / "engine.json"
+    data = json.loads(engine_file.read_text())
+    data.pop("worktree_branch", None)
+    engine_file.write_text(json.dumps(data, indent=2))
+
+    assert exists_for_branch(main, branch)
+
+    rc = end_session(project_root=main, flow_id=flow_id)
+    assert rc == 0
+
+    # Worktree archived, and the worktree directory + registration cleaned up
+    # despite the missing branch in engine.json.
+    assert not wt_path.exists()
+    assert not exists_for_branch(main, branch)
+
+
+def test_stale_unregistered_worktree_dir_is_removed(tmp_path: Path) -> None:
+    """A stale worktree dir (no git registration, no branch) is fully removed.
+
+    When a worktree session's engine.json carries no ``worktree_branch`` AND git
+    no longer tracks the directory as a registered worktree (so no branch can be
+    inferred), end-session takes the remove-by-path branch. ``remove_worktree``
+    only drives git and would leave the on-disk directory behind; the command
+    must still delete the directory rather than reporting success while it
+    survives.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+
+    flow_id = "stale-wt"
+    # Build a worktree session dir manually — it is NOT a registered git
+    # worktree, and its engine.json has no worktree_branch, so the branch can
+    # neither be recorded nor inferred.
+    wt_path = main / "se3" / "worktrees" / "stale"
+    state_dir = wt_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    engine = {
+        "flow_id": flow_id,
+        "status": "FAILED",
+        "is_worktree_mode": True,
+        "worktree_path": str(wt_path),
+        # no worktree_branch
+    }
+    (state_dir / "engine.json").write_text(json.dumps(engine, indent=2))
+    assert wt_path.exists()
+
+    rc = end_session(project_root=main, flow_id=flow_id)
+    assert rc == 0
+
+    # The stale worktree directory is gone (archived first, then removed).
+    assert not wt_path.exists()
+    # And it was archived before removal.
+    archive_root = main / "se3" / "worktrees" / ".archive"
+    assert archive_root.exists() and any(archive_root.iterdir())
+
+
+def test_discovers_live_worktree_parent_by_descendant_cwd(tmp_path: Path) -> None:
+    """A live ``--worktree`` flow's parent is found via its agent child's cwd.
+
+    A ``se3 run --worktree`` parent keeps cwd==main_root and writes engine.json
+    into the worktree, so the main engine.json's flow_id never confirms it.
+    Discovery must instead match the descendant (agent subprocess) running inside
+    the worktree path. We spawn a parent (cwd=main, fake ``se3 run`` cmdline)
+    that forks a child chdir'd into the worktree, and verify the parent pid is
+    discovered.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    flow_id = "live-wt"
+    branch = "worktree/live-1"
+    wt_path = _make_worktree_session(main, flow_id, branch, status="RUNNING")
+
+    # NOTE: no main engine.json is created, mirroring a real worktree flow whose
+    # state lives only inside the worktree.
+
+    pidfile = tmp_path / "child.pid"
+    child_code = (
+        "import os, time; "
+        f"os.chdir(r'{wt_path}'); "
+        "time.sleep(120)"
+    )
+    # The parent stays at cwd=main and spawns the child chdir'd into the
+    # worktree. Trailing 'se3 run' args make the parent's cmdline match the
+    # se3-run heuristic without affecting the script.
+    parent_code = (
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"open(r'{pidfile}', 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", parent_code, "se3", "run"], cwd=str(main)
+    )
+    child_pid = None
+    try:
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                child_pid = int(pidfile.read_text().strip())
+                break
+            time.sleep(0.1)
+        assert child_pid is not None
+        # Give the child a moment to finish chdir into the worktree.
+        time.sleep(0.3)
+
+        pids = end_session_cmd._discover_pids_for_flow(flow_id, main, wt_path)
+        assert proc.pid in pids
+    finally:
+        for p in (proc.pid, child_pid):
+            if p:
+                try:
+                    end_session_cmd.os.kill(p, 9)
+                except Exception:
+                    pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def test_discovers_live_worktree_parent_via_pidfile(tmp_path: Path) -> None:
+    """A live ``--worktree`` parent with NO descendant in the worktree is found.
+
+    This is the self-check scenario: the parent keeps cwd==main_root, the main
+    engine.json does not carry the flow_id (the flow's state is in the worktree),
+    and the parent is momentarily between agent/test subprocesses so it has no
+    descendant whose cwd is inside the worktree. The cwd/descendant heuristics
+    cannot find it; the ``se3 run`` process records its pid in the worktree's
+    ``run.pid`` marker, and discovery MUST locate it from there so the worktree
+    is never archived/deleted under a still-live process.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    flow_id = "live-wt-pidfile"
+    branch = "worktree/live-pidfile-1"
+    wt_path = _make_worktree_session(main, flow_id, branch, status="RUNNING")
+
+    # A parent that has NO children and stays at cwd=main. Trailing 'se3 run'
+    # args make its cmdline match the se3-run heuristic (and pass the run.pid
+    # liveness/cmdline guard).
+    parent_code = "import time\ntime.sleep(120)\n"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", parent_code, "se3", "run", "--worktree"],
+        cwd=str(main),
+    )
+    try:
+        # ``se3 run`` writes its pid into the worktree's state dir; simulate it.
+        (wt_path / "se3" / "state" / "run.pid").write_text(str(proc.pid))
+
+        pids = end_session_cmd._discover_pids_for_flow(flow_id, main, wt_path)
+        assert proc.pid in pids
+    finally:
+        try:
+            end_session_cmd.os.kill(proc.pid, 9)
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def test_stale_pidfile_is_ignored(tmp_path: Path) -> None:
+    """A run.pid pointing at a dead pid must not be reported as a live process."""
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    flow_id = "stale-pid"
+    branch = "worktree/stale-1"
+    wt_path = _make_worktree_session(main, flow_id, branch)
+
+    # Spawn and reap a short-lived process to get a definitely-dead pid.
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (wt_path / "se3" / "state" / "run.pid").write_text(str(dead.pid))
+
+    pids = end_session_cmd._discover_pids_for_flow(flow_id, main, wt_path)
+    assert dead.pid not in pids
+
+
 def test_no_live_process_still_archives(tmp_path: Path) -> None:
     """A PAUSED worktree with no live process is still archived cleanly."""
     main = tmp_path / "repo"

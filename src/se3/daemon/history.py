@@ -297,6 +297,21 @@ _DESC_CLIP = 200
 #: flows within the window.
 BUILD_INDEX_TTL = 3.0
 
+#: Cross-root flow_id de-duplication precedence (lower number = higher priority).
+#: When the SAME flow_id is found under more than one root — the classic
+#: ``se3 run --worktree`` split where the pre-fork discovery dir survives in the
+#: main repo as a *history-only* entry while the live ``engine.json`` + later
+#: steps live under the worktree subdir — the higher-precedence source wins
+#: REGARDLESS of which root is enumerated first. ``_iter_roots`` enumerates the
+#: main repo before its ``se3/worktrees/<name>`` subdir (a main root sorts
+#: before a path nested under it), so a plain first-claim-wins dedup would record
+#: the active worktree flow as a non-active ``history`` row under the MAIN root:
+#: it would then neither be recognised as active (so never stream live) nor — for
+#: the index's recorded authoritative root — point at the worktree. Letting an
+#: ``active`` claim supersede a ``history`` claim keeps the authoritative
+#: ``SessionMeta.project_root`` on the worktree root.
+_SOURCE_PRIORITY = {"active": 0, "archived": 1, "resumable": 2, "history": 3}
+
 #: Type of the project-roots provider — a zero-arg callable returning the roots
 #: the daemon currently tracks (typically ``aggregator.project_roots``).
 ProjectRootsProvider = Callable[[], Iterable[Any]]
@@ -500,9 +515,18 @@ class DaemonHistoryReader:
         return metas
 
     def _build_index_fresh(self) -> List[SessionMeta]:
-        """Uncached index build — walks all roots from disk."""
+        """Uncached index build — walks all roots from disk.
+
+        ``seen`` maps ``flow_id`` to its position in *metas* (rather than being a
+        bare presence set) so a later, higher-precedence source for an
+        already-claimed flow can *replace* the earlier entry — see
+        :data:`_SOURCE_PRIORITY` and :meth:`_claim`. This is what lets an active
+        worktree flow (its live ``engine.json`` under the worktree subdir,
+        enumerated AFTER the main repo) supersede the main repo's history-only
+        clone of the same flow_id.
+        """
         metas: List[SessionMeta] = []
-        seen: set = set()
+        seen: Dict[str, int] = {}
         for root in self._iter_roots():
             try:
                 self._index_root(root, metas, seen)
@@ -510,6 +534,34 @@ class DaemonHistoryReader:
                 logger.exception("history: failed to index root %s", root)
         metas.sort(key=lambda m: m.updated_at or "", reverse=True)
         return metas
+
+    def _claim(
+        self,
+        flow_id: str,
+        source: str,
+        metas: List[SessionMeta],
+        seen: Dict[str, int],
+        factory: Callable[[], SessionMeta],
+    ) -> None:
+        """Record (or upgrade) a flow's :class:`SessionMeta` by source precedence.
+
+        On the first sighting of *flow_id* the *factory* result is appended. On a
+        later sighting the new *source* replaces the recorded entry ONLY when it
+        has strictly higher precedence (a smaller :data:`_SOURCE_PRIORITY`), so a
+        cross-root ``active`` claim supersedes an earlier ``history`` claim while
+        an equal/lower-precedence repeat is ignored. The *factory* is invoked
+        lazily — never for an ignored repeat — so an unchanged flow incurs no
+        extra disk read (preserving the prior first-claim-wins cost profile).
+        """
+        new_pri = _SOURCE_PRIORITY.get(source, 99)
+        pos = seen.get(flow_id)
+        if pos is None:
+            seen[flow_id] = len(metas)
+            metas.append(factory())
+            return
+        existing_pri = _SOURCE_PRIORITY.get(metas[pos].source, 99)
+        if new_pri < existing_pri:
+            metas[pos] = factory()
 
     @staticmethod
     def _is_still_active(meta: SessionMeta) -> bool:
@@ -540,18 +592,29 @@ class DaemonHistoryReader:
         return _is_active_status(status)
 
     def _index_root(
-        self, root: Path, metas: List[SessionMeta], seen: set
+        self, root: Path, metas: List[SessionMeta], seen: Dict[str, int]
     ) -> None:
-        """Append the sessions found under one project *root* into *metas*."""
+        """Append the sessions found under one project *root* into *metas*.
+
+        Each source claims its flow_ids through :meth:`_claim`, so a
+        higher-precedence source — whether processed later within this root or
+        discovered under a *different* root in a later :meth:`_index_root` call —
+        supersedes a lower-precedence claim of the same flow_id (see
+        :data:`_SOURCE_PRIORITY`).
+        """
         state_dir = root / "se3" / "state"
 
         # 1. Active flow from engine.json.
         data = _read_engine_cached(state_dir / "engine.json")
         if isinstance(data, dict) and data.get("flow_id"):
             flow_id = str(data["flow_id"])
-            if flow_id not in seen:
-                seen.add(flow_id)
-                metas.append(self._meta_from_engine(root, data, source="active"))
+            self._claim(
+                flow_id,
+                "active",
+                metas,
+                seen,
+                lambda: self._meta_from_engine(root, data, source="active"),
+            )
 
         # 2. Archived flows.
         archive_dir = state_dir / "archive"
@@ -561,26 +624,29 @@ class DaemonHistoryReader:
                 if not isinstance(adata, dict):
                     continue
                 flow_id = str(adata.get("flow_id") or "")
-                if not flow_id or flow_id in seen:
+                if not flow_id:
                     continue
-                seen.add(flow_id)
-                metas.append(
-                    self._meta_from_engine(
+                self._claim(
+                    flow_id,
+                    "archived",
+                    metas,
+                    seen,
+                    lambda adata=adata, archive_file=archive_file: self._meta_from_engine(
                         root,
                         adata,
                         source="archived",
                         fallback_mtime=_safe_mtime(archive_file),
-                    )
+                    ),
                 )
 
         # 3. Resumable per-flow snapshots (se3/state/resumable/<flow_id>.json).
         # A paused/interrupted/failed flow writes a snapshot here; a later
         # ``se3 run`` overwrites the single-slot engine.json but leaves the
         # snapshot intact, so the flow survives only here (plus possibly a
-        # history dir). Indexed *before* the history-only source so such a flow
-        # keeps its original status + ``resumable=True`` rather than degrading
-        # to a non-resumable ``source="history"`` row. Deduped against
-        # active/archived (which win) via ``seen``.
+        # history dir). ``_SOURCE_PRIORITY`` keeps it above the history-only
+        # source so such a flow keeps its original status + ``resumable=True``
+        # rather than degrading to a non-resumable ``source="history"`` row, and
+        # below active/archived (which win).
         resumable_dir = state_dir / "resumable"
         if resumable_dir.is_dir():
             for snap_file in sorted(resumable_dir.glob("*.json")):
@@ -588,7 +654,7 @@ class DaemonHistoryReader:
                 if not isinstance(sdata, dict):
                     continue
                 flow_id = str(sdata.get("flow_id") or "")
-                if not flow_id or flow_id in seen:
+                if not flow_id:
                     continue
                 # The embedded flow_id MUST match the snapshot filename
                 # (resumable/<flow_id>.json); the load/resume path is keyed by
@@ -604,15 +670,18 @@ class DaemonHistoryReader:
                 # still degrade to a normal history-only row below.
                 if not _is_resumable_status(str(sdata.get("status") or "")):
                     continue
-                seen.add(flow_id)
-                metas.append(
-                    self._meta_from_engine(
+                self._claim(
+                    flow_id,
+                    "resumable",
+                    metas,
+                    seen,
+                    lambda sdata=sdata, snap_file=snap_file: self._meta_from_engine(
                         root,
                         sdata,
                         source="resumable",
                         fallback_mtime=_safe_mtime(snap_file),
                         resumable=True,
-                    )
+                    ),
                 )
 
         # 4. History-only flows (may have no engine.json at all).
@@ -622,10 +691,13 @@ class DaemonHistoryReader:
                 if not flow_dir.is_dir():
                     continue
                 flow_id = flow_dir.name
-                if flow_id in seen:
-                    continue
-                seen.add(flow_id)
-                metas.append(self._meta_from_history(root, flow_dir))
+                self._claim(
+                    flow_id,
+                    "history",
+                    metas,
+                    seen,
+                    lambda flow_dir=flow_dir: self._meta_from_history(root, flow_dir),
+                )
 
     def _meta_from_engine(
         self,
@@ -782,17 +854,25 @@ class DaemonHistoryReader:
         the server — the candidate order is:
 
           1. the authoritative root's directory (highest priority);
-          2. the owning main-repo root reverse-resolved by
-             :func:`resolve_worktree_main_root` (so a worktree flow still picks
-             up the pre-fork discovery written to the main repo).
+          2. the owning main-repo root (``project_root`` itself when it is the
+             main repo, else the one reverse-resolved from a worktree copy by
+             :func:`resolve_worktree_main_root`), so a worktree flow still picks
+             up the pre-fork discovery written to the main repo;
+          3. **every** ``<main>/se3/worktrees/<name>`` isolation copy under that
+             main repo that carries this flow's history — the *forward* (main →
+             worktree) expansion. This is what makes the read complete even when
+             the authoritative root recorded by the index is the **main** repo
+             (e.g. the pre-fork discovery dir is enumerated first and claims the
+             flow_id): without it, ``read_flow(project_root=<main>)`` would
+             resolve to ``[main dir]`` only and again show discovery alone.
+
+        So the merge reaches BOTH the main repo and the worktree regardless of
+        which of the two roots the index recorded as the authoritative
+        ``project_root``.
 
         Each candidate is admitted only when its directory exists (``is_dir``);
-        a missing / non-worktree root is silently skipped, so a non-worktree or
-        main-repo *project_root* simply yields ``[its own dir]``. Only the
-        genuine worktree↔owning-main-repo pair is merged — an unrelated tracked
-        root that merely happens to carry the same ``flow_id`` (a coincidental
-        decoy) is NOT pulled in, so the authoritative root governs the read
-        rather than whichever root a bare registry scan would hit first.
+        a missing root is silently skipped, so a non-worktree main-repo
+        *project_root* with no worktree copies simply yields ``[its own dir]``.
 
         When *project_root* is empty the method degrades to the legacy
         registry-walk heuristic (:meth:`_resolve_flow_dir`), returning the single
@@ -820,22 +900,48 @@ class DaemonHistoryReader:
             seen.add(resolved)
             ordered.append(resolved)
 
-        # 1. Authoritative root (single source of truth).
+        # 1. Authoritative root (single source of truth, highest priority).
         try:
-            _add(Path(project_root).resolve())
+            auth = Path(project_root).resolve()
         except Exception:  # pragma: no cover - defensive
-            pass
+            auth = None
+        _add(auth)
 
-        # 2. Owning main-repo root (worktree → main attribution).
+        # 2. Owning main-repo root. When *project_root* is a worktree copy,
+        #    reverse-resolve it; otherwise *project_root* IS the main repo.
         try:
-            main = resolve_worktree_main_root(project_root)
+            resolved_main = resolve_worktree_main_root(project_root)
         except Exception:  # pragma: no cover - defensive
-            main = None
-        if main:
+            resolved_main = None
+        main_root: Optional[Path] = None
+        if resolved_main:
             try:
-                _add(Path(main).resolve())
+                main_root = Path(resolved_main).resolve()
             except Exception:  # pragma: no cover - defensive
-                pass
+                main_root = None
+        elif auth is not None:
+            main_root = auth
+        _add(main_root)
+
+        # 3. Forward expansion: every worktree isolation copy under the main repo
+        #    that carries this flow's history (main → worktree direction). Keeps
+        #    the merge complete even when the index recorded the *main* root.
+        if main_root is not None:
+            worktrees_dir = main_root / "se3" / "worktrees"
+            try:
+                entries = (
+                    sorted(worktrees_dir.iterdir())
+                    if worktrees_dir.is_dir()
+                    else []
+                )
+            except OSError:  # pragma: no cover - defensive
+                entries = []
+            for wt in entries:
+                try:
+                    if wt.is_dir():
+                        _add(wt)
+                except OSError:  # pragma: no cover - racy unlink
+                    continue
 
         return ordered
 
@@ -845,28 +951,38 @@ class DaemonHistoryReader:
         de-duplicated physical-file list.
 
         Several candidate ``se3/history/<flow_id>`` directories may hold the
-        *same* physical step filename — most commonly a worktree flow whose
-        pre-fork discovery file was written to the main repo and then cloned into
-        the worktree, so ``01_discovery_xx.jsonl`` exists under both roots. The
-        incremental cursor is keyed by filename, so each filename MUST resolve to
-        exactly ONE physical file or the two copies would collide on the same
-        cursor key. The chosen copy is the most complete one (largest byte
-        size), with ties broken by directory priority (the authoritative root
-        comes first in *flow_dirs*); this keeps the result stable (a given step
-        file is only ever *written* by one root, so the other root's copy is a
-        static pre-fork clone) and loses no records.
+        *same* logical step — most commonly a worktree flow whose pre-fork
+        discovery file was written to the main repo and then cloned into the
+        worktree, so the discovery step exists under both roots. The clone may
+        carry the *same* physical name (``01_discovery_ab.jsonl`` under both) or
+        a name differing only by the per-step ``<hash>`` segment
+        (``01_discovery_ab.jsonl`` vs ``01_discovery_cd.jsonl``). De-duplication
+        is therefore keyed by the *logical* step identity
+        (:func:`_cross_root_step_key`) — the ``NN`` sequence + step type + group
+        + sidecar marker, hash stripped — NOT the raw filename, so a discovery
+        clone collapses to one entry regardless of whether its hash matches.
 
-        A filename unique to a single root is always included, so a split
+        The cursor is keyed by physical filename, so each logical step MUST
+        resolve to exactly ONE physical file or two copies of the same step
+        would render twice. The chosen copy is the most complete one (largest
+        byte size), with ties broken by directory priority (the authoritative
+        root comes first in *flow_dirs*); this keeps the result stable (a given
+        step file is only ever *written* by one root, so the other root's copy
+        is a static pre-fork clone) and loses no records.
+
+        A logical step unique to a single root is always included, so a split
         history — discovery only in the main repo, later steps only in the
         worktree — is merged in full with no missing step and no duplicate
-        discovery.
+        discovery.  A step's primary ``*.jsonl`` and its ``*.jsonl.from-<branch>``
+        sidecar carry distinct cross-root keys (the sidecar marker), so both are
+        kept and merged into one step stream by :meth:`read_flow`.
 
         The result is sorted by filename so a step's primary file sorts ahead of
-        its ``*.jsonl.from-<branch>`` sidecars and steps stay in ``NN_`` order,
-        matching :func:`_iter_history_jsonl`'s single-root ordering.
+        its sidecars and steps stay in ``NN_`` order, matching
+        :func:`_iter_history_jsonl`'s single-root ordering.
         """
-        # name -> (priority, size, path); priority = index in flow_dirs (lower
-        # index = higher priority = authoritative root first).
+        # logical-step-key -> (priority, size, path); priority = index in
+        # flow_dirs (lower index = higher priority = authoritative root first).
         chosen: Dict[str, Tuple[int, int, Path]] = {}
         for priority, flow_dir in enumerate(flow_dirs):
             for jsonl in _iter_history_jsonl(flow_dir):
@@ -874,9 +990,10 @@ class DaemonHistoryReader:
                     size = jsonl.stat().st_size
                 except OSError:  # pragma: no cover - defensive
                     continue
-                prev = chosen.get(jsonl.name)
+                key = _cross_root_step_key(jsonl.name)
+                prev = chosen.get(key)
                 if prev is None:
-                    chosen[jsonl.name] = (priority, size, jsonl)
+                    chosen[key] = (priority, size, jsonl)
                     continue
                 prev_priority, prev_size, _prev_path = prev
                 # More complete (larger) wins; on an exact tie the
@@ -884,7 +1001,7 @@ class DaemonHistoryReader:
                 if size > prev_size or (
                     size == prev_size and priority < prev_priority
                 ):
-                    chosen[jsonl.name] = (priority, size, jsonl)
+                    chosen[key] = (priority, size, jsonl)
         return [entry[2] for entry in sorted(chosen.values(), key=lambda e: e[2].name)]
 
     @staticmethod
@@ -1676,6 +1793,63 @@ def _logical_step_id(filename: str) -> str:
     if idx < 0:
         return filename
     return filename[:idx]
+
+
+def _cross_root_step_key(filename: str) -> str:
+    """Return a *cross-root* logical step identity for merge de-duplication.
+
+    When a flow's history is split across two roots (the ``se3 run --worktree``
+    case), the SAME logical step can appear under file names that differ only by
+    their per-step ``<hash>`` segment — e.g. the discovery step is
+    ``01_discovery_ab.jsonl`` in the main repo but cloned into the worktree as
+    ``01_discovery_cd.jsonl``. Keying the cross-root merge by the *physical*
+    file name treats those as two different steps and renders the discovery
+    twice; this key collapses them to one by stripping the trailing hash while
+    keeping every structural piece that genuinely distinguishes one step from
+    another:
+
+    * the ``NN`` sequence number and the ``<step_type>`` (so ``01_discovery``
+      and ``02_analyze`` stay distinct);
+    * an optional ``_Gk`` DAG-group suffix (so two implement groups stay
+      distinct);
+    * any ``.from-<branch>`` *sidecar* marker (so a step's primary file and its
+      merge-back sidecar stay DISTINCT and are BOTH read — the post-merge
+      single-root behaviour relies on this).
+
+    Examples::
+
+        01_discovery_ab.jsonl                      -> "01_discovery\\x00"
+        01_discovery_cd.jsonl                      -> "01_discovery\\x00"   (dedups)
+        02_analyze_ef.jsonl                        -> "02_analyze\\x00"
+        05_implement_aa_G2.jsonl                   -> "05_implement_G2\\x00"
+        01_discovery_ab.jsonl.from-worktree__b     -> "01_discovery\\x00worktree__b"
+
+    This is a pure function and never raises; the ``\\x00`` separator keeps the
+    sidecar marker unambiguous against a step type that contains underscores.
+    """
+    idx = filename.find(".jsonl")
+    if idx < 0:
+        stem = filename
+        sidecar = ""
+    else:
+        stem = filename[:idx]
+        suffix = filename[idx + len(".jsonl") :]
+        m = re.match(r"\.from-(.+)$", suffix)
+        sidecar = m.group(1) if m else ""
+
+    # Strip an optional trailing ``_Gk`` group suffix, preserving it in the key.
+    group = ""
+    gm = re.search(r"_G\d+$", stem)
+    if gm:
+        group = gm.group(0)
+        stem = stem[: gm.start()]
+
+    # Strip a trailing hexadecimal hash segment, keeping ``NN_<step_type>``.
+    parts = stem.split("_")
+    if len(parts) >= 2 and parts[-1] and re.fullmatch(r"[0-9a-fA-F]+", parts[-1]):
+        stem = "_".join(parts[:-1])
+
+    return f"{stem}{group}\x00{sidecar}"
 
 
 def _iter_history_jsonl(flow_dir: Path) -> List[Path]:

@@ -158,6 +158,52 @@ stalled flow rather than answering a pending interaction.
 - **AND** the request only ever resumes the live flow, never restoring an
   archived snapshot
 
+### Requirement: End Session Control in the Flow Sidebar
+
+When a flow opened in `#flow-view` is in a non-`COMPLETED` active or recoverable
+state, the view MUST present an **End Session** control in the flow's detail
+sidebar (and on the flow card header) so the operator can terminate a session
+and clean it up without leaving the console. The control's semantics are
+distinct from Resume and from the docked reply box: it terminates and
+**archives** the session (for a worktree session its worktree is cleaned up and
+its uncommitted work is **not** merged into the main branch) rather than
+continuing a stalled flow or answering a pending interaction. It exists so a
+worktree session that would otherwise leave a never-disappearing worktree behind
+can be ended and archived exactly like a normally-completed session.
+
+Visibility is decided by the pure predicate `isFlowEndable(flow)`: the control
+appears for any active / resumable flow that is not `completed` and not an
+archived / history-only entry, and is absent for a `completed` flow. The control
+reuses the shared `makeEndButton(flow)` helper (returning nothing when the flow
+is not endable, so no End control is rendered at all), and `makeEndButton` is
+injected into both `renderFlowCard`'s header and `renderFlowSidebar`'s detail
+region.
+
+Activating it opens a confirmation modal (`end-session-modal`, reusing the
+`issue-action-modal` pattern) warning that the session will be ended and
+archived, the worktree cleaned up, and uncommitted work not merged. On
+confirmation `endFlow(flowId)` POSTs `POST /api/flows/{flow_id}/end`, debounced
+per flow via `state.endSessionRequests`, and surfaces the `202` / `404` / `409`
+/ `503` outcome as a toast. The terminated flow's archival is reflected by the
+next `status_update` rather than an immediate ack.
+
+#### Scenario: Sidebar shows End Session for a non-completed active flow
+- **GIVEN** a flow is open in `#flow-view`
+- **WHEN** the detail sidebar (or flow card header) is rendered
+- **THEN** an End Session control appears whenever `isFlowEndable(flow)` is true
+  — the flow is active / resumable, not `completed`, and not archived /
+  history-only
+- **AND** no End Session control is rendered for a `completed` flow
+
+#### Scenario: Confirming End Session dispatches a terminate-and-archive request
+- **GIVEN** the End Session control is visible
+- **WHEN** the user activates it and confirms in the `end-session-modal`
+- **THEN** the frontend POSTs `/api/flows/{flow_id}/end`, debounced per flow via
+  `state.endSessionRequests`
+- **AND** the request terminates and archives the session (worktree cleanup, no
+  merge into the main branch), never continuing the flow or answering an
+  interaction
+
 ### Requirement: Docked Persistent Reply Box
 
 The bottom of `#flow-view`'s main column MUST host a persistently docked

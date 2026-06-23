@@ -212,6 +212,64 @@ There is no two-stage "first Ctrl+C interrupts / second Ctrl+C exits" state mach
 - **AND** the process exits
 - **AND** the flow can later be resumed with `se3 run --resume`
 
+### Requirement: Remote Session Termination
+
+The system SHALL support actively **ending** a session — terminating it
+deliberately and cleaning it up — as a distinct terminal form alongside normal
+completion (the Session Shutdown Protocol) and interrupt-then-resume. This exists
+because a `se3 run --worktree` session that is merely abandoned leaves a
+never-disappearing git worktree and branch behind; ending such a session SHALL
+archive it just as a normally-completed worktree session is archived, rather than
+leaving the sandbox dangling. The capability is exposed both as the
+operator-facing `se3 end-session <flow_id>` CLI command and as a remote control
+path (the web console's End Session control → `POST /api/flows/{flow_id}/end` →
+the daemon's `MSG_END_SESSION` → an off-loop `se3 end-session` subprocess).
+
+Ending a session SHALL run as a salvage-style, independently fault-tolerant
+pipeline:
+
+1. **Terminate the running process.** For a session that still has a live
+   `se3 run` process (the parent plus its agent children), the process tree SHALL
+   be terminated gracefully — `SIGTERM`, a bounded poll-until-dead grace window,
+   then `SIGKILL` — **before** any destructive archival, and archival SHALL be
+   refused while any process is still alive.
+2. **Archive a worktree session.** When the flow is a `se3 run --worktree`
+   session (detected by scanning `se3/worktrees/*/se3/state/engine.json` for the
+   `flow_id`), it SHALL be archived exactly as a normally-completed worktree is
+   cleaned up by `se3 merge --delete-merged`: archive the worktree backup, promote
+   the terminal engine state into the main repo's `se3/state/archive/` (via the
+   `force=True` promotion path so a non-`COMPLETED` terminal state is still
+   archived), sync its history into the main repo (with collision sidecars),
+   delete the branch and worktree, and clear the resumable snapshot. Worktree /
+   branch deletion SHALL be gated on a successful archive copy.
+3. **Archive a main-branch session.** When the flow ran on the main branch, the
+   session's persisted state SHALL be archived (its `engine.json` state cleared
+   and its resumable snapshot cleared); there is no worktree to remove.
+
+This path SHALL terminate-and-archive **without merging** the session's work into
+the main branch, distinguishing it from `se3 merge` (which completes and merges).
+Because the worktree archival reuses the same machinery as a normal completion,
+an ended worktree session surfaces in the web history and the daemon aggregator
+as an ordinary archived run with no special-casing.
+
+#### Scenario: Ending a worktree session archives it without merging
+- **GIVEN** a `se3 run --worktree` session (possibly still running, paused, or
+  failed) that has left a worktree and branch behind
+- **WHEN** the session is ended via `se3 end-session <flow_id>` or `POST /api/flows/{flow_id}/end`
+- **THEN** any live `se3 run` process for the flow is gracefully terminated
+  (`SIGTERM` → grace → `SIGKILL`) before archival
+- **AND** the worktree is archived, its terminal engine state promoted to the
+  main repo's `se3/state/archive/`, its history synced, and its branch / worktree
+  / resumable snapshot cleaned up
+- **AND** the session's uncommitted work is NOT merged into the main branch
+
+#### Scenario: Ending a main-branch session archives its state
+- **GIVEN** a session that ran on the main branch
+- **WHEN** the session is ended
+- **THEN** its live process (if any) is gracefully terminated first
+- **AND** its persisted flow state and resumable snapshot are archived / cleared,
+  with no worktree to remove
+
 ### Requirement: Step Failure Interactive Recovery
 
 When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL obtain a Retry/Skip/Abort recovery decision, subject to a hard retry ceiling, rather than immediately failing the flow. The decision path is a **dual-channel pause**: on every failure with retries remaining — regardless of whether the process owns a terminal — a `retry_decision` call file is written and a `FLOW_PAUSED` event is emitted so a web-console bystander sees the failure as a Retry/Skip/Abort chip and can answer it. On an interactive terminal the CLI Retry/Skip/Abort prompt is then **raced** against the web response poller (whoever answers first wins); off a terminal the flow pauses and the decision is resolved out-of-band on the next `se3 run --resume`. This makes the CLI and the web console *equivalent* on the failure-decision path — it closes both "the webui can't see the failure" and "the webui can't retry".

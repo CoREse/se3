@@ -23,6 +23,7 @@ These tests pin the fix described in design group G1:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from se3.daemon.history import DaemonHistoryReader
 from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
@@ -305,6 +306,139 @@ def test_read_flow_missing_one_root_does_not_raise(tmp_path):
     reader = _make_reader(main, wt)
     read = reader.read_flow(flow_id, project_root=str(wt))
     assert [r["message"]["content"] for r in read.records] == ["task", "a1"]
+
+
+def test_read_flow_dedups_discovery_with_differing_hash(tmp_path):
+    """A discovery clone under a DIFFERENT per-step hash still dedups to one.
+
+    The main repo wrote ``01_discovery_ab.jsonl`` before the fork; the worktree
+    carries the same logical discovery step but under a different hash segment
+    (``01_discovery_cd.jsonl``). The merge MUST collapse them to a single
+    discovery (keyed by logical step identity, not the physical filename) so the
+    conversation shows discovery exactly once before the worktree-only steps.
+    """
+    main = tmp_path / "main"
+    wt = _make_worktree(main)
+    flow_id = "wt-hash"
+
+    main_flow = _flow_dir(main, flow_id)
+    wt_flow = _flow_dir(wt, flow_id)
+
+    # Same logical discovery step, DIFFERENT hash in each root.
+    _write_jsonl(
+        main_flow / "01_discovery_ab.jsonl",
+        [_msg("user", "the task"), _msg("assistant", "discovery answer")],
+    )
+    _write_jsonl(
+        wt_flow / "01_discovery_cd.jsonl",
+        [_msg("user", "the task"), _msg("assistant", "discovery answer")],
+    )
+    _write_jsonl(wt_flow / "02_analyze_ef.jsonl", [_msg("assistant", "analyze body")])
+
+    reader = _make_reader(main, wt)
+    read = reader.read_flow(flow_id, project_root=str(wt))
+
+    contents = [r["message"]["content"] for r in read.records]
+    # Discovery appears ONCE (deduped across the differing hashes), then analyze.
+    assert contents == ["the task", "discovery answer", "analyze body"]
+    assert [r["step_type"] for r in read.records] == [
+        "discovery",
+        "discovery",
+        "analyze",
+    ]
+
+
+# --------------------------------------------------------------------------
+# index → authoritative project_root for a split ACTIVE worktree flow
+# --------------------------------------------------------------------------
+
+
+def _write_engine(root, flow_id, status, *, is_worktree_mode=False):
+    state_dir = root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"flow_id": flow_id, "status": status}
+    if is_worktree_mode:
+        payload["is_worktree_mode"] = True
+    (state_dir / "engine.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_index_records_worktree_root_for_split_active_flow(tmp_path):
+    """The index must record the WORKTREE root (not the main repo) for a split
+    active worktree flow, and that recorded root must let the read reach the
+    worktree's later steps.
+
+    Reproduces the regression path: the main repo carries the pre-fork
+    discovery dir (a *history-only* source) and the worktree subdir carries the
+    live ``engine.json`` + later steps (an *active* source). ``_iter_roots``
+    enumerates the main repo first, so a first-claim-wins dedup would record the
+    flow as a non-active history row under the main root — neither streamed live
+    nor pointing at the worktree. Source precedence must instead keep the active
+    worktree claim authoritative.
+    """
+    main = tmp_path / "main"
+    wt = _make_worktree(main)
+    flow_id = "wt-active"
+
+    main_flow = _flow_dir(main, flow_id)
+    wt_flow = _flow_dir(wt, flow_id)
+
+    # Main repo: only the pre-fork discovery dir (history-only, no engine.json).
+    _write_jsonl(main_flow / "01_discovery_ab.jsonl", [_msg("user", "the task")])
+    # Worktree: the live engine.json + the later steps.
+    _write_engine(wt, flow_id, "RUNNING", is_worktree_mode=True)
+    _write_jsonl(wt_flow / "02_analyze_cd.jsonl", [_msg("assistant", "analyze body")])
+
+    # Provider order mirrors the real ``all_observable_roots`` sorted order:
+    # the main repo sorts before its ``se3/worktrees/<name>`` subdir.
+    reader = _make_reader(main, wt)
+    index = reader.build_index()
+    meta = next(m for m in index if m.flow_id == flow_id)
+
+    # The active worktree claim supersedes the main repo's history-only clone.
+    assert meta.source == "active"
+    assert meta.active is True
+    assert Path(meta.project_root).resolve() == wt.resolve()
+
+    # And the recorded authoritative root reaches the worktree's later steps
+    # (merged with the main repo's discovery) — the end-to-end invariant.
+    read = reader.read_flow(flow_id, project_root=meta.project_root)
+    assert [r["message"]["content"] for r in read.records] == [
+        "the task",
+        "analyze body",
+    ]
+
+
+def test_read_flow_main_root_forward_expands_into_worktree(tmp_path):
+    """Even if the index recorded the MAIN root, the read still reaches the
+    worktree's later steps via forward (main → worktree) expansion.
+
+    This is the backstop that keeps the merge complete regardless of which of
+    the two roots the index recorded as authoritative.
+    """
+    main = tmp_path / "main"
+    wt = _make_worktree(main)
+    flow_id = "wt-fwd"
+
+    main_flow = _flow_dir(main, flow_id)
+    wt_flow = _flow_dir(wt, flow_id)
+
+    _write_jsonl(main_flow / "01_discovery_ab.jsonl", [_msg("user", "the task")])
+    _write_jsonl(wt_flow / "02_analyze_cd.jsonl", [_msg("assistant", "analyze body")])
+
+    reader = _make_reader(main, wt)
+
+    # Resolve with the MAIN root as authoritative: forward expansion must pull
+    # in the worktree subdir's later steps.
+    dirs = reader._resolve_flow_dirs(flow_id, str(main))
+    resolved = {d.resolve() for d in dirs}
+    assert (main / "se3" / "history" / flow_id).resolve() in resolved
+    assert (wt / "se3" / "history" / flow_id).resolve() in resolved
+
+    read = reader.read_flow(flow_id, project_root=str(main))
+    assert [r["message"]["content"] for r in read.records] == [
+        "the task",
+        "analyze body",
+    ]
 
 
 def test_read_flow_authoritative_root_beats_registry_first_match(tmp_path):

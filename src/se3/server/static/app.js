@@ -2500,19 +2500,39 @@ function makeResumeButton(flow) {
 // `isFlowEndable` predicate (a UI gate mirroring the server's
 // `ServerState.is_flow_endable`) and debounced via `state.endSessionRequests`.
 
+// Pure helper: is *projectRoot* an se3 `--worktree` isolation directory
+// (`<main>/se3/worktrees/<name>`)?  This is the structural check the server's
+// `_is_worktree_session_path` mirrors — a live (possibly dangling) worktree run
+// is reported with its worktree sandbox as `project_root`.
+function isWorktreeSessionPath(projectRoot) {
+  if (!projectRoot) return false;
+  const parts = String(projectRoot)
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter(Boolean);
+  if (parts.length < 3) return false;
+  return parts[parts.length - 2] === "worktrees" && parts[parts.length - 3] === "se3";
+}
+
 // Pure UI gate: may *flow* be ended from the console?  A flow is endable when
-// it carries a flow_id, is not already completed, and is not an
-// archived/history-only snapshot (those have no live process / worktree to
-// clean up). Every active or recoverable state (running / paused / failed /
-// recovering / init) is endable, because a dangling worktree may be left by
-// any of them — this mirrors the server's pre-check which only rejects
-// COMPLETED flows.
+// it carries a flow_id and is not an archived/history-only snapshot (those have
+// no live process / worktree to clean up). Every active or recoverable state
+// (running / paused / failed / recovering / init) is endable, because a
+// dangling worktree may be left by any of them. A COMPLETED flow is normally
+// NOT endable (it was cleaned up the ordinary way) — EXCEPT a completed
+// worktree session whose `project_root` still points inside
+// `<main>/se3/worktrees/<name>`: that is a `se3 run --worktree` flow whose
+// follow-up merge/cleanup failed, leaving an orphan worktree on disk that this
+// feature exists to archive, so it stays endable. This mirrors the server's
+// `ServerState.is_flow_endable` pre-check.
 function isFlowEndable(flow) {
   if (!flow || typeof flow !== "object") return false;
   if (!flow.flow_id) return false;
-  if (String(flow.status || "").toLowerCase() === "completed") return false;
   const src = String(flow.source || "").toLowerCase();
   if (src === "archived" || src === "history") return false;
+  if (String(flow.status || "").toLowerCase() === "completed") {
+    return isWorktreeSessionPath(flow.project_root);
+  }
   return true;
 }
 
@@ -11636,6 +11656,7 @@ if (typeof module !== "undefined" && module.exports) {
     // End-session pure helpers (G4) — exposed for the DOM-free tests in
     // tests/frontend/end_session.test.mjs.
     isFlowEndable,
+    isWorktreeSessionPath,
     isEndInProgress,
     makeEndButton,
     // Waiting-for-lock running sub-state (G2) — exposed for the DOM-free tests

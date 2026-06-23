@@ -27,6 +27,30 @@ from typing import Any, Dict, List, Optional, Tuple
 from se3.daemon import protocol
 
 
+def _is_worktree_session_path(project_root: object) -> bool:
+    """Return whether *project_root* is an se3 ``--worktree`` isolation dir.
+
+    A ``se3 run --worktree`` flow body executes inside, and persists its
+    ``engine.json`` under, ``<main_root>/se3/worktrees/<name>/``. The daemon
+    reports such a live (possibly dangling) run with that path as its
+    ``project_root``. This is the **structural** half of the daemon's
+    :func:`se3.daemon.supervisor.resolve_worktree_main_root` check — the last
+    two path segments being ``se3/worktrees`` — without the filesystem
+    ``<main>/se3`` directory probe, because the server runs on a different host
+    than the worktree and cannot stat it. Used by :meth:`ServerState.is_flow_endable`
+    so a *completed* worktree session whose follow-up cleanup failed is still
+    recognised as having an orphan worktree to archive.
+    """
+    if not project_root:
+        return False
+    # Split on both separators and drop empties so trailing slashes don't shift
+    # the segment positions; a worktree dir is ``…/se3/worktrees/<name>``.
+    parts = [seg for seg in str(project_root).replace("\\", "/").split("/") if seg]
+    if len(parts) < 3:
+        return False
+    return parts[-2] == "worktrees" and parts[-3] == "se3"
+
+
 # -- history progress token --------------------------------------------------
 #
 # The REST snapshot endpoint (``GET /api/history/{flow_id}``) can serve an
@@ -585,21 +609,35 @@ class ServerState:
         """Return ``(machine_id, flow_dict)`` when *flow_id* can be ended.
 
         A flow is endable when it is owned by *owner* (or the unscoped admin
-        view) and its status is **not** ``completed``: a dangling worktree may
-        be left behind by a RUNNING / PAUSED / FAILED / RECOVERING / INIT
-        session, so all of those are endable, while a ``completed`` flow has
-        already been cleaned up the normal way and has nothing left to end.
+        view) and either:
+
+        * its status is **not** ``completed`` — a dangling worktree may be left
+          behind by a RUNNING / PAUSED / FAILED / RECOVERING / INIT session, so
+          all of those are endable; or
+        * it *is* ``completed`` **but** is still a live worktree session whose
+          ``project_root`` points inside ``<main>/se3/worktrees/<name>``. This
+          is the dangling-worktree case this feature exists for: when a
+          ``se3 run --worktree`` flow reaches COMPLETED but the follow-up
+          merge/cleanup fails or is interrupted, the worktree stays on disk with
+          a completed ``engine.json`` and the daemon keeps reporting it live
+          under its worktree root. Such an orphan must still be endable so the
+          daemon can archive and remove it. An ordinary completed (main-branch)
+          session, or a worktree session already cleaned up the normal way
+          (which is reported only as an archived/main-root flow, never under a
+          live worktree root), has nothing left to end.
 
         Returns ``None`` for an unknown / cross-owner flow (caller maps to 404)
-        and for a ``completed`` flow (caller maps to 409), mirroring the honest
-        receipt the resume gate provides.
+        and for an ordinary already-completed flow (caller maps to 409),
+        mirroring the honest receipt the resume gate provides.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
             return None
         machine_id, flow = result
         status = str(flow.get("status") or "").lower()
-        if status == "completed":
+        if status == "completed" and not _is_worktree_session_path(
+            flow.get("project_root")
+        ):
             return None
         return machine_id, flow
 

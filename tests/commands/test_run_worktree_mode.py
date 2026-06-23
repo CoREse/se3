@@ -181,6 +181,49 @@ class TestRunWorktreeMode:
         rc = run.run_worktree_mode(project_root=Path("/repo"), task="x")
         assert rc == 1
 
+    def test_run_pidfile_survives_into_trailing_merge(self, tmp_path):
+        """The worktree's ``run.pid`` marker MUST exist for the WHOLE lifecycle.
+
+        Regression for the self-check finding: ``run_flow`` clears ``run.pid`` in
+        its own ``finally`` before ``run_worktree_mode`` starts the trailing
+        merge, so an ``se3 end-session`` dispatched during the merge could not
+        discover the still-live wrapper process and would archive/delete the
+        worktree mid-merge. The caller must own the marker across the flow body
+        AND the trailing merge; it may only vanish after the run fully returns.
+        """
+        wt_path = tmp_path / "se3" / "worktrees" / "wt"
+        (wt_path / "se3" / "state").mkdir(parents=True)
+        pid_file = wt_path / "se3" / "state" / "run.pid"
+
+        seen = {}
+
+        def fake_run_flow(*_a, **kwargs):
+            # ``run_flow`` is told NOT to manage the marker for a worktree body.
+            assert kwargs["manage_pidfile"] is False
+            seen["during_flow"] = pid_file.read_text().strip()
+            return 0
+
+        def fake_merge(*_a, **_kw):
+            # The merge phase runs AFTER run_flow returned — the marker must
+            # still be present so end-session can find the live process.
+            seen["during_merge"] = pid_file.read_text().strip()
+            return 0
+
+        with patch("se3.commands.run.run_flow", side_effect=fake_run_flow), \
+             patch("se3.commands.merge_cmd.run_merge", side_effect=fake_merge), \
+             patch("se3.commands.run._worktree_flow_status", return_value="completed"), \
+             patch("se3.engine.worktree.fork_worktree", return_value=wt_path), \
+             patch("se3.engine.worktree.get_current_branch", return_value="main"), \
+             patch("se3.commands.run.clear_main_repo_root_cache"):
+            rc = run.run_worktree_mode(project_root=tmp_path, task="Add feature")
+
+        assert rc == 0
+        # Present during both the flow body and the trailing merge, naming us.
+        assert seen["during_flow"] == str(__import__("os").getpid())
+        assert seen["during_merge"] == str(__import__("os").getpid())
+        # Cleared once the run fully returns (worktree not deleted by the mock).
+        assert not pid_file.exists()
+
 
 # --------------------------------------------------------------------------
 # worktree-run discovery + resume

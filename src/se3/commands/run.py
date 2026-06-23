@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import signal
 import subprocess
@@ -2020,6 +2021,7 @@ def run_flow(
     acquire_main_lock: bool = True,
     worktree_branch: Optional[str] = None,
     worktree_original_branch: Optional[str] = None,
+    manage_pidfile: bool = True,
 ) -> int:
     """Run a flow to completion.
 
@@ -2053,6 +2055,19 @@ def run_flow(
             run was launched from / will merge back into; recorded on the flow
             (``worktree_original_branch``) so resume can drive the trailing
             merge. Ignored on resume.
+        manage_pidfile: When ``True`` (default for a synchronous ``se3 run``),
+            ``run_flow`` writes ``se3/state/run.pid`` on entry and clears it on
+            exit so ``se3 end-session`` can locate the live process. When
+            ``False`` — the case for a ``--worktree`` run's isolated flow body —
+            the CALLER (``run_worktree_mode`` / ``_resume_worktree_run``) owns
+            the pidfile for the WHOLE worktree-run lifecycle, INCLUDING the
+            post-COMPLETED trailing merge/cleanup phase that runs after
+            ``run_flow`` returns. If ``run_flow`` cleared the marker in its own
+            ``finally``, end-session dispatched during that trailing merge would
+            find no pidfile and (because the still-live wrapper keeps
+            ``cwd==main_root`` and the main ``engine.json`` does not carry the
+            worktree flow_id) could not discover the process — and would then
+            archive/delete the worktree out from under a still-running merge.
 
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -2079,6 +2094,21 @@ def run_flow(
     # isolated flow body — no lock object is created at all, so the body runs
     # lock-free.
     main_lock = None
+    # Record this process's pid into ``se3/state/run.pid`` so ``se3 end-session``
+    # can RELIABLY identify the live flow process even when it is a ``--worktree``
+    # run whose process ``cwd`` stays at the main repo (engine.json lives in the
+    # worktree) and which is momentarily between agent/test subprocesses, i.e.
+    # has no descendant whose cwd is inside the worktree. Cwd/descendant scanning
+    # cannot find such a parent; the on-disk pid does. The file lives in the same
+    # state dir as engine.json (the worktree's for a worktree run), so there is
+    # at most one writer per state dir. It is cleared on every exit path below.
+    #
+    # For a ``--worktree`` flow body the CALLER owns the pidfile for the whole
+    # worktree-run lifecycle (flow body + trailing merge), so it passes
+    # ``manage_pidfile=False`` and we neither write nor clear it here — see the
+    # ``manage_pidfile`` docstring above.
+    if manage_pidfile:
+        _write_run_pidfile(persistence)
     try:
         if acquire_main_lock:
             from .merge.merge_lock import MergeLock
@@ -2107,6 +2137,50 @@ def run_flow(
         # Release the main-worktree mutex (held for the whole synchronous run).
         if main_lock is not None:
             main_lock.release()
+        # Drop our run.pid marker so a finished flow is no longer reported as a
+        # live process (best-effort; only removes the file when it still names us).
+        # Skipped when the caller manages the pidfile (a --worktree flow body):
+        # the marker must survive into the trailing merge/cleanup phase.
+        if manage_pidfile:
+            _clear_run_pidfile(persistence)
+
+
+def _write_run_pidfile(persistence: PersistenceManager) -> None:
+    """Best-effort: record the current pid into ``se3/state/run.pid``.
+
+    Read by ``se3 end-session`` to reliably locate the live flow process. Never
+    raises — a failure to write the marker only degrades end-session back to its
+    process-scan heuristics.
+    """
+    try:
+        persistence.ensure_directories()
+        pid_file = persistence.state_dir / "run.pid"
+        tmp = pid_file.with_suffix(".pid.tmp")
+        tmp.write_text(str(os.getpid()), encoding="utf-8")
+        tmp.replace(pid_file)
+    except Exception:  # noqa: BLE001 - the marker is purely advisory
+        logger.debug("Failed to write run.pid marker", exc_info=True)
+
+
+def _clear_run_pidfile(persistence: PersistenceManager) -> None:
+    """Best-effort: remove ``se3/state/run.pid`` when it still names this process.
+
+    Only unlinks when the recorded pid is our own, so a concurrently-relaunched
+    flow that overwrote the marker (e.g. a fast ``--resume`` in the same state
+    dir) is never clobbered. Never raises.
+    """
+    try:
+        pid_file = persistence.state_dir / "run.pid"
+        if not pid_file.exists():
+            return
+        try:
+            recorded = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            recorded = None
+        if recorded is None or recorded == os.getpid():
+            pid_file.unlink()
+    except Exception:  # noqa: BLE001 - the marker is purely advisory
+        logger.debug("Failed to clear run.pid marker", exc_info=True)
 
 
 def _run_flow_impl(
@@ -3006,65 +3080,83 @@ def run_worktree_mode(
         title="Worktree Run",
     )
 
-    # Run the flow inside the worktree. acquire_main_lock=False: the flow body
-    # runs lock-free so concurrent --worktree runs do not serialise here; only
-    # the trailing merge contends on the main-worktree mutex.
-    exit_code = run_flow(
-        project_root=worktree_path,
-        task_description=task,
-        task_type=task_type,
-        change_name=change_name,
-        is_worktree_mode=True,
-        prompt_history=prompt_history,
-        source_issue_id=source_issue_id,
-        output_format=output_format,
-        acquire_main_lock=False,
-        worktree_branch=worktree_branch,
-        worktree_original_branch=original_branch,
-    )
-
-    if exit_code != 0:
-        # Failed / interrupted: preserve the worktree + branch for --resume and
-        # do NOT merge. Mirrors a synchronous run that left state behind.
-        render_full(
-            "\n".join(
-                [
-                    f"Worktree run did not complete (exit {exit_code}).",
-                    f"State preserved in worktree '{worktree_path}' "
-                    f"(branch '{worktree_branch}').",
-                    "Resume with: se3 run --resume",
-                ]
-            ),
-            title="Worktree Run Paused",
+    # Own the worktree's ``run.pid`` marker for the ENTIRE worktree-run lifecycle
+    # — the isolated flow body AND the trailing merge/cleanup phase below — so
+    # ``se3 end-session`` can reliably terminate this still-live wrapper process
+    # at any point. ``run_flow`` is told NOT to manage the marker
+    # (``manage_pidfile=False``); if it cleared the marker in its own ``finally``
+    # the still-running merge would be undiscoverable (the wrapper keeps
+    # ``cwd==main_root`` and the main ``engine.json`` lacks the worktree flow_id),
+    # letting end-session archive/delete the worktree mid-merge. The marker lives
+    # in the worktree's own state dir (where end-session looks first for a
+    # worktree session). The finally clears it on every exit; a successful merge
+    # may have already deleted the worktree (and the marker with it), in which
+    # case the clear is a harmless no-op.
+    wt_persistence = PersistenceManager(worktree_path)
+    _write_run_pidfile(wt_persistence)
+    try:
+        # Run the flow inside the worktree. acquire_main_lock=False: the flow body
+        # runs lock-free so concurrent --worktree runs do not serialise here; only
+        # the trailing merge contends on the main-worktree mutex.
+        exit_code = run_flow(
+            project_root=worktree_path,
+            task_description=task,
+            task_type=task_type,
+            change_name=change_name,
+            is_worktree_mode=True,
+            prompt_history=prompt_history,
+            source_issue_id=source_issue_id,
+            output_format=output_format,
+            acquire_main_lock=False,
+            worktree_branch=worktree_branch,
+            worktree_original_branch=original_branch,
+            manage_pidfile=False,
         )
-        return exit_code
 
-    # A 0 exit code is ambiguous in --output-format json: a flow that PAUSED
-    # for non-interactive input (e.g. a daemon-spawned --worktree --discover run
-    # awaiting a web answer) also returns 0. Only a genuinely COMPLETED flow may
-    # trigger the trailing merge — merging a paused flow would delete its branch
-    # and archive its worktree (engine.json + call files), irrecoverably losing
-    # the run that the web operator is about to answer. Preserve and exit.
-    status = _worktree_flow_status(worktree_path)
-    if status != FlowStatus.COMPLETED.value:
-        render_full(
-            "\n".join(
-                [
-                    f"Worktree run paused (status: {status or 'unknown'}); "
-                    "no merge attempted.",
-                    f"State preserved in worktree '{worktree_path}' "
-                    f"(branch '{worktree_branch}').",
-                    "It will be resumed once the pending input is answered.",
-                ]
-            ),
-            title="Worktree Run Paused",
+        if exit_code != 0:
+            # Failed / interrupted: preserve the worktree + branch for --resume
+            # and do NOT merge. Mirrors a synchronous run that left state behind.
+            render_full(
+                "\n".join(
+                    [
+                        f"Worktree run did not complete (exit {exit_code}).",
+                        f"State preserved in worktree '{worktree_path}' "
+                        f"(branch '{worktree_branch}').",
+                        "Resume with: se3 run --resume",
+                    ]
+                ),
+                title="Worktree Run Paused",
+            )
+            return exit_code
+
+        # A 0 exit code is ambiguous in --output-format json: a flow that PAUSED
+        # for non-interactive input (e.g. a daemon-spawned --worktree --discover
+        # run awaiting a web answer) also returns 0. Only a genuinely COMPLETED
+        # flow may trigger the trailing merge — merging a paused flow would delete
+        # its branch and archive its worktree (engine.json + call files),
+        # irrecoverably losing the run the web operator is about to answer.
+        status = _worktree_flow_status(worktree_path)
+        if status != FlowStatus.COMPLETED.value:
+            render_full(
+                "\n".join(
+                    [
+                        f"Worktree run paused (status: {status or 'unknown'}); "
+                        "no merge attempted.",
+                        f"State preserved in worktree '{worktree_path}' "
+                        f"(branch '{worktree_branch}').",
+                        "It will be resumed once the pending input is answered.",
+                    ]
+                ),
+                title="Worktree Run Paused",
+            )
+            return exit_code
+
+        # Success: merge the isolation branch back into the original branch.
+        return _finalize_worktree_merge(
+            project_root, worktree_branch, original_branch
         )
-        return exit_code
-
-    # Success: merge the isolation branch back into the original branch.
-    return _finalize_worktree_merge(
-        project_root, worktree_branch, original_branch
-    )
+    finally:
+        _clear_run_pidfile(wt_persistence)
 
 
 def find_resumable_worktree_runs(project_root: Path) -> List[Dict[str, Any]]:
@@ -3193,56 +3285,67 @@ def _resume_worktree_run(
         )
         return 1
 
-    exit_code = run_flow(
-        project_root=worktree_path,
-        flow_id=run["id"],
-        prompt_history=prompt_history,
-        output_format=output_format,
-        acquire_main_lock=False,
-    )
-
-    if exit_code != 0:
-        render_full(
-            "\n".join(
-                [
-                    f"Worktree run did not complete (exit {exit_code}).",
-                    f"State preserved in worktree '{worktree_path}'.",
-                    "Resume again with: se3 run --resume",
-                ]
-            ),
-            title="Worktree Run Paused",
+    # Own the worktree's ``run.pid`` marker for the whole resume lifecycle (flow
+    # body + trailing merge), mirroring ``run_worktree_mode`` — ``run_flow`` is
+    # told not to manage it so the marker survives into the post-COMPLETED merge,
+    # keeping the still-live process discoverable by ``se3 end-session``. See the
+    # ``run_flow`` ``manage_pidfile`` docstring.
+    wt_persistence = PersistenceManager(worktree_path)
+    _write_run_pidfile(wt_persistence)
+    try:
+        exit_code = run_flow(
+            project_root=worktree_path,
+            flow_id=run["id"],
+            prompt_history=prompt_history,
+            output_format=output_format,
+            acquire_main_lock=False,
+            manage_pidfile=False,
         )
-        return exit_code
 
-    # A 0 exit is ambiguous in json mode: a flow that PAUSED again for further
-    # non-interactive input also returns 0. Only merge a genuinely COMPLETED
-    # flow — merging a still-paused flow would archive its worktree and delete
-    # its branch, losing the run mid-resume.
-    status = _worktree_flow_status(worktree_path)
-    if status != FlowStatus.COMPLETED.value:
-        render_full(
-            "\n".join(
-                [
-                    f"Worktree run paused again (status: {status or 'unknown'}); "
-                    "no merge attempted.",
-                    f"State preserved in worktree '{worktree_path}'.",
-                    "It will be resumed once the pending input is answered.",
-                ]
-            ),
-            title="Worktree Run Paused",
+        if exit_code != 0:
+            render_full(
+                "\n".join(
+                    [
+                        f"Worktree run did not complete (exit {exit_code}).",
+                        f"State preserved in worktree '{worktree_path}'.",
+                        "Resume again with: se3 run --resume",
+                    ]
+                ),
+                title="Worktree Run Paused",
+            )
+            return exit_code
+
+        # A 0 exit is ambiguous in json mode: a flow that PAUSED again for further
+        # non-interactive input also returns 0. Only merge a genuinely COMPLETED
+        # flow — merging a still-paused flow would archive its worktree and delete
+        # its branch, losing the run mid-resume.
+        status = _worktree_flow_status(worktree_path)
+        if status != FlowStatus.COMPLETED.value:
+            render_full(
+                "\n".join(
+                    [
+                        f"Worktree run paused again (status: {status or 'unknown'}); "
+                        "no merge attempted.",
+                        f"State preserved in worktree '{worktree_path}'.",
+                        "It will be resumed once the pending input is answered.",
+                    ]
+                ),
+                title="Worktree Run Paused",
+            )
+            return exit_code
+
+        if not worktree_branch:
+            display_error(
+                "Worktree run completed but no isolation branch was recorded; "
+                "cannot merge automatically. Merge manually if needed."
+            )
+            return 1
+
+        return _finalize_worktree_merge(
+            project_root, worktree_branch, worktree_original_branch
         )
-        return exit_code
-
-    if not worktree_branch:
-        display_error(
-            "Worktree run completed but no isolation branch was recorded; "
-            "cannot merge automatically. Merge manually if needed."
-        )
-        return 1
-
-    return _finalize_worktree_merge(
-        project_root, worktree_branch, worktree_original_branch
-    )
+    finally:
+        _clear_run_pidfile(wt_persistence)
 
 
 def resume_run(

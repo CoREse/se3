@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
 import time
 from pathlib import Path
@@ -293,45 +294,225 @@ def _proc_alive(pid: int) -> bool:
     return True
 
 
-def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
-    """Terminate a single pid (SIGTERM → grace poll → SIGKILL).
+def _collect_descendants(pids: List[int]) -> set:
+    """Return *pids* plus all their live recursive descendants.
 
-    Returns ``(ok, detail)`` where ``ok`` is ``True`` only when the process is
-    confirmed dead (or was never running). A process that survives SIGKILL, or a
-    signal that fails outright (e.g. ``PermissionError``), returns ``ok=False``
-    so the caller can refuse the destructive archive path while the session
-    process is still alive.
+    Ending a worktree session must terminate the whole live process tree, not
+    just the top ``se3 run`` parent: a running flow typically has an active
+    Claude/Codex agent **child** subprocess executing inside the worktree, and
+    killing only the parent would orphan that child (reparented to init), which
+    would keep writing into the worktree while the command proceeds to archive
+    and delete it. Capturing the descendant set up front — before SIGTERM kills
+    the parent and orphans the children — lets us signal and verify the entire
+    tree. When psutil is unavailable (or a pid no longer exists) we degrade to
+    the bare pid set; the caller's own-pid exclusion is applied separately.
+    """
+    result: set = set()
+    if psutil is None:
+        return set(pids)
+    for pid in pids:
+        result.add(pid)
+        try:
+            proc = psutil.Process(pid)
+            for child in proc.children(recursive=True):
+                result.add(child.pid)
+        except psutil.NoSuchProcess:
+            continue
+        except Exception:  # noqa: BLE001 - defensive; never block on scan
+            continue
+    return result
+
+
+def _any_alive(pids) -> bool:
+    """Return whether any pid in *pids* is currently alive."""
+    return any(_proc_alive(p) for p in pids)
+
+
+def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
+    """Terminate a pid and its whole descendant tree (SIGTERM → grace → SIGKILL).
+
+    Ending a session must stop the entire live process tree — the top
+    ``se3 run`` parent **and** every agent (Claude/Codex) subprocess it spawned
+    — before the worktree is archived or deleted, so no writer can keep mutating
+    the worktree underneath the cleanup. The descendant set is captured up front
+    (before the parent is killed and the children are orphaned), SIGTERM'd as a
+    group, then any survivors are SIGKILL'd (re-collecting descendants of
+    still-alive members to catch late-spawned grandchildren).
+
+    Returns ``(ok, detail)`` where ``ok`` is ``True`` only when **every** process
+    in the tree is confirmed dead (or none was running). If any member survives
+    SIGKILL, or a signal fails outright (e.g. ``PermissionError``), returns
+    ``ok=False`` so the caller can refuse the destructive archive path while a
+    session process is still alive.
     """
     if not _proc_alive(pid):
         return True, f"pid {pid} not running"
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return True, f"pid {pid} already gone"
-    except OSError as exc:
-        return False, f"pid {pid} SIGTERM failed: {exc}"
+
+    own = os.getpid()
+    # Capture the full tree up front, before SIGTERM orphans the children.
+    tree = {p for p in _collect_descendants([pid]) if p != own and p > 0}
+    if not tree:
+        tree = {pid}
+
+    n = len(tree)
+    sigterm_failed: List[str] = []
+    for p in tree:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            sigterm_failed.append(f"pid {p} SIGTERM failed: {exc}")
 
     deadline = time.monotonic() + max(0.0, grace_seconds)
     while time.monotonic() < deadline:
-        if not _proc_alive(pid):
-            return True, f"pid {pid} terminated (SIGTERM)"
+        if not _any_alive(tree):
+            return True, f"pid {pid} tree terminated (SIGTERM, {n} proc)"
         time.sleep(0.1)
 
-    # Escalate to SIGKILL.
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return True, f"pid {pid} terminated (SIGTERM, late)"
-    except OSError as exc:
-        return False, f"pid {pid} SIGKILL failed: {exc}"
+    # Escalate: re-collect descendants of still-alive members (late-spawned
+    # grandchildren) and SIGKILL every survivor.
+    survivors = {
+        p
+        for p in (tree | _collect_descendants([p for p in tree if _proc_alive(p)]))
+        if p != own and p > 0
+    }
+    kill_failed: List[str] = list(sigterm_failed)
+    for p in survivors:
+        if not _proc_alive(p):
+            continue
+        try:
+            os.kill(p, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            kill_failed.append(f"pid {p} SIGKILL failed: {exc}")
 
-    # Brief wait for the kernel to reap.
+    # Brief wait for the kernel to reap the whole tree.
     kill_deadline = time.monotonic() + 2.0
     while time.monotonic() < kill_deadline:
-        if not _proc_alive(pid):
-            return True, f"pid {pid} killed (SIGKILL)"
+        if not _any_alive(survivors):
+            return True, f"pid {pid} tree killed (SIGKILL, {len(survivors)} proc)"
         time.sleep(0.1)
-    return False, f"pid {pid} still alive after SIGKILL"
+
+    alive = sorted(p for p in survivors if _proc_alive(p))
+    detail = f"tree of pid {pid} still alive after SIGKILL: {alive}"
+    if kill_failed:
+        detail += "; " + "; ".join(kill_failed)
+    return False, detail
+
+
+def _read_run_pidfile(state_root: Path) -> Optional[int]:
+    """Read the live-flow pid recorded in ``<state_root>/se3/state/run.pid``.
+
+    ``se3 run`` writes its own pid into this marker for the lifetime of the flow
+    (in the *worktree's* state dir for a ``--worktree`` run), so end-session can
+    locate the live process deterministically — including the otherwise
+    un-findable case of a ``--worktree`` parent that keeps ``cwd==main_root`` and
+    is momentarily between agent/test subprocesses (no descendant inside the
+    worktree). Returns ``None`` when the marker is absent / unreadable / empty.
+    """
+    pid_file = state_root / "se3" / "state" / "run.pid"
+    try:
+        raw = pid_file.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_is_live_se3_run(pid: int) -> bool:
+    """Return whether *pid* is a live process whose cmdline is an ``se3 run``.
+
+    Guards the ``run.pid`` marker against staleness: a recorded pid that has
+    since died, or been recycled by an unrelated process, must NOT be signalled.
+    When psutil is unavailable we fall back to a bare liveness probe (the
+    cmdline cannot be inspected), which is still safe because the pid was written
+    by an ``se3 run`` into this flow's own state dir.
+    """
+    if not _proc_alive(pid):
+        return False
+    if psutil is None:
+        return True
+    from ..daemon.supervisor import _cmdline_is_se3_run
+
+    try:
+        cmdline = psutil.Process(pid).cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    except Exception:  # noqa: BLE001 - defensive
+        return False
+    return _cmdline_is_se3_run(cmdline or [])
+
+
+def _proc_has_descendant_in_dir(proc: Any, target_real: str) -> bool:
+    """Return whether *proc*'s process tree is anchored inside *target_real*.
+
+    A ``se3 run --worktree`` flow's parent process never chdirs: it keeps its
+    ``cwd`` at the main root and writes its ``engine.json`` into the worktree, so
+    the main project's ``engine.json`` carries a different / absent ``flow_id``
+    and cannot confirm this flow. The agent (Claude/Codex) subprocess it spawns,
+    however, runs with its ``cwd`` set to the (per-flow unique) worktree
+    directory, and the parent / its children frequently hold files open under the
+    worktree (history jsonl, prompt snapshots, state). Matching either a
+    descendant whose ``cwd`` is inside the worktree path OR any tree member that
+    holds an open file under it positively identifies the live parent of this
+    specific worktree flow, so the whole tree can be terminated before the
+    destructive archive/cleanup runs.
+    """
+    if psutil is None or not target_real:
+        return False
+    prefix = target_real + os.sep
+    # Check the parent itself plus all descendants for an open file under the
+    # worktree (covers a parent that is between agent/test subprocesses but still
+    # holds worktree files open).
+    try:
+        members = [proc] + proc.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        members = [proc]
+    except Exception:  # noqa: BLE001 - defensive
+        members = [proc]
+    for member in members:
+        try:
+            for of in member.open_files():
+                ofpath = getattr(of, "path", None)
+                if not ofpath:
+                    continue
+                try:
+                    ofreal = os.path.realpath(ofpath)
+                except OSError:  # pragma: no cover - defensive
+                    continue
+                if ofreal == target_real or ofreal.startswith(prefix):
+                    return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001 - defensive; never block on scan
+            continue
+    try:
+        children = proc.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    except Exception:  # noqa: BLE001 - defensive; never block on scan
+        return False
+    for child in children:
+        try:
+            ccwd = child.cwd()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001 - defensive
+            continue
+        if not ccwd:
+            continue
+        try:
+            ccwd_real = os.path.realpath(ccwd)
+        except OSError:  # pragma: no cover - defensive
+            continue
+        if ccwd_real == target_real or ccwd_real.startswith(target_real + os.sep):
+            return True
+    return False
 
 
 def _discover_pids_for_flow(
@@ -341,13 +522,38 @@ def _discover_pids_for_flow(
 ) -> List[int]:
     """Discover live ``se3 run`` pids that belong to *flow_id*.
 
-    A match is made when an ``se3 run`` process's ``cwd`` is the worktree path
-    (worktree session) or the main root (main-branch session) and its
-    ``engine.json`` carries the requested ``flow_id``, OR when its command line
-    explicitly carries ``--flow-id <flow_id>`` (the resume case).
+    The most reliable source is the ``run.pid`` marker ``se3 run`` writes into the
+    flow's own ``se3/state`` dir (the worktree's for a ``--worktree`` run): it
+    pins the live process regardless of ``cwd`` and even when the parent is
+    momentarily between agent/test subprocesses with no descendant in the
+    worktree. Failing that (an older run that predates the marker, or a stale
+    marker), a match is also made when an ``se3 run`` process's ``cwd`` is the
+    worktree path (worktree session) or the main root (main-branch session) and
+    its ``engine.json`` carries the requested ``flow_id``, OR when its command
+    line explicitly carries ``--flow-id <flow_id>`` (the resume case), OR — for a
+    live ``--worktree`` flow whose parent stays at the main root while its agent
+    child runs inside the worktree — when its process tree is anchored inside this
+    flow's unique worktree path (a descendant cwd or any open file under it).
     """
+    pids: List[int] = []
+
+    # 1) The authoritative source: the on-disk run.pid marker. For a worktree
+    #    session it lives in the worktree's own state dir; for a main-branch
+    #    session it lives in the main root's state dir. Verify the recorded pid
+    #    is a live ``se3 run`` before trusting it, so a dead / recycled pid is
+    #    never signalled.
+    pid_roots: List[Path] = []
+    if worktree_path is not None:
+        pid_roots.append(Path(worktree_path))
+    pid_roots.append(Path(main_root))
+    own_pid = os.getpid()
+    for root in pid_roots:
+        recorded = _read_run_pidfile(root)
+        if recorded and recorded != own_pid and _pid_is_live_se3_run(recorded):
+            pids.append(recorded)
+
     if psutil is None:
-        return []
+        return list(dict.fromkeys(pids))
 
     from ..daemon.supervisor import _cmdline_is_se3_run
 
@@ -369,7 +575,6 @@ def _discover_pids_for_flow(
         except OSError:  # pragma: no cover - defensive
             worktree_real = None
 
-    pids: List[int] = []
     try:
         current = psutil.Process().pid
         for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
@@ -416,13 +621,23 @@ def _discover_pids_for_flow(
                 if flow_id and not is_worktree_cwd:
                     on_disk = _read_main_flow_id(Path(cwd_real))
                     if on_disk != str(flow_id):
-                        continue
+                        # A ``se3 run --worktree`` flow's parent keeps
+                        # cwd==main_root while its engine.json lives in the
+                        # worktree, so the main engine.json's flow_id cannot
+                        # confirm it. Fall back to matching a descendant (the
+                        # agent subprocess) running inside this flow's unique
+                        # worktree path, which positively identifies the live
+                        # parent so it is terminated before archive/cleanup.
+                        if worktree_real is None or not _proc_has_descendant_in_dir(
+                            proc, worktree_real
+                        ):
+                            continue
                 pids.append(pid)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
     except Exception:  # noqa: BLE001 - defensive, never block on scan
         logger.debug("Process scan for flow %s failed", flow_id, exc_info=True)
-    return pids
+    return list(dict.fromkeys(pids))
 
 
 def _terminate_session_process(
@@ -535,13 +750,22 @@ def _archive_worktree_session(
     # 4.4 — clear the worktree's resumable snapshot. Done BEFORE the worktree
     # is removed below: PersistenceManager re-creates ``se3/state/`` on
     # construction, so clearing after deletion would leave a stray empty dir
-    # behind in the just-removed worktree path.
-    try:
-        _clear_resumable(worktree_path, flow_id)
-        results.append(("Clear resumable", "OK", flow_id or "(unknown)"))
-    except Exception as e:  # noqa: BLE001
-        results.append(("Clear resumable", "FAIL", str(e)[:80]))
-        logger.warning("Clear resumable failed: %s", e)
+    # behind in the just-removed worktree path. For the same reason, skip this
+    # entirely when the worktree directory is already gone: there is no snapshot
+    # to clear in a vanished worktree, and constructing PersistenceManager would
+    # re-create ``<worktree_path>/se3/state`` on disk — exactly the stray remnant
+    # we are trying to avoid.
+    if worktree_path.exists():
+        try:
+            _clear_resumable(worktree_path, flow_id)
+            results.append(("Clear resumable", "OK", flow_id or "(unknown)"))
+        except Exception as e:  # noqa: BLE001
+            results.append(("Clear resumable", "FAIL", str(e)[:80]))
+            logger.warning("Clear resumable failed: %s", e)
+    else:
+        results.append(
+            ("Clear resumable", "SKIP", "Worktree dir already gone")
+        )
 
     # 4.5 — delete the isolation branch and force-clean the worktree.
     # Skipped when the archive could not be created (4.1 FAIL): destroying the
@@ -554,16 +778,67 @@ def _archive_worktree_session(
                 "Archive not created — worktree/branch preserved",
             )
         )
-    elif branch:
+    else:
+        # The worktree_branch may be absent from a worktree's engine.json (an
+        # older / corrupt / tolerant state). The worktree has already been
+        # archived above, so we MUST still remove the on-disk worktree and its
+        # git registration rather than leaving it hanging — the whole reason
+        # end-session exists. Prefer the recorded branch; otherwise infer it
+        # from git's worktree metadata; failing that, remove by path.
+        cleanup_branch = branch or _infer_worktree_branch(
+            project_root, worktree_path
+        )
         try:
-            wt_mod.delete_branch(project_root, branch)
-            wt_mod.force_cleanup_worktree(project_root, branch)
-            results.append(("Cleanup branch", "OK", branch))
+            if cleanup_branch:
+                wt_mod.delete_branch(project_root, cleanup_branch)
+                wt_mod.force_cleanup_worktree(project_root, cleanup_branch)
+                detail = (
+                    cleanup_branch
+                    if branch
+                    else f"{cleanup_branch} (inferred)"
+                )
+                results.append(("Cleanup branch", "OK", detail))
+            else:
+                # No branch recorded and none inferable — remove the worktree
+                # directory + registration by path so it is not left behind.
+                # ``remove_worktree`` only drives git (remove/prune): for a
+                # directory that git no longer tracks as a registered worktree
+                # (stale / lost metadata), git leaves the on-disk directory in
+                # place, so we follow up with an explicit rmtree and a final
+                # prune, then verify the directory is actually gone before
+                # reporting success — otherwise a stale worktree would survive
+                # an end-session that reported OK.
+                wt_mod.remove_worktree(project_root, worktree_path)
+                if worktree_path.exists():
+                    shutil.rmtree(worktree_path, ignore_errors=True)
+                    # Prune any git metadata now the directory is gone.
+                    try:
+                        wt_mod.remove_worktree(project_root, worktree_path)
+                    except Exception:  # noqa: BLE001 - best effort prune
+                        logger.debug(
+                            "Post-rmtree prune failed for %s",
+                            worktree_path,
+                            exc_info=True,
+                        )
+                if worktree_path.exists():
+                    results.append(
+                        (
+                            "Cleanup worktree",
+                            "FAIL",
+                            f"Worktree dir still present: {worktree_path}",
+                        )
+                    )
+                else:
+                    results.append(
+                        (
+                            "Cleanup worktree",
+                            "OK",
+                            f"Removed by path: {worktree_path}",
+                        )
+                    )
         except Exception as e:  # noqa: BLE001
             results.append(("Cleanup branch", "FAIL", str(e)[:80]))
-            logger.warning("Cleanup branch failed: %s", e)
-    else:
-        results.append(("Cleanup branch", "SKIP", "No branch recorded"))
+            logger.warning("Cleanup branch/worktree failed: %s", e)
 
 
 def _archive_main_session(
@@ -623,6 +898,51 @@ def _archive_main_session(
     except Exception as e:  # noqa: BLE001
         results.append(("Clear resumable", "FAIL", str(e)[:80]))
         logger.warning("Clear resumable (main) failed: %s", e)
+
+
+def _infer_worktree_branch(
+    project_root: Path, worktree_path: Path
+) -> Optional[str]:
+    """Infer the branch checked out at *worktree_path* from git's metadata.
+
+    Used when the worktree's ``engine.json`` did not record a
+    ``worktree_branch`` (older / corrupt / tolerant state) but the worktree is
+    still registered with git. Parses ``git worktree list --porcelain`` and
+    matches the requested path (by realpath) to its ``branch refs/heads/<name>``
+    line. Returns ``None`` when no registered worktree matches the path or it is
+    in a detached-HEAD state.
+    """
+    from ..engine.worktree import _run_git
+
+    try:
+        target = os.path.realpath(str(worktree_path))
+    except OSError:  # pragma: no cover - defensive
+        target = str(worktree_path)
+
+    try:
+        result = _run_git(
+            project_root, "worktree", "list", "--porcelain", check=False
+        )
+    except Exception:  # noqa: BLE001 - never block cleanup on inference
+        return None
+    if result.returncode != 0:
+        return None
+
+    current_path: Optional[str] = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.split(" ", 1)[1]
+        elif line.startswith("branch ") and current_path is not None:
+            try:
+                cp_real = os.path.realpath(current_path)
+            except OSError:  # pragma: no cover - defensive
+                cp_real = current_path
+            if cp_real == target:
+                ref = line.split(" ", 1)[1]
+                if ref.startswith("refs/heads/"):
+                    return ref[len("refs/heads/"):]
+                return ref or None
+    return None
 
 
 def _sync_worktree_history(

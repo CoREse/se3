@@ -374,17 +374,19 @@ class Daemon:
                 f"Flow {flow_id!r} not found among supervised flows "
                 "and no project_root supplied"
             )
-        # Prefer the caller-supplied main root; otherwise fold the record's own
-        # root back to its owning ``<main>`` (a worktree-copy root resolves to
-        # its main project), matching the attribution every other registration
-        # path uses so the subprocess archives under the right root.
-        if project_root:
-            main_root = str(Path(project_root).resolve())
-        else:
-            resolved = resolve_worktree_main_root(record.project_root)
-            main_root = str(
-                resolved if resolved is not None else record.project_root
-            )
+        # Fold whichever root we use back to its owning ``<main>`` (a
+        # worktree-copy root resolves to its main project), matching the
+        # attribution every other registration path uses so the subprocess
+        # archives under the right root. The server reports a worktree session's
+        # ``project_root`` as the ``<main>/se3/worktrees/<name>`` sandbox itself
+        # (that is the root its engine.json lives under), so a caller-supplied
+        # root must be normalized too — otherwise ``se3 end-session -p`` would
+        # run against the worktree dir and never locate/archive the worktree.
+        raw_root = project_root if project_root else record.project_root
+        resolved = resolve_worktree_main_root(raw_root)
+        main_root = (
+            resolved if resolved is not None else str(Path(raw_root).resolve())
+        )
         pid = record.pid if record is not None else None
         spawned = self.spawner.end_session(
             flow_id, project_root=main_root, pid=pid
