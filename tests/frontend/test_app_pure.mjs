@@ -6200,6 +6200,40 @@ check("projectBasename returns '' for empty / non-string input", () => {
   assert.equal(app.projectBasename({}), "");
 });
 
+// -- projectDisplayLabel: worktree-aware project label -----------------------
+check("projectDisplayLabel returns the basename for ordinary roots", () => {
+  // Ordinary (non-worktree) roots must match projectBasename exactly.
+  assert.equal(app.projectDisplayLabel("/data/cre/workspace/se3.0"), "se3.0");
+  assert.equal(app.projectDisplayLabel("/srv/projects/my-app"), "my-app");
+  assert.equal(app.projectDisplayLabel("/a/b/"), "b");
+});
+
+check("projectDisplayLabel labels worktree roots as '<name>（worktree）'", () => {
+  assert.equal(
+    app.projectDisplayLabel(
+      "/data/cre/workspace/se3.0/se3/worktrees/" +
+        "worktree-bug-discovery-se3-run-webui-se-20260623-101934-c6becdd0",
+    ),
+    "se3.0（worktree）",
+  );
+});
+
+check("projectDisplayLabel tolerates Windows-style worktree paths", () => {
+  assert.equal(
+    app.projectDisplayLabel("C:\\work\\proj\\se3\\worktrees\\wt-x"),
+    "proj（worktree）",
+  );
+});
+
+check("projectDisplayLabel falls back safely on degenerate input", () => {
+  assert.equal(app.projectDisplayLabel(""), "");
+  assert.equal(app.projectDisplayLabel(null), "");
+  assert.equal(app.projectDisplayLabel(undefined), "");
+  assert.equal(app.projectDisplayLabel(123), "");
+  assert.equal(app.projectDisplayLabel({}), "");
+  assert.equal(app.projectDisplayLabel("/"), "");
+});
+
 // -- machinesSignature / flowsSignature: per-field distinguishing (G2) -------
 
 function sampleMachines() {

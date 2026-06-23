@@ -1,7 +1,7 @@
 id: '214'
 description: webui主界面session的项目显示，对于worktree来说，显示的是那一长串worktree的名字，既没有项目名也冗杂。改成项目名（worktree）。
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-06-23T10:12:20.502643'
-updated_at: '2026-06-23T10:12:20.502643'
+updated_at: '2026-06-23T15:26:54.005313'

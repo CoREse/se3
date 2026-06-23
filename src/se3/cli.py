@@ -1178,5 +1178,44 @@ def salvage_cmd(
     raise typer.Exit(exit_code)
 
 
+@app.command(name="end-session")
+def end_session_cmd(
+    flow_id: Optional[str] = typer.Argument(
+        None,
+        help="Flow id to end (default: the main project's active session).",
+    ),
+    project_root: Optional[str] = typer.Option(
+        None, "--project-root", "-p", help="Project root directory"
+    ),
+    pid: Optional[int] = typer.Option(
+        None, "--pid", help="Hint: pid of the live se3 run process to terminate."
+    ),
+    no_archive_worktree: bool = typer.Option(
+        False,
+        "--no-archive-worktree",
+        help="Terminate the process but leave the worktree in place (do not archive).",
+    ),
+):
+    """End and archive a session (worktree is cleaned up; uncommitted work is NOT merged).
+
+    Terminates the live ``se3 run`` process (if any) and archives the session.
+    A ``--worktree`` session is archived exactly like a normally completed run —
+    the worktree is archived, its terminal state is promoted into the main
+    project's archive, its history is synced, and the isolation branch +
+    worktree are removed — but its (possibly unfinished) work is NOT merged into
+    the main branch. A main-branch session simply has its engine state archived.
+    """
+    from .commands.end_session_cmd import end_session
+
+    root = Path(project_root) if project_root else None
+    exit_code = end_session(
+        project_root=root,
+        flow_id=flow_id,
+        pid=pid,
+        archive_worktree=not no_archive_worktree,
+    )
+    raise typer.Exit(exit_code)
+
+
 if __name__ == "__main__":
     app()

@@ -462,6 +462,8 @@ def _archive_worktree(
 def _promote_completed_engine_state(
     project_root: Path,
     wt_path: Path,
+    *,
+    force: bool = False,
 ) -> Optional[Path]:
     """Promote a worktree's COMPLETED ``engine.json`` into the main archive.
 
@@ -484,7 +486,15 @@ def _promote_completed_engine_state(
     This MUST be called BEFORE the destructive worktree-remove / branch-delete
     step so the source engine.json still exists. Returns the promoted archive
     path on success, or ``None`` when there is nothing to promote (no
-    engine.json, unreadable, missing flow_id, or status is not COMPLETED).
+    engine.json, unreadable, missing flow_id, or — when ``force`` is False —
+    status is not COMPLETED).
+
+    ``force``: when True, the worktree engine.json is promoted to the main
+    archive regardless of its ``status`` (RUNNING / PAUSED / FAILED / …). This
+    is used by ``se3 end-session`` to archive a *terminated* worktree flow the
+    same way a normally completed one is archived. When False (the default,
+    used by ``se3 merge --delete-merged``) the original COMPLETED-only behavior
+    is preserved byte-for-byte.
 
     Failures are non-fatal: the caller treats a ``None`` / raised error as
     "nothing promoted" and proceeds with cleanup — losing the brief Completed
@@ -507,10 +517,12 @@ def _promote_completed_engine_state(
         return None
 
     status = str(data.get("status") or "").strip().lower()
-    if status != "completed":
-        # Only a genuinely COMPLETED flow is promoted. A FAILED / PAUSED
-        # worktree run keeps its worktree (cleanup never reaches a non-merged
-        # branch), so there is nothing to promote here.
+    if not force and status != "completed":
+        # Only a genuinely COMPLETED flow is promoted on the default
+        # ``se3 merge --delete-merged`` path. A FAILED / PAUSED worktree run
+        # keeps its worktree (cleanup never reaches a non-merged branch), so
+        # there is nothing to promote here. ``force=True`` (``se3 end-session``)
+        # bypasses this gate to archive a terminated flow regardless of status.
         return None
 
     flow_id = data.get("flow_id")

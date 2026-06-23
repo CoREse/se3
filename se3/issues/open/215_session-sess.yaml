@@ -1,0 +1,7 @@
+id: '215'
+description: 增加结束某个session的能力（对于在主分支进行的session可能只要退出不管就行了，但是对于worktree的分支，它会留一个永远不会消失的worktree在那里，就很难受了，所以需要一个结束session的能力，如果是worktree则给它归档，就像正常结束的session那样）。
+status: in-progress
+tags: []
+source: human
+created_at: '2026-06-23T15:23:34.991986'
+updated_at: '2026-06-23T15:27:04.501640'

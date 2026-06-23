@@ -278,6 +278,35 @@ function projectBasename(projectRoot) {
   return parts[parts.length - 1] || "";
 }
 
+// Derive the display label shown for a flow's project. Worktree-mode flows
+// carry a project_root that points deep inside '{project_root}/se3/worktrees/
+// {safe_name}', whose basename is a long, opaque slug that is neither the
+// project name nor concise. Detect the 'se3/worktrees/' path segment: when
+// present, take the basename of everything BEFORE that segment as the real
+// project name and return '<项目名>（worktree）'; otherwise fall back to the
+// plain basename. Worktree identification is by full path segment (not a
+// substring match) to stay aligned with worktree-management's fixed layout and
+// avoid misclassifying an ordinary directory that merely contains "worktrees"
+// in its name. Tolerant of both POSIX ('/') and Windows ('\\') separators;
+// non-string / empty / root-only input falls back to projectBasename so this
+// never throws. DOM-free; exported for the pure tests.
+function projectDisplayLabel(projectRoot) {
+  if (typeof projectRoot !== "string") return projectBasename(projectRoot);
+  // Normalize separators to '/' so segment matching is separator-agnostic.
+  const normalized = projectRoot.replace(/\\/g, "/");
+  const segments = normalized.replace(/\/+$/, "").split("/");
+  // Find the 'se3' segment immediately followed by 'worktrees'.
+  for (let i = 0; i + 1 < segments.length; i++) {
+    if (segments[i] === "se3" && segments[i + 1] === "worktrees") {
+      // The real project root is everything before the 'se3' segment.
+      const prefix = segments.slice(0, i).join("/");
+      const projectName = projectBasename(prefix) || projectBasename(projectRoot);
+      return `${projectName}（worktree）`;
+    }
+  }
+  return projectBasename(projectRoot);
+}
+
 // Pure signature of the machine-list's visible dependencies. renderMachines
 // paints one <li> per machine carrying only: the online/offline dot, the name
 // (hostname || machine_id), the flow count, and the selected highlight. The
@@ -1486,10 +1515,12 @@ function renderFlowCard(flow) {
   head.append(task, badge);
 
   // Annotate which project this running flow belongs to so flows from
-  // different project roots are distinguishable at a glance. Show the basename
-  // as the readable label; the full project_root is the hover title. Skip the
-  // badge entirely when project_root is missing to avoid empty-label noise.
-  const projectName = projectBasename(flow.project_root);
+  // different project roots are distinguishable at a glance. Show the
+  // worktree-aware label ('<项目名>（worktree）' for worktree flows, else the
+  // basename) as the readable text; the full project_root is the hover title.
+  // Skip the badge entirely when project_root is missing to avoid empty-label
+  // noise.
+  const projectName = projectDisplayLabel(flow.project_root);
   if (projectName) {
     const project = el("span", "flow-card-project", projectName);
     project.title = flow.project_root;
@@ -2227,7 +2258,7 @@ function renderFlowSidebar(flow, machineId) {
   overview.appendChild(kv("Status", flowStatusLabel(flow)));
   overview.appendChild(kv("Type", flow.task_type || "-"));
   overview.appendChild(kv(
-    "Project", projectBasename(flow.project_root) || "-", flow.project_root || "",
+    "Project", projectDisplayLabel(flow.project_root) || "-", flow.project_root || "",
   ));
   overview.appendChild(kv(
     "Progress",
@@ -11420,6 +11451,7 @@ if (typeof module !== "undefined" && module.exports) {
     // Project-root basename label for running flows (exposed for the DOM-free
     // tests in tests/frontend/test_app_pure.mjs).
     projectBasename,
+    projectDisplayLabel,
     // Machine/flow list signatures (G2) — exposed for the DOM-free tests.
     machinesSignature,
     flowsSignature,

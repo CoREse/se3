@@ -1099,17 +1099,85 @@ DOM-stub test suite can cover the equality logic without a browser.
   `/srv/work/proj-b`)
 - **WHEN** the Flows panel renders each flow's card and the user opens one flow's
   session view
-- **THEN** each flow card displays a project label equal to the basename of its
-  `project_root` (a pure `projectBasename` helper derived from
-  `flowsSignature`'s `project_root` field), so the two flows are visually
-  distinguishable by owning project, and that label element's hover `title`
-  carries the full `project_root` path
+- **THEN** each flow card displays a project label produced by the worktree-aware
+  `projectDisplayLabel` helper (derived from `flowsSignature`'s `project_root`
+  field), which for these non-worktree roots reduces to `projectBasename`, so the
+  two flows are visually distinguishable by owning project, and that label
+  element's hover `title` carries the full `project_root` path
 - **AND** the opened flow's sidebar Overview includes a `Project` row whose value
-  is the same `projectBasename(project_root)` (placeholder `-` when absent) and
-  whose `title` carries the full `project_root` path
+  is the same `projectDisplayLabel(project_root)` (placeholder `-` when absent)
+  and whose `title` carries the full `project_root` path
+- **AND** the worktree-aware annotation layered on top of this label is specified
+  by the *Flow Card Project Annotation* requirement
 - **AND** when a flow's `project_root` is empty or missing, the card omits the
   project label and the sidebar `Project` row shows the placeholder, with no
   error in either path
+
+### Requirement: Flow Card Project Annotation
+
+The per-flow project label shown on a running-flow card's project badge and in
+the flow detail sidebar Overview's `Project` row MUST be produced by a
+worktree-aware display helper, `projectDisplayLabel(project_root)`, so that a
+flow running inside a git worktree is annotated by its **owning project name
+plus a `（worktree）` suffix** rather than the long, opaque worktree directory
+slug. `projectDisplayLabel` is a pure, DOM-free function layered on top of the
+basename primitive `projectBasename` (which keeps its sole "last path segment"
+semantics unchanged) and is exported (`module.exports`) for the Node DOM-stub
+test suite.
+
+`projectDisplayLabel` normalizes path separators (so POSIX and Windows roots
+behave identically) and detects the fixed worktree layout
+`…/se3/worktrees/<safe_name>` by matching the `se3` and `worktrees` path
+components as **whole segments**, NOT a substring containment test — consistent
+with *worktree-management*, where every worktree lives at
+`{project_root}/se3/worktrees/{safe_name}`. On a match it takes the basename of
+the path prefix preceding the `se3` segment as the real project name and returns
+`<project_name>（worktree）`; on no match — or for empty / degenerate /
+non-string input — it falls back to `projectBasename(project_root)` and MUST NOT
+throw.
+
+Both project-label render sites — the running-flow card's project badge and the
+flow detail Overview's `Project` row — MUST source their visible text from
+`projectDisplayLabel(flow.project_root)`, while each element's hover `title` MUST
+continue to carry the full, unabbreviated `project_root` path. An empty label
+still suppresses the card badge and shows the sidebar placeholder `-`, with no
+error in either path. This requirement is the display layer refining the
+project-label behavior demonstrated in *Diff-Aware Rebuild Skipping*'s
+"Running-flow card and sidebar surface the owning project" scenario.
+
+#### Scenario: Worktree flow shows owning project name with worktree suffix
+- **GIVEN** a running flow whose `project_root` is
+  `/home/me/myproj/se3/worktrees/session-resume-resume-dispatch-20260623-100549-63acd8fa`
+- **WHEN** the Flows panel renders the flow's card and the user opens its session
+  view
+- **THEN** both the card's project badge and the sidebar Overview `Project` row
+  display `myproj（worktree）` — the basename of the prefix preceding the
+  `se3/worktrees` segment plus the `（worktree）` suffix — instead of the long
+  worktree-slug basename
+- **AND** each label element's hover `title` still carries the full
+  `project_root` path
+
+#### Scenario: Non-worktree flow falls back to plain basename
+- **GIVEN** a running flow whose `project_root` is `/srv/work/proj-b`, containing
+  no `se3/worktrees` segment
+- **WHEN** its card and sidebar render
+- **THEN** `projectDisplayLabel` returns `projectBasename(project_root)` =
+  `proj-b`, identical to the pre-existing behavior
+
+#### Scenario: Worktree detection matches whole segments, not substrings
+- **GIVEN** a flow whose `project_root` merely embeds the text `worktrees` in a
+  directory name (e.g. `/home/me/my-worktrees-archive/proj-c`) without the fixed
+  `se3/worktrees/` segment pair
+- **WHEN** its project label is computed
+- **THEN** the path is NOT treated as a worktree root and the label falls back to
+  `projectBasename` (`proj-c`), because matching is on whole `se3` + `worktrees`
+  path segments aligned with the fixed worktree layout
+
+#### Scenario: Degenerate input falls back safely
+- **GIVEN** a `project_root` that is empty, missing, or a non-string value
+- **WHEN** `projectDisplayLabel` is invoked
+- **THEN** it returns the `projectBasename` fallback (driving the placeholder
+  behavior at the render sites) and never throws
 
 ### Requirement: Interjection Lifecycle Events
 

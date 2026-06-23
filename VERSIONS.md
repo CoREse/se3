@@ -64,6 +64,14 @@
 
 
 
+
+## 10.8.0 - 2026-06-23
+
+- Display worktree-based session projects as '<项目名>（worktree）' instead of the long opaque worktree slug
+- Add a worktree-aware projectDisplayLabel helper that detects the se3/worktrees/<name> layout and derives the real owning project name
+- Apply the friendlier project label to both the running-flow card badge and the sidebar Overview Project row
+- Retain the full project path as a hover title for the project label
+- Fall back to the plain project basename for non-worktree or degenerate project roots
 ## 10.7.1 - 2026-06-23
 
 - Fix LLMCaller agent rotation so each internal retry sequence restarts from the preferred (first) agent instead of getting permanently stuck on the last agent
