@@ -1,0 +1,8 @@
+id: '216'
+description: worktree的session在webui里还是只能显示第一个回复，后面的都没有。这个很难解决吗？不就是对于worktree来说把监控的位置从主文件夹变成worktree里面吗？（merge之前）
+status: resolved
+tags: []
+source: human
+created_at: '2026-06-23T16:09:19.086646'
+updated_at: '2026-06-23T16:16:56.858011'
+type: bug

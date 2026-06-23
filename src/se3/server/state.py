@@ -577,6 +577,32 @@ class ServerState:
             return None
         return machine_id, flow
 
+    # -- end-session helpers -----------------------------------------------
+
+    async def is_flow_endable(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return ``(machine_id, flow_dict)`` when *flow_id* can be ended.
+
+        A flow is endable when it is owned by *owner* (or the unscoped admin
+        view) and its status is **not** ``completed``: a dangling worktree may
+        be left behind by a RUNNING / PAUSED / FAILED / RECOVERING / INIT
+        session, so all of those are endable, while a ``completed`` flow has
+        already been cleaned up the normal way and has nothing left to end.
+
+        Returns ``None`` for an unknown / cross-owner flow (caller maps to 404)
+        and for a ``completed`` flow (caller maps to 409), mirroring the honest
+        receipt the resume gate provides.
+        """
+        result = await self.get_flow(flow_id, owner=owner)
+        if result is None:
+            return None
+        machine_id, flow = result
+        status = str(flow.get("status") or "").lower()
+        if status == "completed":
+            return None
+        return machine_id, flow
+
     # -- history relay (in-memory only, never persisted) -------------------
 
     async def update_history_index(

@@ -114,26 +114,47 @@ def end_session(
         logger.warning("Step 2 (find worktree) failed: %s", e)
 
     # -- Step 3: terminate the live se3 run process -----------------------
+    # ``terminate_ok`` gates the destructive archive path below: when the
+    # session process could not be killed it may still be executing, so
+    # archiving / deleting its worktree (or clearing the main snapshot) would
+    # remove or archive a stale snapshot out from under a live flow.
+    terminate_ok = True
     try:
         worktree_path = (
             Path(wt_record["worktree_path"])
             if wt_record and wt_record.get("worktree_path")
             else None
         )
-        detail = _terminate_session_process(
+        terminate_ok, detail = _terminate_session_process(
             flow_id=flow_id,
             pid=pid,
             main_root=project_root,
             worktree_path=worktree_path,
             grace_seconds=grace_seconds,
         )
-        results.append(("Terminate process", "OK", detail))
+        results.append(
+            ("Terminate process", "OK" if terminate_ok else "FAIL", detail)
+        )
+        if not terminate_ok:
+            logger.warning("Step 3 (terminate process) did not confirm exit: %s", detail)
     except Exception as e:  # noqa: BLE001
+        terminate_ok = False
         results.append(("Terminate process", "FAIL", str(e)[:80]))
         logger.warning("Step 3 (terminate process) failed: %s", e)
 
     # -- Step 4: archive ---------------------------------------------------
-    if wt_record is not None and archive_worktree:
+    # Refuse to archive/clean while the session process is still alive: the
+    # on-disk worktree + engine snapshot are still being written to, so a
+    # destructive cleanup here could remove or archive a stale snapshot.
+    if not terminate_ok:
+        results.append(
+            (
+                "Archive session",
+                "SKIP",
+                "Process still alive — archive skipped to avoid losing live work",
+            )
+        )
+    elif wt_record is not None and archive_worktree:
         _archive_worktree_session(project_root, flow_id, wt_record, results)
     elif wt_record is not None and not archive_worktree:
         results.append(
@@ -241,9 +262,25 @@ def _find_worktree_session(
 # Step 3 helpers
 # --------------------------------------------------------------------------
 def _proc_alive(pid: int) -> bool:
-    """Return whether *pid* names a live process."""
+    """Return whether *pid* names a live (non-zombie) process.
+
+    A zombie (already-exited but not yet reaped by its parent) is treated as
+    NOT alive: ``os.kill(pid, 0)`` succeeds for a zombie, so when psutil is
+    available we additionally exclude the zombie status so a SIGKILL'd process
+    awaiting reap by its parent is correctly seen as dead.
+    """
     if pid <= 0:
         return False
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            return True
+        except Exception:  # noqa: BLE001 - fall back to os.kill below
+            pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -256,41 +293,45 @@ def _proc_alive(pid: int) -> bool:
     return True
 
 
-def _terminate_one(pid: int, grace_seconds: float) -> str:
+def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
     """Terminate a single pid (SIGTERM → grace poll → SIGKILL).
 
-    Returns a short human-readable description of the outcome.
+    Returns ``(ok, detail)`` where ``ok`` is ``True`` only when the process is
+    confirmed dead (or was never running). A process that survives SIGKILL, or a
+    signal that fails outright (e.g. ``PermissionError``), returns ``ok=False``
+    so the caller can refuse the destructive archive path while the session
+    process is still alive.
     """
     if not _proc_alive(pid):
-        return f"pid {pid} not running"
+        return True, f"pid {pid} not running"
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return f"pid {pid} already gone"
+        return True, f"pid {pid} already gone"
     except OSError as exc:
-        return f"pid {pid} SIGTERM failed: {exc}"
+        return False, f"pid {pid} SIGTERM failed: {exc}"
 
     deadline = time.monotonic() + max(0.0, grace_seconds)
     while time.monotonic() < deadline:
         if not _proc_alive(pid):
-            return f"pid {pid} terminated (SIGTERM)"
+            return True, f"pid {pid} terminated (SIGTERM)"
         time.sleep(0.1)
 
     # Escalate to SIGKILL.
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
-        return f"pid {pid} terminated (SIGTERM, late)"
+        return True, f"pid {pid} terminated (SIGTERM, late)"
     except OSError as exc:
-        return f"pid {pid} SIGKILL failed: {exc}"
+        return False, f"pid {pid} SIGKILL failed: {exc}"
 
     # Brief wait for the kernel to reap.
     kill_deadline = time.monotonic() + 2.0
     while time.monotonic() < kill_deadline:
         if not _proc_alive(pid):
-            return f"pid {pid} killed (SIGKILL)"
+            return True, f"pid {pid} killed (SIGKILL)"
         time.sleep(0.1)
-    return f"pid {pid} still alive after SIGKILL"
+    return False, f"pid {pid} still alive after SIGKILL"
 
 
 def _discover_pids_for_flow(
@@ -320,6 +361,13 @@ def _discover_pids_for_flow(
             targets.add(os.path.realpath(str(worktree_path)))
         except OSError:  # pragma: no cover - defensive
             pass
+
+    worktree_real: Optional[str] = None
+    if worktree_path is not None:
+        try:
+            worktree_real = os.path.realpath(str(worktree_path))
+        except OSError:  # pragma: no cover - defensive
+            worktree_real = None
 
     pids: List[int] = []
     try:
@@ -353,11 +401,21 @@ def _discover_pids_for_flow(
                     continue
                 if cwd_real not in targets:
                     continue
-                # Confirm via the engine.json sitting at that cwd, when flow_id
-                # is known; otherwise accept the cwd match.
-                if flow_id:
+                # A cwd inside the session-unique worktree path is itself a
+                # session-specific match and is accepted directly. A cwd at the
+                # (shared) main root is ambiguous — an unrelated concurrent
+                # ``se3 run`` may also run there — so when a specific flow_id is
+                # requested we require the engine.json at that cwd to POSITIVELY
+                # confirm the same flow_id. An unreadable/absent on-disk flow_id
+                # (corrupt, mid-write, or an INIT-phase flow not yet carrying a
+                # flow_id) is NOT a confirmation and must NOT be terminated, lest
+                # an unrelated session be killed by cwd alone.
+                is_worktree_cwd = (
+                    worktree_real is not None and cwd_real == worktree_real
+                )
+                if flow_id and not is_worktree_cwd:
                     on_disk = _read_main_flow_id(Path(cwd_real))
-                    if on_disk and on_disk != str(flow_id):
+                    if on_disk != str(flow_id):
                         continue
                 pids.append(pid)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -373,12 +431,15 @@ def _terminate_session_process(
     main_root: Path,
     worktree_path: Optional[Path],
     grace_seconds: float,
-) -> str:
+) -> Tuple[bool, str]:
     """Terminate the live ``se3 run`` process(es) for the session.
 
     Uses *pid* when supplied; otherwise discovers candidates by *flow_id*.
-    Returns a human-readable summary. A session with no live process (e.g. a
-    PAUSED/FAILED worktree) is fine — it returns a "no live process" note.
+    Returns ``(ok, summary)``. ``ok`` is ``True`` when every targeted process is
+    confirmed dead (or there was no live process — a PAUSED/FAILED worktree is
+    fine), and ``False`` when any process could not be terminated (e.g. a
+    permission failure or a process that survives SIGKILL), so the caller can
+    refuse the destructive archive path while the session is still executing.
     """
     pids: List[int] = []
     if pid is not None and pid > 0:
@@ -387,10 +448,15 @@ def _terminate_session_process(
         pids = _discover_pids_for_flow(flow_id, main_root, worktree_path)
 
     if not pids:
-        return "no live process found"
+        return True, "no live process found"
 
-    outcomes = [_terminate_one(p, grace_seconds) for p in dict.fromkeys(pids)]
-    return "; ".join(outcomes)
+    all_ok = True
+    details: List[str] = []
+    for p in dict.fromkeys(pids):
+        ok, detail = _terminate_one(p, grace_seconds)
+        all_ok = all_ok and ok
+        details.append(detail)
+    return all_ok, "; ".join(details)
 
 
 # --------------------------------------------------------------------------
@@ -416,6 +482,14 @@ def _archive_worktree_session(
     worktree_path = Path(wt_record["worktree_path"])
     branch = wt_record.get("worktree_branch")
 
+    # Whether it is safe to destroy the on-disk worktree + isolation branch
+    # below. The destructive cleanup (4.5) must NOT run unless we have either
+    # successfully created an archive copy or confirmed there is nothing left
+    # to lose (the worktree directory is already gone). A failed archive (disk
+    # full, permission denied, etc.) leaves the only copy of the unfinished /
+    # unmerged work in the live worktree, so deleting it would lose that work.
+    archive_ok = False
+
     # 4.1 — copy the worktree directory into se3/worktrees/.archive/.
     if worktree_path.exists():
         try:
@@ -423,6 +497,7 @@ def _archive_worktree_session(
                 project_root, branch or (flow_id or "worktree"), worktree_path
             )
             results.append(("Archive worktree", "OK", str(archive_path)))
+            archive_ok = True
         except Exception as e:  # noqa: BLE001
             results.append(("Archive worktree", "FAIL", str(e)[:80]))
             logger.warning("Archive worktree failed: %s", e)
@@ -430,6 +505,8 @@ def _archive_worktree_session(
         results.append(
             ("Archive worktree", "SKIP", "Worktree dir already gone")
         )
+        # Nothing on disk to lose — the branch metadata cleanup is still safe.
+        archive_ok = True
 
     # 4.2 — promote the worktree's terminal engine.json into the main archive
     # regardless of status (force=True).
@@ -467,7 +544,17 @@ def _archive_worktree_session(
         logger.warning("Clear resumable failed: %s", e)
 
     # 4.5 — delete the isolation branch and force-clean the worktree.
-    if branch:
+    # Skipped when the archive could not be created (4.1 FAIL): destroying the
+    # branch + worktree then would lose the only copy of the unfinished work.
+    if not archive_ok:
+        results.append(
+            (
+                "Cleanup branch",
+                "SKIP",
+                "Archive not created — worktree/branch preserved",
+            )
+        )
+    elif branch:
         try:
             wt_mod.delete_branch(project_root, branch)
             wt_mod.force_cleanup_worktree(project_root, branch)
@@ -484,14 +571,33 @@ def _archive_main_session(
     flow_id: Optional[str],
     results: List[Tuple[str, str, str]],
 ) -> None:
-    """Archive a main-branch session: clear_state + clear resumable snapshot."""
+    """Archive a main-branch session: clear_state + clear resumable snapshot.
+
+    When a specific *flow_id* was requested we MUST only archive the main
+    engine state if it actually belongs to that flow. Otherwise — e.g. ending
+    flow A whose worktree is already gone while the main project is busy with a
+    different active flow B — we would archive (delete) the unrelated flow B's
+    session, ending the wrong session. In that case we skip the destructive
+    clear and only proceed to the (flow-scoped, harmless) resumable cleanup.
+    """
     from ..engine.persistence import PersistenceManager
 
     try:
         pm = PersistenceManager(project_root)
         if pm.state_file.exists():
-            pm.clear_state()
-            results.append(("Archive session", "OK", "Session archived"))
+            main_flow_id = _read_main_flow_id(project_root)
+            if flow_id and main_flow_id and str(main_flow_id) != str(flow_id):
+                results.append(
+                    (
+                        "Archive session",
+                        "SKIP",
+                        f"Main engine.json is flow {main_flow_id}, "
+                        f"not {flow_id}",
+                    )
+                )
+            else:
+                pm.clear_state()
+                results.append(("Archive session", "OK", "Session archived"))
         else:
             results.append(("Archive session", "SKIP", "No session to archive"))
     except Exception as e:  # noqa: BLE001
@@ -520,8 +626,14 @@ def _sync_worktree_history(
     Files that do not yet exist in the main history directory are copied
     verbatim; a collision with an existing file is written as a
     ``<name>.from-<branch>`` sidecar (mirroring the merge-back convention used
-    by the history reader) so existing records are never overwritten. Returns
-    the number of files copied.
+    by the history reader) so existing records are never overwritten. When that
+    sidecar name is *also* already taken (a prior partial end-session run, a
+    merge-back sidecar, or a retry), a unique ``<name>.from-<branch>-N`` name is
+    chosen instead of silently dropping the current worktree's file — so the
+    latest record file is never lost when the worktree is subsequently deleted.
+    A byte-identical existing target is treated as already-synced and skipped
+    (keeping the operation idempotent across retries). Returns the number of
+    files copied.
     """
     from ..utils import copy_file
 
@@ -541,15 +653,49 @@ def _sync_worktree_history(
         if not src.is_file():
             continue
         rel = src.relative_to(src_dir)
-        dst = dst_dir / rel
-        if dst.exists():
-            # Append-don't-overwrite: write a sidecar next to the existing file.
-            dst = dst.with_name(f"{dst.name}.from-{safe_branch}")
-            if dst.exists():
-                continue
+        dst = _resolve_history_target(dst_dir / rel, src, safe_branch)
+        if dst is None:
+            # An identical copy already exists in the main history dir.
+            continue
         copy_file(src, dst)
         copied += 1
     return copied
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Return True when *a* and *b* have byte-identical content (fault-tolerant)."""
+    import filecmp
+
+    try:
+        return filecmp.cmp(str(a), str(b), shallow=False)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _resolve_history_target(
+    dst: Path, src: Path, safe_branch: str
+) -> Optional[Path]:
+    """Resolve where to copy *src*, never overwriting an existing file.
+
+    Returns the primary ``dst`` when it is free, a collision sidecar
+    ``<name>.from-<branch>`` (or a uniquified ``...-N`` variant when that too is
+    taken) otherwise, or ``None`` when a byte-identical copy already exists at
+    any of those locations (idempotent skip).
+    """
+    if not dst.exists():
+        return dst
+    if _same_file(src, dst):
+        return None
+
+    base_name = f"{dst.name}.from-{safe_branch}"
+    candidate = dst.with_name(base_name)
+    n = 2
+    while candidate.exists():
+        if _same_file(src, candidate):
+            return None
+        candidate = dst.with_name(f"{base_name}-{n}")
+        n += 1
+    return candidate
 
 
 def _clear_resumable(worktree_path: Path, flow_id: Optional[str]) -> None:

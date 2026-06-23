@@ -152,6 +152,12 @@ class InterjectRequest(BaseModel):
     text: str
 
 
+class EndSessionRequest(BaseModel):
+    """Body of ``POST /api/flows/{id}/end`` — terminate + archive the session."""
+
+    reason: str = ""
+
+
 class LoginRequest(BaseModel):
     """Body of ``POST /api/auth/login`` — local username + password login."""
 
@@ -766,6 +772,69 @@ def create_app(
                 "status": "resume_dispatched",
                 "machine_id": machine_id,
                 "flow_id": flow_id,
+            },
+        )
+
+    @app.post("/api/flows/{flow_id}/end")
+    async def end_flow(
+        flow_id: str,
+        req: EndSessionRequest = EndSessionRequest(),
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        """End (terminate + archive) a session.
+
+        For a main-branch session this just terminates the live ``se3 run``
+        process; for a worktree session it additionally archives the worktree
+        the way a normally-completed session is cleaned up, so no dangling
+        worktree is left behind. The owning daemon receives a
+        ``MSG_END_SESSION`` and off-loads the work to an ``se3 end-session``
+        subprocess.
+
+        The receipt is honest, mirroring the resume gate:
+
+        * unknown flow / cross-owner → 404 (leak nothing);
+        * already completed → 409 (nothing left to end);
+        * owning machine not connected / delivery failure → 503;
+        * otherwise dispatch and return 202 ``end_dispatched``.
+        """
+        scope = _scope_for(identity_)
+        existing = await state.get_flow(flow_id, owner=scope)
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"flow '{flow_id}' not found",
+            )
+        result = await state.is_flow_endable(flow_id, owner=scope)
+        if result is None:
+            # Visible to the caller but already completed — nothing to end.
+            raise HTTPException(
+                status_code=409,
+                detail="该 flow 已完成/已结束，无法 end",
+            )
+        machine_id, flow = result
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' owning flow '{flow_id}' is not connected",
+            )
+        message = protocol.make_end_session(
+            flow_id,
+            project_root=flow.get("project_root", ""),
+            reason=req.reason or "user terminated",
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver end SESSION to '{machine_id}'",
+            )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "end_dispatched",
+                "machine_id": machine_id,
+                "flow_id": flow_id,
+                "reason": req.reason or "user terminated",
             },
         )
 

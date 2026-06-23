@@ -462,6 +462,43 @@ class DaemonSpawner:
         logger.info("Resuming flow %s in %s", flow_id, cwd)
         return self._launch(args, cwd, f"[resume {flow_id}]", env)
 
+    def end_session(
+        self,
+        flow_id: str,
+        *,
+        project_root: Optional[str] = None,
+        pid: Optional[int] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> SpawnedProcess:
+        """End a session by spawning ``se3 end-session`` as a child process.
+
+        This is the daemon-side mechanism behind a server end-session request.
+        The heavy work — gracefully terminating the live ``se3 run`` process
+        (SIGTERM → grace wait → SIGKILL) and archiving a worktree session the
+        way a normally-completed run is cleaned up — is delegated to the
+        ``se3 end-session`` CLI subcommand rather than performed inline, so the
+        daemon's event loop is never blocked by the grace wait or the on-disk
+        archival.
+
+        The argv is built from the same ``_resolve_se3_command()`` prefix and
+        merged-PATH ``_launch`` machinery as :meth:`spawn` / :meth:`resume`, so
+        the subprocess always runs the daemon's own ``se3`` wheel. The
+        ``flow_id`` is passed positionally (matching the CLI's
+        ``se3 end-session <flow_id>`` signature), and ``--pid`` is appended only
+        when a *pid* hint is supplied.
+        """
+        cwd = str(Path(project_root).resolve()) if project_root else os.getcwd()
+        args = _resolve_se3_command() + [
+            "end-session",
+            str(flow_id),
+            "-p",
+            cwd,
+        ]
+        if pid is not None:
+            args += ["--pid", str(pid)]
+        logger.info("Ending session %s in %s (pid hint=%s)", flow_id, cwd, pid)
+        return self._launch(args, cwd, f"[end-session {flow_id}]", env)
+
     def _launch(
         self,
         args: List[str],

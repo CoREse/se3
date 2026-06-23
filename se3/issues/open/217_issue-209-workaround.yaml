@@ -1,0 +1,7 @@
+id: '217'
+description: 'issue #209提到的那个workaround，会导致刷新的时候聊天记录被往上滚动一大截，修复它，不应该滚动聊天记录。'
+status: in-progress
+tags: []
+source: human
+created_at: '2026-06-23T17:03:30.132099'
+updated_at: '2026-06-23T17:05:08.936314'

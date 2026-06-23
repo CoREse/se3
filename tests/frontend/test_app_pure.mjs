@@ -3813,6 +3813,13 @@ issue209ReplayMod.registerIssue209RealFrameReplayTests({ app, check, findOne, fi
 const progressionRefreshMod = await import("./progression_refresh.test.mjs");
 await progressionRefreshMod.registerProgressionRefreshTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the element-anchored scroll-preservation tests (issue #217 / #209
+// jump fix): the silent rebuild anchors on the bubble the reader is looking at
+// (by recordKey) and restores its viewport offset, so a content-height change
+// above it no longer scrolls the conversation up a large stretch.
+const issue217AnchorMod = await import("./issue217_scroll_anchor.test.mjs");
+issue217AnchorMod.registerIssue217ScrollAnchorTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

@@ -259,6 +259,25 @@
     </div>
   </div>
 
+  <!-- End-session confirmation modal: confirm ending (and archiving) a flow. -->
+  <div id="end-session-modal" class="modal hidden">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-head">
+        <h3 id="end-session-title">结束 Session</h3>
+        <button id="end-session-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="end-session-message">确认结束并归档该 session；若为 worktree
+          会被清理归档，未提交的工作不会合并进主分支。</p>
+        <p id="end-session-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="end-session-confirm" class="btn-end">结束并归档</button>
+          <button type="button" id="end-session-cancel" class="ghost-btn">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Start-flow-from-issue modal: confirm launch + optional discovery step. -->
   <div id="issue-launch-modal" class="modal hidden">
     <div class="modal-card modal-card-sm">

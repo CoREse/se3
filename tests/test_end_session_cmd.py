@@ -291,6 +291,41 @@ def test_no_live_process_still_archives(tmp_path: Path) -> None:
     assert (main / "se3" / "state" / "archive" / f"engine_{flow_id}.json").exists()
 
 
+def test_unkillable_process_skips_destructive_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target process that cannot be terminated must NOT trigger archival.
+
+    If ``--pid`` points to a process that stays alive after SIGKILL (e.g. a
+    permission failure), the worktree/branch must be preserved and the command
+    must exit non-zero rather than archiving a stale snapshot of a live flow.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    flow_id = "wt-alive"
+    branch = "worktree/alive-1"
+    wt_path = _make_worktree_session(main, flow_id, branch)
+
+    # Simulate a process that refuses to die: signals "succeed" but the process
+    # is reported alive throughout.
+    monkeypatch.setattr(end_session_cmd, "_proc_alive", lambda pid: True)
+    monkeypatch.setattr(end_session_cmd.os, "kill", lambda *a, **k: None)
+
+    rc = end_session(
+        project_root=main, flow_id=flow_id, pid=4242, grace_seconds=0.2
+    )
+    assert rc == 1  # termination not confirmed → nonzero exit
+
+    # Destructive archive must have been skipped: worktree + branch survive.
+    assert wt_path.exists()
+    assert _branch_exists(main, branch)
+    assert exists_for_branch(main, branch)
+    assert not (
+        main / "se3" / "state" / "archive" / f"engine_{flow_id}.json"
+    ).exists()
+
+
 # --------------------------------------------------------------------------
 # degradation + fault tolerance
 # --------------------------------------------------------------------------
@@ -303,6 +338,62 @@ def test_missing_worktree_degrades_to_main_archive(tmp_path: Path) -> None:
 
     rc = end_session(project_root=main, flow_id="lonely-flow")
     assert rc == 0
+
+
+def test_mismatched_main_flow_is_not_archived(tmp_path: Path) -> None:
+    """Ending flow A (worktree gone) must NOT archive an unrelated active flow B.
+
+    The main project's engine.json belongs to a *different* flow; clearing it
+    would end the wrong session.
+    """
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    # The main project is busy with flow B.
+    _make_main_session(main, "flow-B", status="RUNNING")
+    state_file = main / "se3" / "state" / "engine.json"
+    b_snapshot = main / "se3" / "state" / "resumable" / "flow-B.json"
+    assert state_file.exists()
+
+    # Ending flow A, whose worktree is already gone (no worktree on disk).
+    rc = end_session(project_root=main, flow_id="flow-A")
+    assert rc == 0
+
+    # Flow B's engine.json + snapshot are left intact — not archived.
+    assert state_file.exists()
+    assert json.loads(state_file.read_text())["flow_id"] == "flow-B"
+    assert b_snapshot.exists()
+    # And no archived engine_flow-B.json was produced.
+    archive_dir = main / "se3" / "state" / "archive"
+    assert not list(archive_dir.glob("engine_*.json")) if archive_dir.exists() else True
+
+
+def test_archive_failure_preserves_worktree_and_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed worktree archive must NOT destroy the only copy of the work."""
+    main = tmp_path / "repo"
+    main.mkdir()
+    _init_repo(main)
+    flow_id = "wt-archive-fail"
+    branch = "worktree/archive-fail-1"
+    wt_path = _make_worktree_session(main, flow_id, branch)
+
+    # Force the archive-copy step to fail (e.g. disk full / permission denied).
+    def _boom(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(
+        "se3.engine.merge.cleanup._archive_worktree", _boom
+    )
+
+    rc = end_session(project_root=main, flow_id=flow_id)
+    assert rc == 1  # archive failed → nonzero exit
+
+    # The destructive cleanup must have been skipped: branch + worktree survive.
+    assert _branch_exists(main, branch)
+    assert exists_for_branch(main, branch)
+    assert wt_path.exists()
 
 
 def test_step_failure_does_not_abort_and_exit_nonzero(

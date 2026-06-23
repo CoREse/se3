@@ -65,6 +65,13 @@
 
 
 
+
+## 10.8.1 - 2026-06-23
+
+- Stop web console modals from closing when clicking the backdrop outside them, preventing accidental loss of typed input
+- Require the new-issue, edit-issue, and other dialog modals to be dismissed explicitly via the × or cancel button
+- Preserve the mobile sidebar drawer's tap-the-backdrop dismiss and the nav menu's outside-click close behavior
+- Retain every modal's explicit close-button binding so dialogs remain fully dismissable
 ## 10.8.0 - 2026-06-23
 
 - Display worktree-based session projects as '<项目名>（worktree）' instead of the long opaque worktree slug

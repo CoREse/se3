@@ -68,6 +68,10 @@ EnsureHandler = Callable[[str], Any]
 #: Type of the resume handler — called with (flow_id, project_root) when a
 #: SPAWN_FLOW carries a ``resume_flow_id``.
 ResumeHandler = Callable[[str, str], Any]
+#: Type of the end-session handler — called with (flow_id, project_root, reason)
+#: when an END_SESSION arrives. The handler terminates the flow's live process
+#: and archives a worktree session (delegated to ``se3 end-session``).
+EndSessionHandler = Callable[[str, str, str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
 #: Type of the history provider — a :class:`~se3.daemon.history.DaemonHistoryReader`
@@ -170,6 +174,7 @@ class DaemonClient:
         spawn_handler: Optional[SpawnHandler] = None,
         ensure_handler: Optional[EnsureHandler] = None,
         resume_handler: Optional[ResumeHandler] = None,
+        end_session_handler: Optional[EndSessionHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         calls_signature_provider: Optional[CallsSignatureProvider] = None,
@@ -197,6 +202,11 @@ class DaemonClient:
                 directory (and to register the root with the aggregator).
                 When the returned object has a truthy ``.error`` attribute,
                 the SPAWN_FLOW is aborted with that error logged.
+            end_session_handler: Callable invoked for an incoming END_SESSION
+                with ``(flow_id, project_root, reason)``. It terminates the
+                flow's live ``se3 run`` process and archives a worktree session
+                (the daemon delegates this to an ``se3 end-session``
+                subprocess). When ``None`` an END_SESSION is logged and ignored.
             respond_handler: Callable invoked for an incoming RESPOND_CALL;
                 when ``None`` the client writes the response file itself.
             history_provider: A :class:`~se3.daemon.history.DaemonHistoryReader`
@@ -230,6 +240,7 @@ class DaemonClient:
         self._spawn_handler = spawn_handler
         self._ensure_handler = ensure_handler
         self._resume_handler = resume_handler
+        self._end_session_handler = end_session_handler
         self._respond_handler = respond_handler or _default_respond_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
@@ -620,6 +631,8 @@ class DaemonClient:
             self._handle_respond(message.payload)
         elif message.type == protocol.MSG_INTERJECT_FLOW:
             await self._handle_interject(message.payload)
+        elif message.type == protocol.MSG_END_SESSION:
+            self._handle_end_session(message.payload)
         elif message.type == protocol.MSG_ISSUE_COMMAND:
             await self._handle_issue_command(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
@@ -892,6 +905,37 @@ class DaemonClient:
                 "History-index lookup for flow %s failed", flow_id, exc_info=True
             )
         return ""
+
+    def _handle_end_session(self, payload: Dict[str, Any]) -> None:
+        """Route an END_SESSION instruction to the daemon's end-session handler.
+
+        Resolves the ``flow_id`` (safely ignoring an empty one) and, when the
+        payload omits ``project_root``, reverse-resolves it from the history
+        index — the same authoritative root the history reader scopes a
+        ``--worktree`` / discovery session to — mirroring the RESPOND_CALL /
+        INTERJECT_FLOW resolution. The injected handler does the heavy work off
+        the event loop by spawning ``se3 end-session``, so this stays a cheap
+        synchronous dispatch. A handler exception is caught and logged so a bad
+        end-session request never tears the connection down.
+        """
+        if self._end_session_handler is None:
+            logger.warning(
+                "Received END_SESSION but no end-session handler is configured"
+            )
+            return
+        flow_id = str(payload.get("flow_id") or "").strip()
+        if not flow_id:
+            logger.warning("Ignoring END_SESSION with empty flow_id")
+            return
+        project_root = str(payload.get("project_root") or "").strip()
+        if not project_root:
+            project_root = self._resolve_flow_root_from_index(flow_id)
+        reason = str(payload.get("reason") or "").strip() or "user terminated"
+        try:
+            self._end_session_handler(flow_id, project_root, reason)
+            logger.info("END_SESSION handled for flow %s", flow_id)
+        except Exception:
+            logger.exception("END_SESSION handler failed for flow %s", flow_id)
 
     async def _handle_issue_command(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Execute an issue write command via :class:`IssueManager`.

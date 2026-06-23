@@ -335,6 +335,69 @@ class Daemon:
         logger.info("Resumed flow %s in %s", flow_id, root)
         return spawned
 
+    def request_end_session(
+        self,
+        flow_id: str,
+        *,
+        project_root: Optional[str] = None,
+        reason: str = "user terminated",
+    ) -> SpawnedProcess:
+        """End (terminate + archive) a supervised flow (entry point for remote requests).
+
+        Locates *flow_id* among the supervisor's tracked flows, takes its live
+        pid and the main project root it is attributed to, and off-loads the
+        heavy work to an ``se3 end-session`` subprocess: the subprocess
+        gracefully terminates the live ``se3 run`` process (SIGTERM → grace →
+        SIGKILL) and, for a worktree session, archives it the way a
+        normally-completed run is cleaned up. The grace wait and the on-disk
+        archival are therefore never performed on the daemon's event loop.
+
+        Raises :class:`ValueError` when no tracked flow matches *flow_id*; the
+        caller surfaces the message as a protocol-level error.
+        """
+        if not flow_id:
+            raise ValueError("request_end_session: empty flow_id")
+        record = None
+        for rec in self.supervisor.flows:
+            if str(rec.flow_id or "") == flow_id:
+                record = rec
+                break
+        # A flow that is NOT among the supervised (live) flows can still be a
+        # dangling worktree session left by a PAUSED / FAILED / interrupted run
+        # whose ``se3 run`` process already exited — the ``se3 end-session`` CLI
+        # archives those without a live process, so as long as the caller (the
+        # server) supplied the project root, we still dispatch the subprocess
+        # with no pid hint. We only refuse when neither a tracked flow nor a
+        # caller-supplied root gives us a place to look.
+        if record is None and not project_root:
+            raise ValueError(
+                f"Flow {flow_id!r} not found among supervised flows "
+                "and no project_root supplied"
+            )
+        # Prefer the caller-supplied main root; otherwise fold the record's own
+        # root back to its owning ``<main>`` (a worktree-copy root resolves to
+        # its main project), matching the attribution every other registration
+        # path uses so the subprocess archives under the right root.
+        if project_root:
+            main_root = str(Path(project_root).resolve())
+        else:
+            resolved = resolve_worktree_main_root(record.project_root)
+            main_root = str(
+                resolved if resolved is not None else record.project_root
+            )
+        pid = record.pid if record is not None else None
+        spawned = self.spawner.end_session(
+            flow_id, project_root=main_root, pid=pid
+        )
+        logger.info(
+            "Dispatched end-session for flow %s in %s (pid=%s, reason=%s)",
+            flow_id,
+            main_root,
+            pid,
+            reason,
+        )
+        return spawned
+
     def _live_project_roots(self) -> Set[str]:
         """Return the set of project roots with a live ``se3 run`` process.
 
@@ -430,6 +493,7 @@ class Daemon:
             spawn_handler=self._handle_spawn_request,
             ensure_handler=self._handle_ensure_request,
             resume_handler=self._handle_resume_request,
+            end_session_handler=self._handle_end_session_request,
             respond_handler=self._handle_respond_request,
             history_provider=self.history_reader,
             calls_signature_provider=self.aggregator.pending_calls_signature,
@@ -468,6 +532,19 @@ class Daemon:
         return self.request_resume(
             flow_id,
             project_root=project_root or None,
+        )
+
+    def _handle_end_session_request(
+        self,
+        flow_id: str,
+        project_root: str,
+        reason: str = "user terminated",
+    ) -> SpawnedProcess:
+        """Adapt a server END_SESSION into a :meth:`request_end_session` call."""
+        return self.request_end_session(
+            flow_id,
+            project_root=project_root or None,
+            reason=reason or "user terminated",
         )
 
     def _handle_ensure_request(self, project_root: str) -> Any:

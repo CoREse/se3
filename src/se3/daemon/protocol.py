@@ -26,7 +26,8 @@ Message directions
   :data:`MSG_SPAWN_FAILED`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
-  :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`.
+  :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`,
+  :data:`MSG_END_SESSION`.
 
 Backward compatibility
 ----------------------
@@ -125,6 +126,16 @@ MSG_HISTORY_INDEX_REQUEST = "history_index_request"
 #: ``se3/calls/`` which ``se3 run`` drains at the next step boundary.
 MSG_INTERJECT_FLOW = "interject_flow"
 
+#: server → daemon: end (terminate + archive) a session by ``flow_id``. The
+#: daemon validates the flow against its supervisor and then off-loads the heavy
+#: work — gracefully terminating the live ``se3 run`` process and archiving a
+#: worktree session the way a normally-completed session would be cleaned up —
+#: to an ``se3 end-session`` subprocess, so the event loop is never blocked by
+#: the grace wait or the on-disk archival. Older daemons that do not recognise
+#: the type simply ignore it (mixed-version compatibility), so no
+#: ``PROTOCOL_VERSION`` bump is required.
+MSG_END_SESSION = "end_session"
+
 #: server → daemon: instruct the daemon to execute an issue write operation
 #: (create / edit / close / reopen). The daemon resolves the project root,
 #: validates the operation and delegates to :class:`IssueManager`.
@@ -193,6 +204,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_HISTORY_INDEX_REQUEST,
         MSG_INTERJECT_FLOW,
         MSG_ISSUE_COMMAND,
+        MSG_END_SESSION,
     }
 )
 #: Every known message type.
@@ -464,6 +476,38 @@ def make_interject_flow(
             "project_root": project_root,
         },
     )
+
+
+def make_end_session(
+    flow_id: str,
+    *,
+    project_root: str = "",
+    reason: str = "user terminated",
+) -> Message:
+    """server → daemon: end (terminate + archive) the session *flow_id*.
+
+    The daemon locates *flow_id* among its supervised flows, then off-loads the
+    actual work to an ``se3 end-session`` subprocess: it gracefully terminates
+    the live ``se3 run`` process and, for a worktree session, archives it the
+    way a normally-completed session is cleaned up (``se3/worktrees/.archive``
+    + a promoted main-repo ``engine_<flow_id>.json`` + history sync + branch /
+    worktree-metadata removal). The work is never done on the event loop.
+
+    *project_root* is the main project root the daemon should pass through to
+    the subprocess; when empty the daemon reverse-resolves it from its history
+    index (mirroring the INTERJECT path). *reason* is free-form prose recorded
+    for diagnostics.
+
+    Empty optional fields are omitted from the wire so a payload carrying only a
+    ``flow_id`` stays compact, and an older daemon that does not recognise the
+    type simply ignores the frame — so no ``PROTOCOL_VERSION`` bump is needed.
+    """
+    payload: Dict[str, Any] = {"flow_id": flow_id}
+    if project_root:
+        payload["project_root"] = project_root
+    if reason:
+        payload["reason"] = reason
+    return Message(type=MSG_END_SESSION, payload=payload)
 
 
 def make_issue_command(

@@ -216,6 +216,11 @@ const state = {
   // Prevents duplicate POST /api/flows/{id}/resume calls and disables the
   // Resume button until the server responds (success or error).
   resumeFlowRequests: new Set(),
+  // ---- End-session tracking ----
+  // Set of flow_ids for which an end-session request is currently in-flight.
+  // Prevents duplicate POST /api/flows/{id}/end calls and disables the
+  // End button until the server responds (success or error).
+  endSessionRequests: new Set(),
 };
 
 // Lifetime of a consumed-state afterimage chip in milliseconds.
@@ -1542,6 +1547,9 @@ function renderFlowCard(flow) {
   const resumeBtn = makeResumeButton(flow);
   if (resumeBtn) head.appendChild(resumeBtn);
 
+  const endBtn = makeEndButton(flow);
+  if (endBtn) head.appendChild(endBtn);
+
   const bar = el("div", "progress");
   const inner = el("div", "progress-bar");
   inner.style.width = Math.round((flow.progress || 0) * 100) + "%";
@@ -1968,10 +1976,16 @@ async function loadFlowConversation(flowId, opts) {
     // follows if already near it, preserving the reader's scroll position.
     const stick = (incremental || silent) ? isNearBottom(container) : true;
     // A silent refresh does a from-scratch `append=false` rebuild that clears
-    // `container.innerHTML`, which clamps scrollTop back to 0. When the reader
-    // is NOT stuck to the bottom, capture the pre-rebuild offset so it can be
-    // restored after the new DOM lands — otherwise the user is silently yanked
-    // to the top instead of keeping their reading position.
+    // `container.innerHTML` and re-lays-out the same records — possibly at
+    // DIFFERENT heights (markdown reflow, a step header appearing, a partial
+    // bubble finalizing). When the reader is NOT stuck to the bottom, anchor on
+    // the actual bubble they are looking at (captured BEFORE the merge mutates
+    // the records array and BEFORE the rebuild clears the DOM) so a height change
+    // above it does not scroll the conversation — the issue #209 jump. The
+    // captured pre-rebuild scrollTop is retained as the absolute fallback for
+    // when no usable geometry exists (DOM-free tests / empty conversation).
+    const scrollAnchor = (silent && !stick)
+      ? captureScrollAnchor(container, state.flowConversationRecords) : null;
     const preserveScrollTop = (silent && !stick) ? container.scrollTop : null;
     // Fold the response in through the shared decision helper, which picks
     // delta-append vs full-replace from the server's `delivery` tag and keeps
@@ -2012,10 +2026,14 @@ async function loadFlowConversation(flowId, opts) {
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) {
       scrollFlowConversationToBottom();
-    } else if (preserveScrollTop !== null) {
-      // Restore the reader's pre-rebuild offset clamped to the new content
-      // height, so a silent full rebuild does not reset them to the top.
-      container.scrollTop = Math.min(preserveScrollTop, container.scrollHeight);
+    } else if (silent) {
+      // Re-anchor the reader's viewport to the same bubble (matched by recordKey
+      // across the rebuilt records), so content height changes above it do not
+      // shift the view. Falls back to the absolute pre-rebuild offset
+      // (preserveScrollTop, clamped to the new height) when the anchor is
+      // unusable — preserving the prior behaviour for DOM-free / edge cases.
+      restoreScrollAnchor(
+        container, state.flowConversationRecords, scrollAnchor, preserveScrollTop);
     }
   } catch (_) {
     if (
@@ -2031,6 +2049,83 @@ async function loadFlowConversation(flowId, opts) {
 function scrollFlowConversationToBottom() {
   const c = $("flow-conversation");
   c.scrollTop = c.scrollHeight;
+}
+
+// --- Element-anchored scroll preservation for the silent full rebuild --------
+//
+// The progression-triggered silent refresh (issue #209's cause-immune
+// workaround) rebuilds `#flow-conversation` from scratch via
+// `renderConversation(append=false)`. Re-laying-out the same records can give
+// the content ABOVE the reader's viewport a different total height, so the old
+// remedy of restoring an absolute pixel `scrollTop` made the conversation
+// visibly jump up a large stretch — the very bug this fixes. Instead of pinning
+// a pixel value we anchor on the CONTENT the reader is looking at: the topmost
+// bubble visible at the viewport top, identified by its record's `recordKey`
+// (stable across the old/new arrays even when `reconcileLocalEchoes` drops a
+// mid-list echo and shifts every index). After the rebuild we move scrollTop so
+// that same bubble returns to the same viewport offset; any height change above
+// it is absorbed and the reader's view does not move.
+
+// captureScrollAnchor — read-only. Returns `{ recordKey, viewportOffset }` for
+// the first bubble whose bottom edge is still below the container's viewport
+// top (the topmost bubble the reader can currently see), or null when there is
+// no usable geometry (no visible bubble / all-zero rects, as in the DOM-free
+// tests) so the caller falls back to the absolute-scrollTop restore. Reads DOM
+// geometry and the passed-in (old) records array only; mutates nothing.
+function captureScrollAnchor(container, records) {
+  if (!container || !records || !records.length) return null;
+  const containerTop = container.getBoundingClientRect().top;
+  for (const child of container.children) {
+    // Skip `.history-step-header` separators (no `__convIdx`); a bubble's
+    // `__convIdx` is its index into the records array it was rendered from.
+    if (child.__convIdx === undefined) continue;
+    const rec = records[child.__convIdx];
+    if (rec === undefined) continue;
+    const rect = child.getBoundingClientRect();
+    // First bubble still (partially) below the viewport top. An all-zero rect
+    // (no layout geometry) never satisfies `bottom > top`, so a DOM-free
+    // container yields null and the caller falls back to preserveScrollTop.
+    if (rect.bottom > containerTop) {
+      return { recordKey: recordKey(rec), viewportOffset: rect.top - containerTop };
+    }
+  }
+  return null;
+}
+
+// restoreScrollAnchor — re-finds the captured record in the NEW records array by
+// recordKey (NOT by absolute index, which a mid-list echo removal would shift),
+// locates its rebuilt bubble, and sets `container.scrollTop` so the bubble sits
+// back at `anchor.viewportOffset`. Reading the rects forces a synchronous
+// layout, so the measured offset is accurate without a requestAnimationFrame
+// deferral. Falls back to `fallbackScrollTop` (the original preserveScrollTop
+// behaviour, clamped to the new content height) when the anchor is unusable:
+// no anchor, the record vanished, its bubble is missing, or it has no geometry.
+function restoreScrollAnchor(container, records, anchor, fallbackScrollTop) {
+  const applyFallback = () => {
+    if (container && fallbackScrollTop != null) {
+      container.scrollTop = Math.min(fallbackScrollTop, container.scrollHeight);
+    }
+  };
+  if (!container || !anchor || !records) { applyFallback(); return; }
+  let newIndex = -1;
+  for (let i = 0; i < records.length; i++) {
+    if (recordKey(records[i]) === anchor.recordKey) { newIndex = i; break; }
+  }
+  if (newIndex < 0) { applyFallback(); return; }
+  let bubble = null;
+  for (const child of container.children) {
+    if (child.__convIdx === newIndex) { bubble = child; break; }
+  }
+  if (!bubble) { applyFallback(); return; }
+  const rect = bubble.getBoundingClientRect();
+  // A degenerate (zero-height) rect means no usable layout geometry — fall back
+  // rather than computing a bogus offset against an all-zero rect.
+  if (rect.bottom === rect.top) { applyFallback(); return; }
+  const containerTop = container.getBoundingClientRect().top;
+  const currentOffset = rect.top - containerTop;
+  // Increasing scrollTop pulls content up (offset shrinks), so shifting by
+  // (currentOffset - target) lands the bubble back at the captured offset.
+  container.scrollTop = container.scrollTop + (currentOffset - anchor.viewportOffset);
 }
 
 // Render a single-message placeholder into the flow view's sidebar.
@@ -2307,12 +2402,14 @@ function renderFlowSidebar(flow, machineId) {
   if (flow.flow_id) machineSec.appendChild(kv("Flow id", flow.flow_id));
   body.appendChild(machineSec);
 
-  // -- resume --
+  // -- resume / end --
   const resumeBtn = makeResumeButton(flow);
-  if (resumeBtn) {
-    const resumeSec = el("div", "detail-section");
-    resumeSec.appendChild(resumeBtn);
-    body.appendChild(resumeSec);
+  const endBtn = makeEndButton(flow);
+  if (resumeBtn || endBtn) {
+    const actionSec = el("div", "detail-section");
+    if (resumeBtn) actionSec.appendChild(resumeBtn);
+    if (endBtn) actionSec.appendChild(endBtn);
+    body.appendChild(actionSec);
   }
 }
 
@@ -2386,6 +2483,140 @@ function makeResumeButton(flow) {
   btn.addEventListener("click", (e) => {
     e.stopPropagation(); // don't bubble to the card's click handler
     resumeFlow(flowId);
+  });
+  return btn;
+}
+
+// ---------------------------------------------------------------------------
+// End session
+// ---------------------------------------------------------------------------
+//
+// Ends (and, for worktree sessions, archives) a non-completed flow. A
+// synchronous `se3 run` on the main branch only needs the process terminated,
+// but a `--worktree` flow otherwise leaves an orphan worktree behind forever;
+// the backend `POST /api/flows/{id}/end` dispatches `MSG_END_SESSION` to the
+// owning daemon which terminates the process and archives the worktree just
+// like a normally-completed session. The control is gated by the pure
+// `isFlowEndable` predicate (a UI gate mirroring the server's
+// `ServerState.is_flow_endable`) and debounced via `state.endSessionRequests`.
+
+// Pure UI gate: may *flow* be ended from the console?  A flow is endable when
+// it carries a flow_id, is not already completed, and is not an
+// archived/history-only snapshot (those have no live process / worktree to
+// clean up). Every active or recoverable state (running / paused / failed /
+// recovering / init) is endable, because a dangling worktree may be left by
+// any of them — this mirrors the server's pre-check which only rejects
+// COMPLETED flows.
+function isFlowEndable(flow) {
+  if (!flow || typeof flow !== "object") return false;
+  if (!flow.flow_id) return false;
+  if (String(flow.status || "").toLowerCase() === "completed") return false;
+  const src = String(flow.source || "").toLowerCase();
+  if (src === "archived" || src === "history") return false;
+  return true;
+}
+
+// Pure helper: is an end-session request currently in-flight for *flowId*?
+function isEndInProgress(flowId) {
+  return state.endSessionRequests.has(flowId);
+}
+
+let _endSessionPending = false;
+
+function openEndSessionModal(flow) {
+  if (!flow || !flow.flow_id) return;
+  const modal = $("end-session-modal");
+  if (!modal) return;
+  const errBox = $("end-session-error");
+  if (errBox) errBox.classList.add("hidden");
+  const msgNode = $("end-session-message");
+  if (msgNode) {
+    msgNode.textContent =
+      "确认结束并归档该 session（" + flow.flow_id.slice(0, 8) + "…）？" +
+      "若为 worktree，它会被清理归档，未提交的工作不会合并进主分支。";
+  }
+  modal.dataset.flowId = flow.flow_id;
+  modal.classList.remove("hidden");
+}
+
+function closeEndSessionModal() {
+  const modal = $("end-session-modal");
+  if (modal) modal.classList.add("hidden");
+  _endSessionPending = false;
+}
+
+async function confirmEndSession() {
+  if (_endSessionPending) return;
+  _endSessionPending = true;
+  const modal = $("end-session-modal");
+  const flowId = modal ? modal.dataset.flowId : "";
+  const confirmBtn = $("end-session-confirm");
+  if (confirmBtn) confirmBtn.disabled = true;
+  try {
+    await endFlow(flowId);
+    closeEndSessionModal();
+  } finally {
+    if (confirmBtn) confirmBtn.disabled = false;
+    _endSessionPending = false;
+  }
+}
+
+async function endFlow(flowId) {
+  if (!flowId) return;
+  if (state.endSessionRequests.has(flowId)) return; // debounce
+  state.endSessionRequests.add(flowId);
+  // Re-render affected surfaces so the button shows a disabled/pending state.
+  renderFlows();
+  renderHistoryList();
+  if (state.flowDetail && state.flowDetail.flow_id === flowId) {
+    renderFlowSidebar(state.flowDetail, state.flowMachineId);
+  }
+  try {
+    const resp = await authedFetch(
+      `/api/flows/${encodeURIComponent(flowId)}/end`,
+      { method: "POST" },
+    );
+    if (resp.ok || resp.status === 202) {
+      showToast("success", `End dispatched for ${flowId.slice(0, 8)}…`);
+    } else if (resp.status === 404) {
+      showToast("error", "Flow not found.");
+    } else if (resp.status === 409) {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch (_) {}
+      showToast("error", detail || "该 session 已结束，无法再次结束。");
+    } else if (resp.status === 503) {
+      showToast("error", "机器未连接 — 无法下发结束指令。");
+    } else {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch (_) {}
+      showToast("error", detail || `End failed (${resp.status}).`);
+    }
+  } catch (_) {
+    showToast("error", "Network error — could not dispatch end.");
+  } finally {
+    state.endSessionRequests.delete(flowId);
+    renderFlows();
+    renderHistoryList();
+    if (state.flowDetail && state.flowDetail.flow_id === flowId) {
+      renderFlowSidebar(state.flowDetail, state.flowMachineId);
+    }
+  }
+}
+
+// Create an End button for an endable flow.  Returns null when the flow is not
+// endable, so callers can unconditionally append the result.  Clicking opens
+// the confirmation modal rather than ending immediately (a destructive op).
+function makeEndButton(flow) {
+  if (!isFlowEndable(flow)) return null;
+  const flowId = flow.flow_id;
+  const pending = isEndInProgress(flowId);
+  const btn = el("button", "btn-end", pending ? "Ending…" : "End");
+  btn.type = "button";
+  btn.disabled = pending;
+  btn.title = "End (and archive) this session";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation(); // don't bubble to the card's click handler
+    openEndSessionModal(flow);
   });
   return btn;
 }
@@ -11134,17 +11365,19 @@ function init() {
     issProjectSel.addEventListener("change", _updateIssueProjectManualVisibility);
   }
   $("issue-modal-close").addEventListener("click", closeIssueModal);
-  $("issue-modal").addEventListener("click", (e) => {
-    if (e.target.id === "issue-modal") closeIssueModal();
-  });
 
   // Issue action (close/reopen) modal.
   $("issue-action-confirm").addEventListener("click", confirmIssueAction);
   $("issue-action-cancel").addEventListener("click", closeIssueActionModal);
   $("issue-action-close").addEventListener("click", closeIssueActionModal);
-  $("issue-action-modal").addEventListener("click", (e) => {
-    if (e.target.id === "issue-action-modal") closeIssueActionModal();
-  });
+
+  // End-session confirmation modal.
+  const endConfirm = $("end-session-confirm");
+  if (endConfirm) endConfirm.addEventListener("click", confirmEndSession);
+  const endCancel = $("end-session-cancel");
+  if (endCancel) endCancel.addEventListener("click", closeEndSessionModal);
+  const endClose = $("end-session-close");
+  if (endClose) endClose.addEventListener("click", closeEndSessionModal);
 
   // Issue launch (start flow from issue) modal.
   const issueLaunchConfirm = $("issue-launch-confirm");
@@ -11158,12 +11391,6 @@ function init() {
   const issueLaunchClose = $("issue-launch-close");
   if (issueLaunchClose) {
     issueLaunchClose.addEventListener("click", closeIssueLaunchModal);
-  }
-  const issueLaunchModal = $("issue-launch-modal");
-  if (issueLaunchModal) {
-    issueLaunchModal.addEventListener("click", (e) => {
-      if (e.target.id === "issue-launch-modal") closeIssueLaunchModal();
-    });
   }
 
   // Narrow-screen History panel switch: return from the session detail to the
@@ -11205,17 +11432,11 @@ function init() {
   $("keys-btn").addEventListener("click", openKeys);
   $("keys-close").addEventListener("click", closeKeys);
   $("keys-create-form").addEventListener("submit", createDaemonKey);
-  $("keys-modal").addEventListener("click", (e) => {
-    if (e.target.id === "keys-modal") closeKeys();
-  });
 
   // User-management panel (admin only).
   $("users-btn").addEventListener("click", openUsers);
   $("users-close").addEventListener("click", closeUsers);
   $("users-create-form").addEventListener("submit", createUser);
-  $("users-modal").addEventListener("click", (e) => {
-    if (e.target.id === "users-modal") closeUsers();
-  });
 
   $("flow-reply-form").addEventListener("submit", submitReply);
   $("flow-interject-btn").addEventListener("click", onInterjectButtonClick);
@@ -11229,11 +11450,6 @@ function init() {
   // WeChat-style auto-grow: resize the textarea to its content as the user
   // types (mobile portrait only; a no-op on desktop).
   $("flow-reply-input").addEventListener("input", autoGrowReplyTextarea);
-
-  // Click the modal backdrop to dismiss.
-  $("new-task-modal").addEventListener("click", (e) => {
-    if (e.target.id === "new-task-modal") closeNewTask();
-  });
 
   // Browser back collapses the flow view back to the flow list, instead of
   // leaving the site. openFlowView pushed an entry on top of the stack; a
@@ -11392,6 +11608,11 @@ if (typeof module !== "undefined" && module.exports) {
     // Reconnect incremental load paths (G4) — exposed for the DOM-stub load
     // path tests in tests/frontend/test_app_pure.mjs.
     loadFlowConversation,
+    // Element-anchored scroll preservation for the silent rebuild (issue #209
+    // jump fix) — exposed for the DOM-stub tests in
+    // tests/frontend/issue217_scroll_anchor.test.mjs.
+    captureScrollAnchor,
+    restoreScrollAnchor,
     // Cause-immune progression-refresh fallback (G2) — exposed for the DOM-stub
     // tests in tests/frontend/progression_refresh.test.mjs.
     maybeRefreshConversationOnProgression,
@@ -11412,6 +11633,11 @@ if (typeof module !== "undefined" && module.exports) {
     isFlowResumable,
     RESUMABLE_STATUSES,
     isResumeInProgress,
+    // End-session pure helpers (G4) — exposed for the DOM-free tests in
+    // tests/frontend/end_session.test.mjs.
+    isFlowEndable,
+    isEndInProgress,
+    makeEndButton,
     // Waiting-for-lock running sub-state (G2) — exposed for the DOM-free tests
     // in tests/frontend/waiting_for_lock.test.mjs.
     isWaitingForLock,
