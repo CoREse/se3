@@ -4122,3 +4122,145 @@ form.
   body are produced by pure functions that can be unit-tested in
   isolation (open-status gate, payload shape, pending/dispatched state)
   without a running server
+
+### Requirement: Progression-Triggered Silent Conversation Rebuild
+
+When the running flow currently open in `#flow-view` is observed to have
+advanced — a step switch or an in-step retry/resume — the console MUST silently
+rebuild that flow's conversation from a fresh non-incremental `GET /api/history`
+snapshot, restoring the main conversation display without the operator having to
+close and reopen the session. This is a deliberately **cause-immune fallback
+workaround** for the long-standing, recurrent bug in which the main conversation
+region stops updating across a step boundary or retry (the prior remedy being a
+manual exit-and-reenter). It does NOT diagnose or fix the underlying freeze and
+MUST NOT modify the incremental-push, `dedupeAppendRecords`, or progress-token
+machinery defined by *Live-Append Record Deduplication Against Snapshot*,
+*Reconnect Incremental History Refresh*, and *Diff-Aware Rebuild Skipping*; it
+coexists with them as an additional recovery path and never claims to repair the
+root cause. Its two design anchors are the two independently-reliable observable
+facts that survive the freeze: (a) the flow's authoritative `/api/flows/{id}`
+snapshot — which drives the sidebar — always advances when the flow truly
+progresses, and (b) the close-and-reopen recovery path
+(`openFlowView` → `loadFlowConversation` doing a non-incremental full reload)
+always restores the display. The workaround uses (a) as the trigger and (b) as
+the remedy, so its correctness does not depend on why the conversation froze.
+
+The accepted, non-defect costs of this workaround MUST be acknowledged: every
+step boundary (including boundaries where the incremental channel would have
+worked) incurs one extra full `GET /api/history` re-fetch and full conversation
+re-render, and recovery is delayed by at most roughly one detail-poll interval
+(about 3 seconds). These are documented trade-offs, not regressions.
+
+The mechanism:
+
+1. **Single convergence-point detection.** Progression detection MUST live at
+   the single site `refreshFlowDetail` (specifically
+   `maybeRefreshConversationOnProgression(flow)` invoked after
+   `state.flowDetail` is assigned), because `refreshFlowDetail` is the common
+   funnel through which every authoritative flow-detail update flows — the 3s
+   poll, `openFlowView`, `applyMachines` (the `STATUS_UPDATE` handler, which
+   calls `refreshFlowDetail` when `selectedFlowId` matches), and the ws-reconnect
+   path — and each call carries the fresh `/api/flows/{id}` snapshot. Detection
+   MUST NOT be duplicated into those individual paths.
+2. **Progression baseline and advance predicate.** The view holds a single
+   baseline `state.flowProgressionMarker` of `{ flowId, currentStep,
+   currentStepIndex, status }` for the open flow. The first observation of a flow
+   (marker absent or its `flowId` not matching) MUST only establish the baseline
+   and MUST NOT trigger a refresh, so a freshly opened flow's first full load is
+   never misread as progression. On a subsequent snapshot the flow is judged to
+   have **advanced** when `current_step` changed, or `current_step_index`
+   changed, or the status made a forward-motion resume transition — a previously
+   `FAILED`/`PAUSED` flow flipping back to `RUNNING` (compared
+   case-insensitively, since production `flow.status` arrives lowercase). A
+   `RUNNING`→`FAILED` / `RUNNING`→`PAUSED` transition is the flow stopping, not
+   advancing, and MUST NOT fire a refresh. The `current_step`/`current_step_index`
+   signals cover step-to-step switches (e.g. discovery→analyze); the
+   resume-from-halt status signal covers in-step retries (e.g. `update_spec`
+   failing and being manually retried), replacing the inert `step_history`-length
+   signal that does not reliably grow on those retries.
+3. **Single fire per advance.** The baseline MUST be updated to the new observed
+   values on every observation (whether or not it fired), so a duplicate snapshot
+   of the same advance — e.g. the 3s poll re-delivering what the WS push already
+   carried — triggers the silent refresh at most once, and a steady-state poll
+   with no advance triggers zero full refreshes. The silent refresh fires only
+   when an advance is detected AND the advanced flow is the one currently selected
+   (`state.selectedFlowId === flow.flow_id`).
+4. **Silent full rebuild (the `loadFlowConversation` `silent` mode).** The
+   refresh MUST be `loadFlowConversation(flowId, { silent: true })`, a non-blank
+   variant of the non-incremental full-load branch that reuses the same epoch
+   guard, the same token-less full `GET /api/history` URL, the same
+   `mergeHistoryResponse` full-replace, `reconcileLocalEchoes`, and full
+   `renderConversation(append=false)` rebuild as the exit-and-reenter path — so
+   the silent refresh's rendered result is equivalent to a manual reopen. Unlike
+   the default non-incremental branch it MUST NOT pre-clear the container or show
+   a `Loading conversation…` placeholder: it fetches in the background and
+   replaces the DOM in one pass only after the data arrives, eliminating the
+   blank flash at each step boundary. `silent` and `incremental` are mutually
+   exclusive.
+5. **Scroll preservation.** The silent refresh MUST anchor scrolling via
+   `isNearBottom(container)` (the same as the reconnect path) rather than forcing
+   `stick = true` to the bottom: it scrolls to the bottom only when the view was
+   already near the bottom before the refresh, otherwise it preserves the user's
+   current reading position so an operator scrolled up through history is not
+   yanked down.
+6. **Reply-region isolation.** The silent refresh MUST act only on the
+   conversation region `#flow-conversation` and its state
+   (`state.flowConversationRecords`, `state.flowConversationProgress`, the
+   container's `__convState`); it MUST NOT read or write the reply region
+   (`#flow-interventions` / `#flow-reply-context`), so a user's in-progress reply
+   draft, input focus, and textarea height are never disturbed.
+
+The progression baseline MUST be initialized to `null` when a flow is opened
+(`openFlowView`) and cleared to `null` when the view is closed
+(`doCloseFlowView`), so opening a flow always re-establishes a fresh baseline and
+a prior flow's progression can never be attributed to a newly opened flow.
+
+#### Scenario: Step switch silently restores the conversation
+- **GIVEN** a running flow open in `#flow-view`, its progression baseline already
+  established, whose main conversation has stopped updating across a step boundary
+- **WHEN** a `refreshFlowDetail` snapshot (from the 3s poll or a
+  `STATUS_UPDATE`) reports a changed `current_step` / `current_step_index` for
+  the currently-selected flow (e.g. discovery advancing to analyze)
+- **THEN** `maybeRefreshConversationOnProgression` fires exactly one
+  `loadFlowConversation(flowId, { silent: true })` and the conversation rebuilds
+  to show the subsequent step's content without any manual exit-and-reenter
+
+#### Scenario: In-step retry recovers via the resume-from-halt status signal
+- **GIVEN** a running flow open in `#flow-view` whose baseline status is `FAILED`
+  or `PAUSED` after a step (e.g. `update_spec`) errored
+- **WHEN** the flow is manually retried and the next `refreshFlowDetail` snapshot
+  reports status back to `RUNNING` (even when `current_step` is unchanged)
+- **THEN** the forward-motion resume transition is detected as an advance and a
+  single silent refresh restores the conversation display for the retried step
+- **AND** a `RUNNING`→`FAILED` or `RUNNING`→`PAUSED` transition is NOT treated as
+  an advance and fires no refresh
+
+#### Scenario: No advance and first-open fire no full refresh
+- **GIVEN** a flow just opened in `#flow-view` (its baseline being established for
+  the first time)
+- **WHEN** the first detail snapshot arrives, and thereafter steady-state 3s
+  polls arrive with no change in `current_step` / `current_step_index` / status
+- **THEN** the first observation only establishes the baseline and fires no
+  silent refresh, and each no-change poll fires zero full refreshes
+- **AND** a duplicate snapshot of the same advance (the poll re-delivering what a
+  WS push already carried) fires the silent refresh at most once because the
+  baseline is updated on every observation
+
+#### Scenario: Silent refresh shows no blank flash and preserves scroll position
+- **GIVEN** a progression-triggered silent refresh of the open flow's
+  conversation
+- **WHEN** the refresh runs
+- **THEN** the container is NOT pre-cleared and no `Loading conversation…`
+  placeholder is shown; the fresh `GET /api/history` data is fetched in the
+  background and the DOM is replaced in a single pass after it arrives
+- **AND** scrolling is anchored via `isNearBottom(container)`: the view scrolls
+  to the bottom only if it was already near the bottom, otherwise the user's
+  current reading position is preserved
+
+#### Scenario: Silent refresh never disturbs the reply draft
+- **GIVEN** a user is composing a reply in the docked reply area with focus and
+  unsent draft text in the textarea
+- **WHEN** a progression-triggered silent refresh rebuilds `#flow-conversation`
+- **THEN** the refresh touches only the conversation region and its state and
+  does not read or write `#flow-interventions` / `#flow-reply-context`, so the
+  draft text, input focus, and textarea height are all preserved
