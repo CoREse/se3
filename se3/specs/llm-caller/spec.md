@@ -11,6 +11,8 @@ The llm-caller subsystem orchestrates LLM step execution above the `agent-runner
 
 The caller maintains an ordered list of agents resolved from configuration. Each agent has a `Runner` instance (cached). On a failed call the caller rotates to the next agent in the list and retries; rotation is attempted on *any* failure (USAGE_LIMIT, TIMEOUT, OTHER are all treated identically — `detect_infra_error` is used only for log labelling).
 
+**Rotation-state lifecycle: reset at every internal retry sequence entry.** The rotation cursor `_current_agent_index` is *not* an instance-lifetime cursor that persists across calls. At the entry of every new internal retry sequence — each time `_call_with_retry` is entered with `json_retry_count == 0`, before its `for internal_attempt in range(max_retries)` loop begins — the caller resets `_current_agent_index` to `0` (the first/preferred agent) and refreshes the current runner (`self._runner = self._get_current_runner()`). Therefore every internal retry sequence starts trying from the preferred agent, regardless of how far rotation advanced in a prior sequence. This reset is at the finest granularity: `_call_with_retry` is the single common entry of all internal retry sequences (`_call_strict` / `_call_extract` / each Phase of two-phase / direct dispatch from `call()`), so in two-phase mode the two phases each reset independently and never inherit each other's rotation progress. Within a single sequence, rotation still advances strictly one-way (see *tail-on-last* below); the per-sequence reset governs only where each *new* sequence begins. The **JSON-continuation recursion** — when `_call_with_retry` self-recurses with `json_retry_count + 1` because a response was not valid JSON — is a session continuation of the *same* logical call and is NOT a new sequence: it does NOT reset, deliberately retaining the current agent and conversation context so JSON-format retries keep their continuity. (This per-sequence reset closes a regression in which the cursor, persisted across `call()` invocations and reused across `se3 sync` rounds on a shared `LLMCaller` instance, stayed permanently stuck on the last agent once rotation reached it.)
+
 **List order is the rotation order.** The resolved agent list — whether it comes from `llm_caller.defaults`, a `llm_caller.steps.<step>` override, or (for `self_check`) the chain selected for the current pass — preserves the **written order** of its reference list. Rotation advances strictly in that order. The deprecated `agents.<name>.priority` field is NOT consulted: the global priority-based reordering that previously re-sorted chains has been removed, so the caller never re-sorts the list before rotating (see the `se3-config` *Agent Registry* and *LLM Caller Configuration* requirements).
 
 **Per-pass chain selection for `self_check`.** When `self_check` is configured with nested per-pass chains, the caller selects the chain for the current 1-based pass index. If the pass index exceeds the number of configured chains, it clamps to the last chain (reuse-last-chain), consistent with the pass-count reconciliation defined in the `se3-config` *Workflow Configuration* requirement. Each selected chain is still rotated in its own written order.
@@ -52,10 +54,28 @@ The caller maintains an ordered list of agents resolved from configuration. Each
 - **AND** rotation consumes one of the `max_retries` internal-attempt slots after a `retry_delay` sleep
 - **AND** an info log records `"Rotating agent: <old> → <new>"`
 
-#### Scenario: Rotation exhausted, tail attempts on last agent
-- **WHEN** `_current_agent_index` is already at the last position and a failure occurs
+#### Scenario: Rotation exhausted, tail attempts on last agent (within one sequence)
+- **WHEN** within a single internal retry sequence `_current_agent_index` is already at the last position and a failure occurs
 - **THEN** `_rotate_agent` returns `False` and logs `"All agents exhausted"`
-- **AND** the remaining `max_retries` attempts run on the last agent without further rotation
+- **AND** the remaining `max_retries` attempts run on the last agent without further rotation (tail-on-last)
+- **AND** if `max_retries` exceeds the agent count, rotation advances to the last agent and then stays there, the sequence being capped and terminated by `max_retries` (raising `LLMCallError`), never wrapping around to the first agent
+
+#### Scenario: Each new internal retry sequence resets to the preferred agent
+- **GIVEN** a single `LLMCaller` instance is reused across multiple `call()` invocations (e.g. `se3 sync` reusing one instance across rounds) and a prior sequence advanced rotation to the last agent
+- **WHEN** a new internal retry sequence is entered (`_call_with_retry` with `json_retry_count == 0`)
+- **THEN** `_current_agent_index` is reset to `0` and `self._runner` is refreshed before the retry loop begins, so the new sequence starts trying from the first/preferred agent
+- **AND** the cursor is never permanently stuck on the last agent across sequences
+
+#### Scenario: JSON-continuation recursion does not reset rotation
+- **GIVEN** a response was not valid JSON and `_call_with_retry` self-recurses with `json_retry_count > 0`
+- **WHEN** that recursive entry runs
+- **THEN** `_current_agent_index` is NOT reset
+- **AND** the current agent and conversation context are retained, preserving JSON-format retry continuity
+
+#### Scenario: Two-phase sequences reset independently
+- **GIVEN** `json_mode` is two-phase, so `_call_two_phase` invokes `_call_with_retry` separately for Phase 1 and Phase 2
+- **WHEN** Phase 1 advanced rotation toward the last agent
+- **THEN** Phase 2's `_call_with_retry` resets to the first/preferred agent at its own entry and does not inherit Phase 1's rotation progress
 
 #### Scenario: Task-level failure still consumes internal retries
 - **WHEN** any failure occurs (the caller does not distinguish infra vs. task-level for rotation purposes)

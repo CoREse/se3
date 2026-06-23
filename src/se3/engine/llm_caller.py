@@ -927,10 +927,19 @@ class LLMCaller:
             logger.debug("on_agent_change notification failed", exc_info=True)
 
     def _rotate_agent(self) -> bool:
-        """Rotate to the next agent in the list.
+        """Advance to the next agent in the list (single direction, no wrap).
+
+        Within one internal retry sequence rotation only ever moves forward by
+        one position and stops once it reaches the last agent — it never wraps
+        back to the first/preferred agent. "Start over from the preferred
+        agent" is a per-sequence concern handled by ``_call_with_retry``'s
+        entry reset (``json_retry_count == 0``), not by this method. Once the
+        index is already at the last position, further failures keep running on
+        the last agent (tail-on-last) until ``max_retries`` caps the sequence.
 
         Returns:
-            True if rotation succeeded, False if all agents are exhausted.
+            True if rotation advanced to a new agent, False if already at the
+            last agent (all agents exhausted for this sequence).
         """
         if self._current_agent_index + 1 >= len(self._agents):
             logger.warning("All agents exhausted — no more agents to rotate to")
@@ -1416,20 +1425,23 @@ class LLMCaller:
                 logger.info("Two-phase: phase 1 JSON missing required keys %s, falling back to phase 2", required_keys)
                 print(f"  {self.stream_prefix}[llm-caller] ⚠️  Phase 1 JSON missing required keys, falling back to phase 2")
 
-        # Phase 2: Extract JSON via LLM
+        # Phase 2: Extract JSON via LLM — routed through THIS caller's own
+        # `_call_with_retry` instead of delegating to a fresh, default-config
+        # `JSONExtractor`-spawned `LLMCaller`. This keeps Phase 2 on the same
+        # configured agent chain as Phase 1, and (being a brand-new internal
+        # retry sequence, json_retry_count == 0) makes the per-sequence entry
+        # reset snap the agent index back to the preferred agent — so Phase 2 is
+        # independent of wherever Phase 1's rotation stopped, yet still uses this
+        # caller's agents rather than the global default chain.
         print(f"  {self.stream_prefix}[llm-caller] 🔍 Phase 2: Extracting JSON from output...")
 
-        from .json_extractor import JSONExtractor
-
-        extractor = JSONExtractor(
-            project_root=self.project_root,
-            timeout=300,  # 5 minutes for large outputs
-        )
-
-        result = extractor.extract(
+        result = self._extract_json_phase2(
             raw_output=phase1_output,
             schema_hint=json_schema_hint,
             required_keys=required_keys,
+            timeout=timeout if timeout else 300,  # 5 minutes for large outputs
+            context_files=context_files,
+            on_output=on_output,
         )
 
         if result is None:
@@ -1449,6 +1461,81 @@ class LLMCaller:
 
         print(f"  {self.stream_prefix}[llm-caller] ✅ JSON extraction complete")
         return json_str
+
+    def _extract_json_phase2(
+        self,
+        raw_output: str,
+        schema_hint: Optional[str],
+        required_keys: Optional[List[str]],
+        timeout: int,
+        context_files: Optional[List[Path]],
+        on_output: Optional[Callable[[str], None]],
+    ) -> Optional[dict]:
+        """Phase-2 JSON extraction that runs on THIS caller's own agent chain.
+
+        This is the production Phase-2 path for ``_call_two_phase``. Unlike the
+        legacy approach of delegating to ``JSONExtractor`` (which constructs a
+        *fresh*, default-configured ``LLMCaller`` and therefore neither uses
+        this caller's configured agents nor exercises its per-sequence reset),
+        the extraction prompt is routed through ``self._call_with_retry`` so:
+
+        * it runs on the *same* configured agent chain as Phase 1, and
+        * being a brand-new internal retry sequence (``json_retry_count == 0``),
+          the entry reset in ``_call_with_retry`` snaps ``_current_agent_index``
+          back to the preferred agent — making Phase 2 independent of wherever
+          Phase 1's rotation happened to stop.
+
+        ``require_json=False`` is used deliberately: the extraction prompt
+        itself demands JSON-only output, and disabling the strict JSON-retry
+        recursion here avoids unbounded re-extraction. ``inject_retry_context``
+        is forced to ``False`` so the self-contained extraction prompt always
+        runs verbatim — this caller is reused across Phase 1/Phase 2 and across
+        state-machine retries, so ``self.external_attempt`` may be > 0; without
+        suppression, continue-mode retry-context injection would replace the
+        extraction prompt and the extraction would yield no JSON. Returns the
+        parsed dict, or ``None`` when the extraction output cannot be parsed
+        (the caller maps that to ``LLMCallError``).
+        """
+        from .utils.json_parser import parse_json_response
+
+        # Fast path: the Phase-1 text may already parse (mirrors the old
+        # JSONExtractor.extract direct-parse shortcut). Harmless when it does
+        # not — Phase 2 only runs after the required-keys check already failed.
+        direct = parse_json_response(raw_output, required_keys=required_keys)
+        if direct is not None:
+            return direct
+
+        from .json_extractor import EXTRACTION_PROMPT
+
+        schema_section = (
+            schema_hint
+            if schema_hint
+            else (
+                "No specific schema provided. Structure the output to include "
+                "every meaningful piece of information from the source content, "
+                "using descriptive field names."
+            )
+        )
+        extraction_prompt = EXTRACTION_PROMPT.format(
+            content=raw_output,
+            schema_hint=schema_section,
+        )
+
+        response = self._call_with_retry(
+            prompt=extraction_prompt,
+            timeout=timeout,
+            context_files=context_files,
+            on_output=on_output,
+            require_json=False,  # extraction prompt already constrains JSON
+            json_retry_count=0,  # brand-new sequence → entry reset applies
+            # Run the extraction prompt verbatim. Phase 2 reuses THIS caller, so
+            # self.external_attempt == the step's retry count; without this, a
+            # retried two_phase step (external_attempt>0) would hit continue-mode
+            # retry-context injection and drop the extraction prompt entirely.
+            inject_retry_context=False,
+        )
+
+        return parse_json_response(response, required_keys=required_keys)
 
     @staticmethod
     def _format_as_stream_json(content: str) -> str:
@@ -1534,17 +1621,61 @@ class LLMCaller:
         require_json: bool,
         json_retry_count: int,
         max_json_retries: int = 2,
+        inject_retry_context: bool = True,
     ) -> str:
         """Internal method to call LLM with retry and agent rotation logic.
 
-        On infrastructure errors (usage limit, timeout, hang), rotates to the
-        next agent and retries.  On task-level failures, retries with the same
-        agent up to ``max_retries`` times before raising.
+        Agent-rotation semantics span three layers:
+
+        * **Per-sequence reset (this method's entry).** Each fresh internal
+          retry sequence starts over from the first/preferred agent. When
+          ``json_retry_count == 0`` (i.e. this is a brand-new sequence, not a
+          JSON continuation), ``_current_agent_index`` is reset to ``0`` and
+          ``self._runner`` is refreshed before the attempt loop. This is what
+          guarantees every ``call()`` — including each ``_call_two_phase``
+          phase and every cross-round reuse of a shared ``LLMCaller`` — begins
+          on the preferred model rather than wherever the previous sequence's
+          rotation happened to stop.
+        * **Within-sequence rotation (single direction, tail-on-last).** On a
+          failure the loop calls ``_rotate_agent`` which advances the index by
+          one and stops once it reaches the last agent (it never wraps). If
+          ``max_retries`` exceeds the agent count, the surplus attempts run on
+          the last agent until ``max_retries`` caps the sequence and raises.
+        * **JSON continuation (no reset).** The recursive self-call at the
+          ``require_json`` non-JSON path (``json_retry_count > 0``) is a
+          session continuation of the *same* logical call, so it deliberately
+          skips the reset and keeps the current agent and conversation context.
+
+        ``inject_retry_context`` (default ``True``) controls whether the
+        chat-history retry-context block is prepended on retries. The Phase-2
+        extraction path (``_extract_json_phase2``) passes ``False``: its
+        ``extraction_prompt`` is self-contained (it embeds the raw content and
+        schema and demands JSON-only output) and MUST run verbatim. Because
+        Phase 2 reuses *this* caller instance, ``self.external_attempt`` equals
+        the step's state-machine retry count; with injection enabled and the
+        default ``retry_mode == "continue"`` a retried two_phase step would
+        discard the extraction prompt and tell the model to "continue the
+        task", yielding no JSON. Suppressing injection here faithfully
+        reproduces the legacy fresh-``LLMCaller`` (``external_attempt == 0``,
+        no flow/step context) behavior that always ran the extraction prompt
+        as-is.
         """
         original_prompt = prompt
 
         # Reset touched-files tracking for this call
         self._last_touched_files = set()
+
+        # Per-sequence agent-rotation reset: every NEW internal retry sequence
+        # starts over from the first (preferred) agent. json_retry_count == 0
+        # marks a brand-new sequence; the JSON-continuation recursion
+        # (json_retry_count > 0, triggered below when require_json output is
+        # not valid JSON) intentionally does NOT reset, so it keeps the current
+        # agent and the in-progress conversation context. No wrap-around /
+        # modulo logic — within-sequence rotation stays single-direction and
+        # tail-on-last (see _rotate_agent).
+        if json_retry_count == 0:
+            self._current_agent_index = 0
+            self._runner = self._get_current_runner()
 
         env = dict(os.environ)
         env.pop("CLAUDECODE", None)
@@ -1553,7 +1684,13 @@ class LLMCaller:
         last_error = ""
 
         for internal_attempt in range(self.max_retries):
-            is_retry = self.external_attempt > 0 or internal_attempt > 0
+            # ``is_retry`` gates retry-context injection AND dedup. Phase-2
+            # extraction passes inject_retry_context=False so its self-contained
+            # extraction prompt always runs verbatim, regardless of the step's
+            # external retry count (see this method's docstring).
+            is_retry = inject_retry_context and (
+                self.external_attempt > 0 or internal_attempt > 0
+            )
 
             # Snapshot the current agent name at the start of this attempt.
             # This captures the agent BEFORE any rotation that might occur

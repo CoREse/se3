@@ -41,6 +41,54 @@ def _make_fail_result(returncode=1, output="error", cmd_used="claude"):
     return result
 
 
+def _setup_per_agent_runners(caller, agents, behavior):
+    """Pre-populate ``caller._runner_cache`` with one MagicMock runner per agent.
+
+    ``behavior`` maps each agent name to a list of MonitoredResults consumed in
+    order by successive ``run_with_monitor`` calls (the last result repeats once
+    exhausted). Pre-populating the cache (keyed by agent name, exactly as
+    ``_get_current_runner`` keys it) means rotation / entry-reset never
+    constructs a real ClaudeCodeRunner — no patching of ClaudeCodeRunner needed.
+
+    Returns a shared ``call_log`` list recording the agent name of every
+    ``run_with_monitor`` invocation in call order, so tests can assert exactly
+    which agent ran each attempt across resets and rotations.
+    """
+    call_log = []
+    for agent in agents:
+        name = agent["name"]
+        runner = MagicMock()
+        runner.detect_infra_error.return_value = InfraErrorType.NONE
+
+        results = behavior[name]
+        if not isinstance(results, list):
+            results = [results]
+
+        def make_side_effect(nm, res_list):
+            it = iter(res_list)
+
+            def _side_effect(*args, **kwargs):
+                call_log.append(nm)
+                try:
+                    return next(it)
+                except StopIteration:
+                    return res_list[-1]  # repeat last result once exhausted
+
+            return _side_effect
+
+        runner.run_with_monitor.side_effect = make_side_effect(name, results)
+        caller._runner_cache[name] = runner
+
+    caller._current_agent_index = 0
+    caller._runner = caller._runner_cache[agents[0]["name"]]
+    return call_log
+
+
+def _json_ok(payload='{"ok": true}'):
+    """A success result whose output is a valid JSON document."""
+    return _make_success_result(output=payload)
+
+
 TWO_AGENTS = [
     {"name": "agent-a", "type": "claude-code", "cmd": "claude-a", "priority": 10},
     {"name": "agent-b", "type": "claude-code", "cmd": "claude-b", "priority": 5},
@@ -471,3 +519,313 @@ class TestAgentAttributionInHistory:
         assistant_msgs = [m for m in session.messages if m.role == "assistant"]
         assert len(assistant_msgs) >= 1
         assert assistant_msgs[0].agent_name == "agent-a"
+
+
+class TestPerSequenceAgentReset:
+    """Regression coverage for the per-sequence agent-rotation reset.
+
+    Each NEW internal retry sequence (json_retry_count == 0) must start over
+    from the first/preferred agent, instead of inheriting wherever the previous
+    sequence's rotation happened to stop (the bug fixed here: the index used to
+    stay permanently pinned to the last agent once rotation reached it).
+    """
+
+    def test_index_starts_at_zero_each_call_when_reused(self):
+        """(a) Reusing one LLMCaller across calls (≈ se3 sync cross-round
+        reuse): the first call rotates all the way to the last agent, yet the
+        second call's sequence still starts on the first/preferred agent."""
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=list(THREE_AGENTS),
+            max_retries=5,
+            retry_delay=0.0,
+        )
+        # First call: a fails, b fails, c succeeds — rotation reaches the last
+        # agent. Second call: a succeeds immediately (its 2nd queued result).
+        call_log = _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                "agent-a": [_make_fail_result(), _make_success_result()],
+                "agent-b": [_make_fail_result()],
+                "agent-c": [_make_success_result()],
+            },
+        )
+
+        result1 = caller.call(prompt="round-1", on_output=lambda x: None)
+        assert result1 == "ok"
+        # Rotation advanced to the last agent during the first sequence.
+        assert call_log == ["agent-a", "agent-b", "agent-c"]
+        assert caller._current_agent_index == 2
+
+        call_log.clear()
+        result2 = caller.call(prompt="round-2", on_output=lambda x: None)
+        assert result2 == "ok"
+        # The new sequence reset to the preferred agent — NOT stuck on the last.
+        assert call_log == ["agent-a"]
+        assert caller._current_agent_index == 0
+
+    def test_reset_refreshes_legacy_runner(self):
+        """Entry reset must also refresh the legacy ``self._runner`` so it
+        agrees with the reset index, not the previous sequence's last agent."""
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=list(THREE_AGENTS),
+            max_retries=5,
+            retry_delay=0.0,
+        )
+        _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                "agent-a": [_make_fail_result(), _make_success_result()],
+                "agent-b": [_make_fail_result()],
+                "agent-c": [_make_success_result()],
+            },
+        )
+        caller.call(prompt="round-1", on_output=lambda x: None)
+        # After the first sequence self._runner points at the last agent.
+        assert caller._runner is caller._runner_cache["agent-c"]
+
+        caller.call(prompt="round-2", on_output=lambda x: None)
+        # The second sequence's entry reset refreshed it back to the preferred.
+        assert caller._runner is caller._runner_cache["agent-a"]
+        assert caller._current_agent_index == 0
+
+
+class TestTailOnLastWithinSequence:
+    """(b) Within a single sequence, when max_retries exceeds the agent count,
+    rotation advances to the last agent and then tails there (no wrap), with
+    the sequence ultimately terminating via the max_retries cap."""
+
+    def test_tail_on_last_then_raises(self):
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=list(THREE_AGENTS),
+            max_retries=5,  # greater than the 3 agents
+            retry_delay=0.0,
+        )
+        call_log = _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                "agent-a": [_make_fail_result()],
+                "agent-b": [_make_fail_result()],
+                "agent-c": [_make_fail_result()],
+            },
+        )
+
+        import se3.engine.llm_caller as _llm_mod
+        with pytest.raises(_llm_mod.LLMCallError, match="after 5 attempts"):
+            caller.call(prompt="test", on_output=lambda x: None)
+
+        # a → b → c (rotation), then the two surplus attempts tail on the last
+        # agent c without wrapping back to a.
+        assert call_log == [
+            "agent-a", "agent-b", "agent-c", "agent-c", "agent-c",
+        ]
+        assert caller._current_agent_index == 2
+
+
+class TestTwoPhasePerPhaseReset:
+    """(c) two_phase mode: each Phase 1 _call_with_retry resets independently,
+    so two separate two_phase calls do not inherit rotation progress."""
+
+    def test_phase1_resets_each_call(self):
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=list(THREE_AGENTS),
+            max_retries=5,
+            retry_delay=0.0,
+        )
+        # First two_phase call: Phase 1 rotates a→b before b returns valid JSON
+        # (so Phase 2 is skipped). Second call: a returns valid JSON directly.
+        call_log = _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                "agent-a": [_make_fail_result(), _json_ok()],
+                "agent-b": [_json_ok()],
+                "agent-c": [_make_fail_result()],
+            },
+        )
+
+        out1 = caller.call(
+            prompt="p1", on_output=lambda x: None, json_mode="two_phase",
+        )
+        assert json.loads(out1) == {"ok": True}
+        assert call_log == ["agent-a", "agent-b"]
+        assert caller._current_agent_index == 1
+
+        call_log.clear()
+        out2 = caller.call(
+            prompt="p2", on_output=lambda x: None, json_mode="two_phase",
+        )
+        assert json.loads(out2) == {"ok": True}
+        # Phase 1 of the second call started over from the preferred agent.
+        assert call_log == ["agent-a"]
+        assert caller._current_agent_index == 0
+
+    def test_phase2_starts_from_first_agent(self):
+        """Force the two_phase call THROUGH the REAL production Phase 2 and
+        assert the Phase-2 extraction begins a fresh internal retry sequence on
+        the preferred agent, independently of where Phase 1's rotation stopped.
+
+        Phase 1 rotates agent-a → agent-b and then emits NON-JSON output, so
+        ``_contains_valid_json`` is False and Phase 2 runs. Production Phase 2
+        (``_extract_json_phase2``) routes the extraction prompt through THIS
+        caller's own ``_call_with_retry`` (``json_retry_count == 0``) rather
+        than a fresh ``JSONExtractor``-spawned ``LLMCaller``; per the entry-reset
+        semantics it must snap back to the first agent rather than inherit
+        Phase 1's tail (agent-b). No test double is patched here — the assertion
+        exercises the production path, so it fails if the per-sequence reset (or
+        the Phase-2 routing) regresses.
+        """
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=list(THREE_AGENTS),
+            max_retries=5,
+            retry_delay=0.0,
+        )
+        # agent-a: fail (consumed by Phase 1) then valid JSON (consumed by the
+        # Phase-2 extraction sequence after it resets back to the preferred
+        # agent). agent-b: a successful but NON-JSON response that forces the
+        # fall-through to Phase 2.
+        call_log = _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                "agent-a": [_make_fail_result(), _json_ok()],
+                "agent-b": [_make_success_result(output="PROSE: no json here")],
+                "agent-c": [_make_fail_result()],
+            },
+        )
+
+        out = caller.call(
+            prompt="p1", on_output=lambda x: None, json_mode="two_phase",
+        )
+        assert json.loads(out) == {"ok": True}
+        # Phase 1 rotated a→b; the non-JSON output reached production Phase 2;
+        # Phase 2's extraction sequence reset back to the preferred agent
+        # (agent-a) and produced the valid JSON.
+        assert call_log == ["agent-a", "agent-b", "agent-a"]
+        assert caller._current_agent_index == 0
+
+    def test_phase2_runs_extraction_prompt_verbatim_on_step_retry(self, tmp_path):
+        """Regression: when a two_phase step is retried at the state-machine
+        level (external_attempt > 0) and Phase 1 emits non-JSON, the production
+        Phase-2 extraction prompt must still run VERBATIM.
+
+        Because Phase 2 reuses THIS caller instance, ``self.external_attempt``
+        equals the step's retry count. With the default ``retry_mode='continue'``
+        and a non-empty chat-history retry context, an un-suppressed Phase-2
+        ``_call_with_retry`` would set ``is_retry=True`` and replace the
+        extraction prompt with 'Continue the task from where you left off …',
+        so the extractor never sees the content to reformat and the step fails.
+        The fix forces ``inject_retry_context=False`` for Phase 2, so the
+        self-contained extraction prompt is always sent as-is regardless of the
+        external retry count.
+
+        With ``external_attempt=0`` this regression is invisible (is_retry is
+        False anyway), so this test deliberately sets ``external_attempt=1`` and
+        a non-empty retry context — the exact production conditions under which
+        the bug manifests.
+        """
+        caller = LLMCaller(
+            project_root=tmp_path,
+            agents=list(THREE_AGENTS),
+            max_retries=5,
+            retry_delay=0.0,
+            flow_id="flow1",
+            step_id="step1",
+            step_type="analyze",
+            external_attempt=1,  # simulate a state-machine retry of the step
+            retry_mode="continue",  # the default mode that drops the prompt
+        )
+        # Always run Phase 1 (no on-disk cache short-circuit).
+        caller._get_phase1_cache_path = lambda: None
+        # Force a non-empty retry context so retry-context injection WOULD fire
+        # if it were not suppressed for Phase 2.
+        caller._get_retry_context = lambda: "PREVIOUS CONVERSATION CONTEXT BLOCK"
+
+        phase1_prose = "PROSE: definitely not json here"
+        call_log = _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                # Phase 1 (attempt with external retry) emits non-JSON prose;
+                # the second result is consumed by the Phase-2 extraction
+                # sequence after its entry reset returns to agent-a.
+                "agent-a": [
+                    _make_success_result(output=phase1_prose),
+                    _json_ok(),
+                ],
+                "agent-b": [_make_fail_result()],
+                "agent-c": [_make_fail_result()],
+            },
+        )
+
+        out = caller.call(
+            prompt="p1", on_output=lambda x: None, json_mode="two_phase",
+        )
+        # Extraction succeeded — the verbatim extraction prompt produced JSON.
+        assert json.loads(out) == {"ok": True}
+        # Phase 1 on agent-a, then Phase 2 reset back to agent-a.
+        assert call_log == ["agent-a", "agent-a"]
+
+        # Inspect the prompts actually handed to the runner. agent-a's
+        # build_call_args was called twice: [0] Phase 1, [1] Phase 2.
+        prompts = [
+            c.kwargs["prompt"]
+            for c in caller._runner_cache["agent-a"].build_call_args.call_args_list
+        ]
+        assert len(prompts) == 2
+        phase1_prompt, phase2_prompt = prompts
+
+        # Phase 1 IS a primary-task retry (external_attempt>0): continue-mode
+        # injection is active and correct for it.
+        assert "Continue the task from where you left off" in phase1_prompt
+
+        # Phase 2 must be VERBATIM: it embeds the Phase-1 content to reformat and
+        # must NOT have been hijacked by continue-mode retry-context injection.
+        assert phase1_prose in phase2_prompt
+        assert "Continue the task from where you left off" not in phase2_prompt
+        assert "PREVIOUS CONVERSATION CONTEXT BLOCK" not in phase2_prompt
+
+
+class TestJsonContinuationNoReset:
+    """(d) The JSON-continuation recursion (json_retry_count > 0) must NOT
+    reset: it keeps the current agent and conversation context rather than
+    snapping back to the preferred agent."""
+
+    def test_json_retry_keeps_current_agent(self):
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=list(THREE_AGENTS),
+            max_retries=5,
+            retry_delay=0.0,
+        )
+        # Sequence: a fails → rotate to b. b succeeds but returns non-JSON →
+        # triggers the json_retry recursion (json_retry_count=1). The recursion
+        # must stay on agent-b (no reset to agent-a) and b then returns valid
+        # JSON.
+        call_log = _setup_per_agent_runners(
+            caller,
+            THREE_AGENTS,
+            {
+                "agent-a": [_make_fail_result()],
+                "agent-b": [
+                    _make_success_result(output="this is not json at all"),
+                    _json_ok(),
+                ],
+                "agent-c": [_make_fail_result()],
+            },
+        )
+
+        result = caller.call(
+            prompt="need-json", on_output=lambda x: None, json_mode="strict",
+        )
+        assert json.loads(result) == {"ok": True}
+        # The continuation stayed on agent-b — it did NOT reset back to agent-a.
+        assert call_log == ["agent-a", "agent-b", "agent-b"]
+        assert caller._current_agent_index == 1

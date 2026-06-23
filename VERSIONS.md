@@ -63,6 +63,16 @@
 
 
 
+
+## 10.7.1 - 2026-06-23
+
+- Fix LLMCaller agent rotation so each internal retry sequence restarts from the preferred (first) agent instead of getting permanently stuck on the last agent
+- Reset _current_agent_index and refresh the active runner at the entry of every new retry sequence (json_retry_count == 0), fixing model lock-in when one LLMCaller is reused across rounds in se3 sync
+- Preserve JSON-continuation recursion semantics: json_retry_count > 0 retries keep the current agent and conversation context without resetting rotation
+- Keep within-sequence rotation one-way (tail-on-last): when max_retries exceeds the agent count, rotation stops at the last agent and terminates under the max_retries cap with no wrap-around
+- Apply the fix at the core LLMCaller layer so all callers (se3 run, se3 sync, merge) benefit uniformly
+- Clarify the llm-caller spec's rotation-state lifecycle and add scenarios for cross-call/cross-round reset, JSON-continuation non-reset, and independent reset per two-phase phase
+- Add unit tests covering cross-sequence reset, tail-on-last termination, two-phase independent rotation, and JSON-continuation context retention
 ## 10.6.0 - 2026-06-22
 
 - Persist a per-flow resumable snapshot at se3/state/resumable/<flow_id>.json on every non-completed save and remove it on completion, so paused, interrupted, or recoverable-error flows survive a later run overwriting the single-slot engine.json

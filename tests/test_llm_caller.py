@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -64,33 +64,32 @@ class TestCallTwoPhaseRequiredKeys:
     def test_fast_path_missing_required_keys_falls_back_to_phase2(
         self, _mock_cache, mock_retry
     ):
-        """When Phase 1 JSON is valid but missing required_keys, fall back to Phase 2."""
-        # Phase 1 returns valid JSON but without the "issues" key
+        """When Phase 1 JSON is valid but missing required_keys, fall back to
+        Phase 2 — and Phase 2 now runs through THIS caller's own
+        ``_call_with_retry`` (a second sequence on the same agent chain),
+        NOT a fresh ``JSONExtractor``-spawned ``LLMCaller``."""
+        # Phase 1 returns valid JSON but without the "issues" key; Phase 2's
+        # extraction sequence (the second _call_with_retry) then returns the
+        # complete JSON.
         phase1_json = json.dumps({"summary": "All good"})
-        mock_retry.return_value = phase1_json
+        phase2_json = json.dumps({"issues": [], "summary": "All good"})
+        mock_retry.side_effect = [phase1_json, phase2_json]
 
-        # Phase 2 extractor returns the complete JSON
-        mock_extractor = MagicMock()
-        mock_extractor.extract.return_value = {"issues": [], "summary": "All good"}
-
-        with patch("se3.engine.json_extractor.JSONExtractor", return_value=mock_extractor) as mock_cls:
-            caller = _make_caller()
-            result = caller._call_two_phase(
-                prompt="test",
-                timeout=None,
-                context_files=None,
-                on_output=None,
-                json_schema_hint=None,
-                required_keys=["issues"],
-            )
+        caller = _make_caller()
+        result = caller._call_two_phase(
+            prompt="test",
+            timeout=None,
+            context_files=None,
+            on_output=None,
+            json_schema_hint=None,
+            required_keys=["issues"],
+        )
 
         parsed = json.loads(result)
         assert "issues" in parsed
-        # Phase 2 extractor was called
-        mock_extractor.extract.assert_called_once()
-        # required_keys was passed to extractor
-        call_kwargs = mock_extractor.extract.call_args
-        assert call_kwargs.kwargs.get("required_keys") == ["issues"]
+        # Two _call_with_retry sequences: Phase 1 generation + Phase 2 extraction
+        # on the same caller (no separate JSONExtractor LLMCaller involved).
+        assert mock_retry.call_count == 2
 
     @patch.object(LLMCaller, "_call_with_retry")
     @patch.object(LLMCaller, "_get_phase1_cache_path", return_value=None)
