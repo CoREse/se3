@@ -3786,6 +3786,15 @@ retryAfterErrorMod.registerLiveAppendRetryAfterErrorTests({ app, check, findOne,
 const e2eConsistencyMod = await import("./live_append_e2e_consistency.test.mjs");
 e2eConsistencyMod.registerConsoleE2EConsistencyTests({ app, check, findOne, findAll });
 
+// Register the G3 worktree-mode merged-snapshot discovery de-dup guard. A flow
+// whose history is split across the main-repo root (discovery) and the worktree
+// root (later steps + its own copy of discovery) is merged by the daemon and
+// de-duped at the file layer; this frontend backstop ensures a `mode: full`
+// snapshot that still carries a duplicate discovery record renders it exactly
+// once, scoped strictly to discovery (later steps / recordKey identity intact).
+const snapshotDiscoveryMod = await import("./snapshot_discovery_dedup.test.mjs");
+snapshotDiscoveryMod.registerSnapshotDiscoveryDedupTests({ app, check, findOne, findAll });
+
 // Register the issue-#209 frontend real-frame replay guard (G3 task 2). Replays
 // the EXACT real frame sequence G1 captured
 // (tests/frontend/fixtures/issue_209/daemon_frames.json) through the production
