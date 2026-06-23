@@ -904,6 +904,60 @@ class ServerState:
                 return machine_id
         return None
 
+    async def get_history_flow_project_root(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[str]:
+        """Resolve the authoritative ``project_root`` a flow runs under.
+
+        This is the single source of truth the on-demand history pull uses to
+        tell the daemon *which* root to read, instead of letting the daemon
+        guess by scanning its whole project-root registry and taking the first
+        root that happens to contain ``se3/history/<flow_id>/``. A worktree-mode
+        flow runs its discovery step in the main repo root (writing one
+        ``01_discovery`` file there) and every later step under the worktree
+        root, so two distinct roots can each contain a ``se3/history/<flow_id>``
+        directory; without the authoritative root the daemon's first-match
+        heuristic returns the main repo's discovery-only directory and the web
+        view freezes after the first step.
+
+        Resolution order, all owner-scoped:
+
+        1. The reported history index (the daemon's ``SessionMeta`` carries the
+           authoritative ``project_root`` of each flow's run).
+        2. The live flow set (an active flow that has not yet been indexed).
+
+        Returns the non-empty ``project_root`` string, or ``None`` when the
+        flow is unknown, owner-scoped out, or has no recorded root (the caller
+        then degrades to the legacy empty-``project_root`` behaviour).
+        """
+
+        def _accept(machine_id: str) -> bool:
+            if owner is None:
+                return True
+            record = self._machines.get(machine_id)
+            return record is not None and _owned(record, owner)
+
+        async with self._lock:
+            # 1) History index — the authoritative SessionMeta.project_root.
+            for machine_id, sessions in self._history_index.items():
+                if not _accept(machine_id):
+                    continue
+                for session in sessions:
+                    if str(session.get("flow_id") or "") == flow_id:
+                        root = str(session.get("project_root") or "")
+                        if root:
+                            return root
+            # 2) Fall back to the live flow set.
+            for machine_id, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
+                flow = record.flows.get(flow_id)
+                if flow is not None:
+                    root = str(flow.project_root or "")
+                    if root:
+                        return root
+            return None
+
     # -- issue mirror (from daemon STATUS_UPDATE snapshots) -----------------
 
     async def get_issues(

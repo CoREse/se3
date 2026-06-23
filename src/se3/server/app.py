@@ -1626,6 +1626,17 @@ def create_app(
                 status_code=404,
                 detail=f"no connected daemon owns history for flow '{flow_id}'",
             )
+        # Resolve the flow's authoritative run root (its SessionMeta.project_root)
+        # and hand it to the daemon as the single source of truth for *which*
+        # root to read. A worktree-mode flow's history is split across the main
+        # repo root (discovery) and the worktree root (later steps); telling the
+        # daemon the authoritative root lets it merge both rather than guessing
+        # the first registry root that matches and returning only discovery.
+        # Resolving to ``None`` degrades to the legacy empty-root behaviour, so
+        # an ordinary non-worktree pull is unaffected.
+        flow_project_root = await state.get_history_flow_project_root(
+            flow_id, owner=target_owner
+        )
         # Concurrent cache-miss requests for the same flow/machine (e.g. the
         # running-flow view and the history-detail view reconnecting at once)
         # share ONE in-flight daemon pull: only the leader sends the
@@ -1657,6 +1668,7 @@ def create_app(
                         flow_id,
                         machine_id=owner_machine,
                         connection=owner_connection,
+                        project_root=flow_project_root or "",
                     )
                     if not sent:
                         raise HTTPException(
