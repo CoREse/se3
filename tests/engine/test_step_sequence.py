@@ -49,13 +49,17 @@ class TestSummarizeInDefaults:
             "SUMMARIZE must immediately follow COMMIT"
         )
 
-    def test_review_summarize_follows_verify_spec(self):
-        """The review sequence has no COMMIT; SUMMARIZE follows VERIFY_SPEC."""
+    def test_review_summarize_follows_invariant_check(self):
+        """The review sequence has no COMMIT; SUMMARIZE follows INVARIANT_CHECK.
+
+        Charter refactor: the review flow is ANALYZE → INVARIANT_CHECK → SUMMARIZE
+        (the retired VERIFY_SPEC is replaced by the anchored INVARIANT_CHECK).
+        """
         steps = get_default_step_sequence("review")
         assert StepType.COMMIT not in steps
         assert steps[-1] == StepType.SUMMARIZE
-        verify_idx = steps.index(StepType.VERIFY_SPEC)
-        assert steps.index(StepType.SUMMARIZE) == verify_idx + 1
+        invariant_idx = steps.index(StepType.INVARIANT_CHECK)
+        assert steps.index(StepType.SUMMARIZE) == invariant_idx + 1
 
     def test_unknown_task_type_falls_back_to_feature_with_summarize(self):
         """An unknown task type falls back to the feature sequence, ending in SUMMARIZE."""
@@ -64,45 +68,47 @@ class TestSummarizeInDefaults:
         assert steps[-1] == StepType.SUMMARIZE
 
 
-class TestSpecGateInDefaults:
-    """Mechanism A: SPEC_GATE is inserted after UPDATE_SPEC (and before
-    VERSION_ANALYZE) in the feature and discovery sequences only — the two
-    task types whose default sequence runs UPDATE_SPEC."""
+class TestCharterStepsInDefaults:
+    """Charter refactor: the retired spec governance steps (VERIFY_SPEC /
+    UPDATE_SPEC / SPEC_GATE) are gone; INVARIANT_CHECK follows SELF_CHECK and
+    CHARTER_FRESHNESS precedes VERSION_ANALYZE."""
 
-    @pytest.mark.parametrize("task_type", ["feature", "discovery"])
-    def test_spec_gate_follows_update_spec(self, task_type):
+    @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
+    def test_retired_spec_steps_absent(self, task_type):
         steps = get_default_step_sequence(task_type)
-        assert StepType.SPEC_GATE in steps, (
-            f"SPEC_GATE should be in the {task_type} sequence"
-        )
-        assert StepType.UPDATE_SPEC in steps
-        # SPEC_GATE must come immediately after UPDATE_SPEC.
-        update_idx = steps.index(StepType.UPDATE_SPEC)
-        gate_idx = steps.index(StepType.SPEC_GATE)
-        assert gate_idx == update_idx + 1, (
-            "SPEC_GATE must immediately follow UPDATE_SPEC"
-        )
+        for retired in (StepType.VERIFY_SPEC, StepType.UPDATE_SPEC, StepType.SPEC_GATE):
+            assert retired not in steps, (
+                f"{retired.value} should not appear in the {task_type} sequence"
+            )
 
-    @pytest.mark.parametrize("task_type", ["feature", "discovery"])
-    def test_spec_gate_precedes_version_analyze(self, task_type):
+    @pytest.mark.parametrize("task_type", ["feature", "bugfix", "discovery"])
+    def test_invariant_check_follows_self_check(self, task_type):
         steps = get_default_step_sequence(task_type)
-        gate_idx = steps.index(StepType.SPEC_GATE)
+        sc_idx = steps.index(StepType.SELF_CHECK)
+        ic_idx = steps.index(StepType.INVARIANT_CHECK)
+        assert ic_idx == sc_idx + 1, "INVARIANT_CHECK must immediately follow SELF_CHECK"
+
+    @pytest.mark.parametrize("task_type", ["feature", "bugfix", "discovery", "small", "directive"])
+    def test_charter_freshness_precedes_version_analyze(self, task_type):
+        steps = get_default_step_sequence(task_type)
+        cf_idx = steps.index(StepType.CHARTER_FRESHNESS)
         version_idx = steps.index(StepType.VERSION_ANALYZE)
-        assert gate_idx < version_idx, (
-            "SPEC_GATE must run before VERSION_ANALYZE"
-        )
-        assert version_idx == gate_idx + 1, (
-            "VERSION_ANALYZE must immediately follow SPEC_GATE"
+        assert version_idx == cf_idx + 1, (
+            "VERSION_ANALYZE must immediately follow CHARTER_FRESHNESS"
         )
 
-    @pytest.mark.parametrize("task_type", ["bugfix", "review", "small", "directive"])
-    def test_spec_gate_absent_when_no_update_spec(self, task_type):
-        """Sequences without UPDATE_SPEC must not carry the gate."""
+    def test_review_has_invariant_check_no_charter_freshness(self):
+        """The commit-less review flow gets INVARIANT_CHECK but no CHARTER_FRESHNESS."""
+        steps = get_default_step_sequence("review")
+        assert StepType.INVARIANT_CHECK in steps
+        assert StepType.CHARTER_FRESHNESS not in steps
+
+    @pytest.mark.parametrize("task_type", ["small", "directive"])
+    def test_lightweight_flows_have_charter_freshness_only(self, task_type):
+        """Lightweight commit-only flows get CHARTER_FRESHNESS but not INVARIANT_CHECK."""
         steps = get_default_step_sequence(task_type)
-        assert StepType.UPDATE_SPEC not in steps
-        assert StepType.SPEC_GATE not in steps, (
-            f"SPEC_GATE should not appear in the {task_type} sequence"
-        )
+        assert StepType.CHARTER_FRESHNESS in steps
+        assert StepType.INVARIANT_CHECK not in steps
 
 
 class TestStepConfig:

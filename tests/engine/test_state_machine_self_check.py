@@ -548,8 +548,9 @@ class TestStepSequences:
         seq = get_default_step_sequence("feature")
         test_idx = seq.index(StepType.TEST)
         sc_idx = seq.index(StepType.SELF_CHECK)
-        vs_idx = seq.index(StepType.VERIFY_SPEC)
-        assert test_idx < sc_idx < vs_idx
+        # Charter refactor: INVARIANT_CHECK replaces VERIFY_SPEC after SELF_CHECK.
+        ic_idx = seq.index(StepType.INVARIANT_CHECK)
+        assert test_idx < sc_idx < ic_idx
 
     def test_bugfix_includes_self_check(self):
         seq = get_default_step_sequence("bugfix")
@@ -559,8 +560,9 @@ class TestStepSequences:
         seq = get_default_step_sequence("bugfix")
         test_idx = seq.index(StepType.TEST)
         sc_idx = seq.index(StepType.SELF_CHECK)
-        vs_idx = seq.index(StepType.VERIFY_SPEC)
-        assert test_idx < sc_idx < vs_idx
+        # Charter refactor: INVARIANT_CHECK replaces VERIFY_SPEC after SELF_CHECK.
+        ic_idx = seq.index(StepType.INVARIANT_CHECK)
+        assert test_idx < sc_idx < ic_idx
 
     def test_discovery_includes_self_check(self):
         seq = get_default_step_sequence("discovery")
@@ -570,8 +572,9 @@ class TestStepSequences:
         seq = get_default_step_sequence("discovery")
         test_idx = seq.index(StepType.TEST)
         sc_idx = seq.index(StepType.SELF_CHECK)
-        vs_idx = seq.index(StepType.VERIFY_SPEC)
-        assert test_idx < sc_idx < vs_idx
+        # Charter refactor: INVARIANT_CHECK replaces VERIFY_SPEC after SELF_CHECK.
+        ic_idx = seq.index(StepType.INVARIANT_CHECK)
+        assert test_idx < sc_idx < ic_idx
 
     def test_small_does_not_include_self_check(self):
         seq = get_default_step_sequence("small")

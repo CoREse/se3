@@ -725,6 +725,15 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
 
     This is the initial selection - the analyze step can modify this.
     """
+    # The spec governance steps (VERIFY_SPEC / UPDATE_SPEC / SPEC_GATE) were
+    # retired by the charter refactor. Their role is replaced by:
+    #   - INVARIANT_CHECK — an anchored diff check (charter + why-comments +
+    #     task) inserted right after SELF_CHECK; it can return REVISION_NEEDED
+    #     and drives the shared fix loop, so it sits inside the fix-loop window.
+    #   - CHARTER_FRESHNESS — a non-blocking advisory inserted just before
+    #     VERSION_ANALYZE; it only surfaces an update prompt and never blocks.
+    # Lightweight commit-only flows (small / directive) get CHARTER_FRESHNESS
+    # but not INVARIANT_CHECK (they have no self_check/spec phase to extend).
     sequences: Dict[str, List[StepType]] = {
         "feature": [
             StepType.ANALYZE,
@@ -732,9 +741,8 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.SELF_CHECK,
-            StepType.VERIFY_SPEC,
-            StepType.UPDATE_SPEC,
-            StepType.SPEC_GATE,
+            StepType.INVARIANT_CHECK,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
@@ -745,20 +753,22 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.SELF_CHECK,
-            StepType.VERIFY_SPEC,
+            StepType.INVARIANT_CHECK,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],
         "review": [
             StepType.ANALYZE,
-            StepType.VERIFY_SPEC,
+            StepType.INVARIANT_CHECK,
             StepType.SUMMARIZE,
         ],
         "small": [
             StepType.ANALYZE,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
@@ -767,6 +777,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.ANALYZE,
             StepType.PLAN,
             StepType.IMPLEMENT,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
@@ -778,9 +789,8 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.SELF_CHECK,
-            StepType.VERIFY_SPEC,
-            StepType.UPDATE_SPEC,
-            StepType.SPEC_GATE,
+            StepType.INVARIANT_CHECK,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,

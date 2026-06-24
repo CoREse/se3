@@ -704,14 +704,20 @@ class TestStepSequences:
                 f"{task_type} sequence still contains PROJECT_SUMMARY"
             )
 
-    def test_small_sequence_unchanged(self):
-        """Small task sequence: ANALYZE → IMPLEMENT → TEST → VERSION_ANALYZE → COMMIT → SUMMARIZE."""
+    def test_small_sequence(self):
+        """Small task sequence (charter refactor): ANALYZE → IMPLEMENT → TEST →
+        CHARTER_FRESHNESS → VERSION_ANALYZE → COMMIT → SUMMARIZE.
+
+        Lightweight commit-only flows gain the non-blocking CHARTER_FRESHNESS
+        advisory but not INVARIANT_CHECK (no self_check / spec phase to extend).
+        """
         from .models import get_default_step_sequence
         seq = get_default_step_sequence("small")
         expected = [
             StepType.ANALYZE,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
@@ -724,13 +730,16 @@ class TestStepSequences:
         seq = get_default_step_sequence("feature")
         assert seq[0] == StepType.ANALYZE
 
-    def test_review_sequence_has_verify_spec(self):
-        """Review sequence: ANALYZE → VERIFY_SPEC → SUMMARIZE."""
+    def test_review_sequence_has_invariant_check(self):
+        """Review sequence (charter refactor): ANALYZE → INVARIANT_CHECK → SUMMARIZE.
+
+        The retired VERIFY_SPEC is replaced by the anchored INVARIANT_CHECK.
+        """
         from .models import get_default_step_sequence
         seq = get_default_step_sequence("review")
         assert seq == [
             StepType.ANALYZE,
-            StepType.VERIFY_SPEC,
+            StepType.INVARIANT_CHECK,
             StepType.SUMMARIZE,
         ]
 

@@ -466,17 +466,10 @@ class StateMachine:
             Final status of the step
         """
         # Freeze the pre-implement test baseline before IMPLEMENT's first write,
-        # so test/verify_spec can tell inherited (baseline) failures from
+        # so the test step can tell inherited (baseline) failures from
         # introduced ones. Idempotent across fix-loop re-entries into implement.
         if step.step_type == StepType.IMPLEMENT:
             self._ensure_baseline_ready(flow)
-
-        # Mechanism A: capture the stable pre-update_spec spec snapshot before
-        # UPDATE_SPEC's first edit, so SPEC_GATE can later tell edited from new
-        # specs and enforce the requirement non-decrease invariant. Idempotent
-        # across update_spec redos and fix-loop re-entries.
-        if step.step_type == StepType.UPDATE_SPEC:
-            self._snapshot_specs_before_update(flow)
 
         handler = self._handlers.get(step.step_type)
 
@@ -763,16 +756,19 @@ class StateMachine:
             )
             return None
 
-        # Handle the fix loop: TEST, SELF_CHECK, VERIFY_SPEC, or the mechanism-A
-        # SPEC_GATE returning REVISION_NEEDED. All four share the same global
-        # max_fix_iterations exhaustion bound; SPEC_GATE differs only in WHERE it
-        # routes (gate_route: implement → fix loop, update_spec → redo).
+        # Handle the fix loop: TEST, SELF_CHECK, or INVARIANT_CHECK returning
+        # REVISION_NEEDED (the anchored INVARIANT_CHECK replaces the retired
+        # SPEC_GATE/verify_spec as the diff-vs-recorded-invariant gate). The
+        # deprecated VERIFY_SPEC is retained in the set so a pre-refactor
+        # persisted flow can still resume its fix loop. All share the same
+        # global max_fix_iterations exhaustion bound and route back to the
+        # implement fix loop.
         if (
             current_step.step_type in (
                 StepType.TEST,
                 StepType.SELF_CHECK,
+                StepType.INVARIANT_CHECK,
                 StepType.VERIFY_SPEC,
-                StepType.SPEC_GATE,
             )
             and current_step.status == StepStatus.REVISION_NEEDED
         ):
@@ -796,22 +792,6 @@ class StateMachine:
                     logger.warning(f"Failed to create fix-loop exhaustion issue: {e}")
                 flow.status = FlowStatus.FAILED
                 return None
-            elif current_step.step_type == StepType.SPEC_GATE:
-                # SPEC_GATE dispatch by gate_route. An invalid spec artifact
-                # routes back to update_spec for a redo; an introduced test
-                # failure after the spec edit routes to the implement fix loop.
-                gate_route = current_step.outputs.get("gate_route", "")
-                if gate_route == "update_spec":
-                    redo_step = self._transition_to_update_spec_redo(flow, current_step)
-                    if redo_step:
-                        return redo_step
-                    logger.info("update_spec redo returned None, falling through to next step")
-                else:
-                    # gate_route == "implement" (or unset → default to the fix loop)
-                    fix_step = self._transition_to_fix(flow, current_step)
-                    if fix_step:
-                        return fix_step
-                    logger.info("Fix transition returned None, falling through to next step")
             else:
                 fix_step = self._transition_to_fix(flow, current_step)
                 if fix_step:
@@ -986,15 +966,16 @@ class StateMachine:
         flow: FlowInstance,
         trigger_step: Step,
     ) -> Optional[Step]:
-        """Transition from TEST, SELF_CHECK, or VERIFY_SPEC back to IMPLEMENT for fixing issues.
+        """Transition from TEST, SELF_CHECK, or INVARIANT_CHECK back to IMPLEMENT for fixing issues.
 
-        This implements the test-selfcheck-verify-fix loop. When issues are detected
-        (by TEST, SELF_CHECK, or VERIFY_SPEC step), the step returns REVISION_NEEDED
-        and this method transitions back to the implement step with fix context.
+        This implements the test/self-check/invariant-fix loop. When issues are
+        detected (by TEST, SELF_CHECK, INVARIANT_CHECK, or the deprecated
+        VERIFY_SPEC step), the step returns REVISION_NEEDED and this method
+        transitions back to the implement step with fix context.
 
         Args:
             flow: Current flow instance
-            trigger_step: The step (TEST, SELF_CHECK, or VERIFY_SPEC) that detected issues
+            trigger_step: The step (TEST, SELF_CHECK, INVARIANT_CHECK, ...) that detected issues
 
         Returns:
             The implement step being re-run, or None if failed
@@ -1128,6 +1109,8 @@ class StateMachine:
             print(f"Reason: Tests failed")
         if trigger_step_type == "self_check":
             print(f"Source: self_check (code review)")
+        if trigger_step_type == "invariant_check":
+            print(f"Source: invariant_check (recorded-invariant audit)")
         if trigger_step_type == "verify_spec":
             print(f"Source: verify_spec (spec compliance check)")
         if fix_context.get("reason") == "self_check":
@@ -1138,110 +1121,6 @@ class StateMachine:
         print(f"{'='*60}\n")
 
         return implement_step
-
-    def _transition_to_update_spec_redo(
-        self,
-        flow: FlowInstance,
-        gate_step: Step,
-    ) -> Optional[Step]:
-        """Route SPEC_GATE → UPDATE_SPEC for a redo when the spec artifact is invalid.
-
-        Mechanism A, invalid-artifact branch: ``update_spec`` produced a
-        structurally broken / requirement-deleting spec. Re-run ``update_spec``
-        with the gate's fix instructions (which name the structural / requirement
-        problems) so the redo repairs the artifact; normal progression then sends
-        the flow back into SPEC_GATE to re-check the redone spec.
-
-        Counts toward the shared global ``fix_iterations`` so the redo loop is
-        bounded by ``max_fix_iterations`` exactly like the implement fix loop —
-        a spec the LLM can never make valid cannot spin forever.
-
-        Args:
-            flow: Current flow instance.
-            gate_step: The SPEC_GATE step that flagged the invalid artifact.
-
-        Returns:
-            The ``update_spec`` step reset for re-execution, or None if no
-            ``update_spec`` step is found / no fix is needed.
-        """
-        fix_instructions = gate_step.outputs.get("fix_instructions", "")
-        fix_context = gate_step.outputs.get("fix_context", {})
-        fix_needed = gate_step.outputs.get("fix_needed", True)
-
-        if not fix_needed:
-            logger.warning("update_spec redo called but fix_needed is False")
-            return None
-
-        # Find the most recent update_spec step in history.
-        update_step: Optional[Step] = None
-        for step_id in reversed(flow.state.step_history):
-            step = flow.state.steps.get(step_id)
-            if step and step.step_type == StepType.UPDATE_SPEC:
-                update_step = step
-                break
-
-        if not update_step:
-            logger.warning("No update_spec step found for spec_gate redo transition")
-            return None
-
-        # Charge the shared global fix-iteration counter so the redo loop shares
-        # the same exhaustion bound as the implement fix loop.
-        iteration = flow.state.increment_fix_iteration(
-            fix_context={
-                "trigger_step_id": gate_step.step_id,
-                "trigger_step_type": gate_step.step_type.value,
-                "update_spec_step_id": update_step.step_id,
-                "reason": fix_context.get("reason") or "spec_artifact",
-                "issues": _normalize_issue_fields(
-                    copy.deepcopy(_cap_issue_list(fix_context.get("issues", [])))
-                ),
-            }
-        )
-
-        logger.info(
-            f"Transitioning to update_spec redo (fix iteration {iteration}); "
-            f"spec artifact invalid"
-        )
-
-        # Clear any Phase 1 cache — a redo is a full fresh LLM call.
-        clear_phase1_cache(self.project_root, flow.flow_id, update_step.step_id)
-
-        # Reset the existing update_spec step for re-execution, injecting the
-        # gate's fix instructions/context so the redo knows WHICH requirement was
-        # deleted / which structural rule was violated.
-        update_step.status = StepStatus.PENDING
-        update_step.inputs["fix_instructions"] = fix_instructions
-        update_step.inputs["fix_context"] = fix_context
-        update_step.inputs["is_spec_redo"] = True
-        update_step.inputs["fix_iteration"] = iteration
-        # A redo is a NEW LLM call with its own fix prompt, not a retry of the
-        # prior update_spec call. Clear any stale retry counter.
-        _reset_retry_counter_for_new_call(update_step)
-        update_step.outputs["_is_outdated"] = True
-
-        # Point the flow back at update_spec; normal progression after it
-        # completes lands on the SPEC_GATE that follows it in the sequence.
-        flow.state.current_step_id = update_step.step_id
-        try:
-            step_index = flow.state.selected_steps.index(StepType.UPDATE_SPEC)
-            flow.state.current_step_index = step_index
-        except ValueError:
-            logger.warning("UPDATE_SPEC step type not in selected sequence")
-
-        self.persistence.save_flow(flow)
-
-        print(f"\n{'='*60}")
-        print(f"📝 SPEC GATE: REDOING UPDATE_SPEC (invalid spec artifact)")
-        print(f"{'='*60}")
-        print(f"Iteration: {iteration}")
-        print(
-            f"Instructions: {fix_instructions[:200]}..."
-            if len(fix_instructions) > 200
-            else f"Instructions: {fix_instructions}"
-        )
-        print(f"{'='*60}\n")
-
-        return update_step
 
     def _get_max_fix_iterations(self) -> int:
         """Get the maximum number of fix iterations allowed.
@@ -1875,21 +1754,27 @@ class StateMachine:
                         inputs["prev_issues"] = copy.deepcopy(all_issues[:20])
                         break
 
-        # Special handling for the mechanism-A SPEC_GATE step. It re-runs the
-        # full test suite through the same shared core as TEST, so it needs the
-        # identical frozen baseline (inherited-vs-introduced split) the TEST step
-        # gets. It also needs the stable pre-update_spec requirement snapshot to
-        # detect edited specs and enforce the non-decrease invariant.
-        # tests_added / estimated_test_duration are already forwarded from the
-        # IMPLEMENT outputs in the history loop above; mirror them defensively
-        # so the gate still has them even if implement is missing from history.
-        if step_type == StepType.SPEC_GATE:
-            inputs["baseline_failures"] = list(flow.state.baseline_failures or [])
-            inputs["spec_requirement_baseline"] = flow.state.context.get(
-                "spec_requirement_baseline", {}
-            )
-            inputs.setdefault("tests_added", [])
-            inputs.setdefault("estimated_test_duration", None)
+        # Special handling for the charter-refactor steps INVARIANT_CHECK and
+        # CHARTER_FRESHNESS. Both anchor on the charter, which is frozen once at
+        # flow start (see _freeze_invariant_anchors) so a charter edited mid-flow
+        # — e.g. one CHARTER_FRESHNESS flagged — cannot retroactively change what
+        # the invariant check anchors against. ``changes_made`` and
+        # ``task_description`` are already populated above (from the IMPLEMENT
+        # history loop and the effective-task composition respectively); the
+        # diff-dependent why-comments are harvested by the handler at check time.
+        if step_type in (StepType.INVARIANT_CHECK, StepType.CHARTER_FRESHNESS):
+            anchors = flow.state.context.get("invariant_anchors") or {}
+            charter_text = anchors.get("charter")
+            if isinstance(charter_text, str) and charter_text:
+                inputs["charter"] = charter_text
+            if step_type == StepType.INVARIANT_CHECK:
+                # INVARIANT_CHECK joins the shared fix loop (TEST / SELF_CHECK),
+                # so it must see the same global bound and current iteration the
+                # state machine enforces centrally.
+                inputs["max_fix_iterations"] = self._get_max_fix_iterations()
+                fix_iteration = flow.state.get_fix_iteration()
+                if fix_iteration > 0:
+                    inputs["fix_iteration"] = fix_iteration
 
         # Special handling for IMPLEMENT step when in fix iteration
         if step_type == StepType.IMPLEMENT:
@@ -2011,40 +1896,47 @@ class StateMachine:
         self._write_flow_meta(flow)
         self._record_baseline_commit(flow)
         self._start_baseline_capture(flow)
+        self._freeze_invariant_anchors(flow)
 
-    def _snapshot_specs_before_update(self, flow: FlowInstance) -> None:
-        """Capture the stable pre-``update_spec`` spec snapshot, once per flow.
+    def _freeze_invariant_anchors(self, flow: FlowInstance) -> None:
+        """Freeze the INVARIANT_CHECK anchor set once per flow, at flow start.
 
-        Mechanism A: before ``update_spec`` first edits any spec, record each
-        on-disk spec's full content plus its ``### Requirement:`` name set into
-        ``flow.state.context['spec_requirement_baseline']``. SPEC_GATE diffs the
-        current disk state against this snapshot to split edited vs new specs and
-        to enforce the requirement non-decrease invariant on edited specs.
+        The anchored invariant check (which replaced the retired spec_gate /
+        verify_spec) guards only invariants that were *explicitly recorded*: the
+        task_description, the charter full text, and the why-comments of the
+        touched code. The first two are stable project-/flow-level text, so they
+        are frozen here into ``flow.state.context['invariant_anchors']`` and the
+        frozen charter is injected into every INVARIANT_CHECK / CHARTER_FRESHNESS
+        step — so a charter edited mid-flow (e.g. one a CHARTER_FRESHNESS advisory
+        prompted) cannot retroactively change what the check anchors against. The
+        why-comments are diff-dependent and are harvested by the handler from the
+        touched files at check time.
 
-        Captured a **single time** per flow and never overwritten: re-snapshotting
-        before an ``update_spec`` redo (or a fix-loop re-entry) would let the gate
-        measure non-decrease against an already-corrupted baseline and wave a
-        deletion through. The one-shot guard keys off the context key's presence,
-        so a legitimately empty snapshot (no specs on disk / missing specs dir) is
-        still recorded once and not re-taken.
+        Captured a **single time** per flow and never overwritten (idempotent
+        across ``--resume`` and fix-loop re-entries). The one-shot guard keys off
+        the context key's presence, so a legitimately empty charter is still
+        recorded once and not re-read.
 
-        Never raises: a snapshot failure must not crash the flow (the gate
-        degrades to a skip when the snapshot is absent).
+        Never raises: a freeze failure must not crash the flow (the handler falls
+        back to an on-disk charter read when no frozen anchor is present).
         """
-        if "spec_requirement_baseline" in flow.state.context:
+        if "invariant_anchors" in flow.state.context:
             return
         try:
-            from .steps.spec_gate import build_spec_requirement_baseline
+            from .charter import load_charter
 
-            snapshot = build_spec_requirement_baseline(self.project_root)
-            flow.state.context["spec_requirement_baseline"] = snapshot
+            charter_text = load_charter(self.project_root)
+            flow.state.context["invariant_anchors"] = {
+                "charter": charter_text or "",
+                "task_description": flow.task_description or "",
+            }
             self.persistence.save_flow(flow)
             logger.info(
-                "spec_gate: captured pre-update_spec snapshot of %d spec(s)",
-                len(snapshot),
+                "invariant_check: froze anchor set at flow start (charter %d chars)",
+                len(charter_text or ""),
             )
-        except Exception as e:  # noqa: BLE001 — never crash the flow on snapshot setup
-            logger.warning("Failed to capture pre-update_spec spec snapshot: %s", e)
+        except Exception as e:  # noqa: BLE001 — never crash the flow on anchor setup
+            logger.warning("Failed to freeze invariant anchors: %s", e)
 
     def _start_baseline_capture(self, flow: FlowInstance) -> None:
         """Launch (or reuse a cached) pre-implement test baseline at flow start.

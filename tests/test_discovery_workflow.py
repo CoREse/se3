@@ -56,7 +56,8 @@ class TestDiscoveryStepSequence:
     def test_discovery_sequence_length(self):
         """Discovery sequence should include all standard steps (summarize now optional)."""
         sequence = get_default_step_sequence("discovery")
-        # discovery + analyze + plan + implement + test + verify_spec + update_spec + version_analyze + commit
+        # discovery + analyze + plan + implement + test + self_check +
+        # invariant_check + charter_freshness + version_analyze + commit + summarize
         assert len(sequence) >= 9
 
 

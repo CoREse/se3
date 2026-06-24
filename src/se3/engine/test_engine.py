@@ -113,6 +113,64 @@ class TestModels:
         small_seq = get_default_step_sequence("small")
         assert len(small_seq) < len(feature_seq)  # Small tasks skip steps
 
+    def test_charter_refactor_sequences_exact(self):
+        """Each task type's sequence matches the charter refactor (task book item 12)."""
+        expected = {
+            "feature": [
+                StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT, StepType.TEST,
+                StepType.SELF_CHECK, StepType.INVARIANT_CHECK, StepType.CHARTER_FRESHNESS,
+                StepType.VERSION_ANALYZE, StepType.COMMIT, StepType.SUMMARIZE,
+            ],
+            "bugfix": [
+                StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT, StepType.TEST,
+                StepType.SELF_CHECK, StepType.INVARIANT_CHECK, StepType.CHARTER_FRESHNESS,
+                StepType.VERSION_ANALYZE, StepType.COMMIT, StepType.SUMMARIZE,
+            ],
+            "review": [
+                StepType.ANALYZE, StepType.INVARIANT_CHECK, StepType.SUMMARIZE,
+            ],
+            "small": [
+                StepType.ANALYZE, StepType.IMPLEMENT, StepType.TEST,
+                StepType.CHARTER_FRESHNESS, StepType.VERSION_ANALYZE,
+                StepType.COMMIT, StepType.SUMMARIZE,
+            ],
+            "directive": [
+                StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT,
+                StepType.CHARTER_FRESHNESS, StepType.VERSION_ANALYZE,
+                StepType.COMMIT, StepType.SUMMARIZE,
+            ],
+            "discovery": [
+                StepType.DISCOVERY, StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT,
+                StepType.TEST, StepType.SELF_CHECK, StepType.INVARIANT_CHECK,
+                StepType.CHARTER_FRESHNESS, StepType.VERSION_ANALYZE, StepType.COMMIT,
+                StepType.SUMMARIZE,
+            ],
+        }
+        for task_type, seq in expected.items():
+            assert get_default_step_sequence(task_type) == seq, task_type
+
+    def test_retired_spec_steps_absent_from_all_sequences(self):
+        """The retired spec governance steps appear in no default sequence."""
+        retired = {StepType.VERIFY_SPEC, StepType.UPDATE_SPEC, StepType.SPEC_GATE}
+        for task_type in ("feature", "bugfix", "review", "small", "directive", "discovery"):
+            seq = set(get_default_step_sequence(task_type))
+            assert not (seq & retired), f"{task_type} still contains a retired spec step"
+
+    def test_invariant_check_placement(self):
+        """INVARIANT_CHECK follows SELF_CHECK; CHARTER_FRESHNESS precedes VERSION_ANALYZE."""
+        for task_type in ("feature", "bugfix", "discovery"):
+            seq = get_default_step_sequence(task_type)
+            assert seq.index(StepType.INVARIANT_CHECK) == seq.index(StepType.SELF_CHECK) + 1
+            assert seq.index(StepType.CHARTER_FRESHNESS) == seq.index(StepType.VERSION_ANALYZE) - 1
+        # review routes ANALYZE -> INVARIANT_CHECK -> SUMMARIZE (no self_check upstream).
+        review = get_default_step_sequence("review")
+        assert review.index(StepType.INVARIANT_CHECK) == review.index(StepType.ANALYZE) + 1
+        # small / directive get only the non-blocking CHARTER_FRESHNESS, no INVARIANT_CHECK.
+        for task_type in ("small", "directive"):
+            seq = get_default_step_sequence(task_type)
+            assert StepType.INVARIANT_CHECK not in seq
+            assert seq.index(StepType.CHARTER_FRESHNESS) == seq.index(StepType.VERSION_ANALYZE) - 1
+
     def test_default_sequences_end_with_summarize(self):
         """summarize is the final step of every default task-type sequence."""
         for task_type in (
@@ -554,6 +612,159 @@ class TestStateTransitions:
             result = sm.run_step(flow, step)
             assert result == StepStatus.COMPLETED
             assert call_count == 2
+
+
+class TestCharterRefactorRouting:
+    """G6: INVARIANT_CHECK joins the fix loop; CHARTER_FRESHNESS is non-blocking;
+    all six task-type sequences run through the state machine."""
+
+    def _run_to_completion(self, sm, flow, max_steps=40):
+        flow.status = FlowStatus.RUNNING
+        taken = 0
+        while flow.status == FlowStatus.RUNNING and taken < max_steps:
+            step = flow.state.get_current_step()
+            if not step:
+                break
+            sm.run_step(flow, step)
+            sm.transition_to_next(flow)
+            taken += 1
+        return taken
+
+    def test_all_six_sequences_run_through(self):
+        """Every task type's default sequence drives to COMPLETED with mock handlers."""
+        for task_type in ("feature", "bugfix", "review", "small", "directive", "discovery"):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                sm = StateMachine(Path(tmpdir))
+
+                def mock_handler(step, flow):
+                    return StepStatus.COMPLETED
+
+                for step_type in StepType:
+                    sm.register_handler(step_type, mock_handler)
+
+                flow = sm.create_flow(f"seq {task_type}", task_type=task_type)
+                sm.init_flow(flow)
+                self._run_to_completion(sm, flow)
+                assert flow.status == FlowStatus.COMPLETED, task_type
+
+    def test_invariant_check_revision_routes_to_implement_fix_loop(self):
+        """INVARIANT_CHECK REVISION_NEEDED routes back to IMPLEMENT and bumps fix_iteration."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            invariant_calls = {"n": 0}
+
+            def mock_handler(step, flow):
+                return StepStatus.COMPLETED
+
+            def invariant_handler(step, flow):
+                invariant_calls["n"] += 1
+                if invariant_calls["n"] == 1:
+                    # First pass flags a recorded-invariant violation.
+                    step.outputs["fix_needed"] = True
+                    step.outputs["fix_instructions"] = "restore the documented invariant"
+                    step.outputs["fix_context"] = {"reason": "invariant_check", "issues": []}
+                    return StepStatus.REVISION_NEEDED
+                return StepStatus.COMPLETED
+
+            for step_type in StepType:
+                sm.register_handler(step_type, mock_handler)
+            sm.register_handler(StepType.INVARIANT_CHECK, invariant_handler)
+
+            flow = sm.create_flow("invariant fix loop", task_type="feature")
+            sm.init_flow(flow)
+            flow.status = FlowStatus.RUNNING
+
+            assert flow.state.get_fix_iteration() == 0
+
+            # Drive until the first INVARIANT_CHECK has fired and routed.
+            saw_implement_after_invariant = False
+            taken = 0
+            while flow.status == FlowStatus.RUNNING and taken < 60:
+                step = flow.state.get_current_step()
+                if not step:
+                    break
+                sm.run_step(flow, step)
+                nxt = sm.transition_to_next(flow)
+                if (
+                    invariant_calls["n"] == 1
+                    and nxt is not None
+                    and nxt.step_type == StepType.IMPLEMENT
+                ):
+                    saw_implement_after_invariant = True
+                    assert flow.state.get_fix_iteration() == 1
+                taken += 1
+
+            assert saw_implement_after_invariant, "INVARIANT_CHECK did not route to the implement fix loop"
+            assert invariant_calls["n"] >= 2, "INVARIANT_CHECK was not re-run after the fix"
+            assert flow.status == FlowStatus.COMPLETED
+
+    def test_invariant_check_shares_max_fix_iterations_exhaustion(self):
+        """An always-failing INVARIANT_CHECK exhausts the shared bound and FAILs the flow."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+            # Force a tiny shared bound so the loop exhausts quickly.
+            sm._get_max_fix_iterations = lambda: 2  # type: ignore[assignment]
+
+            def mock_handler(step, flow):
+                return StepStatus.COMPLETED
+
+            def always_revision(step, flow):
+                step.outputs["fix_needed"] = True
+                step.outputs["fix_instructions"] = "still broken"
+                step.outputs["fix_context"] = {"reason": "invariant_check", "issues": []}
+                return StepStatus.REVISION_NEEDED
+
+            for step_type in StepType:
+                sm.register_handler(step_type, mock_handler)
+            sm.register_handler(StepType.INVARIANT_CHECK, always_revision)
+
+            flow = sm.create_flow("exhaust invariant", task_type="feature")
+            sm.init_flow(flow)
+            self._run_to_completion(sm, flow, max_steps=80)
+
+            assert flow.status == FlowStatus.FAILED
+
+    def test_charter_freshness_is_non_blocking(self):
+        """CHARTER_FRESHNESS never routes a fix loop even if it 'flags' an update."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def mock_handler(step, flow):
+                return StepStatus.COMPLETED
+
+            def freshness_handler(step, flow):
+                # Advisory output; must NOT divert the flow.
+                step.outputs["charter_update_needed"] = True
+                step.outputs["touched_classes"] = ["top-level architecture"]
+                return StepStatus.COMPLETED
+
+            for step_type in StepType:
+                sm.register_handler(step_type, mock_handler)
+            sm.register_handler(StepType.CHARTER_FRESHNESS, freshness_handler)
+
+            flow = sm.create_flow("charter freshness", task_type="small")
+            sm.init_flow(flow)
+            self._run_to_completion(sm, flow)
+
+            assert flow.status == FlowStatus.COMPLETED
+            assert flow.state.get_fix_iteration() == 0
+
+    def test_freeze_invariant_anchors_idempotent(self):
+        """The anchor set is frozen once at flow start and not re-read on resume."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+            flow = sm.create_flow("freeze anchors", task_type="feature")
+            sm.init_flow(flow)
+
+            anchors = flow.state.context.get("invariant_anchors")
+            assert isinstance(anchors, dict)
+            assert "charter" in anchors and "task_description" in anchors
+
+            # Mutate then re-init: the one-shot guard must keep the frozen value.
+            anchors["charter"] = "FROZEN-SENTINEL"
+            sm.init_flow(flow)
+            assert flow.state.context["invariant_anchors"]["charter"] == "FROZEN-SENTINEL"
 
 
 class TestStreamProgressHistory:
