@@ -23,7 +23,6 @@ import hashlib
 import json
 import logging
 import os
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -270,48 +269,15 @@ def compute_code_fingerprint(project_root: Path) -> str:
     return hasher.hexdigest()
 
 
-def _is_se3_path(rel_path: str) -> bool:
-    """True when *rel_path* is inside the ``se3/`` runtime directory."""
-    normalized = rel_path.replace("\\", "/")
-    return normalized == "se3" or normalized.startswith("se3/")
-
-
-def _git_ls_files_paths(root: Path) -> List[str]:
-    """Return relative paths of every tracked file (``git ls-files``).
-
-    The returned set is the index view — files deleted from the working tree
-    but not yet ``git rm``'d are still listed.  Callers that need working-tree
-    existence must re-check via ``(root / rel_path).is_file()``.
-    """
-    try:
-        out = subprocess.check_output(
-            ["git", "ls-files", "-z"],
-            cwd=str(root),
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
-        logger.warning("git ls-files failed: %s", exc)
-        return []
-
-    return [p for p in out.split("\0") if p]
-
-
-def _git_ls_files_other(root: Path) -> List[str]:
-    """Return relative paths of untracked, non-ignored files.
-
-    Uses ``git ls-files --others --exclude-standard``.
-    """
-    try:
-        out = subprocess.check_output(
-            ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=str(root),
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
-        logger.warning("git ls-files --others failed: %s", exc)
-        return []
-
-    return [line for line in out.splitlines() if line.strip()]
+# The git enumeration helpers were relocated to ``file_enum.py`` so they outlive
+# the ``se3 sync`` machinery (the code-index subsystem depends on them after sync
+# is retired). They are re-exported here unchanged so existing sync callers keep
+# importing ``sync_state._git_ls_files_paths`` etc. without modification.
+from .file_enum import (  # noqa: E402  (re-export after module docstring/imports)
+    _git_ls_files_other,
+    _git_ls_files_paths,
+    _is_se3_path,
+)
 
 
 # ---------------------------------------------------------------------------
