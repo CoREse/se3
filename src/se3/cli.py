@@ -406,6 +406,9 @@ from .commands.issue_cmd import app as issue_app
 # Import spec command (read-only spec index navigation)
 from .commands.spec_cmd import app as spec_app
 
+# Import migrate command (registry-based version/format migration channel)
+from .commands.migrate_cmd import migrate_app
+
 
 @app.command(name="init")
 def init_cmd(
@@ -604,6 +607,9 @@ app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 # Register spec command (read-only spec index navigation: index / show)
 app.add_typer(spec_app, name="spec", help="Navigate the spec index (read-only)")
+
+# Register migrate command (registry-based version/format migration channel)
+app.add_typer(migrate_app, name="migrate", help="Run a registered version/format migration")
 
 
 # ---------------------------------------------------------------------------
