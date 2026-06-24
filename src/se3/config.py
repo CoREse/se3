@@ -3044,6 +3044,152 @@ def load_spec_governance_config(
     return SpecGovernanceConfig.load(project_root)
 
 
+# Default knobs for the code-index config section. Kept as module constants so
+# other modules / tests can reference the canonical defaults instead of
+# hard-coding the numbers. The four size thresholds are the degrade trigger
+# (when a non-binary, structure-less file is large enough to fall back to
+# line/byte chunking) and the chunk granularity (the size of each degraded
+# chunk). See the code-index design: AST/structure boundaries are the base
+# granularity; line/byte slicing is only the last-resort degrade mode.
+DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_LINES = 2000
+DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_BYTES = 256 * 1024  # 256 KiB
+DEFAULT_CODE_INDEX_CHUNK_LINES = 200
+DEFAULT_CODE_INDEX_CHUNK_BYTES = 16 * 1024  # 16 KiB
+
+
+@dataclass
+class CodeIndexConfig:
+    """Code-index generation knobs loaded from the ``code_index:`` section.
+
+    Loaded from the ``code_index:`` section of ``se3.yaml``. Every field has a
+    sensible default and loading is fault-tolerant: an illegal value falls back
+    to the default and logs a warning rather than raising, so a malformed config
+    never breaks index (re)building.
+
+    Fields:
+        degrade_trigger_lines: A structure-less, non-binary text file with this
+            many lines or more becomes eligible for the line/byte chunk degrade
+            mode (one of the two size triggers — first to hit wins). Default
+            2000.
+        degrade_trigger_bytes: The byte counterpart of ``degrade_trigger_lines``.
+            Default 262144 (256 KiB).
+        chunk_lines: When a file degrades to chunking, each chunk spans at most
+            this many lines. Default 200.
+        chunk_bytes: The byte counterpart of ``chunk_lines`` — each degraded
+            chunk spans at most this many bytes (first limit to hit cuts the
+            chunk). Default 16384 (16 KiB).
+        exclude: An explicit-exclude list of project-relative path patterns that
+            backstops the gitignore-based enumeration for tracked-but-unwanted
+            noise git cannot filter (vendored blobs, huge generated files).
+            Default an empty list.
+    """
+
+    degrade_trigger_lines: int = DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_LINES
+    degrade_trigger_bytes: int = DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_BYTES
+    chunk_lines: int = DEFAULT_CODE_INDEX_CHUNK_LINES
+    chunk_bytes: int = DEFAULT_CODE_INDEX_CHUNK_BYTES
+    exclude: list = field(default_factory=list)
+
+    @staticmethod
+    def _coerce_positive_int(data: dict, key: str, default: int) -> int:
+        """Return a positive int from ``data[key]`` or fall back to *default*.
+
+        Bool, float, non-integer, and non-positive values warn and fall back —
+        the thresholds must be literal positive integers.
+        """
+        if key not in data:
+            return default
+        raw = data[key]
+        # bool is a subclass of int; reject it explicitly.
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            logger.warning(
+                "code_index.%s has invalid value %r (expected a positive "
+                "integer); falling back to default %d.",
+                key, raw, default,
+            )
+            return default
+        return raw
+
+    @staticmethod
+    def _coerce_exclude(data: dict) -> list:
+        """Return the explicit-exclude list from ``data['exclude']``.
+
+        A non-list value warns and yields an empty list; individual non-string
+        or blank entries are dropped with a warning so a malformed entry never
+        poisons the whole list.
+        """
+        raw = data.get("exclude", [])
+        if not isinstance(raw, list):
+            logger.warning(
+                "code_index.exclude has invalid value %r (expected a list of "
+                "path patterns); falling back to an empty list.",
+                raw,
+            )
+            return []
+        result: list = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                result.append(item.strip())
+            else:
+                logger.warning(
+                    "code_index.exclude entry %r is not a non-empty string; "
+                    "dropping it.",
+                    item,
+                )
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CodeIndexConfig":
+        """Create from the ``code_index`` YAML section (fault-tolerant)."""
+        if not data or not isinstance(data, dict):
+            return cls()
+        return cls(
+            degrade_trigger_lines=cls._coerce_positive_int(
+                data, "degrade_trigger_lines",
+                DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_LINES,
+            ),
+            degrade_trigger_bytes=cls._coerce_positive_int(
+                data, "degrade_trigger_bytes",
+                DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_BYTES,
+            ),
+            chunk_lines=cls._coerce_positive_int(
+                data, "chunk_lines", DEFAULT_CODE_INDEX_CHUNK_LINES
+            ),
+            chunk_bytes=cls._coerce_positive_int(
+                data, "chunk_bytes", DEFAULT_CODE_INDEX_CHUNK_BYTES
+            ),
+            exclude=cls._coerce_exclude(data),
+        )
+
+    @classmethod
+    def load(cls, project_root: Path) -> "CodeIndexConfig":
+        """Load code-index configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        ci_data = data.get("code_index", {})
+        if not ci_data or not isinstance(ci_data, dict):
+            return cls()
+        return cls.from_dict(ci_data)
+
+
+def load_code_index_config(
+    project_root: Optional[Path] = None,
+) -> CodeIndexConfig:
+    """Load code-index generation configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working
+            directory.
+
+    Returns:
+        CodeIndexConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return CodeIndexConfig.load(project_root)
+
+
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     f"""Get the maximum number of fix iterations for the test-verify-fix loop.
 

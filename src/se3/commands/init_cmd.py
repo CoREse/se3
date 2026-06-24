@@ -98,9 +98,10 @@ env/
 *~
 .DS_Store
 
-# SE3: ignore runtime content, whitelist specs/issues/scripts
+# SE3: ignore runtime content, whitelist committed artifacts
 /se3/*
-!/se3/specs/
+!/se3/code-index.md
+!/se3/charter.md
 !/se3/issues/
 !/se3/scripts/
 !/se3/version-rules.md
