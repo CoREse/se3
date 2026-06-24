@@ -418,8 +418,8 @@ class TestStepSequencesIncludeSelfCheck:
         assert StepType.SELF_CHECK in seq
         test_idx = seq.index(StepType.TEST)
         sc_idx = seq.index(StepType.SELF_CHECK)
-        vs_idx = seq.index(StepType.VERIFY_SPEC)
-        assert test_idx < sc_idx < vs_idx
+        ic_idx = seq.index(StepType.INVARIANT_CHECK)
+        assert test_idx < sc_idx < ic_idx
 
     def test_bugfix_includes_self_check(self):
         from se3.engine.models import get_default_step_sequence
@@ -427,8 +427,8 @@ class TestStepSequencesIncludeSelfCheck:
         assert StepType.SELF_CHECK in seq
         test_idx = seq.index(StepType.TEST)
         sc_idx = seq.index(StepType.SELF_CHECK)
-        vs_idx = seq.index(StepType.VERIFY_SPEC)
-        assert test_idx < sc_idx < vs_idx
+        ic_idx = seq.index(StepType.INVARIANT_CHECK)
+        assert test_idx < sc_idx < ic_idx
 
     def test_discovery_includes_self_check(self):
         from se3.engine.models import get_default_step_sequence
@@ -436,8 +436,8 @@ class TestStepSequencesIncludeSelfCheck:
         assert StepType.SELF_CHECK in seq
         test_idx = seq.index(StepType.TEST)
         sc_idx = seq.index(StepType.SELF_CHECK)
-        vs_idx = seq.index(StepType.VERIFY_SPEC)
-        assert test_idx < sc_idx < vs_idx
+        ic_idx = seq.index(StepType.INVARIANT_CHECK)
+        assert test_idx < sc_idx < ic_idx
 
     def test_small_excludes_self_check(self):
         from se3.engine.models import get_default_step_sequence

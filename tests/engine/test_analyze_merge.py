@@ -153,17 +153,20 @@ class TestStepSequenceNoProjectSummaryOrReadSpec:
         assert seq[0] == StepType.ANALYZE
         assert seq[1] == StepType.PLAN
 
-    def test_review_sequence_analyze_then_verify_spec(self):
+    def test_review_sequence_analyze_then_invariant_check(self):
+        # Charter refactor: VERIFY_SPEC retired, replaced by INVARIANT_CHECK.
         seq = get_default_step_sequence("review")
-        assert seq == [StepType.ANALYZE, StepType.VERIFY_SPEC, StepType.SUMMARIZE]
+        assert seq == [StepType.ANALYZE, StepType.INVARIANT_CHECK, StepType.SUMMARIZE]
 
-    def test_small_sequence_unchanged(self):
-        """Small sequence never had PROJECT_SUMMARY (now ends with SUMMARIZE)."""
+    def test_small_sequence(self):
+        """Small sequence never had PROJECT_SUMMARY; charter refactor adds the
+        non-blocking CHARTER_FRESHNESS before VERSION_ANALYZE."""
         seq = get_default_step_sequence("small")
         assert seq == [
             StepType.ANALYZE,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.CHARTER_FRESHNESS,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
