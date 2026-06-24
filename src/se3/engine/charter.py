@@ -164,6 +164,46 @@ def render_charter_template(**values: str) -> str:
     return content
 
 
+def _changed_paths_touch_charter(changed_files: Optional[list]) -> bool:
+    """Return True iff ``se3/charter.md`` appears in *changed_files*.
+
+    The match is on the path tail so it works whether callers pass
+    project-relative (``se3/charter.md``) or absolute paths, and tolerates
+    Windows-style separators. Non-string / malformed entries are skipped.
+    """
+    if not changed_files:
+        return False
+    target = CHARTER_RELATIVE_PATH.as_posix()  # "se3/charter.md"
+    for entry in changed_files:
+        if not isinstance(entry, str) or not entry:
+            continue
+        norm = entry.replace("\\", "/")
+        if norm == target or norm.endswith("/" + target):
+            return True
+    return False
+
+
+def admission_check_for_changes(
+    project_root: Union[str, Path],
+    changed_files: Optional[list],
+    threshold_bytes: int = DEFAULT_CHARTER_MAX_BYTES,
+) -> Optional[AdmissionResult]:
+    """Run the altitude gate **only when the charter was actually touched**.
+
+    This is the trigger point wired into the flow: the admission gate
+    (low-level-content-leakage monitoring) should fire *when the charter
+    changes*, not on every flow. When ``se3/charter.md`` is not among
+    *changed_files* the function returns ``None`` (nothing to check); otherwise
+    it loads the current charter and returns the :class:`AdmissionResult` from
+    :func:`check_admission`, whose ``warning`` is a monitoring light — it never
+    blocks the flow.
+    """
+    if not _changed_paths_touch_charter(changed_files):
+        return None
+    charter_text = load_charter(project_root)
+    return check_admission(charter_text, threshold_bytes=threshold_bytes)
+
+
 def check_admission(
     charter_text: str,
     threshold_bytes: int = DEFAULT_CHARTER_MAX_BYTES,
