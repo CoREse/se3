@@ -8,7 +8,7 @@
 
 > **A project-level, cross-session flow framework where the program — not the human — supervises the AI agent. You prompt once, walk away, and come back to a finished deliverable.**
 
-SE3 is not a single-session prompting tool, a skill, a subagent, or a dynamic workflow. Those are *in-session* aids that augment one human-in-the-loop turn. SE3 sits one layer above: it is a CLI engine + persistent state machine + code-first code↔spec governance that supervises an AI coding agent across many sessions, on many machines, until the work is actually done.
+SE3 is not a single-session prompting tool, a skill, a subagent, or a dynamic workflow. Those are *in-session* aids that augment one human-in-the-loop turn. SE3 sits one layer above: it is a CLI engine + persistent state machine + a code-first knowledge system (code-index + charter + why-comments) that supervises an AI coding agent across many sessions, on many machines, until the work is actually done.
 
 ---
 
@@ -18,7 +18,7 @@ SE3 is not a single-session prompting tool, a skill, a subagent, or a dynamic wo
 
 Skills, subagents, and dynamic workflows make a *single AI turn* smarter or more parallel. They are valuable, but they assume a human is present, reading output and steering after every step.
 
-SE3 makes a different bet. The unit of work is not a turn; it is a **project task**. Between `se3 run "…"` and the final commit there may be dozens of LLM calls across plan / implement / test / verify / commit steps, multiple agent rotations, fix loops, spec-guardrail rollbacks, and even multi-machine collaboration via the daemon and central server. The supervisor of all this is the SE3 engine — Python code running a deterministic state machine — not a person watching a terminal.
+SE3 makes a different bet. The unit of work is not a turn; it is a **project task**. Between `se3 run "…"` and the final commit there may be dozens of LLM calls across plan / implement / test / self-check / invariant-check / commit steps, multiple agent rotations, fix loops, and even multi-machine collaboration via the daemon and central server. The supervisor of all this is the SE3 engine — Python code running a deterministic state machine — not a person watching a terminal.
 
 | Tool class | Scope | Who supervises | Where state lives |
 |------------|-------|----------------|-------------------|
@@ -33,8 +33,8 @@ The ideal SE3 session looks like this:
 
 1. **Prompt** — you type `se3 run "…"` (or open a discovery session).
 2. **Discover** — the engine asks a few targeted clarifying questions until requirements converge.
-3. **Fire-and-forget** — you walk away. The engine plans, implements, tests, self-checks, verifies against the spec, updates the spec, bumps the version, and commits.
-4. **Pick up the deliverable** — you come back to a clean commit on a branch, with the spec, version, and history already aligned.
+3. **Fire-and-forget** — you walk away. The engine plans, implements, tests, self-checks, checks the diff against recorded invariants, flags any charter drift, bumps the version, and commits.
+4. **Pick up the deliverable** — you come back to a clean commit on a branch, with the version, history, and code-index already aligned.
 
 Steps 1 and 2 are the only places where human attention is genuinely required. Everything else is the program's job.
 
@@ -43,17 +43,58 @@ Steps 1 and 2 are the only places where human attention is genuinely required. E
 A program-as-supervisor paradigm only holds up if the framework provides four things that in-session tools cannot:
 
 - **Cross-session state machine** — `se3/state/engine.json` persists the exact step, attempt, context, and fix-loop history of every flow. `se3 daemon` keeps a resident process supervising local `se3 run` flows; `se3-server` aggregates many daemons into one web view; `se3 run --loop` chains tasks autonomously on isolated git worktrees. The flow survives terminal exits, machine restarts, and hand-offs between machines. *Why this paradigm needs it:* without durable state, "walking away" loses the work.
-- **Spec ↔ code two-way governance (asymmetric)** — `se3/specs/*/spec.md` is a documented snapshot of the code. The two directions are deliberately not equal. **code → spec is primary:** `se3 sync` regenerates the spec from the current code, and when the two disagree the code wins and the spec is updated — never the reverse. **spec → code is only a bounded, within-flow drift guard:** for the duration of a single flow, `se3 guardrails` treats the already-recorded SHALL/MUST requirements as the implementation contract *for that flow*, blocking silent weakening or deletion mid-flow; it does not make the spec authoritative over the code in general. *Why this paradigm needs it:* a long-running unattended agent will otherwise drift; the spec is the implementation contract for the duration of a flow.
-- **Failure recovery built in** — `se3 salvage` rescues a crashed session by committing dangling changes, filing follow-up issues, and archiving the state. `se3/state/known_test_failures.json` distinguishes a new regression from a pre-existing red test. Issue discovery promotes any unresolved concern into a tracked `se3/issues/` record. *Why this paradigm needs it:* when no human is watching, the framework must catch its own failures rather than leak them.
+- **A code-first knowledge system (code-index + charter + why-comments)** — the source of truth is the code itself. A `se3/code-index.md` structure map (auto-maintained, self-freshening) gives the agent an orientation map of *what modules and symbols exist and where*; a small hand-maintained `se3/charter.md` carries only the high-altitude facts every step needs in full (project identity, top-level architecture, project-wide invariants); colocated why-comments carry intent the code cannot express. *Why this paradigm needs it:* a long-running unattended agent needs to orient itself in the codebase cheaply on every step without a curated mirror of the code rotting beside it. See [The knowledge system](#the-knowledge-system-code-index--charter--why-comments) below for why this beats the spec-mirror it replaces.
+- **Failure recovery built in** — `se3 salvage` rescues a crashed session by committing dangling changes, filing follow-up issues, and archiving the state. The test-baseline cache distinguishes a new regression from a pre-existing red test. Issue discovery promotes any unresolved concern into a tracked `se3/issues/` record. *Why this paradigm needs it:* when no human is watching, the framework must catch its own failures rather than leak them.
 - **Portable substrate** — the engine is pure Python over the file system. The LLM call layer is a thin `AgentRunner` adapter; today's concrete runner is the Claude Code CLI, but the abstraction (`AgentRunner` / `RunResult` / `InfraErrorType`) is provider-neutral. *Why this paradigm needs it:* a paradigm bet should not be a single-vendor bet.
 
 ### se3 vs Claude Code Dynamic Workflows (complementary, not competing)
 
 Dynamic Workflows solve *in-session* parallelism: deterministic fan-out, judge panels, pipelines, all inside one orchestrating conversation. They make a single turn comprehensive and confident.
 
-SE3 solves *cross-session* project governance: persistent state, code↔spec governance, failure recovery, and a portable substrate that outlives any single conversation.
+SE3 solves *cross-session* project governance: persistent state, a code-first knowledge system, failure recovery, and a portable substrate that outlives any single conversation.
 
 The two compose. A future SE3 step can delegate its in-step parallel work to a Dynamic Workflow without changing SE3's outer state machine. We deliberately do not pin to specific DW API names here, because DW is still in research preview and its surface will evolve.
+
+---
+
+## The knowledge system: code-index + charter + why-comments
+
+Earlier SE3 versions kept a parallel corpus of `se3/specs/**/spec.md` files — a curated prose mirror of the code — plus an entire governance machine to keep it from drifting: `se3 sync` rounds, per-requirement drift baselines, `verify_spec` / `update_spec` / `spec_gate` flow steps, and the whole `sync_*` analyzer/loop/state/discovery stack. SE3 replaced that mirror with three colocated artifacts whose source of truth is the code itself.
+
+### The three pieces
+
+- **code-index** — a *structure map* of the project. Its structure comes deterministically from the code (a filesystem walk + Python AST symbol enumeration: directory/package → file/module → class → function/method); a one-line LLM summary is attached to each level. It lands as two physical files:
+  - `se3/code-index.md` — the **authoritative product, committed to git**. It *is* the map, and it is what `se3 code-index` renders (drilling down by level) and what gets injected into every flow step. Because it is plain text in a diff, a wrong summary can be spotted by a human reviewer and corrected, and the correction lands durably.
+  - `se3/cache/code-index.json` — a **volatile memo cache, gitignored**. It stores a per-symbol content fingerprint (mtime + size + sha256) and the summary that fingerprint produced. Its only job is to make regeneration incremental: on rebuild only the changed symbols are re-summarized by the LLM; unchanged symbols reuse the summary already in the `.md` (so human corrections survive). It is a pure performance optimization and guards nothing.
+
+  The structure comes from the **code**, not the json; the json is just a rebuild accelerator. Display reads only the `.md`. The optimization goal is **structural coverage, not summary depth** — the map answers *which modules/symbols exist and where*, and deliberately does not descend into implementation detail (that is the source code's job; copying it into the index would just reproduce a worse-than-code mirror).
+
+- **charter** — `se3/charter.md`, the slimmed, renamed successor of the old base spec. It is injected, in full, into every step, and doubles as the conventions channel for sandboxed sub-processes (which cannot read `CLAUDE.md`). An *altitude gate* admits only what is **un-sayable in code and needed in full by the whole project**: project identity, top-level architecture, and project-wide cross-cutting invariants. The per-module locator index that used to bloat the base spec is gone — that job belongs to code-index. A byte threshold is a monitoring light, not a hard wall: because charter content is decoupled from project size (it grows with architectural complexity, not LOC), full-loading it stays cheap even on large projects; if it ever grows hard to load in full, that is a red flag that low-altitude content leaked in — not a reason to build an index over the charter.
+
+- **why-comments** — colocated comments that carry *only* the why/intent that code cannot express, updated only when the why changes. They are not a source for code-index, so there is no per-change synchronization tax; the implement step's prompt simply asks the agent to update the colocated why-comment when a change's intent changes. This is honestly a prompt-level soft convention (same strength as the other conventions), pressing the comment-discipline surface to its minimum rather than eliminating it.
+
+### What actually got better (an honest accounting)
+
+This refactor does **not** make code descriptions more semantically correct: an LLM-generated summary can be wrong in exactly the same way a hand-written spec was. The real gains are elsewhere:
+
+- **Source of truth returns to the code.** Navigation and intent live next to the code, not in a separate corpus that has to be kept honest.
+- **Staleness is eliminated.** code-index regenerates incrementally with zero discipline required: a deterministic enumerator re-walks the tree every build, so a newly added symbol is enumerated, a deleted one is pruned, and only fingerprint-changed symbols are re-summarized. Completeness is a *property of the enumerator*, not of LLM diligence — the LLM only summarizes the symbols it is handed and never decides who is included, so it cannot omit a symbol, and a mis-summarized line still appears on the map.
+- **The governance maintenance surface collapses.** The entire `sync_*` stack, `verify_spec`, `update_spec`, `spec_gate`, the per-requirement drift baselines, and the old `spec_check` all retire. What remains is two cheap, anchored checks: `INVARIANT_CHECK` (does the diff violate any *already-recorded* binding invariant — anchored to {task description, charter, the touched code's why-comments}?) and `CHARTER_FRESHNESS` (an advisory that flags only when the diff plausibly touches one of charter's content classes, and otherwise passes for free).
+- **Granularity and admission become explicit knobs.** code-index granularity bottoms out at each file's smallest *natural* semantic unit (code → function/method; structured non-code → its natural unit; opaque files → one file-level line), with line/byte chunking only as a last-resort degrade mode gated behind three simultaneous conditions; the four thresholds are exposed via `se3 config`. Charter content is gated by an admission standard you can read and enforce. Both are dials you turn, not emergent behavior you fight.
+- **Charter volume is decoupled from project scale.** It grows with architecture, not lines of code.
+- **The failure floor is higher than the old system's.** Even if every soft discipline lapses, the one automatically-maintained artifact — code-index — stays self-fresh. The system's worst case is therefore strictly better than the old system's worst case of *a rotting spec corpus + grep*.
+
+### A concrete before/after — and why spec-index could never win this
+
+Take the old `spec_index.py` (~1130 lines — itself retired by this very refactor) as a worked example. Suppose you need to answer a *navigation* question about it: where is it, what does it do, what are its key symbols?
+
+Without a code-index, you have to read the whole ~1130-line file into context to answer even that. With a code-index, you first read the few map lines about that file — for instance, *"builds an item-level spec index, incremental invalidation via mtime + size + sha256; key symbols `load_or_build` / `_make_summary` / `_extract_locator` / `_h4_dividers`."* Navigation questions never touch the source. And a *precise* question — say, the exact boundary condition of one heuristic — needs only a pinpoint read of those ~30 lines, not the whole file.
+
+**The comparison with spec-index is the sharpest point.** A spec / spec-index has an upside that is *fundamentally capped by living one layer above the code*: even assuming a spec were perfectly accurate and perfectly complete, it still sits at spec altitude and cannot surface the actual code-level detail — so after it locates the file for you, you still have to go back and read the code, and to be thorough you have to read all of it. The spec's likely inaccuracy and incompleteness is merely insult on top of that injury; it is **not** the reason it loses to code-index. code-index is not subject to this cap at the root, because its source of truth *is* the code and it walks you straight to those ~30 lines.
+
+This is exactly the **coverage > depth** bet cashing out: the map's job is to tell you which ~30 lines to flip to — not to replace those ~30 lines. And that context saving is not a one-time win: it compounds on **every step of every flow**, which is precisely the cost code-index exists to cut.
+
+> Historical decisions and retained-but-removed intent (e.g. a feature pulled out while its intent is kept on record) do not enter the charter; they continue through the issue channel (`se3 issue`). Cross-file architectural decisions with no single owner enter the charter, hand-maintained, accepting that they cannot be auto-synced.
 
 ---
 
@@ -70,7 +111,7 @@ pip install 'se3[server]'
 pip install 'se3[browser]'
 ```
 
-Current version: **8.0.0**. Two console scripts are installed:
+Current version: **10.8.1**. Two console scripts are installed:
 
 | Script | Purpose |
 |--------|---------|
@@ -84,19 +125,24 @@ The core CLI never imports the web stack, so installing without `[server]` keeps
 ## Quick Start
 
 ```bash
-# 1. Initialize a project (creates se3.yaml, se3/specs/base/spec.md, .gitignore, git repo)
+# 1. Initialize a project (creates se3.yaml, se3/charter.md, .gitignore, git repo)
 cd your-project
 se3 init
 
 # 2. Optional: explore vague requirements through multi-turn discovery first
 se3 run --discover "I want a CLI tool that does X"
 
-# 3. Run a task end-to-end (analyze → plan → implement → test → self-check →
-#    verify_spec → update_spec → version_analyze → commit)
+# 3. Run a task end-to-end (analyze → plan → implement → test → self_check →
+#    invariant_check → charter_freshness → version_analyze → commit → summarize)
 se3 run "Add JWT authentication"
 
 # 4. Resume an interrupted flow exactly where it stopped
 se3 run --resume
+
+# 5. Navigate the codebase via the structure map
+se3 code-index                       # root view: one line per directory / file
+se3 code-index src/se3/engine         # drill into a directory
+se3 code-index show src/se3/cli.py    # one file's full function/method detail
 ```
 
 ### Three operating modes
@@ -114,7 +160,7 @@ se3 run --resume
   view. Useful for fleets, remote launch, and watching long-running flows
   from a browser. Defaults to `127.0.0.1:8080`.
 
-#### Web console authentication (since 8.0.0)
+#### Web console authentication
 
 The central server is a multi-tenant control plane — the web console and REST
 API require a login, and every machine / flow is scoped to the owner that owns
@@ -139,17 +185,20 @@ for the full end-to-end auth walkthrough and configuration keys.
 ## Command Reference
 
 All commands found below are present in `src/se3/cli.py` or its registered
-sub-typers as of version 8.0.0.
+sub-typers as of version 10.8.1.
 
 ### Top-level commands
 
 | Command | Purpose |
 |---------|---------|
-| `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit). Supports `--resume`, `--flow-id`, `--loop`, `--max-iterations`, `--no-worktree`, `--merge`, `--list-loops`, `--discover`, `--from-issue`, `--change`, `--type`, `--preset`, `--output-format`. |
-| `se3 init` | Initialize a new project: writes `se3.yaml`, base spec, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
-| `se3 guardrails <spec-file>` | Run SE3 spec guardrails on a spec file (deleted-requirement / weakened-language detection). Used by CI and by `se3 merge`. Flag: `--original` / `-o <original-file>` to compare against a specific baseline. |
-| `se3 sync` | One-directional code → spec sync. Iterates rounds until convergence. Flags include `--once`, `--max-rounds`, `--stable-rounds`, `--interactive`, `--show-diff`, `--validate-only`, `--resume`, `--force`, `--confirm-cleanup`. |
-| `se3 sync-respond <call-file>` | Apply a human decision file produced by `se3 sync --interactive` for high-impact requirement deletions. |
+| `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize). Supports `--resume`, `--flow-id`, `--loop`, `--max-iterations`, `--no-worktree`, `--merge`, `--list-loops`, `--discover`, `--from-issue`, `--change`, `--type`, `--preset`, `--output-format`. |
+| `se3 init` | Initialize a new project: writes `se3.yaml`, `se3/charter.md`, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
+| `se3 code-index [PATH]` | Render the code-index structure map from `se3/code-index.md`. No argument → the root view (one line per directory / file). A `PATH` drills down: a directory lists its files; a file lists its functions/methods. Regenerated lazily/incrementally on demand. |
+| `se3 code-index show <path>` | Print one file's full function/method detail (and any degraded chunks) from the structure map. |
+| `se3 code-index rebuild [--force]` | Rebuild the code-index. Incremental by default (only fingerprint-changed symbols are re-summarized); `--force` re-summarizes everything. |
+| `se3 code-index inspect` | Show code-index build/cache diagnostics. |
+| `se3 migrate <id>` | Run a registered version/format migration. A reusable registry skeleton; the first migrator converts a legacy `se3/specs/` project to the code-index + charter + why-comments system in one reviewable, `git revert`-able change. |
+| `se3 guardrails <spec-file>` | Run SE3 guardrails on a file (deleted-line / weakened-language detection); `--sizes` runs project-wide size checks. Used by `se3 merge`. Flag: `--original` / `-o <baseline-file>`. |
 | `se3 merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution. Flags: `--strategy fast\|safe\|strict`, `--delete-merged` / `--no-delete-merged`. Runtime data under `se3/` is synchronized per the tiered policy. |
 | `se3 merge-respond <call-file>` | Apply a human decision file produced by `se3 merge` when conflicts or guardrail violations escalated to a human MCP call. |
 | `se3 salvage` | Best-effort recovery of an abnormally terminated session: tolerant state load, commit dangling diff, file follow-up issues, archive the session. Flag: `--project-root` / `-p <path>`. |
@@ -185,8 +234,8 @@ sub-typers as of version 8.0.0.
 ## Directory Layout
 
 Everything under `se3/` is gitignored by default *except* the whitelisted
-sub-paths shown below (specs, issues, scripts, prompts, and `version-rules.md`
-are tracked; runtime state and logs are not).
+sub-paths shown below (the code-index map, charter, issues, scripts, prompts,
+and `version-rules.md` are tracked; runtime state and logs are not).
 
 ```
 your-project/
@@ -197,63 +246,45 @@ your-project/
 ├── scripts/                       # Helper scripts
 ├── .gitignore                     # Written / extended by `se3 init`
 └── se3/                           # SE3 runtime root
-    ├── specs/                     # ✅ tracked — documented snapshot of code
-    │   ├── base/spec.md           # Base project spec, auto-loaded in every flow
-    │   └── <capability>/spec.md
-    ├── issues/                    # ✅ tracked — open/ and closed/ YAML records
-    ├── prompts/                   # ✅ tracked — project-level preset prompt bodies (se3 run --preset)
-    ├── version-rules.md           # ✅ tracked — optional, not present by default
-    ├── state/                     # ❌ runtime — engine.json, sync_state.json, …
-    │   └── archive/               #   archived engine snapshots
-    ├── history/                   # ❌ runtime — per-flow per-step jsonl conversations
-    ├── logs/                      # ❌ runtime — execution logs (incl. logs/llm/ traces)
-    ├── calls/                     # ❌ runtime — pending human MCP call files
-    ├── collab/                    # ❌ runtime — multi-agent collaboration state
-    ├── cache/                     # ❌ runtime — derived caches (e.g. spec-index)
-    ├── tmp/                       # ❌ runtime — transient prompt/response snapshots
-    └── worktrees/                 # ❌ runtime — loop-mode / DAG isolation worktrees
+    ├── code-index.md             # ✅ tracked — authoritative structure map (LLM-injected, human-reviewable)
+    ├── charter.md                # ✅ tracked — project identity / architecture / invariants, injected in full every step
+    ├── issues/                   # ✅ tracked — open/ and closed/ YAML records
+    ├── prompts/                  # ✅ tracked — project-level preset prompt bodies (se3 run --preset)
+    ├── version-rules.md          # ✅ tracked — optional, not present by default
+    ├── state/                    # ❌ runtime — engine.json, …
+    │   └── archive/              #   archived engine snapshots
+    ├── history/                  # ❌ runtime — per-flow per-step jsonl conversations
+    ├── logs/                     # ❌ runtime — execution logs (incl. logs/llm/ traces)
+    ├── calls/                    # ❌ runtime — pending human MCP call files
+    ├── cache/                    # ❌ runtime — derived caches (incl. code-index.json memo)
+    ├── tmp/                      # ❌ runtime — transient prompt/response snapshots
+    └── worktrees/                # ❌ runtime — loop-mode / DAG isolation worktrees
 ```
 
 ---
 
-## Specs Catalog
+## Navigating the codebase
 
-SE3 ships 24 self-describing specs under `se3/specs/`. They are the project's
-living documentation — a code-first snapshot of what the code currently does —
-which `se3 guardrails` protects from silent weakening within a flow. Use this
-as your index into the codebase.
+The code-index *is* the index into this codebase. Start at the root view and
+drill down — you read the map's few lines first, and open source files only
+when you need the implementation detail behind a specific symbol:
 
-| Spec | One-line purpose |
-|------|------------------|
-| `base` | Project identity, directory layout, coding & workflow conventions; auto-loaded in every flow. |
-| `se3-commands` | CLI surface contract for all top-level `se3 *` commands and their options. |
-| `se3-config` | `se3.yaml` / `se3.local.yaml` schema and load/override semantics. |
-| `se3-scaffold` | Standard project structure and what `se3 init` creates. |
-| `se3-workflows` | The five workflow types (feature / bugfix / review / small / directive) + discovery, and which steps each runs. |
-| `se3-versioning` | SemVer 2.0.0 rules, single-source version file, automatic bump contract. |
-| `session-protocol` | Session startup, resume, loop mode lifecycle, branch isolation, and merge-back rules. |
-| `flow-engine` | The core state machine — step pool, transitions, event stream, sinks, prompt markers, fix loops. |
-| `agent-runner-infrastructure` | `AgentRunner` ABC and the `ClaudeCodeRunner` adapter: subprocess, hang detection, oversized-prompt rerouting. |
-| `llm-caller` | Agent rotation, retry-context injection, JSON extraction modes, NDJSON streaming. |
-| `dag-scheduler` | Parallel DAG executor for the implement step (relay worktrees, transitive reduction). |
-| `worktree-management` | Loop / merge worktree lifecycle, branch naming, cleanup of orphaned worktrees. |
-| `requirement-intake` | How new requirements enter SE3 through `se3 run` (intake contract). |
-| `preset-prompts` | Built-in + project two-layer preset prompt registry reused by `se3 run --preset` for standardized recurring tasks. |
-| `spec-format` | Spec-format v1 grammar: marker, headings, `### Requirement:` items, scenarios. |
-| `spec-guardrails` | Rules that block silent weakening / deletion of existing requirements. |
-| `spec-role` | The spec's role as a documented snapshot of code (spec-assistant): code → spec is primary, with no routine manual-edit entry. |
-| `issue-management` | `se3 issue` CLI and `IssueManager` storage API (YAML on disk, state machine). |
-| `issue-discovery` | Automatic discovery of issues from flow execution and unresolved concerns. |
-| `documentation-updater` | `README.md` badge updates and `VERSIONS.md` changelog generation. |
-| `salvage-command` | Five-step best-effort recovery pipeline for crashed sessions. |
-| `user-interjection-handling` | Ctrl-C interjection lifecycle and call-file routing across CLI / daemon / web. |
-| `running-flow-console` | Web console behavior for the live, full-screen running-flow view. |
-| `test-project` | The end-to-end test project used to exercise `se3 run` workflows. |
+```bash
+se3 code-index                        # every directory / file, one line each
+se3 code-index src/se3/engine          # the engine package's files
+se3 code-index show src/se3/engine/code_index.py   # that file's full symbol tree
+```
+
+The same root-view map is injected automatically into every flow step, so the
+agent always carries a project-wide orientation map; deeper function-level
+detail is fetched on demand. Charter (`se3/charter.md`) is injected in full
+alongside it and carries the high-altitude facts — project identity, top-level
+architecture, and project-wide invariants — that every step needs to see whole.
 
 ---
 
 ## Version & License
 
-- Version is owned by `pyproject.toml` (`8.0.0`) and bumped by the engine's `version_analyze` + `commit` steps. Do not hand-edit it.
+- Version is owned by `pyproject.toml` (`10.8.1`) and bumped by the engine's `version_analyze` + `commit` steps. Do not hand-edit it.
 - License: Apache-2.0.
 - See [VERSIONS.md](VERSIONS.md) for the full changelog.
