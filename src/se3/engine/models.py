@@ -54,9 +54,11 @@ class StepType(Enum):
     IMPLEMENT = "implement"  # Write code (most critical step)
     TEST = "test"  # Run tests (program execution, not LLM)
     SELF_CHECK = "self_check"  # Code self-review: logic completeness and robustness
-    VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency
-    UPDATE_SPEC = "update_spec"  # Update spec to record changes
-    SPEC_GATE = "spec_gate"  # Mechanism A: post-update_spec artifact gate + full re-test
+    INVARIANT_CHECK = "invariant_check"  # Anchored check: diff vs recorded binding invariants (charter + why-comments + task)
+    CHARTER_FRESHNESS = "charter_freshness"  # Advisory: does this diff touch charter's three content classes?
+    VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency (deprecated by the charter refactor)
+    UPDATE_SPEC = "update_spec"  # Update spec to record changes (deprecated by the charter refactor)
+    SPEC_GATE = "spec_gate"  # Mechanism A: post-update_spec artifact gate + full re-test (deprecated by the charter refactor)
     VERSION_ANALYZE = "version_analyze"  # Analyze changes to determine version bump type
     COMMIT = "commit"  # Commit changes (program execution)
     SUMMARIZE = "summarize"  # Generate summary and handoff
@@ -619,6 +621,42 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "read_only": True,
         "inputs": ["changes_made", "test_results", "spec_content", "task_description"],
         "outputs": ["self_check_result", "issues", "actionable_count"],
+    },
+    StepType.INVARIANT_CHECK: {
+        "name": "invariant_check",
+        # Why an anchored check (not a free self-check): the source pool is the
+        # closed set {task_description, charter full text, why-comments of the
+        # touched code}. An issue survives only when its verbatim_quote is a
+        # substring of that pool, so coverage is limited to invariants that were
+        # *explicitly recorded* — unwritten expectations are not machine-guarded.
+        "description": (
+            "Anchored invariant check (replaces spec_gate/spec_check): judge "
+            "whether the diff violates any explicitly recorded binding "
+            "invariant. Anchor set = {task_description, charter, touched-code "
+            "why-comments}, frozen at flow start; reuses self_check's "
+            "verbatim_quote anchoring. No diff / no anchors => cheap pass."
+        ),
+        "uses_llm": True,
+        "read_only": True,
+        "inputs": ["task_description", "charter", "changes_made", "why_comments"],
+        "outputs": ["issues", "actionable_count", "fix_needed", "fix_instructions", "fix_context"],
+    },
+    StepType.CHARTER_FRESHNESS: {
+        "name": "charter_freshness",
+        # Advisory, never blocking: it only flags when the diff plausibly
+        # touches one of charter's three content classes, mirroring
+        # version_analyze's "LLM reads the change -> suggests" shape.
+        "description": (
+            "Charter freshness advisory: does this diff touch any of charter's "
+            "three content classes (project identity / top-level architecture / "
+            "project-wide cross-cutting conventions)? Hit => surface an update "
+            "prompt; the overwhelming majority of flows pass cheaply. Never "
+            "blocks the flow."
+        ),
+        "uses_llm": True,
+        "read_only": True,
+        "inputs": ["task_description", "charter", "changes_made"],
+        "outputs": ["charter_update_needed", "touched_classes", "reason", "suggested_update"],
     },
     StepType.VERIFY_SPEC: {
         "name": "verify_spec",

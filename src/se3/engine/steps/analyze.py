@@ -184,10 +184,20 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append issue discovery injection if applicable
-    from ..context_builder import get_issue_discovery_injection, get_runtime_environment_injection
+    from ..context_builder import (
+        get_issue_discovery_injection,
+        get_charter_injection,
+        get_code_index_injection,
+        get_runtime_environment_injection,
+    )
     injection = get_issue_discovery_injection("analyze", project_root)
     if injection:
         prompt += injection
+    # Inject the project charter (full text) + code-index top map: project-level
+    # conventions and the structural orientation map (function-level detail
+    # pulled on demand via `se3 code-index show <path>`).
+    prompt += get_charter_injection(project_root)
+    prompt += get_code_index_injection(project_root)
     runtime_env = get_runtime_environment_injection("analyze", project_root)
     if runtime_env:
         prompt += runtime_env

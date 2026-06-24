@@ -382,6 +382,89 @@ def get_spec_names_injection(
     )
 
 
+def get_charter_injection(project_root: Path) -> str:
+    """Get the full-charter prompt injection.
+
+    The charter (``se3/charter.md``) is the shrunk rename of the retired base
+    spec and plays exactly one runtime role: it is injected **in full, into
+    every step, unconditionally**, doubling as the conventions channel for the
+    sandboxed LLM sub-process (which cannot read CLAUDE.md and obtains
+    project-level conventions only through what se3 injects). This helper is the
+    charter half of the injection-surface switch that replaces the retired
+    ``get_spec_names_injection`` (spec-name list) path.
+
+    Returns the charter wrapped in a labelled section (prefixed with ``\\n\\n``
+    so it concatenates cleanly onto a prompt suffix), or ``""`` when the charter
+    file is absent / empty — a missing charter degrades to "no project-level
+    conventions injected" rather than breaking the flow.
+    """
+    from .charter import load_charter
+
+    charter_text = load_charter(project_root)
+    if not charter_text.strip():
+        return ""
+
+    return (
+        "\n\n## Project Charter\n"
+        "The charter below is the project's authoritative, high-altitude "
+        "convention channel — project identity, top-level architecture, and "
+        "project-wide cross-cutting constraints. It is injected in full on every "
+        "step (it is also the only way a sandboxed sub-process learns project "
+        "conventions, since it cannot read CLAUDE.md). Treat it as authoritative "
+        "project-level context.\n\n"
+        + charter_text.rstrip()
+        + "\n"
+    )
+
+
+def get_code_index_injection(project_root: Path) -> str:
+    """Get the code-index top-map prompt injection.
+
+    The **code-index** is the project's structural orientation map. Only the
+    **top map** (one line per directory / file) is injected on every step, to
+    keep the context window bounded; the function/method-level detail of any
+    single file is pulled **on demand** by the agent via
+    ``se3 code-index show <path>``. This mirrors spec_index's root-view vs
+    drill-in split and is the code-index half of the injection-surface switch
+    that replaces the retired ``get_spec_names_injection`` path.
+
+    The map is read **only** from the authoritative ``se3/code-index.md`` — the
+    json memo is never consulted for display, and this helper never triggers a
+    (re)build (regeneration is the lazy/incremental ``load_or_build`` job the
+    CLI / consuming steps own). When the md has not been built yet the helper
+    still injects the drill-down protocol plus a one-line note so the agent
+    knows the map exists and how to materialise it.
+
+    Returns the injection string (prefixed with ``\\n\\n`` for clean suffix
+    concatenation). It is non-empty regardless of build state, because the
+    "consult code-index before reading source" convention is itself valuable.
+    """
+    from .code_index_render import load_for_display, render_top_map
+
+    header = (
+        "\n\n## Code Index (project structure map)\n"
+        "The map below is the project's structural orientation map — one line "
+        "per directory / file. It is your project-wide structural awareness, "
+        "injected on every step.\n\n"
+        "**Before reading source code, FIRST consult the code-index to locate "
+        "the relevant symbols.** Scan this top map to find the file(s) that "
+        "matter, then drill into a file's function/method-level detail on demand "
+        "with `se3 code-index show <path>` (run via Bash) instead of reading "
+        "whole source files blindly — the map points you at the few symbols "
+        "worth reading.\n\n"
+    )
+
+    index = load_for_display(Path(project_root))
+    if index is None or not index.files:
+        return header + (
+            "_(The code-index has not been built yet. Run "
+            "`se3 code-index rebuild` to generate `se3/code-index.md`, or use "
+            "`se3 code-index show <path>` which builds it lazily.)_\n"
+        )
+
+    return header + render_top_map(index).rstrip() + "\n"
+
+
 # Sync-engine pseudo-steps that run read-only sub-agents. These are NOT
 # `se3 run` state-machine steps (so they are absent from STEP_POOL / StepType),
 # but their sub-agents must only read code and return spec text — never write

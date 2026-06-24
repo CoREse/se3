@@ -457,7 +457,8 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     from ..context_builder import (
         get_step_language_instruction,
         get_issue_discovery_injection,
-        get_spec_names_injection,
+        get_charter_injection,
+        get_code_index_injection,
         get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
@@ -474,12 +475,12 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if injection:
         prompt += injection
 
-    # Append available-specs names injection if applicable
-    spec_names = get_spec_names_injection(
-        "plan", project_root, step.inputs.get("relevant_specs"),
-    )
-    if spec_names:
-        prompt += spec_names
+    # Inject the project charter (full text) + the code-index top map. These
+    # replace the retired spec-name list: the charter carries project-level
+    # conventions and the code-index top map is the structural orientation map
+    # (function-level detail pulled on demand via `se3 code-index show`).
+    prompt += get_charter_injection(project_root)
+    prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable
     runtime_env = get_runtime_environment_injection("plan", project_root)

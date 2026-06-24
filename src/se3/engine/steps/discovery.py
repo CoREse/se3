@@ -734,6 +734,8 @@ def _run_discovery_round(
     from ..context_builder import (
         get_step_language_instruction,
         get_issue_discovery_injection,
+        get_charter_injection,
+        get_code_index_injection,
         get_runtime_environment_injection,
     )
     lang_instruction = get_step_language_instruction("discovery", project_root)
@@ -744,6 +746,11 @@ def _run_discovery_round(
     injection = get_issue_discovery_injection("discovery", project_root)
     if injection:
         prompt += injection
+
+    # Inject the project charter (full text) + code-index top map so discovery
+    # shares the same project-level conventions and structural orientation map.
+    prompt += get_charter_injection(project_root)
+    prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable
     runtime_env = get_runtime_environment_injection("discovery", project_root)
