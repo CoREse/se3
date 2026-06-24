@@ -204,6 +204,13 @@ from se3.engine.models import (
 
 INJECTION_MARKER = "All available specs in this project:"
 INJECTION_HEADING = "## Available Specifications"
+# G7: plan / plan_tasks / implement / self_check no longer inject the spec-names
+# list — they inject the charter (full text) + the code-index top map instead.
+# The fixtures create no se3/charter.md, so get_charter_injection() returns ""
+# and only the code-index injection (which is emitted unconditionally, with a
+# build note when the map is absent) is observable in the prompt.
+CODE_INDEX_HEADING = "## Code Index (project structure map)"
+CODE_INDEX_DRILL = "se3 code-index show"
 # The fixtures create real specs named "base" and "flow-engine" under the
 # derived project_root; the injection MUST list them by name so regressions in
 # path resolution / spec enumeration are actually caught.
@@ -231,9 +238,10 @@ def _make_flow(tmp_path: Path, step_type: StepType, task_type: str = "feature") 
 
 
 class TestHandlerIntegrationPositive:
-    """Each whitelisted handler appends the spec-names injection to its prompt."""
+    """G7: plan / plan_tasks / implement / self_check inject the charter +
+    code-index top map (replacing the retired spec-names list)."""
 
-    def test_plan_handler_injects_spec_names(self, tmp_path):
+    def test_plan_handler_injects_code_index(self, tmp_path):
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.PLAN)
         step = Step(
@@ -269,11 +277,13 @@ class TestHandlerIntegrationPositive:
             with patch("se3.engine.steps.plan._display_plan"):
                 plan_handler(step, flow)
             prompt = mock_caller.call.call_args[1]["prompt"]
-        assert INJECTION_HEADING in prompt
-        assert INJECTION_MARKER in prompt
-        assert INJECTION_REAL_SPECS in prompt
+        assert CODE_INDEX_HEADING in prompt
+        assert CODE_INDEX_DRILL in prompt
+        # The retired spec-names list is no longer injected by this handler.
+        assert INJECTION_HEADING not in prompt
+        assert INJECTION_MARKER not in prompt
 
-    def test_plan_tasks_handler_injects_spec_names(self, tmp_path):
+    def test_plan_tasks_handler_injects_code_index(self, tmp_path):
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.PLAN_TASKS)
         step = Step(
@@ -307,11 +317,12 @@ class TestHandlerIntegrationPositive:
             from se3.engine.steps.plan_tasks import plan_tasks_handler
             plan_tasks_handler(step, flow)
             prompt = mock_caller.call.call_args[1]["prompt"]
-        assert INJECTION_HEADING in prompt
-        assert INJECTION_MARKER in prompt
-        assert INJECTION_REAL_SPECS in prompt
+        assert CODE_INDEX_HEADING in prompt
+        assert CODE_INDEX_DRILL in prompt
+        assert INJECTION_HEADING not in prompt
+        assert INJECTION_MARKER not in prompt
 
-    def test_implement_handler_injects_spec_names(self, tmp_path):
+    def test_implement_handler_injects_code_index(self, tmp_path):
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.IMPLEMENT)
         step = Step(
@@ -348,15 +359,16 @@ class TestHandlerIntegrationPositive:
             prompt_arg = mock_caller.call.call_args.kwargs.get("prompt")
             if prompt_arg is None:
                 prompt_arg = mock_caller.call.call_args.args[0]
-        assert INJECTION_HEADING in prompt_arg
-        assert INJECTION_MARKER in prompt_arg
-        assert INJECTION_REAL_SPECS in prompt_arg
+        assert CODE_INDEX_HEADING in prompt_arg
+        assert CODE_INDEX_DRILL in prompt_arg
+        assert INJECTION_HEADING not in prompt_arg
+        assert INJECTION_MARKER not in prompt_arg
 
-    def test_implement_handler_sequential_group_path_injects_spec_names(self, tmp_path):
-        """Regression guard for implement.py:487-496 (IMPLEMENT_GROUP_PROMPT
-        sequential group-by-group loop). The positive single-group test only
-        exercises IMPLEMENT_PROMPT; this test uses multiple groups with
-        total_loc > threshold and forces the sequential fallback by mocking
+    def test_implement_handler_sequential_group_path_injects_code_index(self, tmp_path):
+        """Regression guard for the IMPLEMENT_GROUP_PROMPT sequential
+        group-by-group loop. The positive single-group test only exercises
+        IMPLEMENT_PROMPT; this test uses multiple groups with total_loc >
+        threshold and forces the sequential fallback by mocking
         _should_use_dag. Every per-group prompt must include the injection."""
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.IMPLEMENT)
@@ -406,9 +418,10 @@ class TestHandlerIntegrationPositive:
         # Sequential path: one LLM call per group.
         assert len(prompts) == 2
         for prompt in prompts:
-            assert INJECTION_HEADING in prompt
-            assert INJECTION_MARKER in prompt
-            assert INJECTION_REAL_SPECS in prompt
+            assert CODE_INDEX_HEADING in prompt
+            assert CODE_INDEX_DRILL in prompt
+            assert INJECTION_HEADING not in prompt
+            assert INJECTION_MARKER not in prompt
 
     def test_implement_dag_execute_fn_injects_spec_names(self, tmp_path):
         """Regression guard for implement.py:836-845 (IMPLEMENT_GROUP_PROMPT
@@ -483,12 +496,11 @@ class TestHandlerIntegrationPositive:
         assert INJECTION_HEADING in prompt
         assert INJECTION_MARKER in prompt
 
-    def test_implement_fix_path_injects_spec_names(self, tmp_path):
-        """Regression guard for implement.py:230-248 (FIX_PROMPT path in fix
-        iterations). A verify_spec-triggered fix loop re-enters implement
-        with is_fix_iteration=True; the spec-names injection must still be
-        appended so the fix-loop LLM can pull in specs flagged during
-        verify_spec."""
+    def test_implement_fix_path_injects_code_index(self, tmp_path):
+        """Regression guard for the FIX_PROMPT path in fix iterations. A
+        fix loop re-enters implement with is_fix_iteration=True; the charter +
+        code-index injection must still be appended so the fix-loop LLM keeps
+        its project-level conventions and structural orientation map."""
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.IMPLEMENT)
         step = Step(
@@ -530,9 +542,10 @@ class TestHandlerIntegrationPositive:
             prompt = call.kwargs.get("prompt")
             if prompt is None:
                 prompt = call.args[0]
-        assert INJECTION_HEADING in prompt
-        assert INJECTION_MARKER in prompt
-        assert INJECTION_REAL_SPECS in prompt
+        assert CODE_INDEX_HEADING in prompt
+        assert CODE_INDEX_DRILL in prompt
+        assert INJECTION_HEADING not in prompt
+        assert INJECTION_MARKER not in prompt
         # Sanity: confirm we actually took the fix path, not a regular one.
         assert "## Fix Instructions" in prompt
 
@@ -608,7 +621,7 @@ class TestHandlerIntegrationPositive:
         assert INJECTION_HEADING not in prompt
         assert INJECTION_MARKER not in prompt
 
-    def test_self_check_handler_injects_spec_names(self, tmp_path):
+    def test_self_check_handler_injects_code_index(self, tmp_path):
         _setup_project(tmp_path)
         flow = _make_flow(tmp_path, StepType.SELF_CHECK)
         step = Step(
@@ -630,9 +643,10 @@ class TestHandlerIntegrationPositive:
             from se3.engine.steps.self_check import self_check_handler
             self_check_handler(step, flow)
             prompt = mock_caller.call.call_args[1]["prompt"]
-        assert INJECTION_HEADING in prompt
-        assert INJECTION_MARKER in prompt
-        assert INJECTION_REAL_SPECS in prompt
+        assert CODE_INDEX_HEADING in prompt
+        assert CODE_INDEX_DRILL in prompt
+        assert INJECTION_HEADING not in prompt
+        assert INJECTION_MARKER not in prompt
 
 
 class TestHandlerIntegrationNegative:

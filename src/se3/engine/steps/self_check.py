@@ -551,13 +551,15 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
-    # Append available-specs names injection if applicable
-    from ..context_builder import get_spec_names_injection, get_runtime_environment_injection
-    spec_names = get_spec_names_injection(
-        "self_check", project_root, step.inputs.get("relevant_specs"),
+    # Inject the project charter (full text) + the code-index top map, replacing
+    # the retired spec-name list.
+    from ..context_builder import (
+        get_charter_injection,
+        get_code_index_injection,
+        get_runtime_environment_injection,
     )
-    if spec_names:
-        prompt += spec_names
+    prompt += get_charter_injection(project_root)
+    prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable
     runtime_env = get_runtime_environment_injection("self_check", project_root)

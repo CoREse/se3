@@ -28,6 +28,16 @@ Free-form content search (fallback):
 
 **Recommended workflow:** 先用 `se3 issue list` 看清单；若需按关键词搜索 issue 内容，则 `grep -r '关键词' se3/issues/`。
 
+**Locate code via the code-index** — trigger before reading source: to answer "where does X live / what symbols are in this file", consult the code-index structure map first instead of reading whole files.
+
+Overview & navigation (preferred first):
+- `se3 code-index` — show the top map (one line per directory / file)
+- `se3 code-index show <path>` — drill into one file's function/method-level detail (builds the index lazily if needed)
+
+The code-index top map is also injected into this step automatically; use `se3 code-index show <path>` only to pull the deeper per-symbol detail on demand.
+
+**Recommended workflow:** 先看注入的 code-index 顶层地图定位相关文件，再用 `se3 code-index show <path>` 拉取该文件的函数级细节，避免盲目通读整份源码。
+
 ### Do NOT call proactively
 
 以下 se3 命令存在但**不在你应主动调用的范围**，除非用户在当前会话中**明确要求**：

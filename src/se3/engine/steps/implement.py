@@ -49,6 +49,33 @@ issue appears to be "wrong version number", the underlying cause is in the
 engine's version-handling steps, not in the implementation — flag it in your
 fix summary and leave the version file untouched.
 """
+
+# Why-comment convention (prompt-level soft constraint). Comments carry only
+# *why* / intent — the reasoning the code itself cannot express — and are
+# updated ONLY when that why changes, so there is no per-change comment-sync
+# tax. They are NOT a source for the code-index (the index is generated
+# structurally + LLM-summarised from the code, never from comments). This is a
+# soft, prompt-level reminder of the same strength as the project's other
+# conventions: it only prompts, it does not mechanically guarantee the comment
+# stays in sync with intent. Contains no `{...}` placeholders, so it is safe to
+# concatenate after the `.format(...)`-style prompt body.
+WHY_COMMENT_CONVENTION = """
+## Why-Comment Convention
+Comments must carry only the *why* / intent — the reasoning the code itself
+cannot express (a non-obvious trade-off, a constraint, the reason a path
+exists). They are NOT a restatement of *what* the code does.
+
+When you change code AND its why / intent changes, update the colocated
+why-comment in the same edit so the recorded intent stays truthful. When the
+why is unchanged, leave the comment alone — do NOT churn comments on every
+edit; only a changed why warrants a comment change. Do NOT add narrating
+comments that merely paraphrase the code.
+
+This is a soft, prompt-level convention (same strength as the project's other
+conventions) — it is a reminder, not a mechanically enforced rule. Comments are
+never harvested as a source for the code-index; the structure map is derived
+from the code itself.
+"""
 from ..worktree import (
     _run_git,
     create_worktree,
@@ -340,6 +367,13 @@ IMPLEMENT_PROMPT = IMPLEMENT_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
 IMPLEMENT_GROUP_PROMPT = IMPLEMENT_GROUP_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
 FIX_PROMPT = FIX_PROMPT + "\n" + VERSION_FILE_GUARDRAIL + FIX_VERSION_FILE_GUARDRAIL
 
+# Append the why-comment convention (a prompt-level soft constraint) to all
+# three implementation prompt templates. Placeholder-free, so safe to
+# concatenate after the `.format(...)`-style body.
+IMPLEMENT_PROMPT = IMPLEMENT_PROMPT + "\n" + WHY_COMMENT_CONVENTION
+IMPLEMENT_GROUP_PROMPT = IMPLEMENT_GROUP_PROMPT + "\n" + WHY_COMMENT_CONVENTION
+FIX_PROMPT = FIX_PROMPT + "\n" + WHY_COMMENT_CONVENTION
+
 # Two-segment marker only: USER_CONTENT region is empty.
 # implement consumes upstream LLM artifacts (design / task_groups /
 # changes_made / test_results) and framework-derived task_description;
@@ -421,13 +455,17 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Append issue discovery injection if applicable
     from ..context_builder import (
         get_issue_discovery_injection,
-        get_spec_names_injection,
+        get_charter_injection,
+        get_code_index_injection,
         get_runtime_environment_injection,
     )
     injection = get_issue_discovery_injection("implement", project_root) or ""
-    injection += get_spec_names_injection(
-        "implement", project_root, step.inputs.get("relevant_specs"),
-    )
+    # Charter (full text) + code-index top map replace the retired spec-name
+    # list: project conventions come from the charter, and the code-index top
+    # map orients the implementer (function-level detail on demand via
+    # `se3 code-index show <path>`).
+    injection += get_charter_injection(project_root)
+    injection += get_code_index_injection(project_root)
     injection += get_runtime_environment_injection("implement", project_root)
 
     retry_count = step.inputs.get("retry_count", 0)
