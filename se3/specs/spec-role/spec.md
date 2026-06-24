@@ -11,6 +11,8 @@ The within-flow drift-guard half of the governance model (the `spec → code` di
 
 ### Requirement: Code-First Spec Role Definition
 
+**DEPRECATED — retired with the spec mirror by the code-first knowledge-system refactor.** The spec-assistant governance model existed to keep a code↔spec mirror honest. With the mirror removed, source-of-truth has returned to the code itself, so `src/se3/engine/spec_role.py` (the `SPEC_ROLE_DEFINITION` export and the anti-spec-driven `SPEC_DRIVEN_FRAMING_PHRASES` scanning) is taken offline. The code-first positioning is now carried directly by the three-piece system — the `se3/charter.md` charter (project identity / top-level architecture / cross-cutting conventions), the `se3/code-index.md` structure map (the code's own orientation map), and colocated why-comments — with no separate spec-role framing to inject. The historical contract below is retained for reference.
+
 The system SHALL maintain a single authoritative, machine- and human-readable statement of the code-first / spec-assistant role, exported as `SPEC_ROLE_DEFINITION` from `src/se3/engine/spec_role.py`. Step prompts and documentation SHALL reference this single wording rather than re-paraphrasing the spec's role inline.
 
 `src/se3/engine/spec_role.py` SHALL have no import-time side effects and depend only on the standard library, so both prompt modules and tests can import it freely.

@@ -221,11 +221,13 @@ class EnsureResult:
 def _is_se3_project(project_root: Path) -> bool:
     """Return whether *project_root* is already an SE3-initialized project.
 
-    The presence of ``<root>/se3/specs/base/spec.md`` is the durable marker
-    that ``se3 init`` ran successfully in this directory; ``se3 init``
-    creates that file unconditionally on success.
+    The presence of ``<root>/se3/charter.md`` is the durable marker that
+    ``se3 init`` ran successfully in this directory; ``se3 init`` creates the
+    charter unconditionally on success. (This replaced the retired
+    ``se3/specs/base/spec.md`` marker when the spec corpus was retired in
+    favour of the code-index + charter + why-comment knowledge system.)
     """
-    return (project_root / "se3" / "specs" / "base" / "spec.md").is_file()
+    return (project_root / "se3" / "charter.md").is_file()
 
 
 class DaemonSpawner:
@@ -281,9 +283,9 @@ class DaemonSpawner:
     ) -> EnsureResult:
         """Make sure *project_root* is an SE3-initialized project.
 
-        When *project_root* already contains the ``se3/specs/base/spec.md``
-        marker file, the directory is treated as an existing SE3 project and
-        the call is a no-op (``EnsureResult(initialized=False)``).
+        When *project_root* already contains the ``se3/charter.md`` marker
+        file, the directory is treated as an existing SE3 project and the call
+        is a no-op (``EnsureResult(initialized=False)``).
 
         Otherwise the directory (which may be a brand-new empty path the user
         just typed into the web *New Task* form) is initialized in-place by
@@ -343,7 +345,7 @@ class DaemonSpawner:
                 initialized=False,
                 error=(
                     "`se3 init` reported success but the SE3 project marker "
-                    f"{root / 'se3' / 'specs' / 'base' / 'spec.md'} is still missing"
+                    f"{root / 'se3' / 'charter.md'} is still missing"
                 ),
                 stdout=stdout,
                 stderr=stderr,

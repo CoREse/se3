@@ -1,6 +1,6 @@
 # SE3 — Software Engineering 3.0 Framework
 
-![Version](https://img.shields.io/badge/version-10.8.1-blue)
+![Version](https://img.shields.io/badge/version-11.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 
@@ -140,9 +140,9 @@ se3 run "Add JWT authentication"
 se3 run --resume
 
 # 5. Navigate the codebase via the structure map
-se3 code-index                       # root view: one line per directory / file
-se3 code-index src/se3/engine         # drill into a directory
-se3 code-index show src/se3/cli.py    # one file's full function/method detail
+se3 code-index                          # root view: one line per directory / file
+se3 code-index index src/se3/engine     # drill into a directory
+se3 code-index show src/se3/cli.py      # one file's full function/method detail
 ```
 
 ### Three operating modes
@@ -193,11 +193,11 @@ sub-typers as of version 10.8.1.
 |---------|---------|
 | `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize). Supports `--resume`, `--flow-id`, `--loop`, `--max-iterations`, `--no-worktree`, `--merge`, `--list-loops`, `--discover`, `--from-issue`, `--change`, `--type`, `--preset`, `--output-format`. |
 | `se3 init` | Initialize a new project: writes `se3.yaml`, `se3/charter.md`, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
-| `se3 code-index [PATH]` | Render the code-index structure map from `se3/code-index.md`. No argument → the root view (one line per directory / file). A `PATH` drills down: a directory lists its files; a file lists its functions/methods. Regenerated lazily/incrementally on demand. |
+| `se3 code-index` / `se3 code-index index [PATH]` | Render the code-index structure map from `se3/code-index.md`. No argument → the root view (one line per directory / file). `index PATH` drills down: a directory lists its files; a file lists its functions/methods. Reads the committed map (reports "not built" until you run `rebuild`); flow steps keep it fresh lazily/incrementally. |
 | `se3 code-index show <path>` | Print one file's full function/method detail (and any degraded chunks) from the structure map. |
 | `se3 code-index rebuild [--force]` | Rebuild the code-index. Incremental by default (only fingerprint-changed symbols are re-summarized); `--force` re-summarizes everything. |
 | `se3 code-index inspect` | Show code-index build/cache diagnostics. |
-| `se3 migrate <id>` | Run a registered version/format migration. A reusable registry skeleton; the first migrator converts a legacy `se3/specs/` project to the code-index + charter + why-comments system in one reviewable, `git revert`-able change. |
+| `se3 migrate run <id>` / `se3 migrate list` | Run a registered version/format migration (`run <id>`), or list the available migrators (`list`). A reusable registry skeleton; the first migrator (`spec-to-new-system`) converts a legacy `se3/specs/` project to the code-index + charter + why-comments system in one reviewable, `git revert`-able change. |
 | `se3 guardrails <spec-file>` | Run SE3 guardrails on a file (deleted-line / weakened-language detection); `--sizes` runs project-wide size checks. Used by `se3 merge`. Flag: `--original` / `-o <baseline-file>`. |
 | `se3 merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution. Flags: `--strategy fast\|safe\|strict`, `--delete-merged` / `--no-delete-merged`. Runtime data under `se3/` is synchronized per the tiered policy. |
 | `se3 merge-respond <call-file>` | Apply a human decision file produced by `se3 merge` when conflicts or guardrail violations escalated to a human MCP call. |
@@ -270,8 +270,8 @@ drill down — you read the map's few lines first, and open source files only
 when you need the implementation detail behind a specific symbol:
 
 ```bash
-se3 code-index                        # every directory / file, one line each
-se3 code-index src/se3/engine          # the engine package's files
+se3 code-index                           # every directory / file, one line each
+se3 code-index index src/se3/engine      # the engine package's files
 se3 code-index show src/se3/engine/code_index.py   # that file's full symbol tree
 ```
 

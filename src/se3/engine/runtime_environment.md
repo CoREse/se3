@@ -32,7 +32,10 @@ Free-form content search (fallback):
 
 Overview & navigation (preferred first):
 - `se3 code-index` — show the top map (one line per directory / file)
-- `se3 code-index show <path>` — drill into one file's function/method-level detail (builds the index lazily if needed)
+- `se3 code-index index <path>` — drill into a directory (lists its files) or a file (lists its functions/methods)
+- `se3 code-index show <path>` — print one file's full function/method-level detail
+
+These display commands read the committed `se3/code-index.md`; if the map has not been built yet they report that and exit, so run `se3 code-index rebuild` once to generate it (flow steps then keep it fresh incrementally).
 
 The code-index top map is also injected into this step automatically; use `se3 code-index show <path>` only to pull the deeper per-symbol detail on demand.
 

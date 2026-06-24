@@ -66,6 +66,17 @@
 
 
 
+
+## 11.0.0 - 2026-06-24
+
+- Replace the spec-mirror knowledge system with a code-index + charter + why-comment triple; source of truth returns to the code itself
+- Add the `se3 code-index` command family: a hierarchical, drill-down code structure map (authoritative se3/code-index.md plus volatile se3/cache/code-index.json) built by deterministic enumeration with LLM one-line summaries and incremental fingerprint caching
+- Add the `se3 migrate` command as a registry-based migration channel, with the first migrator converting an existing spec corpus into charter + code-index + colocated why-comments in one git-revertable change
+- Retire the `se3 spec` and `se3 sync` command families and the entire spec-governance machinery (spec baselines, verify/update/gate steps, sync_* stack)
+- Rename and shrink the base spec into se3/charter.md (template src/se3/templates/charter.md), gated by an altitude admission standard and a byte-threshold monitoring light
+- Rewrite all six task-type flow sequences: insert INVARIANT_CHECK (verbatim-quote anchored over task description, charter, and touched-code why-comments) after self_check and the advisory CHARTER_FRESHNESS before version_analyze
+- Add a code_index configuration section exposing degrade/chunk thresholds (2000 lines / 256 KiB trigger, 200 lines / 16 KiB chunks) and an explicit exclude list
+- Update README/README.zh and self-hosted specs to document the new three-piece design and its advantages over the spec-index system
 ## 10.8.1 - 2026-06-23
 
 - Stop web console modals from closing when clicking the backdrop outside them, preventing accidental loss of typed input

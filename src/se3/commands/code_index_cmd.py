@@ -61,6 +61,41 @@ _NOT_BUILT_HINT = (
 )
 
 
+def _render_root_map() -> None:
+    """Render the code-index root view (one line per directory / file).
+
+    Shared by the bare ``se3 code-index`` invocation (the no-subcommand
+    callback) and the explicit ``se3 code-index index`` form, so both surface
+    the same orientation map injected on every flow step.
+    """
+    from ..engine import code_index_render
+
+    project_root = get_project_root()
+    index = code_index_render.load_for_display(project_root)
+    if index is None:
+        typer.echo(_NOT_BUILT_HINT, err=True)
+        raise typer.Exit(code=1)
+
+    output = code_index_render.render_top_map(index)
+    # The renderer terminates the view with a trailing newline; print without
+    # adding another so the stdout (a tool result for the LLM) is exact.
+    typer.echo(output, nl=False)
+
+
+@app.callback(invoke_without_command=True)
+def code_index_main(ctx: typer.Context):
+    """Navigate the code-index structure map.
+
+    Bare ``se3 code-index`` (no subcommand) renders the root view — the
+    top-level map (one line per directory / file) that is the primary
+    navigation entry point. Subcommands drill in / rebuild / inspect:
+    ``index <path>`` drills down, ``show <path>`` details one file,
+    ``rebuild`` (re)builds the map, ``inspect`` shows summary stats.
+    """
+    if ctx.invoked_subcommand is None:
+        _render_root_map()
+
+
 @app.command(name="index")
 def index_cmd(
     path: Optional[str] = typer.Argument(
@@ -80,6 +115,10 @@ def index_cmd(
     it drills down: a directory prefix lists the file one-liners beneath it, an
     indexed file shows its full function/method tree.
     """
+    if not path:
+        _render_root_map()
+        return
+
     from ..engine import code_index_render
 
     project_root = get_project_root()
@@ -88,10 +127,7 @@ def index_cmd(
         typer.echo(_NOT_BUILT_HINT, err=True)
         raise typer.Exit(code=1)
 
-    if path:
-        output = code_index_render.render_path(index, path)
-    else:
-        output = code_index_render.render_top_map(index)
+    output = code_index_render.render_path(index, path)
     # The renderer terminates the view with a trailing newline; print without
     # adding another so the stdout (a tool result for the LLM) is exact.
     typer.echo(output, nl=False)

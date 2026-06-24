@@ -38,21 +38,21 @@ PLAN_PROMPT_HEADER = """You are an expert software engineering assistant. Create
 ## Scope
 {scope}
 
-## Relevant Specifications
-The specifications below are a read-only reference to how the code currently
-behaves, not contracts the plan must be aligned to. `se3` is code-first: the
-code is authoritative and specs are its documented snapshot.
-{spec_content}
+The project charter (project-level conventions) and the code-index (structural
+orientation map) are injected below — plan against the task, the charter, and
+the code-index. Before reading source, consult the code-index map to locate the
+relevant modules / symbols and pull deeper detail on demand via
+`se3 code-index show <path>`.
 
 {revision_section}
 """
 
 # Two-segment marker only: USER_CONTENT region is empty.
 # The plan step has no user-literal field at the prompt-assembly point —
-# every template field (task_description, proposal, design, project_context,
-# spec_content) is either upstream LLM output or framework-derived. The
-# web console therefore falls back to rendering the whole post-BEGIN tail
-# inside the collapsed system-prompt chip.
+# every template field (task_description, proposal, design, project_context)
+# is either upstream LLM output or framework-derived. The web console
+# therefore falls back to rendering the whole post-BEGIN tail inside the
+# collapsed system-prompt chip.
 PLAN_PROMPT_HEADER = inject_boundary(PLAN_PROMPT_HEADER, "## Project Context\n")
 
 PROPOSAL_SECTION = """## Part 1: Proposal
@@ -148,15 +148,6 @@ Respond in JSON format:
             ]
         }}
     ],
-    "spec_changes": [
-        {{
-            "spec_name": "flow-engine",
-            "change_type": "add_requirement|modify_requirement|add_scenario|deprecate_requirement",
-            "target": "Requirement: Example Requirement Name",
-            "description": "What this change entails",
-            "rationale": "Why this change is needed"
-        }}
-    ],
     "total_complexity": "small|medium|large",
     "estimated_effort": "brief estimate"
 }}
@@ -167,7 +158,6 @@ Important:
 - `group_order` determines execution sequence
 - `depends_on` lists group_ids that must complete before this group
 - Each group will be implemented in a **separate LLM call with isolated context**
-- `spec_changes` declares expected spec modifications; use an empty array if none
 """
 
 # Medium depth output schema for bugfix
@@ -266,24 +256,6 @@ Respond in JSON format:
 ```
 """
 
-SPEC_CHANGES_SECTION = """## Spec Changes Declaration
-Analyze the gap between the current specifications and the planned implementation.
-Declare any spec changes you expect this task to introduce.
-
-For each expected change, provide:
-- **spec_name**: Which spec file is affected (e.g., "flow-engine", "se3-workflows")
-- **change_type**: One of:
-  - `add_requirement` — A new requirement will be added to the spec
-  - `modify_requirement` — An existing requirement will be changed
-  - `add_scenario` — A new scenario will be added to an existing requirement
-  - `deprecate_requirement` — An existing requirement will be marked as deprecated
-- **target**: The specific requirement or scenario affected (e.g., "Requirement: Plan spec_changes Output")
-- **description**: What the change entails
-- **rationale**: Why this change is needed
-
-If no spec changes are expected, return an empty array for `spec_changes`.
-"""
-
 REVISION_SECTION = """
 ## Previous Plan (to revise)
 {previous_output}
@@ -315,32 +287,6 @@ the plan and explain in the proposal summary that the version bump will be
 handled automatically by the engine.
 """
 
-SPEC_WRITE_PROTECTION_SECTION = """
-## Guardrail: Implementation Tasks Must Not Write Spec Files
-The implementation is free to change the code's existing behavior — that is a
-normal outcome of a task. Changing behavior and writing a spec file under
-`se3/specs/` are two different things, and only the second is restricted here.
-
-Writing spec files is the exclusive job of the `update_spec` step and `se3 sync`;
-the implementation steps that consume your task groups (especially `implement`)
-are downstream of you and MUST NOT touch the spec corpus.
-
-Therefore:
-- The task groups and task descriptions you produce MUST NOT instruct any
-  downstream step to create, modify, or delete any file under `se3/specs/`
-  (no `spec.md` edits, no new spec directories, no spec deletions). Do not list
-  any `se3/specs/**` path in a task's `files`, and do not phrase any task as
-  "update the spec to ...". The recorded behavior may change freely; the spec
-  *files* are simply not the implementer's to write.
-- You SHALL still declare the spec/behavior changes you expect through the
-  structured `spec_changes` array described below. That declaration is the
-  correct channel: it is consumed only by `update_spec` (which writes the spec)
-  and is used by `verify_spec` to treat the matching deviations as intended
-  rather than regressions. Declaring `spec_changes` is encouraged; routing spec
-  *writes* into implementation tasks is forbidden.
-"""
-
-
 def _get_prompt_depth(task_type: str) -> str:
     """Determine prompt depth based on task_type.
 
@@ -358,7 +304,6 @@ def _build_prompt(
     task_description: str,
     task_type: str,
     scope: str,
-    spec_content: str,
     project_summary: str,
     revision_section: str,
     depth: str,
@@ -371,7 +316,6 @@ def _build_prompt(
         task_description=task_description,
         task_type=task_type,
         scope=scope,
-        spec_content=spec_content,
         project_summary=project_summary,
         revision_section=revision_section,
     ))
@@ -381,20 +325,16 @@ def _build_prompt(
         parts.append(DESIGN_SECTION)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
         parts.append(VERSION_FILE_GUARDRAIL)
-        parts.append(SPEC_WRITE_PROTECTION_SECTION)
-        parts.append(SPEC_CHANGES_SECTION)
         parts.append(FULL_JSON_SCHEMA)
     elif depth == "medium":
         parts.append(PROPOSAL_SECTION)
         parts.append(DESIGN_SECTION_BUGFIX)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
         parts.append(VERSION_FILE_GUARDRAIL)
-        parts.append(SPEC_WRITE_PROTECTION_SECTION)
         parts.append(MEDIUM_JSON_SCHEMA)
     else:  # shallow
         parts.append(TASKS_SECTION.format(part_label="Instructions"))
         parts.append(VERSION_FILE_GUARDRAIL)
-        parts.append(SPEC_WRITE_PROTECTION_SECTION)
         parts.append(SHALLOW_JSON_SCHEMA)
 
     return "\n".join(parts)
@@ -416,7 +356,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     task_type = step.inputs.get("task_type", "feature")
     scope = step.inputs.get("scope", "")
-    spec_content = step.inputs.get("spec_content", {})
     project_summary = step.inputs.get("project_summary", "Not available")
     revision_feedback = step.inputs.get("revision_feedback", "")
     is_revision = step.inputs.get("is_revision", False)
@@ -424,9 +363,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if not task_description:
         step.error_message = "No task description provided"
         return StepStatus.FAILED
-
-    # Format spec content for prompt
-    spec_text = _format_spec_content(spec_content)
 
     # Build revision section if this is a revision
     if is_revision and revision_feedback:
@@ -447,7 +383,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         task_description=task_description,
         task_type=task_type,
         scope=scope,
-        spec_content=spec_text,
         project_summary=project_summary,
         revision_section=revision_section,
         depth=depth,
@@ -459,6 +394,7 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_issue_discovery_injection,
         get_charter_injection,
         get_code_index_injection,
+        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
@@ -480,6 +416,9 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # conventions and the code-index top map is the structural orientation map
     # (function-level detail pulled on demand via `se3 code-index show`).
     prompt += get_charter_injection(project_root)
+    # Lazy-incremental refresh so the injected map reflects source edited since
+    # the last build, without a manual `se3 code-index rebuild`.
+    ensure_code_index_fresh(project_root)
     prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable
@@ -563,24 +502,3 @@ def _display_plan(plan: dict, task_groups: list, depth: str) -> None:
         console.print(tree_panel)
         summary_panel = formatter.format_summary(task_groups)
         console.print(summary_panel)
-
-
-def _format_spec_content(spec_content) -> str:
-    """Format spec content for inclusion in prompt.
-
-    Accepts either a pre-rendered string (current spec_loader output) or a
-    legacy ``{spec_name: text}`` dict from older persisted flows.
-    """
-    if not spec_content:
-        return "No relevant specifications found."
-
-    if isinstance(spec_content, str):
-        return spec_content
-
-    parts = []
-    for name, content in spec_content.items():
-        parts.append(f"### {name}")
-        parts.append(content)
-        parts.append("")
-
-    return "\n".join(parts)

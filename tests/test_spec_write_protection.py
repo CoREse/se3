@@ -147,11 +147,17 @@ class TestInjectionWording:
         lowered = get_spec_write_protection_injection("implement").lower()
         assert "free to change existing code behavior" in lowered
 
-    def test_routes_changes_through_the_channel(self):
+    def test_records_changes_through_charter_refactor_channels(self):
+        # The charter refactor retired the plan spec_changes / verify_spec /
+        # update_spec spec channel; behavior changes are now recorded in the
+        # charter + colocated why-comments, kept current by charter_freshness
+        # and the implement step's why-comment convention.
         injection = get_spec_write_protection_injection("implement")
-        assert "spec_changes" in injection
-        assert "update_spec" in injection
-        assert "verify_spec" in injection
+        lowered = injection.lower()
+        assert "charter" in lowered
+        assert "why-comment" in lowered
+        assert "charter_freshness" in lowered
+        assert "spec_changes" not in injection
 
     def test_forbids_spec_writes_via_tools_and_bash(self):
         injection = get_spec_write_protection_injection("implement")
@@ -195,58 +201,33 @@ class TestLLMCallerWeave:
 
 
 # ---------------------------------------------------------------------------
-# plan.py — dedicated protection section + preserved spec_changes channel
+# plan.py — spec machinery retired: no dedicated section, no spec_changes channel
 # ---------------------------------------------------------------------------
 
 class TestPlanProtectionSection:
-    def _section(self):
-        from se3.engine.steps.plan import SPEC_WRITE_PROTECTION_SECTION
+    """The plan step no longer routes work through the retired spec governance
+    steps, so its dedicated spec-write-protection section (and the
+    ``spec_changes`` / ``update_spec`` / ``verify_spec`` framing it carried) has
+    been removed. The plan plans against task / charter / code-index only."""
 
-        return SPEC_WRITE_PROTECTION_SECTION
+    def test_section_constant_removed(self):
+        import se3.engine.steps.plan as plan_mod
 
-    def test_section_forbids_downstream_spec_writes(self):
-        text = self._section()
-        assert "se3/specs/" in text
-        assert "MUST NOT" in text
-        # Names the downstream step it must not instruct to write specs.
-        assert "implement" in text
-
-    def test_section_preserves_spec_changes_channel(self):
-        text = self._section()
-        assert "spec_changes" in text
-        assert "update_spec" in text
-        assert "verify_spec" in text
-
-    def test_section_allows_behavior_change(self):
-        assert "behavior" in self._section().lower()
+        assert not hasattr(plan_mod, "SPEC_WRITE_PROTECTION_SECTION")
 
     @pytest.mark.parametrize("depth", ["full", "medium", "shallow"])
-    def test_section_present_at_every_depth(self, depth):
-        from se3.engine.steps.plan import SPEC_WRITE_PROTECTION_SECTION, _build_prompt
-
-        prompt = _build_prompt(
-            task_description="Add feature X",
-            task_type="feature",
-            scope="m",
-            spec_content="s",
-            project_summary="p",
-            revision_section="",
-            depth=depth,
-        )
-        assert SPEC_WRITE_PROTECTION_SECTION in prompt
-
-    def test_full_depth_keeps_spec_changes_declaration(self):
+    def test_no_spec_machinery_in_prompt(self, depth):
         from se3.engine.steps.plan import _build_prompt
 
         prompt = _build_prompt(
             task_description="Add feature X",
             task_type="feature",
             scope="m",
-            spec_content="s",
             project_summary="p",
             revision_section="",
-            depth="full",
+            depth=depth,
         )
-        # The protection section must NOT suppress the spec_changes channel.
-        assert "Spec Changes Declaration" in prompt
-        assert "spec_changes" in prompt
+        assert "spec_changes" not in prompt
+        assert "update_spec" not in prompt
+        assert "verify_spec" not in prompt
+        assert "Spec Changes Declaration" not in prompt

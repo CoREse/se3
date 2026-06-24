@@ -548,10 +548,20 @@ def run_spec_to_new_system(
             applied, skipped = _apply_colocations(
                 project_root, salvage_result.colocations
             )
-            colocate_ok = True
+            # Deletion of the spec corpus is gated on the code-bound why/intent
+            # having actually been salvaged into source files. A skipped
+            # colocation (e.g. its target source file could not be resolved)
+            # means that intent never landed anywhere, so it is NOT safe to
+            # delete the spec that carries it. Only an all-applied result — or a
+            # genuinely empty colocation set (nothing code-bound to salvage) —
+            # confirms the salvage; any skip keeps colocate_ok False so specs
+            # are preserved.
+            colocate_ok = not skipped
             detail = f"{applied} colocated"
             if skipped:
-                detail += f", {len(skipped)} skipped"
+                detail += (
+                    f", {len(skipped)} skipped — specs kept (salvage incomplete)"
+                )
                 report.notes.extend(f"colocation skipped: {s}" for s in skipped)
             report.add("Colocate why-comments", "OK", detail)
     except Exception as exc:  # noqa: BLE001

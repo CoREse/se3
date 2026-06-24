@@ -11,27 +11,31 @@ Define the standard workflows for SE3 development using the Flow Engine's 13-ste
 
 The system SHALL support six workflow types, mapped to different step sequences from the step pool:
 
+The step sequences below reflect the **code-first knowledge-system refactor**, which retired the spec-mirror governance steps. The `verify_spec`, `update_spec`, and `spec_gate` steps were removed from every sequence and replaced by two new steps: `invariant_check` (anchored binding-invariant guard, inserted after `self_check`) and `charter_freshness` (advisory charter-drift prompt, inserted before `version_analyze`). Lightweight commit-bearing sequences that never carried a spec step (`small`, `directive`) gain only `charter_freshness`.
+
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `feature` | analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit → summarize | New functionality or significant enhancement |
-| `bugfix` | analyze → plan → implement → test → self_check → verify_spec → version_analyze → commit → summarize | Bug reports (plan uses medium depth) |
-| `review` | analyze → verify_spec → summarize | Code review, audit, or analysis |
-| `small` | analyze → implement → test → version_analyze → commit → summarize | Minor fixes, typos, simple changes |
-| `directive` | analyze → plan → implement → version_analyze → commit → summarize | Following specific instructions (plan uses shallow depth) |
-| `discovery` | discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit → summarize | Exploratory requirements gathering via multi-turn conversation, triggered by `--discover` flag |
+| `feature` | analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize | New functionality or significant enhancement |
+| `bugfix` | analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize | Bug reports (plan uses medium depth) |
+| `review` | analyze → invariant_check → summarize | Code review, audit, or analysis |
+| `small` | analyze → implement → test → charter_freshness → version_analyze → commit → summarize | Minor fixes, typos, simple changes |
+| `directive` | analyze → plan → implement → charter_freshness → version_analyze → commit → summarize | Following specific instructions (plan uses shallow depth) |
+| `discovery` | discovery → analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize | Exploratory requirements gathering via multi-turn conversation, triggered by `--discover` flag |
 
-**Step Pool (12 active steps in default sequences):**
+**Step Pool (active steps in default sequences):**
 1. **discovery** - Multi-turn requirements exploration with user, generates refined task description
-2. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
+2. **analyze** - Analyze task type and scope, collect project context, inject the charter and the `se3/code-index.md` top-level map
 3. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
-4. **implement** - Write code implementation
+4. **implement** - Write code implementation (and, when the why/intent of touched code changes, update the colocated why-comment)
 5. **test** - Run tests to verify
 6. **self_check** - LLM code review for logic completeness, robustness, functional gaps, and test coverage gaps (excludes spec compliance)
-7. **verify_spec** - Check implementation vs spec
-8. **update_spec** - Update spec records
+7. **invariant_check** - Anchored check that the diff violates no binding invariant explicitly recorded in the anchor set {task_description, full charter, touched-code why-comments}, frozen at flow start (replaces `spec_gate` / `spec_check`)
+8. **charter_freshness** - Advisory step that reads the diff and prompts a charter update only when the diff touches one of the charter's three content classes; cheaply passes otherwise
 9. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
 10. **commit** - Commit changes (generates template summary only as a fallback when summarize step is absent)
-11. **summarize** - Generate LLM-based summary and handoff. The final step of every default task-type sequence (appended after `commit`, or after `verify_spec` for `review`).
+11. **summarize** - Generate LLM-based summary and handoff. The final step of every default task-type sequence (appended after `commit`, or after `invariant_check` for `review`).
+
+**Deprecated spec-mirror steps (removed from default sequences):** `verify_spec`, `update_spec`, and `spec_gate` are retired along with the spec mirror; the `code → spec` source-of-truth has returned to the code itself, surfaced through the `se3/code-index.md` structure map, the `se3/charter.md` charter, and colocated why-comments.
 
 **Dynamically-inserted step (available in pool, not in default sequences):**
 - **confirm** - Review and confirm previous step output (human or LLM review gate). Inserted after configured steps via `se3.yaml` confirmation settings, not part of any default sequence.
@@ -42,7 +46,7 @@ The system SHALL support six workflow types, mapped to different step sequences 
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow with full 10 default steps (ending in `summarize`)
+- **THEN** the system uses the feature workflow with its full default sequence (analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize)
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"
@@ -54,7 +58,7 @@ The system SHALL support six workflow types, mapped to different step sequences 
 
 #### Scenario: Discovery workflow selection
 - **WHEN** the `--discover` flag is passed to `se3 run`
-- **THEN** the system uses the discovery workflow (discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit → summarize)
+- **THEN** the system uses the discovery workflow (discovery → analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize)
 - **AND** the analyze step MUST NOT auto-detect "discovery" as a task type — it is exclusively triggerable via `--discover`
 
 ### Requirement: Discovery Workflow
@@ -122,20 +126,19 @@ The feature workflow SHALL follow these steps:
 
 **5. SELF_CHECK**
    - LLM reviews implementation for logic completeness, robustness, functional gaps, and test coverage gaps
-   - Explicitly excludes spec compliance checks (handled by verify_spec)
+   - Explicitly excludes spec/invariant compliance checks (handled by invariant_check)
    - Receives test_results and changes_made as input context
    - If critical/high issues found, trigger fix loop to return to implement step
-   - If no critical/high issues, continue to verify_spec
+   - If no critical/high issues, continue to invariant_check
 
-**6. VERIFY_SPEC**
-   - Check implementation against specifications
-   - Verify all scenarios are covered
-   - Identify any discrepancies
+**6. INVARIANT_CHECK**
+   - Anchored check that the diff violates no binding invariant explicitly recorded in the frozen anchor set {task_description, full charter, touched-code why-comments}
+   - Reuses the `self_check` verbatim_quote anchoring pattern, so every flagged violation is grounded in a quoted anchor (no ungrounded nits)
+   - On a violation, returns `REVISION_NEEDED` and joins the shared fix loop; otherwise continues
 
-**7. UPDATE_SPEC**
-   - Update specs to reflect changes made
-   - Add new capabilities documentation
-   - Mark scenarios as implemented
+**7. CHARTER_FRESHNESS**
+   - Advisory step (reuses the `version_analyze` "LLM reads diff → suggests" pattern) that judges whether the diff touches any of the charter's three content classes (project identity, top-level architecture, project-wide cross-cutting conventions)
+   - Prompts a charter update only on a hit; cheaply passes (always `COMPLETED`, never blocking) otherwise
 
 **8. VERSION_ANALYZE**
    - Analyze changes to determine SemVer bump type
@@ -188,16 +191,19 @@ The bugfix workflow SHALL follow these steps (plan uses medium depth):
    - LLM reviews fix for logic completeness, robustness, and functional gaps
    - Ensures the fix doesn't introduce new issues or miss related changes
 
-**6. VERIFY_SPEC**
-   - Verify fix meets requirements
+**6. INVARIANT_CHECK**
+   - Anchored check that the fix violates no binding invariant recorded in the frozen anchor set {task_description, full charter, touched-code why-comments}
 
-**7. VERSION_ANALYZE**
+**7. CHARTER_FRESHNESS**
+   - Advisory: prompt a charter update only when the diff touches one of the charter's three content classes
+
+**8. VERSION_ANALYZE**
    - Determine version bump type and generate commit message
 
-**8. COMMIT**
+**9. COMMIT**
    - Commit the fix with version bump
 
-**9. SUMMARIZE**
+**10. SUMMARIZE**
    - Generate an LLM-based summary and handoff document as the final default step
 
 #### Scenario: Complex bug fix
@@ -217,10 +223,9 @@ The review workflow SHALL follow minimal steps:
    - Identify what to review
    - Collect project context and load relevant specs
 
-**2. VERIFY_SPEC**
-   - Review code against specs (consumes `spec_content` directly from analyze)
-   - Categorize findings by priority: critical / high / medium / low
-   - Classify scope: in_scope / out_of_scope
+**2. INVARIANT_CHECK**
+   - Anchored review of the diff against the frozen anchor set {task_description, full charter, touched-code why-comments}
+   - Flags only violations grounded in a quoted anchor (binding invariants explicitly recorded in the charter or in colocated why-comments)
 
 **3. SUMMARIZE**
    - Generate an LLM-based summary and handoff of the review findings as the final default step
@@ -238,9 +243,10 @@ The small workflow SHALL be used for simple changes:
 1. ANALYZE - Confirm it's a small change
 2. IMPLEMENT - Direct code changes
 3. TEST - Run tests
-4. VERSION_ANALYZE - Determine version bump and generate commit message
-5. COMMIT - Commit changes
-6. SUMMARIZE - Generate an LLM-based summary and handoff as the final default step
+4. CHARTER_FRESHNESS - Advisory charter-drift prompt (cheap pass unless the diff touches a charter content class)
+5. VERSION_ANALYZE - Determine version bump and generate commit message
+6. COMMIT - Commit changes
+7. SUMMARIZE - Generate an LLM-based summary and handoff as the final default step
 
 #### Scenario: Documentation update
 - **WHEN** updating README or comments

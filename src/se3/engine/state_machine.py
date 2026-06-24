@@ -1807,8 +1807,12 @@ class StateMachine:
         frozen charter is injected into every INVARIANT_CHECK / CHARTER_FRESHNESS
         step — so a charter edited mid-flow (e.g. one a CHARTER_FRESHNESS advisory
         prompted) cannot retroactively change what the check anchors against. The
-        why-comments are diff-dependent and are harvested by the handler from the
-        touched files at check time.
+        why-comments are diff-dependent (the touched set is unknown until after
+        implement), so the handler harvests them at check time — but reads each
+        touched file's content at the **frozen baseline commit** (recorded here
+        by ``_record_baseline_commit``) as well as the working tree, so the
+        original why-comment anchor text is preserved even when the diff deleted
+        or rewrote a comment that documented a binding invariant.
 
         Captured a **single time** per flow and never overwritten (idempotent
         across ``--resume`` and fix-loop re-entries). The one-shot guard keys off

@@ -48,8 +48,10 @@ def _dir_of(relpath: str) -> str:
 def render_top_map(index: CodeIndex) -> str:
     """Render the root view: each directory group with its files' one-liners.
 
-    Symbols (functions/methods) are intentionally omitted — this is the
-    orientation map injected on every step, kept small on purpose.
+    Each directory/package heading carries its own one-line summary (the level
+    above files) so the orientation map is zoomable at the dir level too, not
+    only at the file/symbol levels. Symbols (functions/methods) are intentionally
+    omitted — this is the map injected on every step, kept small on purpose.
     """
     groups: Dict[str, List[FileEntry]] = {}
     for relpath in sorted(index.files):
@@ -57,7 +59,11 @@ def render_top_map(index: CodeIndex) -> str:
 
     lines: List[str] = ["# Code Index (top map)", ""]
     for dir_name in sorted(groups):
-        lines.append(f"## `{dir_name}`")
+        head = f"## `{dir_name}`"
+        dir_summary = index.dir_summaries.get(dir_name, "")
+        if dir_summary:
+            head += f" — {dir_summary}"
+        lines.append(head)
         for fe in sorted(groups[dir_name], key=lambda f: f.path):
             line = f"- `{fe.path}`"
             if fe.kind:

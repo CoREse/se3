@@ -251,7 +251,7 @@ class _IsolatedConsole:
             timeout=120,
         )
         assert init.returncode == 0, f"se3 init failed: {init.stdout}\n{init.stderr}"
-        assert (self.project / "se3" / "specs" / "base" / "spec.md").exists()
+        assert (self.project / "se3" / "charter.md").exists()
 
         # 1b. Seed the admin owner + daemon key before the server opens the DB.
         self._seed_admin_and_key()

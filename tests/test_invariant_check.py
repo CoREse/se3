@@ -16,6 +16,7 @@ Coverage:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,61 @@ def test_why_comment_anchor_is_harvested_from_changed_file(tmp_path, monkeypatch
         "task_description": "",
         "charter": "",
         "changes_made": {"files_changed": ["src/widget.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert state["calls"] == 1
+    assert result is StepStatus.REVISION_NEEDED
+    assert step.outputs["actionable_count"] == 1
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def test_deleted_why_comment_invariant_recovered_from_baseline(tmp_path, monkeypatch):
+    """A why-comment documenting a binding invariant must remain anchorable even
+    when the violating diff DELETED that comment.
+
+    Regression guard: the harvest reads each touched file's baseline (flow-start)
+    content via ``git show <baseline>:<path>``, not just the working tree, so an
+    implementation that erases the original comment while breaking the invariant
+    cannot launder the violation past the anchored check.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "ledger.py"
+    f.write_text(
+        "# Invariant: account balance must never go negative\n"
+        "def debit(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    _git(["init"], tmp_path)
+    _git(["config", "user.email", "t@t"], tmp_path)
+    _git(["config", "user.name", "t"], tmp_path)
+    _git(["add", "src/ledger.py"], tmp_path)
+    _git(["commit", "-m", "baseline"], tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True
+    ).stdout.strip()
+
+    # The violating change rewrites the file and DELETES the invariant comment.
+    f.write_text("def debit(x):\n    return -x\n", encoding="utf-8")
+
+    quote = "account balance must never go negative"
+    issue = _grounded_issue(quote, "src/ledger.py")
+    issue["expectation_source"]["type"] = "why_comment"
+    state = _install_fake_caller(
+        monkeypatch, [json.dumps({"issues": [issue], "summary": "x"})]
+    )
+    # The ONLY anchor is the deleted why-comment, recoverable from baseline.
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/ledger.py"]},
     })
 
     result = invariant_check.invariant_check_handler(step, flow)

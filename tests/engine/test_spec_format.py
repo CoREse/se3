@@ -502,7 +502,14 @@ class TestRealSpecFiles:
         # added documenting the se3/state/resumable/<flow_id>.json per-flow
         # snapshot that keeps a paused/interrupted/failed flow resumable after a
         # later se3 run overwrites the single-slot engine.json.
-        assert len(parsed.requirements) == 52
+        # 54 after the knowledge-record refactor (code-index + charter +
+        # why-comments) added the "INVARIANT_CHECK Anchored Check" and
+        # "CHARTER_FRESHNESS Check" Requirements: INVARIANT_CHECK is the
+        # anchored diff guard (verbatim-quote anchor set frozen at flow start)
+        # that supersedes the retired SPEC_GATE/spec_check, and
+        # CHARTER_FRESHNESS is the end-of-flow advisory that prompts a charter
+        # update only when the diff touches a charter content class.
+        assert len(parsed.requirements) == 54
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()

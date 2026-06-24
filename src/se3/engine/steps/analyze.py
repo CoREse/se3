@@ -124,6 +124,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_issue_discovery_injection,
         get_charter_injection,
         get_code_index_injection,
+        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     injection = get_issue_discovery_injection("analyze", project_root)
@@ -133,6 +134,10 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # conventions and the structural orientation map (function-level detail
     # pulled on demand via `se3 code-index show <path>`).
     prompt += get_charter_injection(project_root)
+    # Lazy-incremental refresh so the injected map reflects source edited since
+    # the last build (e.g. a prior flow's commits) — keeps it fresh without a
+    # manual `se3 code-index rebuild`.
+    ensure_code_index_fresh(project_root)
     prompt += get_code_index_injection(project_root)
     runtime_env = get_runtime_environment_injection("analyze", project_root)
     if runtime_env:

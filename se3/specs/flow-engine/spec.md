@@ -389,7 +389,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 
 ### Requirement: 16-Step Flow Pool
 
-The flow engine SHALL define a fixed pool of step types (the StepType enum), and all flow steps are selected from this pool. The pool grew to 17 entries with the addition of the `spec_gate` step (mechanism A — the post-`update_spec` verification gate; see *Post-update_spec Spec Verification Gate*); it consists of 6 active steps + CONFIRM + DISCOVERY + 4 deprecated steps + others. The table below lists the main steps; for the backward-compatible behavior of deprecated steps, see the *Deprecated Step Type Backward Compatibility* requirement.
+The flow engine SHALL define a fixed pool of step types (the StepType enum), and all flow steps are selected from this pool. The code-first knowledge-system refactor removed the spec-mirror steps `verify_spec` / `update_spec` / `spec_gate` from the default sequences and added two new active steps — `invariant_check` (anchored binding-invariant guard, replacing `spec_gate` / `spec_check`) and `charter_freshness` (advisory charter-drift prompt). The pool consists of these active steps + CONFIRM + DISCOVERY + the deprecated steps (`verify_spec`, `update_spec`, `spec_gate`, `project_summary`, `read_spec`, `propose`, `design`, `plan_tasks`, retained as stub/legacy handlers for persisted flows) + others. The table below lists the main steps; for the backward-compatible behavior of deprecated steps, see the *Deprecated Step Type Backward Compatibility* requirement.
 
 | Step | Responsibility | LLM Involvement | JSON Mode | Read-Only | Input | Output |
 |------|------|---------|-----------|-----------|------|------|
@@ -398,28 +398,30 @@ The flow engine SHALL define a fixed pool of step types (the StepType enum), and
 | `plan` | Unified planning: proposal + design + task decomposition (adaptive depth based on task_type) | Yes | TWO_PHASE | **Yes** | spec_content, task_description, task_type, scope, project_summary | plan{proposal,design}, task_groups, spec_changes, total_complexity, estimated_effort |
 | `implement` | Write the code implementation | Yes | TWO_PHASE | No | design_doc, task_groups | implemented_groups, files_changed, total_groups |
 | `test` | Run tests for validation | No (program execution) | - | No | - | test_results, tests_passed |
-| `self_check` | LLM code review: logic completeness, code robustness, functional omissions, test-uncovered areas (does not check spec compliance) | Yes | TWO_PHASE | **Yes** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | self_check_result, issues (structured list with description, severity, location), actionable_count |
-| `verify_spec` | Check the implementation's consistency with the spec | Yes | EXTRACT | **Yes** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context, **verified** (rule-based, computed by code: `(in_scope_count == 0) and tests_passed` — see *verify_spec Unified Priority and Scope Mechanism*) |
-| `update_spec` | Update the spec to record changes | Yes | EXTRACT | No | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
-| `spec_gate` | **Mechanism A**: post-`update_spec` gate — programmatically validate each edited/new spec, then re-run the full test suite (see *Post-update_spec Spec Verification Gate*) | No (program execution) | - | No | changes_made, baseline_failures, spec_requirement_baseline | gate_passed, gate_route, gate_skipped, fix_needed, fix_instructions, fix_context, test_results |
+| `self_check` | LLM code review: logic completeness, code robustness, functional omissions, test-uncovered areas (does not check spec/invariant compliance) | Yes | TWO_PHASE | **Yes** | test_results, changes_made, charter, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | self_check_result, issues (structured list with description, severity, location), actionable_count |
+| `invariant_check` | Anchored binding-invariant guard (reuses self_check verbatim_quote anchoring over the frozen anchor set {task_description, full charter, touched-code why-comments}); replaces `spec_gate` / `spec_check` (see *INVARIANT_CHECK Anchored Check*) | Yes | TWO_PHASE | **Yes** | changes_made, anchor set (task_description, charter, touched-code why-comments) | invariant_check_result, issues (verbatim-anchored), fix_needed, fix_instructions, fix_context |
+| `charter_freshness` | Advisory charter-drift prompt (reuses `version_analyze` "LLM reads diff → suggests"); always `COMPLETED`, never blocks (see *CHARTER_FRESHNESS Check*) | Yes | EXTRACT | **Yes** | changes_made | charter_update_suggested, suggestion |
+| ~~`verify_spec`~~ | ~~Check the implementation's consistency with the spec~~ (DEPRECATED — spec mirror retired; superseded by `invariant_check`) | Yes | EXTRACT | **Yes** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context, **verified** (rule-based — see *verify_spec Unified Priority and Scope Mechanism*) |
+| ~~`update_spec`~~ | ~~Update the spec to record changes~~ (DEPRECATED — spec mirror retired) | Yes | EXTRACT | No | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
+| ~~`spec_gate`~~ | ~~**Mechanism A**: post-`update_spec` gate~~ (DEPRECATED — spec mirror retired; superseded by `invariant_check`; see *Post-update_spec Spec Verification Gate*) | No (program execution) | - | No | changes_made, baseline_failures, spec_requirement_baseline | gate_passed, gate_route, gate_skipped, fix_needed, fix_instructions, fix_context, test_results |
 | `version_analyze` | Analyze changes to determine suggested_version (authoritative) + generate commit message | Yes | EXTRACT | **Yes** | changes_made, summary, verification_result, task_type | **suggested_version** (authoritative), bump_type, confidence, reasoning, commit_message |
 | `commit` | Commit changes | No (program execution) | - | No | changes_made, bump_type, commit_message, proposal, updated_specs | commit_hash |
 | `summarize` | Generate a summary and handoff | Yes | Text | **Yes** | all_previous_outputs | summary (Markdown text) |
 | ~~`project_summary`~~ | ~~Generate a project context summary~~ (deprecated — merged into analyze) | Yes | Text | **Yes** | project state | summary string |
 
-**Step sequences for different task types:**
-- `discovery`: discovery → analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit → **summarize**
-- `feature`: analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **spec_gate** → **version_analyze** → commit → **summarize**
-- `bugfix`: analyze → plan → implement → test → **self_check** → verify_spec → **version_analyze** → commit → **summarize**
-- `review`: analyze → verify_spec → **summarize**
-- `small`: analyze → implement → test → **version_analyze** → commit → **summarize**
-- `directive`: analyze → plan → implement → **version_analyze** → commit → **summarize**
+**Step sequences for different task types** (post code-first knowledge-system refactor — `verify_spec` / `update_spec` / `spec_gate` removed; `invariant_check` inserted after `self_check`; `charter_freshness` inserted before `version_analyze`):
+- `discovery`: discovery → analyze → plan → implement → test → **self_check** → **invariant_check** → **charter_freshness** → **version_analyze** → commit → **summarize**
+- `feature`: analyze → plan → implement → test → **self_check** → **invariant_check** → **charter_freshness** → **version_analyze** → commit → **summarize**
+- `bugfix`: analyze → plan → implement → test → **self_check** → **invariant_check** → **charter_freshness** → **version_analyze** → commit → **summarize**
+- `review`: analyze → **invariant_check** → **summarize**
+- `small`: analyze → implement → test → **charter_freshness** → **version_analyze** → commit → **summarize**
+- `directive`: analyze → plan → implement → **charter_freshness** → **version_analyze** → commit → **summarize**
 
-**Note:** The `summarize` step is the final step of every default task-type sequence (it is appended after `commit`, or after `verify_spec` for the `review` type). It remains available in the step pool and is produced by `get_default_step_sequence`. Because `apply_step_config` deduplicates appended steps by step value, an existing `steps.append: [summarize]` configuration becomes a silent no-op (it neither errors nor warns, and does not add a second `summarize`). The `commit` step retains its template-summary fallback (`se3/state/summary-{flow_id}.md`, built from structured flow state) for the rare case where `summarize` is removed from the sequence; on the default path `summarize` runs and supersedes that template.
+**Note:** The `summarize` step is the final step of every default task-type sequence (it is appended after `commit`, or after `invariant_check` for the `review` type). It remains available in the step pool and is produced by `get_default_step_sequence`. Because `apply_step_config` deduplicates appended steps by step value, an existing `steps.append: [summarize]` configuration becomes a silent no-op (it neither errors nor warns, and does not add a second `summarize`). The `commit` step retains its template-summary fallback (`se3/state/summary-{flow_id}.md`, built from structured flow state) for the rare case where `summarize` is removed from the sequence; on the default path `summarize` runs and supersedes that template.
 
 #### Scenario: Feature Task Full Flow
 - **WHEN** the task type is `feature`
-- **THEN** execute the full 12-step flow (plan uses full depth), including the self_check step, the `spec_gate` step inserted between `update_spec` and `version_analyze`, and the `summarize` step appended after `commit`
+- **THEN** execute the full feature sequence (plan uses full depth), including the self_check step, the `invariant_check` step inserted after `self_check`, the `charter_freshness` step inserted before `version_analyze`, and the `summarize` step appended after `commit`
 
 #### Scenario: Small Task Simplified Flow
 - **WHEN** the task type is `small`
@@ -3104,6 +3106,8 @@ The `State.fix_history` list SHALL be capped at `FIX_HISTORY_MAX_ENTRIES` (defin
 
 ### Requirement: Post-update_spec Spec Verification Gate
 
+**DEPRECATED — removed by the code-first knowledge-system refactor.** The `spec_gate` step, the `spec_requirement_baseline` frozen pre-`update_spec` snapshot, and the entire per-requirement spec-drift governance it enforced have been retired together with the spec mirror layer. The `SPEC_GATE` step type no longer appears in any default step sequence, `steps/spec_gate.py` and `build_spec_requirement_baseline` are removed, and the state machine no longer captures or routes against `spec_requirement_baseline`. Its role — machine-guarded invariants — is now served by the anchored *INVARIANT_CHECK Anchored Check* requirement, which guards only invariants explicitly recorded in the charter or in colocated why-comments rather than every `### Requirement:` count. The historical contract below is retained verbatim for flows persisted before the refactor.
+
 The flow engine SHALL run a `spec_gate` step (mechanism A) immediately after `update_spec` in the `feature` and `discovery` step sequences (statically inserted between `update_spec` and `version_analyze`). The gate closes the root-cause gap whereby a spec edited by `update_spec` (a non-read-only step that uses Edit to rewrite `spec.md`) was followed by **no further test step**, so a spec-content test broken by that edit (e.g. a hard-coded requirement-count assertion) was committed unre-tested and froze into a permanent inherited "zombie" failure for every later flow.
 
 `spec_gate` is a pure program step (`uses_llm=False`, `read_only=False`). It is implemented in `steps/spec_gate.py` (see base *Engine Step Implementations*) and shares the exhaustion bound of the existing fix loop.
@@ -3882,3 +3886,50 @@ The flow state is saved in `se3/state/engine.json`:
   }
 }
 ```
+
+### Requirement: INVARIANT_CHECK Anchored Check
+
+The flow engine SHALL run an `invariant_check` step that judges whether the current diff violates any **binding invariant that has been explicitly recorded**, using a verbatim-quote anchoring discipline so every flagged violation is grounded in a quoted anchor. `INVARIANT_CHECK` replaces the retired `SPEC_GATE` / `spec_check` and is inserted immediately after `SELF_CHECK` in the `feature`, `bugfix`, and `discovery` sequences (and is the sole post-`analyze` review step in `review`). It is implemented in `steps/invariant_check.py` and reuses the verbatim_quote anchoring machinery proven in `self_check.py` (the pattern self_check adopted after a free-text schema produced ungrounded nits).
+
+**Anchor set (frozen at flow start).** The check's anchor set is the closed set `{task_description, the full charter text, the why-comments of the code the diff touches}`, captured once at flow start and held constant for the flow. A reported violation MUST quote, verbatim, a fragment of one of those anchors; an issue that cannot be grounded in a quoted anchor is filtered out (the same `_build_source_pool` / `_normalize_for_quote_match` / `_validate_and_filter_issues` discipline reused from self_check). The check therefore covers ONLY invariants already written down as a charter rule or a why-comment — invariants never recorded are, by design, no longer machine-guarded. Anchor-less / ungrounded self-check is explicitly rejected.
+
+**Routing.** When the check finds a grounded violation it returns `REVISION_NEEDED` and joins the existing shared fix loop (the same global `workflow.max_fix_iterations` bound as TEST / SELF_CHECK), routing back to `implement`; with no grounded violation it returns `COMPLETED`. When the anchor set is empty (no task_description, no charter, no touched-code why-comments), the check cheaply passes (`COMPLETED`) rather than fabricating findings.
+
+#### Scenario: Grounded invariant violation routes to the fix loop
+- **GIVEN** the charter or a touched-code why-comment records a binding invariant, and the diff violates it
+- **WHEN** the `invariant_check` step runs
+- **THEN** it returns `REVISION_NEEDED` with an issue that quotes, verbatim, the violated anchor, and the flow enters the shared fix loop back to `implement`
+
+#### Scenario: Ungrounded finding is filtered out
+- **GIVEN** a candidate concern that cannot be grounded in a verbatim quote from the anchor set {task_description, charter, touched-code why-comments}
+- **WHEN** `invariant_check` validates its findings
+- **THEN** that concern is dropped, so the step never reports an ungrounded nit
+
+#### Scenario: Empty anchor set passes cheaply
+- **GIVEN** a flow with no task_description, no charter, and no touched-code why-comments
+- **WHEN** the `invariant_check` step runs
+- **THEN** it returns `COMPLETED` without fabricating any finding
+
+#### Scenario: Anchor set is frozen at flow start
+- **WHEN** the flow first reaches `invariant_check` and again on any later fix-loop re-entry
+- **THEN** the anchor set used is the one frozen at flow start (task_description + full charter + touched-code why-comments), not re-derived against an already-mutated working tree
+
+### Requirement: CHARTER_FRESHNESS Check
+
+The flow engine SHALL run a `charter_freshness` step that judges whether the current diff touches any of the charter's three content classes (project identity, top-level architecture, project-wide cross-cutting conventions) and, only on a hit, prompts the operator to update `se3/charter.md`. It is implemented in `steps/charter_freshness.py` and reuses the `version_analyze` "LLM reads the diff → emits a suggestion" paradigm (the mature `version_bumper.py` range). `CHARTER_FRESHNESS` is inserted immediately before `VERSION_ANALYZE` in every commit-bearing sequence — `feature`, `bugfix`, `discovery`, `small`, and `directive`.
+
+**Advisory, non-blocking.** The step is purely advisory: it ALWAYS returns `COMPLETED` and never blocks the flow or enters a fix loop. The vast majority of flows touch none of the charter's content classes, so the step cheaply passes with no prompt. This gives the human-maintained charter a cheap drift *hint* rather than imposing a per-change hard-sync tax (the charter cannot be auto-synced and the refactor accepts that cost deliberately).
+
+#### Scenario: Diff touching a charter content class prompts an update
+- **GIVEN** a diff that changes the project's top-level architecture, identity, or a project-wide cross-cutting convention
+- **WHEN** the `charter_freshness` step reads the diff
+- **THEN** it surfaces a prompt suggesting the operator update `se3/charter.md`, and still returns `COMPLETED`
+
+#### Scenario: Ordinary diff passes cheaply
+- **GIVEN** a diff that touches none of the charter's three content classes
+- **WHEN** the `charter_freshness` step runs
+- **THEN** it returns `COMPLETED` with no charter-update prompt
+
+#### Scenario: Charter freshness never blocks the flow
+- **WHEN** the `charter_freshness` step runs in any commit-bearing sequence
+- **THEN** it returns `COMPLETED` (advisory only) and never returns `REVISION_NEEDED` or enters the fix loop

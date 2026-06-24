@@ -197,6 +197,27 @@ class TestExtraction:
         syms = code_index._extract_json('{"a": 1, "b": {"c": 2}}')
         assert {s.local_id for s in syms} == {"a", "b"}
 
+    def test_structured_keys_carry_value_content(self):
+        # json/yaml top-level keys have no line range (json) or only the key
+        # declaration line (yaml), so they must carry their own value content
+        # for the summariser instead of an empty / key-only segment.
+        ysyms = {s.local_id: s for s in code_index._extract_yaml("beta:\n  nested: 2\n")}
+        assert "2" in ysyms["beta"].content and "nested" in ysyms["beta"].content
+        jsyms = {s.local_id: s for s in code_index._extract_json('{"b": {"c": 2}}')}
+        assert "c" in jsyms["b"].content and "2" in jsyms["b"].content
+
+    def test_make_target_summarizes_json_key_from_value(self):
+        # _make_target must feed the key's value content (not an empty string)
+        # to the summariser for a json-key whose line range is 0/0.
+        fe = code_index.FileEntry(
+            path="conf.json",
+            kind="json",
+            fingerprint=code_index.Fingerprint(0.0, 0, ""),
+        )
+        sym = code_index._extract_json('{"database": {"host": "x", "pool": 10}}')[0]
+        target = code_index._make_target(fe, sym, Path("conf.json"))
+        assert "host" in target.content and "pool" in target.content
+
     def test_symbol_fingerprint_changes_with_content(self):
         a = code_index._extract_python("def f():\n    return 1\n")
         b = code_index._extract_python("def f():\n    return 2\n")
@@ -335,6 +356,52 @@ class TestDegrade:
         detail = code_index_render.render_path(index, "big.txt")
         assert DEGRADED_MARKER in detail
 
+    def test_oversized_structured_file_drops_to_file_level(self, project: Path):
+        """Size-cap secondary guard: a structured BUT oversized file (huge
+        generated module / large data file) is dropped to a single file-level
+        line instead of enumerating every symbol — independent of structure."""
+        cfg = self._cfg()  # degrade_trigger_lines=5
+        # A real Python module with many top-level functions, well over the
+        # 5-line trigger: it HAS structure (ast yields symbols) yet is oversized.
+        body = "\n\n".join(f"def f{i}():\n    return {i}" for i in range(40))
+        gen = project / "src" / "generated.py"
+        gen.write_text(body, encoding="utf-8")
+        index = build_index(project, summarizer=RecordingSummarizer(), cfg=cfg)
+        fe = index.files["src/generated.py"]
+        # The size cap drops it to a file-level line: no per-symbol enumeration.
+        assert fe.symbols == []
+        # ... and it is NOT degrade-chunked either (structure present).
+        assert fe.kind == "python"
+
+
+# ---------------------------------------------------------------------------
+# Summary flattening (one node per physical md line)
+# ---------------------------------------------------------------------------
+
+class TestSummaryFlatten:
+    def test_flatten_collapses_newlines(self):
+        assert code_index._flatten_summary("a\nb") == "a b"
+        assert code_index._flatten_summary("  a \n\n  b  ") == "a b"
+        assert code_index._flatten_summary("single") == "single"
+
+    def test_newline_summary_survives_md_round_trip(self, project: Path):
+        """A multi-line LLM summary must collapse to one physical md line so the
+        md→summary round-trip (which reuses human-correctable summaries) does
+        not lose the orphaned tail on the next incremental build."""
+
+        class NewlineSummarizer:
+            def __call__(self, targets):
+                return {t.id: "first sentence\nsecond sentence" for t in targets}
+
+        index = build_index(project, summarizer=NewlineSummarizer())
+        md = code_index.md_path(project).read_text(encoding="utf-8")
+        # No summary spills onto its own orphan line.
+        parsed = code_index._parse_md_summaries(md)
+        fe = index.files["src/mod.py"]
+        # Every symbol's summary is recoverable from the md (single line each).
+        for sym in fe.symbols:
+            assert parsed.get(fe.symbol_id(sym)) == "first sentence second sentence"
+
 
 # ---------------------------------------------------------------------------
 # Rendering (reads md only)
@@ -348,6 +415,55 @@ class TestRender:
         assert "`src/mod.py`" in top
         # Symbol bullets are NOT in the top map.
         assert "Greeter.hello" not in top
+
+    def test_top_map_shows_directory_summaries(self, project: Path):
+        """Every structural level — including dir/package — carries a one-line
+        summary so the orientation map is zoomable at the dir level too."""
+        summ = RecordingSummarizer()
+        index = build_index(project, summarizer=summ)
+        # The directory group nodes were summarised (id == dir group name).
+        assert "src/" in index.dir_summaries
+        assert index.dir_summaries["src/"] == "S:src/"
+        top = code_index_render.render_top_map(index)
+        # The dir heading line carries its summary, not just the bare path.
+        assert "## `src/` — S:src/" in top
+
+    def test_dir_summary_survives_md_round_trip(self, project: Path):
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        index = code_index_render.load_for_display(project)
+        assert index is not None
+        assert index.dir_summaries.get("src/") == "S:src/"
+
+    def test_unchanged_sibling_dir_summary_reused(self, project: Path):
+        """The content-aware dir fingerprint is still incremental per directory:
+        editing a file in one directory re-summarises only that directory; a
+        sibling directory whose members are untouched reuses its cached summary."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        # Edit a root-level file; the "src/" directory is untouched.
+        (project / "README.md").write_text(
+            "# Title\n\nchanged intro\n\n## Section A\n\nbody a\n", encoding="utf-8"
+        )
+        build_index(project, summarizer=summ)
+        # The root dir is re-summarised (its member changed) but the untouched
+        # sibling "src/" dir reuses its cached summary.
+        assert "(root)" in summ.last
+        assert "src/" not in summ.last
+
+    def test_dir_summary_refreshed_when_member_content_changes(self, project: Path):
+        """A pure content edit inside an existing file re-summarises the dir, so
+        the top map never carries a dir summary stale relative to the refreshed
+        file/symbol summaries underneath it."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        (project / "src" / "mod.py").write_text(
+            "def alpha():\n    return 2\n", encoding="utf-8"
+        )
+        build_index(project, summarizer=summ)
+        # The member file's content changed, so the dir is re-summarised even
+        # though its membership is unchanged.
+        assert "src/" in summ.last
 
     def test_render_path_file_shows_symbols(self, project: Path):
         summ = RecordingSummarizer()
@@ -411,6 +527,28 @@ class TestCodeIndexCLI:
         # Top map lists files, NOT function-level symbols.
         assert "Greeter.hello" not in result.output
 
+    def test_bare_invocation_renders_top_map(self, built_project: Path):
+        # Bare `se3 code-index` (no subcommand) must render the root/top map,
+        # NOT exit with Typer's "Missing command" error.
+        bare = runner.invoke(app, ["code-index"])
+        assert bare.exit_code == 0, bare.output
+        assert "Missing command" not in bare.output
+        assert "`src/mod.py`" in bare.output
+        # And it must match the explicit `index` (no-arg) subcommand output.
+        sub = runner.invoke(app, ["code-index", "index"])
+        assert bare.output == sub.output
+
+    def test_bare_invocation_unbuilt_errors_without_missing_command(
+        self, project: Path, monkeypatch
+    ):
+        # Bare invocation on an unbuilt project hits the not-built hint (exit 1),
+        # never Typer's "Missing command" usage error.
+        monkeypatch.setattr(code_index_cmd, "get_project_root", lambda: project)
+        bare = runner.invoke(app, ["code-index"])
+        assert bare.exit_code == 1
+        assert "Missing command" not in bare.output
+        assert "code-index rebuild" in bare.output
+
     def test_index_with_path_drills_into_file(self, built_project: Path):
         result = runner.invoke(app, ["code-index", "index", "src/mod.py"])
         assert result.exit_code == 0, result.output
@@ -468,3 +606,66 @@ class TestCodeIndexCLI:
         result = runner.invoke(app, ["code-index", "--help"])
         assert result.exit_code == 0, result.output
         assert "se3/code-index.md" in result.output
+
+
+class TestConcurrentRebuildSafety:
+    """The lazy/incremental (re)build must serialize across processes and never
+    write through a fixed, collision-prone temp filename."""
+
+    def test_atomic_write_uses_unique_temp_no_fixed_leftover(self, project: Path):
+        build_index(project, summarizer=RecordingSummarizer())
+        md = code_index.md_path(project)
+        cache = code_index.cache_path(project)
+        assert md.exists() and cache.exists()
+        # The retired fixed-name temp files must not be left behind.
+        assert not (md.parent / "code-index.md.tmp").exists()
+        assert not (cache.parent / "code-index.tmp").exists()
+        # No stray *.tmp scratch files survive a successful write either.
+        assert not list(md.parent.glob("code-index.md.*.tmp"))
+        assert not list(cache.parent.glob("code-index.json.*.tmp"))
+
+    def test_build_lock_serializes_concurrent_builds(self, project: Path):
+        # Two builds run back-to-back while one holds the advisory lock: the
+        # second must wait, then re-enumerate and produce a valid, current map.
+        import threading
+
+        from se3.engine import code_index as ci
+
+        order: list[str] = []
+
+        # First build to establish md/cache, then a concurrent pair.
+        build_index(project, summarizer=RecordingSummarizer())
+
+        barrier = threading.Event()
+
+        def worker(tag: str):
+            order.append(f"start:{tag}")
+            build_index(project, summarizer=RecordingSummarizer())
+            order.append(f"done:{tag}")
+
+        t1 = threading.Thread(target=worker, args=("a",))
+        t2 = threading.Thread(target=worker, args=("b",))
+        t1.start(); t2.start()
+        t1.join(timeout=30); t2.join(timeout=30)
+        assert not t1.is_alive() and not t2.is_alive()
+        # Both finished and the map is intact / parseable.
+        idx = code_index_render.load_for_display(project)
+        assert idx is not None and idx.files
+        assert order.count("done:a") == 1 and order.count("done:b") == 1
+
+    def test_build_proceeds_unlocked_when_fcntl_unavailable(
+        self, project: Path, monkeypatch
+    ):
+        # When fcntl is unavailable the build still runs (best-effort), just
+        # without the advisory lock.
+        from se3.engine import code_index as ci
+
+        monkeypatch.setattr(ci, "_HAVE_FCNTL", False)
+        idx = build_index(project, summarizer=RecordingSummarizer())
+        assert idx.files
+        assert ci.md_path(project).exists()
+
+    def test_lock_path_lives_next_to_cache(self, project: Path):
+        lp = code_index.lock_path(project)
+        assert lp.name == "code-index.json.lock"
+        assert lp.parent == code_index.cache_path(project).parent

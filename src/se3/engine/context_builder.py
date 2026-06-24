@@ -458,11 +458,48 @@ def get_code_index_injection(project_root: Path) -> str:
     if index is None or not index.files:
         return header + (
             "_(The code-index has not been built yet. Run "
-            "`se3 code-index rebuild` to generate `se3/code-index.md`, or use "
-            "`se3 code-index show <path>` which builds it lazily.)_\n"
+            "`se3 code-index rebuild` to generate `se3/code-index.md`; the "
+            "display commands `se3 code-index index <path>` / "
+            "`se3 code-index show <path>` read that map and report it is not "
+            "built until you do.)_\n"
         )
 
     return header + render_top_map(index).rstrip() + "\n"
+
+
+def ensure_code_index_fresh(project_root: Path) -> None:
+    """Trigger the lazy-incremental code-index rebuild so a consuming flow step
+    sees a fresh map, mirroring ``spec_index``'s ``load_or_build`` invalidation.
+
+    A flow step that injects the code-index (analyze / plan / implement / …)
+    calls this immediately before :func:`get_code_index_injection`, so the
+    authoritative ``se3/code-index.md`` is re-enumerated and only the symbols
+    whose content fingerprint changed are re-summarised (unchanged symbols reuse
+    their md summary, preserving human corrections). Without this, source files
+    edited since the last build — e.g. by a prior flow's commits — would leave a
+    stale map injected into every step until a human ran ``se3 code-index
+    rebuild`` manually.
+
+    Gated on the md already existing: the **initial** build is owned by
+    ``se3 migrate`` / the explicit ``se3 code-index rebuild`` command (the
+    injection itself surfaces a build note when no map exists), so a project that
+    has never built the index does not pay a full LLM build mid-flow. Once a map
+    exists, every consuming step keeps it fresh incrementally.
+
+    Best-effort: any failure is logged and swallowed so prompt construction (and
+    therefore the flow step) never breaks on a flaky rebuild.
+    """
+    try:
+        from . import code_index
+
+        root = Path(project_root)
+        if not code_index.md_path(root).exists():
+            # No built map yet — leave the initial build to migrate / the
+            # explicit rebuild command; there is nothing to keep fresh.
+            return
+        code_index.load_or_build(root)
+    except Exception as exc:  # noqa: BLE001 — never break prompt construction
+        logger.warning("code_index: lazy freshness refresh failed: %s", exc)
 
 
 # Sync-engine pseudo-steps that run read-only sub-agents. These are NOT
@@ -599,8 +636,11 @@ def get_spec_write_protection_injection(step_type: str) -> str:
     ``se3/specs/`` while explicitly leaving it free to change existing code
     behavior. Writing spec files is the dedicated responsibility of
     ``update_spec`` / ``se3 sync``; a step that changes behavior or believes a
-    spec needs updating notes that in its summary and lets the
-    plan ``spec_changes`` → ``verify_spec`` → ``update_spec`` channel handle it.
+    project convention/architecture shift should be recorded notes that in its
+    summary, and the durable records of the charter refactor capture it — the
+    charter (``se3/charter.md``) and colocated why-comments, kept current by
+    their own mechanisms (the ``charter_freshness`` step and the implement
+    step's why-comment convention) — not this step writing a spec file.
 
     Returns an empty string for steps that are not spec-write-protected.
     """
@@ -620,11 +660,14 @@ def get_spec_write_protection_injection(step_type: str) -> str:
         "any file under `se3/specs/`\n"
         "- Do NOT use Bash to write spec files either (e.g., `>`/`>>` redirects, "
         "`sed -i`, `tee`, `cp`/`mv` into `se3/specs/`)\n\n"
-        "If your change alters existing behavior or you think a spec needs "
-        "updating, do NOT edit the spec yourself — just note it in your summary. "
-        "The plan's `spec_changes` declaration, the `verify_spec` step, and the "
-        "`update_spec` step are the channel that records such changes into the "
-        "specs afterward."
+        "If your change alters existing behavior or you believe a project "
+        "convention should be recorded, do NOT edit any spec file yourself — "
+        "just note it in your summary. Durable records live in the charter "
+        "(`se3/charter.md`, high-level conventions/architecture) and in "
+        "colocated why-comments (code-level intent); they are kept current by "
+        "their own dedicated mechanisms (the `charter_freshness` step and the "
+        "implement step's why-comment convention), not by writing a spec file "
+        "in this step."
     )
 
 

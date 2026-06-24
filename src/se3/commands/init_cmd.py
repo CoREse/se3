@@ -8,6 +8,8 @@ from typing import Optional
 
 import typer
 
+from ..engine import charter as charter_mod
+
 # Note: This module exports the init function directly to be registered by cli.py
 # Not using app.command() here because cli.py registers it directly
 
@@ -343,27 +345,29 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
     return "appended", f"appended {LOCAL_CONFIG_PATTERN} to existing .gitignore"
 
 
-def _get_base_spec_template(project_name: str) -> str:
-    """Generate base spec content from the ``base_spec.md`` template.
+def _get_charter_template(project_name: str) -> str:
+    """Generate the project charter content from the ``charter.md`` template.
 
-    Reads ``src/se3/templates/base_spec.md`` as the single source of truth
-    (replacing the previously-hardcoded f-string, which had drifted out of
-    sync and never mentioned the ``se3/version-rules.md`` custom-rules
-    mechanism). The fill-in placeholders are seeded with the same
-    please-fill-this-in prompts the old hardcoded template used, so a fresh
-    project still gets a guided skeleton — while the Version Management
-    section now authoritatively documents ``se3/version-rules.md``.
+    The charter (``se3/charter.md``) is the new-knowledge-system replacement
+    for the retired base spec: it is injected — in full — into every `se3 run`
+    step and doubles as the conventions channel for sandboxed LLM
+    sub-processes. ``se3 init`` scaffolds it (rather than the retired
+    ``se3/specs/base/spec.md``) so a fresh, non-migrated project bootstraps the
+    code-index + charter + why-comment triad with a committable charter from
+    the start.
+
+    The fill-in placeholders are seeded with the same please-fill-this-in
+    prompts the old base-spec skeleton used, so a fresh project still gets a
+    guided skeleton; the rendering is delegated to
+    ``charter.render_charter_template`` so it stays consistent with the
+    `se3 migrate` charter assembly and the packaged template stays the single
+    source of truth.
     """
-    return _render_template(
-        "base_spec.md",
+    return charter_mod.render_charter_template(
         project_name=project_name,
         project_description="（请填写项目简述）",
         languages_and_frameworks="（请填写语言和框架）",
-        directory_structure=(
-            "`src/` — 源码目录\n"
-            "- `tests/` — 测试目录\n"
-            "- `se3/specs/` — SE3 规范目录"
-        ),
+        top_level_architecture="（请填写顶层架构：主要子系统及其边界）",
         coding_conventions="（请填写代码规范）",
         key_constraints="（请填写关键约束）",
         workflow_conventions=(
@@ -406,14 +410,12 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     created = []
     skipped = []
 
-    # Create se3 directory structure
+    # Create se3 runtime directory. The retired spec corpus (se3/specs/) is no
+    # longer scaffolded — the new knowledge system stores project conventions
+    # in se3/charter.md (committable via the gitignore whitelist) and the
+    # auto-maintained se3/code-index.md.
     se3_dir = root / "se3"
-    specs_dir = se3_dir / "specs"
-    base_dir = specs_dir / "base"
-
     se3_dir.mkdir(exist_ok=True)
-    specs_dir.mkdir(exist_ok=True)
-    base_dir.mkdir(exist_ok=True)
 
     # Create se3.yaml (never touch se3.local.yaml — it is user-owned and
     # takes precedence at load time).
@@ -435,13 +437,18 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     # at this path would not shadow, so we shouldn't warn about it.
     local_overrides_yaml = local_yaml.is_file()
 
-    # Create base spec
-    base_spec = base_dir / "spec.md"
-    if not base_spec.exists() or force:
-        base_spec.write_text(_get_base_spec_template(project_name), encoding="utf-8")
-        created.append(str(base_spec.relative_to(root)))
+    # Create the project charter (se3/charter.md). This is the single
+    # project-convention artifact the new knowledge system scaffolds; it is
+    # whitelisted by the generated .gitignore (!/se3/charter.md) so it is
+    # committable, and get_charter_injection injects it in full into every
+    # step. Writing a base spec into the now-gitignored se3/specs/ tree would
+    # leave a fresh project with no committable, no injectable conventions.
+    charter_file = charter_mod.charter_path(root)
+    if not charter_file.exists() or force:
+        charter_file.write_text(_get_charter_template(project_name), encoding="utf-8")
+        created.append(str(charter_file.relative_to(root)))
     else:
-        skipped.append(f"{base_spec.relative_to(root)} already exists (use --force to overwrite)")
+        skipped.append(f"{charter_file.relative_to(root)} already exists (use --force to overwrite)")
 
     # Create initial VERSIONS.md from template (skip if it already exists,
     # unless --force). Tracked via dedicated flags rather than the
@@ -511,8 +518,8 @@ def init_cmd(
 
     Creates the standard SE3 directory structure:
     - se3.yaml - Project configuration
-    - se3/specs/ - Specification directory
-    - se3/specs/base/spec.md - Base project specification
+    - se3/ - SE3 runtime directory
+    - se3/charter.md - Project charter (injected into every flow step)
     """
     root = Path(project_root).resolve()
 
@@ -564,5 +571,5 @@ def init_cmd(
     typer.echo(f"\n🎉 SE3 project initialized: {name}")
     typer.echo(f"\nNext steps:")
     typer.echo(f"  1. Edit se3.yaml to configure your project")
-    typer.echo(f"  2. Edit se3/specs/base/spec.md to define project conventions")
+    typer.echo(f"  2. Edit se3/charter.md to define project conventions")
     typer.echo(f"  3. Run 'se3 run \"your task\"' to start developing")

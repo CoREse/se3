@@ -72,30 +72,33 @@ so it is committed with the project.
 
 ### Requirement: Base Specification
 
-The system SHALL require a base specification at `se3/specs/base/spec.md` in every SE3 project.
+**RENAMED to the charter by the code-first knowledge-system refactor.** The former `base` spec has been shrunk and renamed to the **charter**, materialized at `se3/charter.md` (top-level, outside `specs/`) with its template source at `src/se3/templates/charter.md` (renamed from `src/se3/templates/base_spec.md`). The system SHALL require a charter at `se3/charter.md` in every SE3 project. The legacy path `se3/specs/base/spec.md` is retained below only as the historical contract; new projects scaffold the charter directly.
 
-**Base spec purpose:** The base spec is a documented snapshot of the project's current code reality — its identity, structure, conventions, and constraints — not a forward-looking design contract. It exists so humans and LLMs share a fast, accurate read of *what the project is today*. Future intent and unimplemented commitments belong in issues, not in the base spec. Concretely, the base spec captures:
-- Project identity (name, description, languages) — as currently configured
-- Directory structure conventions — as currently laid out on disk
-- Coding conventions — as currently practiced
-- Key constraints — as currently enforced
-- Workflow conventions — as currently used
-- Version management rules — as currently applied
+**Charter purpose and admission standard (altitude gate):** The charter retains the base spec's role of being injected **unconditionally and in full into every step of every flow**, and additionally serves as the conventions channel for sandbox subprocesses (which cannot read `CLAUDE.md`). Its size is therefore a fixed cost paid on every LLM call, so its content is governed by an altitude gate: it MAY carry ONLY content that is *both* (a) un-expressible by the code itself and (b) needed in full by the whole project. Concretely:
+- Project identity / positioning (what the project is, its primary language / framework)
+- The top-level architecture picture (how the major subsystems fit together, including the subjective "why these modules form one subsystem" layering that the mechanical code-index deliberately omits)
+- Project-wide cross-cutting mandatory conventions
 
-**Base spec auto-loading:**
-- The base spec SHALL be automatically loaded in all `se3 run` flows
-- It provides context for the discovery and analyze steps
-- It helps the AI understand project conventions without manual prompting
+The charter MUST NOT carry per-module locators (those are now the `se3/code-index.md` structure map's job) or any low-altitude module detail. Because charter content is decoupled from project size (it grows with architectural complexity, not with LOC), full-load cost stays bounded for large projects. The byte threshold is a **monitoring light, not a hard wall**: exceeding it triggers a review for low-altitude content leakage rather than building an index over the charter. Cross-file, no-single-owner architecture decisions live in the charter, human-maintained, accepting that they cannot be auto-synced; preserved historical decisions or future intent do NOT go in the charter — they continue through issues (`se3 issue`).
 
-#### Scenario: Base spec discovered
-- **GIVEN** a project with `se3/specs/base/spec.md`
-- **WHEN** `se3 run` executes discovery or analyze steps
-- **THEN** the base spec content is automatically loaded into context
+**Charter auto-loading:**
+- The charter SHALL be automatically and fully loaded into every `se3 run` step
+- It provides project-wide context for discovery, analyze, and all downstream steps, and the conventions channel for sandbox subprocesses
+- When the charter file is absent, injection degrades to an empty string rather than failing
 
-#### Scenario: Base spec missing
-- **GIVEN** a project without `se3/specs/base/spec.md`
+#### Scenario: Charter discovered and injected in full
+- **GIVEN** a project with `se3/charter.md`
+- **WHEN** `se3 run` executes any step
+- **THEN** the charter content is automatically loaded into context in full
+
+#### Scenario: Charter missing
+- **GIVEN** a project without `se3/charter.md`
 - **WHEN** `se3 init` is run
-- **THEN** a base spec template is created automatically
+- **THEN** a charter template (from `src/se3/templates/charter.md`) is created automatically
+
+#### Scenario: Gitignore whitelists the committed charter and code-index
+- **WHEN** `se3 init` writes the project `.gitignore`
+- **THEN** the `.gitignore` whitelists the committed artifacts via `!/se3/charter.md` and `!/se3/code-index.md` (under the `/se3/*` blanket-ignore + `!`-whitelist scheme), while the volatile `se3/cache/code-index.json` stays ignored
 
 ### Requirement: Configuration System
 

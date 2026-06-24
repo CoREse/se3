@@ -140,9 +140,9 @@ se3 run "Add JWT authentication"
 se3 run --resume
 
 # 5. 用结构地图导航代码库
-se3 code-index                       # 根视图：每个目录 / 文件一行
-se3 code-index src/se3/engine         # 钻进一个目录
-se3 code-index show src/se3/cli.py    # 某个文件的完整函数/方法详情
+se3 code-index                          # 根视图：每个目录 / 文件一行
+se3 code-index index src/se3/engine     # 钻进一个目录
+se3 code-index show src/se3/cli.py      # 某个文件的完整函数/方法详情
 ```
 
 ### 三种运行形态
@@ -181,11 +181,11 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 |------|------|
 | `se3 run [TASK]` | 统一入口。驱动 flow engine 状态机（analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize）。支持 `--resume` / `--flow-id` / `--loop` / `--max-iterations` / `--no-worktree` / `--merge` / `--list-loops` / `--discover` / `--from-issue` / `--change` / `--type` / `--preset` / `--output-format`。 |
 | `se3 init` | 初始化新项目：写 `se3.yaml`、`se3/charter.md`、`.gitignore`，按需 `git init`。参数：`--project-root` / `--name` / `--force`。 |
-| `se3 code-index [PATH]` | 从 `se3/code-index.md` 渲染结构地图。无参 → 根视图（每个目录 / 文件一行）；带 `PATH` 则钻取：目录列出其文件、文件列出其函数/方法。按需懒增量再生。 |
+| `se3 code-index` / `se3 code-index index [PATH]` | 从 `se3/code-index.md` 渲染结构地图。无参 → 根视图（每个目录 / 文件一行）；`index PATH` 则钻取：目录列出其文件、文件列出其函数/方法。读取已提交的地图（未构建时提示先 `rebuild`）；flow step 会按需懒增量保持其新鲜。 |
 | `se3 code-index show <path>` | 从结构地图打印某个文件的完整函数/方法详情（及任何降级 chunk）。 |
 | `se3 code-index rebuild [--force]` | 重建 code-index。默认增量（只对指纹变更的 symbol 重跑摘要）；`--force` 全量重跑。 |
 | `se3 code-index inspect` | 展示 code-index 的构建 / 缓存诊断信息。 |
-| `se3 migrate <id>` | 运行一个已注册的版本/格式迁移。它是可复用的注册式骨架；首个迁移器把旧的 `se3/specs/` 项目一次性迁到 code-index + charter + why-注释 体系，落成单个可 review、可 `git revert` 的变更。 |
+| `se3 migrate run <id>` / `se3 migrate list` | 运行一个已注册的版本/格式迁移（`run <id>`），或列出可用迁移器（`list`）。它是可复用的注册式骨架；首个迁移器（`spec-to-new-system`）把旧的 `se3/specs/` 项目一次性迁到 code-index + charter + why-注释 体系，落成单个可 review、可 `git revert` 的变更。 |
 | `se3 guardrails <spec-file>` | 对文件跑 SE3 guardrails（检测被删除的行 / 被弱化的语言）；`--sizes` 跑项目级的尺寸检查。供 `se3 merge` 共用。参数：`--original` / `-o <baseline-file>`。 |
 | `se3 merge <branch> [<branch> ...]` | 按序把多个分支合并到当前 HEAD，冲突由 LLM 驱动解决。参数：`--strategy fast\|safe\|strict` / `--delete-merged` / `--no-delete-merged`。`se3/` 下的运行时数据按分层策略同步。 |
 | `se3 merge-respond <call-file>` | 处理 `se3 merge` 在冲突或 guardrail 违规升级为人工 MCP call 时写出的响应文件。 |
@@ -255,8 +255,8 @@ code-index *就是*进入这个代码库的索引。从根视图开始往下钻�
 只有在需要某个符号背后的实现细节时才打开源码文件：
 
 ```bash
-se3 code-index                        # 每个目录 / 文件一行
-se3 code-index src/se3/engine          # engine 包下的文件
+se3 code-index                           # 每个目录 / 文件一行
+se3 code-index index src/se3/engine      # engine 包下的文件
 se3 code-index show src/se3/engine/code_index.py   # 该文件的完整符号树
 ```
 

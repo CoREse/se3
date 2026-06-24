@@ -274,6 +274,28 @@ def test_missing_colocation_target_is_skipped(project: Path):
     assert statuses["Colocate why-comments"] == "OK"
     # the real one applied, the ghost noted as skipped
     assert any("does_not_exist" in n for n in report.notes)
+    # A skipped colocation means that code-bound intent never landed in source,
+    # so the spec corpus must be KEPT (salvage incomplete), not deleted.
+    assert (project / "se3" / "specs").exists()
+    assert statuses["Delete se3/specs"] == "SKIP"
+
+
+def test_all_colocations_skipped_keeps_specs(project: Path):
+    """If EVERY colocation is skipped (all targets unresolvable), the spec
+    corpus must survive — the code-bound why/intent was never salvaged."""
+    salvager = _make_salvager(
+        "# C\n\nx\n",
+        colocations=[
+            ColocatedWhy(file_path="src/ghost_a.py", why="lost a"),
+            ColocatedWhy(file_path="src/ghost_b.py", why="lost b"),
+        ],
+    )
+    report = run_spec_to_new_system(
+        project, salvager=salvager, summarizer=FakeSummarizer()
+    )
+    statuses = {r.name: r.status for r in report.results}
+    assert statuses["Delete se3/specs"] == "SKIP"
+    assert (project / "se3" / "specs").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -2157,3 +2157,31 @@ plaintext default.
   both are present
 - **AND** the key is not read from `se3.yaml` and never appears in the
   daemon status file or log
+
+### Requirement: Code Index Configuration
+
+The system SHALL support a `code_index` section in `se3.yaml` (and `~/.se3/config.yaml`) that exposes the code-index granularity and content-admission knobs, turning what was implicit in the old spec mirror into explicitly controllable settings. All keys MUST have sensible defaults so a project with no `code_index` section behaves identically to the documented defaults.
+
+The section SHALL expose the four degrade thresholds and the explicit-exclude list:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `degrade_trigger_lines` | `2000` | A text, structureless file is degraded to line/byte chunking only when its size exceeds this many lines (whichever of the line/byte trigger is reached first). |
+| `degrade_trigger_bytes` | `262144` (256 KiB) | The byte counterpart of the degrade trigger. |
+| `chunk_lines` | `200` | When degraded, each chunk spans at most this many lines (whichever of the line/byte chunk size is reached first). |
+| `chunk_bytes` | `16384` (16 KiB) | The byte counterpart of the chunk size. |
+| `exclude` | `[]` | An explicit-exclude list of project-specific paths/globs that the gitignore-respecting enumeration cannot catch (tracked-but-unwanted vendored blobs, huge generated files), as a secondary guardrail beyond binary detection and the size cap. |
+
+**Degrade is a last-resort fallback, not the base granularity.** A file degrades to line/byte chunking ONLY when all three conditions hold simultaneously: (1) content sniffs as text (non-binary); (2) the structural extractor yields zero natural units (AST has no symbol, markdown no heading, yaml/json no top-level key); and (3) the size exceeds the degrade trigger (`degrade_trigger_lines` or `degrade_trigger_bytes`, first reached). A non-binary, structureless, but under-threshold small file stops at a single file-level line and is NOT chunked. Each degraded chunk carries one one-sentence summary and is explicitly marked `[degraded:chunk]` to signal that its boundaries are semantically meaningless. Fixed line/byte splitting is explicitly rejected as the base granularity because its boundaries carry no meaning; AST/structural boundaries are preferred precisely because they are naturally meaningful.
+
+#### Scenario: Defaults apply when the section is absent
+- **WHEN** `se3.yaml` has no `code_index` section
+- **THEN** the code-index uses the documented defaults (2000-line / 256 KiB degrade trigger, 200-line / 16 KiB chunk size, empty explicit-exclude list)
+
+#### Scenario: Thresholds are operator-tunable knobs
+- **WHEN** the operator sets `code_index.degrade_trigger_lines`, `degrade_trigger_bytes`, `chunk_lines`, or `chunk_bytes` in `se3.yaml`
+- **THEN** the code-index honors the overridden thresholds when deciding whether to degrade a file and how large each degraded chunk is
+
+#### Scenario: Explicit-exclude list drops project-specific noise
+- **WHEN** a tracked file matches an entry in `code_index.exclude`
+- **THEN** the enumeration skips it (or limits it to a file-level line), as a secondary guardrail beyond binary detection and the size cap

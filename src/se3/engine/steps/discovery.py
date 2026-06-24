@@ -654,6 +654,7 @@ def _run_discovery_round(
         get_issue_discovery_injection,
         get_charter_injection,
         get_code_index_injection,
+        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     lang_instruction = get_step_language_instruction("discovery", project_root)
@@ -668,6 +669,9 @@ def _run_discovery_round(
     # Inject the project charter (full text) + code-index top map so discovery
     # shares the same project-level conventions and structural orientation map.
     prompt += get_charter_injection(project_root)
+    # Lazy-incremental refresh so the injected map stays fresh without a manual
+    # `se3 code-index rebuild`.
+    ensure_code_index_fresh(project_root)
     prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable

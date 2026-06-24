@@ -163,6 +163,11 @@ class FileSize:
     lines: int
     bytes: int
 
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "FileSize":
+        """Measure already-read content without re-reading the file."""
+        return cls(lines=data.count(b"\n") + (1 if data else 0), bytes=len(data))
+
 
 def measure_file(path: Path) -> Optional[FileSize]:
     """Return the (line, byte) size of *path*, or None if it cannot be read."""
@@ -170,7 +175,7 @@ def measure_file(path: Path) -> Optional[FileSize]:
         data = path.read_bytes()
     except OSError:
         return None
-    return FileSize(lines=data.count(b"\n") + (1 if data else 0), bytes=len(data))
+    return FileSize.from_bytes(data)
 
 
 # ---------------------------------------------------------------------------

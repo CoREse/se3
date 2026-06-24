@@ -217,6 +217,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_issue_discovery_injection,
         get_charter_injection,
         get_code_index_injection,
+        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
@@ -225,6 +226,9 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt += injection
     # Charter (full text) + code-index top map replace the retired spec-name list.
     prompt += get_charter_injection(project_root)
+    # Lazy-incremental refresh so the injected map stays fresh without a manual
+    # `se3 code-index rebuild`.
+    ensure_code_index_fresh(project_root)
     prompt += get_code_index_injection(project_root)
     runtime_env = get_runtime_environment_injection("plan_tasks", project_root)
     if runtime_env:

@@ -417,6 +417,8 @@ se3 guardrails <spec-file> [--original <original-file>]
 
 ### Requirement: `se3 spec` Command
 
+**DEPRECATED — superseded by `se3 code-index` (see the `se3 code-index` Command requirement).** The code-first knowledge-system refactor retired the spec mirror, so there is no longer a `se3/specs/` corpus for `se3 spec index` / `se3 spec show` to navigate. The navigation/locator role those subcommands served is now carried by `se3 code-index`, which indexes the **code itself** (deterministic file-tree + AST symbol enumeration with one-sentence LLM summaries) rather than a spec mirror. The historical contract below is retained for reference.
+
 The `se3 spec` command SHALL expose the item-level spec index to the LLM (and to humans) as a pair of read-only subcommands — `se3 spec index` and `se3 spec show` — that render the program-derived navigation layer as **size-bounded** views over the authoritative `spec.md` storage. The index is a navigation layer (programmatically derived, rebuildable at any time, holding no authoritative content); the spec files are the storage layer (the authoritative content, unified as a single `spec.md` per spec). These subcommands are the unified LLM-facing surface for spec information retrieval; their stdout (plus the program-injected root view produced by the same renderer) is the only spec-index channel the LLM consumes — the `se3/cache/spec-index.json` cache is an internal format and is NOT a direct LLM read target.
 
 **Interface:**
@@ -646,6 +648,8 @@ history flows pick up the corrected title with no data migration.
 - **AND** when there are no archived flows the output is the JSON serialization of an empty list (no "No archived flows found." message is printed under `--json`)
 
 ### Requirement: `se3 sync` Command
+
+**DEPRECATED — removed by the code-first knowledge-system refactor.** With the spec mirror retired, there is no `se3/specs/` corpus to converge code→spec, so the entire `se3 sync` command family and its supporting `sync_*` modules (analyzer/checkpoint/discovery/engine/governance/history/interaction/loop/state) are removed. The only knowledge artifact still auto-maintained from code is the `se3/code-index.md` structure map, rebuilt lazily/incrementally by `se3 code-index` (no convergence loop, no governance). The gitignore-respecting file enumeration that `se3 sync` relied on (`git ls-files` + `git ls-files --others --exclude-standard`) was relocated into `src/se3/engine/file_enum.py` so it survives sync's removal and now backs code-index enumeration. The historical contract below is retained for reference.
 
 The `se3 sync` command SHALL refresh `se3/specs/` so that each spec file reflects the **current state of project code**. Sync is one-directional (code → spec): when a spec drifts from the code, the spec is updated. The command iterates rounds until a fixed point is reached (no spec changes), or a hard cap is hit, or oscillation is detected.
 
@@ -1848,6 +1852,66 @@ on a core-only install.
 - **AND** the plaintext token is never written to any log
 - **AND** running the command again mints a fresh token without invalidating the single-admin-subject model
 - **AND** the subcommand succeeds on a core-only install because it is intercepted before any FastAPI / uvicorn import
+
+### Requirement: `se3 code-index` Command
+
+The `se3 code-index` command SHALL expose the project's **code structure map** — a hierarchical orientation map of the code itself — as the navigation surface that replaces the retired `se3 spec` index. The map answers locator questions ("which modules / symbols exist, and where") without descending into implementation detail (that remains the source code's job); it optimizes for structural coverage over per-symbol summary depth (coverage > depth).
+
+The map is materialized as two physical files in an **authoritative-artifact + volatile-cache** relationship (NOT source + annotation):
+
+- `se3/code-index.md` — the **authoritative, version-controlled** product. It IS the map: the code's intrinsic hierarchy (directory/package → file/module → class → function/method) with a one-sentence summary at each level. It is what `se3 code-index` displays (drilled by level), what a human reviews, and where a human's correction of a mis-summarized entry durably lands. Display reads ONLY this file.
+- `se3/cache/code-index.json` — the **volatile, gitignored** memo cache. It stores a per-symbol content fingerprint (mtime + size + sha256) plus that fingerprint's summary; its sole purpose is to decide, on rebuild, which symbols' fingerprints changed so only those re-run the LLM summary while unchanged symbols reuse the summary already in the `.md` (preserving human corrections). It is a pure performance optimization and participates in NO guarding or validation.
+
+**Direction (correcting the common misreading):** structure comes from the code itself (deterministic walk + AST enumeration), not from the json; summaries are LLM-generated and rendered into the `.md`; the json only makes regeneration incremental. The `.md` is the authoritative source (committed, correctable), the json is a rebuildable accelerator, and structure belongs to the code. There is no "read json + md to synthesize the index"; display touches only the `.md`, and the json is touched only on (re)build.
+
+**Primary consumer is the LLM:** `se3/code-index.md`'s top-level map is injected into every step's context as the agent's project-wide structural orientation; human review is a derived property of its being plain text in git (so summary errors are catchable and correctable in a diff). The command SHALL provide hierarchical drill-down display (top level lists each folder/file's role → drill into a level → into a file → into the file's function-level entries), first-build (invoked by `se3 migrate`), forced full rebuild, and show/inspect. Routine regeneration follows the lazy-incremental `load_or_build` pattern (the same mtime + size + sha256 incremental mechanism reused from the former spec index, lowered to the symbol level), triggered by an invalidation check when consumed by `analyze` / `plan` / etc. Regeneration re-runs only the enumeration-delta plus changed-fingerprint symbols; the deterministic enumeration step is never skipped, so the map is complete and current for the whole current symbol set after every build.
+
+The interface SHALL include:
+```bash
+se3 code-index                       # render the top-level map (folders/files, one-line each)
+se3 code-index show <path>           # drill into one path down to its function-level entries
+se3 code-index rebuild               # force a full rebuild (ignore the cache)
+se3 code-index inspect               # diagnostics over the index/cache
+```
+
+#### Scenario: Top-level map lists each folder and file with a one-line summary
+- **WHEN** the user (or an LLM step) runs `se3 code-index` with no argument
+- **THEN** the output renders the top level of `se3/code-index.md` — each folder/file with a one-sentence summary of its role
+- **AND** display reads only `se3/code-index.md`, never `se3/cache/code-index.json`
+
+#### Scenario: Drill-down reaches function/method level on demand
+- **WHEN** the user runs `se3 code-index show <path>`
+- **THEN** the output drills into that path down to its natural-structure leaves (function/method for code files), so deep detail is fetched on demand rather than injected wholesale
+
+#### Scenario: Incremental rebuild re-summarizes only changed symbols
+- **GIVEN** a prior `se3/cache/code-index.json` recording each symbol's fingerprint and summary
+- **WHEN** the index is rebuilt and only some symbols' fingerprints (mtime + size + sha256) changed
+- **THEN** only the changed symbols re-run the LLM summary, unchanged symbols reuse their existing `.md` summary (preserving any human correction), and the enumeration step still runs in full so newly added symbols are included and deleted ones pruned
+
+#### Scenario: Forced full rebuild ignores the cache
+- **WHEN** the user runs `se3 code-index rebuild`
+- **THEN** every symbol is re-summarized regardless of fingerprint, and both `se3/code-index.md` and `se3/cache/code-index.json` are regenerated
+
+### Requirement: `se3 migrate` Command
+
+The `se3 migrate` command SHALL provide a first-class, **registry-based** version/format migration channel for an SE3 project, structured as a reusable skeleton so later schema/format upgrades register and reuse the same entry point. Each migrator is a named, ordered transformation; `se3 migrate` selects and runs the applicable migrator(s) and lands the result as a single reviewable, `git revert`-able change.
+
+The first registered migrator (spec → code-first knowledge system) SHALL execute in this fixed order, landing one `git diff`-able change:
+1. **Assemble the charter** — write `se3/charter.md` exactly once (no overwrite window), composed from two inputs in a single pass: the former `se3/specs/base/spec.md` shrunk and altitude-gate filtered (dropping per-module locators and other low-altitude content), plus the cross-file / no-single-owner why/intent salvaged from scanning the non-`base` specs.
+2. **Colocate why-comments** — relocate the non-`base` specs' why/intent that binds to a specific code location into colocated why-comments in the corresponding source files (independent of the charter write; targets are code files).
+3. **First-build the code-index** — run one symbol extraction + LLM summary pass over the whole code tree (enumerated via the gitignore-respecting `file_enum`), producing `se3/code-index.md` and `se3/cache/code-index.json`.
+4. **Delete `se3/specs/`** — only after the charter assembly and the why-comment colocation are confirmed complete (`base` is deleted too, since it has been transformed into the charter).
+5. **Rewrite `.gitignore`** — add the whitelist entries `!/se3/code-index.md` and `!/se3/charter.md`, and remove `!/se3/specs/`.
+6. **One change** — the whole migration lands as a single `git diff` / `git revert`-able commit, so reversibility is carried by git and the salvage output stays reviewable.
+
+#### Scenario: First migrator runs the spec→code-first steps in order, landing one change
+- **WHEN** the operator runs `se3 migrate` on a project still using the spec mirror
+- **THEN** the migrator assembles `se3/charter.md` once, colocates why-comments, first-builds the code-index, deletes `se3/specs/` only after the charter and why-comments are confirmed, and rewrites `.gitignore`
+- **AND** the entire migration is a single reviewable, `git revert`-able change
+
+#### Scenario: Registry is reusable for later migrations
+- **WHEN** a future schema/format upgrade needs a migration
+- **THEN** it is registered as a new named migrator under the same `se3 migrate` entry point rather than a one-off script
 
 ## Error Codes
 

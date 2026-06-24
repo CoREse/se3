@@ -1,4 +1,12 @@
-"""Tests for plan step spec_changes output (G1)."""
+"""Tests for the plan step prompt and outputs after the spec machinery retired.
+
+The plan step no longer routes work through the retired spec governance steps
+(``verify_spec`` / ``update_spec``): it plans against the task, the charter, and
+the code-index. These tests pin that the spec-change declaration section and the
+spec-file-write-protection section are gone from the prompt / JSON schemas, that
+the version-file guardrail is still injected, and that ``spec_changes`` degrades
+to an empty list for any defensive downstream consumer.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +17,6 @@ from unittest.mock import Mock, patch
 
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
 from se3.engine.steps.plan import (
-    SPEC_CHANGES_SECTION,
-    SPEC_WRITE_PROTECTION_SECTION,
     FULL_JSON_SCHEMA,
     MEDIUM_JSON_SCHEMA,
     SHALLOW_JSON_SCHEMA,
@@ -21,32 +27,25 @@ from se3.engine.steps.plan import (
 )
 
 
-class TestSpecChangesSection:
-    """Test SPEC_CHANGES_SECTION constant."""
+class TestSpecMachineryRetired:
+    """The retired spec-governance constants are gone from the plan module."""
 
-    def test_section_exists(self):
-        assert isinstance(SPEC_CHANGES_SECTION, str)
-        assert len(SPEC_CHANGES_SECTION) > 0
+    def test_spec_changes_section_constant_removed(self):
+        import se3.engine.steps.plan as plan_mod
 
-    def test_section_describes_structure(self):
-        assert "spec_name" in SPEC_CHANGES_SECTION
-        assert "change_type" in SPEC_CHANGES_SECTION
-        assert "target" in SPEC_CHANGES_SECTION
-        assert "description" in SPEC_CHANGES_SECTION
-        assert "rationale" in SPEC_CHANGES_SECTION
+        assert not hasattr(plan_mod, "SPEC_CHANGES_SECTION")
 
-    def test_section_describes_change_types(self):
-        assert "add_requirement" in SPEC_CHANGES_SECTION
-        assert "modify_requirement" in SPEC_CHANGES_SECTION
-        assert "add_scenario" in SPEC_CHANGES_SECTION
-        assert "deprecate_requirement" in SPEC_CHANGES_SECTION
+    def test_spec_write_protection_section_constant_removed(self):
+        import se3.engine.steps.plan as plan_mod
+
+        assert not hasattr(plan_mod, "SPEC_WRITE_PROTECTION_SECTION")
 
 
 class TestJsonSchemas:
-    """Test spec_changes in JSON schemas."""
+    """No depth's JSON schema solicits spec_changes anymore."""
 
-    def test_full_schema_includes_spec_changes(self):
-        assert "spec_changes" in FULL_JSON_SCHEMA
+    def test_full_schema_excludes_spec_changes(self):
+        assert "spec_changes" not in FULL_JSON_SCHEMA
 
     def test_medium_schema_excludes_spec_changes(self):
         assert "spec_changes" not in MEDIUM_JSON_SCHEMA
@@ -56,48 +55,52 @@ class TestJsonSchemas:
 
 
 class TestBuildPrompt:
-    """Test _build_prompt includes SPEC_CHANGES_SECTION only for full depth."""
+    """_build_prompt no longer carries any retired spec machinery."""
 
-    def test_full_depth_includes_spec_changes_section(self):
+    def test_full_depth_has_no_spec_machinery(self):
         prompt = _build_prompt(
             task_description="Add feature X",
             task_type="feature",
             scope="module_a",
-            spec_content="some spec",
             project_summary="summary",
             revision_section="",
             depth="full",
         )
-        assert "Spec Changes Declaration" in prompt
-        assert "spec_changes" in prompt
+        assert "Spec Changes Declaration" not in prompt
+        assert "spec_changes" not in prompt
+        assert "update_spec" not in prompt
+        assert "verify_spec" not in prompt
+        # The header no longer frames a Relevant Specifications spec dump.
+        assert "Relevant Specifications" not in prompt
 
-    def test_medium_depth_excludes_spec_changes_section(self):
+    def test_medium_depth_has_no_spec_machinery(self):
         prompt = _build_prompt(
             task_description="Fix bug Y",
             task_type="bugfix",
             scope="module_b",
-            spec_content="some spec",
             project_summary="summary",
             revision_section="",
             depth="medium",
         )
         assert "Spec Changes Declaration" not in prompt
+        assert "spec_changes" not in prompt
 
-    def test_shallow_depth_excludes_spec_changes_section(self):
+    def test_shallow_depth_has_no_spec_machinery(self):
         prompt = _build_prompt(
             task_description="Directive Z",
             task_type="directive",
             scope="module_c",
-            spec_content="some spec",
             project_summary="summary",
             revision_section="",
             depth="shallow",
         )
         assert "Spec Changes Declaration" not in prompt
+        assert "spec_changes" not in prompt
 
 
 class TestPlanHandlerSpecChanges:
-    """Test plan_handler extracts and stores spec_changes."""
+    """plan_handler completes and exposes an empty spec_changes for defensive
+    downstream consumers."""
 
     @pytest.fixture
     def flow(self, tmp_path):
@@ -120,13 +123,13 @@ class TestPlanHandlerSpecChanges:
                 "task_description": "Add new feature",
                 "task_type": "feature",
                 "scope": "engine",
-                "spec_content": {"flow-engine": "spec content"},
                 "project_summary": "A project",
             },
         )
 
-    def _mock_llm_response(self, spec_changes=None):
-        """Build a mock LLM JSON response."""
+    def _mock_llm_response(self):
+        """Build a mock LLM JSON response (no spec_changes — the prompt no
+        longer solicits it)."""
         data = {
             "plan": {
                 "proposal": {"summary": "s", "motivation": "m", "files_to_modify": [], "files_to_create": [], "risks": []},
@@ -145,33 +148,19 @@ class TestPlanHandlerSpecChanges:
             "total_complexity": "small",
             "estimated_effort": "1h",
         }
-        if spec_changes is not None:
-            data["spec_changes"] = spec_changes
         return json.dumps(data)
 
+    @patch("se3.engine.context_builder.get_runtime_environment_injection", return_value="")
+    @patch("se3.engine.context_builder.get_code_index_injection", return_value="")
+    @patch("se3.engine.context_builder.ensure_code_index_fresh", return_value=None)
+    @patch("se3.engine.context_builder.get_charter_injection", return_value="")
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
     @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
-    def test_spec_changes_extracted_and_stored(self, _lang, _inj, flow, step):
-        changes = [
-            {"spec_name": "flow-engine", "change_type": "add_requirement", "target": "Req X", "description": "Add X", "rationale": "Need X"}
-        ]
+    def test_spec_changes_defaults_to_empty_list(self, _lang, _inj, _ch, _fresh, _ci, _env, flow, step):
+        """When the LLM omits spec_changes, the output defaults to []."""
         with patch("se3.engine.steps.plan.LLMCaller") as mock_cls:
             mock_caller = Mock()
-            mock_caller.call.return_value = self._mock_llm_response(spec_changes=changes)
-            mock_cls.return_value = mock_caller
-
-            result = plan_handler(step, flow)
-
-        assert result == StepStatus.COMPLETED
-        assert step.outputs["spec_changes"] == changes
-
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
-    def test_spec_changes_defaults_to_empty_list(self, _lang, _inj, flow, step):
-        """When LLM omits spec_changes, default to []."""
-        with patch("se3.engine.steps.plan.LLMCaller") as mock_cls:
-            mock_caller = Mock()
-            mock_caller.call.return_value = self._mock_llm_response(spec_changes=None)
+            mock_caller.call.return_value = self._mock_llm_response()
             mock_cls.return_value = mock_caller
 
             result = plan_handler(step, flow)
@@ -179,15 +168,18 @@ class TestPlanHandlerSpecChanges:
         assert result == StepStatus.COMPLETED
         assert step.outputs["spec_changes"] == []
 
+    @patch("se3.engine.context_builder.get_runtime_environment_injection", return_value="")
+    @patch("se3.engine.context_builder.get_code_index_injection", return_value="")
+    @patch("se3.engine.context_builder.ensure_code_index_fresh", return_value=None)
+    @patch("se3.engine.context_builder.get_charter_injection", return_value="")
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
     @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
-    def test_display_not_affected_by_spec_changes(self, _lang, _inj, flow, step):
-        """Display logic should not crash with spec_changes present."""
-        changes = [{"spec_name": "x", "change_type": "add_requirement", "target": "T", "description": "D", "rationale": "R"}]
+    def test_display_not_affected(self, _lang, _inj, _ch, _fresh, _ci, _env, flow, step):
+        """Display logic should not crash."""
         with patch("se3.engine.steps.plan.LLMCaller") as mock_cls, \
              patch("se3.engine.steps.plan._display_plan") as mock_display:
             mock_caller = Mock()
-            mock_caller.call.return_value = self._mock_llm_response(spec_changes=changes)
+            mock_caller.call.return_value = self._mock_llm_response()
             mock_cls.return_value = mock_caller
 
             result = plan_handler(step, flow)
@@ -197,7 +189,8 @@ class TestPlanHandlerSpecChanges:
 
 
 class TestVersionFileGuardrail:
-    """G1: prompt-layer guardrail forbidding version-file bumps as plan tasks."""
+    """The prompt-layer guardrail forbidding version-file bumps as plan tasks
+    is still injected at every depth."""
 
     def test_guardrail_constant_exists_and_lists_examples(self):
         assert isinstance(VERSION_FILE_GUARDRAIL, str)
@@ -213,7 +206,6 @@ class TestVersionFileGuardrail:
             task_description="Add feature X",
             task_type="feature",
             scope="m",
-            spec_content="s",
             project_summary="p",
             revision_section="",
             depth="full",
@@ -227,7 +219,6 @@ class TestVersionFileGuardrail:
             task_description="Fix bug Y",
             task_type="bugfix",
             scope="m",
-            spec_content="s",
             project_summary="p",
             revision_section="",
             depth="medium",
@@ -240,84 +231,9 @@ class TestVersionFileGuardrail:
             task_description="Directive Z",
             task_type="directive",
             scope="m",
-            spec_content="s",
             project_summary="p",
             revision_section="",
             depth="shallow",
         )
         assert "Do Not Bump Version Files" in prompt
         assert "pyproject.toml" in prompt
-
-
-class TestSpecWriteProtectionSection:
-    """G2: plan-specific guardrail forbidding downstream spec-file writes,
-    while preserving (and encouraging) the spec_changes declaration channel."""
-
-    def test_section_exists(self):
-        assert isinstance(SPEC_WRITE_PROTECTION_SECTION, str)
-        assert len(SPEC_WRITE_PROTECTION_SECTION) > 0
-
-    def test_section_forbids_instructing_downstream_spec_writes(self):
-        text = SPEC_WRITE_PROTECTION_SECTION
-        # Two-layer semantics: forbid spec-file writes ...
-        assert "se3/specs/" in text
-        assert "MUST NOT" in text
-        assert "implement" in text
-        # ... but preserve the spec_changes declaration channel.
-        assert "spec_changes" in text
-        assert "update_spec" in text
-        assert "verify_spec" in text
-
-    def test_section_allows_behavior_change(self):
-        """Wording must allow changing existing behavior; it only restricts
-        who writes spec files."""
-        lowered = SPEC_WRITE_PROTECTION_SECTION.lower()
-        assert "behavior" in lowered
-
-    def test_full_depth_includes_section_and_keeps_spec_changes(self):
-        prompt = _build_prompt(
-            task_description="Add feature X",
-            task_type="feature",
-            scope="m",
-            spec_content="s",
-            project_summary="p",
-            revision_section="",
-            depth="full",
-        )
-        assert SPEC_WRITE_PROTECTION_SECTION in prompt
-        # full depth still keeps the spec_changes declaration channel intact
-        assert "Spec Changes Declaration" in prompt
-        assert "spec_changes" in prompt
-
-    def test_medium_depth_includes_section(self):
-        prompt = _build_prompt(
-            task_description="Fix bug Y",
-            task_type="bugfix",
-            scope="m",
-            spec_content="s",
-            project_summary="p",
-            revision_section="",
-            depth="medium",
-        )
-        assert SPEC_WRITE_PROTECTION_SECTION in prompt
-
-    def test_shallow_depth_includes_section(self):
-        prompt = _build_prompt(
-            task_description="Directive Z",
-            task_type="directive",
-            scope="m",
-            spec_content="s",
-            project_summary="p",
-            revision_section="",
-            depth="shallow",
-        )
-        assert SPEC_WRITE_PROTECTION_SECTION in prompt
-
-
-class TestStepPoolSpecChanges:
-    """Test that STEP_POOL declares spec_changes in PLAN outputs."""
-
-    def test_plan_outputs_include_spec_changes(self):
-        from se3.engine.models import STEP_POOL
-        plan_info = STEP_POOL[StepType.PLAN]
-        assert "spec_changes" in plan_info["outputs"]

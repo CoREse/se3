@@ -27,6 +27,7 @@ when it changed nothing.
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -56,37 +57,99 @@ logger = logging.getLogger(__name__)
 _COMMENT_MARKERS = ("#", "//")
 
 
-def _harvest_why_comments(project_root: Path, changed_files: set[str]) -> list[str]:
+def _extract_comments(text: str) -> list[str]:
+    """Return the text of single-line comments (``#`` / ``//``) in ``text``.
+
+    Best-effort textual harvest (not an AST pass): keeps the body after the
+    comment marker, dropping empty markers.
+    """
+    comments: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        for marker in _COMMENT_MARKERS:
+            if stripped.startswith(marker):
+                body = stripped[len(marker):].strip()
+                if body:
+                    comments.append(body)
+                break
+    return comments
+
+
+def _read_baseline_file(
+    project_root: Path, baseline_commit: str | None, rel: str
+) -> str | None:
+    """Read ``rel`` as it existed at the flow's frozen baseline commit.
+
+    Uses ``git show <baseline>:<rel>`` so the ORIGINAL pre-implementation text
+    is recovered even after the working tree edited or deleted the file.
+    Returns ``None`` (silently) when there is no baseline, the file did not
+    exist at baseline, or git is unavailable.
+    """
+    if not baseline_commit:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{baseline_commit}:{rel}"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+    except (OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _harvest_why_comments(
+    project_root: Path,
+    changed_files: set[str],
+    baseline_commit: str | None = None,
+) -> list[str]:
     """Collect colocated comment lines from the touched code files.
 
     The new knowledge system puts *why / intent* into colocated comments, so the
-    why-comments of the changed code are part of the frozen anchor set. This is a
-    best-effort textual harvest (not an AST pass): for each changed file we read
-    it and keep the text of single-line comments (``#`` / ``//``). Unreadable or
-    binary files are skipped silently. Returns one string per file (its comment
-    block joined by newlines) so ``_build_source_pool`` can treat each as a pool
-    entry.
+    why-comments of the changed code are part of the anchor set. Crucially, the
+    harvest reads BOTH the file's **baseline** content (as frozen at flow start,
+    before ``implement`` could touch it) AND its current working-tree content,
+    merging the two comment sets per file. This closes the gap where an
+    implementation that deletes or rewrites a why-comment documenting a binding
+    invariant — while violating that invariant — would otherwise erase the
+    original quote from the anchor pool and let the violation slip through: the
+    baseline copy preserves the original quote regardless of what the diff did,
+    and the working-tree copy still surfaces any newly added intent comments.
+
+    Unreadable or binary files are skipped silently. Returns one string per file
+    (its merged comment block joined by newlines) so ``_build_source_pool`` can
+    treat each as a pool entry.
     """
     out: list[str] = []
     for rel in sorted(changed_files):
         if not isinstance(rel, str) or not rel:
             continue
+        comments: list[str] = []
+        seen: set[str] = set()
+
+        def _add(text: str) -> None:
+            for body in _extract_comments(text):
+                if body not in seen:
+                    seen.add(body)
+                    comments.append(body)
+
+        # Baseline (pre-implementation) content first — preserves the ORIGINAL
+        # why-comment anchor text even if the diff edited or deleted it.
+        baseline_text = _read_baseline_file(project_root, baseline_commit, rel)
+        if baseline_text is not None:
+            _add(baseline_text)
+
+        # Working-tree content — surfaces newly added intent comments.
         path = project_root / rel
         try:
-            if not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8")
+            if path.is_file():
+                _add(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
-            continue
-        comments: list[str] = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            for marker in _COMMENT_MARKERS:
-                if stripped.startswith(marker):
-                    body = stripped[len(marker):].strip()
-                    if body:
-                        comments.append(body)
-                    break
+            pass
+
         if comments:
             out.append("\n".join(comments))
     return out
@@ -125,11 +188,15 @@ def _build_anchor_inputs(step: Step, flow: FlowInstance, project_root: Path) -> 
     changed = _changed_paths({"changes_made": changes_made})
 
     # why-comments: prefer an explicit frozen list from inputs, else harvest.
+    # The harvest reads the baseline (pre-implementation) copy of each touched
+    # file as well as the working tree, so the original why-comment anchor text
+    # survives even when the diff deleted or rewrote it.
     why_comments = step.inputs.get("why_comments")
     if isinstance(why_comments, list):
         why_comments = [w for w in why_comments if isinstance(w, str) and w.strip()]
     else:
-        why_comments = _harvest_why_comments(project_root, changed)
+        baseline_commit = getattr(flow, "baseline_commit", None)
+        why_comments = _harvest_why_comments(project_root, changed, baseline_commit)
 
     spec_content: dict[str, str] = {}
     if isinstance(charter_text, str) and charter_text.strip():

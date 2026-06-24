@@ -29,16 +29,23 @@ from se3.commands.init_cmd import (
 class TestRunInit:
     """Tests for the run_init function."""
 
-    def test_creates_base_spec(self, tmp_path):
-        """se3 init creates se3/specs/base/spec.md from template."""
+    def test_creates_charter(self, tmp_path):
+        """se3 init creates se3/charter.md from template (new knowledge system).
+
+        The retired spec corpus (se3/specs/base/spec.md) is no longer
+        scaffolded — a fresh project bootstraps the code-index + charter +
+        why-comment triad with a committable, injectable charter instead.
+        """
         result = run_init(tmp_path, "TestProject")
 
-        base_spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
-        assert base_spec.exists()
-        content = base_spec.read_text()
+        charter = tmp_path / "se3" / "charter.md"
+        assert charter.exists()
+        content = charter.read_text()
         assert "TestProject" in content
-        assert "Base Specification" in content
-        assert "se3/specs/base/spec.md" in result["created"]
+        assert "Charter" in content
+        assert "se3/charter.md" in result["created"]
+        # The retired base spec must NOT be created.
+        assert not (tmp_path / "se3" / "specs" / "base" / "spec.md").exists()
 
     def test_creates_se3_yaml(self, tmp_path):
         """se3 init creates se3.yaml when it doesn't exist."""
@@ -50,25 +57,27 @@ class TestRunInit:
         assert "TestProject" in content
         assert "se3.yaml" in result["created"]
 
-    def test_creates_specs_directory(self, tmp_path):
-        """se3 init creates se3/specs/ directory."""
+    def test_creates_se3_directory(self, tmp_path):
+        """se3 init creates the se3/ runtime directory."""
         run_init(tmp_path, "TestProject")
 
-        specs_dir = tmp_path / "se3" / "specs"
-        assert specs_dir.is_dir()
+        se3_dir = tmp_path / "se3"
+        assert se3_dir.is_dir()
+        # The retired spec corpus directory is no longer scaffolded.
+        assert not (se3_dir / "specs").exists()
 
-    def test_no_overwrite_existing_base_spec(self, tmp_path):
-        """se3 init does not overwrite existing base spec."""
-        # Pre-create base spec with custom content
-        base_dir = tmp_path / "se3" / "specs" / "base"
-        base_dir.mkdir(parents=True)
-        base_spec = base_dir / "spec.md"
-        base_spec.write_text("# Custom content - do not overwrite")
+    def test_no_overwrite_existing_charter(self, tmp_path):
+        """se3 init does not overwrite an existing charter."""
+        # Pre-create charter with custom content
+        se3_dir = tmp_path / "se3"
+        se3_dir.mkdir(parents=True)
+        charter = se3_dir / "charter.md"
+        charter.write_text("# Custom content - do not overwrite")
 
         result = run_init(tmp_path, "TestProject")
 
         # Verify content was not overwritten
-        assert base_spec.read_text() == "# Custom content - do not overwrite"
+        assert charter.read_text() == "# Custom content - do not overwrite"
         assert any("already exists" in s for s in result["skipped"])
 
     def test_no_overwrite_existing_se3_yaml(self, tmp_path):
@@ -85,8 +94,8 @@ class TestRunInit:
         """Template placeholders are replaced with project name."""
         run_init(tmp_path, "My Great Project")
 
-        base_spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
-        content = base_spec.read_text()
+        charter = tmp_path / "se3" / "charter.md"
+        content = charter.read_text()
         assert "My Great Project" in content
         assert "{project_name}" not in content
 
@@ -96,7 +105,7 @@ class TestRunInit:
         result = run_init(tmp_path, "TestProject")
 
         assert result["created"] == []
-        # se3.yaml + base spec are skipped; .gitignore is tracked separately
+        # se3.yaml + charter are skipped; .gitignore is tracked separately
         assert len(result["skipped"]) == 2
         # .gitignore should be marked as already existed
         assert result["gitignore_already_existed"] is True
@@ -280,17 +289,17 @@ class TestRunInit:
         assert "0.1.0" in content
         assert "# Stale changelog" not in content
 
-    def test_base_spec_mentions_version_rules(self, tmp_path):
-        """The generated base spec documents the se3/version-rules.md mechanism.
+    def test_charter_mentions_version_rules(self, tmp_path):
+        """The generated charter documents the se3/version-rules.md mechanism.
 
-        Guards against regressing to a base spec that locks in static bump
+        Guards against regressing to a charter that locks in static bump
         rules and never tells new projects the custom version-rules file
         exists.
         """
         run_init(tmp_path, "TestProject")
 
-        base_spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
-        content = base_spec.read_text()
+        charter = tmp_path / "se3" / "charter.md"
+        content = charter.read_text()
         assert "se3/version-rules.md" in content
 
 

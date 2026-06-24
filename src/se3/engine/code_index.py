@@ -39,17 +39,26 @@ Granularity floor (defaults; tunable via ``code_index`` config):
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 from ..config import CodeIndexConfig, load_code_index_config
 from . import file_enum
+
+try:  # POSIX advisory locking; absent on some platforms (e.g. Windows).
+    import fcntl
+
+    _HAVE_FCNTL = True
+except ImportError:  # pragma: no cover - platform dependent
+    _HAVE_FCNTL = False
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +117,13 @@ class Symbol:
     sha256: str              # hash of this symbol's own content segment
     summary: str = ""
     degraded: bool = False
+    # The natural unit's own content for units whose semantic content is NOT
+    # recoverable by line-slicing (json-key, yaml-key): a JSON top-level key has
+    # no line range, and a YAML top-level key's declaration line excludes its
+    # nested block. When set, ``_make_target`` summarises from this verbatim
+    # content instead of slicing ``line_start..line_end``; line-based units
+    # (code symbols, markdown headings, degraded chunks) leave it empty.
+    content: str = ""
 
 
 @dataclass
@@ -130,6 +146,12 @@ class CodeIndex:
 
     project_root: Path
     files: Dict[str, FileEntry] = field(default_factory=dict)
+    # Directory/package-level one-line summaries, keyed by the directory group
+    # name produced by ``_dir_of`` (e.g. ``"src/se3/"`` or ``"(root)"``). This is
+    # the structural level above files: every level of the map (dir → file →
+    # symbol) carries its own one-line summary so the orientation map is zoomable
+    # at the directory level, not just the file/symbol levels.
+    dir_summaries: Dict[str, str] = field(default_factory=dict)
 
     # -- reconstruct from the authoritative md (render-only consumers) ------
 
@@ -146,6 +168,15 @@ class CodeIndex:
         index = cls(project_root=project_root)
         cur: Optional[FileEntry] = None
         for line in md_text.splitlines():
+            dh = _MD_DIR_HEADING_RE.match(line)
+            if dh:
+                # A directory/package heading (``## `dir/` — summary``). Capture
+                # its summary; it owns no symbol bullets, so drop the current
+                # file context to avoid mis-attaching a stray bullet.
+                if dh.group(2):
+                    index.dir_summaries[dh.group(1)] = dh.group(2).strip()
+                cur = None
+                continue
             fh = _MD_FILE_HEADING_RE.match(line)
             if fh:
                 path, kind, summary = fh.group(1), fh.group(2) or "", fh.group(3) or ""
@@ -187,14 +218,28 @@ class CodeIndex:
 # ---------------------------------------------------------------------------
 
 # ``### `path` (kind) — summary``  (kind + summary optional)
+#
+# The id capture is **lazy** and anchored by a lookahead requiring the closing
+# backtick to be followed by the structural suffix (`` (kind)``, `` — summary``,
+# or end of line). A plain ``[^`]+`` id group cannot match an id that itself
+# contains a backtick (e.g. a markdown heading rendered as ``## `se3 run` `` whose
+# heading text is the inline-code token ``\`se3 run\``), because the node is then
+# rendered with a doubled-backtick code span; the lazy/lookahead form recovers
+# such ids while still stopping at the *real* close (it never runs past the id
+# into a summary that happens to contain its own backticks, since the structural
+# suffix follows the id's close immediately in every rendered line).
 _MD_FILE_HEADING_RE = re.compile(
-    r"^###\s+`([^`]+)`(?:\s+\(([^)]*)\))?(?:\s+—\s+(.*))?$"
+    r"^###\s+`(.+?)`(?=\s+\(|\s+—|$)(?:\s+\(([^)]*)\))?(?:\s+—\s+(.*))?$"
 )
 # ``  - `local_id` <middle> — summary``  (indent captured for depth)
 _MD_BULLET_RE = re.compile(
-    r"^( *)-\s+`([^`]+)`(.*?)(?:\s+—\s+(.*))?$"
+    r"^( *)-\s+`(.+?)`(?=\s+\(|\s+—|$)(.*?)(?:\s+—\s+(.*))?$"
 )
 _MD_BULLET_KIND_RE = re.compile(r"\(([^)]*)\)")
+# ``## `dir/` — summary``  (directory/package heading; summary optional). The
+# ``##`` anchor (followed by whitespace) does not match the ``###`` file heading,
+# whose third ``#`` is not whitespace, so the two heading levels never collide.
+_MD_DIR_HEADING_RE = re.compile(r"^##\s+`([^`]+)`(?:\s+—\s+(.*))?$")
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +410,7 @@ def _extract_yaml(text: str) -> List[Symbol]:
                 line_start=ln,
                 line_end=ln,
                 sha256=_sha256_text(f"{key}:{seg}"),
+                content=f"{key}: {seg}",
             )
         )
     return out
@@ -392,6 +438,7 @@ def _extract_json(text: str) -> List[Symbol]:
                 line_start=0,
                 line_end=0,
                 sha256=_sha256_text(f"{key}:{seg}"),
+                content=f"{key}: {seg}",
             )
         )
     return out
@@ -525,7 +572,23 @@ def _index_file(path: Path, relpath: str, cfg: CodeIndexConfig) -> FileEntry:
     kind = _file_kind(path)
 
     symbols = _extract_structure(path, text)
-    if not symbols and is_degrade_eligible(text, bool(symbols), cfg):
+    # Size-cap secondary guard (independent of structure): an oversized tracked
+    # file — a huge generated module, a vendored blob, a large data JSON with
+    # thousands of top-level keys — is dropped to a single file-level line
+    # instead of enumerating every symbol, which would bloat code-index.md and
+    # the per-build LLM summarisation cost. The cap reuses the degrade size
+    # thresholds. A structure-LESS oversized file still degrades to chunks (the
+    # designed last-resort path); only the structure-FUL oversized case is what
+    # this guard newly catches.
+    fsize = file_enum.FileSize.from_bytes(data)
+    oversized = (
+        fsize.lines > cfg.degrade_trigger_lines
+        or fsize.bytes > cfg.degrade_trigger_bytes
+    )
+    if symbols:
+        if oversized:
+            symbols = []
+    elif is_degrade_eligible(text, False, cfg):
         symbols = _chunk_degraded(text, cfg)
 
     return FileEntry(
@@ -546,6 +609,94 @@ def cache_path(project_root: Path) -> Path:
 
 def md_path(project_root: Path) -> Path:
     return Path(project_root) / _MD_REL_PATH
+
+
+def lock_path(project_root: Path) -> Path:
+    """Path of the advisory lock file serializing concurrent (re)builds.
+
+    Lives next to the gitignored json memo (``se3/cache/code-index.json.lock``)
+    so it is never committed.
+    """
+    cp = cache_path(project_root)
+    return cp.with_name(cp.name + ".lock")
+
+
+@contextlib.contextmanager
+def _build_lock(project_root: Path) -> Iterator[None]:
+    """Hold an exclusive advisory ``flock`` across a (re)build's whole
+    load → enumerate → write critical section, so two concurrent
+    ``load_or_build`` calls (parallel flows, or a CLI rebuild racing a flow's
+    lazy refresh) cannot interleave their md/cache reads and atomic replaces —
+    and a slower, stale writer cannot clobber a fresher map.
+
+    Because the lock spans the read too, the writer that waits re-enumerates the
+    *post-lock* on-disk state (the other build's freshly written md/cache + any
+    source edits), so it produces a current result rather than overwriting with
+    stale data.
+
+    Best-effort: when ``fcntl`` is unavailable (non-POSIX) or the lock file
+    cannot be opened, the build proceeds **unlocked** rather than failing — a
+    missing lock degrades to the prior unsynchronised behavior (still protected
+    from temp-file collisions by the unique-temp writes), it never blocks.
+    """
+    if not _HAVE_FCNTL:
+        yield
+        return
+
+    lp = lock_path(project_root)
+    fd: Optional[int] = None
+    try:
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError as exc:
+        logger.warning(
+            "code_index: cannot open lock file %s (%s); building unlocked", lp, exc
+        )
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        yield
+        return
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically via a unique temp file in the same
+    directory + ``os.replace``.
+
+    A unique per-write temp name (``tempfile.mkstemp``) — not a fixed
+    ``.tmp`` sibling — is required so two concurrent writers never share the
+    same scratch file: with a fixed name, one process could ``os.replace`` (and
+    thereby unlink) the temp file out from under another still writing to it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _load_cache(project_root: Path) -> Dict[str, dict]:
@@ -569,10 +720,30 @@ def _load_cache(project_root: Path) -> Dict[str, dict]:
     return files if isinstance(files, dict) else {}
 
 
+def _load_dir_cache(project_root: Path) -> Dict[str, dict]:
+    """Load the per-directory memo (``{dir_name: {fingerprint, summary}}``).
+
+    Same self-invalidation contract as :func:`_load_cache`: a missing file,
+    corrupt JSON, version mismatch, or absent ``dirs`` key yields an empty memo
+    (the build then re-summarises every directory). An older cache written before
+    directory summaries existed simply lacks the key and degrades gracefully.
+    """
+    path = cache_path(project_root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if data.get("version") != CACHE_VERSION:
+        return {}
+    dirs = data.get("dirs")
+    return dirs if isinstance(dirs, dict) else {}
+
+
 def _save_cache(project_root: Path, index: CodeIndex) -> Path:
     """Atomically write the json memo (fingerprint + summary per node)."""
     path = cache_path(project_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     files_payload: Dict[str, dict] = {}
     for relpath, fe in index.files.items():
         files_payload[relpath] = {
@@ -587,10 +758,15 @@ def _save_cache(project_root: Path, index: CodeIndex) -> Path:
                 for sym in fe.symbols
             },
         }
-    payload = {"version": CACHE_VERSION, "files": files_payload}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    dirs_payload: Dict[str, dict] = {
+        dir_name: {
+            "fingerprint": _dir_fingerprint(members, index.files),
+            "summary": index.dir_summaries.get(dir_name, ""),
+        }
+        for dir_name, members in _group_dirs(index.files).items()
+    }
+    payload = {"version": CACHE_VERSION, "files": files_payload, "dirs": dirs_payload}
+    _atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False))
     return path
 
 
@@ -604,6 +780,34 @@ def _dir_of(relpath: str) -> str:
     return "(root)"
 
 
+def _group_dirs(files: Dict[str, FileEntry]) -> Dict[str, List[str]]:
+    """Group enumerated file relpaths by their directory group name."""
+    groups: Dict[str, List[str]] = {}
+    for relpath in files:
+        groups.setdefault(_dir_of(relpath), []).append(relpath)
+    return groups
+
+
+def _dir_fingerprint(child_relpaths: List[str], files: Dict[str, "FileEntry"]) -> str:
+    """Fingerprint a directory by both its *membership* and the *content* of its
+    members (each child relpath paired with that file's whole-file sha256). The
+    directory's one-line summary is regenerated when its composition changes (a
+    file added / removed / renamed under it) OR when the content of any member
+    file changes — so a pure edit inside an already-present file (e.g. switching
+    ``charge.py`` from synchronous to queued charging) churns the dir summary and
+    keeps every map level current after a rebuild, rather than leaving a stale
+    directory summary atop refreshed file/symbol summaries. This still reuses the
+    cached summary for genuinely unchanged directories, preserving the per-symbol
+    incremental discipline (only changed nodes are re-summarised) and human
+    corrections in the md. A missing member (defensive) contributes an empty sha.
+    """
+    parts = [
+        f"{rel}\t{files[rel].fingerprint.sha256 if rel in files else ''}"
+        for rel in sorted(child_relpaths)
+    ]
+    return _sha256_text("\n".join(parts))
+
+
 def render_full(index: CodeIndex) -> str:
     """Render the complete authoritative map (files + all symbols)."""
     lines: List[str] = ["# Code Index", ""]
@@ -611,7 +815,11 @@ def render_full(index: CodeIndex) -> str:
     for relpath in sorted(index.files):
         groups.setdefault(_dir_of(relpath), []).append(index.files[relpath])
     for dir_name in sorted(groups):
-        lines.append(f"## `{dir_name}`")
+        head = f"## `{dir_name}`"
+        dir_summary = index.dir_summaries.get(dir_name, "")
+        if dir_summary:
+            head += f" — {dir_summary}"
+        lines.append(head)
         lines.append("")
         for fe in sorted(groups[dir_name], key=lambda f: f.path):
             summary = fe.summary or ""
@@ -632,10 +840,7 @@ def render_full(index: CodeIndex) -> str:
 
 def _write_md(project_root: Path, index: CodeIndex) -> Path:
     path = md_path(project_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".md.tmp")
-    tmp.write_text(render_full(index), encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_write_text(path, render_full(index))
     return path
 
 
@@ -646,6 +851,15 @@ def _parse_md_summaries(md_text: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     cur_path: Optional[str] = None
     for line in md_text.splitlines():
+        dh = _MD_DIR_HEADING_RE.match(line)
+        if dh:
+            # Directory-level summary, keyed by the dir group name (e.g.
+            # ``"src/se3/"``). Holds the human-correctable dir summary reused for
+            # unchanged directories.
+            if dh.group(2):
+                out[dh.group(1)] = dh.group(2).strip()
+            cur_path = None
+            continue
         fh = _MD_FILE_HEADING_RE.match(line)
         if fh:
             cur_path = fh.group(1)
@@ -663,6 +877,19 @@ def _parse_md_summaries(md_text: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 # Default LLM summariser
 # ---------------------------------------------------------------------------
+
+def _flatten_summary(value: object) -> str:
+    """Collapse a summary to a single physical line.
+
+    The md format and the md→summary round-trip (:func:`_parse_md_summaries`)
+    assume exactly one node per line; an LLM summary that carries a newline (or
+    multiple sentences split across lines) would render across two physical
+    lines, corrupting the md and silently losing the orphaned tail on the next
+    incremental parse (it matches no heading/bullet regex). Any run of
+    whitespace — including newlines — is collapsed to a single space.
+    """
+    return re.sub(r"\s+", " ", str(value)).strip()
+
 
 def _heuristic_summary(target: SummaryTarget) -> str:
     """Deterministic fallback summary used when no LLM is available or a call
@@ -713,7 +940,7 @@ def _make_llm_summarizer(project_root: Path) -> Summarizer:
             for t in group:
                 val = parsed.get(t.id) if isinstance(parsed, dict) else None
                 result[t.id] = (
-                    str(val).strip() if val else _heuristic_summary(t)
+                    _flatten_summary(val) if val else _heuristic_summary(t)
                 )
         return result
 
@@ -738,7 +965,15 @@ def _make_target(
             id=fe.path, path=fe.path, kind=fe.kind, name=fe.path,
             content=text[:_SUMMARY_CONTENT_CAP],
         )
-    seg = _slice_lines(lines, sym.line_start, sym.line_end) if sym.line_start else ""
+    if sym.content:
+        # Structured non-code units (json-key, yaml-key) carry their own content
+        # because line-slicing cannot recover it (no line range, or only the key
+        # declaration line). Summarise from that verbatim content.
+        seg = sym.content
+    elif sym.line_start:
+        seg = _slice_lines(lines, sym.line_start, sym.line_end)
+    else:
+        seg = ""
     return SummaryTarget(
         id=fe.symbol_id(sym), path=fe.path, kind=sym.kind, name=sym.name,
         content=seg[:_SUMMARY_CONTENT_CAP], degraded=sym.degraded,
@@ -758,11 +993,28 @@ def build_index(
     its md summary (preserving human corrections) and is NOT re-summarised. With
     ``force=True`` the memo and md are ignored and every node is re-summarised
     from scratch.
+
+    The whole load → enumerate → write critical section runs under an exclusive
+    advisory lock (:func:`_build_lock`) so concurrent (re)builds serialize
+    instead of racing on the md/cache files; the lock is best-effort and the
+    build still proceeds (unlocked) when ``fcntl`` is unavailable.
     """
     project_root = Path(project_root)
     cfg = cfg or load_code_index_config(project_root)
 
+    with _build_lock(project_root):
+        return _build_index_locked(project_root, summarizer, force, cfg)
+
+
+def _build_index_locked(
+    project_root: Path,
+    summarizer: Optional[Summarizer],
+    force: bool,
+    cfg: CodeIndexConfig,
+) -> CodeIndex:
+    """The body of :func:`build_index`, run while holding the build lock."""
     cache = {} if force else _load_cache(project_root)
+    dir_cache = {} if force else _load_dir_cache(project_root)
     md_summaries: Dict[str, str] = {}
     if not force:
         mp = md_path(project_root)
@@ -813,14 +1065,47 @@ def build_index(
             else:
                 targets.append(_make_target(fe, sym, abs_path))
 
+    # --- directory/package-level node summaries ---
+    # The level above files: each directory gets a one-line summary so the
+    # orientation map is zoomable at the dir level, not only file/symbol. A dir
+    # is re-summarised when its membership OR any member file's content changed
+    # (see _dir_fingerprint), otherwise its md summary is reused (preserving human
+    # corrections). Dir targets join the SAME summariser batch as files/symbols
+    # (one call), so their content is built from child file paths + kinds —
+    # independent of the not-yet-computed child summaries — which is enough to
+    # describe the directory's purpose for orientation.
+    for dir_name, members in _group_dirs(index.files).items():
+        fp = _dir_fingerprint(members, index.files)
+        cached_dir = dir_cache.get(dir_name, {}) if isinstance(dir_cache, dict) else {}
+        prev_fp = cached_dir.get("fingerprint") if isinstance(cached_dir, dict) else None
+        if not force and prev_fp == fp and fp:
+            index.dir_summaries[dir_name] = md_summaries.get(
+                dir_name, cached_dir.get("summary", "")
+            )
+        else:
+            listing = "\n".join(
+                f"- {rel} ({index.files[rel].kind})" for rel in sorted(members)
+            )
+            targets.append(
+                SummaryTarget(
+                    id=dir_name,
+                    path=dir_name,
+                    kind="directory",
+                    name=dir_name,
+                    content=listing[:_SUMMARY_CONTENT_CAP],
+                )
+            )
+
     # --- summarise the changed/new nodes ---
     if targets:
         summ = summarizer or _make_llm_summarizer(project_root)
         produced = summ(targets)
         for t in targets:
             value = produced.get(t.id) if isinstance(produced, dict) else None
-            value = str(value).strip() if value else _heuristic_summary(t)
-            if "::" in t.id and t.id.split("::", 1)[0] == t.path:
+            value = _flatten_summary(value) if value else _heuristic_summary(t)
+            if t.kind == "directory":
+                index.dir_summaries[t.name] = value
+            elif "::" in t.id and t.id.split("::", 1)[0] == t.path:
                 fe = index.files[t.path]
                 local = t.id.split("::", 1)[1]
                 for sym in fe.symbols:

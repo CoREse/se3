@@ -1,8 +1,8 @@
 id: '218'
 description: 在webui新建issue时（也许还有其它的小窗口也有这个问题），点击这个小窗口外面就会直接关掉这个小窗口，这也太难受了，不小心点到外面打的所有东西都没了，既然这样要那个关闭按钮干嘛呢？修改成点击关闭按钮才会关闭。
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-06-23T17:04:55.669949'
-updated_at: '2026-06-23T17:05:43.446793'
+updated_at: '2026-06-24T00:45:53.577957'
 type: enhancement

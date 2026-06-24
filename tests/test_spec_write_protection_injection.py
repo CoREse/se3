@@ -104,9 +104,12 @@ class TestGetSpecWriteProtectionInjection:
         injection = get_spec_write_protection_injection("implement")
         lowered = injection.lower()
         assert "free to change existing code behavior" in lowered
-        # And it must point the behavior-change channel at plan/update_spec.
-        assert "spec_changes" in injection
-        assert "update_spec" in injection
+        # And it must point the behavior-change record at the charter-refactor
+        # durable records (charter + why-comments), NOT the retired
+        # plan/verify_spec/update_spec spec channel.
+        assert "charter" in lowered
+        assert "why-comment" in lowered
+        assert "spec_changes" not in injection
 
     def test_constraint_forbids_spec_writes(self):
         injection = get_spec_write_protection_injection("implement")

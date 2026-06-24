@@ -402,8 +402,8 @@ class TestEnsureSe3Project:
     """Pre-spawn auto-init hook used by the web `New Task` form."""
 
     def test_skips_init_when_already_se3_project(self, tmp_path, monkeypatch):
-        """Directory containing se3/specs/base/spec.md must not re-run init."""
-        spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        """Directory containing se3/charter.md must not re-run init."""
+        spec = tmp_path / "se3" / "charter.md"
         spec.parent.mkdir(parents=True)
         spec.write_text("# existing\n", encoding="utf-8")
 
@@ -433,7 +433,7 @@ class TestEnsureSe3Project:
             captured["args"] = args
             captured["cwd"] = kwargs.get("cwd")
             # Simulate init writing the marker file.
-            spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+            spec = tmp_path / "se3" / "charter.md"
             spec.parent.mkdir(parents=True, exist_ok=True)
             spec.write_text("# initialized\n", encoding="utf-8")
             return _FakeCompleted()
