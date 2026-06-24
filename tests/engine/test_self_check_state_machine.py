@@ -282,30 +282,6 @@ class TestBuildStepInputsSelfCheck:
         assert inputs["changes_made"]["files_changed"] == ["src/a.py", "src/b.py"]
         assert len(inputs["changes_made"]["implemented_groups"]) == 1
 
-    def test_self_check_receives_spec_content(self, state_machine):
-        """SELF_CHECK inputs should include spec_content from ANALYZE step."""
-        flow = FlowInstance(
-            flow_id="test-inputs",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-
-        analyze_step = Step(
-            step_type=StepType.ANALYZE,
-            status=StepStatus.COMPLETED,
-            outputs={
-                "task_type": "feature",
-                "scope": "engine",
-                "spec_content": "# Test Spec\nSome spec content",
-            },
-        )
-        flow.state.add_step(analyze_step)
-
-        inputs = state_machine._build_step_inputs(flow, StepType.SELF_CHECK)
-
-        assert "spec_content" in inputs
-        assert "Test Spec" in inputs["spec_content"]
-
     def test_self_check_receives_fix_iteration_in_fix_loop(self, state_machine):
         """SELF_CHECK should receive fix_iteration when in a fix loop."""
         flow = FlowInstance(
@@ -363,7 +339,7 @@ class TestBuildStepInputsSelfCheck:
         assert inputs["self_check_issues"] == []
 
     def test_self_check_receives_all_required_inputs(self, state_machine):
-        """Integration: SELF_CHECK receives test_results, changes_made, spec_content, task_description."""
+        """Integration: SELF_CHECK receives test_results, changes_made, task_description."""
         flow = FlowInstance(
             flow_id="test-full",
             task_description="Implement feature X",
@@ -406,7 +382,6 @@ class TestBuildStepInputsSelfCheck:
         assert inputs["task_description"] == "Implement feature X"
         assert inputs["test_results"]["passed"] is True
         assert inputs["changes_made"]["files_changed"] == ["src/engine/foo.py"]
-        assert inputs["spec_content"] == "Spec content here"
 
 
 class TestStepSequencesIncludeSelfCheck:

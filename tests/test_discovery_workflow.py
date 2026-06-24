@@ -609,14 +609,14 @@ class TestDiscoveryPromptTemplates:
         assert "Modify any files" in CONTINUE_DISCOVERY_PROMPT or "modify" in CONTINUE_DISCOVERY_PROMPT.lower()
 
     def test_initial_prompt_allows_reading(self):
-        """INITIAL_DISCOVERY_PROMPT must allow reading spec files and source code."""
+        """INITIAL_DISCOVERY_PROMPT must allow consulting the code-index and source code."""
         assert "read" in INITIAL_DISCOVERY_PROMPT.lower()
-        assert "se3/specs/" in INITIAL_DISCOVERY_PROMPT
+        assert "code-index" in INITIAL_DISCOVERY_PROMPT
 
     def test_continue_prompt_allows_reading(self):
-        """CONTINUE_DISCOVERY_PROMPT must allow reading spec files and source code."""
+        """CONTINUE_DISCOVERY_PROMPT must allow consulting the code-index and source code."""
         assert "read" in CONTINUE_DISCOVERY_PROMPT.lower()
-        assert "se3/specs/" in CONTINUE_DISCOVERY_PROMPT
+        assert "code-index" in CONTINUE_DISCOVERY_PROMPT
 
 
 class TestDiscoveryLLMCallErrorHandling:

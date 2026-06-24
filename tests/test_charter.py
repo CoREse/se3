@@ -1,6 +1,3 @@
-The file on disk already contains the fully resolved content with no conflict markers. Here it is:
-
-```python
 """Tests for the code-index + charter system (config knobs, charter subsystem,
 and the context-injection surface).
 
@@ -430,4 +427,3 @@ class TestCodeIndexInjection:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
-```

@@ -34,7 +34,6 @@ from ..config import (
     ConfigError,
     insert_confirmation_steps,
     resolve_confirm_inputs,
-    SpecLoadingConfig,
     WorkflowConfig,
 )
 from .. import __version__ as se3_version
@@ -1380,11 +1379,11 @@ class StateMachine:
                 elif step.step_type == StepType.ANALYZE:
                     inputs["task_type"] = step.outputs.get("task_type")
                     inputs["scope"] = step.outputs.get("scope")
-                    # New outputs merged from former project_summary and read_spec steps
+                    # Merged from the former project_summary step. The retired
+                    # spec-selection mechanism no longer produces spec_content /
+                    # relevant_specs / selected_items; downstream steps receive the
+                    # charter + code-index injection instead.
                     inputs["project_summary"] = step.outputs.get("project_summary")
-                    inputs["relevant_specs"] = step.outputs.get("relevant_specs")
-                    inputs["spec_content"] = step.outputs.get("spec_content")
-                    inputs["selected_items"] = step.outputs.get("selected_items", [])
                 # Deprecated: PROJECT_SUMMARY merged into ANALYZE (backward compat for persisted flows)
                 elif step.step_type == StepType.PROJECT_SUMMARY:
                     inputs["project_summary"] = step.outputs.get("project_summary")
@@ -1431,12 +1430,6 @@ class StateMachine:
                 elif step.step_type == StepType.SELF_CHECK:
                     inputs["self_check_result"] = step.outputs.get("self_check_result")
                     inputs["self_check_issues"] = step.outputs.get("issues")
-                elif step.step_type == StepType.VERIFY_SPEC:
-                    inputs["verification_result"] = step.outputs.get("verification_result")
-                    inputs["fix_instructions"] = step.outputs.get("fix_instructions")
-                    inputs["fix_context"] = step.outputs.get("fix_context")
-                elif step.step_type == StepType.UPDATE_SPEC:
-                    inputs["updated_specs"] = step.outputs.get("updated_specs")
                 elif step.step_type == StepType.VERSION_ANALYZE:
                     inputs["bump_type"] = step.outputs.get("bump_type")
                     inputs["reasoning"] = step.outputs.get("reasoning")
@@ -1454,66 +1447,9 @@ class StateMachine:
                     # Pass through review result for tracking
                     inputs["last_review_result"] = step.outputs.get("review_result")
 
-        # Resolve spec loading mode for downstream steps.
-        # If the current step is configured for full_spec mode, re-render
-        # spec_content from the full spec files rather than using the
-        # analyze-step item-filtered version.
-        #
-        # Sentinel check: distinguish "ANALYZE never ran" (key absent) from
-        # "ANALYZE ran and returned an empty list" (key present, value []).  The
-        # old truthy check `if not selected_items` would fall back to stale
-        # context for an explicit empty list, pulling in specs from a previous
-        # ANALYZE run that the user did not intend.
-        if "selected_items" not in inputs:
-            # ANALYZE step hasn't populated it — fall back to flow context
-            # (e.g. flow resumed mid-way, CONFIRM steps obscure the walk).
-            fallback = flow.state.context.get("selected_items")
-            if fallback is not None:
-                selected_items = fallback
-            else:
-                selected_items = []
-            inputs["selected_items"] = selected_items
-        else:
-            selected_items = inputs["selected_items"] or []
-
-        try:
-            from ..config import load_spec_loading_config
-            spec_loading = load_spec_loading_config(self.project_root)
-            load_mode = spec_loading.mode_for(step_type.value)
-        except Exception:
-            # Fall back to per-step built-in defaults (items for every step
-            # unless a project explicitly opts a step into full_spec) when
-            # config loading fails.
-            load_mode = SpecLoadingConfig().mode_for(step_type.value)
-
-        if load_mode == "full_spec":
-            from .spec_loader import load_for_step
-            try:
-                full_result = load_for_step(
-                    step_type=step_type.value,
-                    selected_items=selected_items,
-                    project_root=self.project_root,
-                    mode="full_spec",
-                )
-            except ValueError:
-                # Configuration/data errors (e.g. empty selected_items in
-                # full_spec mode) must surface immediately — they indicate a
-                # broken upstream step, not a recoverable I/O hiccup.
-                raise
-            except Exception:
-                logger.warning(
-                    "full_spec load failed for step %s; "
-                    "downstream step receiving items-mode spec_content",
-                    step_type.value,
-                    exc_info=True,
-                )
-                # Leave the existing items-mode spec_content in place
-            else:
-                inputs["spec_content"] = full_result.text
-                inputs["relevant_specs"] = full_result.relevant_specs
-
-        # Ensure selected_items is always present in inputs (may be empty)
-        inputs["selected_items"] = selected_items
+        # The spec system (item-level loader, full_spec re-render, selected_items
+        # selection) was retired; downstream steps now receive the charter +
+        # code-index injection instead of assembled spec_content.
 
         # When discovery produced a refined_description, preserve original
         # for traceability and override the effective task_description.
@@ -1726,34 +1662,6 @@ class StateMachine:
                         "implemented_groups": step.outputs.get("implemented_groups", []),
                     }
 
-        # Special handling for VERIFY_SPEC step when in fix iteration
-        if step_type == StepType.VERIFY_SPEC:
-            # Inject the same frozen baseline as the TEST step so verify_spec's
-            # test gate consumes the identical inherited-vs-introduced verdict
-            # (not-yet-captured injects as []).
-            inputs["baseline_failures"] = list(flow.state.baseline_failures or [])
-            # Always populate max_fix_iterations (see SELF_CHECK comment above
-            # for rationale: avoids extra YAML parse on the initial pass).
-            inputs["max_fix_iterations"] = self._get_max_fix_iterations()
-            fix_iteration = flow.state.get_fix_iteration()
-            if fix_iteration > 0:
-                inputs["fix_iteration"] = fix_iteration
-                inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
-                # Find previous VERIFY_SPEC with REVISION_NEEDED
-                for step_id in reversed(flow.state.step_history):
-                    step = flow.state.steps.get(step_id)
-                    if not step or step.status == StepStatus.FAILED:
-                        continue
-                    if (step.step_type == StepType.VERIFY_SPEC
-                            and step.status == StepStatus.REVISION_NEEDED):
-                        inputs["prev_verification_result"] = copy.deepcopy(
-                            step.outputs.get("verification_result")
-                        )
-                        inputs["prev_fix_instructions"] = step.outputs.get("fix_instructions") or ""
-                        all_issues = step.outputs.get("issues", [])
-                        inputs["prev_issues"] = copy.deepcopy(all_issues[:20])
-                        break
-
         # Special handling for the charter-refactor steps INVARIANT_CHECK and
         # CHARTER_FRESHNESS. Both anchor on the charter, which is frozen once at
         # flow start (see _freeze_invariant_anchors) so a charter edited mid-flow
@@ -1785,31 +1693,21 @@ class StateMachine:
                 inputs["fix_iteration"] = fix_iteration
                 inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
 
-                # Find the most recent TEST and VERIFY_SPEC steps for context
-                found_test = False
-                found_verify = False
+                # Find the most recent TEST step for fix context. (The retired
+                # VERIFY_SPEC step no longer contributes verification_result /
+                # fix_context; INVARIANT_CHECK routes its own fix instructions
+                # through the shared fix loop.)
                 for step_id in reversed(flow.state.step_history):
                     step = flow.state.steps.get(step_id)
                     if not step or step.status == StepStatus.FAILED:
                         continue
-                    if step.step_type == StepType.TEST and not found_test:
+                    if step.step_type == StepType.TEST:
                         # Always overwrite with a deep copy in the fix loop —
                         # the base-loop version is a direct reference, which would
                         # leak later mutations to step.outputs.
                         inputs["test_results"] = copy.deepcopy(
                             step.outputs.get("test_results")
                         )
-                        found_test = True
-                    elif step.step_type == StepType.VERIFY_SPEC and not found_verify:
-                        inputs["verification_result"] = copy.deepcopy(
-                            step.outputs.get("verification_result")
-                        )
-                        inputs["fix_instructions"] = step.outputs.get("fix_instructions") or ""
-                        inputs["fix_context"] = copy.deepcopy(
-                            step.outputs.get("fix_context")
-                        )
-                        found_verify = True
-                    if found_test and found_verify:
                         break
 
         return inputs

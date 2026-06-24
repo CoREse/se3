@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from .models import FlowInstance, Step, StepStatus, StepType
-from .steps import analyze
 from .steps import (
     STEP_HANDLERS,
     analyze_handler,
@@ -23,21 +22,22 @@ from .steps import (
 class TestAnalyzeStep:
     """Tests for the analyze step."""
 
-    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine", "se3-workflows"])
     @patch("se3.engine.steps.analyze.ProjectContextCollector")
-    @patch("se3.engine.steps.analyze.ContextBuilder")
     @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_success(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
-        """Test successful analysis includes all new output fields."""
+    def test_analyze_success(self, MockLLMCaller, MockCollector):
+        """Test successful analysis produces classification fields.
+
+        The retired spec-selection mechanism no longer produces real
+        ``spec_content`` / ``relevant_specs`` / ``selected_items`` — they are
+        emitted empty so defensive downstream consumers degrade cleanly, and
+        the legacy ``selected_specs`` key never appears.
+        """
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
             "task_type": "feature",
             "scope": "backend",
             "complexity": "medium",
             "reasoning": "New user login feature",
-            "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "16-Step Flow Pool"},
-            ],
         })
         MockLLMCaller.return_value = mock_caller
 
@@ -49,14 +49,6 @@ class TestAnalyzeStep:
         }
         MockCollector.return_value = mock_collector_inst
 
-        # Mock context builder for spec loading
-        mock_builder = MagicMock()
-        mock_builder.specs_dir = Path("/tmp/specs")
-        def mock_load_spec(name):
-            return f"# {name} spec content"
-        mock_builder._load_spec_content.side_effect = mock_load_spec
-        MockContextBuilder.return_value = mock_builder
-
         flow = FlowInstance(task_description="Add user login")
         step = Step(step_type=StepType.ANALYZE)
         step.inputs["task_description"] = "Add user login"
@@ -64,156 +56,20 @@ class TestAnalyzeStep:
         result = analyze_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
-        # Original outputs
+        # Classification outputs
         assert step.outputs["task_type"] == "feature"
         assert step.outputs["scope"] == "backend"
         assert step.outputs["complexity"] == "medium"
         assert step.outputs["reasoning"] == "New user login feature"
-        # New merged outputs
-        assert "project_summary" in step.outputs
+        # Project summary is collected programmatically
         assert isinstance(step.outputs["project_summary"], str)
         assert len(step.outputs["project_summary"]) > 0
-        assert "relevant_specs" in step.outputs
-        assert "base" in step.outputs["relevant_specs"]
-        assert "flow-engine" in step.outputs["relevant_specs"]
-        assert "spec_content" in step.outputs
-        assert "base" in step.outputs["spec_content"]
-        assert "flow-engine" in step.outputs["spec_content"]
-        # selected_specs must NOT appear in outputs (output-side cleanup)
+        # Retired spec-selection outputs are present but empty
+        assert step.outputs["relevant_specs"] == []
+        assert step.outputs["spec_content"] == ""
+        assert step.outputs["selected_items"] == []
+        # The legacy selected_specs key must never appear
         assert "selected_specs" not in step.outputs
-
-    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base"])
-    @patch("se3.engine.steps.analyze.ProjectContextCollector")
-    @patch("se3.engine.steps.analyze.ContextBuilder")
-    @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_empty_selected_items_loads_base(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
-        """Test that base spec is loaded even when LLM returns empty selected_items."""
-        mock_caller = MagicMock()
-        mock_caller.call.return_value = json.dumps({
-            "task_type": "small",
-            "scope": "readme",
-            "complexity": "simple",
-            "reasoning": "Typo fix",
-            "selected_items": [],
-        })
-        MockLLMCaller.return_value = mock_caller
-
-        mock_collector_inst = MagicMock()
-        mock_collector_inst.collect.return_value = {"git": {"branch": "main"}}
-        MockCollector.return_value = mock_collector_inst
-
-        mock_builder = MagicMock()
-        mock_builder.specs_dir = Path("/tmp/specs")
-        mock_builder._load_spec_content.side_effect = lambda name: f"# {name} content" if name == "base" else None
-        MockContextBuilder.return_value = mock_builder
-
-        flow = FlowInstance(task_description="Fix typo")
-        step = Step(step_type=StepType.ANALYZE)
-        step.inputs["task_description"] = "Fix typo"
-
-        result = analyze_handler(step, flow)
-
-        assert result == StepStatus.COMPLETED
-        assert "base" in step.outputs["spec_content"]
-        assert step.outputs["relevant_specs"] == ["base"]
-
-    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine"])
-    @patch("se3.engine.steps.analyze.ProjectContextCollector")
-    @patch("se3.engine.steps.analyze.ContextBuilder")
-    @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_invalid_spec_names_rejected(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
-        """Unknown/hallucinated spec names are rejected by the out-port validation
-        (item-identity invariant, machine guarantee c): an unknown ``<spec>`` (or
-        unknown ``<spec>::<requirement>``) carries no flat item address, so it is a
-        validation failure rather than being silently skipped. Because the mock
-        returns the same invalid selection on every call, the handler exhausts its
-        bounded in-step retries and then FAILs, surfacing the rejected addresses
-        for the engine-level retry path."""
-        mock_caller = MagicMock()
-        mock_caller.call.return_value = json.dumps({
-            "task_type": "feature",
-            "scope": "auth module",
-            "complexity": "medium",
-            "reasoning": "Auth feature",
-            "selected_items": [
-                {"spec": "nonexistent-spec", "requirement_name": "X"},
-                {"spec": "also-fake", "requirement_name": "Y"},
-            ],
-        })
-        MockLLMCaller.return_value = mock_caller
-
-        mock_collector_inst = MagicMock()
-        mock_collector_inst.collect.return_value = {"git": {"branch": "main"}}
-        MockCollector.return_value = mock_collector_inst
-
-        mock_builder = MagicMock()
-        mock_builder.specs_dir = Path("/tmp/specs")
-        mock_builder._load_spec_content.side_effect = lambda name: f"# {name} content"
-        MockContextBuilder.return_value = mock_builder
-
-        flow = FlowInstance(task_description="Add auth")
-        step = Step(step_type=StepType.ANALYZE)
-        step.inputs["task_description"] = "Add auth"
-
-        result = analyze_handler(step, flow)
-
-        # Persistently-invalid selection: retried in-step up to the bound, then FAILED.
-        assert result == StepStatus.FAILED
-        assert mock_caller.call.call_count == analyze.MAX_SELECTION_ATTEMPTS
-        # The rejected non-item addresses are surfaced for the engine-level retry.
-        assert step.error_message
-        assert "nonexistent-spec::X" in step.error_message
-        assert "also-fake::Y" in step.error_message
-        # No partial/hallucinated selection leaks downstream as a base::* fallback.
-        assert step.outputs.get("selected_items") != [
-            {"spec": "base", "requirement_name": "*"}
-        ]
-
-    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine"])
-    @patch("se3.engine.steps.analyze.ProjectContextCollector")
-    @patch("se3.engine.steps.analyze.ContextBuilder")
-    @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_outputs_omit_selected_specs(
-        self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs
-    ):
-        """analyze handler MUST NOT write 'selected_specs' to step.outputs.
-
-        The output-side has been migrated to 'selected_items'. This guards
-        against accidental re-introduction of the legacy key.
-        """
-        mock_caller = MagicMock()
-        # Even if the LLM emits both keys, only selected_items should appear
-        # in step.outputs.
-        mock_caller.call.return_value = json.dumps({
-            "task_type": "feature",
-            "scope": "engine",
-            "complexity": "medium",
-            "reasoning": "test",
-            "selected_items": [
-                {"spec": "flow-engine", "requirement_name": "16-Step Flow Pool"},
-            ],
-            "selected_specs": ["flow-engine"],
-        })
-        MockLLMCaller.return_value = mock_caller
-
-        mock_collector_inst = MagicMock()
-        mock_collector_inst.collect.return_value = {"git": {"branch": "main"}}
-        MockCollector.return_value = mock_collector_inst
-
-        mock_builder = MagicMock()
-        mock_builder.specs_dir = Path("/tmp/specs")
-        mock_builder._load_spec_content.side_effect = lambda name: f"# {name}"
-        MockContextBuilder.return_value = mock_builder
-
-        flow = FlowInstance(task_description="Test")
-        step = Step(step_type=StepType.ANALYZE)
-        step.inputs["task_description"] = "Test"
-
-        result = analyze_handler(step, flow)
-
-        assert result == StepStatus.COMPLETED
-        assert "selected_specs" not in step.outputs
-        assert "selected_items" in step.outputs
 
     @patch("se3.engine.steps.analyze.LLMCaller")
     def test_analyze_invalid_json(self, MockLLMCaller):
@@ -371,8 +227,17 @@ class TestStepHandlers:
     """Tests for the STEP_HANDLERS registry."""
 
     def test_all_step_types_have_handlers(self):
-        """Verify all step types have registered handlers."""
+        """Verify all step types have registered handlers.
+
+        The retired spec steps (VERIFY_SPEC / UPDATE_SPEC / SPEC_GATE) keep their
+        deprecated enum members for persisted-flow rendering but have no handlers
+        — they are excluded here.
+        """
+        retired = {StepType.VERIFY_SPEC, StepType.UPDATE_SPEC, StepType.SPEC_GATE}
         for step_type in StepType:
+            if step_type in retired:
+                assert step_type not in STEP_HANDLERS
+                continue
             assert step_type in STEP_HANDLERS, f"Missing handler for {step_type}"
 
     def test_handler_consistency(self):
@@ -601,74 +466,24 @@ class TestBuildStepInputs:
         flow.state.step_history.append(analyze_step.step_id)
         return flow
 
-    def test_analyze_mapping_includes_new_fields(self, tmp_path):
-        """ANALYZE outputs include spec_content, relevant_specs, project_summary."""
+    def test_analyze_mapping_forwards_classification_and_summary(self, tmp_path):
+        """ANALYZE forwards task_type / scope / project_summary downstream.
+
+        The retired spec-selection mechanism no longer forwards spec_content /
+        relevant_specs / selected_items; downstream steps receive the charter +
+        code-index injection instead.
+        """
         sm = self._make_state_machine(tmp_path)
         flow = self._make_flow_with_analyze()
 
         inputs = sm._build_step_inputs(flow, StepType.PLAN)
 
         assert inputs["project_summary"] == "Branch: main\nRecent commits:\n  - abc123"
-        assert inputs["relevant_specs"] == ["base", "flow-engine"]
-        assert inputs["spec_content"] == {
-            "base": "# base spec content",
-            "flow-engine": "# flow-engine spec content",
-        }
         assert inputs["task_type"] == "feature"
         assert inputs["scope"] == "backend"
-
-    def test_plan_step_receives_spec_content_and_project_summary(self, tmp_path):
-        """PLAN step inputs include spec_content and project_summary from ANALYZE."""
-        sm = self._make_state_machine(tmp_path)
-        flow = self._make_flow_with_analyze()
-
-        inputs = sm._build_step_inputs(flow, StepType.PLAN)
-
-        assert "spec_content" in inputs
-        assert "project_summary" in inputs
-        assert "base" in inputs["spec_content"]
-
-    def test_verify_spec_receives_spec_content(self, tmp_path):
-        """VERIFY_SPEC step inputs include spec_content from ANALYZE (review flow key path)."""
-        sm = self._make_state_machine(tmp_path)
-        flow = self._make_flow_with_analyze()
-
-        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
-
-        assert "spec_content" in inputs
-        assert inputs["spec_content"]["base"] == "# base spec content"
-        assert inputs["spec_content"]["flow-engine"] == "# flow-engine spec content"
-
-    def test_implement_step_receives_spec_content(self, tmp_path):
-        """IMPLEMENT step inputs include spec_content from ANALYZE."""
-        sm = self._make_state_machine(tmp_path)
-        flow = self._make_flow_with_analyze()
-
-        inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
-
-        assert "spec_content" in inputs
-        assert "relevant_specs" in inputs
-
-    def test_review_flow_verify_spec_gets_spec_content_without_read_spec(self, tmp_path):
-        """In review flow (ANALYZE → VERIFY_SPEC), verify_spec gets spec_content directly from ANALYZE."""
-        sm = self._make_state_machine(tmp_path)
-        # Simulate review flow: only ANALYZE completed (READ_SPEC removed)
-        flow = self._make_flow_with_analyze(
-            task_desc="Review auth module",
-            analyze_outputs={
-                "task_type": "review",
-                "scope": "auth",
-                "spec_content": {"base": "# base", "auth-spec": "# auth spec"},
-                "relevant_specs": ["base", "auth-spec"],
-                "project_summary": "Branch: review-branch",
-            },
-        )
-
-        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
-
-        # verify_spec must get spec_content from ANALYZE (READ_SPEC removed)
-        assert inputs["spec_content"] == {"base": "# base", "auth-spec": "# auth spec"}
-        assert inputs["relevant_specs"] == ["base", "auth-spec"]
+        # spec_content / relevant_specs are no longer forwarded from ANALYZE.
+        assert "spec_content" not in inputs
+        assert "relevant_specs" not in inputs
 
     def test_deprecated_project_summary_step_backward_compat(self, tmp_path):
         """Persisted flows with old PROJECT_SUMMARY step still provide project_summary."""

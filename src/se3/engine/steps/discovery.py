@@ -16,11 +16,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..prompt_markers import wrap_user_section
-from ..spec_role import SPEC_ROLE_DEFINITION
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -90,30 +88,15 @@ You MUST NOT:
 - Give implementation plans, architecture suggestions, or design proposals
 - Write or suggest code snippets
 - Modify any files
-- Propose creating or rewriting spec files — recording code into specs is the job of the `update_spec` step and `se3 sync`, not of discovery
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
-Discovery is a read-only step. To ask better, more informed questions you MAY consult specs and source code:
-- For specs, run the read-only `se3 spec` commands via Bash — `se3 spec index` (root view: every spec + locator + item count; drill in with `se3 spec index <spec> [<group>...]`) to navigate, then `se3 spec show <spec>::<requirement>` to read one Requirement's body. Do NOT read an entire `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
+Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
+- Before reading source, consult the code-index map (the project charter + code-index top map are injected below) to locate relevant modules / symbols; pull deeper detail on demand via `se3 code-index show <path>`.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
 
 {project_context}
-
-"""
-    + SPEC_ROLE_DEFINITION
-    + """
-
-## Available Specifications
-
-The specs below are a **read-only reference to the code's current state** (see *The Role of Specs in se3* above) — use them to understand how the project currently behaves. Do NOT treat them as architectural contracts the task must be aligned to, and do NOT propose creating or rewriting them.
-
-{specs_info}
-
-## Base Specification (if available)
-
-{base_spec_content}
 
 ## Discovery Context
 - Discovery round: {round_number}
@@ -219,26 +202,15 @@ You MUST NOT:
 - Give implementation plans, architecture suggestions, or design proposals
 - Write or suggest code snippets
 - Modify any files
-- Propose creating or rewriting spec files — recording code into specs is the job of the `update_spec` step and `se3 sync`, not of discovery
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
-Discovery is a read-only step. To ask better, more informed questions you MAY consult specs and source code:
-- For specs, run the read-only `se3 spec` commands via Bash — `se3 spec index` (root view: every spec + locator + item count; drill in with `se3 spec index <spec> [<group>...]`) to navigate, then `se3 spec show <spec>::<requirement>` to read one Requirement's body. Do NOT read an entire `se3/specs/<name>/spec.md` file with the Read tool (large specs exceed the Read size limit).
+Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
+- Before reading source, consult the code-index map (the project charter + code-index top map are injected below) to locate relevant modules / symbols; pull deeper detail on demand via `se3 code-index show <path>`.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
 
 {project_context}
-
-"""
-    + SPEC_ROLE_DEFINITION
-    + """
-
-## Available Specifications
-
-The specs below are a **read-only reference to the code's current state** (see *The Role of Specs in se3* above) — use them to understand how the project currently behaves. Do NOT treat them as architectural contracts the task must be aligned to, and do NOT propose creating or rewriting them.
-
-{specs_info}
 
 ## Discovery Context
 - Initial description: {initial_description}
@@ -386,46 +358,6 @@ def _gather_project_context(project_root: Path) -> str:
     return "\n".join(context_parts) if context_parts else "No additional context available"
 
 
-def _gather_specs_info(builder: ContextBuilder) -> tuple[str, str]:
-    """Gather information about available specs.
-
-    Args:
-        builder: ContextBuilder instance
-
-    Returns:
-        Tuple of (specs_info_str, base_spec_content)
-    """
-    specs_info_lines = []
-    base_spec_content = ""
-
-    # List all specs directories
-    try:
-        specs = []
-        if builder.specs_dir.exists():
-            for item in builder.specs_dir.iterdir():
-                if item.is_dir() and not item.name.startswith("_"):
-                    specs.append(item.name)
-
-        if specs:
-            specs_info_lines.append(f"Specs Directory: {builder.specs_dir}")
-            specs_info_lines.append(f"Available Specs: {', '.join(sorted(specs))}")
-            specs_info_lines.append(f"Total Specs: {len(specs)}")
-        else:
-            specs_info_lines.append("No specs found in specs directory")
-
-        # Try to load base spec
-        base_spec_content = builder._load_spec_content("base")
-        if base_spec_content:
-            specs_info_lines.append("\nBase spec loaded successfully")
-        else:
-            specs_info_lines.append("\nNo base spec found (optional)")
-
-    except Exception as e:
-        specs_info_lines.append(f"Error listing specs: {e}")
-
-    return "\n".join(specs_info_lines), base_spec_content or "No base spec available"
-
-
 def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the discovery step.
 
@@ -468,10 +400,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Gather project context
     project_context = _gather_project_context(project_root)
 
-    # Gather specs information
-    builder = ContextBuilder(project_root)
-    specs_info, base_spec_content = _gather_specs_info(builder)
-
     try:
         # Defensive guard: the sentinel must never reach the LLM as a user turn.
         # The orchestrator stores this in user_response only after setting
@@ -493,8 +421,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 round_number=round_number,
                 conversation_history=conversation_history,
                 project_context=project_context,
-                specs_info=specs_info,
-                base_spec_content=base_spec_content,
             )
         else:
             # Continuing discovery with user response
@@ -516,8 +442,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 conversation_history=conversation_history,
                 user_response=user_response if resumed else "",
                 project_context=project_context,
-                specs_info=specs_info,
-                base_spec_content=base_spec_content,
             )
 
         # Parse result
@@ -695,8 +619,6 @@ def _run_discovery_round(
     conversation_history: List[Dict[str, str]],
     user_response: str = "",
     project_context: str = "",
-    specs_info: str = "",
-    base_spec_content: str = "",
 ) -> tuple[Dict[str, Any], str]:
     """Run a single discovery round with the LLM.
 
@@ -710,8 +632,6 @@ def _run_discovery_round(
         conversation_history: List of conversation entries
         user_response: Latest user response (if any)
         project_context: Project context information
-        specs_info: Information about available specs
-        base_spec_content: Content of base spec (if available)
 
     Returns:
         Tuple of (parsed JSON result, raw result text from LLM)
@@ -726,8 +646,6 @@ def _run_discovery_round(
         conversation_history=history_text,
         user_response=user_response,
         project_context=project_context,
-        specs_info=specs_info,
-        base_spec_content=base_spec_content,
     )
 
     # Append language instruction if configured

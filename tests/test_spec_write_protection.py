@@ -34,7 +34,6 @@ from se3.engine.context_builder import (
     _is_spec_write_protected_step,
     get_spec_write_protection_injection,
 )
-from se3.engine.spec_role import find_spec_driven_framing
 
 
 # Steps that MUST receive the spec-write-protection injection: every
@@ -160,12 +159,6 @@ class TestInjectionWording:
         for token in ("Write", "Edit", "NotebookEdit", "Bash"):
             assert token in injection
 
-    @pytest.mark.parametrize("step", PROTECTED_STEPS)
-    def test_wording_avoids_spec_driven_framing(self, step):
-        assert find_spec_driven_framing(
-            get_spec_write_protection_injection(step)
-        ) == []
-
 
 # ---------------------------------------------------------------------------
 # LLMCaller.call() weaves the injection for protected steps only
@@ -226,9 +219,6 @@ class TestPlanProtectionSection:
 
     def test_section_allows_behavior_change(self):
         assert "behavior" in self._section().lower()
-
-    def test_section_is_framing_compliant(self):
-        assert find_spec_driven_framing(self._section()) == []
 
     @pytest.mark.parametrize("depth", ["full", "medium", "shallow"])
     def test_section_present_at_every_depth(self, depth):

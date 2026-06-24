@@ -174,119 +174,6 @@ class TestFixLoopIterations:
             assert flow.state.get_fix_iteration() == 3  # Should not increment
 
 
-class TestRevisionNeededBehavior:
-    """Test cases for REVISION_NEEDED status behavior."""
-
-    @pytest.fixture
-    def state_machine(self, tmp_path):
-        """Create a test state machine with mocked persistence."""
-        with patch("se3.engine.state_machine.PersistenceManager"):
-            return StateMachine(project_root=tmp_path)
-
-    def test_revision_needed_returned_when_tests_fail(self, state_machine):
-        """Test that REVISION_NEEDED is returned when tests fail.
-
-        Acceptance Criteria: Tests verify REVISION_NEEDED is returned when tests fail
-        """
-        from se3.engine.steps.verify_spec import verify_spec_handler
-
-        flow = FlowInstance(
-            flow_id="test-flow-123",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-
-        step = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.PENDING,
-            inputs={
-                "task_description": "Test task",
-                "spec_content": {},
-                "changes_made": {},
-                "test_results": {
-                    "passed": False,
-                    "returncode": 1,
-                    "stdout": "Test failed",
-                    "stderr": "Error",
-                },
-                "fix_iteration": 0,
-            },
-        )
-
-        mock_response = """{
-            "verified": false,
-            "issues": [{"severity": "error", "message": "Tests failed"}],
-            "summary": "Tests failed",
-            "recommendations": ["Fix tests"],
-            "test_analysis": {
-                "tests_passed": false,
-                "failure_summary": "Test failure",
-                "root_cause": "Bug"
-            },
-            "fix_instructions": "Fix the bug"
-        }"""
-
-        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
-            mock_caller = Mock()
-            mock_caller.call.return_value = mock_response
-            mock_caller_class.return_value = mock_caller
-
-            result = verify_spec_handler(step, flow)
-
-            assert result == StepStatus.REVISION_NEEDED
-            assert step.outputs["fix_needed"] is True
-            assert step.outputs["fix_instructions"] == "Fix the bug"
-
-    def test_completed_returned_when_tests_pass(self, state_machine):
-        """Test that COMPLETED is returned when tests pass."""
-        from se3.engine.steps.verify_spec import verify_spec_handler
-
-        flow = FlowInstance(
-            flow_id="test-flow-123",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-
-        step = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.PENDING,
-            inputs={
-                "task_description": "Test task",
-                "spec_content": {},
-                "changes_made": {},
-                "test_results": {
-                    "passed": True,
-                    "returncode": 0,
-                    "stdout": "All tests passed",
-                    "stderr": "",
-                },
-            },
-        )
-
-        mock_response = """{
-            "verified": true,
-            "issues": [],
-            "summary": "All tests passed",
-            "recommendations": [],
-            "test_analysis": {
-                "tests_passed": true,
-                "failure_summary": "",
-                "root_cause": ""
-            },
-            "fix_instructions": ""
-        }"""
-
-        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
-            mock_caller = Mock()
-            mock_caller.call.return_value = mock_response
-            mock_caller_class.return_value = mock_caller
-
-            result = verify_spec_handler(step, flow)
-
-            assert result == StepStatus.COMPLETED
-            assert step.outputs["verified"] is True
-
-
 class TestFixContextPassing:
     """Test cases for fix_context passing between steps."""
 
@@ -407,14 +294,40 @@ class TestFixContextPassing:
 
 
 class TestTestStepFailureHandling:
-    """Test cases for test step behavior when tests fail."""
+    """Test cases for test step behavior when tests fail.
+
+    The TEST step now triggers the fix loop directly when tests fail,
+    skipping verify_spec for faster iteration. These exercise the handler
+    against the shared ``_run_command`` core (mocked at that boundary) so we
+    avoid spawning a real subprocess.
+    """
+
+    # A failed pytest run whose single failure is NOT in the baseline →
+    # classified as an introduced regression → triggers the fix loop.
+    _STDOUT_REGRESSION_FAIL = (
+        "tests/test_a.py::test_one PASSED\n"
+        "tests/test_a.py::test_two FAILED\n"
+    )
+
+    @staticmethod
+    def _run_result(stdout: str, stderr: str = "Test failed") -> dict:
+        return {
+            "command": "python -m pytest -v",
+            "returncode": 1,
+            "stdout": stdout,
+            "stderr": stderr,
+            "passed": False,
+        }
+
+    def _make_step(self) -> Step:
+        return Step(
+            step_type=StepType.TEST,
+            status=StepStatus.PENDING,
+            inputs={"baseline_failures": [], "tests_added": []},
+        )
 
     def test_test_step_returns_revision_needed_on_failure(self):
-        """Test that test step returns REVISION_NEEDED when tests fail.
-
-        The test step now triggers the fix loop directly when tests fail,
-        skipping verify_spec for faster iteration.
-        """
+        """Test that test step returns REVISION_NEEDED when tests fail."""
         from se3.engine.steps.test import test_handler
 
         flow = FlowInstance(
@@ -422,31 +335,26 @@ class TestTestStepFailureHandling:
             task_description="Test task",
             status=FlowStatus.RUNNING,
         )
+        step = self._make_step()
 
-        step = Step(
-            step_type=StepType.TEST,
-            status=StepStatus.PENDING,
-            inputs={},
-        )
+        with patch("se3.config.TestConfig") as mock_config, \
+             patch("se3.engine.steps.test._run_command") as mock_run, \
+             patch("se3.engine.steps.test._record_test_history"), \
+             patch("se3.engine.steps.test._report_pre_existing_issues"):
+            mock_config.load.return_value = MagicMock(
+                command="python -m pytest -v", timeout=60,
+                get_phases_for_run=MagicMock(return_value=[]),
+            )
+            mock_run.return_value = self._run_result(self._STDOUT_REGRESSION_FAIL)
 
-        # Must remove SE3_TEST_RUNNING so the recursion guard doesn't
-        # short-circuit before our Popen mock gets called.
-        env_without_guard = {k: v for k, v in os.environ.items() if k != "SE3_TEST_RUNNING"}
-        with patch.dict("os.environ", env_without_guard, clear=True):
-            with patch("se3.engine.steps.test.subprocess.Popen") as mock_popen:
-                mock_process = Mock()
-                mock_process.returncode = 1
-                mock_process.communicate.return_value = ("Test output", "Test failed")
-                mock_popen.return_value = mock_process
+            result = test_handler(step, flow)
 
-                result = test_handler(step, flow)
-
-                assert result == StepStatus.REVISION_NEEDED
-                assert step.outputs["test_results"]["passed"] is False
-                assert step.outputs["test_results"]["returncode"] == 1
-                assert step.outputs["fix_needed"] is True
-                assert "fix_instructions" in step.outputs
-                assert "fix_context" in step.outputs
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs["test_results"]["passed"] is False
+            assert step.outputs["test_results"]["returncode"] == 1
+            assert step.outputs["fix_needed"] is True
+            assert "fix_instructions" in step.outputs
+            assert "fix_context" in step.outputs
 
     def test_test_step_stores_detailed_results_and_fix_context(self):
         """Test that test step stores detailed test results and fix context when failing."""
@@ -457,106 +365,33 @@ class TestTestStepFailureHandling:
             task_description="Test task",
             status=FlowStatus.RUNNING,
         )
+        step = self._make_step()
 
-        step = Step(
-            step_type=StepType.TEST,
-            status=StepStatus.PENDING,
-            inputs={},
-        )
+        with patch("se3.config.TestConfig") as mock_config, \
+             patch("se3.engine.steps.test._run_command") as mock_run, \
+             patch("se3.engine.steps.test._record_test_history"), \
+             patch("se3.engine.steps.test._report_pre_existing_issues"):
+            mock_config.load.return_value = MagicMock(
+                command="python -m pytest -v", timeout=60,
+                get_phases_for_run=MagicMock(return_value=[]),
+            )
+            mock_run.return_value = self._run_result(
+                self._STDOUT_REGRESSION_FAIL, stderr="Test stderr content"
+            )
 
-        env_without_guard = {k: v for k, v in os.environ.items() if k != "SE3_TEST_RUNNING"}
-        with patch.dict("os.environ", env_without_guard, clear=True):
-            with patch("se3.engine.steps.test.subprocess.Popen") as mock_popen:
-                mock_process = Mock()
-                mock_process.returncode = 1
-                mock_process.communicate.return_value = ("Test stdout content", "Test stderr content")
-                mock_popen.return_value = mock_process
-
-                result = test_handler(step, flow)
-
-                assert result == StepStatus.REVISION_NEEDED
-                test_results = step.outputs["test_results"]
-                assert test_results["passed"] is False
-                assert test_results["returncode"] == 1
-                assert test_results["stdout"] == "Test stdout content"
-                assert test_results["stderr"] == "Test stderr content"
-                # Verify fix loop context is stored
-                assert step.outputs["fix_needed"] is True
-                assert "fix_instructions" in step.outputs
-                fix_context = step.outputs["fix_context"]
-                assert fix_context["test_failed"] is True
-                assert fix_context["reason"] == "test_failure"
-
-
-class TestMaxIterationEnforcement:
-    """Test cases for max iteration enforcement.
-
-    verify_spec and self_check always return REVISION_NEEDED when issues
-    are found. Exhaustion (max iterations) is enforced centrally by the
-    state machine's transition_to_next method, which creates the A-class
-    issue and sets the flow to FAILED.
-    """
-
-    def test_verify_spec_returns_revision_needed_at_max_iterations(self):
-        """verify_spec returns REVISION_NEEDED even at max iterations.
-
-        The state machine is responsible for detecting exhaustion and
-        failing the flow — the handler never short-circuits to FAILED.
-        """
-        from se3.engine.steps.verify_spec import verify_spec_handler
-
-        flow = FlowInstance(
-            flow_id="test-flow-123",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-
-        # Restore an explicit max_fix_iterations cap matching fix_iteration
-        # so the test actually exercises the cap-exhaustion edge. With the
-        # default raised to 100, fix_iteration=3 alone is no longer at the
-        # cap; the inline comment would otherwise be misleading.
-        flow.state.context["max_fix_iterations"] = 3
-
-        step = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.PENDING,
-            inputs={
-                "task_description": "Test task",
-                "spec_content": {},
-                "changes_made": {},
-                "test_results": {
-                    "passed": False,
-                    "returncode": 1,
-                    "stdout": "Failed",
-                    "stderr": "Error",
-                },
-                "fix_iteration": 3,  # At max iterations (cap=3 set above)
-                "max_fix_iterations": 3,
-            },
-        )
-
-        mock_response = """{
-            "verified": false,
-            "issues": [{"severity": "error", "message": "Tests still failing"}],
-            "summary": "Tests failed after max iterations",
-            "recommendations": [],
-            "test_analysis": {
-                "tests_passed": false,
-                "failure_summary": "Still failing",
-                "root_cause": "Unknown"
-            },
-            "fix_instructions": "Manual fix needed"
-        }"""
-
-        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
-            mock_caller = Mock()
-            mock_caller.call.return_value = mock_response
-            mock_caller_class.return_value = mock_caller
-
-            result = verify_spec_handler(step, flow)
+            result = test_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
-            assert step.outputs.get("fix_needed") is True
+            test_results = step.outputs["test_results"]
+            assert test_results["passed"] is False
+            assert test_results["returncode"] == 1
+            assert test_results["stderr"] == "Test stderr content"
+            # Verify fix loop context is stored
+            assert step.outputs["fix_needed"] is True
+            assert "fix_instructions" in step.outputs
+            fix_context = step.outputs["fix_context"]
+            assert fix_context["test_failed"] is True
+            assert fix_context["reason"] == "test_failure"
 
 
 class TestFixLoopIntegration:

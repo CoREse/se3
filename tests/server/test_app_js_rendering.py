@@ -644,8 +644,6 @@ def test_every_step_prompt_template_carries_marker_pair():
     from se3.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
     from se3.engine.steps.self_check import SELF_CHECK_PROMPT
     from se3.engine.steps.summarize import SUMMARIZE_PROMPT
-    from se3.engine.steps.update_spec import UPDATE_SPEC_PROMPT
-    from se3.engine.steps.verify_spec import VERIFY_PROMPT
     from se3.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
 
     all_prompts = {
@@ -657,10 +655,8 @@ def test_every_step_prompt_template_carries_marker_pair():
         "CONTINUE_DISCOVERY_PROMPT": CONTINUE_DISCOVERY_PROMPT,
         "PLAN_PROMPT_HEADER": PLAN_PROMPT_HEADER,
         "PLAN_TASKS_PROMPT": PLAN_TASKS_PROMPT,
-        "VERIFY_PROMPT": VERIFY_PROMPT,
         "SELF_CHECK_PROMPT": SELF_CHECK_PROMPT,
         "SUMMARIZE_PROMPT": SUMMARIZE_PROMPT,
-        "UPDATE_SPEC_PROMPT": UPDATE_SPEC_PROMPT,
         "VERSION_ANALYZE_PROMPT": VERSION_ANALYZE_PROMPT,
     }
     for name, prompt in all_prompts.items():

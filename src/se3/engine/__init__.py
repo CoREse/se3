@@ -11,17 +11,6 @@ from .persistence import PersistenceManager
 from .llm_caller import LLMCaller, LLMCallError
 from .schema import FlowInstanceSchema, ContextSchema, build_context_from_flow
 from .logging_config import StructuredLogger, LogEventType, LogLevel, get_logger
-from .spec_index import (
-    SpecIndex,
-    ItemMeta,
-    load_or_build,
-    get_or_build_index,
-)
-from .spec_loader import (
-    LoadResult,
-    load_for_step,
-    load_full,
-)
 from .event_stream import (
     Event,
     EventType,
@@ -58,13 +47,6 @@ __all__ = [
     "LogEventType",
     "LogLevel",
     "get_logger",
-    "SpecIndex",
-    "ItemMeta",
-    "load_or_build",
-    "get_or_build_index",
-    "LoadResult",
-    "load_for_step",
-    "load_full",
     "Event",
     "EventType",
     "EventEmitter",

@@ -25,8 +25,6 @@ from se3.engine.steps.plan import PLAN_PROMPT_HEADER
 from se3.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
 from se3.engine.steps.self_check import SELF_CHECK_PROMPT
 from se3.engine.steps.summarize import SUMMARIZE_PROMPT
-from se3.engine.steps.update_spec import UPDATE_SPEC_PROMPT
-from se3.engine.steps.verify_spec import VERIFY_PROMPT
 from se3.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
 
 
@@ -172,10 +170,8 @@ _ALL_STEP_PROMPTS = {
     "CONTINUE_DISCOVERY_PROMPT": CONTINUE_DISCOVERY_PROMPT,
     "PLAN_PROMPT_HEADER": PLAN_PROMPT_HEADER,
     "PLAN_TASKS_PROMPT": PLAN_TASKS_PROMPT,
-    "VERIFY_PROMPT": VERIFY_PROMPT,
     "SELF_CHECK_PROMPT": SELF_CHECK_PROMPT,
     "SUMMARIZE_PROMPT": SUMMARIZE_PROMPT,
-    "UPDATE_SPEC_PROMPT": UPDATE_SPEC_PROMPT,
     "VERSION_ANALYZE_PROMPT": VERSION_ANALYZE_PROMPT,
 }
 
@@ -213,10 +209,8 @@ def test_role_opener_is_in_prefix_segment():
         ),
         "PLAN_PROMPT_HEADER": "You are an expert software engineering assistant.",
         "PLAN_TASKS_PROMPT": "You are an expert software engineering assistant.",
-        "VERIFY_PROMPT": "You are an expert software quality assurance engineer.",
         "SELF_CHECK_PROMPT": "You are an expert code reviewer.",
         "SUMMARIZE_PROMPT": "You are an expert software engineering assistant.",
-        "UPDATE_SPEC_PROMPT": "You are an expert technical writer.",
         "VERSION_ANALYZE_PROMPT": "You are an expert in Semantic Versioning 2.0.0.",
     }
     for name, prompt in _ALL_STEP_PROMPTS.items():
@@ -248,10 +242,8 @@ def test_user_content_anchor_is_in_suffix_segment():
         "CONTINUE_DISCOVERY_PROMPT": "{user_response}",
         "PLAN_PROMPT_HEADER": "## Project Context\n",
         "PLAN_TASKS_PROMPT": "## Task Description\n",
-        "VERIFY_PROMPT": "## Task Description\n",
         "SELF_CHECK_PROMPT": "## Task Description\n",
         "SUMMARIZE_PROMPT": "## Task Description\n",
-        "UPDATE_SPEC_PROMPT": "## Task Description\n",
         "VERSION_ANALYZE_PROMPT": "## Task Information\n",
     }
     for name, prompt in _ALL_STEP_PROMPTS.items():

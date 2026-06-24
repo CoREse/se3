@@ -2971,24 +2971,10 @@ class SpecGovernanceConfig:
         index_render_threshold = cls._coerce_positive_int(
             data, "index_render_threshold", DEFAULT_INDEX_RENDER_THRESHOLD
         )
-        # Clamp up to the renderer's irreducible navigation floor: a threshold
-        # below the compact navigation header would force the renderer to
-        # byte-truncate that header and sever a drill command mid-line, leaving a
-        # bounded-but-not-self-describing view. Clamping here keeps every emitted
-        # view BOTH within budget and navigable. The floor is owned by the render
-        # module (single source of truth); import lazily to avoid an import cycle.
-        try:
-            from .engine.spec_index_render import MIN_RENDER_THRESHOLD
-        except Exception:  # pragma: no cover - defensive
-            MIN_RENDER_THRESHOLD = 0
-        if MIN_RENDER_THRESHOLD and index_render_threshold < MIN_RENDER_THRESHOLD:
-            logger.warning(
-                "spec_governance.index_render_threshold=%d is below the minimum "
-                "navigable floor of %d bytes; clamping up so every index view "
-                "stays self-describing.",
-                index_render_threshold, MIN_RENDER_THRESHOLD,
-            )
-            index_render_threshold = MIN_RENDER_THRESHOLD
+        # The spec index renderer (and its navigation-floor clamp) was retired
+        # along with the spec system; ``index_render_threshold`` is retained as an
+        # inert config field for backward compatibility but no longer drives any
+        # renderer.
         spec_file_warn_bytes = cls._coerce_positive_int(
             data, "spec_file_warn_bytes", DEFAULT_SPEC_FILE_WARN_BYTES
         )

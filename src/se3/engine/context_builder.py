@@ -783,40 +783,6 @@ class ContextBuilder:
 
         return None
 
-    def load_specs_for_step(
-        self,
-        step_type: str,
-        selected_items: list[dict[str, str]] | None,
-        mode: Literal["items", "full_spec"] = "items",
-    ) -> str:
-        """Assemble spec text for a step using the item-level loader.
-
-        Delegates to :func:`spec_loader.load_for_step`.  When
-        *selected_items* is empty/None, falls back to loading only the
-        base spec in full-spec mode.
-
-        Args:
-            step_type: Current step type name.
-            selected_items: Items selected by the analyze step selector.
-            mode: ``"items"`` (default) or ``"full_spec"``.
-
-        Returns:
-            Assembled spec text string, ready for LLM prompt injection.
-        """
-        from .spec_loader import load_for_step, load_full
-
-        if not selected_items:
-            # Fallback: load base spec only (full text)
-            return load_full(["base"], self.project_root)
-
-        result = load_for_step(
-            step_type=step_type,
-            selected_items=selected_items,
-            project_root=self.project_root,
-            mode=mode,
-        )
-        return result.text
-
 
 def build_llm_review_prompt(
     step_to_review_type: str,

@@ -7,7 +7,7 @@ Covers:
 - run_step / _ensure_baseline_ready: baseline is non-None before IMPLEMENT,
   background failure falls back to a synchronous re-measurement, both-fail
   degrades to an empty baseline, and fix-loop re-entry is idempotent.
-- _build_step_inputs: TEST and VERIFY_SPEC inputs carry baseline_failures
+- _build_step_inputs: TEST inputs carry baseline_failures
   (injected as [] when not yet captured).
 """
 
@@ -342,25 +342,14 @@ class TestBuildStepInputsBaselineInjection:
 
         assert inputs["baseline_failures"] == ["tests/test_g.py::test_h"]
 
-    def test_verify_spec_step_receives_baseline_failures(self, tmp_path):
-        sm = StateMachine(tmp_path)
-        flow = _make_flow()
-        flow.state.baseline_failures = ["tests/test_i.py::test_j"]
-
-        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
-
-        assert inputs["baseline_failures"] == ["tests/test_i.py::test_j"]
-
     def test_uncaptured_baseline_injected_as_empty_list(self, tmp_path):
         sm = StateMachine(tmp_path)
         flow = _make_flow()
         assert flow.state.baseline_failures is None  # not captured
 
         test_inputs = sm._build_step_inputs(flow, StepType.TEST)
-        verify_inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
 
         assert test_inputs["baseline_failures"] == []
-        assert verify_inputs["baseline_failures"] == []
 
     def test_injected_baseline_is_a_copy(self, tmp_path):
         """Mutating the injected list must not corrupt flow state."""

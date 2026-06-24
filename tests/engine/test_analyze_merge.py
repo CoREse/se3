@@ -80,35 +80,11 @@ class TestBuildStepInputsAnalyzeMapping:
         assert inputs["project_summary"] == "Project: SE3 Framework, branch: main"
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_analyze_forwards_relevant_specs(self, _cfg, sm, flow_with_analyze):
-        inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
-        assert inputs["relevant_specs"] == ["flow-engine", "base"]
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_analyze_forwards_spec_content(self, _cfg, sm, flow_with_analyze):
-        inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
-        assert inputs["spec_content"]["base"] == "# Base spec content"
-        assert inputs["spec_content"]["flow-engine"] == "# Flow engine spec content"
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_task_type_and_scope(self, _cfg, sm, flow_with_analyze):
         """Original ANALYZE outputs still forwarded."""
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
         assert inputs["task_type"] == "feature"
         assert inputs["scope"] == "engine module"
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_verify_spec_gets_spec_content_from_analyze(self, _cfg, sm, flow_with_analyze):
-        """verify_spec (direct consumer in review flow) gets spec_content from analyze."""
-        inputs = sm._build_step_inputs(flow_with_analyze, StepType.VERIFY_SPEC)
-        assert "spec_content" in inputs
-        assert inputs["spec_content"]["flow-engine"] == "# Flow engine spec content"
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_implement_gets_spec_content_from_analyze(self, _cfg, sm, flow_with_analyze):
-        """implement gets spec_content from analyze (via inputs passthrough)."""
-        inputs = sm._build_step_inputs(flow_with_analyze, StepType.IMPLEMENT)
-        assert "spec_content" in inputs
 
 
 class TestBuildStepInputsDeprecatedBackwardCompat:
@@ -229,68 +205,3 @@ class TestStubHandlers:
 
         mock_handler.assert_called_once_with(step, flow)
         assert result == StepStatus.COMPLETED
-
-# --- Integration: downstream steps get spec_content from analyze ---
-
-class TestDownstreamSpecContentAccess:
-    """Verify plan, implement, verify_spec get spec_content from analyze outputs.
-
-    This is the critical integration path: analyze now provides spec_content
-    that was previously provided by read_spec.
-    """
-
-    @pytest.fixture
-    def sm(self, tmp_path):
-        return StateMachine(tmp_path)
-
-    def _flow_with_analyze_and_plan(self, tmp_path):
-        """Flow with completed ANALYZE and PLAN steps."""
-        flow = _make_flow(tmp_path)
-        _add_completed_step(flow, StepType.ANALYZE, {
-            "task_type": "feature",
-            "scope": "auth module",
-            "project_summary": "SE3 project",
-            "relevant_specs": ["flow-engine", "base"],
-            "spec_content": {"flow-engine": "# FE spec", "base": "# Base spec"},
-        })
-        _add_completed_step(flow, StepType.PLAN, {
-            "plan": {"proposal": {"summary": "Add auth"}, "design": {"overview": "Auth design"}},
-            "task_groups": [{"group_id": "G1", "name": "auth", "tasks": []}],
-            "spec_changes": [],
-        })
-        return flow
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_plan_receives_spec_content(self, _cfg, sm, tmp_path):
-        flow = _make_flow(tmp_path)
-        _add_completed_step(flow, StepType.ANALYZE, {
-            "task_type": "feature",
-            "scope": "auth",
-            "project_summary": "SE3",
-            "relevant_specs": ["base"],
-            "spec_content": {"base": "# Base"},
-        })
-        inputs = sm._build_step_inputs(flow, StepType.PLAN)
-        assert inputs["spec_content"] == {"base": "# Base"}
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_implement_receives_spec_content(self, _cfg, sm, tmp_path):
-        flow = self._flow_with_analyze_and_plan(tmp_path)
-        inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
-        assert inputs["spec_content"] == {"flow-engine": "# FE spec", "base": "# Base spec"}
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_verify_spec_receives_spec_content_in_review_flow(self, _cfg, sm, tmp_path):
-        """In review flow, verify_spec is the direct consumer of analyze's spec_content."""
-        flow = _make_flow(tmp_path, task_type="review")
-        _add_completed_step(flow, StepType.ANALYZE, {
-            "task_type": "review",
-            "scope": "full review",
-            "project_summary": "SE3 review",
-            "relevant_specs": ["flow-engine"],
-            "spec_content": {"flow-engine": "# Flow engine spec"},
-        })
-        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
-        assert inputs["spec_content"] == {"flow-engine": "# Flow engine spec"}
-        assert inputs["relevant_specs"] == ["flow-engine"]
-        assert inputs["project_summary"] == "SE3 review"

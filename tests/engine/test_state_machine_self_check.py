@@ -478,14 +478,6 @@ class TestBuildStepInputsForSelfCheck:
         assert "changes_made" in inputs
         assert "src/feature.py" in inputs["changes_made"]["files_changed"]
 
-    def test_includes_spec_content(self, sm, tmp_path):
-        flow = self._make_flow_with_history(tmp_path)
-
-        inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
-
-        assert "spec_content" in inputs
-        assert inputs["spec_content"]["base"] == "Base spec"
-
     def test_includes_task_description(self, sm, tmp_path):
         flow = self._make_flow_with_history(tmp_path)
 

@@ -704,14 +704,6 @@ class TestBuildStepInputsWithFixContext:
         assert "test_results" in inputs
         assert inputs["test_results"]["passed"] is False
 
-    def test_build_step_inputs_includes_verification_result_for_implement(self, state_machine, flow_with_fix_history):
-        """Test that _build_step_inputs includes verification_result when in fix loop."""
-        inputs = state_machine._build_step_inputs(flow_with_fix_history, StepType.IMPLEMENT)
-
-        assert "verification_result" in inputs
-        assert "fix_instructions" in inputs
-        assert "fix_context" in inputs
-
     def test_build_step_inputs_no_fix_context_when_iteration_zero(self, state_machine, tmp_path):
         """Test that _build_step_inputs doesn't include fix context when iteration is 0."""
         flow = FlowInstance(
@@ -725,90 +717,6 @@ class TestBuildStepInputsWithFixContext:
         # Should not have fix-specific keys when not in a fix loop
         assert "fix_iteration" not in inputs
         assert "fix_history" not in inputs
-
-
-class TestBuildStepInputsVerifySpec:
-    """Test _build_step_inputs propagation for VERIFY_SPEC in fix loop."""
-
-    @pytest.fixture
-    def state_machine(self, tmp_path):
-        return StateMachine(project_root=tmp_path)
-
-    @pytest.fixture
-    def flow_in_fix_loop(self):
-        flow = FlowInstance(
-            flow_id="test-flow-vs",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-        flow.state.increment_fix_iteration(fix_context={"reason": "spec_compliance"})
-
-        impl_step = Step(
-            step_type=StepType.IMPLEMENT,
-            status=StepStatus.COMPLETED,
-            outputs={"files_changed": ["a.py"]},
-        )
-        flow.state.add_step(impl_step)
-
-        test_step = Step(
-            step_type=StepType.TEST,
-            status=StepStatus.COMPLETED,
-            outputs={"test_results": {"passed": True}},
-        )
-        flow.state.add_step(test_step)
-
-        prev_verify = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.REVISION_NEEDED,
-            outputs={
-                "verification_result": {"issues": [{"message": "Missing check", "scope": "in_scope"}]},
-                "fix_instructions": "Add boundary check in handler",
-                "issues": [{"message": "Missing check", "scope": "in_scope", "priority": "high"}],
-            },
-        )
-        flow.state.add_step(prev_verify)
-
-        return flow
-
-    def test_propagates_fix_iteration(self, state_machine, flow_in_fix_loop):
-        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
-        assert inputs["fix_iteration"] == 1
-
-    def test_propagates_fix_history(self, state_machine, flow_in_fix_loop):
-        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
-        assert len(inputs["fix_history"]) == 1
-        assert inputs["fix_history"][0]["reason"] == "spec_compliance"
-
-    def test_propagates_max_fix_iterations(self, state_machine, flow_in_fix_loop):
-        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
-        assert "max_fix_iterations" in inputs
-        # Fixture has no se3.yaml override → state machine resolves to the
-        # framework default. Pin to the exact value so a future flip of
-        # the default to the unlimited sentinel (0) is caught explicitly.
-        assert inputs["max_fix_iterations"] == DEFAULT_MAX_FIX_ITERATIONS
-
-    def test_propagates_prev_issues(self, state_machine, flow_in_fix_loop):
-        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
-        assert len(inputs["prev_issues"]) == 1
-        assert inputs["prev_issues"][0]["message"] == "Missing check"
-
-    def test_propagates_prev_verification_result(self, state_machine, flow_in_fix_loop):
-        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
-        assert inputs["prev_verification_result"]["issues"][0]["message"] == "Missing check"
-
-    def test_propagates_prev_fix_instructions(self, state_machine, flow_in_fix_loop):
-        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
-        assert inputs["prev_fix_instructions"] == "Add boundary check in handler"
-
-    def test_no_prev_data_when_not_in_fix_loop(self, state_machine):
-        flow = FlowInstance(
-            flow_id="test-flow-vs2",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-        inputs = state_machine._build_step_inputs(flow, StepType.VERIFY_SPEC)
-        assert "prev_issues" not in inputs
-        assert "fix_iteration" not in inputs
 
 
 class TestBuildStepInputsSelfCheck:
@@ -907,40 +815,6 @@ class TestPrevInputsDeepCopy:
     def state_machine(self, tmp_path):
         return StateMachine(project_root=tmp_path)
 
-    def _make_flow_with_prev_verify(self):
-        flow = FlowInstance(
-            flow_id="test-deepcopy-vs",
-            task_description="Test task",
-            status=FlowStatus.RUNNING,
-        )
-        flow.state.increment_fix_iteration(fix_context={"reason": "spec_compliance"})
-
-        impl_step = Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED, outputs={})
-        flow.state.add_step(impl_step)
-
-        prev_verify = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.REVISION_NEEDED,
-            outputs={
-                "verification_result": {"issues": [{"message": "A", "scope": "in_scope"}]},
-                "fix_instructions": "do X",
-                "issues": [{"message": "A", "scope": "in_scope", "priority": "high"}],
-            },
-        )
-        flow.state.add_step(prev_verify)
-        return flow, prev_verify
-
-    def test_verify_spec_prev_issues_is_deep_copied(self, state_machine):
-        flow, prev_verify = self._make_flow_with_prev_verify()
-        inputs = state_machine._build_step_inputs(flow, StepType.VERIFY_SPEC)
-
-        # Mutate the snapshot inside inputs; originals on the step must be untouched.
-        inputs["prev_issues"][0]["message"] = "MUTATED"
-        inputs["prev_verification_result"]["issues"][0]["message"] = "MUTATED"
-
-        assert prev_verify.outputs["issues"][0]["message"] == "A"
-        assert prev_verify.outputs["verification_result"]["issues"][0]["message"] == "A"
-
     def test_self_check_prev_issues_is_deep_copied(self, state_machine):
         from se3.config import WorkflowConfig
         flow = FlowInstance(
@@ -964,7 +838,10 @@ class TestPrevInputsDeepCopy:
         inputs["prev_self_check_issues"][0]["description"] = "MUTATED"
         assert prev_sc.outputs["issues"][0]["description"] == "D"
 
-    def test_implement_test_and_verify_results_deep_copied(self, state_machine):
+    def test_implement_test_results_deep_copied(self, state_machine):
+        """IMPLEMENT fix-context carries a deep copy of the most recent TEST
+        step's ``test_results`` so later mutations of the snapshot can't
+        corrupt the originals stored on the step."""
         flow = FlowInstance(
             flow_id="test-deepcopy-impl",
             task_description="Test task",
@@ -978,26 +855,12 @@ class TestPrevInputsDeepCopy:
             outputs={"test_results": {"passed": False, "failures": [{"name": "t1"}]}},
         )
         flow.state.add_step(test_step)
-        verify_step = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.REVISION_NEEDED,
-            outputs={
-                "verification_result": {"issues": [{"message": "V"}]},
-                "fix_instructions": "do Y",
-                "fix_context": {"spec_issues": [{"priority": "high", "message": "V"}]},
-            },
-        )
-        flow.state.add_step(verify_step)
 
         inputs = state_machine._build_step_inputs(flow, StepType.IMPLEMENT)
 
         inputs["test_results"]["failures"][0]["name"] = "MUTATED"
-        inputs["verification_result"]["issues"][0]["message"] = "MUTATED"
-        inputs["fix_context"]["spec_issues"][0]["message"] = "MUTATED"
 
         assert test_step.outputs["test_results"]["failures"][0]["name"] == "t1"
-        assert verify_step.outputs["verification_result"]["issues"][0]["message"] == "V"
-        assert verify_step.outputs["fix_context"]["spec_issues"][0]["message"] == "V"
 
 
 class TestMultiIterationAccumulation:
@@ -1231,53 +1094,6 @@ class TestUnlimitedSentinelEndToEnd:
         ))
         return flow
 
-    @pytest.mark.parametrize("fix_iteration", [1, 5, 50, 250])
-    def test_verify_spec_prompt_says_unlimited_across_iterations(
-        self, tmp_path, fix_iteration
-    ):
-        """se3.yaml(max_fix_iterations: 0) → state_machine builds inputs →
-        verify_spec prompt contains 'unlimited' regardless of iteration count.
-
-        Catches a regression where the propagation line in state_machine
-        (`inputs["max_fix_iterations"] = self._get_max_fix_iterations()`)
-        ever changed back to a form that drops 0.
-        """
-        from se3.engine.steps.verify_spec import verify_spec_handler
-
-        self._write_unlimited_yaml(tmp_path)
-        sm = StateMachine(project_root=tmp_path)
-        flow = self._flow_in_fix_loop(fix_iteration)
-
-        # 1. Real config path produces 0 (the unlimited sentinel).
-        assert sm._get_max_fix_iterations() == 0
-
-        # 2. _build_step_inputs propagates 0 to step.inputs (no `or` swap).
-        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
-        assert inputs["max_fix_iterations"] == 0
-        assert inputs["fix_iteration"] == fix_iteration
-
-        # 3. The handler renders the prompt with 'unlimited' and no
-        #    'final attempt' warning, regardless of how high fix_iteration is.
-        step = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.PENDING, inputs=inputs)
-        flow.change_path = tmp_path
-
-        mock_response = '{"issues": [], "summary": "", "recommendations": [],' \
-            ' "test_analysis": {"tests_passed": false, "failure_summary": "",' \
-            ' "root_cause": ""}, "fix_instructions": "fix it"}'
-
-        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class, \
-             patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
-            mock_caller = Mock()
-            mock_caller.call.return_value = mock_response
-            mock_caller_class.return_value = mock_caller
-            verify_spec_handler(step, flow)
-            prompt = mock_caller.call.call_args[1]["prompt"]
-
-        assert "unlimited" in prompt.lower()
-        assert "final fix attempt" not in prompt.lower()
-        assert f"of {fix_iteration}" not in prompt  # never literal "of N"
-        assert step.outputs["max_fix_iterations"] == 0
-
     @pytest.mark.parametrize("fix_iteration", [1, 5, 200])
     def test_self_check_prompt_says_unlimited_across_iterations(
         self, tmp_path, fix_iteration
@@ -1312,62 +1128,6 @@ class TestUnlimitedSentinelEndToEnd:
         assert "unlimited" in prompt.lower()
         assert "final fix attempt" not in prompt.lower()
         assert f"of {fix_iteration}" not in prompt
-
-    def test_verify_spec_initial_iteration_unlimited_no_warning(self, tmp_path):
-        """fix_iteration=0 with unlimited mode: the prompt renders 'no
-        previous fix attempts' and never injects the 'final fix attempt'
-        warning, regardless of whether the underlying max_fix_iterations
-        is the unlimited sentinel (0) or the default (100).
-
-        Under unlimited mode, the prompt also includes an 'unlimited mode'
-        parenthetical marker so future iteration-cap-dependent guidance has
-        a visible signal at fix_iteration==0. No count is rendered so the
-        observable contracts at iteration 0 are: (a) absence of the
-        final-attempt warning under sentinel mode, (b) no 'fix iteration: N'
-        line, and (c) presence of the 'unlimited mode' marker.
-        """
-        from se3.engine.steps.verify_spec import verify_spec_handler
-
-        flow = self._flow_in_fix_loop(0)
-        flow.change_path = tmp_path
-
-        # Inject inputs directly: at fix_iteration=0 the state_machine does
-        # not auto-propagate max_fix_iterations (the gap mentioned in the
-        # self-check feedback). Simulate the unlimited-mode call as the
-        # handler would receive it once feature parity is restored, and
-        # also verify the assertion holds with the current omit-then-load
-        # path by leaving max_fix_iterations off and writing se3.yaml.
-        self._write_unlimited_yaml(tmp_path)
-        inputs = {
-            "task_description": "Test",
-            "spec_content": {},
-            "changes_made": {},
-            "test_results": {"passed": True, "returncode": 0, "stdout": "OK"},
-            "fix_iteration": 0,
-            "max_fix_iterations": 0,
-        }
-        step = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.PENDING, inputs=inputs)
-
-        mock_response = '{"issues": [], "summary": "", "recommendations": [],' \
-            ' "test_analysis": {"tests_passed": true, "failure_summary": "",' \
-            ' "root_cause": ""}, "fix_instructions": ""}'
-
-        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class, \
-             patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
-            mock_caller = Mock()
-            mock_caller.call.return_value = mock_response
-            mock_caller_class.return_value = mock_caller
-            verify_spec_handler(step, flow)
-            prompt = mock_caller.call.call_args[1]["prompt"]
-
-        assert "no previous fix attempts" in prompt.lower()
-        assert "final fix attempt" not in prompt.lower()
-        # No count is rendered at iteration 0 — there is no "Fix iteration: N"
-        # string to match either the legacy form or any unlimited variant.
-        assert "fix iteration:" not in prompt.lower()
-        # Unlimited-mode marker is present so future iteration-cap-dependent
-        # guidance won't silently misrender at fix_iteration==0.
-        assert "unlimited mode" in prompt.lower()
 
     def test_self_check_initial_iteration_unlimited_no_warning(self, tmp_path):
         """Same contract for SELF_CHECK at fix_iteration=0."""
@@ -1589,59 +1349,6 @@ class TestUnlimitedOutputDiskShape:
     'unlimited'. The handler comments now document the sentinel, but a
     serialization round-trip test makes the contract executable.
     """
-
-    def test_verify_spec_outputs_serialize_with_sentinel(self, tmp_path):
-        """verify_spec → JSON → back: max_fix_iterations stays ``0`` (int)."""
-        from se3.engine.steps.verify_spec import verify_spec_handler
-        import json as _json
-
-        flow = FlowInstance(
-            flow_id="disk-shape-vs",
-            task_description="t",
-            task_type="feature",
-            status=FlowStatus.RUNNING,
-            change_path=tmp_path / "changes" / "c",
-        )
-        flow.state.selected_steps = [StepType.VERIFY_SPEC]
-
-        step = Step(
-            step_type=StepType.VERIFY_SPEC,
-            status=StepStatus.PENDING,
-            inputs={
-                "task_description": "t",
-                "spec_content": {"s.md": "x"},
-                "changes_made": {},
-                "test_results": {
-                    "passed": False, "returncode": 1, "stdout": "", "stderr": "",
-                },
-                "fix_iteration": 7,
-                "max_fix_iterations": 0,  # the unlimited sentinel
-            },
-        )
-        response = _json.dumps({
-            "issues": [],
-            "summary": "",
-            "recommendations": [],
-            "test_analysis": {"tests_passed": False, "failure_summary": "", "root_cause": ""},
-            "fix_instructions": "fix",
-        })
-
-        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_cls, \
-             patch("se3.engine.steps.verify_spec._log_out_of_scope_issues"):
-            mock_caller = Mock()
-            mock_caller.call.return_value = response
-            mock_cls.return_value = mock_caller
-            verify_spec_handler(step, flow)
-
-        # Round-trip through JSON to lock the on-disk shape (engine.json is
-        # produced by json.dump on outputs).
-        roundtripped = _json.loads(_json.dumps(step.outputs))
-        assert roundtripped["max_fix_iterations"] == 0
-        assert isinstance(roundtripped["max_fix_iterations"], int)
-        # Document the contract: ``0`` IS the unlimited marker, not a None
-        # placeholder. A consumer doing ``current/max`` would div-by-zero;
-        # consumers must check ``<= 0`` first.
-        assert roundtripped["max_fix_iterations"] is not None
 
     def test_self_check_outputs_serialize_with_sentinel(self, tmp_path):
         """self_check → JSON → back: max_fix_iterations stays ``0`` (int)."""

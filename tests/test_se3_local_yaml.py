@@ -484,26 +484,6 @@ class TestMaxFixIterationsLocal:
         # local wins — yaml's 99 must NOT leak through.
         assert get_max_fix_iterations(tmp_path) == 7
 
-    def test_verify_spec_get_max_fix_iterations_reads_local(self, tmp_path):
-        """``verify_spec._get_max_fix_iterations`` is the per-step helper
-        used inside the fix loop — it has its own get_project_config_path
-        call site that must also pick up ``se3.local.yaml``.
-        """
-        from types import SimpleNamespace
-
-        from se3.engine.steps.verify_spec import _get_max_fix_iterations
-
-        (tmp_path / "se3.local.yaml").write_text(
-            "workflow:\n  max_fix_iterations: 11\n"
-        )
-        # Build a minimal flow stub with project_root in the context so
-        # the helper picks the right directory.
-        flow = SimpleNamespace(
-            state=SimpleNamespace(context={"project_root": str(tmp_path)}),
-            change_path=None,
-        )
-        assert _get_max_fix_iterations(flow) == 11
-
 
 # ---------------------------------------------------------------------------
 # context_builder injection whitelists honour se3.local.yaml

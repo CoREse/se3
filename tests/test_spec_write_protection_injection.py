@@ -20,7 +20,6 @@ from se3.engine.context_builder import (
     _is_spec_write_protected_step,
     get_spec_write_protection_injection,
 )
-from se3.engine.spec_role import find_spec_driven_framing
 
 
 # --- Derived exemption set ---
@@ -114,13 +113,6 @@ class TestGetSpecWriteProtectionInjection:
         assert "se3/specs" in injection
         for tool in ("Write", "Edit", "NotebookEdit", "Bash"):
             assert tool in injection
-
-    def test_wording_avoids_spec_driven_framing(self):
-        """The injection must not trip the anti-regression framing guardrail."""
-        for step in ("implement", "propose", "design", "plan_tasks"):
-            assert find_spec_driven_framing(
-                get_spec_write_protection_injection(step)
-            ) == []
 
 
 class TestIsSpecWriteProtectedStep:

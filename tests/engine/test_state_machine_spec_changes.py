@@ -206,39 +206,3 @@ class TestEmptyDesignDoc:
         })
         inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
         assert inputs["design_doc"] == {}
-
-
-class TestFullSpecFallback:
-    """Test that full_spec load failure falls back to items-mode spec_content."""
-
-    @pytest.fixture
-    def sm(self, tmp_path):
-        return StateMachine(tmp_path)
-
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_full_spec_failure_falls_back_to_items(self, _cfg, sm, tmp_path):
-        """When load_for_step raises in full_spec mode, items-mode content is preserved."""
-        # Create a flow with analyze outputs (items-mode spec_content)
-        flow = _make_flow(tmp_path)
-        items_content = "items-mode spec content"
-        _add_completed_step(flow, StepType.ANALYZE, {
-            "task_type": "feature",
-            "scope": "src/",
-            "selected_items": [{"spec": "base", "requirement_name": "Project Identity"}],
-            "spec_content": items_content,
-            "relevant_specs": ["base"],
-        })
-
-        # Patch the config module (local import inside _build_step_inputs)
-        # and spec_loader (local import inside the full_spec branch)
-        with patch("se3.config.load_spec_loading_config") as mock_cfg_cls:
-            mock_cfg = mock_cfg_cls.return_value
-            mock_cfg.mode_for.return_value = "full_spec"
-
-            with patch("se3.engine.spec_loader.load_for_step") as mock_load:
-                mock_load.side_effect = OSError("disk full")
-                inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
-                # items-mode content should be preserved as fallback
-                assert inputs["spec_content"] == items_content
-                assert inputs["relevant_specs"] == ["base"]
-                mock_load.assert_called_once()

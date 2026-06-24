@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
-from se3.engine.spec_role import find_spec_driven_framing
 from se3.engine.steps.plan import (
     SPEC_CHANGES_SECTION,
     SPEC_WRITE_PROTECTION_SECTION,
@@ -274,11 +273,6 @@ class TestSpecWriteProtectionSection:
         who writes spec files."""
         lowered = SPEC_WRITE_PROTECTION_SECTION.lower()
         assert "behavior" in lowered
-
-    def test_section_avoids_anti_regression_framing(self):
-        """find_spec_driven_framing must be empty — the new wording must not
-        reintroduce spec-driven framing."""
-        assert find_spec_driven_framing(SPEC_WRITE_PROTECTION_SECTION) == []
 
     def test_full_depth_includes_section_and_keeps_spec_changes(self):
         prompt = _build_prompt(
