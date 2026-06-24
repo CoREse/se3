@@ -1,0 +1,197 @@
+"""Charter subsystem: load, render, and altitude-gate the project charter.
+
+The **charter** (`se3/charter.md`) is the shrunk rename of the retired base
+spec. It plays exactly one runtime role: it is injected **in full, into every
+`se3 run` step, unconditionally**, and so doubles as the conventions channel
+for sandboxed LLM sub-processes (which cannot read CLAUDE.md and obtain
+project-level conventions only through what se3 injects).
+
+Three capabilities live here:
+
+- :func:`load_charter` — read ``se3/charter.md`` for whole-text injection.
+- :func:`render_charter_template` — render the packaged ``charter.md`` template
+  with project-init placeholder substitution (used by init / migrate).
+- :func:`check_admission` — the **altitude gate**. The normative admission
+  standard (:data:`CHARTER_ADMISSION_STANDARD`, relocated and adapted from
+  ``spec_governance.BASE_ADMISSION_STANDARD``) is the LLM-facing text that
+  guards against low-level content leaking into the charter; the byte threshold
+  is a **monitoring light**, not a hard wall — over-threshold flags a review of
+  whether low-level content has leaked in, it never blocks.
+
+This module has **no import-time side effects** and depends only on the
+standard library, so prompt modules, the migrate command, and tests can import
+it freely without pulling in the heavier config / engine stack.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Union
+
+# ---------------------------------------------------------------------------
+# physical location
+# ---------------------------------------------------------------------------
+#: Path of the charter file relative to the project root. The charter lives at
+#: the top of the runtime directory (sibling of ``se3/code-index.md``), pulled
+#: out of ``se3/specs/`` because the spec corpus is retired by this refactor.
+CHARTER_RELATIVE_PATH = Path("se3") / "charter.md"
+
+#: Filename of the packaged charter template (mirrors templates.CHARTER_TEMPLATE).
+CHARTER_TEMPLATE_NAME = "charter.md"
+
+# ---------------------------------------------------------------------------
+# admission monitoring threshold
+# ---------------------------------------------------------------------------
+# Charter content is decoupled from project size — it grows only with
+# architectural complexity, not with LOC — so a fixed byte ceiling is a
+# reasonable monitoring light. The default mirrors the base spec's historical
+# 32 KiB ceiling. It is NOT a hard wall: see check_admission.
+DEFAULT_CHARTER_MAX_BYTES = 32768
+
+
+# ---------------------------------------------------------------------------
+# altitude gate — admission standard (relocated from BASE_ADMISSION_STANDARD)
+# ---------------------------------------------------------------------------
+# The normative text that defines what the charter MAY carry. It is injected
+# into the LLM-driven charter-admission check (see flow check (b)), which is the
+# component that actually judges whether low-level content leaked in. This is
+# the charter-flavoured adaptation of spec_governance.BASE_ADMISSION_STANDARD:
+# charter IS the renamed base, so the admission altitude is identical, but the
+# wording references code-index (the new home of per-module locators) rather
+# than the retired `se3 spec` surface.
+CHARTER_ADMISSION_STANDARD = """\
+## Charter Admission Standard
+
+The `charter` (`se3/charter.md`) is injected — in full — into every step of
+every session, and is the conventions channel for sandboxed sub-processes. Its
+size is therefore a fixed cost paid on every single LLM call. Keep it small and
+high-altitude.
+
+The charter MAY carry ONLY content that is code-inexpressible AND that every
+session genuinely needs loaded in full:
+
+- Project identity / positioning (what this project is, its primary language /
+  framework).
+- The top-level architecture picture — specifically the *semantic / subjective*
+  layering that mechanical structure cannot express (why these modules form one
+  subsystem, where the cross-subsystem boundaries are).
+- Project-wide cross-cutting conventions and hard constraints (coding
+  conventions, key constraints, workflow conventions) that apply everywhere.
+- Version-management policy.
+
+The charter MUST NOT carry low-level content:
+
+- Per-module / per-file / per-symbol locators — *where a thing lives, what it
+  does, what its key symbols are* — belong to **code-index**
+  (`se3 code-index` for the top map, `se3 code-index show <path>` to drill in),
+  NOT to the charter. Copying them in only yields a size-bloating mirror that
+  is less accurate than the code itself.
+- Implementation detail of any single module — its mechanics, its internal
+  behaviour — belongs in that module's code and its colocated why-comments, not
+  in the charter.
+
+When charter content exceeds its configured byte threshold, treat it as a RED
+LIGHT prompting a review of whether low-level content has leaked in — NOT as a
+reason to build an index over the charter. The fix is to remove the leaked
+low-level content (relocating locator detail to code-index), not to chunk the
+charter."""
+
+
+# ---------------------------------------------------------------------------
+# admission result
+# ---------------------------------------------------------------------------
+@dataclass
+class AdmissionResult:
+    """Outcome of the charter altitude gate (a monitoring-light check).
+
+    Attributes:
+        size_bytes: UTF-8 byte size of the charter text.
+        threshold_bytes: The monitoring-light threshold checked against.
+        over_threshold: ``True`` iff ``size_bytes > threshold_bytes``. This is
+            advisory — it NEVER means the charter is rejected.
+        admission_standard: The normative altitude-gate text
+            (:data:`CHARTER_ADMISSION_STANDARD`) to feed the LLM admission
+            check that judges low-level-content leakage.
+        warning: A human-readable monitoring-light message when over threshold,
+            else ``None``.
+    """
+
+    size_bytes: int
+    threshold_bytes: int
+    over_threshold: bool
+    admission_standard: str
+    warning: Optional[str] = None
+
+
+def charter_path(project_root: Union[str, Path]) -> Path:
+    """Return the absolute charter path for *project_root*."""
+    return Path(project_root) / CHARTER_RELATIVE_PATH
+
+
+def load_charter(project_root: Union[str, Path]) -> str:
+    """Read ``se3/charter.md`` for whole-text injection into every step.
+
+    Returns the full charter text, or an empty string when the file is absent
+    or unreadable (the loader never raises — a missing charter degrades to "no
+    project-level conventions injected" rather than breaking the flow). This is
+    the single entry point steps and the sandbox conventions channel call.
+    """
+    path = charter_path(project_root)
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def load_charter_template() -> str:
+    """Return the raw packaged charter template text (no substitution)."""
+    template_path = Path(__file__).parent.parent / "templates" / CHARTER_TEMPLATE_NAME
+    return template_path.read_text(encoding="utf-8")
+
+
+def render_charter_template(**values: str) -> str:
+    """Render the packaged charter template, substituting ``{key}`` placeholders.
+
+    Uses literal ``str.replace`` (not ``str.format``) so incidental braces in
+    the template body — e.g. inside a fenced code block — are left untouched and
+    never raise ``KeyError``. Mirrors ``init_cmd._render_template`` so charter
+    rendering stays consistent with the other init templates.
+    """
+    content = load_charter_template()
+    for key, value in values.items():
+        content = content.replace("{" + key + "}", value)
+    return content
+
+
+def check_admission(
+    charter_text: str,
+    threshold_bytes: int = DEFAULT_CHARTER_MAX_BYTES,
+) -> AdmissionResult:
+    """Run the charter altitude gate against *charter_text*.
+
+    The byte-size check is a **monitoring light**, not a hard wall: exceeding
+    *threshold_bytes* sets ``over_threshold`` / ``warning`` so a reviewer (or a
+    downstream LLM gate) is prompted to check for low-level-content leakage, but
+    it NEVER blocks or raises. The returned ``admission_standard`` carries the
+    normative text the LLM-driven admission check uses to judge what counts as
+    leaked low-level content.
+    """
+    size_bytes = len((charter_text or "").encode("utf-8"))
+    over_threshold = size_bytes > threshold_bytes
+    warning: Optional[str] = None
+    if over_threshold:
+        warning = (
+            f"charter is {size_bytes} bytes, over the {threshold_bytes}-byte "
+            "monitoring threshold. This is a red light prompting a review of "
+            "whether low-level content (per-module locators, implementation "
+            "detail) has leaked in — relocate such content to code-index. It is "
+            "NOT a hard limit and does not block the flow."
+        )
+    return AdmissionResult(
+        size_bytes=size_bytes,
+        threshold_bytes=threshold_bytes,
+        over_threshold=over_threshold,
+        admission_standard=CHARTER_ADMISSION_STANDARD,
+        warning=warning,
+    )
