@@ -406,6 +406,10 @@ from .commands.issue_cmd import app as issue_app
 # Import spec command (read-only spec index navigation)
 from .commands.spec_cmd import app as spec_app
 
+# Import code-index command (structure-map navigation; takes over the per-module
+# locator-navigation role the old base spec carried)
+from .commands.code_index_cmd import app as code_index_app
+
 
 @app.command(name="init")
 def init_cmd(
@@ -604,6 +608,15 @@ app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 # Register spec command (read-only spec index navigation: index / show)
 app.add_typer(spec_app, name="spec", help="Navigate the spec index (read-only)")
+
+# Register code-index command (structure map navigation: index / show / rebuild
+# / inspect). Named "code-index" — not the ambiguous "code" — and reads the
+# authoritative se3/code-index.md product.
+app.add_typer(
+    code_index_app,
+    name="code-index",
+    help="Navigate the code-index structure map (reads se3/code-index.md)",
+)
 
 
 # ---------------------------------------------------------------------------

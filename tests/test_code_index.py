@@ -18,7 +18,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from se3.cli import app
+from se3.commands import code_index_cmd
 from se3.engine import code_index, code_index_render, file_enum
 from se3.engine.code_index import (
     DEGRADED_MARKER,
@@ -26,6 +29,8 @@ from se3.engine.code_index import (
     build_index,
     load_or_build,
 )
+
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
@@ -384,3 +389,82 @@ class TestRender:
         assert index is not None
         top = code_index_render.render_top_map(index)
         assert "`README.md`" in top
+
+
+# ---------------------------------------------------------------------------
+# CLI: se3 code-index (group G2)
+# ---------------------------------------------------------------------------
+
+class TestCodeIndexCLI:
+    @pytest.fixture
+    def built_project(self, project: Path, monkeypatch) -> Path:
+        """A project whose code-index md/json are built (no LLM — fake summariser),
+        with ``get_project_root`` pointed here so the CLI resolves to it."""
+        build_index(project, summarizer=RecordingSummarizer())
+        monkeypatch.setattr(code_index_cmd, "get_project_root", lambda: project)
+        return project
+
+    def test_index_no_arg_renders_top_map(self, built_project: Path):
+        result = runner.invoke(app, ["code-index", "index"])
+        assert result.exit_code == 0, result.output
+        assert "`src/mod.py`" in result.output
+        # Top map lists files, NOT function-level symbols.
+        assert "Greeter.hello" not in result.output
+
+    def test_index_with_path_drills_into_file(self, built_project: Path):
+        result = runner.invoke(app, ["code-index", "index", "src/mod.py"])
+        assert result.exit_code == 0, result.output
+        assert "Greeter.hello" in result.output
+        assert "`alpha`" in result.output
+
+    def test_index_with_directory_lists_files(self, built_project: Path):
+        result = runner.invoke(app, ["code-index", "index", "src"])
+        assert result.exit_code == 0, result.output
+        assert "`src/mod.py`" in result.output
+        assert "Greeter.hello" not in result.output
+
+    def test_show_pulls_function_level(self, built_project: Path):
+        result = runner.invoke(app, ["code-index", "show", "src/mod.py"])
+        assert result.exit_code == 0, result.output
+        assert "Greeter.hello" in result.output
+        assert "Greeter.bye" in result.output
+
+    def test_index_unbuilt_errors(self, project: Path, monkeypatch):
+        # No build has run -> no md on disk -> non-zero exit with a hint.
+        monkeypatch.setattr(code_index_cmd, "get_project_root", lambda: project)
+        result = runner.invoke(app, ["code-index", "index"])
+        assert result.exit_code == 1
+        assert "code-index rebuild" in result.output
+
+    def test_rebuild_force_full_rebuild(self, project: Path, monkeypatch):
+        # First build with a fake summariser so no LLM is touched on the build path.
+        build_index(project, summarizer=RecordingSummarizer())
+        monkeypatch.setattr(code_index_cmd, "get_project_root", lambda: project)
+
+        # Force the rebuild summariser to a fake so --force does not call the LLM.
+        from se3.engine import code_index as ci
+
+        recorder = RecordingSummarizer()
+        monkeypatch.setattr(
+            ci, "_make_llm_summarizer", lambda project_root: recorder
+        )
+
+        result = runner.invoke(app, ["code-index", "rebuild", "--force"])
+        assert result.exit_code == 0, result.output
+        assert "full rebuild" in result.output
+        # --force re-summarises everything, so the fake summariser saw symbols.
+        assert any("src/mod.py::alpha" in batch for batch in recorder.batches)
+        # Both physical files exist after the rebuild.
+        assert code_index.md_path(project).exists()
+        assert code_index.cache_path(project).exists()
+
+    def test_inspect_reports_stats(self, built_project: Path):
+        result = runner.invoke(app, ["code-index", "inspect"])
+        assert result.exit_code == 0, result.output
+        assert "Files:" in result.output
+        assert "Symbols:" in result.output
+
+    def test_help_mentions_md_authoritative_product(self):
+        result = runner.invoke(app, ["code-index", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "se3/code-index.md" in result.output
