@@ -6230,14 +6230,14 @@ check("projectDisplayLabel labels worktree roots as '<name>（worktree）'", () 
       "/data/cre/workspace/se3.0/se3/worktrees/" +
         "worktree-bug-discovery-se3-run-webui-se-20260623-101934-c6becdd0",
     ),
-    "se3.0（worktree）",
+    "se3.0 (worktree)",
   );
 });
 
 check("projectDisplayLabel tolerates Windows-style worktree paths", () => {
   assert.equal(
     app.projectDisplayLabel("C:\\work\\proj\\se3\\worktrees\\wt-x"),
-    "proj（worktree）",
+    "proj (worktree)",
   );
 });
 

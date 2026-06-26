@@ -288,7 +288,7 @@ function projectBasename(projectRoot) {
 // {safe_name}', whose basename is a long, opaque slug that is neither the
 // project name nor concise. Detect the 'se3/worktrees/' path segment: when
 // present, take the basename of everything BEFORE that segment as the real
-// project name and return '<项目名>（worktree）'; otherwise fall back to the
+// project name and return '<项目名> (worktree)'; otherwise fall back to the
 // plain basename. Worktree identification is by full path segment (not a
 // substring match) to stay aligned with worktree-management's fixed layout and
 // avoid misclassifying an ordinary directory that merely contains "worktrees"
@@ -306,7 +306,7 @@ function projectDisplayLabel(projectRoot) {
       // The real project root is everything before the 'se3' segment.
       const prefix = segments.slice(0, i).join("/");
       const projectName = projectBasename(prefix) || projectBasename(projectRoot);
-      return `${projectName}（worktree）`;
+      return `${projectName} (worktree)`;
     }
   }
   return projectBasename(projectRoot);
@@ -1521,7 +1521,7 @@ function renderFlowCard(flow) {
 
   // Annotate which project this running flow belongs to so flows from
   // different project roots are distinguishable at a glance. Show the
-  // worktree-aware label ('<项目名>（worktree）' for worktree flows, else the
+  // worktree-aware label ('<项目名> (worktree)' for worktree flows, else the
   // basename) as the readable text; the full project_root is the hover title.
   // Skip the badge entirely when project_root is missing to avoid empty-label
   // noise.

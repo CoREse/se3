@@ -67,6 +67,12 @@
 
 
 
+
+## 11.0.1 - 2026-06-26
+
+- Display the running-flow card worktree tag as `project_name (worktree)` with a half-width space and half-width parentheses instead of full-width Chinese parentheses
+- Sync code comments describing the worktree label format to the new output
+- Update frontend pure-function tests to expect the new worktree label format
 ## 11.0.0 - 2026-06-24
 
 - Replace the spec-mirror knowledge system with a code-index + charter + why-comment triple; source of truth returns to the code itself
