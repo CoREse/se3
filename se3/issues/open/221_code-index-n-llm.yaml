@@ -1,0 +1,7 @@
+id: '221'
+description: code-index加上并发功能（同时调用n个llm任务）
+status: open
+tags: []
+source: human
+created_at: '2026-06-26T11:05:32.572527'
+updated_at: '2026-06-26T11:05:32.572527'
