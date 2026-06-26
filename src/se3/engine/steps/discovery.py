@@ -91,7 +91,7 @@ You MUST NOT:
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
 Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
-- Before reading source, consult the code-index map (the project charter + code-index top map are injected below) to locate relevant modules / symbols; pull deeper detail on demand via `se3 code-index show <path>`.
+- Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `se3 code-index index <path>` and pull a file's function/method detail on demand with `se3 code-index show <path>`.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
@@ -205,7 +205,7 @@ You MUST NOT:
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
 Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
-- Before reading source, consult the code-index map (the project charter + code-index top map are injected below) to locate relevant modules / symbols; pull deeper detail on demand via `se3 code-index show <path>`.
+- Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `se3 code-index index <path>` and pull a file's function/method detail on demand with `se3 code-index show <path>`.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context

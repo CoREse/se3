@@ -3041,6 +3041,11 @@ DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_LINES = 2000
 DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_BYTES = 256 * 1024  # 256 KiB
 DEFAULT_CODE_INDEX_CHUNK_LINES = 200
 DEFAULT_CODE_INDEX_CHUNK_BYTES = 16 * 1024  # 16 KiB
+# Byte budget for the adaptive root-view map injected on every flow step. Small
+# on purpose: it bounds the always-injected orientation map and naturally stops
+# expansion at directory granularity (file-level for one big tree already dwarfs
+# this), which is the right altitude — function/method detail is pulled on demand.
+DEFAULT_CODE_INDEX_VIEW_BUDGET_BYTES = 8 * 1024  # 8 KiB
 
 
 @dataclass
@@ -3068,6 +3073,13 @@ class CodeIndexConfig:
             backstops the gitignore-based enumeration for tracked-but-unwanted
             noise git cannot filter (vendored blobs, huge generated files).
             Default an empty list.
+        view_budget_bytes: Byte budget for the adaptive root-view map injected on
+            every flow step. Default 8192 (8 KiB).
+        primary_roots: Explicit list of top-level directory names whose subtree
+            the adaptive root view drills into (the rest stay collapsed at the
+            top level). Empty (the default) means auto-detect the code-bearing
+            top-level directories. Entries may be given with or without a
+            trailing slash (``src`` or ``src/``).
     """
 
     degrade_trigger_lines: int = DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_LINES
@@ -3075,6 +3087,8 @@ class CodeIndexConfig:
     chunk_lines: int = DEFAULT_CODE_INDEX_CHUNK_LINES
     chunk_bytes: int = DEFAULT_CODE_INDEX_CHUNK_BYTES
     exclude: list = field(default_factory=list)
+    view_budget_bytes: int = DEFAULT_CODE_INDEX_VIEW_BUDGET_BYTES
+    primary_roots: list = field(default_factory=list)
 
     @staticmethod
     def _coerce_positive_int(data: dict, key: str, default: int) -> int:
@@ -3124,6 +3138,33 @@ class CodeIndexConfig:
                 )
         return result
 
+    @staticmethod
+    def _coerce_primary_roots(data: dict) -> list:
+        """Return the normalised ``primary_roots`` list (each with a trailing
+        slash). A non-list value warns and yields an empty list (= auto-detect);
+        non-string / blank entries are dropped with a warning."""
+        raw = data.get("primary_roots", [])
+        if not isinstance(raw, list):
+            logger.warning(
+                "code_index.primary_roots has invalid value %r (expected a list "
+                "of top-level directory names); falling back to auto-detect.",
+                raw,
+            )
+            return []
+        result: list = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                norm = item.strip().replace("\\", "/").strip("/")
+                if norm:
+                    result.append(norm + "/")
+            else:
+                logger.warning(
+                    "code_index.primary_roots entry %r is not a non-empty "
+                    "string; dropping it.",
+                    item,
+                )
+        return result
+
     @classmethod
     def from_dict(cls, data: dict) -> "CodeIndexConfig":
         """Create from the ``code_index`` YAML section (fault-tolerant)."""
@@ -3145,6 +3186,10 @@ class CodeIndexConfig:
                 data, "chunk_bytes", DEFAULT_CODE_INDEX_CHUNK_BYTES
             ),
             exclude=cls._coerce_exclude(data),
+            view_budget_bytes=cls._coerce_positive_int(
+                data, "view_budget_bytes", DEFAULT_CODE_INDEX_VIEW_BUDGET_BYTES
+            ),
+            primary_roots=cls._coerce_primary_roots(data),
         )
 
     @classmethod

@@ -66,10 +66,3 @@ charter 只收录**代码说不出、且全项目每个 step 都需要全量看�
 **文档更新:**
 - README.md: 显示当前版本徽章/头部
 - VERSIONS.md: 维护版本历史变更日志
-
-#### Scenario: 版本自动更新
-- **GIVEN** 当前版本为 1.2.3
-- **WHEN** 完成 feature 任务并执行 commit 步骤
-- **THEN** 版本自动更新为 1.3.0
-- **AND** README.md 和 VERSIONS.md 同步更新
-- **AND** 所有变更一起提交

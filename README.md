@@ -63,9 +63,7 @@ Earlier SE3 versions kept a parallel corpus of `se3/specs/**/spec.md` files — 
 
 ### The three pieces
 
-- **code-index** — a *structure map* of the project. Its structure comes deterministically from the code (a filesystem walk + Python AST symbol enumeration: directory/package → file/module → class → function/method); a one-line LLM summary is attached to each level. It lands as two physical files:
-  - `se3/code-index.md` — the **authoritative product, committed to git**. It *is* the map, and it is what `se3 code-index` renders (drilling down by level) and what gets injected into every flow step. Because it is plain text in a diff, a wrong summary can be spotted by a human reviewer and corrected, and the correction lands durably.
-  - `se3/cache/code-index.json` — a **volatile memo cache, gitignored**. It stores a per-symbol content fingerprint (mtime + size + sha256) and the summary that fingerprint produced. Its only job is to make regeneration incremental: on rebuild only the changed symbols are re-summarized by the LLM; unchanged symbols reuse the summary already in the `.md` (so human corrections survive). It is a pure performance optimization and guards nothing.
+- **code-index** — a *structure map* of the project. Its structure comes deterministically from the code (a filesystem walk + Python AST symbol enumeration: directory/package → file/module → class → function/method); a one-line LLM summary, synthesized bottom-up (a directory's summary from its files', a file's from its symbols'), is attached to each level. It lands as **one self-sufficient file**, `se3/code-index.md` — the **authoritative product, committed to git**. It *is* the map, and it is what `se3 code-index` renders and what gets injected into every flow step. Because it is plain text in a diff, a wrong summary can be spotted by a human reviewer and corrected, and the correction lands durably. Each node line also carries an embedded content fingerprint (a terse, render-invisible HTML comment), so the committed md *alone* decides what changed: on rebuild only fingerprint-changed nodes are re-summarized by the LLM, unchanged nodes reuse their existing summary (so human corrections survive), and the md is flushed periodically during a build so a crash resumes from where it stopped. There is no separate cache file — structure, summaries, and fingerprints all live in the one committed, human-diffable file.
 
   The structure comes from the **code**, not the json; the json is just a rebuild accelerator. Display reads only the `.md`. The optimization goal is **structural coverage, not summary depth** — the map answers *which modules/symbols exist and where*, and deliberately does not descend into implementation detail (that is the source code's job; copying it into the index would just reproduce a worse-than-code mirror).
 
@@ -140,8 +138,8 @@ se3 run "Add JWT authentication"
 se3 run --resume
 
 # 5. Navigate the codebase via the structure map
-se3 code-index                          # root view: one line per directory / file
-se3 code-index index src/se3/engine     # drill into a directory
+se3 code-index                          # adaptive root map: a budgeted, zoomable directory tree
+se3 code-index index src/se3/engine     # drill one literal level (a directory's immediate children)
 se3 code-index show src/se3/cli.py      # one file's full function/method detail
 ```
 
@@ -193,10 +191,11 @@ sub-typers as of version 10.8.1.
 |---------|---------|
 | `se3 run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize). Supports `--resume`, `--flow-id`, `--loop`, `--max-iterations`, `--no-worktree`, `--merge`, `--list-loops`, `--discover`, `--from-issue`, `--change`, `--type`, `--preset`, `--output-format`. |
 | `se3 init` | Initialize a new project: writes `se3.yaml`, `se3/charter.md`, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
-| `se3 code-index` / `se3 code-index index [PATH]` | Render the code-index structure map from `se3/code-index.md`. No argument → the root view (one line per directory / file). `index PATH` drills down: a directory lists its files; a file lists its functions/methods. Reads the committed map (reports "not built" until you run `rebuild`); flow steps keep it fresh lazily/incrementally. |
+| `se3 code-index` | Render the **adaptive root map** from `se3/code-index.md`: a byte-budgeted, zoomable directory tree (top level always shown; code directories expanded a few levels deep within the budget). This is the same map injected into every flow step. Reads the committed map (reports "not built" until you run `rebuild`); flow steps keep it fresh lazily/incrementally. |
+| `se3 code-index index [PATH]` | Render exactly **one literal level** at `PATH`: a directory's immediate children (subdirs + files), or a file's functions/methods. No argument → the literal root level. Unlike the bare command, it never auto-expands. |
 | `se3 code-index show <path>` | Print one file's full function/method detail (and any degraded chunks) from the structure map. |
-| `se3 code-index rebuild [--force]` | Rebuild the code-index. Incremental by default (only fingerprint-changed symbols are re-summarized); `--force` re-summarizes everything. |
-| `se3 code-index inspect` | Show code-index build/cache diagnostics. |
+| `se3 code-index rebuild [--force]` | Rebuild the code-index, flushing the md periodically as a checkpoint. Incremental by default (only fingerprint-changed nodes are re-summarized); `--force` re-summarizes everything. |
+| `se3 code-index inspect` | Show code-index stats (file / symbol / degraded-chunk counts) from the on-disk map. |
 | `se3 migrate run <id>` / `se3 migrate list` | Run a registered version/format migration (`run <id>`), or list the available migrators (`list`). A reusable registry skeleton; the first migrator (`spec-to-new-system`) converts a legacy `se3/specs/` project to the code-index + charter + why-comments system in one reviewable, `git revert`-able change. |
 | `se3 guardrails <spec-file>` | Run SE3 guardrails on a file (deleted-line / weakened-language detection); `--sizes` runs project-wide size checks. Used by `se3 merge`. Flag: `--original` / `-o <baseline-file>`. |
 | `se3 merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution. Flags: `--strategy fast\|safe\|strict`, `--delete-merged` / `--no-delete-merged`. Runtime data under `se3/` is synchronized per the tiered policy. |
@@ -256,7 +255,7 @@ your-project/
     ├── history/                  # ❌ runtime — per-flow per-step jsonl conversations
     ├── logs/                     # ❌ runtime — execution logs (incl. logs/llm/ traces)
     ├── calls/                    # ❌ runtime — pending human MCP call files
-    ├── cache/                    # ❌ runtime — derived caches (incl. code-index.json memo)
+    ├── cache/                    # ❌ runtime — derived caches (build locks, etc.)
     ├── tmp/                      # ❌ runtime — transient prompt/response snapshots
     └── worktrees/                # ❌ runtime — loop-mode / DAG isolation worktrees
 ```
@@ -270,8 +269,8 @@ drill down — you read the map's few lines first, and open source files only
 when you need the implementation detail behind a specific symbol:
 
 ```bash
-se3 code-index                           # every directory / file, one line each
-se3 code-index index src/se3/engine      # the engine package's files
+se3 code-index                           # the adaptive root map (budgeted zoomable tree)
+se3 code-index index src/se3/engine      # one level: the engine package's immediate children
 se3 code-index show src/se3/engine/code_index.py   # that file's full symbol tree
 ```
 

@@ -60,7 +60,14 @@ def _commit_all(root: Path, msg: str = "snapshot") -> None:
 
 class RecordingSummarizer:
     """Fake summariser: records each batch's target ids, returns deterministic
-    ``S:<name>`` summaries — never touches the LLM."""
+    ``S:<name>`` summaries — never touches the LLM.
+
+    A single build now summarises bottom-up in several waves (symbols, then
+    files, then directories deepest-first), so one ``build_index`` call can
+    invoke this summariser multiple times. ``all`` is the union of every recorded
+    batch's ids; ``reset`` clears the record (but not the on-disk md) so a test
+    can isolate the work done by a *subsequent* incremental build.
+    """
 
     def __init__(self) -> None:
         self.batches: list[list[str]] = []
@@ -70,12 +77,19 @@ class RecordingSummarizer:
         return {t.id: f"S:{t.name}" for t in targets}
 
     @property
+    def all(self) -> set:
+        return {i for batch in self.batches for i in batch}
+
+    @property
     def last(self) -> list[str]:
         return self.batches[-1] if self.batches else []
 
     @property
     def call_count(self) -> int:
         return len(self.batches)
+
+    def reset(self) -> None:
+        self.batches = []
 
 
 @pytest.fixture
@@ -232,13 +246,12 @@ class TestBuild:
     def test_first_build_summarizes_all(self, project: Path):
         summ = RecordingSummarizer()
         index = build_index(project, summarizer=summ)
-        # Both physical files written.
+        # The single authoritative md is written (no separate json cache exists).
         assert code_index.md_path(project).exists()
-        assert code_index.cache_path(project).exists()
-        # File nodes + symbols all summarised on first build.
+        # File nodes + symbols all summarised on first build (across waves).
         assert "src/mod.py" in index.files
-        assert "src/mod.py" in summ.last
-        assert "src/mod.py::Greeter.hello" in summ.last
+        assert "src/mod.py" in summ.all
+        assert "src/mod.py::Greeter.hello" in summ.all
         # The map is complete for the current symbol set.
         mod = index.files["src/mod.py"]
         assert {s.local_id for s in mod.symbols} == {
@@ -256,6 +269,7 @@ class TestBuild:
     def test_changed_symbol_only_resummarized(self, project: Path):
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
+        summ.reset()
         # Edit only Greeter.hello's body.
         (project / "src" / "mod.py").write_text(
             "def alpha():\n    return 1\n\n\n"
@@ -264,13 +278,13 @@ class TestBuild:
             encoding="utf-8",
         )
         build_index(project, summarizer=summ)
-        batch = set(summ.last)
+        touched = summ.all
         # The edited method + the file node (file content changed) re-summarised.
-        assert "src/mod.py::Greeter.hello" in batch
-        assert "src/mod.py" in batch
+        assert "src/mod.py::Greeter.hello" in touched
+        assert "src/mod.py" in touched
         # Untouched sibling is reused, not re-summarised.
-        assert "src/mod.py::Greeter.bye" not in batch
-        assert "src/mod.py::alpha" not in batch
+        assert "src/mod.py::Greeter.bye" not in touched
+        assert "src/mod.py::alpha" not in touched
 
     def test_human_correction_preserved(self, project: Path):
         summ = RecordingSummarizer()
@@ -295,15 +309,99 @@ class TestBuild:
         index = build_index(project, summarizer=summ)
         assert "README.md" not in index.files
         assert "src/new.py" in index.files
-        assert "src/new.py::g" in summ.last
+        assert "src/new.py::g" in summ.all
 
     def test_force_resummarizes_everything(self, project: Path):
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
+        summ.reset()
         build_index(project, summarizer=summ, force=True)
-        # force ignores the memo => every node re-summarised.
-        assert "src/mod.py::Greeter.hello" in summ.last
-        assert "src/mod.py::alpha" in summ.last
+        # force ignores the md fingerprints => every node re-summarised.
+        assert "src/mod.py::Greeter.hello" in summ.all
+        assert "src/mod.py::alpha" in summ.all
+
+    def test_summary_is_bottom_up(self, project: Path):
+        """A node's summary is synthesised from its children's summaries: a file
+        with symbols is summarised from those symbols' summaries (not raw source),
+        and a directory from its child files' summaries."""
+        captured: dict[str, str] = {}
+
+        class Capturing:
+            def __call__(self, targets):
+                out = {}
+                for t in targets:
+                    captured[t.id] = t.content
+                    out[t.id] = f"S:{t.name}"
+                return out
+
+        build_index(project, summarizer=Capturing())
+        # The file node is fed its child symbols' summaries, NOT raw source.
+        file_content = captured["src/mod.py"]
+        assert "S:Greeter.hello" in file_content
+        assert "def hello" not in file_content
+        # The directory node is fed its child files' summaries.
+        assert "S:src/mod.py" in captured["src/"]
+
+    def test_checkpoint_flushes_partial_md_for_resume(self, project: Path):
+        """A crash mid-build leaves a resumable partial md: files summarised
+        before the crash carry fingerprints and are reused on the next build,
+        rather than the whole run being lost."""
+        class Boom:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def __call__(self, targets):
+                self.n += 1
+                if self.n > 2:  # let the first file's batches through, then crash
+                    raise RuntimeError("boom")
+                return {t.id: f"S:{t.name}" for t in targets}
+
+        with pytest.raises(RuntimeError):
+            build_index(project, summarizer=Boom())
+
+        # A partial md was flushed before the crash and carries real fingerprints.
+        md_text = code_index.md_path(project).read_text(encoding="utf-8")
+        assert "<!--#" in md_text
+        _, fps = code_index._parse_md(md_text)
+        assert fps, "expected at least one checkpointed node with a fingerprint"
+
+        # Resume with a working summariser: the build completes, and the nodes
+        # the partial md already fingerprinted are reused (not re-summarised).
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        reused_ids = set(fps)
+        assert reused_ids and not (reused_ids & summ.all), (
+            "checkpointed nodes should be reused, not re-summarised on resume"
+        )
+
+    def test_checkpoint_flush_preserves_unchanged_file_fingerprints(self, project: Path):
+        """A checkpoint flush re-renders the whole index; an unchanged file the
+        work loop has not reached yet must KEEP its fingerprint in the flushed md
+        (seeded up front), so an interrupted build never blanks it and forces a
+        needless re-summarisation next time."""
+        (project / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+        (project / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+        (project / "c.py").write_text("def c():\n    return 3\n", encoding="utf-8")
+        build_index(project, summarizer=RecordingSummarizer())
+
+        # Edit a and c (NOT b); b must survive untouched across the flush.
+        (project / "a.py").write_text("def a():\n    return 11\n", encoding="utf-8")
+        (project / "c.py").write_text("def c():\n    return 33\n", encoding="utf-8")
+
+        class CrashOnC:
+            def __call__(self, targets):
+                if any(t.path == "c.py" for t in targets):
+                    raise RuntimeError("boom")
+                return {t.id: f"S:{t.name}" for t in targets}
+
+        with pytest.raises(RuntimeError):
+            build_index(project, summarizer=CrashOnC())
+
+        # b.py (unchanged, never reached before the crash) keeps its fingerprint.
+        md = code_index.md_path(project).read_text(encoding="utf-8")
+        _, fps = code_index._parse_md(md)
+        assert "b.py" in fps
+        assert "b.py::b" in fps
 
     def test_binary_file_is_file_level_only(self, project: Path):
         (project / "data.bin").write_bytes(b"\x00\x01\x02\x03\x04")
@@ -314,7 +412,7 @@ class TestBuild:
         assert fe.symbols == []
         assert "binary" in fe.summary.lower()
         # Binary file node is not sent to the LLM.
-        assert "data.bin" not in summ.last
+        assert "data.bin" not in summ.all
 
     def test_load_or_build_alias(self, project: Path):
         summ = RecordingSummarizer()
@@ -408,25 +506,25 @@ class TestSummaryFlatten:
 # ---------------------------------------------------------------------------
 
 class TestRender:
-    def test_top_map_lists_files_not_symbols(self, project: Path):
+    def test_adaptive_lists_files_not_symbols(self, project: Path):
         summ = RecordingSummarizer()
         index = build_index(project, summarizer=summ)
-        top = code_index_render.render_top_map(index)
-        assert "`src/mod.py`" in top
-        # Symbol bullets are NOT in the top map.
-        assert "Greeter.hello" not in top
+        view = code_index_render.render_adaptive(index)
+        assert "`src/mod.py`" in view
+        # Symbol bullets are NOT in the root view.
+        assert "Greeter.hello" not in view
 
-    def test_top_map_shows_directory_summaries(self, project: Path):
+    def test_adaptive_shows_directory_summaries(self, project: Path):
         """Every structural level — including dir/package — carries a one-line
         summary so the orientation map is zoomable at the dir level too."""
         summ = RecordingSummarizer()
         index = build_index(project, summarizer=summ)
-        # The directory group nodes were summarised (id == dir group name).
+        # The directory nodes were summarised (id == dir key).
         assert "src/" in index.dir_summaries
         assert index.dir_summaries["src/"] == "S:src/"
-        top = code_index_render.render_top_map(index)
-        # The dir heading line carries its summary, not just the bare path.
-        assert "## `src/` — S:src/" in top
+        view = code_index_render.render_adaptive(index)
+        # The dir line carries its summary, not just the bare path.
+        assert "`src/` — S:src/" in view
 
     def test_dir_summary_survives_md_round_trip(self, project: Path):
         summ = RecordingSummarizer()
@@ -436,11 +534,13 @@ class TestRender:
         assert index.dir_summaries.get("src/") == "S:src/"
 
     def test_unchanged_sibling_dir_summary_reused(self, project: Path):
-        """The content-aware dir fingerprint is still incremental per directory:
-        editing a file in one directory re-summarises only that directory; a
-        sibling directory whose members are untouched reuses its cached summary."""
+        """The recursive dir fingerprint is still incremental per directory:
+        editing a file in one directory re-summarises only that directory's
+        ancestors; a sibling directory whose subtree is untouched reuses its
+        cached summary."""
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
+        summ.reset()
         # Edit a root-level file; the "src/" directory is untouched.
         (project / "README.md").write_text(
             "# Title\n\nchanged intro\n\n## Section A\n\nbody a\n", encoding="utf-8"
@@ -448,22 +548,23 @@ class TestRender:
         build_index(project, summarizer=summ)
         # The root dir is re-summarised (its member changed) but the untouched
         # sibling "src/" dir reuses its cached summary.
-        assert "(root)" in summ.last
-        assert "src/" not in summ.last
+        assert "(root)" in summ.all
+        assert "src/" not in summ.all
 
     def test_dir_summary_refreshed_when_member_content_changes(self, project: Path):
-        """A pure content edit inside an existing file re-summarises the dir, so
-        the top map never carries a dir summary stale relative to the refreshed
-        file/symbol summaries underneath it."""
+        """A pure content edit inside an existing file re-summarises its ancestor
+        directories, so the map never carries a dir summary stale relative to the
+        refreshed file/symbol summaries underneath it."""
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
+        summ.reset()
         (project / "src" / "mod.py").write_text(
             "def alpha():\n    return 2\n", encoding="utf-8"
         )
         build_index(project, summarizer=summ)
         # The member file's content changed, so the dir is re-summarised even
         # though its membership is unchanged.
-        assert "src/" in summ.last
+        assert "src/" in summ.all
 
     def test_render_path_file_shows_symbols(self, project: Path):
         summ = RecordingSummarizer()
@@ -496,15 +597,38 @@ class TestRender:
             "alpha", "Greeter", "Greeter.hello", "Greeter.bye"
         }
 
-    def test_from_md_does_not_need_json(self, project: Path):
+    def test_md_is_self_sufficient_for_incremental_rebuild(self, project: Path):
+        """The md alone (no out-of-band cache) carries the fingerprints, so a
+        rebuild on an unchanged tree re-summarises nothing and preserves human
+        corrections — incrementality does not depend on anything outside git."""
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
-        # Delete the json memo; rendering must still work from md alone.
-        code_index.cache_path(project).unlink()
+        # No json sidecar is written at all.
+        assert not (project / "se3" / "cache" / "code-index.json").exists()
+        # A second build with the source unchanged does zero LLM work, driven
+        # purely by the fingerprints embedded in the committed md.
+        summ.reset()
+        build_index(project, summarizer=summ)
+        assert summ.call_count == 0
+        # And the md still renders fine on its own.
         index = code_index_render.load_for_display(project)
         assert index is not None
-        top = code_index_render.render_top_map(index)
-        assert "`README.md`" in top
+        view = code_index_render.render_adaptive(index)
+        assert "`README.md`" in view
+
+    def test_md_embeds_node_fingerprints(self, project: Path):
+        """Every rendered node line carries a terse 16-hex fingerprint comment so
+        staleness is decidable from the committed md alone."""
+        build_index(project, summarizer=RecordingSummarizer())
+        md = code_index.md_path(project).read_text(encoding="utf-8")
+        import re
+
+        # A file heading line carries a <!--#<16-hex>--> fingerprint.
+        assert re.search(r"### `src/mod\.py`.*<!--#[0-9a-f]{16}-->", md)
+        # The fingerprint is invisible to the parsed summary (stripped first).
+        summaries, fps = code_index._parse_md(md)
+        assert "src/mod.py" in fps and len(fps["src/mod.py"]) == 16
+        assert "<!--" not in summaries.get("src/mod.py", "")
 
 
 # ---------------------------------------------------------------------------
@@ -514,29 +638,32 @@ class TestRender:
 class TestCodeIndexCLI:
     @pytest.fixture
     def built_project(self, project: Path, monkeypatch) -> Path:
-        """A project whose code-index md/json are built (no LLM — fake summariser),
+        """A project whose code-index md is built (no LLM — fake summariser),
         with ``get_project_root`` pointed here so the CLI resolves to it."""
         build_index(project, summarizer=RecordingSummarizer())
         monkeypatch.setattr(code_index_cmd, "get_project_root", lambda: project)
         return project
 
-    def test_index_no_arg_renders_top_map(self, built_project: Path):
+    def test_index_no_arg_renders_literal_root_level(self, built_project: Path):
+        # `index` with no path shows exactly the literal root level: top-level
+        # directories collapsed (one line) + root files — NOT one level deeper.
         result = runner.invoke(app, ["code-index", "index"])
         assert result.exit_code == 0, result.output
-        assert "`src/mod.py`" in result.output
-        # Top map lists files, NOT function-level symbols.
+        assert "`src/`" in result.output
+        # src/mod.py lives one level below src/, so it is NOT shown here.
+        assert "`src/mod.py`" not in result.output
         assert "Greeter.hello" not in result.output
 
-    def test_bare_invocation_renders_top_map(self, built_project: Path):
-        # Bare `se3 code-index` (no subcommand) must render the root/top map,
-        # NOT exit with Typer's "Missing command" error.
+    def test_bare_invocation_renders_adaptive_map(self, built_project: Path):
+        # Bare `se3 code-index` (no subcommand) renders the adaptive root view,
+        # NOT exit with Typer's "Missing command" error. src/ is a code root, so
+        # the budget expands it and src/mod.py appears.
         bare = runner.invoke(app, ["code-index"])
         assert bare.exit_code == 0, bare.output
         assert "Missing command" not in bare.output
         assert "`src/mod.py`" in bare.output
-        # And it must match the explicit `index` (no-arg) subcommand output.
-        sub = runner.invoke(app, ["code-index", "index"])
-        assert bare.output == sub.output
+        # The adaptive view still omits function-level symbols.
+        assert "Greeter.hello" not in bare.output
 
     def test_bare_invocation_unbuilt_errors_without_missing_command(
         self, project: Path, monkeypatch
@@ -592,9 +719,8 @@ class TestCodeIndexCLI:
         assert "full rebuild" in result.output
         # --force re-summarises everything, so the fake summariser saw symbols.
         assert any("src/mod.py::alpha" in batch for batch in recorder.batches)
-        # Both physical files exist after the rebuild.
+        # The authoritative md exists after the rebuild.
         assert code_index.md_path(project).exists()
-        assert code_index.cache_path(project).exists()
 
     def test_inspect_reports_stats(self, built_project: Path):
         result = runner.invoke(app, ["code-index", "inspect"])
@@ -615,14 +741,11 @@ class TestConcurrentRebuildSafety:
     def test_atomic_write_uses_unique_temp_no_fixed_leftover(self, project: Path):
         build_index(project, summarizer=RecordingSummarizer())
         md = code_index.md_path(project)
-        cache = code_index.cache_path(project)
-        assert md.exists() and cache.exists()
-        # The retired fixed-name temp files must not be left behind.
+        assert md.exists()
+        # The fixed-name temp file must not be left behind.
         assert not (md.parent / "code-index.md.tmp").exists()
-        assert not (cache.parent / "code-index.tmp").exists()
         # No stray *.tmp scratch files survive a successful write either.
         assert not list(md.parent.glob("code-index.md.*.tmp"))
-        assert not list(cache.parent.glob("code-index.json.*.tmp"))
 
     def test_build_lock_serializes_concurrent_builds(self, project: Path):
         # Two builds run back-to-back while one holds the advisory lock: the
@@ -665,7 +788,7 @@ class TestConcurrentRebuildSafety:
         assert idx.files
         assert ci.md_path(project).exists()
 
-    def test_lock_path_lives_next_to_cache(self, project: Path):
+    def test_lock_path_lives_under_gitignored_cache(self, project: Path):
         lp = code_index.lock_path(project)
-        assert lp.name == "code-index.json.lock"
-        assert lp.parent == code_index.cache_path(project).parent
+        assert lp.name == "code-index.lock"
+        assert lp.parent == project / "se3" / "cache"

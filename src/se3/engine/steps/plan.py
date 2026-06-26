@@ -38,11 +38,12 @@ PLAN_PROMPT_HEADER = """You are an expert software engineering assistant. Create
 ## Scope
 {scope}
 
-The project charter (project-level conventions) and the code-index (structural
-orientation map) are injected below — plan against the task, the charter, and
-the code-index. Before reading source, consult the code-index map to locate the
-relevant modules / symbols and pull deeper detail on demand via
-`se3 code-index show <path>`.
+The project charter (project-level conventions) and the code-index (a zoomable
+structural orientation map) are injected below — plan against the task, the
+charter, and the code-index. Before reading source, consult the code-index map
+to locate the relevant modules / symbols; open a collapsed directory one more
+level with `se3 code-index index <path>` and pull a file's function/method
+detail on demand with `se3 code-index show <path>`.
 
 {revision_section}
 """

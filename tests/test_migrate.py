@@ -187,9 +187,9 @@ def test_full_migration_happy_path(project: Path):
 
     ast.parse(src)
 
-    # code-index built (md + json)
+    # code-index built (single authoritative md; no json sidecar)
     assert (project / "se3" / "code-index.md").exists()
-    assert (project / "se3" / "cache" / "code-index.json").exists()
+    assert not (project / "se3" / "cache" / "code-index.json").exists()
 
     # specs deleted after salvage confirmed
     assert not (project / "se3" / "specs").exists()

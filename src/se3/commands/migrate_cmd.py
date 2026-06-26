@@ -24,7 +24,7 @@ Pipeline (see :func:`run_spec_to_new_system`):
    the non-base specs is inserted as ``WHY``-comments into the corresponding
    source files.
 3. **code-index first build** — a full ``code_index.build_index`` over the whole
-   tree, producing ``se3/code-index.md`` + ``se3/cache/code-index.json``.
+   tree, producing the authoritative ``se3/code-index.md``.
 4. **delete specs** — the entire ``se3/specs/`` tree is removed, but **only
    after** the charter assembly and colocation both succeeded (so nothing is
    deleted until the salvage is confirmed). Recoverability rides on git.
@@ -573,7 +573,7 @@ def run_spec_to_new_system(
         code_index.build_index(project_root, summarizer=summarizer, force=True)
         report.add(
             "Build code-index", "OK",
-            "wrote se3/code-index.md + se3/cache/code-index.json",
+            "wrote se3/code-index.md",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("migrate: code-index build failed: %s", exc)

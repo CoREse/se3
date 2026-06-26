@@ -134,6 +134,15 @@ class TestSyncStepReadOnly:
         assert is_step_read_only("totally_unknown_step") is False
         assert is_step_read_only("") is False
 
+    def test_is_step_read_only_internal_pure_data_steps_true(self):
+        # The code-index summariser and the migrate salvager are pure-data
+        # sub-agents: they only read and return JSON/text while SE3 writes every
+        # file itself, so they MUST run read-only (no Write/Edit tool) — otherwise
+        # the agent can drop stray response files into the tree and pollute the
+        # gitignore-respecting index. Regression guard for that.
+        assert is_step_read_only("code_index") is True
+        assert is_step_read_only("migrate") is True
+
     def test_injection_for_sync_scan_and_analyze_non_empty(self):
         assert get_read_only_injection("sync_scan") != ""
         assert "READ-ONLY" in get_read_only_injection("sync_scan")

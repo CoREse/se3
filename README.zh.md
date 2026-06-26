@@ -63,9 +63,7 @@ SE3 解决的是*跨 session*的项目治理：持久化状态、code-first 知�
 
 ### 三件套
 
-- **code-index** — 项目的*结构地图*。结构来自代码本身的确定性提取（文件树遍历 + Python AST 符号枚举：目录/包 → 文件/模块 → 类 → 函数/方法）；每一级挂一句 LLM 摘要。它落成两个物理文件：
-  - `se3/code-index.md` — **权威产物，纳入版本控制**。它*就是*那张地图，是 `se3 code-index` 按层级钻取展示的对象，也是注入每个 flow step 的东西。因为它是 diff 里的纯文本，摘错的一条可被人在 review 中发现并纠正，且纠正 durably 落地。
-  - `se3/cache/code-index.json` — **易失的 memo 缓存，gitignored**。存 per-symbol 内容指纹（mtime + size + sha256）+ 该指纹对应的摘要。它唯一的作用是让再生增量化：重建时只对指纹变更的 symbol 重跑 LLM 摘要，未变者沿用 `.md` 中既有摘要（从而保住人工纠正）。它是纯性能优化，**不参与任何守护**。
+- **code-index** — 项目的*结构地图*。结构来自代码本身的确定性提取（文件树遍历 + Python AST 符号枚举：目录/包 → 文件/模块 → 类 → 函数/方法）；每一级挂一句**自底向上**合成的 LLM 摘要（目录的摘要由其文件的摘要合成，文件的由其符号的合成）。它落成**单一自给自足的文件** `se3/code-index.md` — **权威产物，纳入版本控制**。它*就是*那张地图，是 `se3 code-index` 渲染的对象，也是注入每个 flow step 的东西。因为它是 diff 里的纯文本，摘错的一条可被人在 review 中发现并纠正，且纠正 durably 落地。每个节点行还内嵌一枚内容指纹（一条简短、渲染时不可见的 HTML 注释），所以**仅凭**已提交的 md 就能判断什么变了：重建时只对指纹变更的节点重跑 LLM 摘要，未变者沿用既有摘要（从而保住人工纠正），且构建途中会周期性 flush 落盘，崩溃后能从断点续跑。**没有独立的缓存文件**——结构、摘要、指纹全都在这一个已提交、人类可 diff 的文件里。
 
   结构来自**代码**而非 json；json 只是再生加速器。显示只读 `.md`。优化目标是**结构覆盖的完整性，而非单符号摘要的深度**——地图回答*有哪些模块/符号、各在何处*，刻意**不下沉到实现细节**（那是源码本身的职责，复制进 index 只会得到一份不如代码准的镜像）。
 
@@ -140,8 +138,8 @@ se3 run "Add JWT authentication"
 se3 run --resume
 
 # 5. 用结构地图导航代码库
-se3 code-index                          # 根视图：每个目录 / 文件一行
-se3 code-index index src/se3/engine     # 钻进一个目录
+se3 code-index                          # 自适应根地图：一棵按预算缩放的目录树
+se3 code-index index src/se3/engine     # 下钻一个字面层级（目录的直接子项）
 se3 code-index show src/se3/cli.py      # 某个文件的完整函数/方法详情
 ```
 
@@ -181,10 +179,11 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 |------|------|
 | `se3 run [TASK]` | 统一入口。驱动 flow engine 状态机（analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize）。支持 `--resume` / `--flow-id` / `--loop` / `--max-iterations` / `--no-worktree` / `--merge` / `--list-loops` / `--discover` / `--from-issue` / `--change` / `--type` / `--preset` / `--output-format`。 |
 | `se3 init` | 初始化新项目：写 `se3.yaml`、`se3/charter.md`、`.gitignore`，按需 `git init`。参数：`--project-root` / `--name` / `--force`。 |
-| `se3 code-index` / `se3 code-index index [PATH]` | 从 `se3/code-index.md` 渲染结构地图。无参 → 根视图（每个目录 / 文件一行）；`index PATH` 则钻取：目录列出其文件、文件列出其函数/方法。读取已提交的地图（未构建时提示先 `rebuild`）；flow step 会按需懒增量保持其新鲜。 |
+| `se3 code-index` | 从 `se3/code-index.md` 渲染**自适应根地图**：一棵按字节预算缩放的目录树（顶层始终显示；代码目录在预算内展开几层）。这正是注入每个 flow step 的那张地图。读取已提交的地图（未构建时提示先 `rebuild`）；flow step 会按需懒增量保持其新鲜。 |
+| `se3 code-index index [PATH]` | 渲染 `PATH` 处**恰好一个字面层级**：目录的直接子项（子目录 + 文件），或文件的函数/方法。无参 → 字面根层级。与裸命令不同，它从不自动展开。 |
 | `se3 code-index show <path>` | 从结构地图打印某个文件的完整函数/方法详情（及任何降级 chunk）。 |
-| `se3 code-index rebuild [--force]` | 重建 code-index。默认增量（只对指纹变更的 symbol 重跑摘要）；`--force` 全量重跑。 |
-| `se3 code-index inspect` | 展示 code-index 的构建 / 缓存诊断信息。 |
+| `se3 code-index rebuild [--force]` | 重建 code-index，构建途中周期性 flush md 作为 checkpoint。默认增量（只对指纹变更的节点重跑摘要）；`--force` 全量重跑。 |
+| `se3 code-index inspect` | 展示 code-index 统计（文件 / 符号 / 降级 chunk 计数）。 |
 | `se3 migrate run <id>` / `se3 migrate list` | 运行一个已注册的版本/格式迁移（`run <id>`），或列出可用迁移器（`list`）。它是可复用的注册式骨架；首个迁移器（`spec-to-new-system`）把旧的 `se3/specs/` 项目一次性迁到 code-index + charter + why-注释 体系，落成单个可 review、可 `git revert` 的变更。 |
 | `se3 guardrails <spec-file>` | 对文件跑 SE3 guardrails（检测被删除的行 / 被弱化的语言）；`--sizes` 跑项目级的尺寸检查。供 `se3 merge` 共用。参数：`--original` / `-o <baseline-file>`。 |
 | `se3 merge <branch> [<branch> ...]` | 按序把多个分支合并到当前 HEAD，冲突由 LLM 驱动解决。参数：`--strategy fast\|safe\|strict` / `--delete-merged` / `--no-delete-merged`。`se3/` 下的运行时数据按分层策略同步。 |
@@ -242,7 +241,7 @@ your-project/
     ├── history/                  # ❌ runtime — per-flow per-step 的 jsonl 对话
     ├── logs/                     # ❌ runtime — 执行日志（含 logs/llm/ 调用 trace）
     ├── calls/                    # ❌ runtime — 待处理的人工 MCP call 文件
-    ├── cache/                    # ❌ runtime — 衍生缓存（含 code-index.json memo）
+    ├── cache/                    # ❌ runtime — 衍生缓存（构建锁等）
     ├── tmp/                      # ❌ runtime — 临时 prompt / response 快照
     └── worktrees/                # ❌ runtime — loop / DAG 隔离用的 worktree
 ```
@@ -255,8 +254,8 @@ code-index *就是*进入这个代码库的索引。从根视图开始往下钻�
 只有在需要某个符号背后的实现细节时才打开源码文件：
 
 ```bash
-se3 code-index                           # 每个目录 / 文件一行
-se3 code-index index src/se3/engine      # engine 包下的文件
+se3 code-index                           # 自适应根地图（按预算缩放的目录树）
+se3 code-index index src/se3/engine      # 一个层级：engine 包的直接子项
 se3 code-index show src/se3/engine/code_index.py   # 该文件的完整符号树
 ```
 

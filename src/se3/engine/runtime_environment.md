@@ -31,15 +31,15 @@ Free-form content search (fallback):
 **Locate code via the code-index** — trigger before reading source: to answer "where does X live / what symbols are in this file", consult the code-index structure map first instead of reading whole files.
 
 Overview & navigation (preferred first):
-- `se3 code-index` — show the top map (one line per directory / file)
-- `se3 code-index index <path>` — drill into a directory (lists its files) or a file (lists its functions/methods)
+- `se3 code-index` — show the adaptive root map: a zoomable directory tree expanded to a byte budget (top level always shown; code directories drilled a few levels deep)
+- `se3 code-index index <path>` — show exactly ONE literal level at `<path>`: a directory's immediate children (subdirs + files), or a file's functions/methods. Use this to open a directory shown collapsed in the root map.
 - `se3 code-index show <path>` — print one file's full function/method-level detail
 
 These display commands read the committed `se3/code-index.md`; if the map has not been built yet they report that and exit, so run `se3 code-index rebuild` once to generate it (flow steps then keep it fresh incrementally).
 
-The code-index top map is also injected into this step automatically; use `se3 code-index show <path>` only to pull the deeper per-symbol detail on demand.
+The code-index root map is also injected into this step automatically; use `se3 code-index index <path>` to open a collapsed directory one more level, and `se3 code-index show <path>` to pull a file's per-symbol detail on demand.
 
-**Recommended workflow:** 先看注入的 code-index 顶层地图定位相关文件，再用 `se3 code-index show <path>` 拉取该文件的函数级细节，避免盲目通读整份源码。
+**Recommended workflow:** 先看注入的 code-index 地图定位相关目录/文件，用 `se3 code-index index <path>` 把折叠的目录再展开一层，再用 `se3 code-index show <path>` 拉取该文件的函数级细节，避免盲目通读整份源码。
 
 ### Do NOT call proactively
 

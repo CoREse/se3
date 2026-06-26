@@ -418,40 +418,43 @@ def get_charter_injection(project_root: Path) -> str:
 
 
 def get_code_index_injection(project_root: Path) -> str:
-    """Get the code-index top-map prompt injection.
+    """Get the code-index root-map prompt injection.
 
     The **code-index** is the project's structural orientation map. Only the
-    **top map** (one line per directory / file) is injected on every step, to
-    keep the context window bounded; the function/method-level detail of any
-    single file is pulled **on demand** by the agent via
-    ``se3 code-index show <path>``. This mirrors spec_index's root-view vs
-    drill-in split and is the code-index half of the injection-surface switch
-    that replaces the retired ``get_spec_names_injection`` path.
+    **adaptive root view** — a zoomable directory tree expanded to a byte budget
+    (``code_index.view_budget_bytes``) — is injected on every step, so the map is
+    bounded no matter how large the project. The agent drills deeper **on
+    demand**: ``se3 code-index index <path>`` shows exactly one more literal
+    level, and ``se3 code-index show <path>`` shows a file's full
+    function/method detail.
 
-    The map is read **only** from the authoritative ``se3/code-index.md`` — the
-    json memo is never consulted for display, and this helper never triggers a
-    (re)build (regeneration is the lazy/incremental ``load_or_build`` job the
-    CLI / consuming steps own). When the md has not been built yet the helper
-    still injects the drill-down protocol plus a one-line note so the agent
-    knows the map exists and how to materialise it.
+    The map is read **only** from the authoritative ``se3/code-index.md``, and
+    this helper never triggers a (re)build (regeneration is the lazy/incremental
+    ``load_or_build`` job the CLI / consuming steps own). When the md has not been
+    built yet the helper still injects the drill-down protocol plus a one-line
+    note so the agent knows the map exists and how to materialise it.
 
     Returns the injection string (prefixed with ``\\n\\n`` for clean suffix
     concatenation). It is non-empty regardless of build state, because the
     "consult code-index before reading source" convention is itself valuable.
     """
-    from .code_index_render import load_for_display, render_top_map
+    from ..config import load_code_index_config
+    from .code_index_render import load_for_display, render_adaptive
 
     header = (
         "\n\n## Code Index (project structure map)\n"
-        "The map below is the project's structural orientation map — one line "
-        "per directory / file. It is your project-wide structural awareness, "
-        "injected on every step.\n\n"
+        "The map below is the project's structural orientation map — a zoomable "
+        "directory tree. The top level is always shown; code-bearing directories "
+        "are expanded a few levels deep within a byte budget, so it is bounded no "
+        "matter how large the project. It is your project-wide structural "
+        "awareness, injected on every step.\n\n"
         "**Before reading source code, FIRST consult the code-index to locate "
-        "the relevant symbols.** Scan this top map to find the file(s) that "
-        "matter, then drill into a file's function/method-level detail on demand "
-        "with `se3 code-index show <path>` (run via Bash) instead of reading "
-        "whole source files blindly — the map points you at the few symbols "
-        "worth reading.\n\n"
+        "the relevant symbols.** Scan this map to find the directory / file(s) "
+        "that matter. A collapsed directory shown as a single line can be opened "
+        "one more level with `se3 code-index index <path>`; a file's "
+        "function/method-level detail is pulled with `se3 code-index show <path>` "
+        "(both run via Bash) — instead of reading whole source files blindly, the "
+        "map points you at the few symbols worth reading.\n\n"
     )
 
     index = load_for_display(Path(project_root))
@@ -464,7 +467,12 @@ def get_code_index_injection(project_root: Path) -> str:
             "built until you do.)_\n"
         )
 
-    return header + render_top_map(index).rstrip() + "\n"
+    cfg = load_code_index_config(Path(project_root))
+    return (
+        header
+        + render_adaptive(index, cfg.primary_roots, cfg.view_budget_bytes).rstrip()
+        + "\n"
+    )
 
 
 def ensure_code_index_fresh(project_root: Path) -> None:
@@ -527,6 +535,18 @@ _WRITABLE_SYNC_STEPS = frozenset({"sync_resolve", "sync_respond"})
 # authoritative sets above.
 _ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
 
+# Internal LLMCaller step types that are NOT `se3 run` state-machine steps (so
+# they are absent from STEP_POOL) but whose sub-agents are *pure functions*:
+# they only read code and RETURN structured text/JSON, while SE3's own code does
+# every disk write. They MUST run read-only so the sub-agent cannot write stray
+# files into the project (which would otherwise be picked up by the gitignore-
+# respecting enumerator and pollute the index / working tree):
+#   - ``code_index`` — the per-node summariser (returns {id: summary}; SE3 writes
+#     se3/code-index.md itself via code_index._write_md).
+#   - ``migrate``    — the spec-salvage LLM (returns charter text + colocations;
+#     SE3 writes se3/charter.md and the why-comments itself).
+_READ_ONLY_INTERNAL_STEPS = frozenset({"code_index", "migrate"})
+
 # The single authoritative set of steps allowed to write ``se3/specs/`` and
 # therefore exempted from the three-layer spec-write protection (soft
 # prompt injection, the PreToolUse hook, and the post-step diff fallback).
@@ -545,6 +565,8 @@ def is_step_read_only(step_type: str) -> bool:
       1. ``se3 run`` state-machine steps — looked up in STEP_POOL by name,
          honoring each step's ``read_only`` attribute.
       2. Sync-engine read-only pseudo-steps (``sync_scan`` / ``sync_analyze``).
+      3. Internal pure-data sub-agent steps (``code_index`` / ``migrate``) whose
+         agent only reads and returns text — SE3 does every write itself.
 
     ``sync_resolve`` and every writable step (implement / update_spec / …)
     return False. Unknown step types return False.
@@ -559,7 +581,10 @@ def is_step_read_only(step_type: str) -> bool:
         if info.get("name") == step_type:
             return bool(info.get("read_only", False))
 
-    return step_type in _READ_ONLY_SYNC_STEPS
+    return (
+        step_type in _READ_ONLY_SYNC_STEPS
+        or step_type in _READ_ONLY_INTERNAL_STEPS
+    )
 
 
 def get_read_only_injection(step_type: str) -> str:
