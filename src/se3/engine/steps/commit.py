@@ -341,6 +341,16 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if version_bumped and new_version:
             _update_docs(project_root, new_version, step, commit_message)
 
+        # Write-side freshness boundary: regenerate the code-index just before
+        # staging so the committed `se3/code-index.md` folds in the code this
+        # flow's implement step wrote. This is the ONLY refresh point after code
+        # changes (the read-side refresh in analyze runs before implement); skip
+        # it and every committed map would lag one flow behind. Best-effort — a
+        # rebuild hiccup must never block the commit (it only reads + writes the
+        # tracked map under se3/, which `git add -A` then stages).
+        from ..context_builder import ensure_code_index_fresh
+        ensure_code_index_fresh(project_root)
+
         # Add all changes
         result = subprocess.run(
             ["git", "add", "-A"],

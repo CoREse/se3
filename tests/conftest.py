@@ -63,3 +63,29 @@ def _reset_config_warning_dedup_sets():
     _clear_all()
     yield
     _clear_all()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_code_index_refresh(monkeypatch):
+    """Neutralise the flow-step code-index freshness hook for every unit test.
+
+    Two step handlers (``analyze`` read-side, ``commit`` write-side) call
+    ``context_builder.ensure_code_index_fresh(project_root)`` to lazily rebuild
+    ``se3/code-index.md``. In tests a ``FlowInstance`` usually has no
+    ``change_path``, so ``project_root`` falls back to ``Path.cwd()`` — the real
+    se3 repo, which now ships a committed ``se3/code-index.md``. The hook's
+    "no map yet → skip" guard then no longer fires, and it runs a *real*
+    incremental build against the live repo: it takes an exclusive ``flock``
+    (so concurrent test processes deadlock on it) and spawns a real LLM
+    summariser subprocess for any stale file. That is exactly what hung the
+    suite past the 1200s timeout.
+
+    Unit tests must never trigger a real code-index build, so the hook is a
+    no-op by default. The dedicated code_index tests exercise the builder
+    directly via ``build_index`` / ``load_or_build`` (not this hook) and are
+    unaffected; a test that specifically wants the real hook can re-patch it.
+    """
+    monkeypatch.setattr(
+        "se3.engine.context_builder.ensure_code_index_fresh",
+        lambda *args, **kwargs: None,
+    )

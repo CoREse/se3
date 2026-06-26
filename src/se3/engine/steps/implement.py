@@ -457,7 +457,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_issue_discovery_injection,
         get_charter_injection,
         get_code_index_injection,
-        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     injection = get_issue_discovery_injection("implement", project_root) or ""
@@ -466,9 +465,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # map orients the implementer (function-level detail on demand via
     # `se3 code-index show <path>`).
     injection += get_charter_injection(project_root)
-    # Lazy-incremental refresh so the implementer sees a map reflecting any
-    # source edited since the last build, without a manual rebuild.
-    ensure_code_index_fresh(project_root)
+    # No code-index refresh here: the read-side map was refreshed once in analyze
+    # (before any code changed) and the post-implement map is refreshed once just
+    # before commit. See analyze.py / commit.py for the two-point rationale.
     injection += get_code_index_injection(project_root)
     injection += get_runtime_environment_injection("implement", project_root)
 

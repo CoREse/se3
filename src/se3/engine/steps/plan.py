@@ -395,7 +395,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_issue_discovery_injection,
         get_charter_injection,
         get_code_index_injection,
-        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
@@ -417,9 +416,8 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # conventions and the code-index top map is the structural orientation map
     # (function-level detail pulled on demand via `se3 code-index show`).
     prompt += get_charter_injection(project_root)
-    # Lazy-incremental refresh so the injected map reflects source edited since
-    # the last build, without a manual `se3 code-index rebuild`.
-    ensure_code_index_fresh(project_root)
+    # No code-index refresh here: analyze already refreshed the read-side map
+    # before any code changed (see analyze.py / commit.py two-point rationale).
     prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable

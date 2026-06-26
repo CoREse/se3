@@ -134,9 +134,13 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # conventions and the structural orientation map (function-level detail
     # pulled on demand via `se3 code-index show <path>`).
     prompt += get_charter_injection(project_root)
-    # Lazy-incremental refresh so the injected map reflects source edited since
-    # the last build (e.g. a prior flow's commits) — keeps it fresh without a
-    # manual `se3 code-index rebuild`.
+    # Read-side freshness boundary: analyze is the FIRST step of the read/plan
+    # run (analyze → plan → plan_tasks → implement → self_check), and code is not
+    # edited until implement. So a single incremental refresh here gives every
+    # read/plan step one consistent, current map — no per-step rebuild. The only
+    # OTHER refresh point in a flow is just before `git commit` (commit.py), which
+    # folds the code implement just wrote into the committed map. See that call
+    # site for the write-side rationale.
     ensure_code_index_fresh(project_root)
     prompt += get_code_index_injection(project_root)
     runtime_env = get_runtime_environment_injection("analyze", project_root)

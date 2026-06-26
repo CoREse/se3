@@ -556,13 +556,13 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     from ..context_builder import (
         get_charter_injection,
         get_code_index_injection,
-        ensure_code_index_fresh,
         get_runtime_environment_injection,
     )
     prompt += get_charter_injection(project_root)
-    # Lazy-incremental refresh so the self-check sees a map reflecting the code
-    # this flow just implemented, without a manual rebuild.
-    ensure_code_index_fresh(project_root)
+    # No code-index refresh here: it would mean rebuilding mid-flow right after
+    # implement. The post-implement map is instead refreshed once just before
+    # commit (commit.py); self_check tolerates the slightly older read-side map
+    # from analyze, as it is not a precise structural check. See analyze.py.
     prompt += get_code_index_injection(project_root)
 
     # Append runtime environment injection if applicable
