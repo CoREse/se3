@@ -69,6 +69,14 @@
 
 
 
+
+## 11.1.1 - 2026-06-29
+
+- Fix daemon mis-detecting `python -c <code> ... se3 run` inline subprocesses as real se3 runs, which spawned phantom RUNNING sessions in the WebUI
+- Restrict `_cmdline_is_se3_run` to the two genuine launch shapes: console-script `se3 run` (argv[0] or shebang-rewritten argv[1]) and module form `python -m se3 run`, requiring `run` as the immediate subcommand token
+- Structurally exclude the interpreter inline-code form by treating a leading `-c` as inline mode while still recognizing the CLI's own `se3 run -c/--change` option
+- Add regression tests asserting the inline `-c` stub returns False and is not registered by `_scan_external`, plus positive coverage for real console-script and `python -m se3 run` forms
+- Preserve existing worktree-sandbox attribution behavior and live discovery of genuine se3 run processes
 ## 11.1.0 - 2026-06-29
 
 - Add a secondary 'list-fp' fingerprint for files and directories so normal rebuild only re-summarizes a file/dir when its direct members' name/kind list changes (add/remove/rename)

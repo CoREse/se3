@@ -310,15 +310,61 @@ class DaemonSupervisor:
 
 
 def _cmdline_is_se3_run(cmdline: List[str]) -> bool:
-    """Heuristically decide whether *cmdline* is an ``se3 run`` invocation."""
+    """Structurally decide whether *cmdline* is a real ``se3 run`` invocation.
+
+    Matches only the two genuine launch shapes, judged against the argv that
+    ``psutil`` actually observes via ``/proc/<pid>/cmdline``:
+
+    * console-script form — ``se3`` (basename) is the executed program. That is
+      ``argv[0]`` for a direct ``se3 run`` / ``/path/se3 run``, but ``argv[1]``
+      once the shebang is rewritten and psutil reports
+      ``["python3", "/path/se3", "run", ...]``; both positions are checked.
+    * module form — ``python [...] -m se3 run`` (``-m`` immediately followed by
+      ``se3``).
+
+    In both shapes ``run`` must be the *immediate* subcommand token — i.e. the
+    one directly after the ``se3`` program / module token. A later standalone
+    ``run`` is NOT sufficient: it would accept other se3 commands whose own
+    subcommand or argument happens to be named ``run`` (e.g.
+    ``se3 migrate run`` / ``python -m se3 migrate run``), re-introducing the
+    false-positive WebUI aggregation this predicate exists to prevent. The
+    callback exposes only the eager-exit ``--version``/``-v`` global option, so
+    a genuine ``se3 run`` never carries another token between ``se3`` and
+    ``run``.
+
+    The Python inline-code form is excluded structurally: ``-c`` is an
+    *interpreter* option, so it precedes any program/module token, and
+    everything after the inline ``<code>`` is that script's own argv (e.g. a
+    test stub ``["python3", "-c", "<code>", "se3", "run"]``) — never a real
+    se3 run. Crucially this excludes only the interpreter ``-c``; the CLI's own
+    ``se3 run -c/--change`` option (which appears *after* the ``run`` token) is
+    still recognised.
+    """
     if not cmdline:
         return False
-    joined = " ".join(cmdline)
-    if "run" not in cmdline:
-        return False
-    # Match both the console-script form (``se3 run ...``) and the module
-    # form (``python -m se3 run ...``).
-    return "se3" in joined and (
-        any(part == "se3" or part.endswith("/se3") for part in cmdline)
-        or "se3" in cmdline
-    )
+    # Console-script form: ``se3`` is the executed program at argv[0] (direct
+    # execution) or argv[1] (shebang rewritten to ``python3 /path/se3 run``),
+    # with ``run`` as the very next token. Here argv[0] is se3 itself, so any
+    # later ``-c`` is the CLI's --change option, never interpreter inline code.
+    for i in (0, 1):
+        if (
+            i + 1 < len(cmdline)
+            and os.path.basename(cmdline[i]) == "se3"
+            and cmdline[i + 1] == "run"
+        ):
+            return True
+    # Module form: ``python [...] -m se3 run``. ``-m`` must be a real
+    # interpreter option, not a token sitting inside an inline ``-c <code>``
+    # argv — so a ``-c`` appearing *before* ``-m`` marks inline-code mode and
+    # disqualifies the match. ``run`` must immediately follow ``se3``.
+    if "-m" in cmdline:
+        idx = cmdline.index("-m")
+        inline_c = "-c" in cmdline and cmdline.index("-c") < idx
+        if (
+            not inline_c
+            and idx + 2 < len(cmdline)
+            and cmdline[idx + 1] == "se3"
+            and cmdline[idx + 2] == "run"
+        ):
+            return True
+    return False

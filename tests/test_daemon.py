@@ -30,6 +30,7 @@ from se3.daemon.daemon import (
     _read_project_roots,
 )
 from se3.daemon import spawner as spawner_mod
+from se3.daemon.supervisor import _cmdline_is_se3_run
 
 
 # --------------------------------------------------------------------------
@@ -156,6 +157,154 @@ class TestSupervisor:
         for t in threads:
             t.join()
         assert sup.count == 150
+
+
+# --------------------------------------------------------------------------
+# _cmdline_is_se3_run predicate
+# --------------------------------------------------------------------------
+
+
+def _wait_until_psutil_observes(pid, timeout: float = 10.0):
+    """Block until ``psutil`` reports *pid* with a populated cmdline.
+
+    The ``_scan_external`` regression tests must scan a process the daemon can
+    actually see. Without this barrier a "not registered" assertion could pass
+    merely because ``process_iter`` missed the freshly-spawned pid (or caught it
+    pre-exec with an empty cmdline) — not because the predicate rejected it,
+    silently voiding the regression's intent. Returns the observed cmdline.
+    """
+    psutil = pytest.importorskip("psutil")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            cmdline = psutil.Process(pid).cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            cmdline = None
+        if cmdline:
+            return cmdline
+        time.sleep(0.02)
+    raise AssertionError(f"psutil did not observe pid {pid} within {timeout}s")
+
+
+def _write_fake_se3(directory, body: str):
+    """Write an executable ``se3`` shebang script running *body*.
+
+    The basename is ``se3`` so psutil observes ``[interpreter, /path/se3, ...]``
+    (se3 at argv[1]) — the real shebang-rewritten console-script shape.
+    """
+    path = directory / "se3"
+    path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+class TestCmdlineIsSe3Run:
+    """The predicate must match only genuine ``se3 run`` launch shapes and
+    must reject inline-code stubs that carry ``se3``/``run`` as script argv."""
+
+    def test_inline_code_form_is_not_se3_run(self):
+        # ``python -c <code> se3 run``: se3/run are the inline script's argv,
+        # not an se3 subcommand — this is the ghost-session false positive.
+        assert _cmdline_is_se3_run(["python3", "-c", "<code>", "se3", "run"]) is False
+
+    def test_direct_console_script_argv0(self):
+        assert _cmdline_is_se3_run(["se3", "run", "--worktree"]) is True
+        assert _cmdline_is_se3_run(["/venv/bin/se3", "run"]) is True
+
+    def test_shebang_rewritten_console_script_argv1(self):
+        # psutil's real observation of a shebang console-script: se3 at argv[1].
+        assert _cmdline_is_se3_run(["python3", "/venv/bin/se3", "run"]) is True
+
+    def test_module_form(self):
+        assert _cmdline_is_se3_run([sys.executable, "-m", "se3", "run"]) is True
+
+    def test_console_script_with_change_option(self):
+        # ``se3 run -c my-change``: the CLI's own -c/--change option must NOT be
+        # mistaken for the interpreter's inline-code -c and still match.
+        assert _cmdline_is_se3_run(["se3", "run", "-c", "my-change", "do work"]) is True
+        assert _cmdline_is_se3_run(
+            ["python3", "/venv/bin/se3", "run", "-c", "my-change"]
+        ) is True
+
+    def test_module_form_with_change_option(self):
+        # ``python -m se3 run -c my-change``: the trailing -c is the CLI option,
+        # not interpreter inline code, so the module form still matches.
+        assert _cmdline_is_se3_run(
+            ["python3", "-m", "se3", "run", "-c", "my-change"]
+        ) is True
+
+    def test_inline_code_carrying_module_tokens_is_not_se3_run(self):
+        # Inline -c precedes a stray ``-m se3 run`` in the script's argv: the
+        # interpreter-mode -c disqualifies the module match.
+        assert _cmdline_is_se3_run(
+            ["python3", "-c", "<code>", "-m", "se3", "run"]
+        ) is False
+
+    def test_se3_run_as_script_arguments_only(self):
+        # se3/run at argv[2]+ with no -m se3 and no se3 program token.
+        assert _cmdline_is_se3_run(["python3", "script.py", "se3", "run"]) is False
+
+    def test_other_se3_subcommand_with_trailing_run_is_not_se3_run(self):
+        # ``run`` must be the IMMEDIATE subcommand. A different se3 command whose
+        # own subcommand/argument is named ``run`` (here ``se3 migrate run``)
+        # must not be mistaken for a top-level ``se3 run`` flow — otherwise it
+        # re-introduces the ghost-session false positive.
+        assert _cmdline_is_se3_run(["se3", "migrate", "run"]) is False
+        assert _cmdline_is_se3_run(["/venv/bin/se3", "migrate", "run"]) is False
+        # Same constraint via the shebang-rewritten console-script shape.
+        assert _cmdline_is_se3_run(["python3", "/venv/bin/se3", "migrate", "run"]) is False
+        # And via the module form: ``python -m se3 migrate run``.
+        assert _cmdline_is_se3_run([sys.executable, "-m", "se3", "migrate", "run"]) is False
+
+    def test_empty_cmdline(self):
+        assert _cmdline_is_se3_run([]) is False
+
+    def test_module_form_without_run(self):
+        assert _cmdline_is_se3_run([sys.executable, "-m", "se3"]) is False
+
+
+# --------------------------------------------------------------------------
+# _scan_external discovery
+# --------------------------------------------------------------------------
+
+
+class TestScanExternalDiscovery:
+    """``_scan_external`` consumes the tightened predicate: inline-code stubs
+    must not be registered, genuine console-script processes still must be."""
+
+    def test_inline_code_se3_run_not_registered(self, tmp_path):
+        sup = DaemonSupervisor()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "se3", "run"],
+            cwd=str(tmp_path),
+        )
+        try:
+            # Only meaningful if psutil actually scans this pid: synchronise
+            # until it is observable, otherwise "not registered" could pass
+            # because the pid was never seen, not because it was rejected.
+            cmdline = _wait_until_psutil_observes(proc.pid)
+            assert "-c" in cmdline and "se3" in cmdline
+            flows = sup.discover_flows(scan_external=True)
+            assert all(f.pid != proc.pid for f in flows)
+            assert sup.get(proc.pid) is None
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+    def test_console_script_se3_run_registered(self, tmp_path):
+        pytest.importorskip("psutil")
+        fake_se3 = _write_fake_se3(tmp_path, "import time\ntime.sleep(30)\n")
+        sup = DaemonSupervisor()
+        proc = subprocess.Popen([str(fake_se3), "run"], cwd=str(tmp_path))
+        try:
+            # Wait until psutil reports the shebang-rewritten cmdline (se3 at
+            # argv[1]) so the positive registration is exercised deterministically.
+            _wait_until_psutil_observes(proc.pid)
+            flows = sup.discover_flows(scan_external=True)
+            assert any(f.pid == proc.pid for f in flows)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
 
 
 # --------------------------------------------------------------------------
