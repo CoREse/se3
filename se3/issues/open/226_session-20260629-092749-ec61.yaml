@@ -1,0 +1,47 @@
+id: '226'
+description: '这个session：20260629-092749_ec61846f
+
+  为什么testing失败了还进入self check？不是应该testing失败了直接进fix loop吗？
+
+
+  TEST
+
+  ▸ user prompt · test
+
+  assistant
+
+  2026/6/29 10:37:05
+
+  (no readable content for this record)
+
+
+  查看原始
+
+  ▸ ✓ Step completed · Testing
+
+  FAILED
+
+  │
+
+  0 / 1 phases
+
+  Phases
+
+  ✗ default
+
+  Command
+
+  /home/cre/.se3-stable/bin/python -m pytest -v
+
+
+  SELF CHECK
+
+  ◐
+
+  Self Check · 进行中'
+status: open
+tags: []
+source: human
+created_at: '2026-06-29T10:39:45.921824'
+updated_at: '2026-06-29T10:39:45.921824'
+type: bug

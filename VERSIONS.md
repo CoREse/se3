@@ -68,6 +68,15 @@
 
 
 
+
+## 11.1.0 - 2026-06-29
+
+- Add a secondary 'list-fp' fingerprint for files and directories so normal rebuild only re-summarizes a file/dir when its direct members' name/kind list changes (add/remove/rename)
+- Stop ancestor-chain re-summarization on body-only edits: changing a function body without renaming re-summarizes only that symbol, leaving its file and parent directories untouched
+- Preserve full content-fingerprint cascade behavior under 'rebuild --force' to still catch same-name behavioral drift and deep semantic changes
+- Extend the code-index.md inline fingerprint comment format to carry both content-fp and optional list-fp, strictly backward compatible with the prior single-fp format
+- Migrate existing indexes lazily and at zero LLM cost: nodes missing list-fp reuse their old summary via content-fp while list-fp is computed and backfilled mechanically
+- Carry list-fp through checkpoint flush re-renders so untouched nodes keep their fingerprints and are not falsely rebuilt on the next run
 ## 11.0.1 - 2026-06-26
 
 - Display the running-flow card worktree tag as `project_name (worktree)` with a half-width space and half-width parentheses instead of full-width Chinese parentheses

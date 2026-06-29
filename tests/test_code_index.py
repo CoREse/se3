@@ -270,7 +270,7 @@ class TestBuild:
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
         summ.reset()
-        # Edit only Greeter.hello's body.
+        # Edit only Greeter.hello's body (its name+kind are unchanged).
         (project / "src" / "mod.py").write_text(
             "def alpha():\n    return 1\n\n\n"
             "class Greeter:\n    def hello(self):\n        return 'HELLO'\n"
@@ -279,10 +279,13 @@ class TestBuild:
         )
         build_index(project, summarizer=summ)
         touched = summ.all
-        # The edited method + the file node (file content changed) re-summarised.
+        # Normal mode gates files/dirs on their list-fp (symbol name+kind roster),
+        # not whole-file content: a body-only edit leaves the roster unchanged, so
+        # ONLY the edited symbol is re-summarised — the file and its dirs are not.
         assert "src/mod.py::Greeter.hello" in touched
-        assert "src/mod.py" in touched
-        # Untouched sibling is reused, not re-summarised.
+        assert "src/mod.py" not in touched
+        assert "src/" not in touched
+        # Untouched sibling symbols are reused, not re-summarised.
         assert "src/mod.py::Greeter.bye" not in touched
         assert "src/mod.py::alpha" not in touched
 
@@ -362,7 +365,7 @@ class TestBuild:
         # A partial md was flushed before the crash and carries real fingerprints.
         md_text = code_index.md_path(project).read_text(encoding="utf-8")
         assert "<!--#" in md_text
-        _, fps = code_index._parse_md(md_text)
+        _, fps, _ = code_index._parse_md(md_text)
         assert fps, "expected at least one checkpointed node with a fingerprint"
 
         # Resume with a working summariser: the build completes, and the nodes
@@ -399,9 +402,13 @@ class TestBuild:
 
         # b.py (unchanged, never reached before the crash) keeps its fingerprint.
         md = code_index.md_path(project).read_text(encoding="utf-8")
-        _, fps = code_index._parse_md(md)
+        _, fps, list_fps = code_index._parse_md(md)
         assert "b.py" in fps
         assert "b.py::b" in fps
+        # The untouched file also keeps its list-fp across the flush (file/dir
+        # lines now carry both fingerprints), so a later build doesn't see it as
+        # unmigrated and needlessly recompute the reuse decision.
+        assert "b.py" in list_fps
 
     def test_binary_file_is_file_level_only(self, project: Path):
         (project / "data.bin").write_bytes(b"\x00\x01\x02\x03\x04")
@@ -418,6 +425,229 @@ class TestBuild:
         summ = RecordingSummarizer()
         index = load_or_build(project, summarizer=summ)
         assert "src/mod.py" in index.files
+
+
+# ---------------------------------------------------------------------------
+# List-fp reuse gate (G3): normal mode gates files/dirs on their direct-member
+# roster (list-fp); --force keeps the whole-content cascade; migration is lazy.
+# ---------------------------------------------------------------------------
+
+class TestListFp:
+    def test_body_only_change_resummarises_symbol_only(self, project: Path):
+        """Acceptance (a): a body-only edit re-summarises ONLY the edited symbol —
+        its file and dirs reuse (list-fps unchanged)."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        (project / "src" / "mod.py").write_text(
+            "def alpha():\n    return 42\n\n\n"
+            "class Greeter:\n    def hello(self):\n        return 'hi'\n"
+            "    def bye(self):\n        return 'bye'\n",
+            encoding="utf-8",
+        )
+        build_index(project, summarizer=summ)
+        assert "src/mod.py::alpha" in summ.all
+        assert "src/mod.py" not in summ.all
+        assert "src/" not in summ.all
+        assert "(root)" not in summ.all
+
+    def test_new_symbol_resummarises_symbol_and_file_not_dir(self, project: Path):
+        """Acceptance (b): adding a symbol re-summarises that symbol and its file
+        (roster changed) but NOT the parent dir (dir roster unchanged)."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        (project / "src" / "mod.py").write_text(
+            "def alpha():\n    return 1\n\n\n"
+            "class Greeter:\n    def hello(self):\n        return 'hi'\n"
+            "    def bye(self):\n        return 'bye'\n\n\n"
+            "def gamma():\n    return 3\n",
+            encoding="utf-8",
+        )
+        build_index(project, summarizer=summ)
+        assert "src/mod.py::gamma" in summ.all
+        assert "src/mod.py" in summ.all
+        assert "src/" not in summ.all
+        assert "(root)" not in summ.all
+
+    def test_renamed_symbol_resummarises_file_not_dir(self, project: Path):
+        """Acceptance (b): renaming a symbol changes the file roster → file +
+        new symbol re-summarised, parent dir untouched."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        (project / "src" / "mod.py").write_text(
+            "def alpha_renamed():\n    return 1\n\n\n"
+            "class Greeter:\n    def hello(self):\n        return 'hi'\n"
+            "    def bye(self):\n        return 'bye'\n",
+            encoding="utf-8",
+        )
+        build_index(project, summarizer=summ)
+        assert "src/mod.py::alpha_renamed" in summ.all
+        assert "src/mod.py" in summ.all
+        assert "src/" not in summ.all
+
+    def test_kind_change_same_name_resummarises_file(self, project: Path):
+        """Acceptance (b), kind component: changing a symbol's kind while keeping
+        its name (function→class for ``alpha``) changes the file roster's
+        ``(kind, name)`` entry → the file is re-summarised in normal mode. Locks
+        in the ``kind`` half of the list-fp: were it dropped, the name-only
+        roster would be unchanged and the file would wrongly reuse."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        (project / "src" / "mod.py").write_text(
+            "class alpha:\n    x = 1\n\n\n"
+            "class Greeter:\n    def hello(self):\n        return 'hi'\n"
+            "    def bye(self):\n        return 'bye'\n",
+            encoding="utf-8",
+        )
+        build_index(project, summarizer=summ)
+        # File roster's (kind, name) for alpha flipped function→class.
+        assert "src/mod.py" in summ.all
+        # Dir roster (direct child names) is unchanged → ancestors reuse.
+        assert "src/" not in summ.all
+        assert "(root)" not in summ.all
+
+    def test_reorder_symbols_no_resummary(self, project: Path):
+        """The file list-fp is order-insensitive: moving an unchanged symbol
+        above/below another (no add/remove/rename/re-kind) leaves the roster's
+        sorted (kind, name) set identical → the file is NOT re-summarised."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        # Greeter moved above alpha; neither symbol's name, kind, or body changed.
+        (project / "src" / "mod.py").write_text(
+            "class Greeter:\n    def hello(self):\n        return 'hi'\n"
+            "    def bye(self):\n        return 'bye'\n\n\n"
+            "def alpha():\n    return 1\n",
+            encoding="utf-8",
+        )
+        build_index(project, summarizer=summ)
+        assert "src/mod.py" not in summ.all
+        assert "src/" not in summ.all
+        assert "(root)" not in summ.all
+
+    def test_dir_membership_change_resummarises_dir_not_ancestors(self, project: Path):
+        """Acceptance (c): adding a file to a subdir re-summarises ONLY that
+        subdir; its ancestor dirs (whose direct rosters are unchanged) reuse."""
+        (project / "src" / "sub").mkdir()
+        (project / "src" / "sub" / "inner.py").write_text(
+            "def inner():\n    return 1\n", encoding="utf-8"
+        )
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        # Add a sibling file inside src/sub/: only src/sub/'s direct roster grows.
+        (project / "src" / "sub" / "added.py").write_text(
+            "def added():\n    return 2\n", encoding="utf-8"
+        )
+        build_index(project, summarizer=summ)
+        assert "src/sub/" in summ.all
+        # Ancestors' direct child names are unchanged (src/ still has mod.py+sub/,
+        # root still has the same direct members), so they are NOT re-summarised.
+        assert "src/" not in summ.all
+        assert "(root)" not in summ.all
+
+    def test_dir_child_removal_resummarises_dir_not_ancestors(self, project: Path):
+        """Acceptance (c): removing a direct child re-summarises that dir only."""
+        (project / "src" / "sub").mkdir()
+        (project / "src" / "sub" / "inner.py").write_text(
+            "def inner():\n    return 1\n", encoding="utf-8"
+        )
+        (project / "src" / "sub" / "extra.py").write_text(
+            "def extra():\n    return 2\n", encoding="utf-8"
+        )
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        (project / "src" / "sub" / "extra.py").unlink()
+        build_index(project, summarizer=summ)
+        assert "src/sub/" in summ.all
+        assert "src/" not in summ.all
+        assert "(root)" not in summ.all
+
+    def test_symbolless_file_content_edit_resummarises_file(self, project: Path):
+        """A file with an EMPTY symbol roster (plain prose/config: no functions,
+        no headings, no keys) has a constant empty list-fp, so the list gate would
+        match forever and freeze its summary. Its file-level summary is the only
+        representation of its content and it has no child symbol leaf, so a content
+        edit must fall back to the content-fp and re-summarise the file node."""
+        notes = project / "notes.txt"
+        notes.write_text("first draft of the notes\n", encoding="utf-8")
+        summ = RecordingSummarizer()
+        index = build_index(project, summarizer=summ)
+        # Precondition: the file really is symbol-less (the gap this guards).
+        assert index.files["notes.txt"].symbols == []
+        assert "notes.txt" in summ.all
+
+        # An untouched symbol-less file reuses (content-fp unchanged → zero LLM).
+        summ.reset()
+        build_index(project, summarizer=summ)
+        assert "notes.txt" not in summ.all
+
+        # A pure body rewrite (no roster — there is none) must still re-summarise
+        # the file node in normal mode, exactly as the old content-fp gate did.
+        summ.reset()
+        notes.write_text("completely rewritten body of the notes\n", encoding="utf-8")
+        build_index(project, summarizer=summ)
+        assert "notes.txt" in summ.all
+        # Its parent dir roster (root's direct child names) is unchanged → no
+        # ancestor cascade in normal mode.
+        assert "(root)" not in summ.all
+
+    def test_force_cascades_whole_content(self, project: Path):
+        """Acceptance (d): --force ignores list-fps and re-summarises every node
+        (symbols, files, all dirs) — the whole-content cascade, unchanged."""
+        summ = RecordingSummarizer()
+        build_index(project, summarizer=summ)
+        summ.reset()
+        build_index(project, summarizer=summ, force=True)
+        touched = summ.all
+        assert "src/mod.py::alpha" in touched
+        assert "src/mod.py::Greeter.hello" in touched
+        assert "src/mod.py" in touched
+        assert "src/" in touched
+        assert "(root)" in touched
+
+    def test_lazy_migration_reuses_old_md_zero_llm(self, project: Path):
+        """Acceptance (e): an md predating list-fps (legacy single-fp lines) is
+        reused for free on the first normal rebuild — zero LLM — and the
+        list-fps are mechanically backfilled into the rewritten md."""
+        import re
+
+        build_index(project, summarizer=RecordingSummarizer())
+        md = code_index.md_path(project)
+        text = md.read_text(encoding="utf-8")
+        # Strip the list-fp segment from every file/dir line → legacy md shape.
+        legacy = re.sub(r"<!--#([0-9a-f]+)\|[0-9a-f]+-->", r"<!--#\1-->", text)
+        assert legacy != text, "fixture md should have had list-fps to strip"
+        md.write_text(legacy, encoding="utf-8")
+        # Sanity: the downgraded md parses with content-fps but no list-fps.
+        _s, content_fps, list_fps = code_index._parse_md(legacy)
+        assert content_fps
+        assert not list_fps
+
+        # First normal rebuild after the upgrade: every node reuses via the
+        # content-fp fallback, so the summariser is never called.
+        summ = RecordingSummarizer()
+        index = build_index(project, summarizer=summ)
+        assert summ.call_count == 0
+        assert summ.all == set()
+
+        # Zero LLM is only half the contract: the OLD summaries from the legacy
+        # md must be carried into the rebuilt index (reuse, not a blank wipe).
+        assert index.files["src/mod.py"].summary == _s["src/mod.py"]
+        assert index.dir_summaries["src/"] == _s["src/"]
+        hello = next(s for s in index.files["src/mod.py"].symbols
+                     if s.local_id == "Greeter.hello")
+        assert hello.summary == _s["src/mod.py::Greeter.hello"]
+
+        # The rebuild mechanically backfilled list-fps into the rewritten md.
+        _s2, _c2, list_fps2 = code_index._parse_md(md.read_text(encoding="utf-8"))
+        assert list_fps2
+        assert "src/mod.py" in list_fps2
+        assert "src/" in list_fps2
 
 
 # ---------------------------------------------------------------------------
@@ -534,37 +764,48 @@ class TestRender:
         assert index.dir_summaries.get("src/") == "S:src/"
 
     def test_unchanged_sibling_dir_summary_reused(self, project: Path):
-        """The recursive dir fingerprint is still incremental per directory:
-        editing a file in one directory re-summarises only that directory's
-        ancestors; a sibling directory whose subtree is untouched reuses its
-        cached summary."""
+        """Each directory's normal-mode reuse is independent: adding a direct
+        member to one directory re-summarises only that directory; a sibling whose
+        own direct-member roster is untouched reuses its cached summary."""
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
         summ.reset()
-        # Edit a root-level file; the "src/" directory is untouched.
-        (project / "README.md").write_text(
-            "# Title\n\nchanged intro\n\n## Section A\n\nbody a\n", encoding="utf-8"
+        # Add a root-level file: the root dir's direct-child roster changes, but
+        # the "src/" directory's roster is untouched.
+        (project / "extra.py").write_text(
+            "def extra():\n    return 0\n", encoding="utf-8"
         )
         build_index(project, summarizer=summ)
-        # The root dir is re-summarised (its member changed) but the untouched
+        # The root dir is re-summarised (its membership changed) but the untouched
         # sibling "src/" dir reuses its cached summary.
         assert "(root)" in summ.all
         assert "src/" not in summ.all
 
-    def test_dir_summary_refreshed_when_member_content_changes(self, project: Path):
-        """A pure content edit inside an existing file re-summarises its ancestor
-        directories, so the map never carries a dir summary stale relative to the
-        refreshed file/symbol summaries underneath it."""
+    def test_dir_summary_not_refreshed_on_member_content_change(self, project: Path):
+        """Normal mode: a pure content edit inside an existing file does NOT
+        re-summarise its ancestor directories (the dir list-fp — its direct child
+        names — is unchanged). This is the cascade this design removes; --force
+        restores the content-fp cascade for catching deep semantic drift."""
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
         summ.reset()
+        # Body-only edit: alpha's body changes, its name+kind do not.
         (project / "src" / "mod.py").write_text(
-            "def alpha():\n    return 2\n", encoding="utf-8"
+            "def alpha():\n    return 2\n\n\n"
+            "class Greeter:\n    def hello(self):\n        return 'hi'\n"
+            "    def bye(self):\n        return 'bye'\n",
+            encoding="utf-8",
         )
         build_index(project, summarizer=summ)
-        # The member file's content changed, so the dir is re-summarised even
-        # though its membership is unchanged.
+        # Neither the file nor the dir is touched — only the edited symbol.
+        assert "src/mod.py::alpha" in summ.all
+        assert "src/mod.py" not in summ.all
+        assert "src/" not in summ.all
+        # --force restores the whole-content cascade.
+        summ.reset()
+        build_index(project, summarizer=summ, force=True)
         assert "src/" in summ.all
+        assert "src/mod.py" in summ.all
 
     def test_render_path_file_shows_symbols(self, project: Path):
         summ = RecordingSummarizer()
@@ -623,12 +864,91 @@ class TestRender:
         md = code_index.md_path(project).read_text(encoding="utf-8")
         import re
 
-        # A file heading line carries a <!--#<16-hex>--> fingerprint.
-        assert re.search(r"### `src/mod\.py`.*<!--#[0-9a-f]{16}-->", md)
-        # The fingerprint is invisible to the parsed summary (stripped first).
-        summaries, fps = code_index._parse_md(md)
+        # A file heading line carries a content-fp plus the optional list-fp
+        # segment: <!--#<16-hex>(|<16-hex>)?-->.
+        assert re.search(r"### `src/mod\.py`.*<!--#[0-9a-f]{16}(\|[0-9a-f]{16})?-->", md)
+        # The fingerprints are invisible to the parsed summary (stripped first).
+        summaries, fps, list_fps = code_index._parse_md(md)
         assert "src/mod.py" in fps and len(fps["src/mod.py"]) == 16
         assert "<!--" not in summaries.get("src/mod.py", "")
+        # A built file node carries a list-fp; a symbol bullet never does.
+        assert "src/mod.py" in list_fps
+        assert not any("::" in key for key in list_fps)
+
+
+# ---------------------------------------------------------------------------
+# md double-fingerprint round-trip (group G2)
+# ---------------------------------------------------------------------------
+
+class TestDoubleFpRoundTrip:
+    """The trailing fp comment carries a content-fp plus an optional list-fp for
+    file/dir lines, while staying byte-compatible with the legacy single-fp form
+    used by symbol lines and any pre-migration md."""
+
+    def test_split_fp_legacy_single_fp(self):
+        line, content, lst = code_index._split_fp("### `a.py` — s <!--#abc123-->")
+        # The leading whitespace before the comment is consumed by the regex.
+        assert line == "### `a.py` — s"
+        assert content == "abc123"
+        assert lst is None
+
+    def test_split_fp_double_fp(self):
+        line, content, lst = code_index._split_fp(
+            "### `a.py` — s <!--#abc123|def456-->"
+        )
+        assert line == "### `a.py` — s"
+        assert content == "abc123"
+        assert lst == "def456"
+
+    def test_split_fp_no_comment(self):
+        line, content, lst = code_index._split_fp("### `a.py` — plain summary")
+        assert line == "### `a.py` — plain summary"
+        assert content is None and lst is None
+
+    def test_fp_comment_round_trip(self):
+        # content-only → legacy shape; content+list → double shape.
+        assert code_index._fp_comment("aa11") == "<!--#aa11-->"
+        assert code_index._fp_comment("aa11", "bb22") == "<!--#aa11|bb22-->"
+        # An empty list-fp falls back to the legacy single-fp shape.
+        assert code_index._fp_comment("aa11", "") == "<!--#aa11-->"
+
+    def test_render_parse_round_trip(self, project: Path):
+        """render_full → _parse_md restores both fingerprints for every file/dir
+        node, no list-fp leaks onto symbol nodes, and an unsummarised node embeds
+        nothing (keeping a checkpointed md a safe resume point)."""
+        index = build_index(project, summarizer=RecordingSummarizer())
+        md = code_index.render_full(index)
+        _summaries, content_fps, list_fps = code_index._parse_md(md)
+
+        # Every file node round-trips both fps.
+        for relpath, fe in index.files.items():
+            if not fe.summary:
+                continue
+            assert content_fps.get(relpath) == code_index._fp(fe.fingerprint.sha256)
+            if fe.list_fp:
+                assert list_fps.get(relpath) == fe.list_fp
+
+        # Every summarised dir node round-trips both fps.
+        for dirkey, dsum in index.dir_summaries.items():
+            if not dsum:
+                continue
+            assert content_fps.get(dirkey) == index.dir_fingerprints.get(dirkey)
+            assert list_fps.get(dirkey) == index.dir_list_fingerprints.get(dirkey)
+
+        # Symbol nodes carry only a content-fp — never a list-fp.
+        assert any("::" in k for k in content_fps)
+        assert not any("::" in k for k in list_fps)
+
+    def test_unsummarised_node_embeds_no_fp(self, project: Path):
+        """A node with no summary embeds neither fingerprint, so a partial md is a
+        safe resume point (no fp → treated as stale next build)."""
+        index = build_index(project, summarizer=RecordingSummarizer())
+        fe = next(iter(index.files.values()))
+        fe.summary = ""
+        md = code_index.render_full(index)
+        _summaries, content_fps, list_fps = code_index._parse_md(md)
+        assert fe.path not in content_fps
+        assert fe.path not in list_fps
 
 
 # ---------------------------------------------------------------------------

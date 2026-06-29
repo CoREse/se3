@@ -148,6 +148,14 @@ class FileEntry:
     path: str                # project-relative POSIX path
     kind: str                # python | markdown | yaml | json | text | binary
     fingerprint: Fingerprint  # whole-file fingerprint (used for the file node)
+    # Secondary "list" fingerprint: a mechanical hash of this file's DIRECT
+    # child-symbol (kind, name) list only — never any symbol body or summary.
+    # It is the normal-mode reuse gate for the file node: it changes only when a
+    # symbol is added/removed/renamed/re-kinded, so a body-only edit no longer
+    # forces the file (and its ancestor chain) to be re-summarised. Because it
+    # looks only at direct names, a deep change cannot reach it, so it never
+    # cascades upward.
+    list_fp: str = ""
     summary: str = ""        # file-level one-line summary
     symbols: List[Symbol] = field(default_factory=list)
     # Absolute path on disk, set during enumeration so the file-level summariser
@@ -174,6 +182,13 @@ class CodeIndex:
     # descendant's content), keyed the same way. Embedded in the md so a rebuild
     # can tell which directories changed without any out-of-band cache.
     dir_fingerprints: Dict[str, str] = field(default_factory=dict)
+    # Secondary "list" fingerprint per directory: a mechanical hash of the
+    # DIRECT child names only (immediate files + immediate subdirs), keyed the
+    # same way. Unlike dir_fingerprints it does NOT fold in descendant content,
+    # so it changes only when this directory's own membership changes
+    # (a direct child added/removed/renamed) and never cascades up from a deep
+    # edit. It is the normal-mode reuse gate for the directory node.
+    dir_list_fingerprints: Dict[str, str] = field(default_factory=dict)
 
     # -- reconstruct from the authoritative md (render-only consumers) ------
 
@@ -188,7 +203,7 @@ class CodeIndex:
         index = cls(project_root=project_root)
         cur: Optional[FileEntry] = None
         for raw in md_text.splitlines():
-            line, _fp = _split_fp(raw)
+            line, _fp, _lfp = _split_fp(raw)
             dh = _MD_DIR_HEADING_RE.match(line)
             if dh:
                 # A directory heading (``## `dir/` — summary``). Capture its
@@ -238,8 +253,14 @@ class CodeIndex:
 # md round-trip regexes
 # ---------------------------------------------------------------------------
 
-# Trailing embedded fingerprint comment, e.g. ``<!--#a1b2c3d4e5f6a7b8-->``.
-_FP_COMMENT_RE = re.compile(r"\s*<!--#([0-9a-f]{1,%d})-->\s*$" % _FP_LEN)
+# Trailing embedded fingerprint comment. Two shapes, both anchored to EOL:
+#   ``<!--#<content>-->``        — content-fp only (legacy; symbol lines; pre-list-fp md)
+#   ``<!--#<content>|<list>-->`` — content-fp + list-fp (migrated file/dir lines)
+# The list segment is optional so old single-fp md parses unchanged (its list-fp
+# is read back as None → "unmigrated", to be filled in mechanically on rebuild).
+_FP_COMMENT_RE = re.compile(
+    r"\s*<!--#([0-9a-f]{1,%d})(?:\|([0-9a-f]{1,%d}))?-->\s*$" % (_FP_LEN, _FP_LEN)
+)
 
 # ``### `path` (kind) — summary``  (kind + summary optional)
 #
@@ -262,21 +283,30 @@ _MD_BULLET_KIND_RE = re.compile(r"\(([^)]*)\)")
 _MD_DIR_HEADING_RE = re.compile(r"^##\s+`([^`]+)`(?:\s+—\s+(.*))?$")
 
 
-def _split_fp(line: str) -> tuple[str, Optional[str]]:
-    """Split a rendered md line into ``(line_without_fp, fingerprint_or_None)``.
+def _split_fp(line: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Split a rendered md line into ``(line_without_fp, content_fp, list_fp)``.
 
     The embedded fingerprint comment is stripped before any heading/bullet regex
-    runs, so the summary capture never swallows it and the fingerprint is parsed
-    out separately.
+    runs, so the summary capture never swallows it and the fingerprints are parsed
+    out separately. ``list_fp`` is ``None`` for legacy single-fp lines (symbol
+    lines always, and any file/dir line written before list-fps existed).
     """
     m = _FP_COMMENT_RE.search(line)
     if m:
-        return line[: m.start()], m.group(1)
-    return line, None
+        return line[: m.start()], m.group(1), m.group(2)
+    return line, None, None
 
 
-def _fp_comment(fp: str) -> str:
-    return f"<!--#{fp}-->"
+def _fp_comment(content_fp: str, list_fp: Optional[str] = None) -> str:
+    """Render the trailing fingerprint comment for an md line.
+
+    With only a content-fp the legacy ``<!--#<content>-->`` shape is emitted (used
+    by symbol lines, which have no list-fp); when a list-fp is supplied the file/
+    dir form ``<!--#<content>|<list>-->`` carries both.
+    """
+    if list_fp:
+        return f"<!--#{content_fp}|{list_fp}-->"
+    return f"<!--#{content_fp}-->"
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +848,48 @@ def _compute_dir_fps(
     return memo
 
 
+def _compute_file_list_fp(fe: FileEntry) -> str:
+    """The file's *list* fingerprint: a mechanical hash of its direct symbols'
+    ordered ``(kind, name)`` list.
+
+    Deliberately ignores each symbol's body, summary, and source position — only
+    the structural roster (what symbols exist, by kind and name) feeds the hash.
+    A body-only edit leaves this unchanged; adding/removing/renaming/re-kinding a
+    symbol changes it. ``(kind, name)`` (not ``name`` alone) lets a
+    ``function``→``class`` change register as a roster change. No LLM, no child
+    summaries.
+
+    The roster is sorted before hashing so that pure reordering (moving an
+    unchanged symbol above/below another) is NOT a roster change — only the
+    *set* of (kind, name) members matters, not their source-file order.
+    """
+    parts = sorted(f"{sym.kind}:{sym.name}" for sym in fe.symbols)
+    return _fp(_sha256_text("\n".join(parts)))
+
+
+def _compute_dir_list_fps(
+    files: Dict[str, FileEntry], all_dirs: set[str]
+) -> Dict[str, str]:
+    """List fingerprint per directory: a mechanical hash of the directory's
+    DIRECT child names only — immediate files and immediate subdirs, sorted.
+
+    Non-recursive by design: unlike :func:`_compute_dir_fps` it folds in neither
+    descendant content nor child summaries, so it changes only when this
+    directory's own membership changes (a direct child added/removed/renamed) and
+    a deep edit beneath it never bubbles up. This is what makes each level's
+    normal-mode reuse decision independent of the levels below it. No LLM.
+    """
+    result: Dict[str, str] = {}
+    for dirkey in all_dirs:
+        parts: List[str] = []
+        for rel in _child_files(dirkey, files):
+            parts.append(f"f:{rel}")
+        for sub in _child_dirs(dirkey, all_dirs):
+            parts.append(f"d:{sub}")
+        result[dirkey] = _fp(_sha256_text("\n".join(parts)))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Markdown rendering (authoritative product) — full tree with embedded fps
 # ---------------------------------------------------------------------------
@@ -843,7 +915,7 @@ def render_full(index: CodeIndex) -> str:
         # empty summary. In a completed md every node has a summary, so this is a
         # no-op there.
         if dir_summary and dfp:
-            head += f" {_fp_comment(dfp)}"
+            head += f" {_fp_comment(dfp, index.dir_list_fingerprints.get(dir_name))}"
         lines.append(head)
         lines.append("")
         for fe in sorted(files_by_dir.get(dir_name, []), key=lambda f: f.path):
@@ -852,7 +924,7 @@ def render_full(index: CodeIndex) -> str:
                 fhead += f" — {fe.summary}"
             ffp = _fp(fe.fingerprint.sha256)
             if fe.summary and ffp:
-                fhead += f" {_fp_comment(ffp)}"
+                fhead += f" {_fp_comment(ffp, fe.list_fp or None)}"
             lines.append(fhead)
             for sym in fe.symbols:
                 indent = "  " * sym.depth
@@ -874,27 +946,35 @@ def _write_md(project_root: Path, index: CodeIndex) -> Path:
     return path
 
 
-def _parse_md(md_text: str) -> tuple[Dict[str, str], Dict[str, str]]:
-    """Parse the authoritative md into ``(summaries, fingerprints)``.
+def _parse_md(
+    md_text: str,
+) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+    """Parse the authoritative md into ``(summaries, content_fps, list_fps)``.
 
-    Both maps are keyed by node id: a directory key (``"src/"``), a file relpath,
-    or ``relpath::local_id`` for a symbol. ``summaries`` holds the
-    human-correctable one-liners reused for unchanged nodes; ``fingerprints``
-    holds each node's embedded content fingerprint, so a rebuild can decide
-    staleness from the committed md alone (no out-of-band cache).
+    All three maps are keyed by node id: a directory key (``"src/"``), a file
+    relpath, or ``relpath::local_id`` for a symbol. ``summaries`` holds the
+    human-correctable one-liners reused for unchanged nodes; ``content_fps`` holds
+    each node's embedded content fingerprint; ``list_fps`` holds the secondary
+    list fingerprint that file/dir lines carry once migrated (symbol lines never
+    carry one, and a pre-migration md has none — such ids are simply absent from
+    ``list_fps``, signalling "fall back to content-fp" to the reuse gate). All are
+    read from the committed md alone (no out-of-band cache).
     """
     summaries: Dict[str, str] = {}
-    fingerprints: Dict[str, str] = {}
+    content_fps: Dict[str, str] = {}
+    list_fps: Dict[str, str] = {}
     cur_path: Optional[str] = None
     for raw in md_text.splitlines():
-        line, fp = _split_fp(raw)
+        line, fp, lfp = _split_fp(raw)
         dh = _MD_DIR_HEADING_RE.match(line)
         if dh:
             key = dh.group(1)
             if dh.group(2):
                 summaries[key] = dh.group(2).strip()
             if fp:
-                fingerprints[key] = fp
+                content_fps[key] = fp
+            if lfp:
+                list_fps[key] = lfp
             cur_path = None
             continue
         fh = _MD_FILE_HEADING_RE.match(line)
@@ -903,7 +983,9 @@ def _parse_md(md_text: str) -> tuple[Dict[str, str], Dict[str, str]]:
             if fh.group(3):
                 summaries[cur_path] = fh.group(3).strip()
             if fp:
-                fingerprints[cur_path] = fp
+                content_fps[cur_path] = fp
+            if lfp:
+                list_fps[cur_path] = lfp
             continue
         bullet = _MD_BULLET_RE.match(line)
         if bullet and cur_path is not None:
@@ -912,8 +994,8 @@ def _parse_md(md_text: str) -> tuple[Dict[str, str], Dict[str, str]]:
             if summary:
                 summaries[sid] = summary.strip()
             if fp:
-                fingerprints[sid] = fp
-    return summaries, fingerprints
+                content_fps[sid] = fp
+    return summaries, content_fps, list_fps
 
 
 def _parse_md_summaries(md_text: str) -> Dict[str, str]:
@@ -1144,13 +1226,20 @@ def _build_index_locked(
     """The body of :func:`build_index`, run while holding the build lock."""
     md_summaries: Dict[str, str] = {}
     md_fps: Dict[str, str] = {}
+    # md_list_fps carries the secondary list fingerprints parsed from the md; it
+    # is the normal-mode reuse gate for file/dir nodes (see _reuse_file/_reuse_dir
+    # below). An md predating list-fps leaves an id absent here, which the gate
+    # reads as "fall back to content-fp" for lazy, zero-LLM migration.
+    md_list_fps: Dict[str, str] = {}
     if not force:
         mp = md_path(project_root)
         if mp.exists():
             try:
-                md_summaries, md_fps = _parse_md(mp.read_text(encoding="utf-8"))
+                md_summaries, md_fps, md_list_fps = _parse_md(
+                    mp.read_text(encoding="utf-8")
+                )
             except OSError:
-                md_summaries, md_fps = {}, {}
+                md_summaries, md_fps, md_list_fps = {}, {}, {}
 
     files = file_enum.enumerate_index_files(project_root, cfg.exclude)
     index = CodeIndex(project_root=Path(project_root))
@@ -1169,9 +1258,63 @@ def _build_index_locked(
     dir_fps = _compute_dir_fps(index.files, all_dirs)
     index.dir_fingerprints = dir_fps
 
+    # list-fps depend only on the enumerated structure (direct child names), never
+    # on a summary, so they can be computed here — before any summarisation —
+    # without touching the bottom-up build order. They become each file/dir
+    # node's normal-mode reuse gate (wired in a later group); computing them
+    # eagerly here keeps that wiring a pure read of already-populated state.
+    for fe in index.files.values():
+        fe.list_fp = _compute_file_list_fp(fe)
+    index.dir_list_fingerprints = _compute_dir_list_fps(index.files, all_dirs)
+
     def _reuse(fp_key: str, cur_sha: str) -> bool:
-        """A node is reusable when its current fingerprint matches the md's."""
+        """A node is reusable when its current content fingerprint matches the
+        md's. Symbols always gate on this: a symbol is a leaf, and refreshing the
+        one symbol whose own body changed is both the cheapest and the most apt
+        thing to do. --force callers never reuse anything (md_fps is empty)."""
         return (not force) and bool(cur_sha) and md_fps.get(fp_key) == _fp(cur_sha)
+
+    # Why a *separate* list-fp gate for files/dirs instead of the content-fp one:
+    # content-fp folds in the whole subtree, so any edit bubbles up the ancestor
+    # chain and re-summarises every level — the waste this design removes. The
+    # list-fp captures only this node's DIRECT-member roster (a file's symbol
+    # name+kind list; a dir's direct child names), so a body-only edit leaves it
+    # unchanged and each level decides independently — a roster change at one level
+    # never cascades to its parent. --force deliberately bypasses both list gates
+    # (returns False) and falls back to content-fp cascade to catch same-name
+    # behaviour drift / deep semantic shifts the list gate is blind to.
+    def _reuse_file(fe: FileEntry) -> bool:
+        if force:
+            return False
+        # A symbol-less file (plain text/config, heading-less prose, a JSON/YAML
+        # with no keys, or an oversized module collapsed to a bare file node) has
+        # an empty, CONSTANT list-fp — it would match the md forever and freeze
+        # the summary. Such a file has no child symbol leaf to catch a body edit,
+        # and its file-level summary is the ONLY representation of its content, so
+        # it must gate on the content-fp like a leaf: a content rewrite re-
+        # summarises the file node itself. (Gating on the constant empty roster
+        # would silently drop content drift in these files from normal mode.)
+        if not fe.symbols:
+            return _reuse(fe.path, fe.fingerprint.sha256)
+        md_lfp = md_list_fps.get(fe.path)
+        if md_lfp is not None:
+            return bool(fe.list_fp) and md_lfp == fe.list_fp
+        # Pre-migration md: no list-fp recorded for this file. Reuse on a
+        # content-fp match (zero LLM); render then writes the freshly computed
+        # list-fp back, completing the migration in place.
+        return _reuse(fe.path, fe.fingerprint.sha256)
+
+    def _reuse_dir(dirkey: str) -> bool:
+        if force:
+            return False
+        cur_lfp = index.dir_list_fingerprints.get(dirkey, "")
+        md_lfp = md_list_fps.get(dirkey)
+        if md_lfp is not None:
+            return bool(cur_lfp) and md_lfp == cur_lfp
+        # Pre-migration md: fall back to the dir's content-fp (already _fp-folded
+        # by _compute_dir_fps, so compared raw against the md value).
+        dfp = dir_fps.get(dirkey, "")
+        return bool(dfp) and md_fps.get(dirkey) == dfp
 
     # --- Pass 1: seed every reused summary up front (NO LLM). ---
     # Each checkpoint flush re-renders the WHOLE index, so any file the work loop
@@ -1183,15 +1326,14 @@ def _build_index_locked(
     for fe in index.files.values():
         if fe.kind == "binary":
             fe.summary = "(binary file — file-level entry only)"
-        elif _reuse(fe.path, fe.fingerprint.sha256):
+        elif _reuse_file(fe):
             fe.summary = md_summaries.get(fe.path, "")
         for sym in fe.symbols:
             sid = fe.symbol_id(sym)
             if _reuse(sid, sym.sha256):
                 sym.summary = md_summaries.get(sid, "")
     for dir_name in all_dirs:
-        dfp = dir_fps.get(dir_name, "")
-        if (not force) and dfp and md_fps.get(dir_name) == dfp:
+        if _reuse_dir(dir_name):
             index.dir_summaries[dir_name] = md_summaries.get(dir_name, "")
 
     # --- Pass 2: per file, summarise the STALE nodes bottom-up, then flush ---
@@ -1213,7 +1355,7 @@ def _build_index_locked(
             _summarize_wave(summ, sym_targets, index)
             did_work = True
 
-        if fe.kind != "binary" and not _reuse(fe.path, fe.fingerprint.sha256):
+        if fe.kind != "binary" and not _reuse_file(fe):
             _summarize_wave(summ, [_make_file_target(fe)], index)
             did_work = True
 
@@ -1225,11 +1367,7 @@ def _build_index_locked(
         dir_targets = [
             _make_dir_target(dir_name, index, all_dirs)
             for dir_name in sorted(d for d in all_dirs if _depth(d) == depth)
-            if not (
-                (not force)
-                and dir_fps.get(dir_name)
-                and md_fps.get(dir_name) == dir_fps.get(dir_name)
-            )
+            if not _reuse_dir(dir_name)
         ]
         _summarize_wave(summ, dir_targets, index)
 

@@ -13,8 +13,8 @@ description: "se3 migrate run spec-to-new-system这个（以及code-index）里�
   \ corpus                                 │\n│ Rewrite .gitignore    │ OK     │ already\
   \ migrated                                    │\n└───────────────────────┴────────┴─────────────────────────────────────────────────────\n\
   然后，这个top层级是怎么定的？se3 code默认输出所有##开头的？怎么定哪些是##，那些是###，我看了一下top层级的se3 code-index对于本项目而言有120多k，是否太大了？我之前的想法是top就是最顶级文件夹下面的一层项目，然后往下也是自然地按照文件夹结构下去，最后下到文件级，然后文件级内部再一直到最细粒度。"
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-06-25T13:32:55.311448'
-updated_at: '2026-06-25T13:54:06.466960'
+updated_at: '2026-06-26T22:00:13.320689'
