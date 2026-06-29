@@ -25,7 +25,6 @@ CORE_MODULES = [
     "se3.cli",
     "se3.commands",
     "se3.commands.run",
-    "se3.commands.sync",
     "se3.engine",
     "se3.engine.state_machine",
     "se3.daemon",
@@ -34,7 +33,7 @@ CORE_MODULES = [
 
 # `se3` command-family subcommands whose `--help` must not trigger a server
 # import (or any ImportError) when the extra is absent.
-CORE_HELP_COMMANDS = ["run", "sync", "merge", "history", "issue", "daemon"]
+CORE_HELP_COMMANDS = ["run", "merge", "history", "issue", "daemon"]
 
 
 def _run_python(code: str) -> subprocess.CompletedProcess:
