@@ -1,3 +1,28 @@
+# =====================================================================
+# Repository root: ignore everything by default.
+# Stray files dropped at the root (test logs, scratch output, etc.) must
+# NOT be accidentally committed. Only the project files/dirs explicitly
+# un-ignored below are tracked. To track a new top-level entry, add an
+# explicit `!/<name>` (files) or `!/<name>/` (dirs) line here.
+# =====================================================================
+/*
+!/.gitignore
+!/.claude/
+!/LICENSE
+!/NOTICE
+!/README.md
+!/README.zh.md
+!/VERSIONS.md
+!/progress.md
+!/pyproject.toml
+!/se3.yaml
+!/docs/
+!/scripts/
+!/se3/
+!/src/
+!/tests/
+
+# --- Global ignore patterns (apply at any depth) ---
 node_modules/
 .DS_Store
 *.swp
