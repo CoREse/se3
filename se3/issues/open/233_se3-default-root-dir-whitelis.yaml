@@ -1,0 +1,22 @@
+id: '233'
+description: "背景：本次会话发现 pytest_full.log / pytest_time.err 两个根目录测试产物被误提交进了 git 历史（提交\
+  \ 82d008d，已推送）。原因是当时 .gitignore 没有覆盖它们，仅靠 se3 提交时使用精确路径 git add 这一习惯侥幸没把更多杂物扫进去；一旦某处用了\
+  \ git add -A / git add . 就会中招（implement.py 中确有 add -A，只是恰好运行在不含这些文件的隔离 worktree\
+  \ 里）。\n\n提议：把“根目录默认全局 ignore + 显式白名单”作为 se3 生成/维护项目 .gitignore 的默认约定。即在 .gitignore\
+  \ 顶部写：\n\n    /*\n    !/.gitignore\n    !/<每个需要跟踪的项目文件或目录>\n    ...\n\n效果：根目录下任何未显式解\
+  \ ignore 的文件/文件夹默认不进 git，杜绝散落产物（日志、缓存、.venv、临时输出）被误提交。这与 se3 既有的 /se3/* 白名单理念一致。\n\
+  \n本会话已在本项目手工落地该 .gitignore（提交 ad47797），可作为参考实现。\n\n需要决定/设计的点：\n1. 是把它做成 se3 对受管项目的硬性默认，还是可配置开关（如\
+  \ se3.yaml 里 gitignore.root_whitelist: true）。\n2. 维护成本：白名单模式下，新增合法顶层文件/目录必须同步加 !/\
+  \ 白名单条目，否则会“静默不被跟踪”。最好配套：se3 在合法新增顶层受跟踪产物时自动补白名单条目，并在文档/onboarding 里明确说明。\n3. 对任意用户项目是否过于\
+  \ opinionated —— 可能需要保守地仅对 se3 自身运行时区域强约束，根目录白名单作为推荐而非强制。\n\n请人工评审是否采纳，以及采用“硬默认”还是“可配置”。"
+status: open
+tags:
+- gitignore
+- convention
+- safety
+source: human
+created_at: '2026-06-29T17:32:18.518011'
+updated_at: '2026-06-29T17:32:18.518011'
+title: 'se3 default: root-dir whitelist gitignore (根目录默认全局ignore)'
+priority: medium
+type: enhancement
