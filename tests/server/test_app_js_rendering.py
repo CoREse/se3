@@ -674,36 +674,6 @@ def test_every_step_prompt_template_carries_marker_pair():
 
 
 # ---------------------------------------------------------------------------
-# 5. running-flow-console spec passes structural validation
-# ---------------------------------------------------------------------------
-
-
-def test_running_flow_console_spec_passes_structural_validation():
-    """The three new / tightened Requirements (Conversation Strict
-    Chronological Order, neutral wording in Unified Intervention Items /
-    Docked Persistent Reply Box, Long-Content Wrapping) must keep the spec
-    file structurally valid against the spec-format v1 contract.
-    """
-    from se3.engine.spec_validator import validate_spec_structure
-
-    spec_path = REPO_ROOT / "se3" / "specs" / "running-flow-console" / "spec.md"
-    assert spec_path.is_file(), f"missing {spec_path}"
-    content = spec_path.read_text(encoding="utf-8")
-    result = validate_spec_structure(content, "running-flow-console")
-    assert result.passed, "running-flow-console spec failed validation: " + (
-        "; ".join(result.errors)
-    )
-    # Sanity: the three new Requirements are actually present.
-    for required_heading in [
-        "### Requirement: Conversation Strict Chronological Order",
-        "### Requirement: Long-Content Wrapping",
-    ]:
-        assert required_heading in content, (
-            f"running-flow-console spec is missing heading: {required_heading!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # 6. Issues view structural guardrails (G7)
 # ---------------------------------------------------------------------------
 

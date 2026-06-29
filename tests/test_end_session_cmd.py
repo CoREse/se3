@@ -44,6 +44,20 @@ def _branch_exists(path: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
+def _write_fake_se3(directory: Path, body: str) -> Path:
+    """Write an executable ``se3`` shebang script that runs *body*.
+
+    Spawning ``[fake_se3, "run", ...]`` makes psutil observe
+    ``[interpreter, /path/se3, run, ...]`` — the real shebang-rewritten
+    console-script shape the tightened ``_cmdline_is_se3_run`` matches at
+    argv[1]. Inline ``python -c <code> se3 run`` is no longer recognised.
+    """
+    path = directory / "se3"
+    path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def _make_worktree_session(
     main: Path,
     flow_id: str,
@@ -434,17 +448,17 @@ def test_discovers_live_worktree_parent_by_descendant_cwd(tmp_path: Path) -> Non
         "time.sleep(120)"
     )
     # The parent stays at cwd=main and spawns the child chdir'd into the
-    # worktree. Trailing 'se3 run' args make the parent's cmdline match the
-    # se3-run heuristic without affecting the script.
+    # worktree. The parent is a faithful console-script stub (a shebang script
+    # named ``se3``) so psutil reads ``[interpreter, /path/se3, run]`` and the
+    # tightened predicate matches it at argv[1].
     parent_code = (
         "import subprocess, sys, time\n"
         f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
         f"open(r'{pidfile}', 'w').write(str(child.pid))\n"
         "time.sleep(120)\n"
     )
-    proc = subprocess.Popen(
-        [sys.executable, "-c", parent_code, "se3", "run"], cwd=str(main)
-    )
+    fake_se3 = _write_fake_se3(tmp_path, parent_code)
+    proc = subprocess.Popen([str(fake_se3), "run"], cwd=str(main))
     child_pid = None
     try:
         for _ in range(100):
@@ -489,12 +503,13 @@ def test_discovers_live_worktree_parent_via_pidfile(tmp_path: Path) -> None:
     branch = "worktree/live-pidfile-1"
     wt_path = _make_worktree_session(main, flow_id, branch, status="RUNNING")
 
-    # A parent that has NO children and stays at cwd=main. Trailing 'se3 run'
-    # args make its cmdline match the se3-run heuristic (and pass the run.pid
-    # liveness/cmdline guard).
-    parent_code = "import time\ntime.sleep(120)\n"
+    # A parent that has NO children and stays at cwd=main. It is a faithful
+    # console-script stub (shebang script named ``se3``) so psutil reads
+    # ``[interpreter, /path/se3, run, --worktree]`` and the tightened predicate
+    # matches it at argv[1] (passing the run.pid liveness/cmdline guard).
+    fake_se3 = _write_fake_se3(tmp_path, "import time\ntime.sleep(120)\n")
     proc = subprocess.Popen(
-        [sys.executable, "-c", parent_code, "se3", "run", "--worktree"],
+        [str(fake_se3), "run", "--worktree"],
         cwd=str(main),
     )
     try:
