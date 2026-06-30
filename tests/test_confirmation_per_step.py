@@ -339,14 +339,29 @@ class TestInsertConfirmationSteps:
         )
         assert StepType.CONFIRM not in result
 
-    def test_empty_dict_no_confirm(self, tmp_path, isolated_global_home):
+    def test_empty_dict_no_confirm_for_non_plan(self, tmp_path, isolated_global_home):
         from se3.engine.models import StepType
 
+        (tmp_path / "se3.yaml").write_text("confirmation: {steps: {}}\n")
+        # plan is always-on, so a sequence without plan is the right probe
+        # for "empty dict means no non-plan confirmation".
+        result = insert_confirmation_steps(
+            [StepType.IMPLEMENT, StepType.TEST], tmp_path,
+        )
+        assert StepType.CONFIRM not in result
+
+    def test_empty_dict_still_confirms_plan(self, tmp_path, isolated_global_home):
+        from se3.engine.models import StepType
+
+        # plan-confirm is always-on: an empty confirmation.steps must still
+        # insert exactly one CONFIRM after plan.
         (tmp_path / "se3.yaml").write_text("confirmation: {steps: {}}\n")
         result = insert_confirmation_steps(
             [StepType.PLAN, StepType.IMPLEMENT], tmp_path,
         )
-        assert StepType.CONFIRM not in result
+        plan_idx = result.index(StepType.PLAN)
+        assert result[plan_idx + 1] == StepType.CONFIRM
+        assert result.count(StepType.CONFIRM) == 1
 
 
 # ---------------------------------------------------------------------------

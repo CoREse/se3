@@ -489,8 +489,9 @@ confirmation:
         assert confirm_after_plan_idx == plan_idx + 1
 
     def test_confirm_steps_not_inserted_when_steps_omitted(self):
-        """Test that CONFIRM steps are not inserted when no steps are listed."""
-        # Empty confirmation.steps means no step gets confirmed.
+        """Empty confirmation.steps confirms only plan (always-on), nothing else."""
+        # Empty confirmation.steps means no NON-plan step gets confirmed;
+        # plan-confirm is always-on and is therefore unaffected.
         se3_yaml = self.project_root / "se3.yaml"
         se3_yaml.write_text("""
 confirmation:
@@ -504,8 +505,10 @@ confirmation:
 
         selected_steps = flow.state.selected_steps
 
-        # Should NOT have any CONFIRM steps
-        assert StepType.CONFIRM not in selected_steps
+        # The only CONFIRM is the always-on plan-confirm directly after PLAN.
+        plan_idx = selected_steps.index(StepType.PLAN)
+        assert selected_steps[plan_idx + 1] == StepType.CONFIRM
+        assert selected_steps.count(StepType.CONFIRM) == 1
 
 
 class TestEndToEndConfirmationFlow:

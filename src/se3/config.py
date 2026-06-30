@@ -656,6 +656,12 @@ def load_config(project_root: Optional[Path] = None) -> Config:
 _CONFIRM_DEFAULT_MAX_ITERATIONS = 3
 _CONFIRM_VALID_STEP_CFG_KEYS = frozenset({"reviewer", "max_iterations"})
 
+# plan-confirm is always-on: its CONFIRM insertion and default reviewer
+# resolution do not depend on a ``confirmation.steps.plan`` entry existing.
+# Named here so both insert_confirmation_steps and resolve_confirm_inputs
+# share one source of truth for the special-cased step type.
+_PLAN_STEP_NAME = "plan"
+
 _warned_confirmation_enabled_for: set[str] = set()
 _warned_confirmation_top_reviewer_for: set[str] = set()
 _warned_confirmation_llm_reviewer_for: set[str] = set()
@@ -935,16 +941,22 @@ def insert_confirmation_steps(
 ) -> list:
     """Insert CONFIRM steps after each step type that requires confirmation.
 
-    A step type triggers a CONFIRM insertion iff it is a key in
+    A non-plan step type triggers a CONFIRM insertion iff it is a key in
     ``confirmation.steps`` (the new per-step dict) AND it actually
-    appears in the supplied step sequence. There is no global on/off
-    switch — opting a step out of confirmation simply means omitting it
-    from ``confirmation.steps``.
+    appears in the supplied step sequence. For those, opting a step out
+    of confirmation simply means omitting it from ``confirmation.steps``.
+
+    ``plan`` is special-cased as **always-on**: a CONFIRM is inserted
+    after every plan step regardless of whether ``confirmation.steps``
+    contains a ``plan`` entry (or is empty entirely). This makes the
+    plan-confirm requirement-coverage check a mechanical guarantee
+    decoupled from config presence — the ``confirmation.steps.plan``
+    entry now only customizes the reviewer / max_iterations, never the
+    on/off decision (which is resolved in ``resolve_confirm_inputs`` by
+    synthesizing a default entry for plan).
     """
     config = load_confirmation_config(project_root)
     steps_dict = config.get("steps", {})
-    if not steps_dict:
-        return steps
 
     step_type_names = set()
     for s in steps:
@@ -953,8 +965,12 @@ def insert_confirmation_steps(
         else:
             step_type_names.add(str(s))
 
+    # plan is always confirmed; other steps only when configured. Even an
+    # empty confirmation.steps must still yield plan-confirm, so we cannot
+    # early-return on an empty steps_dict.
     steps_to_confirm = {s for s in steps_dict.keys() if s in step_type_names}
-    if not steps_to_confirm:
+    steps_to_confirm.add(_PLAN_STEP_NAME)
+    if not steps_to_confirm & step_type_names:
         return steps
 
     from .engine.models import StepType
@@ -1887,6 +1903,14 @@ def resolve_confirm_inputs(
     confirmation (i.e. absent from ``confirmation.steps``), so the caller
     can defensively fall back without an extra read.
 
+    Exception: ``plan`` is always-on. When ``reviewed_step_type == 'plan'``
+    and no ``confirmation.steps.plan`` entry exists, a default entry is
+    synthesized (reviewer=None → default ``llm_caller.defaults`` chain,
+    default max_iterations) rather than returning None, so plan-confirm
+    never degrades into state_machine's human fallback. An explicit
+    ``confirmation.steps.plan`` entry still overrides reviewer /
+    max_iterations.
+
     Otherwise returns ``{"reviewer": str|None, "max_iterations": int|None,
     "agents": list[dict]|None}``:
     - ``reviewer == 'human'``   → ``agents`` is ``None``; caller routes
@@ -1919,7 +1943,16 @@ def resolve_confirm_inputs(
 
     step_cfg = merged_steps.get(reviewed_step_type)
     if step_cfg is None:
-        return None
+        # plan-confirm is always-on: even without a confirmation.steps.plan
+        # entry it must resolve to a usable CONFIRM input. Synthesize the
+        # default entry (reviewer=None → default llm_caller chain, default
+        # max_iterations) instead of returning None. This keeps the
+        # always-on guarantee decoupled from config presence and prevents
+        # state_machine's resolved-is-None→human fallback from firing for
+        # plan. Non-plan steps still return None when unconfigured.
+        if reviewed_step_type != _PLAN_STEP_NAME:
+            return None
+        step_cfg = {"reviewer": None, "max_iterations": None}
 
     reviewer = step_cfg.get("reviewer")
     max_iterations = step_cfg.get("max_iterations")
