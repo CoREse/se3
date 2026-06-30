@@ -74,6 +74,15 @@
 
 
 
+
+## 11.4.0 - 2026-07-01
+
+- Inject recency context into the discovery step's initial (round 0) prompt so it no longer cold-starts and can resolve cross-session references like 'continue the last one'
+- Summarize the most recent 3 session reports (se3/state/summary-*.md) via structured extraction of the Task line and report body, with per-entry length caps
+- Include the latest 10 non-merge git commit subjects (subjects only, --no-merges) as context to help discovery avoid duplicate proposals and recognize follow-ups
+- Gate recency injection to round 0 only; later rounds inherit it through conversation history, saving repeated prompt token cost
+- Skip any missing or unavailable recency source silently, preserving the discovery step's read-only nature and never failing on absent summaries or git data
+- Apply identical round-0 recency injection behavior in worktree mode
 ## 11.3.2 - 2026-06-30
 
 - Prevent silent, unrecoverable loss of uncommitted untracked files (e.g. concurrently created se3/issues/open/NNN_*.yaml and .next_id) during worktree/branch merge stash-pop

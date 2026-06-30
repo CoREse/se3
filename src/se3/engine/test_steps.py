@@ -109,7 +109,7 @@ class TestTestStep:
     """Tests for the test step."""
 
     @pytest.fixture(autouse=True)
-    def _warm_main_repo_root_cache(self):
+    def _warm_main_repo_root_cache(self, monkeypatch):
         """Pre-warm the git-probe lru_cache before ``@patch('subprocess.Popen')``.
 
         ``TestConfig.load`` (called at the top of ``test_handler``) resolves the
@@ -121,9 +121,20 @@ class TestTestStep:
         fail in isolation. This autouse fixture runs *before* the patch is
         applied, warming the cache for the current working directory so the
         probe never runs under the patched Popen.
+
+        It also clears ``SE3_TEST_RUNNING`` from the environment for the test's
+        duration. ``_run_command`` short-circuits to a ``passed=True`` skip
+        result when that sentinel is set (its recursive-invocation guard), which
+        fires whenever this suite is itself launched *by* the se3 test step
+        (which exports ``SE3_TEST_RUNNING=1`` before spawning pytest). With the
+        sentinel inherited, the failure-asserting test below would never reach
+        its mocked ``Popen`` and would observe COMPLETED instead of
+        REVISION_NEEDED. Clearing it makes these tests exercise the real path
+        regardless of how the outer suite was invoked.
         """
         import se3.config as _cfg
 
+        monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
         _cfg._resolve_main_repo_root(Path.cwd())
         yield
 
@@ -181,20 +192,32 @@ class TestCommitStep:
     def test_commit_success(self, mock_run, mock_version_config):
         """Test successful commit (pure-git path, version bumping disabled).
 
-        With version bumping disabled the commit handler issues exactly four
-        git calls — status, add, commit, rev-parse — matching the mock below.
-        Version-bump behaviour is covered separately in
+        With version bumping disabled the commit handler still issues several
+        git calls beyond the core add/commit/rev-parse: ``_has_changes`` runs
+        ``git status --porcelain``, the runtime-leak guard runs
+        ``git diff --cached --name-only -z``, and the root-whitelist diagnostic
+        runs ``git ls-files``. Rather than a brittle positional list, dispatch
+        each mock by git subcommand so the test is robust to the exact call
+        order/count. Version-bump behaviour is covered separately in
         ``tests/engine/steps/test_commit.py``.
         """
         from .version_bumper import VersionConfig
         mock_version_config.return_value = VersionConfig(enabled=False)
-        # Mock git status (has changes) then git add, git commit, git rev-parse
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="M file.py", stderr=""),  # git status
-            MagicMock(returncode=0, stdout="", stderr=""),  # git add
-            MagicMock(returncode=0, stdout="[main abc123] message", stderr=""),  # git commit
-            MagicMock(returncode=0, stdout="abc123def456", stderr=""),  # git rev-parse
-        ]
+
+        def fake_git(cmd, *args, **kwargs):
+            sub = cmd[1] if isinstance(cmd, (list, tuple)) and len(cmd) > 1 else ""
+            if sub == "status":
+                # _has_changes fallback: non-empty porcelain => has changes.
+                return MagicMock(returncode=0, stdout="M file.py", stderr="")
+            if sub == "commit":
+                return MagicMock(returncode=0, stdout="[main abc123] message", stderr="")
+            if sub == "rev-parse":
+                return MagicMock(returncode=0, stdout="abc123def456", stderr="")
+            # add / diff (leak guard, empty => no leaks) / ls-files / anything
+            # else: succeed with empty output.
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = fake_git
 
         with tempfile.TemporaryDirectory() as tmpdir:
             flow = FlowInstance(task_description="Test commit")
@@ -249,8 +272,14 @@ class TestStepHandlers:
 class TestLLMCallerIntegration:
     """Tests for LLM caller integration with retry logic."""
 
+    # Pin agent rotation off: LLMCaller() with no explicit agents resolves the
+    # project's se3.yaml multi-agent chain and rotates agents on every failure,
+    # which would reach the real CodexRunner. Forcing _rotate_agent to report
+    # "no rotation available" isolates the retry-on-same-agent behavior these
+    # tests target (the single mocked ClaudeCodeRunner).
+    @patch("se3.engine.llm_caller.LLMCaller._rotate_agent", return_value=False)
     @patch("se3.engine.llm_caller.ClaudeCodeRunner")
-    def test_llm_retry_success(self, MockRunner):
+    def test_llm_retry_success(self, MockRunner, _mock_no_rotate):
         """Test that retries eventually succeed."""
         from .llm_caller import LLMCaller
 
@@ -271,8 +300,9 @@ class TestLLMCallerIntegration:
         assert result == "success"
         assert mock_runner.run_with_monitor.call_count == 3
 
+    @patch("se3.engine.llm_caller.LLMCaller._rotate_agent", return_value=False)
     @patch("se3.engine.llm_caller.ClaudeCodeRunner")
-    def test_llm_retry_exhausted(self, MockRunner):
+    def test_llm_retry_exhausted(self, MockRunner, _mock_no_rotate):
         """Test that retry exhaustion raises LLMCallError."""
         from .llm_caller import LLMCaller, LLMCallError
 
@@ -676,20 +706,23 @@ class TestDiscoveryCarriedTokenUsage:
 
             with patch.object(discovery_mod, "_run_discovery_round", side_effect=fake_round), \
                  patch.object(discovery_mod, "_display_discovery_message"):
-                # Round 1 (question) — PAUSED: carry holds round 1 only.
+                # Round 1 (question) — PAUSED: carry holds round 1 only. The
+                # finally block publishes token_usage for non-terminal runs too
+                # (so step renderers can display it), so on a PAUSED round it
+                # equals the carried total at that point, not absent.
                 sm.run_step(flow, step)
                 assert step.status == StepStatus.PAUSED
-                assert "token_usage" not in step.outputs
+                assert step.outputs["token_usage"]["input_tokens"] == 100
                 assert step.outputs["carried_token_usage"]["input_tokens"] == 100
 
                 # Round 2 (question) — PAUSED: carry survives the clear and
-                # accumulates round 1 + round 2.
+                # accumulates round 1 + round 2; published token_usage tracks it.
                 step.status = StepStatus.PENDING
                 step.inputs["resumed"] = True
                 step.inputs["user_response"] = "answer 1"
                 sm.run_step(flow, step)
                 assert step.status == StepStatus.PAUSED
-                assert "token_usage" not in step.outputs
+                assert step.outputs["token_usage"]["input_tokens"] == 150
                 assert step.outputs["carried_token_usage"]["input_tokens"] == 150
 
                 # Round 3 (confirmation gate) — still PAUSED, carry now sums all
@@ -844,11 +877,12 @@ class TestDiscoveryRoundUsageFooter:
 class TestCliSinkUsageRendering:
     """CliSink per-step usage routing for the interactive/special step types (G3).
 
-    discovery → no usage block (its per-round footer is rendered inline by the
-    discovery handler); confirm → compact dim single-line footer from
-    ``step.outputs['token_usage']`` (only when the LLM was actually called);
-    plan → the unchanged big ``Step Token Usage`` block; other types →
-    ``render_step_output`` unchanged.
+    discovery → a compact dim cumulative line (its per-round footer is rendered
+    inline by the discovery handler; the terminal event surfaces the
+    whole-discovery total), never the big usage block or full report; confirm →
+    compact dim single-line footer from ``step.outputs['token_usage']`` (only
+    when the LLM was actually called); plan → the unchanged big ``Step Token
+    Usage`` block; other types → ``render_step_output`` unchanged.
     """
 
     def _completed_event(self, step):
@@ -908,7 +942,7 @@ class TestCliSinkUsageRendering:
 
         assert console.export_text().strip() == ""
 
-    def test_discovery_renders_no_usage(self):
+    def test_discovery_renders_cumulative_usage(self):
         from rich.console import Console
 
         from .sink import CliSink
@@ -922,9 +956,13 @@ class TestCliSinkUsageRendering:
              patch("se3.engine.step_renderers.render_step_output") as full_report:
             sink.consume(self._completed_event(step))
 
-        # Discovery's per-round footer is owned by the handler; the sink renders
-        # nothing for discovery (neither usage block nor full report).
-        assert console.export_text().strip() == ""
+        # Discovery's terminal event renders ONLY a compact dim cumulative line
+        # (the whole-discovery total, including the confirmation round that
+        # issues no LLM call) — never the big per-step usage block nor the full
+        # report (both owned by the orchestrator's interactive path).
+        out = console.export_text()
+        assert "Discovery cumulative:" in out
+        assert "999" in out and "111" in out
         big_block.assert_not_called()
         full_report.assert_not_called()
 

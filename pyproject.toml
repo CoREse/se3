@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "se3"
-version = "11.3.2"
+version = "11.4.0"
 description = "SE 3.0 framework - Pure CLI flow engine"
 requires-python = ">=3.8"
 dependencies = [
@@ -65,7 +65,10 @@ packages = ["src/se3"]
 artifacts = ["src/se3/server/static/**"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Charter permits engine-colocated pytest modules under src/se3/engine/ (tightly
+# coupled to private step internals); include that path so the default pytest run
+# discovers them alongside tests/ instead of silently skipping them.
+testpaths = ["tests", "src/se3/engine"]
 pythonpath = ["src"]
 # Deselect the Chromium e2e test — it requires libnspr4.so / playwright
 # which are not available in this environment. The node-stub sibling

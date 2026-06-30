@@ -1,0 +1,14 @@
+id: '240'
+description: "Fast strategy auto-stashed dirty working tree (se3-pre-fast-merge-1782830447)\
+  \ before merge; on pop, conflicts/collisions were resolved by keeping the merged\
+  \ (HEAD) version.\n\nAffected files:\n  - se3/code-index.md\n  - src/se3/engine/merge/runtime_sync.py"
+status: open
+tags:
+- merge-fallback
+- stash-pop-fallback
+source: system
+created_at: '2026-06-30T22:40:50.793092'
+updated_at: '2026-06-30T22:40:50.793092'
+title: 'se3 merge: stash-pop fallback (label: se3-pre-fast-merge-1782830447)'
+priority: medium
+type: task

@@ -68,7 +68,7 @@ description: 'se3 的 worktree/分支合并会**静默丢失未提交的 issue �
 
   [[需求与task覆盖、正确性check 的 plan-confirm/self_check 改造提案]]（本会话恢复出的另一条诉求，已知是用户 06-30 重写版）；与
   #232（stash-pop fallback 自报）、#093（merge take-theirs）同源。'
-status: open
+status: resolved
 tags:
 - merge
 - stash-pop
@@ -77,7 +77,7 @@ tags:
 - concurrency
 source: human
 created_at: '2026-06-30T12:25:58.460746'
-updated_at: '2026-06-30T12:25:58.460746'
+updated_at: '2026-06-30T17:47:37.811995'
 title: se3 合并的 stash-pop take-ours 会静默丢失未提交的 issue 文件（只留路径不留内容）
 priority: high
 type: bug

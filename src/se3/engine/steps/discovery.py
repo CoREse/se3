@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -360,6 +362,222 @@ def _gather_project_context(project_root: Path) -> str:
     return "\n".join(context_parts) if context_parts else "No additional context available"
 
 
+# Recency-context tuning constants. The Task line is the user's verbatim intent
+# from a past session — useful but unbounded, so cap it; the per-summary cap then
+# bounds Task + first-paragraph combined. Values chosen per the task's ~200 /
+# ~600–800 char budget to keep round-0 token cost predictable.
+_RECENCY_TASK_MAX_CHARS = 200
+_RECENCY_SUMMARY_MAX_CHARS = 800
+
+
+# Matches the canonical ``summary-YYYYMMDD-HHMMSS`` filename prefix whose digits
+# encode the session's creation time — the authoritative recency signal.
+_SUMMARY_TS_RE = re.compile(r"^summary-(\d{8})-(\d{6})")
+
+
+def _summary_recency_key(path: Path) -> float:
+    """Recency sort key for a ``summary-*.md`` file, as a comparable epoch float.
+
+    The filename timestamp is the authoritative creation time, so when the name
+    conforms to ``summary-YYYYMMDD-HHMMSS-*`` we parse those digits into a real
+    epoch (interpreted as local wall-clock, matching how the filename is stamped)
+    so it lives on the *same numeric scale* as the mtime used for non-conforming
+    names. This is the whole point of the conversion: a packed 14-digit integer
+    like ``20260601000000`` would dwarf any 10-digit mtime epoch, forcing every
+    timestamped file ahead of every oddly-named one regardless of actual recency
+    and dropping a freshly-written ``summary-latest.md`` out of the top-N. By
+    putting both branches in epoch seconds, mtime is a genuine recency fallback,
+    so a newer non-conforming summary correctly outranks older timestamped ones.
+
+    If the digits are not a valid calendar timestamp (e.g. out-of-range month),
+    parsing fails and we fall back to mtime rather than guessing.
+    """
+    match = _SUMMARY_TS_RE.match(path.name)
+    if match:
+        try:
+            # Naive datetime -> .timestamp() interprets as local time, aligning
+            # the filename's local wall-clock stamp with the local-epoch mtime.
+            return datetime.strptime(
+                match.group(1) + match.group(2), "%Y%m%d%H%M%S"
+            ).timestamp()
+        except (ValueError, OverflowError, OSError):
+            pass
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _collect_session_summaries(project_root: Path, limit: int = 3) -> List[str]:
+    """Collect structured excerpts from the most recent session summaries.
+
+    Reads ``se3/state/summary-*.md`` (only ``.md`` — JSON siblings are ignored),
+    most-recent-first, and for each of the latest *limit* files extracts a
+    compact excerpt: the frontmatter ``**Task:**`` line (truncated to
+    :data:`_RECENCY_TASK_MAX_CHARS`) plus the first paragraph of the report body
+    (the text after the ``---`` separator). Each excerpt is hard-capped at
+    :data:`_RECENCY_SUMMARY_MAX_CHARS`.
+
+    This feeds discovery's round-0 recency context so the LLM can resolve
+    cross-session references ("continue the last one") without a cold start. It
+    is strictly read-only and best-effort: any I/O or parse error on a single
+    file is silently skipped so discovery never fails on it.
+
+    Args:
+        project_root: Project root directory.
+        limit: Maximum number of summaries to return (most recent first).
+
+    Returns:
+        A list of formatted excerpt strings (0..limit entries).
+    """
+    state_dir = project_root / "se3" / "state"
+    try:
+        files = list(state_dir.glob("summary-*.md"))
+    except Exception:
+        return []
+    if not files:
+        return []
+
+    # Order strictly by recency. A summary's true creation time lives in its
+    # filename timestamp (summary-YYYYMMDD-HHMMSS_*), so we key on that parsed
+    # epoch when present; otherwise we fall back to mtime. Both branches yield a
+    # comparable epoch float, so a newer timestamped file always outranks an
+    # older oddly-named one — a plain lexical name sort would let a non-conforming
+    # name (e.g. summary-e752e110-*.md) leapfrog a recent summary-2026*.md.
+    try:
+        files.sort(key=_summary_recency_key, reverse=True)
+    except Exception:
+        files.sort(key=lambda p: p.name, reverse=True)
+
+    excerpts: List[str] = []
+    for path in files[:limit]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        task = ""
+        first_para = ""
+        lines = text.splitlines()
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("**Task:**"):
+                task = stripped[len("**Task:**"):].strip()
+                if len(task) > _RECENCY_TASK_MAX_CHARS:
+                    task = task[:_RECENCY_TASK_MAX_CHARS].rstrip() + "…"
+                break
+
+        # First paragraph of the report body: the first run of non-blank lines
+        # after the frontmatter/body ``---`` separator. We deliberately take the
+        # structured first paragraph rather than literal first N lines so the
+        # excerpt captures the report's lede, not boilerplate.
+        sep_idx = None
+        for i, line in enumerate(lines):
+            if line.strip() == "---":
+                sep_idx = i
+                break
+        if sep_idx is not None:
+            para_lines: List[str] = []
+            for line in lines[sep_idx + 1:]:
+                if line.strip():
+                    para_lines.append(line.strip())
+                elif para_lines:
+                    break
+            first_para = " ".join(para_lines).strip()
+
+        parts: List[str] = []
+        if task:
+            parts.append(f"Task: {task}")
+        if first_para:
+            parts.append(first_para)
+        if not parts:
+            continue
+
+        excerpt = "\n".join(parts)
+        if len(excerpt) > _RECENCY_SUMMARY_MAX_CHARS:
+            excerpt = excerpt[:_RECENCY_SUMMARY_MAX_CHARS].rstrip() + "…"
+        excerpts.append(excerpt)
+
+    return excerpts
+
+
+def _collect_recent_commits(project_root: Path, limit: int = 10) -> List[str]:
+    """Collect the subject lines of the most recent non-merge commits.
+
+    Runs ``git log --no-merges --format=%s -n <limit>``. Only subjects are
+    taken — commit bodies are highly redundant with session summaries and would
+    only inflate the round-0 token cost. Best-effort and read-only: a missing
+    repo, unavailable git, or any non-zero exit yields an empty list rather than
+    raising, so discovery never fails on it.
+
+    Args:
+        project_root: Project root directory.
+        limit: Maximum number of commit subjects to return.
+
+    Returns:
+        A list of commit subject strings (newest first; empty on any failure).
+    """
+    try:
+        import subprocess
+        # Bound the call so a wedged git (e.g. a stuck lock or hung filesystem)
+        # can never hang the read-only discovery step. TimeoutExpired is a
+        # SubprocessError, so the broad except below turns it into an empty list.
+        result = subprocess.run(
+            ["git", "log", "--no-merges", "--format=%s", "-n", str(limit)],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _gather_recency_context(project_root: Path) -> str:
+    """Build the round-0 "Recent Activity Context" block.
+
+    Combines :func:`_collect_session_summaries` and
+    :func:`_collect_recent_commits` into a single titled Markdown block with up
+    to two subsections (recent session summaries, recent commits). A subsection
+    is omitted when its collector returned nothing; if both are empty the whole
+    block is empty (returns ``""``) so nothing is appended to the prompt.
+
+    This is intentionally separate from :func:`_gather_project_context`:
+    project context is injected every round, whereas this recency block is
+    injected only on round 0 (its value is concentrated at initial orientation,
+    and round-0 output flows forward via the conversation history).
+
+    Args:
+        project_root: Project root directory.
+
+    Returns:
+        A formatted Markdown block, or "" when there is no recency data.
+    """
+    summaries = _collect_session_summaries(project_root)
+    commits = _collect_recent_commits(project_root)
+
+    if not summaries and not commits:
+        return ""
+
+    parts: List[str] = ["## Recent Activity Context"]
+
+    if summaries:
+        parts.append("\n### Recent session summaries")
+        for i, excerpt in enumerate(summaries, 1):
+            parts.append(f"{i}. {excerpt}")
+
+    if commits:
+        parts.append("\n### Recent commits")
+        for subject in commits:
+            parts.append(f"- {subject}")
+
+    return "\n".join(parts)
+
+
 def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the discovery step.
 
@@ -649,6 +867,17 @@ def _run_discovery_round(
         user_response=user_response,
         project_context=project_context,
     )
+
+    # Round-0-only recency context: session summaries + recent commits give the
+    # initial discovery round cross-session orientation. Skipped on round >= 1
+    # because that round-0 output already flows forward via conversation_history,
+    # so re-injecting it every round would just burn duplicate tokens. Kept
+    # separate from the per-round project_context above so the gate is purely
+    # round-based; worktree mode is treated identically (no special-casing).
+    if round_number == 0:
+        recency_context = _gather_recency_context(project_root)
+        if recency_context:
+            prompt += "\n\n" + recency_context
 
     # Append language instruction if configured
     from ..context_builder import (

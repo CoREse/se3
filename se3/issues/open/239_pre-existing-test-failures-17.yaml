@@ -1,0 +1,74 @@
+id: '239'
+description: '**17 pre-existing test failure(s)** detected during flow execution.
+
+  These failures were NOT introduced by the current change.
+
+
+  **Failing tests:**
+
+  - `tests/test_history_sink_step_started.py::test_record_step_started_writes_running_record`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_record_step_started_default_timestamp_is_iso_string`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_has_step_started_event_detection`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_get_step_history_skips_step_started`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_history_sink_persists_step_started`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_history_sink_step_started_is_idempotent_while_running`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_history_sink_step_started_rearms_after_pause`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_history_sink_step_started_skipped_after_terminal`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_history_sink_terminal_events_unchanged`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_run_flow_emits_step_started_for_non_llm_step`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_run_flow_resume_after_pause_rearms_running_then_completes`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_record_step_status_writes_status_record`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_has_step_status_event_is_status_specific`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_get_step_history_skips_step_status`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_run_flow_persists_step_status_on_pause`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_run_flow_step_status_records_paused_after_running_rearm`:
+  test failed (details in pytest output)
+
+  - `tests/test_history_sink_step_started.py::test_run_flow_step_status_dedups_back_to_back_paused`:
+  test failed (details in pytest output)
+
+
+  **Task:** discovery步骤里要不要加入前几个session的总结步骤的前几行以及前几个git commit的commit message？要加的话这些几你判断一下是多少合适？
+
+
+  These tests should be investigated and fixed to prevent the broken-window effect.'
+status: open
+tags:
+- auto-discovered
+- source:test-pre-existing
+source: system
+created_at: '2026-06-30T19:38:41.372526'
+updated_at: '2026-06-30T19:38:41.372526'
+title: Pre-existing test failures (17 tests)
+priority: medium
+type: bug
