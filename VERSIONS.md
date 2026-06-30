@@ -72,6 +72,14 @@
 
 
 
+
+## 11.3.1 - 2026-06-30
+
+- Extend the discovery HARD INVARIANT to forbid reader-facing decision-point / changeable annotations (e.g. '默认选择，可改', '(default, changeable)', 'you can change this') from appearing in refined_description, not just open-item phrasing
+- Require already-made decisions to appear in refined_description only as clean conclusions (e.g. 'Decided: use X') with no 'default / changeable' parenthetical attached
+- Clarify that all 'default / changeable / adjustable' meta-notes belong solely in the content field shown to the user, never in the downstream-consumed refined_description
+- Update both discovery prompt templates' content and refined_description field descriptions and the 'route every unsettled matter' Guidelines to match the tightened invariant, keeping the two templates consistent
+- Add explicit WRONG/RIGHT examples showing how a settled-but-changeable decision should be split between refined_description and content
 ## 11.3.0 - 2026-06-30
 
 - Add a dedicated plan-confirm prompt that decomposes embedded requirements and verifies every requirement is covered by a plan task

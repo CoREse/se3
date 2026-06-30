@@ -110,9 +110,9 @@ _INITIAL_DISCOVERY_PROMPT_SUFFIX = """
 Respond in JSON format:
 {{
     "mode": "question|synthesis|confirmation",
-    "content": "Your message to the user - ask questions, summarize understanding, or present refined description. MAY also carry meta-notes such as 'this is a default I picked on your behalf and you can change it'",
+    "content": "Your message to the user - ask questions, summarize understanding, or present refined description. This is the ONLY place for any reader-facing meta-note about a decision being a default / changeable / adjustable (e.g. 'this is a default I picked on your behalf and you can change it' / '默认值，可改'); every such note MUST live here and MUST NOT appear in refined_description",
     "questions": ["question1", "question2"],  // If mode is "question". ONLY for true blockers — see below
-    "refined_description": "If mode is 'synthesis' or 'confirmation', the refined task description. MUST be clean and final — see hard invariant below",
+    "refined_description": "If mode is 'synthesis' or 'confirmation', the refined task description. MUST be clean, final, and free of any reader-facing decision-point / changeable annotation — see hard invariant below",
     "issue_operations": [  // OPTIONAL — only when the user explicitly directs an issue create/update/delete this turn. See "Issue Operations" below. Omit (or use []) otherwise.
         {{"action": "create", "title": "Short title", "description": "Details", "priority": "critical|high|medium|low", "type": "bug|feature|...", "tags": ["tag1"]}},
         {{"action": "update", "id": "<id of an issue created earlier in THIS discovery session>", "title": "...", "description": "...", "priority": "...", "type": "...", "tags": ["..."]}},
@@ -133,6 +133,7 @@ Issue Operations (`issue_operations`) — strictly user-directed, scope-limited:
 HARD INVARIANT — `refined_description` must be clean, final, and zero open items:
 - `refined_description` MUST be a clean, finalized, directly-executable task description with ZERO open items.
 - It MUST NOT contain any open-item phrasing whatsoever: no "to be confirmed" / "TBD" / "to be decided" / "to be determined" / "to be supplemented" / "open question(s)" / "pending" / "either A or B (undecided)" / "待确认" / "待定" / "待补充" / "二选一未决", or any equivalent. Any matter not yet nailed down MUST NOT survive inside `refined_description` in the form of a "question".
+- It MUST NOT contain any reader-facing decision-point / changeability annotation either, EVEN for a decision you have already made: no "默认选择，可改" / "可改" / "可调整" / "如需可改" / "默认值，可修改" / "(default, changeable)" / "you can change this", or any equivalent parenthetical or aside. An already-made decision MUST appear only as a clean conclusion (e.g. "Decided: use X") with NO "this is a default / can be changed" annotation attached. WRONG: `refined_description` reads "Decided: use X (default, changeable)". RIGHT: `refined_description` reads "Decided: use X", and `content` reads "X is a default I picked on your behalf — you can change it". These reader-facing notes belong ONLY in `content` (see the `content` field above).
 - Every item that is not yet settled has exactly two destinations:
   1. **True blocker** (cannot proceed at all without the user's adjudication): put it in `questions`. A non-empty `questions` means discovery continues looping and does NOT reach the confirmation gate — i.e. as long as a genuine open decision remains, the user should not be asked to confirm at all.
   2. **Non-blocker** (you can reasonably pick a sensible default / make the decision yourself): write it into `refined_description` as an already-made decision (e.g. "Decided: use default value X"), and put the meta-note that "this is a default I picked on your behalf and can be changed" into `content` for the user's reference. Do NOT put non-blockers into `questions`.
@@ -175,8 +176,8 @@ Guidelines:
 - After gathering enough info, provide a synthesis (mode: "synthesis")
 - Once user confirms, finalize the description (mode: "confirmation")
 - Be conversational but focused on understanding requirements
-- `refined_description` must be a clean, finalized, zero-open-item executable task description — never let any "to be confirmed / TBD / to be decided / undecided either-or / 待确认 / 待定" open item remain inside it (see the HARD INVARIANT above)
-- Route every unsettled matter to one of two places: a true blocker goes into `questions` (which keeps discovery looping and stays out of the confirmation gate); a non-blocker is written into `refined_description` as an already-made decision (e.g. "Decided: use default value X") with a "default picked on your behalf, changeable" note placed in `content` — never put a non-blocker into `questions`
+- `refined_description` must be a clean, finalized, zero-open-item executable task description — never let any "to be confirmed / TBD / to be decided / undecided either-or / 待确认 / 待定" open item, nor any reader-facing "默认选择，可改 / 可改 / 可调整 / (default, changeable) / you can change this" decision-point annotation, remain inside it (see the HARD INVARIANT above)
+- Route every unsettled matter to one of two places: a true blocker goes into `questions` (which keeps discovery looping and stays out of the confirmation gate); a non-blocker is written into `refined_description` as a clean already-made decision (e.g. "Decided: use default value X") with NO "default / changeable" annotation attached, while the "default picked on your behalf, changeable" meta-note goes ONLY into `content` (never inside `refined_description`) — never put a non-blocker into `questions`
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
 
@@ -225,9 +226,9 @@ _CONTINUE_DISCOVERY_PROMPT_SUFFIX = """
 Respond in JSON format:
 {{
     "mode": "question|synthesis|confirmation",
-    "content": "Your message to the user. MAY also carry meta-notes such as 'this is a default I picked on your behalf and you can change it'",
+    "content": "Your message to the user - ask questions, summarize understanding, or present refined description. This is the ONLY place for any reader-facing meta-note about a decision being a default / changeable / adjustable (e.g. 'this is a default I picked on your behalf and you can change it' / '默认值，可改'); every such note MUST live here and MUST NOT appear in refined_description",
     "questions": ["question1", "question2"],  // If mode is "question". ONLY for true blockers — see below
-    "refined_description": "If mode is 'synthesis' or 'confirmation', the refined task description. MUST be clean and final — see hard invariant below",
+    "refined_description": "If mode is 'synthesis' or 'confirmation', the refined task description. MUST be clean, final, and free of any reader-facing decision-point / changeable annotation — see hard invariant below",
     "issue_operations": [  // OPTIONAL — only when the user explicitly directs an issue create/update/delete this turn. See "Issue Operations" below. Omit (or use []) otherwise.
         {{"action": "create", "title": "Short title", "description": "Details", "priority": "critical|high|medium|low", "type": "bug|feature|...", "tags": ["tag1"]}},
         {{"action": "update", "id": "<id of an issue created earlier in THIS discovery session>", "title": "...", "description": "...", "priority": "...", "type": "...", "tags": ["..."]}},
@@ -249,6 +250,7 @@ Issue Operations (`issue_operations`) — strictly user-directed, scope-limited:
 HARD INVARIANT — `refined_description` must be clean, final, and zero open items:
 - `refined_description` MUST be a clean, finalized, directly-executable task description with ZERO open items.
 - It MUST NOT contain any open-item phrasing whatsoever: no "to be confirmed" / "TBD" / "to be decided" / "to be determined" / "to be supplemented" / "open question(s)" / "pending" / "either A or B (undecided)" / "待确认" / "待定" / "待补充" / "二选一未决", or any equivalent. Any matter not yet nailed down MUST NOT survive inside `refined_description` in the form of a "question".
+- It MUST NOT contain any reader-facing decision-point / changeability annotation either, EVEN for a decision you have already made: no "默认选择，可改" / "可改" / "可调整" / "如需可改" / "默认值，可修改" / "(default, changeable)" / "you can change this", or any equivalent parenthetical or aside. An already-made decision MUST appear only as a clean conclusion (e.g. "Decided: use X") with NO "this is a default / can be changed" annotation attached. WRONG: `refined_description` reads "Decided: use X (default, changeable)". RIGHT: `refined_description` reads "Decided: use X", and `content` reads "X is a default I picked on your behalf — you can change it". These reader-facing notes belong ONLY in `content` (see the `content` field above).
 - Every item that is not yet settled has exactly two destinations:
   1. **True blocker** (cannot proceed at all without the user's adjudication): put it in `questions`. A non-empty `questions` means discovery continues looping and does NOT reach the confirmation gate — i.e. as long as a genuine open decision remains, the user should not be asked to confirm at all.
   2. **Non-blocker** (you can reasonably pick a sensible default / make the decision yourself): write it into `refined_description` as an already-made decision (e.g. "Decided: use default value X"), and put the meta-note that "this is a default I picked on your behalf and can be changed" into `content` for the user's reference. Do NOT put non-blockers into `questions`.
@@ -273,8 +275,8 @@ Guidelines:
 - If things are still unclear, ask more specific questions
 - When you have enough information, provide a refined description and ask for confirmation
 - Be ready to proceed only when the user explicitly confirms
-- `refined_description` must be a clean, finalized, zero-open-item executable task description — never let any "to be confirmed / TBD / to be decided / undecided either-or / 待确认 / 待定" open item remain inside it (see the HARD INVARIANT above)
-- Route every unsettled matter to one of two places: a true blocker goes into `questions` (which keeps discovery looping and stays out of the confirmation gate); a non-blocker is written into `refined_description` as an already-made decision (e.g. "Decided: use default value X") with a "default picked on your behalf, changeable" note placed in `content` — never put a non-blocker into `questions`
+- `refined_description` must be a clean, finalized, zero-open-item executable task description — never let any "to be confirmed / TBD / to be decided / undecided either-or / 待确认 / 待定" open item, nor any reader-facing "默认选择，可改 / 可改 / 可调整 / (default, changeable) / you can change this" decision-point annotation, remain inside it (see the HARD INVARIANT above)
+- Route every unsettled matter to one of two places: a true blocker goes into `questions` (which keeps discovery looping and stays out of the confirmation gate); a non-blocker is written into `refined_description` as a clean already-made decision (e.g. "Decided: use default value X") with NO "default / changeable" annotation attached, while the "default picked on your behalf, changeable" meta-note goes ONLY into `content` (never inside `refined_description`) — never put a non-blocker into `questions`
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
 
