@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from ..context_builder import build_llm_review_prompt
+from ..context_builder import build_llm_review_prompt, build_plan_confirm_prompt
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..utils.json_parser import parse_json_response
@@ -199,15 +199,27 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     if reviewed_step and reviewed_step.inputs.get('is_revision'):
         revision_feedback = reviewed_step.inputs.get('revision_feedback')
 
-    # Build prompt
+    # Build prompt. plan confirms are always specialized into a dedicated
+    # requirement-coverage review (decompose requirements -> check every
+    # requirement has a covering task), fully decoupled from the generic
+    # per-step confirm; every other step keeps the generic review prompt.
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
-    prompt = build_llm_review_prompt(
-        step_to_review_type=step_to_review_type,
-        step_output=step_output,
-        task_description=step.inputs.get("task_description", flow.task_description),
-        revision_feedback=revision_feedback,
-        project_root=project_root,
-    )
+    task_description = step.inputs.get("task_description", flow.task_description)
+    if step_to_review_type == 'plan':
+        prompt = build_plan_confirm_prompt(
+            step_output=step_output,
+            task_description=task_description,
+            revision_feedback=revision_feedback,
+            project_root=project_root,
+        )
+    else:
+        prompt = build_llm_review_prompt(
+            step_to_review_type=step_to_review_type,
+            step_output=step_output,
+            task_description=task_description,
+            revision_feedback=revision_feedback,
+            project_root=project_root,
+        )
 
     # Call LLM
     try:
