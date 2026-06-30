@@ -1,0 +1,83 @@
+id: '235'
+description: 'se3 的 worktree/分支合并会**静默丢失未提交的 issue 文件**（以及其它未跟踪产物），且只留路径、不留内容。本会话疑似因此丢了
+  issue 229/230/231。
+
+
+  ## 机制（已在代码中确认，非推断）
+
+  两个合并路径同构，都会这样做：
+
+  - `se3 merge` 快速/robust 路径：`src/se3/commands/merge_cmd.py:584-604`
+
+  - DAG 叶分支回并：`src/se3/engine/steps/implement.py:1489-1592`
+
+  - 公共助手：`src/se3/engine/stash_utils.py:43-63`、`18-40`
+
+
+  流程：
+
+  1. 合并前 `git stash push --include-untracked`（implement.py:1490 / 见 merge_cmd 同款）。`--include-untracked`
+  会把**主工作树里并发 discovery 步骤刚创建、尚未提交的 `se3/issues/open/NNN_*.yaml`** 一并卷进 stash。
+
+  2. 执行合并。
+
+  3. `git stash pop`。若某路径与合并带进来的文件**同名碰撞**，git 报 `"<path>: already exists, no checkout"`，且**不**标记为
+  unmerged（`parse_stashpop_already_exists` 就是为解析这种情况而写）。此时被 stash 的那份**无法恢复**。
+
+  4. `take_ours_for_stashpop` 保留合并后的 HEAD 版本（`checkout --ours`）。
+
+  5. **无条件 `git stash drop`**（merge_cmd.py:604，注释原文："Drop the stash regardless — leaving
+  it behind on partial recovery is worse than dropping"）。于是 stash 里**没能恢复的未跟踪内容被永久丢弃**。
+
+
+  ## 为什么是"静默 + 不可恢复"
+
+  - 只有 `_record_stashpop_takeours_event` 记一条审计 issue，里面**只有被丢文件的路径，没有内容**。stash 已
+  drop，git 对象也回收，内容无处可寻。
+
+  - 注释里 "partial recovery" 一词等于承认：pop 是部分恢复，剩下的直接 drop。
+
+
+  ## 触发条件（与本次吻合）
+
+  并发：一个 worktree flow 在跑合并的同时，主仓的 daemon/discovery 正在新建 issue 文件（未提交）。这些文件被 `--include-untracked`
+  卷入 → pop 时碰撞（例如 `se3/issues/.next_id` 必然碰撞）→ 连同**没碰撞的其它新 issue 文件**一起被 drop。计数器照常前进（229→…→232），文件却没了——正是
+  229/230/231 的现象。本会话 se3 自己也自动建了 #232 记录这次 stash-pop take-ours 触发（影响 `se3/issues/.next_id`、`se3/code-index.md`）。
+
+
+  ## 置信度边界
+
+  机制：**已确认**（代码 + 本会话 #232 实证触发）。"229/230/231 就是被它吃掉的"：**强推断**，非亲眼所见（计数器前进 + 文件在所有地方都不存在
+  + 同一机制本会话确实触发过）。
+
+
+  ## 建议修复方向
+
+  1. drop 之前**先抢救内容**：把未能恢复/被 take-ours 覆盖的 stashed 路径内容落盘到恢复区（如 `se3/worktrees/.archive/`
+  或 `se3/issues/.recovered/`），而不是只记路径。
+
+  2. `se3/issues/*.yaml` 不应靠 "stash 后也许 drop" 来周转——合并前应对它们做**提交/单独保全**，或合并采用 union/rename
+  策略而非 take-ours-then-drop。
+
+  3. 审计事件应记录**内容**（至少 stashed blob 的 sha 或正文），而非仅路径。
+
+  4. 碰撞时把 stashed 版本**改名让位**（NNN_*.yaml → NNN_*.stashed.yaml）而不是销毁。
+
+
+  ## 关联
+
+  [[需求与task覆盖、正确性check 的 plan-confirm/self_check 改造提案]]（本会话恢复出的另一条诉求，已知是用户 06-30 重写版）；与
+  #232（stash-pop fallback 自报）、#093（merge take-theirs）同源。'
+status: open
+tags:
+- merge
+- stash-pop
+- data-loss
+- issues
+- concurrency
+source: human
+created_at: '2026-06-30T12:25:58.460746'
+updated_at: '2026-06-30T12:25:58.460746'
+title: se3 合并的 stash-pop take-ours 会静默丢失未提交的 issue 文件（只留路径不留内容）
+priority: high
+type: bug
