@@ -3709,6 +3709,17 @@ tokenUsageMod.registerTokenUsageTests({ app, check, findOne, findAll });
 const roundUsageMod = await import("./round_usage.test.mjs");
 roundUsageMod.registerRoundUsageTests({ app, check, findOne, findAll });
 
+// Register the history flow_id display tests (Parts 1 & 2): the list-card meta
+// flow_id span and the detail-header dedicated full flow_id line. Async because
+// the detail-line check drives openHistorySession through a canned fetch.
+const historyFlowIdMod = await import("./history_flow_id.test.mjs");
+await historyFlowIdMod.registerHistoryFlowIdTests({ app, check, checkAsync, findOne, findAll });
+
+// Register the history-detail session token-usage badge tests (Part 3): the
+// history badge reuses the running-flow view's applyUsageBadge renderer.
+const historyUsageMod = await import("./history_usage.test.mjs");
+historyUsageMod.registerHistoryUsageTests({ app, check, findOne, findAll });
+
 // Register the G3 admin-only user-management row-model tests (separate module —
 // same `check` reporter, same `app` module, same shared DOM stub).
 const userMgmtMod = await import("./user_mgmt.test.mjs");

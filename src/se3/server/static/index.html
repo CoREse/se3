@@ -121,6 +121,15 @@
         <button id="history-back-btn" type="button" class="history-back-btn"
                 aria-label="返回会话列表">&larr; 会话列表</button>
         <h4 id="history-detail-title">Session</h4>
+        <!-- The full flow_id of the open session, shown as its own dedicated
+             line independent of the title's task_description→flow_id fallback so
+             the se3 flow_id is always identifiable and copyable. -->
+        <div id="history-detail-flow-id" class="history-detail-flow-id"></div>
+        <!-- Session token/cost total for the open history session — reuses the
+             running-flow view's .flow-usage-badge styling and accounting.
+             Hidden until this session has consumed tokens. -->
+        <div id="history-usage-badge" class="flow-usage-badge hidden"
+             title="本次 session 已消耗的 token 与成本合计"></div>
         <div id="history-detail" class="history-detail">
           <p class="empty">Select a session to view its step records.</p>
         </div>

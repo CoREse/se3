@@ -73,6 +73,14 @@
 
 
 
+
+## 11.4.0 - 2026-06-30
+
+- Show each history session's flow_id on its list card meta row, truncated with ellipsis and a full-value tooltip for readability and copy
+- Display the complete flow_id on its own dedicated line in the history detail header, independent of the task_description fallback
+- Add a session-total token-usage badge to the history detail view, reusing the running-flow usage rendering and hiding when no usage exists
+- Clear the history header flow_id and usage badge when closing a session so stale values don't bleed into the next opened session
+- Anchor the resume button insertion to the stable flow_id line so it cleans up reliably with the new header elements present
 ## 11.3.1 - 2026-06-30
 
 - Extend the discovery HARD INVARIANT to forbid reader-facing decision-point / changeable annotations (e.g. '默认选择，可改', '(default, changeable)', 'you can change this') from appearing in refined_description, not just open-item phrasing
