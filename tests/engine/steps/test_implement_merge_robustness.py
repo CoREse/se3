@@ -159,9 +159,12 @@ class TestStashPopConflict:
         assert result is True
         mock_audit.assert_called_once()
         call_args = mock_audit.call_args
-        # branch + conflict_files + flow_id are passed
+        # branch + archived manifest + flow_id are passed. The third arg is
+        # now the recovery manifest (list[ArchivedEntry]) rather than a bare
+        # list of paths — the audit records *where the content was saved*.
         assert call_args.args[1] == "impl/f/G1"
-        assert "app.py" in call_args.args[2]
+        archived_paths = [e.rel_path for e in call_args.args[2]]
+        assert "app.py" in archived_paths
         assert call_args.args[3] == "20260101-test"
 
 

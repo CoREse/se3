@@ -13,6 +13,7 @@ import logging
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -92,8 +93,18 @@ from ..worktree import (
     resolve_merge_conflicts_with_context,
 )
 from ..stash_utils import (
+    ArchivedEntry,
+    format_archived_manifest as _format_archived_manifest,
     parse_stashpop_already_exists as _parse_stashpop_already_exists,
+    pop_stash_by_label as _pop_stash_by_label,
+    resolve_stashpop_safely as _resolve_stashpop_safely,
     take_ours_for_stashpop as _take_ours_for_stashpop,
+)
+# The LLM-aware case-a resolver lives in the LLM integration layer, not in the
+# generic no-data-loss stash_utils engine; the leaf-back merge injects it into
+# ``resolve_stashpop_safely`` so stash_utils stays free of LLM-stack coupling.
+from ..stashpop_llm_resolver import (
+    make_llm_stashpop_resolver as _make_llm_stashpop_resolver,
 )
 
 logger = logging.getLogger(__name__)
@@ -1474,21 +1485,32 @@ def _merge_leaf_branch(
        commit, audit via ``IssueManager``. Always preserves the leaf
        branch's commits (which encapsulate the DAG implement output);
        only discards the master-pre-merge version of conflicting paths.
-    4. Post-merge ``git stash pop``; pop conflicts (a stashed untracked
-       file collides with a file the merge brought in) resolved by
-       ``_take_ours_for_stashpop`` — keep the merged HEAD version, drop
-       the stashed version, audit via ``IssueManager``. Stash is always
-       dropped at the end so no dangling ``stash@{0}`` remains.
+    4. Post-merge ``git stash pop``; any non-clean pop is recovered through
+       the shared ``resolve_stashpop_safely`` (same entry point as the
+       ``se3 merge`` fast path). It archives the still-live stash's full
+       content to ``se3/worktrees/.archive`` BEFORE any disposition — case b
+       (untracked-collision, e.g. concurrent discovery issue files) gives
+       way to the merged tree and is never destroyed; case a (real 3-way
+       tracked) is reconciled by an injected LLM resolver (symmetric with
+       layer 2's merge-body resolution), with both sides archived first and a
+       deterministic take-ours fallback when the LLM is unavailable. The
+       stash is dropped only after archival is proven; if it cannot be, the
+       live stash is kept for manual recovery. ``IssueManager`` audits the
+       archive manifest so the operator can actually restore.
     """
     current = get_current_branch(project_root)
     if current != original_branch:
         _run_git(project_root, "checkout", original_branch)
 
     # Layer 1: pre-merge stash (include untracked so discovery/analyze/plan
-    # artefacts in the main repo don't block FF/3-way merge).
+    # artefacts in the main repo don't block FF/3-way merge). The label is
+    # fixed here and reused for every pop below so we always operate on this
+    # exact stash by ref, never a bare ``stash@{0}`` that a concurrent stash
+    # could have displaced.
+    stash_label = f"se3-pre-leaf-merge-{branch}"
     stash_result = _run_git(
         project_root, "stash", "push", "--include-untracked",
-        "-m", f"se3-pre-leaf-merge-{branch}",
+        "-m", stash_label,
         check=False,
     )
     stashed = (
@@ -1531,12 +1553,12 @@ def _merge_leaf_branch(
             )
         if stashed:
             try:
-                _run_git(project_root, "stash", "pop", check=False)
+                _pop_stash_by_label(project_root, stash_label)
             except Exception:
                 logger.warning(
                     "stash pop during exception cleanup also failed; "
-                    "dangling stash@{0} may remain — original exception "
-                    "preserved",
+                    "dangling pre-leaf-merge stash may remain — original "
+                    "exception preserved",
                 )
         raise
 
@@ -1547,49 +1569,63 @@ def _merge_leaf_branch(
         # ``_clean_index_after_failed_merge``; restore stash and bail.
         # Branch cleanup is protected by the reachability check upstream.
         if stashed:
-            _run_git(project_root, "stash", "pop", check=False)
+            _pop_stash_by_label(project_root, stash_label)
         return False
 
     # Merge succeeded (whether via LLM or take-theirs); restore stashed
-    # state.
+    # state by popping the EXACT labeled stash (never a bare ``stash@{0}``).
     if stashed:
-        pop_result = _run_git(project_root, "stash", "pop", check=False)
+        pop_result = _pop_stash_by_label(project_root, stash_label)
         if pop_result.returncode != 0:
-            # Two distinct stash-pop failure modes, both end with the same
-            # cleanup (drop the dangling stash, leave working tree at the
-            # merged HEAD state, record audit):
-            #
-            #   (a) Real 3-way conflict on a tracked file — surfaces via
-            #       ``get_conflicting_files``. Resolve by taking ours
-            #       (HEAD content); the stashed pre-merge version of the
-            #       conflicting path is the part being dropped.
-            #
-            #   (b) Untracked-file collision — a stash entry from
-            #       ``--include-untracked`` cannot be restored because the
-            #       merge has populated the same path. Git's ``stash pop``
-            #       prints ``"<path>: already exists, no checkout"`` to
-            #       stderr, leaves working tree at the merged content,
-            #       and does NOT mark the path as unmerged. Detect by
-            #       parsing the message; record the same audit signal.
-            pop_conflict_files = get_conflicting_files(project_root)
-            if pop_conflict_files:
-                _take_ours_for_stashpop(project_root, pop_conflict_files)
-
-            collision_files = _parse_stashpop_already_exists(pop_result)
-            # Union (preserving order, dedupe). Mixed scenarios — some stashed
-            # paths in 3-way conflict, others colliding as untracked — must
-            # surface both kinds in the audit trail.
-            seen: set[str] = set()
-            affected: list[str] = []
-            for path in list(pop_conflict_files) + list(collision_files):
-                if path not in seen:
-                    seen.add(path)
-                    affected.append(path)
-            if affected:
-                _record_stashpop_takeours_event(
-                    project_root, branch, affected, flow_id,
+            # Non-clean pop: hand the whole recovery to the shared
+            # no-data-loss entry point so this leaf-back path and the
+            # ``se3 merge`` fast path behave identically. It archives the
+            # still-live stash's full content (untracked collisions that
+            # were never checked out — case b, plus tracked working-tree
+            # changes about to be take-ours'd over — case a) to
+            # ``se3/worktrees/.archive`` BEFORE any disposition, gives case b
+            # away to the merged tree (never destroying the concurrent new
+            # files, e.g. discovery's issue files), take-ours' case a, and
+            # drops the stash only after archival is proven. ``stash_label``
+            # is the same one used at push time so the live stash resolves.
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            # case a (real 3-way tracked) stash-pop conflicts get the same
+            # LLM-as-editor treatment as this path's merge body
+            # (resolve_merge_conflicts_with_context); the resolver falls back
+            # to deterministic take-ours when the LLM is unavailable, and both
+            # discarded sides are archived first so any choice is reversible.
+            outcome = _resolve_stashpop_safely(
+                project_root, stash_label, pop_result, timestamp=timestamp,
+                conflict_resolver=_make_llm_stashpop_resolver(
+                    flow_id=flow_id,
+                    step_id=merge_step_id,
+                    context=(
+                        f"DAG leaf-back merge of {branch}. "
+                        f"Task: {task_description}"
+                    ),
+                ),
+            )
+            _record_stashpop_takeours_event(
+                project_root, branch, outcome.archived, flow_id,
+                archive_failed=outcome.archive_failed,
+                unresolved_files=outcome.unresolved_files,
+            )
+            if outcome.archive_failed:
+                # Recovery did not finalize: the live stash was kept and the
+                # index may still hold unmerged case-a paths. Reporting success
+                # would let the DAG advance (cleanup → test → self_check, or the
+                # next leaf merge) over an unreconciled main repo — and a
+                # stage>0 index wedges every subsequent ``git stash``. Signal
+                # failure so the step status reflects it; the leaf commit itself
+                # already landed, and the discarded content is archived +
+                # audited, so nothing is lost by halting here for manual fixup.
+                logger.error(
+                    "Leaf merge of %s landed, but post-merge stash-pop "
+                    "recovery did NOT finalize (%d unmerged path(s); live "
+                    "stash kept). Reporting failure for manual intervention.",
+                    branch, len(outcome.unresolved_files),
                 )
-            _run_git(project_root, "stash", "drop", check=False)
+                return False
 
     logger.info("Leaf merge succeeded: %s -> %s", branch, original_branch)
     return True
@@ -1796,38 +1832,86 @@ def _record_take_theirs_event(
 def _record_stashpop_takeours_event(
     project_root: Path,
     branch: str,
-    conflict_files: list[str],
+    archived: list[ArchivedEntry],
     flow_id: str | None,
+    *,
+    archive_failed: bool = False,
+    unresolved_files: list[str] | None = None,
 ) -> None:
-    """File an audit issue when stash-pop conflict was resolved by take-ours."""
+    """File an audit issue for a recovered stash-pop, with recovery pointers.
+
+    Unlike the original (which recorded only conflict-file *paths*, leaving
+    nothing to restore from), this records the archive manifest — for each
+    discarded/colliding file, where its full content was persisted under
+    ``se3/worktrees/.archive`` and a verifiable blob sha — so the operator
+    can actually recover. ``archive_failed`` flips the issue to a high-prio
+    data-loss-risk alert: recovery did not finalize so the live stash was
+    kept (not dropped) and must be recovered manually. The manifest is still
+    recorded in that case whenever content WAS archived (case-a sides captured
+    before an unresolved resolution) — recovery pointers belong in the issue
+    even when the final disposition could not complete. ``unresolved_files``
+    names the case-a paths still unmerged in the index, if any.
+    """
     try:
         from ..issue_manager import IssueManager
     except ImportError:
         return
+    if archive_failed:
+        title = (
+            f"DAG leaf merge: stash-pop recovery INCOMPLETE on {branch}"
+        )
+        unresolved_note = ""
+        if unresolved_files:
+            unresolved_note = (
+                "Unmerged paths still in the index (resolve manually):\n  - "
+                + "\n  - ".join(unresolved_files)
+                + "\n\n"
+            )
+        description = (
+            f"Flow: {flow_id or '<unknown>'}\n"
+            f"Branch: {branch}\n\n"
+            "After the leaf merge landed, restoring the pre-merge stash "
+            "(--include-untracked) could not be finalized. The stash was "
+            "therefore NOT dropped to avoid data loss — recover it manually "
+            "via `git stash list` / `git stash show -p`.\n\n"
+            f"{unresolved_note}"
+            "Content archived before the stash was kept (recoverable):\n"
+            + _format_archived_manifest(archived)
+        )
+        priority = "high"
+        tags = ["merge-fallback", "audit", "stash-pop", "data-loss-risk"]
+    else:
+        title = (
+            f"DAG leaf merge: stash pop conflict recovered on {branch}"
+        )
+        description = (
+            f"Flow: {flow_id or '<unknown>'}\n"
+            f"Branch: {branch}\n\n"
+            "After successful leaf merge, restoring the pre-merge stash "
+            "(--include-untracked) conflicted on some paths. Case-a (tracked "
+            "3-way) was reconciled by the LLM resolver (or take-ours fallback) "
+            "with BOTH sides archived; case-b (untracked-collision — "
+            "concurrent unrelated new files) gave way to the merged tree. "
+            "Every discarded/colliding file's full content was archived first "
+            "and the stash dropped only after that was proven, so each entry "
+            "below is recoverable.\n\n"
+            "Recoverable archive manifest:\n"
+            + _format_archived_manifest(archived)
+        )
+        priority = "medium"
+        tags = ["merge-fallback", "audit", "stash-pop"]
     try:
         IssueManager(project_root).create(
-            title=(
-                f"DAG leaf merge: stash pop conflict resolved (take-ours) "
-                f"on {branch}"
-            ),
-            description=(
-                f"Flow: {flow_id or '<unknown>'}\n"
-                f"Branch: {branch}\n\n"
-                "After successful leaf merge, restoring the pre-merge stash "
-                "(--include-untracked) conflicted on some paths. Resolved by "
-                "keeping the merged HEAD version; the stashed pre-merge "
-                "version was discarded for these paths.\n\n"
-                "Conflict files (kept the merged HEAD version):\n  - "
-                + "\n  - ".join(conflict_files)
-            ),
-            priority="medium",
+            title=title,
+            description=description,
+            priority=priority,
             type="task",
-            tags=["merge-fallback", "audit", "stash-pop"],
+            tags=tags,
             source="system",
         )
     except Exception as e:
         logger.warning(
-            "Failed to record stash-pop take-ours audit issue: %s", e,
+            "Failed to record stash-pop recovery audit issue: %s", e,
         )
 
 

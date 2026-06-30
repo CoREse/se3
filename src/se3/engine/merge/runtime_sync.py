@@ -596,7 +596,14 @@ def _collect_files_under(path: Path, source_se3: Path | None = None) -> list[Pat
     def _walk(current: Path, seen: set[Path]) -> list[Path]:
         result: list[Path] = []
         try:
-            items = list(current.iterdir())
+            # Sort entries so the copy phase processes files in a stable,
+            # reproducible order.  iterdir() yields entries in arbitrary
+            # filesystem order; that non-determinism makes which tier-A file
+            # is written "first" unpredictable, which in turn makes the
+            # all-or-nothing (strict) rollback and lenient-preserve contracts
+            # observe a different in-flight file on each run.  A deterministic
+            # order keeps the sync — and its failure handling — reproducible.
+            items = sorted(current.iterdir())
         except OSError:
             return result
         for p in items:
@@ -672,7 +679,10 @@ def _collect_glob_files(base: Path, pattern: str, source_se3: Path | None = None
         return []
     result: list[Path] = []
     source_se3_resolved = source_se3.resolve() if source_se3 else None
-    for p in base.glob(pattern):
+    # Sort glob matches so the copy phase processes them in a stable order
+    # (see the rationale in ``_collect_files_under``: deterministic ordering
+    # keeps the sync and its failure handling reproducible).
+    for p in sorted(base.glob(pattern)):
         # Boundary check: verify the resolved target stays within source_se3.
         # This catches intermediate-directory symlinks that glob() silently
         # traversed — the match itself may not be a symlink, but a parent

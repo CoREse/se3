@@ -554,87 +554,160 @@ def _fast_stash_pop(
     project_root: Path,
     stash_label: str,
     audit_messages: list[str],
-) -> None:
-    """Pop the fast pre-merge stash, resolving conflicts deterministically.
+) -> bool:
+    """Pop the fast pre-merge stash through the shared no-data-loss path.
 
-    Steps:
-      1. ``git stash pop`` (no --index; merge-style application).
-      2. On 3-way conflicts (paths reported by ``get_conflicting_files``):
-         take-ours (HEAD/merged version wins) — symmetric with the
-         implement-step stash-pop policy. LLM is intentionally NOT
-         consulted: the merged HEAD is the canonical post-merge state,
-         while the stashed content was authored against an older tree
-         that didn't know about the incoming branch — letting an LLM
-         try to combine them risks generating incoherent output.
-      3. On untracked-collision (``<path>: already exists`` lines): parse
-         via ``parse_stashpop_already_exists`` and add them to the
-         take-ours set.
-      4. ``git stash drop`` — the working tree is by now reconciled,
-         keeping the stash entry around would only confuse a future run.
-      5. Audit-issue file the take-ours event so the operator can review
-         what was dropped.
+    Returns ``True`` when post-merge recovery did NOT finalize — the live
+    stash was kept for manual recovery and/or the working tree is left with
+    unmerged paths. The caller (:func:`run_merge`) must then refuse to report a
+    clean success, because the merge result is layered over an unreconciled
+    working tree. Returns ``False`` on a clean pop or a fully-recovered,
+    dropped stash.
+
+
+    Delegates the whole recovery to :func:`resolve_stashpop_safely`, the
+    single implementation both merge paths (this fast strategy and the
+    implement-step leaf-back merge) share so they cannot diverge. The
+    invariant it enforces:
+
+      1. ``git stash pop <ref>`` resolved by the stash's ``-m`` label (never a
+         bare pop, which would target ``stash@{0}`` — possibly an unrelated
+         concurrent stash). A clean pop drops the stash itself — nothing to do.
+      2. On any non-clean pop the still-live stash's *entire* recoverable
+         content is archived to ``se3/worktrees/.archive`` (full bytes, not
+         just paths) BEFORE any disposition or drop. If that cannot be
+         proven the stash is kept, not dropped.
+      3. The two conflict classes are no longer lumped into one take-ours:
+         case b (untracked-collision — concurrent unrelated new files such
+         as the issue files discovery created in the main repo) gives way to
+         the merged tree and is recovered from the archive, never destroyed;
+         case a (real 3-way tracked conflict) is handed to an injected LLM
+         resolver (symmetric with the merge body), falling back to take-ours
+         only when the LLM is unavailable or leaves markers — with BOTH sides
+         archived first so any choice is reversible. This replaces the earlier
+         "LLM is intentionally NOT consulted" hard-coding, which was the very
+         wrapper where data was being lost.
+      4. The stash is dropped only after archival is proven.
+      5. An audit issue is filed carrying the archive manifest (archive
+         path + blob sha per file) so the operator can actually restore.
     """
+    import time
+
     from ..engine.issue_manager import IssueManager
     from ..engine.stash_utils import (
-        parse_stashpop_already_exists,
-        take_ours_for_stashpop,
+        format_archived_manifest,
+        pop_stash_by_label,
+        resolve_stashpop_safely,
     )
-    from ..engine.worktree import get_conflicting_files
+    # The LLM-aware case-a resolver is injected from the merge integration
+    # layer; stash_utils itself stays LLM-free and only invokes what we pass.
+    from ..engine.stashpop_llm_resolver import make_llm_stashpop_resolver
 
-    pop = _run_git(project_root, "stash", "pop", check=False)
+    # Pop the EXACT labeled stash, never a bare ``stash pop`` (which targets
+    # ``stash@{0}`` — possibly an unrelated stash pushed concurrently between
+    # our pre-merge push and here). A clean pop drops the stash itself.
+    pop = pop_stash_by_label(project_root, stash_label)
     if pop.returncode == 0:
-        return  # clean pop, nothing to do
+        return False  # clean pop, nothing to do
 
-    pop_conflict_files = get_conflicting_files(project_root)
-    collision_files = parse_stashpop_already_exists(pop)
-    # Union preserving order: 3-way conflicts first (their paths often
-    # carry semantic value), then untracked collisions.
-    seen: set[str] = set()
-    affected: list[str] = []
-    for f in list(pop_conflict_files) + list(collision_files):
-        if f not in seen:
-            seen.add(f)
-            affected.append(f)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    # Case-a (real 3-way tracked) stash-pop conflicts get the same LLM-as-
+    # editor treatment as the merge body; the resolver falls back to a safe
+    # deterministic take-ours when the LLM is unavailable or unresolved, and
+    # both discarded sides are archived first so any choice is reversible.
+    outcome = resolve_stashpop_safely(
+        project_root, stash_label, pop, timestamp=timestamp,
+        conflict_resolver=make_llm_stashpop_resolver(
+            context=(
+                "`se3 merge` fast strategy: reconciling the user's "
+                "pre-merge uncommitted changes with the just-merged result."
+            ),
+        ),
+    )
 
-    if affected:
-        take_ours_for_stashpop(project_root, affected)
-
-    # Drop the stash regardless — leaving it behind on partial recovery
-    # is worse than dropping (the operator can still see the audit issue).
-    drop = _run_git(project_root, "stash", "drop", check=False)
-    if drop.returncode != 0:
-        logger.warning(
-            "Fast stash drop failed after pop conflict (rc=%s): %s",
-            drop.returncode,
-            (drop.stderr or drop.stdout or "").strip(),
+    # Recovery did not finalize: the live stash was deliberately kept for
+    # manual recovery (either archival could not be confirmed, or case-a
+    # content WAS archived but its resolution left the index unmerged).
+    # Surface that loudly AND signal the caller not to report a clean success
+    # — pretending the working tree is reconciled is the very defect this path
+    # guards against.
+    if outcome.archive_failed:
+        archived = outcome.archived
+        msg = (
+            f"Fast stash-pop did NOT finalize recovery (label: {stash_label}); "
+            f"live stash kept for manual recovery"
+            + (
+                f"; {len(outcome.unresolved_files)} path(s) remain unmerged"
+                if outcome.unresolved_files else ""
+            )
+            + "."
         )
+        audit_messages.append(msg)
+        render_text(msg, title="Fast Merge: Stash-Pop Recovery Incomplete")
+        # Whenever content WAS archived (case-a sides captured before an
+        # unresolved resolution), the audit issue must still carry the
+        # manifest pointers so the operator can recover — not just be told to
+        # poke at the live stash.
+        unresolved_note = (
+            "Unmerged paths still in the index (resolve manually):\n  - "
+            + "\n  - ".join(outcome.unresolved_files)
+            + "\n\n"
+            if outcome.unresolved_files else ""
+        )
+        try:
+            IssueManager(project_root).create(
+                title=(
+                    f"se3 merge: stash-pop recovery INCOMPLETE "
+                    f"(label: {stash_label})"
+                ),
+                description=(
+                    f"Fast strategy auto-stashed dirty working tree "
+                    f"({stash_label}) before merge; on pop the recovery could "
+                    f"not be finalized, so the stash was NOT dropped to avoid "
+                    f"data loss. Recover it manually via `git stash list` / "
+                    f"`git stash show -p`.\n\n"
+                    f"{unresolved_note}"
+                    f"git output:\n{pop.stdout}\n{pop.stderr}\n\n"
+                    f"Content archived before the stash was kept "
+                    f"(recoverable):\n"
+                    + format_archived_manifest(archived)
+                ),
+                priority="high",
+                type="task",
+                tags=["merge-fallback", "stash-pop-fallback", "data-loss-risk"],
+                source="system",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to file fast stash-pop recovery-incomplete issue: %s",
+                exc,
+            )
+        return True
 
+    archived = outcome.archived
     msg = (
-        f"Fast stash-pop conflict resolved via take-ours "
-        f"(label: {stash_label}; {len(affected)} affected file(s))."
+        f"Fast stash-pop recovered safely (label: {stash_label}; "
+        f"{len(outcome.case_a_files)} tracked / "
+        f"{len(outcome.case_b_files)} untracked-collision; "
+        f"{len(archived)} file(s) archived)."
     )
     audit_messages.append(msg)
-    render_text(msg, title="Fast Merge: Stash-Pop Fallback")
+    render_text(msg, title="Fast Merge: Stash-Pop Recovery")
 
-    if affected:
-        description = (
-            f"Fast strategy auto-stashed dirty working tree "
-            f"({stash_label}) before merge; on pop, conflicts/"
-            f"collisions were resolved by keeping the merged (HEAD) "
-            f"version.\n\nAffected files:\n  - "
-            + "\n  - ".join(affected)
-        )
-    else:
-        description = (
-            f"Fast strategy auto-stashed dirty working tree "
-            f"({stash_label}) and pop failed with no detectable "
-            f"conflicts. Stash has been dropped.\n\n"
-            f"git output:\n{pop.stdout}\n{pop.stderr}"
-        )
-
+    description = (
+        f"Fast strategy auto-stashed dirty working tree ({stash_label}) "
+        f"before merge; on pop, case-a (tracked 3-way) conflicts were "
+        f"reconciled by the LLM resolver (or take-ours fallback) with BOTH "
+        f"sides archived, and case-b (untracked-collision) files gave way to "
+        f"the merged tree. Every discarded/colliding file's full content was "
+        f"archived first and the stash dropped only after that was proven, so "
+        f"each entry below is recoverable.\n\n"
+        f"Recoverable archive manifest:\n"
+        + format_archived_manifest(archived)
+    )
     try:
         IssueManager(project_root).create(
-            title=f"se3 merge: stash-pop fallback (label: {stash_label})",
+            title=f"se3 merge: stash-pop recovery (label: {stash_label})",
             description=description,
             priority="medium",
             type="task",
@@ -645,6 +718,8 @@ def _fast_stash_pop(
         logger.warning(
             "Failed to file fast stash-pop audit issue: %s", exc,
         )
+
+    return False
 
 
 def run_merge(
@@ -787,6 +862,10 @@ def run_merge(
     )
 
     stash_audit_messages: list[str] = []
+    # Set by the post-merge stash-pop below when recovery did not finalize
+    # (live stash kept / index left with unmerged paths). When True the merge
+    # must NOT report a clean success even if the orchestrator's report does.
+    stash_pop_incomplete = False
     try:
         with MergeLock(lock_root, blocking=True):
             # Stashing happens INSIDE the lock so two racing ``se3 merge``
@@ -825,7 +904,7 @@ def run_merge(
                 # messages in ``stash_audit_messages`` and via the issue
                 # tracker; they do not raise.
                 if stash_label is not None:
-                    _fast_stash_pop(
+                    stash_pop_incomplete = _fast_stash_pop(
                         project_root, stash_label, stash_audit_messages,
                     )
     except MergeLockBusy as exc:
@@ -847,6 +926,34 @@ def run_merge(
             f"Remove the stale lock file and retry:\n"
             f"  rm {exc.lock_file}",
             title="Merge Lock Stale",
+        )
+        return 1
+
+    if report.success and stash_pop_incomplete:
+        # The branch merge itself landed, but restoring the user's pre-merge
+        # working tree did not finalize: the live stash was kept for manual
+        # recovery and/or the index is left with unmerged paths. Reporting a
+        # clean success here would advance over an unreconciled tree (the very
+        # data-integrity hazard the no-data-loss recovery exists to prevent),
+        # so we surface a failure that points the operator at the kept stash
+        # and the archived content. ``_fast_stash_pop`` already filed the
+        # detailed audit issue and archive manifest.
+        lines = [
+            "Branches merged, but post-merge stash-pop recovery did NOT "
+            "finalize — manual intervention required.",
+            "",
+            "Your pre-merge uncommitted changes are preserved in the live git "
+            "stash and archived under se3/worktrees/.archive; the working tree "
+            "may still contain unmerged paths.",
+            "",
+            "Inspect and recover:",
+            "  git status                 -- check for unmerged paths",
+            "  git stash list             -- the kept pre-merge stash",
+            "  git stash show -p stash@{0}",
+        ]
+        render_text(
+            "\n".join(lines),
+            title="Merge: Stash-Pop Recovery Incomplete",
         )
         return 1
 
