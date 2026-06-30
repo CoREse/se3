@@ -70,6 +70,14 @@
 
 
 
+
+## 11.2.0 - 2026-06-30
+
+- Generate new-project .gitignore as root `/*` default-deny plus explicit `!/<name>` whitelist entries for every standard top-level artifact, hardening against stray root files being staged by `git add -A`
+- Extend `migrate` to introduce the root `/*` default-deny while enumerating already-tracked top-level paths via `git ls-files` and re-allowing each, so no existing project silently loses tracking
+- Keep `migrate`'s gitignore rewrite idempotent so repeated runs produce no further changes
+- Add a fault-tolerant commit-time detector that emits a WARNING when a new top-level path is excluded by the root rule, surfacing otherwise-silent untracked work without ever blocking or failing the commit
+- Limit the commit-time detector to warning only — it never edits .gitignore or auto-whitelists, preserving the default-deny guarantee
 ## 11.1.1 - 2026-06-29
 
 - Fix daemon mis-detecting `python -c <code> ... se3 run` inline subprocesses as real se3 runs, which spawned phantom RUNNING sessions in the WebUI

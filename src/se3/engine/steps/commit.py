@@ -343,6 +343,14 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     baseline_commit = getattr(flow, "baseline_commit", None)
     if not _has_changes(project_root, baseline_commit=baseline_commit):
         logger.info("No changes to commit")
+        # A top-level path excluded by the root ``/*`` default-deny rule is
+        # invisible to ``git status``/``git diff`` (it is ignored, not
+        # untracked-and-visible), so a new root file like ``notes.txt`` can be
+        # the *only* work present yet still register as "no changes". Run the
+        # root-whitelist guard here too — otherwise the dropped work stays
+        # silent precisely in the case the guard exists to surface. Pure
+        # diagnostic, fully fault-tolerant: it only warns, never blocks.
+        _detect_root_whitelist_exclusions(project_root)
         step.outputs["commit_hash"] = "no-changes"
         step.outputs["committed"] = False
         return StepStatus.COMPLETED

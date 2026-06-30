@@ -9,14 +9,14 @@ description: "背景：本次会话发现 pytest_full.log / pytest_time.err 两�
   \ se3.yaml 里 gitignore.root_whitelist: true）。\n2. 维护成本：白名单模式下，新增合法顶层文件/目录必须同步加 !/\
   \ 白名单条目，否则会“静默不被跟踪”。最好配套：se3 在合法新增顶层受跟踪产物时自动补白名单条目，并在文档/onboarding 里明确说明。\n3. 对任意用户项目是否过于\
   \ opinionated —— 可能需要保守地仅对 se3 自身运行时区域强约束，根目录白名单作为推荐而非强制。\n\n请人工评审是否采纳，以及采用“硬默认”还是“可配置”。"
-status: open
+status: resolved
 tags:
 - gitignore
 - convention
 - safety
 source: human
 created_at: '2026-06-29T17:32:18.518011'
-updated_at: '2026-06-29T17:32:18.518011'
+updated_at: '2026-06-30T09:39:29.223011'
 title: 'se3 default: root-dir whitelist gitignore (根目录默认全局ignore)'
 priority: medium
 type: enhancement

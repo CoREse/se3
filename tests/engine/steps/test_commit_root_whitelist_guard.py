@@ -277,6 +277,41 @@ class TestCommitHandlerIntegration:
             r for r in caplog.records if "Root-whitelist guard" in r.message
         ]
 
+    def test_warns_when_root_exclusion_is_the_only_work(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        # Regression: a top-level file denied by `/*` is invisible to
+        # `git status`/`git diff`, so it can be the *only* change present yet
+        # register as "no changes". The early no-changes return must still run
+        # the root-whitelist guard, otherwise the dropped work stays silent.
+        repo = _init_git_repo(tmp_path, _ROOT_DENY)
+        (repo / "notes.txt").write_text("scratch\n")
+
+        with caplog.at_level(logging.WARNING):
+            result = self._run_commit(repo)
+
+        assert result == StepStatus.COMPLETED
+        assert any(
+            "Root-whitelist guard" in r.message and "notes.txt" in r.message
+            for r in caplog.records
+        )
+        # Guard is diagnostic only — nothing committed, file left on disk.
+        assert "notes.txt" not in _head_tree_files(repo)
+        assert (repo / "notes.txt").exists()
+
+    def test_no_changes_and_no_exclusion_is_silent(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        repo = _init_git_repo(tmp_path, _ROOT_DENY)
+
+        with caplog.at_level(logging.WARNING):
+            result = self._run_commit(repo)
+
+        assert result == StepStatus.COMPLETED
+        assert not [
+            r for r in caplog.records if "Root-whitelist guard" in r.message
+        ]
+
     def test_detector_return_value_does_not_feed_control_flow(
         self, tmp_path: Path
     ) -> None:

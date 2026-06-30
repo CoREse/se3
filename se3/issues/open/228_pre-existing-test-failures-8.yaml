@@ -17,13 +17,13 @@ description: "**8 pre-existing test failure(s)** detected during flow execution.
   : \"discovery\",\n  \"message\": {\n    \"role\": \"user\",\n    \"content\": \"\
   hello\"\n  }\n}\n\nThese tests should be investigated and fixed to prevent the broken-window\
   \ effect."
-status: open
+status: in-progress
 tags:
 - auto-discovered
 - source:test-pre-existing
 source: system
 created_at: '2026-06-29T16:10:40.664649'
-updated_at: '2026-06-29T16:10:40.664649'
+updated_at: '2026-06-30T09:38:01.848028'
 title: Pre-existing test failures (8 tests)
 priority: medium
 type: bug
