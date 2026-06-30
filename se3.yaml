@@ -40,6 +40,13 @@ llm_caller:
 #   - omitted / null → LLM review via `llm_caller.defaults`
 confirmation:
   steps:
+    # plan-confirm is ALWAYS-ON: a CONFIRM running the dedicated
+    # requirement-coverage review is inserted after every plan step
+    # regardless of this block — even if this `plan` entry (or all of
+    # confirmation.steps) is removed. This entry's scope is now narrowed to
+    # customizing only the reviewer and max_iterations; it no longer gates
+    # whether plan is confirmed. Omitting it falls back to LLM review via
+    # llm_caller.defaults with the default max_iterations.
     plan:
       # reviewer omitted → LLM review via llm_caller.defaults
       max_iterations: 3

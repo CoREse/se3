@@ -925,3 +925,106 @@ If the output is acceptable, set "approved" to true. If changes are needed, set 
 {lang_instruction}"""
 
     return prompt
+
+
+def build_plan_confirm_prompt(
+    step_output: Dict[str, Any],
+    task_description: str,
+    revision_feedback: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> str:
+    """Build the plan-specific *requirement coverage* review prompt.
+
+    Unlike the generic ``build_llm_review_prompt``, this prompt is narrowly
+    specialized for confirming a ``plan`` step: it does not score the plan on
+    general quality axes (completeness/clarity/feasibility). Instead it asks the
+    reviewer to (1) decompose the discrete requirements embedded in the original
+    ``task_description`` and (2) check, requirement by requirement, that every
+    requirement has at least one corresponding task in the plan's task_groups.
+    This is the always-on first half of the two-stage guarantee
+    (requirement -> task coverage); the second half (task -> implementation
+    correctness) lives in the self_check step.
+
+    The output schema is the same ``{approved, feedback}`` contract the generic
+    builder uses, so ``_llm_review``'s parsing, revision loop, and
+    cross-revision max_iterations counting are reused unchanged.
+
+    Args:
+        step_output: The outputs from the plan step (proposal/design/task_groups)
+        task_description: Original task description from the flow
+        revision_feedback: Previous revision feedback if this is a re-review
+        project_root: Project root directory for language config
+
+    Returns:
+        Formatted prompt string for the plan requirement-coverage reviewer
+    """
+    import json as _json
+
+    # Format plan output for display (proposal/design/task_groups, etc.).
+    output_parts = []
+    for key, value in step_output.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(value, (dict, list)):
+            output_parts.append(f"**{key}:**\n```json\n{_json.dumps(value, indent=2, default=str)}\n```")
+        elif value is not None:
+            output_parts.append(f"**{key}:**\n{value}")
+    step_output_text = "\n\n".join(output_parts) if output_parts else "(no output)"
+
+    revision_section = ""
+    if revision_feedback:
+        revision_section = f"""
+## Previous Revision Feedback
+The following feedback was given in a previous review. Check whether it has been addressed:
+{revision_feedback}
+"""
+
+    # Language instruction
+    lang_instruction = ""
+    if project_root:
+        lang_instruction = get_step_language_instruction("confirm_llm_review", project_root)
+
+    prompt = f"""You are reviewing the output of the **plan** step in an SE3 development workflow.
+
+Your one and only job here is to verify **requirement coverage**: that the plan's
+tasks together cover every requirement embedded in the original task. Do NOT
+grade the plan on general quality, style, or feasibility — that is out of scope
+for this review.
+
+## Original Task (the requirements live in here)
+{task_description}
+
+## Output of the PLAN Step (proposal / design / task_groups)
+{step_output_text}
+{revision_section}
+## Review Procedure (follow in order)
+1. **Decompose discrete requirements from the task_description**: read the
+   Original Task above and break it into a numbered list of discrete, atomic
+   requirements. A single sentence may contain several requirements; split them.
+2. **Check requirement-by-requirement coverage**: for each requirement, check
+   whether the plan's task_groups contain at least one task that covers it
+   (consult the proposal and design as supporting context). In other words,
+   verify that **every requirement has a corresponding task**.
+3. **List uncovered requirements**: explicitly call out any requirement that has
+   no corresponding task, or that is only partially covered. These coverage gaps
+   are the reason to request a revision.
+
+Approve only if every discrete requirement maps to at least one covering task.
+If any requirement is uncovered or under-covered, do NOT approve — the plan must
+be regenerated to add the missing tasks.
+
+## Response Format
+You MUST respond with a JSON object in this exact format:
+```json
+{{
+    "approved": true or false,
+    "feedback": "Your detailed feedback here. If not approved, list the numbered requirements and, for each, which task covers it; name every uncovered requirement explicitly."
+}}
+```
+
+If every requirement is covered, set "approved" to true. If any requirement
+lacks a corresponding task, set "approved" to false and list the uncovered
+requirements with specific, actionable feedback.
+{lang_instruction}"""
+
+    return prompt
