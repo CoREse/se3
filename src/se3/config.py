@@ -1957,6 +1957,16 @@ def resolve_confirm_inputs(
     reviewer = step_cfg.get("reviewer")
     max_iterations = step_cfg.get("max_iterations")
 
+    # plan-confirm is always-on and this resolver is the single source of
+    # truth for its CONFIRM inputs: bake in the concrete default here (covering
+    # both the synthesized no-entry case and an explicit but value-less
+    # ``plan: {}`` entry) so a direct caller — or any future CONFIRM
+    # construction path that does not duplicate the state_machine None→default
+    # fallback — observes the real limit rather than a None it must re-default.
+    # An explicit positive max_iterations is preserved untouched.
+    if reviewed_step_type == _PLAN_STEP_NAME and max_iterations is None:
+        max_iterations = _CONFIRM_DEFAULT_MAX_ITERATIONS
+
     if reviewer == "human":
         return {
             "reviewer": "human",

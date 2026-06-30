@@ -5,8 +5,8 @@ description: "有时webui里会出现一个叫do a thing的session，怎么回�
   ResumeEnd\nDISCOVERY\n▾ user prompt · discovery\nuser\nhello\n隐藏原始 (envelope)\n\
   {\n  \"step_id\": \"01_discovery_ab12\",\n  \"step_type\": \"discovery\",\n  \"\
   message\": {\n    \"role\": \"user\",\n    \"content\": \"hello\"\n  }\n}"
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-06-29T10:13:19.262110'
-updated_at: '2026-06-29T10:13:19.262110'
+updated_at: '2026-06-30T11:37:11.058561'

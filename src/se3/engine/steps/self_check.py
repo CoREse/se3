@@ -184,12 +184,21 @@ def _changed_paths(step_inputs: dict) -> set[str]:
     return out
 
 
-def _validate_evidence(issue: dict, changed: set[str]) -> bool:
+def _validate_evidence(
+    issue: dict, changed: set[str], *, require_changed_line: bool = False
+) -> bool:
     """Return True when the issue carries usable evidence — at least one
     well-formed ``path:N`` entry whose path is in ``changed``, OR at
     least one non-empty ``missing_in`` entry. ``missing_in`` covers
     "the implementation should have edited X but didn't" cases that
     naturally cannot point at a changed line.
+
+    When ``require_changed_line`` is set the ``missing_in`` fallback is
+    disabled: only a real changed-line entry counts. Regression issues use
+    this — a regression claims a change BROKE existing behavior, so it must
+    point at the changed line(s) responsible; a ``missing_in`` (a file that
+    was never edited) is self-contradictory grounding for a regression and
+    would leave the implement step with no concrete location to fix.
     """
     evidence = issue.get("evidence_lines") or []
     if isinstance(evidence, list):
@@ -202,6 +211,8 @@ def _validate_evidence(issue: dict, changed: set[str]) -> bool:
             path = ev.rsplit(":", 1)[0]
             if path in changed:
                 return True
+    if require_changed_line:
+        return False
     missing_in = issue.get("missing_in") or []
     if isinstance(missing_in, list):
         for mp in missing_in:
@@ -319,11 +330,28 @@ def _validate_and_filter_issues(
             if not norm_quote:
                 stats["empty_quote_count"] += 1
                 continue
-            if not any(norm_quote in p for p in pool_normalized):
+            # _format_task_groups renders each task as a prompt-visible line
+            # "- [<id>] <description>", capping an oversized description with a
+            # trailing ellipsis under budget pressure. The source pool holds only
+            # the raw, un-decorated description, so a reviewer who copies the
+            # visible line verbatim carries BOTH a leading bullet/id prefix and a
+            # trailing ellipsis that the pool lacks. Build relaxed candidates that
+            # strip each so the full task still substring-matches.
+            candidates = [norm_quote]
+            trimmed = norm_quote.rstrip(". ").rstrip()
+            if trimmed and trimmed != norm_quote:
+                candidates.append(trimmed)
+            for c in list(candidates):
+                unprefixed = re.sub(r"^-\s*(\[[^\]]*\]\s*)?", "", c)
+                if unprefixed and unprefixed != c:
+                    candidates.append(unprefixed)
+            if not any(c in p for c in candidates for p in pool_normalized):
                 stats["quote_not_in_source_count"] += 1
                 continue
 
-        if not _validate_evidence(issue, changed):
+        if not _validate_evidence(
+            issue, changed, require_changed_line=(src_type == "regression")
+        ):
             stats["bad_evidence_count"] += 1
             continue
 
@@ -359,7 +387,7 @@ SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementatio
 
 Focus your review on these dimensions. Do NOT check spec compliance — that is handled by a separate verification step.
 
-1. **Per-Task Correctness (HARD AUDIT)**: Using the **Plan Task Groups** section below as the authoritative task list, audit EACH planned task one by one against the actual implementation. For every task, infer from the changed files / diff which changes are meant to implement it, then verify it was implemented *correctly* — the described behavior is present, the acceptance_criteria are satisfied, and the logic is right. You MAY read the actual diff and the changed files via your worktree tools (e.g. `git diff`, reading files) to confirm the correspondence and correctness. A task that is missing, only partially implemented, or implemented with wrong logic IS an issue — file it with `expectation_source.type = "plan_task"`, quoting the task description or an acceptance criterion. This is a strict per-task audit, not a loose sanity check; do NOT excuse a real gap as an acceptable deviation.
+1. **Per-Task Correctness (HARD AUDIT)**: Using the **Plan Task Groups** section below as the authoritative task list, audit EACH planned task one by one against the actual implementation. The **Changes Made** section above lists only the changed *paths*, not the line-level edits — that file list alone is NOT sufficient to judge correctness. Therefore, BEFORE you judge any task, you MUST obtain the actual diff yourself via your worktree tools (run `git diff`, and read the changed files as needed); base every correctness verdict on the real diff/file contents, not on the path list. For every task, infer from that diff which changes are meant to implement it, then verify it was implemented *correctly* — the described behavior is present, the acceptance_criteria are satisfied, and the logic is right. A task that is missing, only partially implemented, or implemented with wrong logic IS an issue — file it with `expectation_source.type = "plan_task"`, quoting the task description or an acceptance criterion. Grounding rule for this dimension (the handler drops issues that violate it, so it is mandatory): for a task that is partially or incorrectly implemented, point `evidence_lines` at the relevant changed line(s); for a task that is ENTIRELY unimplemented there are no changed lines to cite, so you MUST instead list the file(s) / integration point(s) that should have been created or edited for that task under `missing_in` (leaving `evidence_lines` empty is fine in that case). Do NOT drop a wholly-missing task just because it has no diff line — `missing_in` is exactly how a "task not implemented at all" finding is grounded. This is a strict per-task audit, not a loose sanity check; do NOT excuse a real gap as an acceptable deviation.
 2. **Regression / Unintended Side Effects**: Verify the change did NOT break or alter existing behavior OUTSIDE the scope of the planned tasks. Look for: existing functions whose contract or return value changed, shared helpers whose behavior shifted for their other callers, removed/renamed symbols still referenced elsewhere, altered defaults, or side effects leaking beyond the task boundary. A behavioral change to out-of-scope existing behavior IS an issue — file it with `expectation_source.type = "regression"` and ground it in `evidence_lines` pointing at the changed line(s) responsible. This dimension is orthogonal to Per-Task Correctness above.
 3. **Logic Completeness**: Are there unhandled boundary conditions, missing error paths, or incomplete control flow? Look for edge cases the implementation should handle but doesn't.
 4. **Code Robustness**: Is exception handling adequate? Are resources properly managed (files, connections, locks)? Are there concurrency safety issues?
@@ -393,7 +421,7 @@ Each issue MUST be a JSON object with these fields:
     - `task_description` / `spec` / `user_interjection` / `plan_task`: `verbatim_quote` MUST be a literal substring of the project's task_description, a non-base spec, a user interjection, or — for `plan_task` — a **Plan Task Groups** task description / acceptance criterion above. The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops any issue whose normalized quote is not a substring of any normalized source-pool entry. Quote a substantive phrase, NOT a single generic noun.
     - `regression`: use for the Regression dimension, where the violated expectation is PRE-EXISTING behavior outside the task scope (it has no entry in the text above). `verbatim_quote` is NOT substring-checked for this type; instead you MUST ground the issue in `evidence_lines` pointing at the changed line(s) that broke the behavior.
 - `evidence_lines`: array of `"path:N"` strings, where `path` MUST appear in `changes_made.files_changed` (the handler verifies). At least one entry required UNLESS `missing_in` is non-empty.
-- `missing_in`: array of file paths that should have been edited but were not. Use this for "missed integration point" issues that cannot point at a changed line.
+- `missing_in`: array of file paths that should have been edited/created but were not. Use this for any issue that cannot point at a changed line — "missed integration point" issues AND a planned `plan_task` that is ENTIRELY unimplemented (list the file(s) that should have carried it).
 - `out_of_scope`: boolean. Set to `true` if the concern is a suggestion / observation rather than an actionable bug — the handler will discard out_of_scope items, so this is the correct release valve. Do NOT downgrade observations to `low` severity; use this field instead.
 
 ## Previous Issue Resolutions (HARD requirement when prev_issues are listed)
@@ -457,25 +485,55 @@ _TASK_GROUPS_SECTION_INTRO = (
     "satisfied, and the logic is right.\n"
     "- A task that is missing, only partially implemented, or implemented with wrong "
     "logic IS an issue. File it with `expectation_source.type = \"plan_task\"`, "
-    "quoting the task description or an acceptance criterion verbatim, and point "
-    "`evidence_lines` at the relevant changed line(s).\n"
+    "quoting the task description or an acceptance criterion verbatim.\n"
+    "- Grounding (mandatory — the handler drops ungrounded issues): for a partially "
+    "or incorrectly implemented task, point `evidence_lines` at the relevant changed "
+    "line(s). For a task that is ENTIRELY unimplemented there are no changed lines to "
+    "cite, so you MUST instead list the file(s) / integration point(s) that should "
+    "have been created or edited under `missing_in` (an empty `evidence_lines` is "
+    "fine in that case). A wholly-missing task is grounded via `missing_in`, never "
+    "dropped for lack of a diff line.\n"
     "- Do NOT excuse an unrealized or incorrectly-realized task as an acceptable "
     "deviation. If a planned task is not correctly implemented, report it.\n\n"
 )
 
 
-def _format_task_groups(task_groups: Any) -> str:
-    """Render plan task_groups as a compact Markdown summary for self_check.
+# Appended when the full task_groups render overflows the budget and detail
+# had to be trimmed. The per-task audit needs every planned task to be visible;
+# this tells the reviewer that detail (not whole tasks) was dropped and exactly
+# how to recover the untruncated list, so a large plan can never pass the audit
+# with tasks silently hidden.
+_TASK_GROUPS_TRIM_NOTE = (
+    "\n\n> NOTE: per-task detail was trimmed to fit the prompt budget, but "
+    "EVERY planned task above is still listed (by id/description). Before "
+    "concluding the per-task audit, retrieve the full, untruncated task_groups "
+    "(complete descriptions + acceptance_criteria) via your worktree tools "
+    "(e.g. read the plan output, or `se3 history show <flow_id>`)."
+)
 
-    Returns an empty string when input is missing, None, empty, or not a list —
-    the caller omits the whole prompt section in that case.
 
-    Output is head-truncated to SELF_CHECK_TASK_GROUPS_MAX_CHARS with an
-    explicit ellipsis marker appended when truncation occurs.
+def _count_tasks(task_groups: list) -> int:
+    """Count well-formed (dict) tasks across all groups, for budget sharing."""
+    n = 0
+    for group in task_groups:
+        if not isinstance(group, dict):
+            continue
+        tasks = group.get("tasks") or []
+        if isinstance(tasks, list):
+            n += sum(1 for t in tasks if isinstance(t, dict))
+    return n
+
+
+def _render_task_groups(
+    task_groups: list, *, include_ac: bool, desc_cap: int | None = None
+) -> str:
+    """Render task_groups as a Markdown summary at a chosen detail level.
+
+    ``include_ac`` controls whether acceptance_criteria bullets are emitted;
+    ``desc_cap`` (when set) truncates each task description to that many chars
+    with a trailing ellipsis. Used by ``_format_task_groups`` to degrade detail
+    under budget pressure WITHOUT dropping any task.
     """
-    if not task_groups or not isinstance(task_groups, list):
-        return ""
-
     lines: list[str] = []
     for group in task_groups:
         if not isinstance(group, dict):
@@ -497,31 +555,65 @@ def _format_task_groups(task_groups: Any) -> str:
                 continue
             task_id = task.get("id")
             desc = (task.get("description") or "").strip()
+            if desc_cap is not None and len(desc) > desc_cap:
+                desc = desc[:desc_cap].rstrip() + "…"
             id_prefix = f"[{task_id}] " if task_id is not None else ""
             lines.append(f"- {id_prefix}{desc}" if desc else f"- {id_prefix}(no description)")
 
-            criteria = task.get("acceptance_criteria") or []
-            if isinstance(criteria, list) and criteria:
-                for c in criteria:
-                    c_text = str(c).strip()
-                    if c_text:
-                        lines.append(f"  - AC: {c_text}")
+            if include_ac:
+                criteria = task.get("acceptance_criteria") or []
+                if isinstance(criteria, list) and criteria:
+                    for c in criteria:
+                        c_text = str(c).strip()
+                        if c_text:
+                            lines.append(f"  - AC: {c_text}")
         lines.append("")
 
-    summary = "\n".join(lines).rstrip()
-    if not summary:
+    return "\n".join(lines).rstrip()
+
+
+def _format_task_groups(task_groups: Any) -> str:
+    """Render plan task_groups as a Markdown summary for self_check.
+
+    Returns an empty string when input is missing, None, empty, or not a list —
+    the caller omits the whole prompt section in that case.
+
+    The Per-Task Correctness HARD AUDIT requires EVERY planned task to be
+    visible to the reviewer: head-truncating the rendered text (the old
+    behavior) silently hid later tasks and let the audit pass without checking
+    them. Instead, when the full render exceeds
+    SELF_CHECK_TASK_GROUPS_MAX_CHARS, detail is degraded — never whole tasks:
+    first acceptance_criteria are dropped, then each description is capped to an
+    equal share of the budget — so all task headers survive, and a retrieval
+    note tells the reviewer how to pull the untruncated list.
+    """
+    if not task_groups or not isinstance(task_groups, list):
         return ""
 
-    if len(summary) > SELF_CHECK_TASK_GROUPS_MAX_CHARS:
-        cut = summary[:SELF_CHECK_TASK_GROUPS_MAX_CHARS]
-        # Prefer cutting at the last newline so we don't split a markdown
-        # bullet or `### Group` header mid-line. Fall back to the raw slice
-        # if no newline exists within the window.
-        nl = cut.rfind("\n")
-        if nl > 0:
-            cut = cut[:nl]
-        summary = cut.rstrip() + "\n… (truncated)"
-    return summary
+    full = _render_task_groups(task_groups, include_ac=True)
+    if not full:
+        return ""
+    if len(full) <= SELF_CHECK_TASK_GROUPS_MAX_CHARS:
+        return full
+
+    budget = SELF_CHECK_TASK_GROUPS_MAX_CHARS - len(_TASK_GROUPS_TRIM_NOTE)
+
+    # Tier 2: drop acceptance_criteria but keep full task descriptions.
+    no_ac = _render_task_groups(task_groups, include_ac=False)
+    if len(no_ac) <= budget:
+        return no_ac + _TASK_GROUPS_TRIM_NOTE
+
+    # Tier 3: still over budget — give each task an equal share of the budget
+    # for its (capped) description so every task header still appears. A small
+    # floor keeps each line readable even when the task count is large; this may
+    # exceed the soft budget slightly, which is the deliberate trade — never
+    # hide a task that the audit must check.
+    n_tasks = _count_tasks(task_groups) or 1
+    per_task_desc = max(80, budget // n_tasks)
+    capped = _render_task_groups(
+        task_groups, include_ac=False, desc_cap=per_task_desc
+    )
+    return capped + _TASK_GROUPS_TRIM_NOTE
 
 
 def _build_task_groups_section(task_groups: Any) -> str:

@@ -1,0 +1,11 @@
+id: '234'
+description: '现在的plan的confirm和self check都太笼统了，缺乏目的性和一个机制性的保证。我的想法是，给plan的confirm加上一个prompt，内容是：检查是否每一个需求，都有对应的task。然后对于self
+  check，增加更多的类型，比如“正确性check”，它会检查每一个task的实现是否正确地实现了task的任务（不过这样是否需要记录task对应的修改？）。我本来还想着要不要加更多的check类型，比如“完整性check”，但是思考了一下，现在这样，需求是否有task覆盖（完整性），由plan的confirm负责，task是否正确实现，由“正确性check”覆盖，已经实现了一个可靠的链路。你觉得还需要更多的check类型吗？你觉得我这个思路对吗？
+
+  另外，既然如此，plan的confirm是否应该固化成一个专门的步骤，而非作为一个可选的通用步骤（和通用的confirm步骤区分开，互相不影响）？另外，你觉得正确性check，以及如果有其它可以有的专门check类型，是作为self
+  check的一个部分（在prompt里作为一个专门部分）好，还是专门弄一个步骤，和self check并列好？'
+status: resolved
+tags: []
+source: human
+created_at: '2026-06-30T11:59:33.772675'
+updated_at: '2026-06-30T12:03:25.349634'

@@ -25,6 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from se3.config import (  # noqa: E402
+    _CONFIRM_DEFAULT_MAX_ITERATIONS,
     insert_confirmation_steps,
     resolve_confirm_inputs,
 )
@@ -131,9 +132,10 @@ class TestResolvePlanInputs:
         assert resolved["agents"] == [
             {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}
         ]
-        # max_iterations carried as the None sentinel; state_machine applies
-        # the default (3) downstream — same contract as an empty plan entry.
-        assert resolved["max_iterations"] is None
+        # resolve_confirm_inputs is the single source of truth for CONFIRM
+        # inputs, so it already bakes in the concrete default rather than
+        # deferring to the state_machine None→default fallback.
+        assert resolved["max_iterations"] == _CONFIRM_DEFAULT_MAX_ITERATIONS
 
     def test_plan_unconfigured_matches_empty_plan_entry(
         self, tmp_path, isolated_global_home

@@ -280,6 +280,92 @@ class TestValidatePlanTaskRegression:
         assert kept == []
         assert stats["out_of_scope_count"] == 1
 
+    def test_wholly_missing_task_survives_via_missing_in(self):
+        # A planned task implemented nowhere has NO changed lines to cite, so the
+        # reviewer grounds it on missing_in. This — the most severe correctness
+        # failure the hard audit exists to catch — must survive validation
+        # rather than being dropped for empty evidence_lines.
+        issue = self._plan_task_issue()
+        issue["actual_behavior"] = "the retry helper was never implemented"
+        issue["evidence_lines"] = []
+        issue["missing_in"] = ["src/feature.py"]
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert len(kept) == 1
+        assert stats["kept_count"] == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_plan_task_without_any_grounding_still_dropped(self):
+        # missing_in is the grounding for a wholly-missing task; without either
+        # evidence_lines or missing_in the issue is genuinely ungrounded and
+        # must still be dropped (the relaxation must not become a free pass).
+        issue = self._plan_task_issue()
+        issue["evidence_lines"] = []
+        issue["missing_in"] = []
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_regression_dropped_when_grounded_only_by_missing_in(self):
+        # A regression claims a change BROKE existing behavior, so it must point
+        # at the changed line(s) responsible. missing_in (a file that was never
+        # edited) is self-contradictory grounding for a regression and would
+        # leave the implement step with no concrete location to fix — drop it
+        # even though missing_in would satisfy the wholly-missing plan_task case.
+        issue = self._regression_issue()
+        issue["evidence_lines"] = []
+        issue["missing_in"] = ["src/config.py"]
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_plan_task_quote_matches_ellipsis_capped_line(self):
+        # When _format_task_groups caps a long task description with a trailing
+        # ellipsis under budget pressure, a reviewer who quotes the prompt-
+        # visible capped line (prefix + "…") must still ground against the full
+        # untruncated description in the source pool.
+        inputs = self._inputs()
+        full_desc = "Add retry with exponential backoff"
+        # Simulate the reviewer copying a prompt-visible capped line.
+        capped_quote = full_desc[:20].rstrip() + "…"
+        issue = self._plan_task_issue(quote=capped_quote)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert len(kept) == 1
+        assert stats["quote_not_in_source_count"] == 0
+
+    def test_plan_task_quote_matches_visible_bullet_id_line(self):
+        # _render_task_groups prefixes every task line with a Markdown bullet
+        # and the task id ("- [1] <desc>…"). A reviewer who copies that exact
+        # prompt-visible line — bullet, id, AND trailing ellipsis — must still
+        # ground against the raw description stored in the source pool.
+        inputs = self._inputs()
+        full_desc = "Add retry with exponential backoff"
+        visible_line = "- [1] " + full_desc[:20].rstrip() + "…"
+        issue = self._plan_task_issue(quote=visible_line)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert len(kept) == 1
+        assert stats["quote_not_in_source_count"] == 0
+
+    def test_plan_task_quote_matches_visible_bullet_line_no_ellipsis(self):
+        # Same as above but for a short (uncapped) task whose visible line keeps
+        # the bullet/id prefix without a trailing ellipsis.
+        inputs = self._inputs()
+        visible_line = "- [1] Add retry with exponential backoff"
+        issue = self._plan_task_issue(quote=visible_line)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert len(kept) == 1
+        assert stats["quote_not_in_source_count"] == 0
+
+
+class TestPromptGroundingDirectives:
+    def test_correctness_dimension_directs_missing_in_for_unimplemented_task(self):
+        # The per-task dimension must tell the reviewer to ground a wholly-
+        # unimplemented task on missing_in (else such findings get dropped).
+        assert "missing_in" in SELF_CHECK_PROMPT
+        # The directive ties an entirely-unimplemented task to missing_in.
+        lowered = SELF_CHECK_PROMPT.lower()
+        assert "entirely unimplemented" in lowered
+        assert "missing_in" in SELF_CHECK_PROMPT
+
 
 # ---------------------------------------------------------------------------
 # Handler-level: the new sections reach the prompt with task_groups present

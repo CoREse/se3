@@ -71,6 +71,15 @@
 
 
 
+
+## 11.3.0 - 2026-06-30
+
+- Add a dedicated plan-confirm prompt that decomposes embedded requirements and verifies every requirement is covered by a plan task
+- Make plan-step requirement-coverage confirmation always-on, independent of whether confirmation.steps.plan is configured
+- Narrow the confirmation.steps.plan config to only select the reviewer and max_iterations, defaulting to an LLM reviewer when omitted
+- Add a strict per-task correctness section to self_check that hard-audits each plan task against the actual diff
+- Add a regression/side-effect section to self_check that flags changes affecting behavior outside the task scope
+- Flip self_check's task_groups handling from soft reference to strict audit, removing the prior 'do not flag missing plan compliance' restriction
 ## 11.2.0 - 2026-06-30
 
 - Generate new-project .gitignore as root `/*` default-deny plus explicit `!/<name>` whitelist entries for every standard top-level artifact, hardening against stray root files being staged by `git add -A`

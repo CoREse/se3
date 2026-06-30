@@ -133,21 +133,45 @@ class TestFormatTaskGroups:
         assert "- AC: real one" in out
         assert out.count("AC:") == 1
 
-    def test_truncation_applied_when_too_long(self):
-        # Build a large task_groups that exceeds the cap.
+    def test_oversized_input_keeps_every_task_visible(self):
+        # A plan whose full render exceeds the cap must NOT silently drop later
+        # tasks (the old head-truncation bug): every task id must remain
+        # present so the per-task audit can check it, with a retrieval note.
         big_desc = "x" * 500
         tasks = [{"id": i, "description": big_desc} for i in range(50)]
         task_groups = [{"group_id": "G1", "name": "big", "tasks": tasks}]
         out = _format_task_groups(task_groups)
-        assert len(out) <= SELF_CHECK_TASK_GROUPS_MAX_CHARS + 50  # ellipsis overhead
-        assert "… (truncated)" in out
+        # Every task header survives (degrade detail, never drop a task).
+        for i in range(50):
+            assert f"[{i}]" in out
+        # An explicit retrieval mechanism is offered for the trimmed detail.
+        assert "trimmed" in out
+        assert "retrieve" in out.lower()
+        # The old silent head-truncation marker must be gone.
+        assert "… (truncated)" not in out
 
-    def test_no_truncation_when_under_cap(self):
+    def test_ac_dropped_first_when_only_slightly_over_cap(self):
+        # When dropping acceptance_criteria alone brings the render under
+        # budget, full task descriptions are preserved (tier-2 degrade).
+        desc = "y" * 100
+        tasks = [
+            {"id": i, "description": desc, "acceptance_criteria": ["z" * 200]}
+            for i in range(12)
+        ]
+        task_groups = [{"group_id": "G1", "name": "g", "tasks": tasks}]
+        out = _format_task_groups(task_groups)
+        for i in range(12):
+            assert f"[{i}] {desc}" in out  # full description retained
+        assert "AC:" not in out  # criteria dropped to fit
+        assert "trimmed" in out
+
+    def test_no_truncation_note_when_under_cap(self):
         task_groups = [
             {"group_id": "G1", "name": "small", "tasks": [{"id": 1, "description": "tiny"}]}
         ]
         out = _format_task_groups(task_groups)
         assert "… (truncated)" not in out
+        assert "trimmed" not in out
 
     def test_non_dict_task_entries_skipped(self):
         task_groups = [

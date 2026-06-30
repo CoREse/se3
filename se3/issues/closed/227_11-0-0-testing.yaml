@@ -1,7 +1,7 @@
 id: '227'
 description: 11.0.0是个大更，再加上之前一直没有清理过testing，tests里面可能有很多过期的test，清理一下。
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-06-29T10:44:51.176270'
-updated_at: '2026-06-29T10:44:51.176270'
+updated_at: '2026-06-30T11:37:27.477767'
