@@ -41,10 +41,14 @@ logger = logging.getLogger(__name__)
 # The new schema requires each issue to carry:
 #   - actual_behavior / expected_behavior / divergence (concrete, non-empty)
 #   - expectation_source.verbatim_quote — a literal substring of the
-#     project's task_description / non-base spec_content. The handler
+#     project's task_description / non-base spec_content / a plan task's
+#     description or acceptance criterion (type=="plan_task"). The handler
 #     normalizes both sides identically (unicode NFKC, smart-quote
 #     replacement, whitespace collapse, literal ``\n`` → real newline)
-#     before comparison so the LLM cannot rely on cosmetic drift.
+#     before comparison so the LLM cannot rely on cosmetic drift. The one
+#     exception is type=="regression": it protects pre-existing,
+#     out-of-scope behavior absent from the source pool, so it skips the
+#     quote check and must instead ground on evidence_lines.
 #   - evidence_lines pointing at changes_made.files_changed paths, or
 #     missing_in for "should-have-been-edited but wasn't" cases.
 #   - out_of_scope=True as an explicit release valve for non-actionable
@@ -97,6 +101,12 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
     4. Project-specific spec_content entries — excluding ``base`` (its
        content is generic project boilerplate like PEP 8 conventions
        that any nit can hang off of).
+    5. ``task_groups`` — each plan task's ``description`` and every
+       ``acceptance_criteria`` entry, added individually so a
+       ``plan_task`` expectation can substring-match the specific task
+       text it audits (the Per-Task Correctness dimension). Without this,
+       plan-grounded correctness issues would have no source-pool entry
+       and be silently dropped.
     """
     pool: list[str] = []
 
@@ -128,6 +138,28 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
                 continue
             if isinstance(content, str) and content:
                 pool.append(content)
+
+    # Plan task text: each task's description + acceptance_criteria, added
+    # individually so a ``plan_task`` quote can pin down the one task it audits.
+    task_groups = step_inputs.get("task_groups") or []
+    if isinstance(task_groups, list):
+        for group in task_groups:
+            if not isinstance(group, dict):
+                continue
+            tasks = group.get("tasks") or []
+            if not isinstance(tasks, list):
+                continue
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                desc = task.get("description")
+                if isinstance(desc, str) and desc.strip():
+                    pool.append(desc)
+                criteria = task.get("acceptance_criteria") or []
+                if isinstance(criteria, list):
+                    for c in criteria:
+                        if isinstance(c, str) and c.strip():
+                            pool.append(c)
     return pool
 
 
@@ -218,6 +250,14 @@ def _validate_and_filter_issues(
     3. ``verbatim_quote`` not a substring of any source-pool entry → drop
     4. ``evidence_lines`` / ``missing_in`` provides no real grounding → drop
     5. ``actual_behavior`` / ``expected_behavior`` / ``divergence`` empty → drop
+
+    Exception: ``expectation_source.type == "regression"`` issues are exempt
+    from the verbatim-quote checks (2 & 3). A regression protects PRE-EXISTING
+    behavior outside the task's textual scope, which by definition has no entry
+    in the source pool; grounding it on a quote would be impossible. Instead the
+    evidence grounding (4) is mandatory — the issue must point at the changed
+    line(s) responsible. ``plan_task`` issues use the ordinary quote path: the
+    source pool now includes task_groups text, so their quote matches there.
     """
     stats = {
         "input_count": 0,
@@ -265,17 +305,23 @@ def _validate_and_filter_issues(
             continue
 
         source = issue.get("expectation_source") or {}
+        src_type = source.get("type", "") if isinstance(source, dict) else ""
         quote = (
             source.get("verbatim_quote", "")
             if isinstance(source, dict) else ""
         )
-        norm_quote = _normalize_for_quote_match(quote)
-        if not norm_quote:
-            stats["empty_quote_count"] += 1
-            continue
-        if not any(norm_quote in p for p in pool_normalized):
-            stats["quote_not_in_source_count"] += 1
-            continue
+
+        # Regression issues protect pre-existing, out-of-scope behavior that has
+        # no entry in the verbatim source pool — so they bypass the quote checks
+        # and rely solely on diff-evidence grounding below.
+        if src_type != "regression":
+            norm_quote = _normalize_for_quote_match(quote)
+            if not norm_quote:
+                stats["empty_quote_count"] += 1
+                continue
+            if not any(norm_quote in p for p in pool_normalized):
+                stats["quote_not_in_source_count"] += 1
+                continue
 
         if not _validate_evidence(issue, changed):
             stats["bad_evidence_count"] += 1
@@ -313,10 +359,12 @@ SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementatio
 
 Focus your review on these dimensions. Do NOT check spec compliance — that is handled by a separate verification step.
 
-1. **Logic Completeness**: Are there unhandled boundary conditions, missing error paths, or incomplete control flow? Look for edge cases the implementation should handle but doesn't.
-2. **Code Robustness**: Is exception handling adequate? Are resources properly managed (files, connections, locks)? Are there concurrency safety issues?
-3. **Functional Gaps**: Are there related modules that should have been modified but weren't? Are there integration points that were missed?
-4. **Test Coverage Gaps**: Based on the test results, which logic paths are NOT exercised by existing tests? Are there critical paths that lack test coverage?
+1. **Per-Task Correctness (HARD AUDIT)**: Using the **Plan Task Groups** section below as the authoritative task list, audit EACH planned task one by one against the actual implementation. For every task, infer from the changed files / diff which changes are meant to implement it, then verify it was implemented *correctly* — the described behavior is present, the acceptance_criteria are satisfied, and the logic is right. You MAY read the actual diff and the changed files via your worktree tools (e.g. `git diff`, reading files) to confirm the correspondence and correctness. A task that is missing, only partially implemented, or implemented with wrong logic IS an issue — file it with `expectation_source.type = "plan_task"`, quoting the task description or an acceptance criterion. This is a strict per-task audit, not a loose sanity check; do NOT excuse a real gap as an acceptable deviation.
+2. **Regression / Unintended Side Effects**: Verify the change did NOT break or alter existing behavior OUTSIDE the scope of the planned tasks. Look for: existing functions whose contract or return value changed, shared helpers whose behavior shifted for their other callers, removed/renamed symbols still referenced elsewhere, altered defaults, or side effects leaking beyond the task boundary. A behavioral change to out-of-scope existing behavior IS an issue — file it with `expectation_source.type = "regression"` and ground it in `evidence_lines` pointing at the changed line(s) responsible. This dimension is orthogonal to Per-Task Correctness above.
+3. **Logic Completeness**: Are there unhandled boundary conditions, missing error paths, or incomplete control flow? Look for edge cases the implementation should handle but doesn't.
+4. **Code Robustness**: Is exception handling adequate? Are resources properly managed (files, connections, locks)? Are there concurrency safety issues?
+5. **Functional Gaps**: Are there related modules that should have been modified but weren't? Are there integration points that were missed?
+6. **Test Coverage Gaps**: Based on the test results, which logic paths are NOT exercised by existing tests? Are there critical paths that lack test coverage?
 
 ## What NOT to check
 - **Spec compliance** — this is handled by the verify_spec step, do NOT duplicate that check.
@@ -339,9 +387,11 @@ Each issue MUST be a JSON object with these fields:
 - `expected_behavior`: what the code SHOULD do (non-empty)
 - `divergence`: under what specific input / sequence / state does `actual_behavior` produce a wrong result (concrete failure scenario; non-empty)
 - `expectation_source`: where "should do" comes from. Must be:
-    {{ "type": "task_description" | "spec" | "user_interjection",
-       "verbatim_quote": "<a literal substring from the project's task_description or non-base spec_content above>" }}
-  The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops any issue whose normalized quote is not a substring of any normalized source-pool entry. Quote a substantive phrase, NOT a single generic noun.
+    {{ "type": "task_description" | "spec" | "user_interjection" | "plan_task" | "regression",
+       "verbatim_quote": "<a literal substring of the grounding text — see rules below>" }}
+  Grounding rules by type (the handler enforces these and drops violators):
+    - `task_description` / `spec` / `user_interjection` / `plan_task`: `verbatim_quote` MUST be a literal substring of the project's task_description, a non-base spec, a user interjection, or — for `plan_task` — a **Plan Task Groups** task description / acceptance criterion above. The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops any issue whose normalized quote is not a substring of any normalized source-pool entry. Quote a substantive phrase, NOT a single generic noun.
+    - `regression`: use for the Regression dimension, where the violated expectation is PRE-EXISTING behavior outside the task scope (it has no entry in the text above). `verbatim_quote` is NOT substring-checked for this type; instead you MUST ground the issue in `evidence_lines` pointing at the changed line(s) that broke the behavior.
 - `evidence_lines`: array of `"path:N"` strings, where `path` MUST appear in `changes_made.files_changed` (the handler verifies). At least one entry required UNLESS `missing_in` is non-empty.
 - `missing_in`: array of file paths that should have been edited but were not. Use this for "missed integration point" issues that cannot point at a changed line.
 - `out_of_scope`: boolean. Set to `true` if the concern is a suggestion / observation rather than an actionable bug — the handler will discard out_of_scope items, so this is the correct release valve. Do NOT downgrade observations to `low` severity; use this field instead.
@@ -397,16 +447,20 @@ SELF_CHECK_PROMPT = inject_boundary(SELF_CHECK_PROMPT, "## Task Description\n")
 
 
 _TASK_GROUPS_SECTION_INTRO = (
-    "## Plan Task Groups (Scope Reference)\n\n"
-    "The following is the plan's task breakdown (task_groups). It is a "
-    "**scope reference**, NOT a strict specification:\n"
-    "- Use it to help judge the **Functional Gaps** dimension: cross-check that "
-    "each planned task's deliverables appear in the implementation.\n"
-    "- Reasonable deviations from the plan (logic correct, functionality covered, "
-    "quality acceptable) do NOT count as issues.\n"
-    "- Do NOT flag missing-plan-compliance as an issue — this is self_check, not a "
-    "plan-conformance audit. Functional-gap judgments should weigh the original "
-    "Task Description together with this list.\n\n"
+    "## Plan Task Groups (Authoritative Task List — HARD AUDIT)\n\n"
+    "The following is the plan's task breakdown (task_groups). Treat it as the "
+    "**authoritative list of what this change was required to implement**, and "
+    "audit it STRICTLY (this drives the **Per-Task Correctness** dimension):\n"
+    "- Go through EACH task below one by one. Infer from the changed files / diff "
+    "which changes are meant to implement that task, then verify it was implemented "
+    "**correctly**: the described behavior is present, its acceptance_criteria are "
+    "satisfied, and the logic is right.\n"
+    "- A task that is missing, only partially implemented, or implemented with wrong "
+    "logic IS an issue. File it with `expectation_source.type = \"plan_task\"`, "
+    "quoting the task description or an acceptance criterion verbatim, and point "
+    "`evidence_lines` at the relevant changed line(s).\n"
+    "- Do NOT excuse an unrealized or incorrectly-realized task as an acceptable "
+    "deviation. If a planned task is not correctly implemented, report it.\n\n"
 )
 
 
@@ -597,7 +651,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 '{"issues": [{"severity": "critical|high|medium|low", '
                 '"actual_behavior": "...", "expected_behavior": "...", '
                 '"divergence": "...", '
-                '"expectation_source": {"type": "task_description|spec|user_interjection", "verbatim_quote": "..."}, '
+                '"expectation_source": {"type": "task_description|spec|user_interjection|plan_task|regression", "verbatim_quote": "..."}, '
                 '"evidence_lines": ["path:N"], "missing_in": [], "out_of_scope": false}], '
                 '"previous_issue_resolutions": [{"prev_issue_summary": "...", "status": "fixed|still_present"}], '
                 '"summary": "..."}'

@@ -1,8 +1,8 @@
 """Tests for self_check task_groups injection.
 
 Covers the `_format_task_groups` helper and the handler-level behavior of
-injecting the Plan Task Groups (Scope Reference) section into the LLM prompt
-when `task_groups` is present in step.inputs.
+injecting the Plan Task Groups (Authoritative Task List — HARD AUDIT) section
+into the LLM prompt when `task_groups` is present in step.inputs.
 """
 
 from __future__ import annotations
@@ -176,9 +176,9 @@ class TestBuildTaskGroupsSection:
             {"group_id": "G1", "name": "X", "tasks": [{"id": 1, "description": "t"}]}
         ]
         out = _build_task_groups_section(task_groups)
-        assert "## Plan Task Groups (Scope Reference)" in out
-        assert "scope reference" in out.lower()
-        assert "NOT a strict specification" in out
+        assert "## Plan Task Groups (Authoritative Task List — HARD AUDIT)" in out
+        assert "hard audit" in out.lower()
+        assert "authoritative list" in out.lower()
         assert "- [1] t" in out
 
     def test_intro_matches_constant(self):
@@ -258,17 +258,20 @@ class TestHandlerPromptInjection:
         step = _make_step(task_groups=task_groups)
         prompt = _call_handler_capture_prompt(step, flow)
 
-        assert "## Plan Task Groups (Scope Reference)" in prompt
+        assert "## Plan Task Groups (Authoritative Task List — HARD AUDIT)" in prompt
         assert "Add login endpoint" in prompt
         assert "AC: Returns 200 on valid creds" in prompt
-        assert "scope reference" in prompt.lower()
-        # Guard the load-bearing disclaimer phrasing: self_check must not
-        # become a plan-conformance audit. These lines must reach the
-        # final prompt verbatim — future edits to _TASK_GROUPS_SECTION_INTRO
-        # that weaken the disclaimer should fail here.
-        assert "NOT a strict specification" in prompt
-        assert "Reasonable deviations from the plan" in prompt
-        assert "do NOT count as issues" in prompt
+        assert "hard audit" in prompt.lower()
+        # Guard the load-bearing hard-audit phrasing: task_groups is the
+        # authoritative task list, audited strictly per task. These lines must
+        # reach the final prompt verbatim — future edits to
+        # _TASK_GROUPS_SECTION_INTRO that weaken the audit should fail here.
+        assert "authoritative list" in prompt.lower()
+        assert 'expectation_source.type = "plan_task"' in prompt
+        # The old soft-reference disclaimer must be gone.
+        assert "NOT a strict specification" not in prompt
+        assert "Reasonable deviations from the plan" not in prompt
+        assert "missing-plan-compliance" not in prompt
 
     def test_prompt_omits_section_when_task_groups_absent(self, flow):
         step = _make_step(task_groups=None)
