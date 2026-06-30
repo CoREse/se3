@@ -198,6 +198,130 @@ def _index_has_staged_changes(project_root: Path) -> bool:
         return True
 
 
+def _root_deny_excludes(project_root: Path, path: str) -> bool:
+    """Return whether ``path`` is ignored *specifically* by the root ``/*`` rule.
+
+    Confirms the matching gitignore rule via ``git check-ignore -v`` and checks
+    that the winning pattern is exactly ``/*`` — the root default-deny line. A
+    path ignored by some other rule (e.g. ``/se3/*`` or ``*.pyc``) is NOT a
+    root-whitelist exclusion and is intentionally left out: those are ordinary,
+    expected ignores, not the "stray top-level artifact the whitelist swept up"
+    case this guard exists to surface.
+
+    Fully fault-tolerant: any subprocess error is treated as "not a root-deny
+    exclusion" (``False``) so the guard never raises.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-v", "--", path],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+    except Exception:
+        return False
+    # check-ignore -v prints "<source>:<linenum>:<pattern>\t<pathname>" for an
+    # ignored path, and nothing (exit 1) for a non-ignored one. The pattern is
+    # the last colon-delimited field of the rule (source/linenum precede it),
+    # so rsplit isolates it without tripping on a ``:`` in the source filename.
+    line = result.stdout.strip()
+    if not line:
+        return False
+    rule = line.split("\t", 1)[0]
+    pattern = rule.rsplit(":", 1)[-1].strip()
+    return pattern == "/*"
+
+
+def _detect_root_whitelist_exclusions(project_root: Path) -> list[str]:
+    """Warn about top-level new paths the root ``/*`` default-deny rule excluded.
+
+    Runs between ``git add -A`` and ``git commit`` on the canonical commit path.
+    The root ``/*`` whitelist convention turns the repo root into default-deny:
+    a freshly-created top-level file/dir that lacks a matching ``!/<name>``
+    whitelist line is silently *not* tracked, so ``git add -A`` never stages it.
+    This helper makes that silence loud — it enumerates the top-level untracked
+    paths excluded *specifically* by ``/*`` and emits a single WARNING listing
+    them, so a human notices the dropped work instead of it vanishing.
+
+    Deliberately diagnostic-only: it does NOT touch ``.gitignore``, does NOT
+    add ``!/<name>`` whitelist lines, and does NOT alter staging. Auto-
+    whitelisting whatever the agent happened to drop would re-admit exactly the
+    stray artifacts the whitelist is meant to block, defeating its purpose. The
+    load-bearing defense is the whitelist itself; this guard only restores
+    visibility.
+
+    Like :func:`_strip_runtime_leaks`, it is a soft backstop: every git
+    subprocess is fully fault-tolerant (any failure only warns and returns an
+    empty list). It never raises and never blocks or fails the commit.
+
+    Args:
+        project_root: Project root directory (git cwd).
+
+    Returns:
+        The top-level path strings excluded by the root ``/*`` rule (sorted),
+        or an empty list when there are none / the check could not run. The
+        return value is for logging/diagnostics only — it never participates in
+        commit control flow.
+    """
+    try:
+        # ``--directory`` collapses an entirely-ignored top-level dir to a
+        # single ``name/`` entry instead of recursing into every file inside
+        # it; ``--ignored --others --exclude-standard`` lists exactly the
+        # untracked-but-ignored paths (the ones ``git add -A`` skipped).
+        result = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Root-whitelist guard: could not list ignored paths (%s); "
+                "skipping root-exclusion check",
+                result.stderr.strip(),
+            )
+            return []
+        entries = [p for p in result.stdout.splitlines() if p.strip()]
+    except Exception as exc:
+        logger.warning(
+            "Root-whitelist guard: listing ignored paths raised (%s); "
+            "skipping root-exclusion check",
+            exc,
+        )
+        return []
+
+    excluded: list[str] = []
+    for raw in entries:
+        entry = raw.strip()
+        # Only the top level: ``/*`` governs root entries, and an ``!/<name>``
+        # that re-admits a dir lets its interior follow normal gitignore rules.
+        # A trailing slash marks a directory entry from ``--directory``.
+        inner = entry.rstrip("/")
+        if not inner or "/" in inner:
+            continue
+        if _root_deny_excludes(project_root, entry):
+            excluded.append(inner)
+
+    if excluded:
+        excluded = sorted(excluded)
+        logger.warning(
+            "Root-whitelist guard: %d top-level path(s) are excluded by the "
+            "root '/*' default-deny rule and were NOT committed; add a "
+            "'!/<name>' whitelist line to .gitignore if they should be "
+            "tracked: %s",
+            len(excluded),
+            ", ".join(excluded),
+        )
+    return excluded
+
+
 def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the commit step.
 
@@ -374,6 +498,14 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # remaining (legitimate) staged content. Entirely fault-tolerant — it
         # never blocks or fails the commit.
         stripped_leaks = _strip_runtime_leaks(project_root)
+
+        # Root-whitelist guard: under the root ``/*`` default-deny convention,
+        # a new top-level path with no ``!/<name>`` whitelist line is silently
+        # not tracked, so ``git add -A`` never staged it. Surface that as a
+        # WARNING so dropped work is loud, not silent. Pure diagnostic — it
+        # touches neither .gitignore nor staging, and its return value never
+        # feeds control flow, so the commit proceeds identically either way.
+        _detect_root_whitelist_exclusions(project_root)
 
         # If stripping leaks emptied the index (the only working-tree change
         # was a runtime leak outside se3/), there is nothing legitimate left
