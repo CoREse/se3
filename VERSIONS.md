@@ -73,6 +73,15 @@
 
 
 
+
+## 11.3.2 - 2026-06-30
+
+- Prevent silent, unrecoverable loss of uncommitted untracked files (e.g. concurrently created se3/issues/open/NNN_*.yaml and .next_id) during worktree/branch merge stash-pop
+- Archive any stashed content that cannot be cleanly restored to se3/worktrees/.archive/ with full file bodies, original relative paths, and timestamp/stash-label, and only drop the stash after recoverability is confirmed
+- Stop unconditionally taking-ours on every stash-pop conflict: untracked-collision (case b) files are renamed aside and archived instead of destroyed, while true 3-way tracked conflicts (case a) allow optional LLM-based resolution with the discarded side archived
+- Upgrade stash-pop audit issues/events to record recoverable content pointers (archive path plus blob sha and/or body) instead of only file paths
+- Apply the no-data-loss archival behavior uniformly across both merge paths (merge_cmd fast strategy and implement leaf-branch merge-back) via the shared engine/stash_utils.py primitive
+- Correct the _fast_stash_pop docstring that incorrectly stated the LLM is intentionally never consulted
 ## 11.3.1 - 2026-06-30
 
 - Extend the discovery HARD INVARIANT to forbid reader-facing decision-point / changeable annotations (e.g. '默认选择，可改', '(default, changeable)', 'you can change this') from appearing in refined_description, not just open-item phrasing
