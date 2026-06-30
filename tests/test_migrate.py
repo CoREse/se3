@@ -321,6 +321,113 @@ def test_gitignore_whitelists_after_se3_anchor(project: Path):
 
 
 # ---------------------------------------------------------------------------
+# Root default-deny (`/*`) + existence-protection for pre-existing projects
+# ---------------------------------------------------------------------------
+
+def _check_ignored(root: Path, rel: str) -> bool:
+    """True iff ``rel`` is ignored by the current .gitignore (git's verdict)."""
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", rel],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    # exit 0 => ignored, 1 => not ignored.
+    return proc.returncode == 0
+
+
+@pytest.fixture
+def legacy_project(tmp_path: Path) -> Path:
+    """A pre-existing git project with several tracked top-level files + dirs
+    and a flat (non-default-deny) .gitignore — the shape migrate must protect."""
+    root = tmp_path / "legacy"
+    (root / "src").mkdir(parents=True)
+    (root / "docs").mkdir(parents=True)
+    (root / "se3").mkdir(parents=True)
+
+    (root / "README.md").write_text("# legacy\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    (root / "src" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "docs" / "guide.md").write_text("doc\n", encoding="utf-8")
+    (root / "se3" / "charter.md").write_text("# charter\n", encoding="utf-8")
+    # Flat legacy gitignore: a global pattern plus the /se3/* anchor, no `/*`.
+    (root / ".gitignore").write_text(
+        "__pycache__/\n\n/se3/*\n!/se3/charter.md\n", encoding="utf-8"
+    )
+
+    _init_git_project(root)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "legacy snapshot")
+    return root
+
+
+def test_root_deny_protects_tracked_toplevel(legacy_project: Path):
+    """Introducing `/*` must whitelist every tracked top-level path so none of
+    them is silently dropped from tracking."""
+    tracked_top = {".gitignore", "README.md", "pyproject.toml", "src", "docs", "se3"}
+
+    changes = migrate_cmd._rewrite_gitignore(legacy_project)
+    assert any("root /* default-deny" in c for c in changes)
+
+    gi = (legacy_project / ".gitignore").read_text(encoding="utf-8")
+    assert "/*" in gi.splitlines()
+    # files get `!/<name>`, dirs get `!/<name>/`
+    for name in ("README.md", "pyproject.toml", ".gitignore"):
+        assert f"!/{name}" in gi.splitlines()
+    for name in ("src", "docs", "se3"):
+        assert f"!/{name}/" in gi.splitlines()
+
+    # git's own verdict: no tracked top-level path is ignored after the rewrite.
+    for name in tracked_top:
+        assert not _check_ignored(legacy_project, name), f"{name} unexpectedly ignored"
+
+    # default-deny actually bites: a stray new root file IS ignored.
+    (legacy_project / "pytest_full.log").write_text("noise\n", encoding="utf-8")
+    assert _check_ignored(legacy_project, "pytest_full.log")
+
+
+def test_root_deny_idempotent(legacy_project: Path):
+    first = migrate_cmd._rewrite_gitignore(legacy_project)
+    assert any("root /* default-deny" in c for c in first)
+    before = (legacy_project / ".gitignore").read_text(encoding="utf-8")
+
+    second = migrate_cmd._rewrite_gitignore(legacy_project)
+    assert second == []
+    after = (legacy_project / ".gitignore").read_text(encoding="utf-8")
+    assert before == after
+
+
+def test_root_deny_skipped_when_ls_files_unavailable(tmp_path: Path):
+    """When `git ls-files` fails (here: not a git repo), `/*` must NOT be added
+    — degrading without ever risking a silent drop — and nothing may raise."""
+    root = tmp_path / "nogit"
+    root.mkdir()
+    (root / ".gitignore").write_text("/se3/*\n!/se3/charter.md\n", encoding="utf-8")
+
+    assert migrate_cmd._tracked_toplevel_whitelists(root) is None
+
+    changes = migrate_cmd._rewrite_gitignore(root)
+    gi = (root / ".gitignore").read_text(encoding="utf-8")
+    assert "/*" not in gi.splitlines()
+    assert not any("root /* default-deny" in c for c in changes)
+
+
+def test_root_deny_skipped_when_ls_files_raises(legacy_project: Path, monkeypatch):
+    """A surprise subprocess failure is swallowed: no `/*`, no exception."""
+
+    def _boom(*a, **k):
+        raise OSError("git vanished")
+
+    monkeypatch.setattr(migrate_cmd.subprocess, "run", _boom)
+    assert migrate_cmd._tracked_toplevel_whitelists(legacy_project) is None
+    # _rewrite_gitignore still runs its non-git-dependent edits without raising.
+    changes = migrate_cmd._rewrite_gitignore(legacy_project)
+    gi = (legacy_project / ".gitignore").read_text(encoding="utf-8")
+    assert "/*" not in gi.splitlines()
+    assert not any("root /* default-deny" in c for c in changes)
+
+
+# ---------------------------------------------------------------------------
 # Corpus loading skips internal/hidden dirs and splits base vs non-base
 # ---------------------------------------------------------------------------
 

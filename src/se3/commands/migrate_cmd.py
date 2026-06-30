@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -440,14 +441,76 @@ def _write_charter_once(project_root: Path, charter_body: str) -> Path:
 _GITIGNORE_WHITELISTS = ["!/se3/code-index.md", "!/se3/charter.md"]
 _GITIGNORE_REMOVE = "!/se3/specs/"
 
+_GITIGNORE_ROOT_DENY_HEADER = [
+    "# Repository root: ignore everything by default; whitelist tracked entries.",
+    "# Stray root files (logs, scratch, caches) must not be auto-committed. To",
+    "# track a new top-level entry add an explicit `!/<name>` (file) or",
+    "# `!/<name>/` (dir) line below.",
+]
+
+
+def _tracked_toplevel_whitelists(project_root: Path) -> Optional[List[str]]:
+    """Return ``!/<name>`` whitelist lines for every git-tracked top-level path.
+
+    Directories get a trailing slash (``!/<name>/``), files do not. ``.gitignore``
+    is always whitelisted first so the root default-deny rule never hides the
+    very file that defines it.
+
+    Returns ``None`` when ``git ls-files`` is unavailable or fails. The caller
+    treats ``None`` as 'do not introduce ``/*``': a root default-deny rule is
+    never added without the matching existence-protection, so existing projects
+    can never silently lose tracking of a top-level path.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    dirs: set = set()
+    files: set = set()
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        head, sep, _ = line.partition("/")
+        if sep:
+            dirs.add(head)
+        else:
+            files.add(head)
+
+    # A real filesystem cannot have a top-level name be both a file and a dir;
+    # if git ever reports both, prefer the directory form.
+    entries = [f"!/{name}/" for name in sorted(dirs)]
+    entries += [f"!/{name}" for name in sorted(files) if name not in dirs]
+
+    # .gitignore must lead so it is tracked even on the (degenerate) chance it
+    # is not yet in the index.
+    ordered = ["!/.gitignore"]
+    ordered += [e for e in entries if e != "!/.gitignore"]
+    return ordered
+
 
 def _rewrite_gitignore(project_root: Path) -> List[str]:
-    """Add the code-index/charter whitelists and drop the specs whitelist.
+    """Add the code-index/charter whitelists, drop the specs whitelist, and put
+    the repository root into default-deny (``/*``) form with existence-protected
+    top-level whitelists.
 
     Idempotent: re-running makes no further change. Returns a human-readable
     list of the changes made (empty when already migrated). When ``/se3/*`` is
     present the whitelists are inserted right after it so the negations take
     effect; otherwise they are appended.
+
+    The root ``/*`` default-deny is introduced only once and only after
+    enumerating every currently-tracked top-level path (via ``git ls-files``)
+    and emitting an explicit ``!/<name>`` for each — so an existing project can
+    never silently lose tracking. If that enumeration is unavailable the rule is
+    skipped entirely (tolerant degrade).
     """
     path = project_root / ".gitignore"
     try:
@@ -475,6 +538,18 @@ def _rewrite_gitignore(project_root: Path) -> List[str]:
         else:
             lines.extend(missing)
         changes.extend(f"added {w}" for w in missing)
+
+    # Introduce root default-deny (`/*`) with existence-protection. Skipped when
+    # `/*` already present (idempotent) or when the tracked-path enumeration is
+    # unavailable (tolerant degrade — never add `/*` without its whitelist).
+    if "/*" not in stripped:
+        protected = _tracked_toplevel_whitelists(project_root)
+        if protected is not None:
+            block = [*_GITIGNORE_ROOT_DENY_HEADER, "/*", *protected, ""]
+            lines = block + lines
+            stripped.add("/*")
+            stripped.update(protected)
+            changes.append("added root /* default-deny with tracked-path whitelist")
 
     if changes:
         new_text = "\n".join(lines)
