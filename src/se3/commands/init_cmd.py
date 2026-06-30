@@ -62,8 +62,41 @@ version:
 #   defaults: [primary]
 """
 
-# Default .gitignore template for SE3 projects
-DEFAULT_GITIGNORE_TEMPLATE = """# Python
+# Default .gitignore template for SE3 projects.
+#
+# The root block is default-deny: `/*` ignores everything at the repo root,
+# and only the explicitly un-ignored top-level entries below are tracked.
+# The real committer is an agent running `git add -A`, so any stray file
+# dropped at the root (test logs, scratch output, caches, .venv) would
+# otherwise be staged silently. Flipping the root layer from a runtime-
+# signature blacklist to default-deny strictly covers the unsigned root
+# junk the blacklist misses. To track a NEW top-level entry, add an
+# explicit `!/<name>` (files) or `!/<name>/` (dirs) line in the root block.
+DEFAULT_GITIGNORE_TEMPLATE = """# =====================================================================
+# Repository root: ignore everything by default.
+# Only the project files/dirs explicitly un-ignored below are tracked.
+# To track a new top-level entry, add an explicit `!/<name>` (files) or
+# `!/<name>/` (dirs) line here.
+# =====================================================================
+/*
+!/.gitignore
+!/.claude/
+!/LICENSE
+!/NOTICE
+!/README.md
+!/README.zh.md
+!/VERSIONS.md
+!/progress.md
+!/pyproject.toml
+!/se3.yaml
+!/docs/
+!/scripts/
+!/se3/
+!/src/
+!/tests/
+
+# --- Global ignore patterns (apply at any depth, e.g. inside src/, tests/) ---
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -100,7 +133,10 @@ env/
 *~
 .DS_Store
 
-# SE3: ignore runtime content, whitelist committed artifacts
+# SE3: ignore runtime content, whitelist committed artifacts.
+# `!/se3/` above un-ignores the se3/ directory so git descends into it;
+# `/se3/*` then re-applies default-deny one level down, tracking only the
+# committable artifacts whitelisted below.
 /se3/*
 !/se3/code-index.md
 !/se3/charter.md
@@ -108,7 +144,9 @@ env/
 !/se3/scripts/
 !/se3/version-rules.md
 
-# SE3: local-only config overrides (never committed)
+# SE3: local-only config overrides (never committed). Redundant under the
+# root default-deny, but kept explicit so the intent survives manual edits
+# that whitelist se3.local.yaml's siblings.
 se3.local.yaml
 """
 

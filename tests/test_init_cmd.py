@@ -146,6 +146,74 @@ class TestRunInit:
         assert "!/se3/issues/" in content
         assert "__pycache__/" in content
 
+    def test_gitignore_has_root_default_deny(self, tmp_path):
+        """Generated .gitignore opens with root default-deny `/*`.
+
+        The bearing defense against an agent's `git add -A` staging stray
+        root junk is flipping the root layer to default-deny; assert the
+        `/*` line is actually present.
+        """
+        run_init(tmp_path, "TestProject")
+        content = (tmp_path / ".gitignore").read_text()
+        # `/*` must appear as its own line (a default-deny anchor), not just
+        # as a substring of some other pattern.
+        assert "/*" in content.splitlines()
+
+    def test_gitignore_whitelists_all_tracked_top_level_entries(self, tmp_path):
+        """Every top-level product run_init lands is un-ignored by name.
+
+        Under root default-deny a missing `!/<name>` line would silently
+        stop tracking a real project file — exactly the "silent loss" this
+        whitelist exists to prevent.
+        """
+        run_init(tmp_path, "TestProject")
+        lines = (tmp_path / ".gitignore").read_text().splitlines()
+
+        # Files/dirs run_init actually creates at the top level, plus the
+        # standard tracked project products a fresh repo carries.
+        for entry in [
+            "!/.gitignore",
+            "!/se3.yaml",
+            "!/VERSIONS.md",
+            "!/se3/",
+            "!/README.md",
+            "!/pyproject.toml",
+            "!/src/",
+            "!/tests/",
+            "!/docs/",
+            "!/scripts/",
+            "!/LICENSE",
+            "!/NOTICE",
+        ]:
+            assert entry in lines, f"missing whitelist entry: {entry}"
+
+    def test_gitignore_does_not_block_init_products(self, tmp_path):
+        """git itself must not ignore any product run_init lands.
+
+        Verifies the whitelist with the real ignore engine (not just string
+        matching): `git check-ignore` should report none of the landed
+        top-level paths as ignored.
+        """
+        import shutil
+        import subprocess
+
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+
+        run_init(tmp_path, "TestProject")
+
+        # run_init initializes the repo and lands these top-level products.
+        landed = ["se3.yaml", "VERSIONS.md", "se3", "se3/charter.md", ".gitignore"]
+        for rel in landed:
+            assert (tmp_path / rel).exists(), f"expected run_init to land {rel}"
+            # check-ignore exits 0 when the path IS ignored, 1 when it is not.
+            proc = subprocess.run(
+                ["git", "check-ignore", "-q", rel],
+                cwd=str(tmp_path),
+                capture_output=True,
+            )
+            assert proc.returncode != 0, f"{rel} is unexpectedly gitignored"
+
     def test_init_force_overwrites_gitignore(self, tmp_path):
         """se3 init --force overwrites existing .gitignore."""
         # Create pre-existing .gitignore
