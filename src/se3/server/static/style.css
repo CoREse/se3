@@ -1264,6 +1264,19 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg-dim);
   font-size: 11px;
 }
+/* The session's flow_id in the meta row: same dim color/size as its siblings,
+ * but bounded and ellipsis-truncated so a long id never widens the card. The
+ * full value stays available via the span's title (and the mobile wrap rule
+ * below relaxes the clamp on narrow screens). */
+.history-item-flow-id {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 
 .badge-live {
   background: rgba(76,175,106,.2);
@@ -1271,6 +1284,19 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 
 /* -- history detail (step records) --------------------------------- */
+
+/* The open session's full flow_id, shown as its own header line. Low-key (small,
+ * dim, tabular) but fully selectable and allowed to wrap so the complete id is
+ * always readable/copyable. Collapsed when empty (no session open). */
+.history-detail-flow-id {
+  margin: 0 0 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+  user-select: text;
+}
+.history-detail-flow-id:empty { display: none; }
 
 .history-detail { display: flex; flex-direction: column; gap: 14px; }
 

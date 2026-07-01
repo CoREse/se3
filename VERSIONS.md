@@ -75,6 +75,14 @@
 
 
 
+## 11.5.0 - 2026-07-01
+
+- Show each history session's flow_id on its list card meta row, truncated with ellipsis and a full-value tooltip for readability and copy
+- Display the complete flow_id on its own dedicated line in the history detail header, independent of the task_description fallback
+- Add a session-total token-usage badge to the history detail view, reusing the running-flow usage rendering and hiding when no usage exists
+- Clear the history header flow_id and usage badge when closing a session so stale values don't bleed into the next opened session
+- Anchor the resume button insertion to the stable flow_id line so it cleans up reliably with the new header elements present
+
 ## 11.4.0 - 2026-07-01
 
 - Inject recency context into the discovery step's initial (round 0) prompt so it no longer cold-starts and can resolve cross-session references like 'continue the last one'
@@ -83,6 +91,7 @@
 - Gate recency injection to round 0 only; later rounds inherit it through conversation history, saving repeated prompt token cost
 - Skip any missing or unavailable recency source silently, preserving the discovery step's read-only nature and never failing on absent summaries or git data
 - Apply identical round-0 recency injection behavior in worktree mode
+
 ## 11.3.2 - 2026-06-30
 
 - Prevent silent, unrecoverable loss of uncommitted untracked files (e.g. concurrently created se3/issues/open/NNN_*.yaml and .next_id) during worktree/branch merge stash-pop
@@ -91,6 +100,7 @@
 - Upgrade stash-pop audit issues/events to record recoverable content pointers (archive path plus blob sha and/or body) instead of only file paths
 - Apply the no-data-loss archival behavior uniformly across both merge paths (merge_cmd fast strategy and implement leaf-branch merge-back) via the shared engine/stash_utils.py primitive
 - Correct the _fast_stash_pop docstring that incorrectly stated the LLM is intentionally never consulted
+
 ## 11.3.1 - 2026-06-30
 
 - Extend the discovery HARD INVARIANT to forbid reader-facing decision-point / changeable annotations (e.g. '默认选择，可改', '(default, changeable)', 'you can change this') from appearing in refined_description, not just open-item phrasing

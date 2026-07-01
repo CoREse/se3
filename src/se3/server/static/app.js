@@ -3473,6 +3473,10 @@ function closeHistory() {
   state.historyRecords = [];
   state.historyProgress = null;
   state.historySelectedProjectRoot = null;
+  // Clear the per-session header so a stale flow_id / usage total can't bleed
+  // into the next opened session.
+  $("history-detail-flow-id").textContent = "";
+  updateHistoryUsageBadge([]);
 }
 
 async function fetchHistoryIndex() {
@@ -3534,6 +3538,7 @@ function applyHistoryData(msg) {
         state.historyRecords = state.historyRecords.concat(fresh);
         renderHistoryRecords(msg.flow_id, state.historyRecords, append);
         refreshHistoryStickyHeader();
+        updateHistoryUsageBadge(state.historyRecords);
         if (stick) scrollHistoryToBottom();
       }
       // else: all duplicates — skip state update and render entirely
@@ -3547,6 +3552,7 @@ function applyHistoryData(msg) {
       state.historyProgress = null;
       renderHistoryRecords(msg.flow_id, state.historyRecords, append);
       refreshHistoryStickyHeader();
+      updateHistoryUsageBadge(state.historyRecords);
       if (stick) scrollHistoryToBottom();
     }
   }
@@ -3790,8 +3796,14 @@ function renderHistoryList() {
     card.appendChild(head);
 
     const meta = el("div", "history-item-meta");
+    // The session's flow_id is its se3 identity (this history record's own ID).
+    // Surface it in the meta row, truncating with ellipsis but keeping the full
+    // value in `title` so it stays readable/copyable when it overflows.
+    const flowIdSpan = el("span", "history-item-flow-id", s.flow_id || "");
+    flowIdSpan.title = s.flow_id || "";
     meta.append(
       el("span", null, s.machine_id || ""),
+      flowIdSpan,
       el("span", null, formatTime(s.updated_at || s.created_at)),
     );
     card.appendChild(meta);
@@ -3840,19 +3852,31 @@ async function openHistorySession(flowId, opts) {
   applyHistoryPanelAction("select-session");
   renderHistoryList();
   $("history-detail-title").textContent = historyTitle(flowId);
+  // Show the complete flow_id on its own line, always — independent of the
+  // title's task_description→flow_id fallback, so the se3 flow_id stays
+  // identifiable even when a task_description is present.
+  const flowIdEl = $("history-detail-flow-id");
+  flowIdEl.textContent = flowId || "";
+  // Reset/seed the session-usage badge: a fresh (non-incremental) open has just
+  // cleared historyRecords so the badge hides until the load lands; a reconnect
+  // refresh keeps the prior total visible.
+  updateHistoryUsageBadge(state.historyRecords);
 
   // Inject a Resume button into the detail header when the session is resumable.
-  const titleEl = $("history-detail-title");
-  let resumeBar = titleEl.nextElementSibling;
-  if (resumeBar && resumeBar.classList.contains("history-resume-bar")) {
-    resumeBar.remove(); // clean up previous
+  // Anchor the resume-bar to the flow_id line (a stable static element) rather
+  // than the title's nextElementSibling: the static flow_id / usage-badge
+  // elements now sit between the title and any resume-bar, so a sibling-of-title
+  // probe would no longer find a prior resume-bar to clean up.
+  const priorBar = flowIdEl.nextElementSibling;
+  if (priorBar && priorBar.classList.contains("history-resume-bar")) {
+    priorBar.remove(); // clean up previous
   }
   const session = (state.historySessions || []).find((x) => x.flow_id === flowId);
   const resumeBtn = makeResumeButton(session);
   if (resumeBtn) {
-    resumeBar = el("div", "history-resume-bar");
+    const resumeBar = el("div", "history-resume-bar");
     resumeBar.appendChild(resumeBtn);
-    titleEl.after(resumeBar);
+    flowIdEl.after(resumeBar);
   }
 
   const detail = $("history-detail");
@@ -3916,6 +3940,7 @@ async function openHistorySession(flowId, opts) {
     // Delta delivery → incremental append render; full fallback → full rebuild.
     renderHistoryRecords(flowId, state.historyRecords, result.render === "delta");
     refreshHistoryStickyHeader();
+    updateHistoryUsageBadge(state.historyRecords);
     if (stick) scrollHistoryToBottom();
   } catch (_) {
     if (
@@ -9629,8 +9654,12 @@ function appendRoundUsageFootnote(container, norm) {
 // records the client has received so far. Hidden (and emptied) when nothing has
 // been consumed yet, so it never shows a bare "0" placeholder. Best-effort —
 // a render fault here must never disturb the conversation.
-function updateFlowUsageBadge(records) {
-  const badge = $("flow-usage-badge");
+// Shared renderer for a session-total usage badge. Both the running-flow badge
+// and the history-detail badge delegate here (passing their own element) so the
+// accounting, empty-usage suppression, and try/catch fault tolerance stay
+// identical across the two views — the history view reuses the running-flow
+// view's exact rendering logic rather than a divergent copy.
+function applyUsageBadge(badge, records) {
   if (!badge) return;
   try {
     const totals = accumulateSessionUsage(records);
@@ -9649,6 +9678,16 @@ function updateFlowUsageBadge(records) {
     badge.innerHTML = "";
     badge.classList.add("hidden");
   }
+}
+
+function updateFlowUsageBadge(records) {
+  applyUsageBadge($("flow-usage-badge"), records);
+}
+
+// History-detail counterpart of updateFlowUsageBadge: same total over the open
+// session's records, rendered into the history view's header badge.
+function updateHistoryUsageBadge(records) {
+  applyUsageBadge($("history-usage-badge"), records);
 }
 
 // Build a default-open collapsible report card. `buildBody()` is invoked
@@ -11542,6 +11581,10 @@ if (typeof module !== "undefined" && module.exports) {
     formatCostUsd,
     buildStepUsageFootnote,
     updateFlowUsageBadge,
+    // History-detail session-usage badge — exposed for the DOM-stub tests in
+    // tests/frontend/history_usage.test.mjs.
+    applyUsageBadge,
+    updateHistoryUsageBadge,
     // Per-round usage footnote (G5) — exposed for the DOM-free tests in
     // tests/frontend/round_usage.test.mjs.
     buildRoundUsageFootnote,
@@ -11638,6 +11681,7 @@ if (typeof module !== "undefined" && module.exports) {
     maybeRefreshConversationOnProgression,
     refreshFlowDetail,
     openHistorySession,
+    closeHistory,
     applyHistoryData,
     // History list rendering + shared mutable state (exposed for the DOM-stub
     // tests in tests/frontend/test_app_pure.mjs).
