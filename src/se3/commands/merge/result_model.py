@@ -258,6 +258,14 @@ class MergeReport:
     )
     runtime_sync_idempotent_records: list = field(default_factory=list)
 
+    # --- Committed-issue ID reconciliation (git three-way-merge channel) ---
+    # Issues renumbered because a clean git merge brought in a committed issue
+    # file whose numeric ID already named a different issue on the current
+    # branch. Each entry is an ``IssueMergeRecord(old_id, new_id, status_dir)``
+    # — the same record type the runtime-sync channel emits — so both merge
+    # channels report renumbers through one uniform shape.
+    committed_issue_renumbers: list = field(default_factory=list)
+
     # --- Rollback state ---
     rollback_failed: bool = False
 

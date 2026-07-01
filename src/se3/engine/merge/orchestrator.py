@@ -10,11 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 
 from ..version_bumper import BumpType, Version
 from ..worktree import _run_git, get_conflicting_files, get_current_branch
@@ -36,6 +39,11 @@ from .guardrails import (
     violation_set_hash,
 )
 from .human_call import HumanCallWriter
+from .issue_renumber import (
+    advance_next_id_to_max,
+    format_renumber_trace,
+    rewrite_issue_references,
+)
 from ...commands.merge.failure_reason import FailureReason
 from ...commands.merge.postcondition import (
     PostConditionViolated,
@@ -46,6 +54,7 @@ from ...commands.merge.postcondition import (
 from .runtime_sync import (
     DEST_HASH_UNAVAILABLE,
     BypassedCollision,
+    IssueMergeRecord,
     RuntimeSyncCollision,
     sync_branch_runtime,
 )
@@ -701,6 +710,11 @@ class MergeOrchestrator:
         # is a single-parent commit on top of the merge; amend mode
         # keeps HEAD as the merge commit itself.
         self._last_branch_repair_used_amend: bool = False
+        # Per-branch flag: True when issue-ID reconciliation appended a
+        # fix-up commit (single parent) on top of the merge commit for the
+        # current branch. Counted alongside the repair fix-up when the
+        # post-aggregation topology check walks back to the merge commit.
+        self._last_branch_reconcile_left_fixup: bool = False
         # Per-execute flag: True when SemVer aggregation took the
         # ``amend=False`` path (HEAD already published) and produced a
         # new single-parent commit on top of the merge commit.  Any
@@ -1431,6 +1445,7 @@ class MergeOrchestrator:
             self._last_stall_iteration_count = None
             self._last_branch_repair_ran = False
             self._last_branch_repair_used_amend = False
+            self._last_branch_reconcile_left_fixup = False
             self._log(f"--- Merging branch: {branch} ---")
 
             result = self._merge_single_branch(branch, report)
@@ -2231,17 +2246,18 @@ class MergeOrchestrator:
             # merge commit so the flag stays False there.
             self._aggregation_used_fixup = False
             self._aggregation_fixup_depth = 0
-            # Pre-aggregation: if the LAST branch's guardrail repair
-            # created a fix-up commit (not amend), HEAD is already a
-            # single-parent commit on top of the merge commit.  Record
-            # depth=1 so the post-aggregation HEAD topology check can
-            # walk back the right number of parents.
-            last_branch_left_fixup = bool(
-                self._last_branch_repair_ran
-                and not self._last_branch_repair_used_amend
-            )
-            if last_branch_left_fixup:
-                self._aggregation_fixup_depth = 1
+            # Pre-aggregation: each single-parent fix-up commit the LAST
+            # branch left on top of the merge commit adds one to the depth
+            # the post-aggregation HEAD topology check must walk back to
+            # reach the merge commit. Two independent sources can stack:
+            # a fast-mode guardrail repair fix-up, and an issue-ID
+            # reconciliation fix-up (they commit in that order, both on top
+            # of the merge commit). An amend-mode repair leaves HEAD as the
+            # merge commit and contributes no depth.
+            if self._last_branch_repair_ran and not self._last_branch_repair_used_amend:
+                self._aggregation_fixup_depth += 1
+            if self._last_branch_reconcile_left_fixup:
+                self._aggregation_fixup_depth += 1
             try:
                 is_published = self._is_head_published()
                 if is_published:
@@ -3006,6 +3022,278 @@ class MergeOrchestrator:
             return "runtime_sync_timeout"
         return None
 
+    # ------------------------------------------------------------------
+    # Committed-issue ID reconciliation (git three-way-merge channel)
+    # ------------------------------------------------------------------
+
+    def _issue_relpath(self, path: Path) -> str:
+        """Repo-relative, forward-slash path for git plumbing commands."""
+        return path.relative_to(self.project_root).as_posix()
+
+    def _path_in_ref(self, ref: str, path: Path) -> bool:
+        """Whether *path* existed as a committed blob at *ref*.
+
+        Used to tell the kept side of a collision (already present on the
+        current branch before the merge) from the merge-introduced side.
+        """
+        if not ref:
+            return False
+        try:
+            res = _run_git(
+                self.project_root,
+                "cat-file",
+                "-e",
+                f"{ref}:{self._issue_relpath(path)}",
+                check=False,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            # Fail closed: if we cannot prove the file predates the merge,
+            # treat it as not-present so it is not mistaken for the keeper.
+            return False
+        return res.returncode == 0
+
+    def _detect_committed_id_collisions(
+        self, issues_root: Path,
+    ) -> list[tuple[int, list[Path]]]:
+        """Group committed issue files by numeric ID and return collisions.
+
+        A numeric ID owns a collision when two or more *distinct* files carry
+        it. Two files can only differ by path (a single path is a single
+        file), so any group of size >= 2 is a genuine "two different issues,
+        one ID" collision — git already folds a byte-identical same-path
+        issue into one file, so it never reaches here.
+        """
+        groups: dict[int, list[Path]] = {}
+        for sub in ("open", "closed"):
+            directory = issues_root / sub
+            if not directory.exists():
+                continue
+            for f in sorted(directory.glob("*.yaml")):
+                match = re.match(r"^(\d+)_", f.name)
+                if match:
+                    groups.setdefault(int(match.group(1)), []).append(f)
+        return [
+            (numeric_id, paths)
+            for numeric_id, paths in sorted(groups.items())
+            if len(paths) >= 2
+        ]
+
+    def _choose_kept_issue(self, paths: list[Path], pre_merge_sha: str) -> Path:
+        """Pick which colliding file keeps its ID; the rest are renumbered.
+
+        The file that already existed at *pre_merge_sha* is the current
+        branch's copy and is kept (matching ``adopt_issue``'s "keep the main
+        copy, renumber the incoming one" semantics). When that is ambiguous
+        (zero survivors, or a pre-existing duplicate with more than one), fall
+        back to the lexicographically smallest repo-relative path so repeated
+        runs converge on the same keeper.
+        """
+        survivors = [p for p in paths if self._path_in_ref(pre_merge_sha, p)]
+        if len(survivors) == 1:
+            return survivors[0]
+        return min(paths, key=self._issue_relpath)
+
+    def _current_max_issue_id(self) -> int:
+        """Highest numeric issue ID across ``se3/issues/{open,closed}``."""
+        issues_root = self.project_root / "se3" / "issues"
+        max_id = 0
+        for sub in ("open", "closed"):
+            directory = issues_root / sub
+            if not directory.exists():
+                continue
+            for f in directory.glob("*.yaml"):
+                match = re.match(r"^(\d+)_", f.name)
+                if match:
+                    max_id = max(max_id, int(match.group(1)))
+        return max_id
+
+    def _renumber_committed_issue(self, path: Path) -> Optional[IssueMergeRecord]:
+        """Renumber one colliding issue file to ``max(ID)+1`` in place.
+
+        Renames the file, rewrites the in-file ``id``, appends an old->new
+        trace to the description, and repoints every ``#old`` cross-reference
+        across the store to ``#new`` via the shared G1 primitive. All writes
+        stay inside ``se3/issues/``. The new ID is recomputed from the current
+        on-disk maximum each call, so several renumbers in one reconcile each
+        get a distinct fresh ID.
+        """
+        match = re.match(r"^(\d+)_(.*)\.yaml$", path.name)
+        if not match:
+            return None
+        old_id = match.group(1)
+        slug = match.group(2)
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+
+        new_id = f"{self._current_max_issue_id() + 1:03d}"
+        data["id"] = new_id
+
+        # Write the renamed file WITHOUT the trace first, then unlink the old
+        # one, so the store holds exactly one #new_id-bearing file before the
+        # reference rewrite runs.
+        new_path = path.parent / f"{new_id}_{slug}.yaml"
+
+        def _dump(d: dict) -> str:
+            return yaml.dump(
+                d, default_flow_style=False, allow_unicode=True, sort_keys=False,
+            )
+
+        new_path.write_text(_dump(data), encoding="utf-8")
+        path.unlink()
+
+        # Rewrite live cross-references across the store now (the new file is
+        # on disk so its own body is scanned too; new_id is max+1 so nothing
+        # pre-existing already reads ``#new_id``). This MUST happen before the
+        # trace is appended, otherwise the rewrite would clobber the ``#old``
+        # inside the trace — the trace is a historical record, not a live ref.
+        rewrite_issue_references(self.project_root, old_id, new_id)
+
+        # Append the old->new trace at the tail so it never shifts the first
+        # non-empty description line (which display_title / slug derive from).
+        # Re-read so any reference rewrite to this file's own body is kept.
+        data = yaml.safe_load(new_path.read_text(encoding="utf-8"))
+        trace = format_renumber_trace(old_id, new_id)
+        desc = str(data.get("description", "") or "")
+        data["description"] = (
+            desc.rstrip() + "\n\n" + trace if desc.strip() else trace
+        )
+        new_path.write_text(_dump(data), encoding="utf-8")
+
+        status_dir = "closed" if path.parent.name == "closed" else "open"
+        return IssueMergeRecord(old_id=old_id, new_id=new_id, status_dir=status_dir)
+
+    def _commit_issue_reconciliation(
+        self, branch: str, records: list[IssueMergeRecord],
+    ) -> bool:
+        """Stage ``se3/issues`` and commit the renumber as a fix-up commit."""
+        add = _run_git(
+            self.project_root, "add", "-A", "--", "se3/issues",
+            check=False, timeout=30,
+        )
+        if add.returncode != 0:
+            self._log(
+                f"Failed to stage renumbered issues for '{branch}': "
+                f"{redact_text(add.stderr.strip())}",
+                level=logging.ERROR,
+            )
+            return False
+        summary = ", ".join(f"#{r.old_id}->#{r.new_id}" for r in records)
+        commit = _run_git(
+            self.project_root, "commit", "--no-edit",
+            "-m",
+            f"se3 merge: renumber colliding issue ID(s) after merging "
+            f"'{branch}' ({summary})",
+            check=False, timeout=30,
+        )
+        if commit.returncode != 0:
+            self._log(
+                f"Failed to commit issue reconciliation for '{branch}': "
+                f"{redact_text(commit.stderr.strip())}",
+                level=logging.ERROR,
+            )
+            return False
+        return True
+
+    def _restore_issues_worktree(self) -> None:
+        """Restore ``se3/issues`` to the current commit (drop uncommitted renumber).
+
+        Used to keep the working tree clean when reconciliation aborts after
+        touching files but before committing — so the already-successful git
+        merge is left intact and the next branch's ``git merge`` sees a clean
+        tree. Confined to ``se3/issues`` to honour the "only touch the issue
+        store" contract.
+        """
+        for args in (
+            ("reset", "-q", "HEAD", "--", "se3/issues"),
+            ("checkout", "--", "se3/issues"),
+            ("clean", "-fdq", "--", "se3/issues"),
+        ):
+            try:
+                _run_git(self.project_root, *args, check=False, timeout=15)
+            except subprocess.TimeoutExpired as exc:
+                self._log(
+                    f"Timed out restoring se3/issues working tree "
+                    f"({' '.join(args)}): {exc}",
+                    level=logging.ERROR,
+                )
+
+    def _reconcile_committed_issue_ids(
+        self, branch: str, pre_merge_sha: str, report: MergeReport,
+    ) -> Optional[str]:
+        """Renumber committed issues that collide on a numeric ID after merge.
+
+        A clean ``git merge`` can bring in an issue file whose numeric ID
+        (parsed from its ``NNN_slug.yaml`` filename) already names a
+        *different* issue on the current branch. Left alone that is a silent
+        duplicate ID. Detection and repair are confined to
+        ``se3/issues/{open,closed}`` (the issue files plus the ``.next_id``
+        counter) and never touch other ``se3/`` runtime state.
+
+        The side that already existed at *pre_merge_sha* is kept; the
+        merge-introduced side is renumbered to ``max(ID)+1`` via the shared G1
+        primitives (rename, old->new trace, cross-reference rewrite, advance
+        ``.next_id``), then staged and committed as an independent fix-up on
+        top of the merge commit.
+
+        Best-effort: any failure is logged, the working tree is restored to
+        the merge commit's ``se3/issues`` state, and the already-successful
+        git merge is never rolled back. Always returns ``None`` — the merge's
+        success never depends on reconciliation.
+        """
+        self._last_branch_reconcile_left_fixup = False
+        issues_root = self.project_root / "se3" / "issues"
+        if not issues_root.exists():
+            return None
+
+        try:
+            collisions = self._detect_committed_id_collisions(issues_root)
+            if not collisions:
+                return None
+
+            records: list[IssueMergeRecord] = []
+            for _numeric_id, paths in collisions:
+                keep = self._choose_kept_issue(paths, pre_merge_sha)
+                for path in paths:
+                    if path == keep:
+                        continue
+                    record = self._renumber_committed_issue(path)
+                    if record is not None:
+                        records.append(record)
+
+            if not records:
+                return None
+
+            # Push .next_id to the new global max so no future allocation
+            # re-collides with a number we just assigned.
+            advance_next_id_to_max(self.project_root)
+
+            if not self._commit_issue_reconciliation(branch, records):
+                self._restore_issues_worktree()
+                return None
+
+            report.committed_issue_renumbers.extend(records)
+            self._last_branch_reconcile_left_fixup = True
+            for rec in records:
+                self._log(
+                    f"Reconciled colliding committed issue ID for "
+                    f"'{branch}': #{rec.old_id} -> #{rec.new_id}"
+                )
+        except Exception as exc:
+            # Best-effort contract: never let a reconciliation problem roll
+            # back an already-successful git merge.
+            self._log(
+                f"Issue-ID reconciliation for '{branch}' failed: {exc}. "
+                f"The git merge is intact; issue store restored.",
+                level=logging.ERROR,
+                exc_info=True,
+            )
+            self._restore_issues_worktree()
+            return None
+        return None
+
     def _merge_single_branch(self, branch: str, report: MergeReport) -> str:
         """Merge a single branch and classify the outcome.
 
@@ -3245,6 +3533,13 @@ class MergeOrchestrator:
             )
             if pc_result is not None:
                 return pc_result
+            # Reconcile committed-issue ID collisions this merge introduced
+            # (two distinct issue files parsing to one numeric ID) before
+            # runtime-sync folds in uncommitted worktree issues. Runs after
+            # the post-condition check so it appends its fix-up commit on top
+            # of an already-verified merge commit. Best-effort: it never
+            # fails the merge.
+            self._reconcile_committed_issue_ids(branch, pre_merge_sha, report)
             sync_result = self._sync_runtime(branch, report)
             if sync_result:
                 return sync_result
