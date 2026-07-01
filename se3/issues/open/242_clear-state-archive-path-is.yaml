@@ -1,4 +1,4 @@
-id: '032'
+id: '242'
 title: clear_state() archive path is never used in normal flow completion
 description: PersistenceManager.clear_state() moves engine.json to se3/state/archive/,
   but it is only called from salvage_cmd.py. Normal flow completion overwrites engine.json
