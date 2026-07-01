@@ -147,6 +147,19 @@ class Issue:
         )
 
 
+def _numeric_id_or_none(value: object) -> Optional[int]:
+    """Return the integer value of an issue ID, or ``None`` when non-numeric.
+
+    Used to decide whether an adopt actually *renumbered* the issue (old vs new
+    integer differ) before invoking the ``#NNN`` reference-rewrite / trace
+    primitives, which only make sense for numeric IDs.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _make_slug(title: str) -> str:
     """Generate a URL-friendly slug from a title.
 
@@ -351,6 +364,7 @@ class IssueManager:
 
         self._ensure_dirs()
 
+        original_id = issue.id
         new_id = self._next_id()
         adopted = replace(issue, id=new_id)
 
@@ -363,9 +377,40 @@ class IssueManager:
         filepath = target_dir / f"{new_id}_{slug}.yaml"
         self._write_issue(filepath, adopted)
 
+        # Runtime-sync parity with the git merge channel: reuse the shared
+        # renumber primitives so both channels satisfy the same "never lose /
+        # never collide" guarantee. Imported lazily because merge/__init__ pulls
+        # orchestrator + runtime_sync, which reference this module — a top-level
+        # import would form a cycle.
+        from .merge.issue_renumber import (
+            advance_next_id_to_max,
+            format_renumber_trace,
+            rewrite_issue_references,
+        )
+
+        old_num = _numeric_id_or_none(original_id)
+        if old_num is not None and old_num != int(new_id):
+            # Repoint every #<old> reference first, then re-read from disk so the
+            # trace line we append last (which itself embeds "#<old>") is not
+            # clobbered by the #<old> -> #<new> rewrite of the same file.
+            rewrite_issue_references(self.project_root, original_id, new_id)
+            reread = self._read_issue(filepath)
+            if reread is not None:
+                adopted = reread
+            adopted.description = (
+                adopted.description.rstrip()
+                + "\n\n"
+                + format_renumber_trace(original_id, new_id)
+            )
+            self._write_issue(filepath, adopted)
+
+        # The adopt just introduced a new highest ID; keep .next_id at max+1 so
+        # a future allocation can never re-hand out a live number.
+        advance_next_id_to_max(self.project_root)
+
         logger.info(
             "Adopted issue as %s (was %s): %s",
-            new_id, issue.id, adopted.display_title,
+            new_id, original_id, adopted.display_title,
         )
         return adopted
 

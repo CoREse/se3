@@ -156,3 +156,28 @@ def format_renumber_trace(old_id: object, new_id: object) -> str:
         A line of the form ``旧号 #014 → 新号 #240 (se3 merge)``.
     """
     return f"旧号 #{_norm_id(old_id):03d} → 新号 #{_norm_id(new_id):03d} (se3 merge)"
+
+
+# Matches one full audit line produced by :func:`format_renumber_trace`. Kept
+# next to the formatter so the two never drift: whoever changes the trace text
+# updates the pattern that strips it back out.
+_TRACE_LINE_RE = re.compile(r"^\s*旧号 #\d+ → 新号 #\d+ \(se3 merge\)\s*$")
+
+
+def strip_renumber_traces(description: str) -> str:
+    """Return *description* with every renumber-trace line removed.
+
+    The runtime-sync channel dedups worktree issues against the main project by
+    content signature. Once an issue has been renumbered, its main-project copy
+    carries a :func:`format_renumber_trace` line that the un-renumbered worktree
+    source lacks — so a naive signature would no longer match on a re-run and
+    the merge would wrongly re-adopt an already-merged issue. Stripping the
+    trace before signing keeps the dedup (and thus idempotency) intact.
+    """
+    if not description:
+        return description
+    kept = [
+        line for line in description.splitlines()
+        if not _TRACE_LINE_RE.match(line)
+    ]
+    return "\n".join(kept).rstrip()

@@ -26,6 +26,7 @@ from .issue_renumber import (
     advance_next_id_to_max,
     format_renumber_trace,
     rewrite_issue_references,
+    strip_renumber_traces,
 )
 from .orchestrator import MergeOrchestrator, MergeReport
 from .runtime_sync import (
@@ -85,6 +86,7 @@ __all__ = [
     "RuntimeSyncCollision",
     "StrategyDecider",
     "StrategyDecision",
+    "strip_renumber_traces",
     "sync_branch_runtime",
     "SyncReport",
     "VersionNotAdvanced",

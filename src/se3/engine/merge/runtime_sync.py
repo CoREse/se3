@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Final, Iterator, Optional
 
 from .cleanup import _get_worktree_path_for_branch
+from .issue_renumber import strip_renumber_traces
 
 logger = logging.getLogger(__name__)
 
@@ -492,12 +493,21 @@ def _issue_content_signature(issue: "Issue") -> tuple[str, str, str]:
     duplicates) when their normalized display title, description, and type
     match. Whitespace is collapsed and case is folded so trivially-different
     renderings of the same text do not defeat the dedup.
+
+    The renumber-trace line an already-adopted main-project issue carries is
+    stripped before signing so it still matches its un-renumbered worktree
+    source on a re-run — otherwise dedup would miss and the issue would be
+    wrongly re-adopted, breaking idempotency.
     """
 
     def _norm(text: str | None) -> str:
         return " ".join((text or "").split()).strip().lower()
 
-    return (_norm(issue.display_title), _norm(issue.description), _norm(issue.type))
+    return (
+        _norm(issue.display_title),
+        _norm(strip_renumber_traces(issue.description)),
+        _norm(issue.type),
+    )
 
 
 def merge_worktree_issues(
