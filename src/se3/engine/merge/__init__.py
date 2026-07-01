@@ -22,6 +22,11 @@ from .guardrails import (
     check_spec_diff,
 )
 from .human_call import HumanCallWriter
+from .issue_renumber import (
+    advance_next_id_to_max,
+    format_renumber_trace,
+    rewrite_issue_references,
+)
 from .orchestrator import MergeOrchestrator, MergeReport
 from .runtime_sync import (
     DEST_HASH_UNAVAILABLE,
@@ -44,6 +49,7 @@ from .version_aggregator import (
 )
 
 __all__ = [
+    "advance_next_id_to_max",
     "aggregate_and_apply",
     "AggregateResult",
     "build",
@@ -59,6 +65,7 @@ __all__ = [
     "DecisionAction",
     "DEST_HASH_UNAVAILABLE",
     "FileResolution",
+    "format_renumber_trace",
     "GuardrailReport",
     "GuardrailViolation",
     "HumanCallWriter",
@@ -74,6 +81,7 @@ __all__ = [
     "MergeReport",
     "MergeStrategy",
     "read_version_at_ref",
+    "rewrite_issue_references",
     "RuntimeSyncCollision",
     "StrategyDecider",
     "StrategyDecision",
