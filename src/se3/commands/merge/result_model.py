@@ -266,6 +266,15 @@ class MergeReport:
     # channels report renumbers through one uniform shape.
     committed_issue_renumbers: list = field(default_factory=list)
 
+    # ``#old`` references whose renumber target could not be proven because
+    # SEVERAL merge-introduced issues shared the same old numeric ID. Such a
+    # reference is deliberately left un-rewritten (rewriting to a guess would
+    # silently corrupt it); each entry
+    # ``{"file": <repo-relative path>, "old_id": "005",
+    # "candidates": ["011", "012"]}`` surfaces the ambiguity to operators,
+    # mirroring the note the reconciler appends inside the affected issue.
+    ambiguous_issue_references: list = field(default_factory=list)
+
     # --- Rollback state ---
     rollback_failed: bool = False
 
@@ -398,6 +407,20 @@ class MergeReport:
             "runtime_sync_discarded": self.runtime_sync_discarded,
             "runtime_sync_collision_path": self.runtime_sync_collision_path,
             "runtime_sync_idempotent_bypasses": self.runtime_sync_idempotent_bypasses,
+            # Serialized as plain dicts (not IssueMergeRecord instances) so the
+            # legacy-dict consumers (JSON persistence, log inspection) need no
+            # knowledge of the runtime_sync record type.
+            "committed_issue_renumbers": [
+                {
+                    "old_id": r.old_id,
+                    "new_id": r.new_id,
+                    "status_dir": r.status_dir,
+                }
+                for r in self.committed_issue_renumbers
+            ],
+            "ambiguous_issue_references": [
+                dict(entry) for entry in self.ambiguous_issue_references
+            ],
             "rollback_failed": self.rollback_failed,
             "unattempted_branches": self.unattempted_branches,
             "outcomes": [

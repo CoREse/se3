@@ -1,0 +1,37 @@
+id: '243'
+description: 'daemon 控制面会被磁盘上的大 engine.json 打瘫/打满,已发生一次 webui 全面冻结(new task 无反应)。py-spy
+  实锤两个病灶:
+
+
+  1)【事件循环冻结,已复现修复】aggregator._active_worktree_run_roots(aggregator.py:620)每个 push
+  tick(~1s)对 se3/worktrees/ 每个直接子目录的 se3/state/engine.json 做无缓存全量 json.loads,且在事件循环线程上执行。当时存在
+  50MB+34MB 两个 completed worktree 的 engine.json → 主线程 100% 卡在 raw_decode → _push_loop
+  饿死 → webui 收不到任何推送,前后两个 daemon 实例(2425360/2486563)均如此。归档这两个 worktree 后主线程降至 ~11%。
+
+
+  2)【executor 持续满载,仍在发生】归档后 daemon 仍烧 ~90% CPU,形态变为 3 个 asyncio executor 线程各 ~30%:历史/归档根周期性重枚举(HISTORICAL_ROOTS_TTL=60s)牵动
+  se3/history(676 条)、se3/state/archive(15 个 engine 快照,最大 102MB)、se3/worktrees/.archive(16
+  个)。to_thread 保住了事件循环,但解析量本身没有护栏。
+
+
+  修复方向:
+
+  - 对所有 engine.json/快照读取加 (path, mtime, size) 键控缓存——completed 的文件永不再变,只该解析一次;
+
+  - 大小护栏:热路径只需要 flow_id / is_worktree_mode / status 少数顶层键,超阈值文件不做全量解析(降级读取或跳过+告警);
+
+  - 任何磁盘 JSON 解析一律不进事件循环线程(统一 to_thread/executor);
+
+  - 验收:两个巨型 engine.json 在位时 daemon CPU 仍 <10%,webui 推送不受影响。
+
+
+  关联:tests/ISSUE_209_FREEZE_DIAGNOSIS.md(starved _push_loop)、issue #241。根源性的状态文件瘦身另立
+  issue(engine.json 热/冷拆分)。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-02T10:03:27.357074'
+updated_at: '2026-07-02T10:03:27.357074'
+title: daemon 热路径反复解析大 JSON:缓存+大小护栏+挪出事件循环
+priority: high
+type: bug

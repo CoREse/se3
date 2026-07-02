@@ -638,6 +638,39 @@ class TestNextId:
             mgr.create(f"Issue {i}")
         assert mgr._next_id() == "006"
 
+    def test_lagging_counter_cannot_remint_live_id(self, tmp_path):
+        """A stale .next_id behind the on-disk store never re-hands a live ID.
+
+        Regression: the allocator used to trust the counter blindly, so a
+        counter of 5 with 005_*.yaml already on disk minted a second 005.
+        """
+        mgr = IssueManager(tmp_path)
+        for i in range(5):
+            mgr.create(f"Issue {i}")  # 001..005 -> counter 6
+        (tmp_path / "se3" / "issues" / ".next_id").write_text("5")
+
+        assert mgr._next_id() == "006"
+
+    def test_ahead_counter_is_honoured(self, tmp_path):
+        """An ahead counter may be a peer's live reservation — keep it."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("Issue")  # 001 -> counter 2
+        (tmp_path / "se3" / "issues" / ".next_id").write_text("9")
+
+        assert mgr._next_id() == "009"
+
+    def test_parsed_id_field_counts_toward_reconcile(self, tmp_path):
+        """A file whose parsed ``id`` outruns its filename still owns that ID."""
+        mgr = IssueManager(tmp_path)
+        mgr._ensure_dirs()
+        (tmp_path / "se3" / "issues" / "open" / "005_x.yaml").write_text(
+            "id: '100'\ndescription: hand-edited\nstatus: open\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "se3" / "issues" / ".next_id").write_text("6")
+
+        assert mgr._next_id() == "101"
+
 
 class TestIssueType:
     """Tests for Issue type field and filtering."""

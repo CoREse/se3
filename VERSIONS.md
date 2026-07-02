@@ -75,6 +75,15 @@
 
 
 
+
+## 11.6.0 - 2026-07-02
+
+- Guarantee that no issue is lost during `se3 merge` across both git three-way merge and runtime-sync channels
+- Detect duplicate issue IDs in committed-issue merges and automatically renumber the incoming worktree's copy instead of silently leaving a collision
+- Coordinate new ID assignment with the `.next_id` counter, reserving under the fcntl lock and advancing it monotonically (only ever increasing) to at least the library max ID + 1
+- Rewrite all provably-attributable `#old` issue cross-references to `#new` library-wide using exact `#NNN` token matching, leaving ambiguous references untouched
+- Record each renumber as a traceable old→new note inside the affected issue and report unresolved ambiguous references in the merge report
+- Align the existing runtime-sync `adopt_issue` renumbering path with the new git-channel logic so both satisfy the same never-lost / never-collide guarantee
 ## 11.5.0 - 2026-07-01
 
 - Show each history session's flow_id on its list card meta row, truncated with ellipsis and a full-value tooltip for readability and copy

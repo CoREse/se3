@@ -1,0 +1,68 @@
+id: '247'
+description: '现场(flow 20260701-110644_b2f4c0ee,已实测复现+归因):
+
+
+  - implement/fix 步骤的 agent 配置是 opus(cmd=oclaude,即 `claude --settings ~/.claude/opus.json`,opus.json
+  内 `"model": "claude-opus-4-8[1m]"`);
+
+  - 但 2026-07-02 11:18 起所有 attempt 的 stream-json init 实际上报 `claude-fable-5`(webui
+  徽章显示正确,不是显示 bug);
+
+  - 根因:`claude_runner.build_call_args`(claude_runner.py:460)对非 spec 步骤在 prompt 之后追加第二个
+  `--settings se3/tmp/spec_write_guard_settings.json`(spec-write PreToolUse hook)。**claude
+  CLI 对重复 --settings 是后者整体替换前者,不是叠加合并**(2.1.197/2.1.198 均实测确认),于是 oclaude 的 flag settings
+  连同 model 被静默丢弃,model 回落到 `--setting-sources user` 的 ~/.claude/settings.json;
+
+  - 代码注释与 spec_write_hook.py 模块 docstring 里 "loaded *additively*" 的假设是错的——--settings
+  的 "additional settings" 语义只对 user/project 设置源叠加,同一 flag 重复出现时后者胜;
+
+  - 之前没暴露是因为 user settings.json 的 model 恰好也是 opus(opus.json 本来就是它的拷贝);07-02 09:29
+  用户把 user settings 的 model 改为 claude-fable-5[1m] 后,被覆盖的事实立即显形;
+
+  - 影响面:所有依赖 `--settings` 传配置的 claude-code agent wrapper,在带 spec guard 的步骤里其 flag
+  settings(model、permissions、effortLevel 等)全部被吞。
+
+
+  修复方案(已在本机对 claude 2.1.196/197/198 实测打通,方向:guard 停用 settings 通道,hook 本体不动):
+
+
+  1. 【运载通道】改用 `--plugin-dir <dir>` 注入 hook:claude plugin 可携带 hooks(hooks/hooks.json),`--plugin-dir`
+  是纯 CLI 参数、仅本次会话生效、可重复、**叠加式加载,不参与 --settings 覆盖语义**。实测:与 `--settings opus.json`
+  同时使用时 init model 保持 claude-opus-4-8[1m];写 se3/specs/ 被拒且 agent 收到 hook 的完整自定义拒绝理由;specs
+  外写入正常;headless + --dangerously-skip-permissions 无信任弹窗;2.1.196 起三个版本均支持该 flag。
+
+  2. 【生成物】spec_write_hook.py:hook 本体(main/_emit_deny/路径判定/symlink resolve)一行不动;`_guard_settings_payload`/`ensure_guard_settings`
+  替换为 `ensure_guard_plugin(project_root)`,幂等生成 `se3/tmp/spec_write_guard_plugin/{.claude-plugin/plugin.json,
+  hooks/hooks.json}`,hook command 沿用 `shlex.quote(sys.executable) -m se3.engine.spec_write_hook`。
+
+  3. 【argv】claude_runner.build_call_args:参数 `spec_guard_settings` 改名 `spec_guard_plugin`,`["--settings",
+  …]` 改为 `["--plugin-dir", …]`;agent_runner/codex_runner/claude_interactive_runner
+  同步签名(后两者照旧 parity 忽略)。
+
+  4. 【判定不变】llm_caller._resolve_spec_guard_settings 的启用判定(SPEC_WRITE_ALLOWED_STEPS
+  豁免 + spec_write_protection.hook_enabled)保持不变,仅换生成函数。
+
+  5. 【测试】test_spec_write_hook.py 中 hook 行为用例全部保留;改写"生成 settings 文件"与 argv 断言(--settings
+  → --plugin-dir)相关用例;post-step spec diff 兜底(snapshot/diff/capture)不动,仍是第二道防线。
+
+
+  验收:
+
+  - 带 guard 的步骤 argv 不再含第二个 --settings;用 oclaude 跑 implement,stream init 上报 model
+  为 opus.json 指定的 claude-opus-4-8[1m];
+
+  - 该步骤内 Write/Edit/NotebookEdit 写 se3/specs/ 仍被拒且带自定义理由,写其它路径不受影响;
+
+  - update_spec 与全部 sync 步骤照旧豁免。'
+status: open
+tags:
+- llm-caller
+- claude-runner
+- spec-guard
+source: human
+created_at: '2026-07-02T15:34:29.098050'
+updated_at: '2026-07-02T15:34:29.098050'
+title: spec-write guard 用第二个 --settings 注入 hook,整体覆盖 agent wrapper 的 --settings(model
+  被静默替换)
+priority: high
+type: bug

@@ -6,7 +6,6 @@ stored as YAML files in se3/issues/open/ and se3/issues/closed/ directories.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import re
 import shutil
@@ -212,56 +211,29 @@ class IssueManager:
     def _next_id(self) -> str:
         """Return the next sequential issue ID (zero-padded 3 digits).
 
-        Uses a counter file (se3/issues/.next_id) for monotonic IDs.
-        Falls back to scanning existing files if the counter file doesn't
-        exist yet (first run or migration).
+        Uses a counter file (se3/issues/.next_id) for monotonic IDs, but
+        never trusts it blindly: every allocation re-scans the issue store
+        and hands out ``max(counter, max existing ID + 1)``, so a stale or
+        lagging counter can never re-mint a number a live issue already
+        owns. An *ahead* counter is honoured as-is — it may be a peer's
+        live reservation, and skipping numbers is harmless while reusing
+        one is a hard-guarantee violation.
 
-        The read-modify-write on the counter file is serialized via
+        The read-scan-write on the counter file is serialized via
         ``fcntl.flock(LOCK_EX)`` so concurrent creators (CLI, webui,
         programmatic discovery) never allocate the same ID.
         """
         self._ensure_dirs()
-        counter_file = self.issues_dir / ".next_id"
 
-        # Open (or create) the counter file and acquire an exclusive lock
-        # before reading/incrementing.  ``a+`` mode creates the file if it
-        # does not exist and allows reading after seeking to 0.
-        with open(counter_file, "a+") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            try:
-                fh.seek(0)
-                raw = fh.read().strip()
+        # Delegate to the single shared reservation primitive so EVERY
+        # allocator — create, adopt, and the git-merge collision-repair
+        # channel — is serialized by the same ``.next_id`` fcntl lock and
+        # agrees on ``max(counter, on-disk max + 1)``. Imported lazily because
+        # merge/__init__ pulls orchestrator + runtime_sync, which reference
+        # this module — a top-level import would form a cycle.
+        from .merge.issue_renumber import reserve_next_id
 
-                next_val = None
-                if raw:
-                    try:
-                        next_val = int(raw)
-                    except ValueError:
-                        pass
-
-                if next_val is None:
-                    # Bootstrap: scan existing files to find the max
-                    max_id = 0
-                    for directory in [self.open_dir, self.closed_dir]:
-                        if not directory.exists():
-                            continue
-                        for f in directory.glob("*.yaml"):
-                            match = re.match(r"^(\d+)_", f.name)
-                            if match:
-                                num = int(match.group(1))
-                                if num > max_id:
-                                    max_id = num
-                    next_val = max_id + 1
-
-                # Write the incremented counter (overwrite the file)
-                fh.seek(0)
-                fh.truncate()
-                fh.write(str(next_val + 1))
-                fh.flush()
-            finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
-
-        return f"{next_val:03d}"
+        return f"{reserve_next_id(self.project_root):03d}"
 
     def _find_issue_file(self, issue_id: str) -> Optional[Path]:
         """Find an issue file by ID across open/ and closed/ directories."""
@@ -335,7 +307,9 @@ class IssueManager:
         logger.info("Created issue %s: %s", issue_id, issue.display_title)
         return issue
 
-    def adopt_issue(self, issue: Issue) -> Issue:
+    def adopt_issue(
+        self, issue: Issue, defer_renumber_finalize: bool = False,
+    ) -> Issue:
         """Adopt an externally-originated *issue* under a freshly-allocated ID.
 
         Unlike :meth:`create`, this preserves every field of *issue* except the
@@ -347,11 +321,23 @@ class IssueManager:
 
         The new ID is allocated via :meth:`_next_id`, whose read-modify-write on
         ``se3/issues/.next_id`` is serialized by ``fcntl.flock`` so concurrent
-        allocators never collide. The original ``issue.id`` is discarded.
+        allocators never collide — and which reconciles the counter against the
+        on-disk store before choosing, so even a stale/lagging ``.next_id``
+        cannot hand out a number an existing issue file already owns. The
+        original ``issue.id`` is discarded.
 
         Args:
             issue: The source issue (e.g. loaded from a worktree's
                 ``se3/issues/``). Its ``description`` must be non-empty.
+            defer_renumber_finalize: When True, skip the per-file ``#<old>``
+                reference rewrite and the renumber-trace append, leaving them
+                to the caller. A batch adopter MUST defer: rewriting each
+                file at adoption time is a multi-phase text edit, and a token
+                one adoption produces (``#005``) is indistinguishable from an
+                original ``#005`` reference a later adoption's rewrite would
+                chain onward. The batch instead runs ONE simultaneous
+                ``rewrite_issue_references_bulk`` over all adopted files and
+                then appends traces via :meth:`append_renumber_trace`.
 
         Returns:
             The adopted :class:`Issue` with its new ID.
@@ -384,28 +370,49 @@ class IssueManager:
         # import would form a cycle.
         from .merge.issue_renumber import (
             advance_next_id_to_max,
-            format_renumber_trace,
+            find_issue_id_owner,
             rewrite_issue_references,
         )
 
         old_num = _numeric_id_or_none(original_id)
-        if old_num is not None and old_num != int(new_id):
-            # Repoint every #<old> reference first, then re-read from disk so the
-            # trace line we append last (which itself embeds "#<old>") is not
-            # clobbered by the #<old> -> #<new> rewrite of the same file.
-            rewrite_issue_references(self.project_root, original_id, new_id)
-            reread = self._read_issue(filepath)
-            if reread is not None:
-                adopted = reread
-            adopted.description = (
-                adopted.description.rstrip()
-                + "\n\n"
-                + format_renumber_trace(original_id, new_id)
+        renumbered = old_num is not None and old_num != int(new_id)
+        if renumbered and not defer_renumber_finalize:
+            # Repoint #<old> references first, then append the trace, so the
+            # trace line (which itself embeds "#<old>") is not clobbered by
+            # the #<old> -> #<new> rewrite of the same file.
+            #
+            # #<old> is ambiguous ONLY when the retired number is still owned by
+            # another (kept) issue on disk — the true collision case, where a
+            # main-project #<old> means that kept issue and must not move; there
+            # we scope the rewrite to the incoming file so only its own
+            # self-references follow to #<new>. When no kept side owns the old
+            # number (adopt reallocates unconditionally, so the incoming ID is
+            # often simply free in the main store), every #<old> across the
+            # store meant this issue, so rewrite them all — otherwise those
+            # references would be left dangling on a number that now belongs to
+            # nobody.
+            #
+            # Ownership is resolved by parsed-``id``-then-filename authority
+            # (find_issue_id_owner), NOT filename prefix alone: a kept issue
+            # whose filename and YAML ``id`` disagree (e.g. 010_main.yaml with
+            # id: '005') still owns its parsed number, so a #<old> naming it
+            # must be scoped out and left pointing at it. The just-written file
+            # carries new_id — and is excluded outright — so it can never be
+            # mistaken for a kept side.
+            kept_side = find_issue_id_owner(
+                self.project_root, original_id, exclude_files=[filepath],
             )
-            self._write_issue(filepath, adopted)
+            scope = [filepath] if kept_side is not None else None
+            rewrite_issue_references(
+                self.project_root, original_id, new_id, scope_files=scope,
+            )
+            traced = self.append_renumber_trace(new_id, original_id)
+            if traced is not None:
+                adopted = traced
 
-        # The adopt just introduced a new highest ID; keep .next_id at max+1 so
-        # a future allocation can never re-hand out a live number.
+        # The adopt just introduced a new highest ID; advance .next_id past it
+        # so a future allocation can never re-hand out a live number (advance
+        # only — an ahead counter may be a peer's live reservation).
         advance_next_id_to_max(self.project_root)
 
         logger.info(
@@ -413,6 +420,39 @@ class IssueManager:
             new_id, original_id, adopted.display_title,
         )
         return adopted
+
+    def append_renumber_trace(
+        self, issue_id: str, old_id: str,
+    ) -> Optional[Issue]:
+        """Append the "old → new" audit line to an already-written issue.
+
+        Completes a deferred adopt (``adopt_issue(...,
+        defer_renumber_finalize=True)``): the batch caller appends traces
+        only AFTER its one-shot bulk reference rewrite has run, so the
+        trace's embedded ``#<old>`` — a historical record, not a live
+        reference — is never repointed.
+
+        Returns:
+            The updated :class:`Issue`, or ``None`` when *issue_id* has no
+            file on disk.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            return None
+        issue = self._read_issue(filepath)
+        if issue is None:
+            return None
+
+        # Lazy for the same merge/__init__ import cycle as in adopt_issue.
+        from .merge.issue_renumber import format_renumber_trace
+
+        issue.description = (
+            issue.description.rstrip()
+            + "\n\n"
+            + format_renumber_trace(old_id, issue_id)
+        )
+        self._write_issue(filepath, issue)
+        return issue
 
     def load(self, issue_id: str) -> Optional[Issue]:
         """Load an issue by ID from open/ or closed/ directory."""

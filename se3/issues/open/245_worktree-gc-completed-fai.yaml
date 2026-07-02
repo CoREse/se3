@@ -1,0 +1,30 @@
+id: '245'
+description: 'worktree run 的清理只挂在 _finalize_worktree_merge(run.py:2985)的正常收尾上;flow
+  一旦 pause 过(resume 不再触发收尾 merge)、或人工手动 merge,worktree 就永久泄漏在 se3/worktrees/。实证:
+
+  - worktree-run-webui-discovery-m-20260623(6/23 completed)赖了 7 天,50MB engine.json;其分支
+  bae64f67(MERGING lifecycle 功能)至今未 merge 回 master,也无人知晓;
+
+  - worktree-session-session-id-20260630(6/30 completed)赖了 2 天,34MB;
+
+  - 两者叠加直接把 daemon 事件循环打满,webui 冻结(见热路径 issue)。
+
+
+  方案:
+
+  - 新增清扫器:daemon 周期任务或 se3 worktree gc 命令,把 status 为 completed/failed 且超龄(如 24h)的
+  worktree run 归档进 se3/worktrees/.archive/(沿用现有 worktree_<name>-<epoch> 命名),git worktree
+  prune;
+
+  - 分支安全:已 merge 的分支随清理删除;未 merge 的分支必须保留 ref,并显式告警"存在 completed 但未 merge 的 worktree
+  分支"(本次 webui-discovery 就是漏网案例,pause 后 resume 完成却从未 merge 的 flow 同理,如 20260630-174542_632f6407);
+
+  - gc 报告列出:归档了什么、保留了哪些未 merge 分支、腾出多少空间。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-02T10:03:28.083931'
+updated_at: '2026-07-02T10:03:28.083931'
+title: worktree 生命周期 GC:completed/failed 的 worktree run 泄漏无人清理
+priority: medium
+type: enhancement

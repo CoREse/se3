@@ -1415,3 +1415,25 @@ class TestFailureReasonRendering:
         assert "Runtime sync collisions (sidecar bypass):" in body
         # Audit-only header MUST be absent when no audit-only rows exist.
         assert "audit-only" not in body
+
+    def test_success_with_committed_issue_renumbers_rendered(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The git-channel #old -> #new renumber mapping appears in the summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import IssueMergeRecord
+
+        report = MergeReport(
+            success=True,
+            merged_branches=["feature"],
+            committed_issue_renumbers=[
+                IssueMergeRecord(old_id="005", new_id="011", status_dir="open"),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 0
+        body = captured[0]["content"]
+        assert "Committed issue renumbers" in body
+        assert "#005 -> #011 (open)" in body

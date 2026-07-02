@@ -25,7 +25,10 @@ from .human_call import HumanCallWriter
 from .issue_renumber import (
     advance_next_id_to_max,
     format_renumber_trace,
+    mask_issue_references,
     rewrite_issue_references,
+    rewrite_issue_references_bulk,
+    rewrite_references_in_added_lines,
     strip_renumber_traces,
 )
 from .orchestrator import MergeOrchestrator, MergeReport
@@ -76,6 +79,7 @@ __all__ = [
     "IssueMergeRecord",
     "merge_worktree_issues",
     "LLMResolution",
+    "mask_issue_references",
     "max_bump",
     "MergeGuardrailsCheck",
     "MergeOrchestrator",
@@ -83,6 +87,8 @@ __all__ = [
     "MergeStrategy",
     "read_version_at_ref",
     "rewrite_issue_references",
+    "rewrite_issue_references_bulk",
+    "rewrite_references_in_added_lines",
     "RuntimeSyncCollision",
     "StrategyDecider",
     "StrategyDecision",

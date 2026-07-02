@@ -281,6 +281,14 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
     failure branches do not lose visibility of partial-sync state. Each
     section is gated by ``if`` so empty fields produce no output.
 
+    Also renders committed-issue renumbers from the git three-way-merge
+    channel: those land in a fix-up commit with no other user-visible trace,
+    so a summary that omitted them would silently hide that an issue's number
+    changed. They ride along in this helper (despite the "runtime sync" name)
+    because it is the one rendering hook every CLI branch already calls —
+    a renumber that happened before a later branch failed must stay visible
+    on the failure paths too.
+
     Called from every CLI branch (success, rollback_failed, pending_human,
     generic-failure) to keep the rendered set consistent. A failure branch
     that completed some tier-A syncs before halting still surfaces
@@ -373,6 +381,37 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
                     f"(src_hash={collision.src_hash[:8]}.. "
                     f"dest_hash={dest_hash_render})"
                 )
+    # getattr guard: pre-typed-model report stubs in tests may lack the field.
+    committed_renumbers = getattr(report, "committed_issue_renumbers", None)
+    if committed_renumbers:
+        lines.append("")
+        lines.append(
+            "Committed issue renumbers (a merged branch's issue shared its "
+            "numeric ID with an existing issue; the incoming copy took a "
+            "new ID and #old references were rewritten):"
+        )
+        for record in committed_renumbers:
+            lines.append(
+                f"  - #{record.old_id} -> #{record.new_id} "
+                f"({record.status_dir})"
+            )
+    # getattr guard: pre-typed-model report stubs in tests may lack the field.
+    ambiguous_refs = getattr(report, "ambiguous_issue_references", None)
+    if ambiguous_refs:
+        lines.append("")
+        lines.append(
+            "Ambiguous issue references (several merged issues shared one "
+            "old ID, so these #old references could not be repointed to a "
+            "single target; a note was recorded in each affected issue):"
+        )
+        for entry in ambiguous_refs:
+            candidates = ", ".join(
+                f"#{c}" for c in entry.get("candidates", [])
+            )
+            lines.append(
+                f"  - {entry.get('file')}: #{entry.get('old_id')} "
+                f"(candidates: {candidates})"
+            )
 
 
 def _split_merged_buckets(

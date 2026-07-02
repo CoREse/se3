@@ -1,0 +1,31 @@
+id: '244'
+description: 'flow 引擎把每个 step 的完整 inputs/outputs 内联持久化进单一 engine.json,且 step 间大工件按值复制,导致状态文件失控膨胀。实测解剖一个
+  31-step 的 completed flow(20260623-100014_0f932622,50MB):
+
+  - test_results(完整 pytest 结果,~700KB)被复制进 25 个 step 的 inputs = 17.5MB;
+
+  - spec_content(整份 spec 文档,~291KB)复制进 29 个 step = 8.5MB;
+
+  - fix_context(2.3MB,内部再嵌套一份 test_results)在 outputs 里又存一遍;
+
+  - spec_requirement_baseline 1.77MB × 3 份。
+
+  代价:①每次状态持久化(至少每个 step 转换)整体重写几十 MB;②resumable 快照同病(当前 in-flight flow 已 8.7MB);③daemon/webui
+  只想要 flow_id/status 也得整文件解析(已引发 daemon 冻结,见热路径 issue)。
+
+
+  方案(一期,必做):热/冷拆分——engine.json 只留小头部(flow 身份、status、current_step、各 step 状态表,KB 级);每个
+  step 的 inputs/outputs 落 state/steps/<step_id>.json,按需加载。resume 只装载相关 step;daemon
+  只读头部。旧格式读兼容(迁移读取器),新写入用新格式。
+
+  方案(二期,可选):大工件按引用传递——inputs 存上游 step 引用或内容寻址 artifacts/<sha>.json,消灭 25 份拷贝和嵌套复制。
+
+  验收:同规模 flow 的 engine.json 头部 <100KB;每步持久化写入量与该步产出成正比,不随 step 数累积。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-02T10:03:27.713485'
+updated_at: '2026-07-02T10:03:27.713485'
+title: engine.json 热/冷拆分:step 工件按值复制导致状态文件膨胀到 50MB
+priority: high
+type: refactor

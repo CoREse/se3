@@ -212,6 +212,19 @@ class TestMergeReportLegacyCompatibility:
         assert d["outcomes"][0]["success"] is True
         assert d["outcomes"][0]["failure_reason"] == ""
 
+    def test_to_legacy_dict_committed_issue_renumbers(self) -> None:
+        """Committed-issue renumbers survive serialization as plain dicts."""
+        from se3.engine.merge.runtime_sync import IssueMergeRecord
+
+        r = MergeReport()
+        r.committed_issue_renumbers.append(
+            IssueMergeRecord(old_id="005", new_id="011", status_dir="open")
+        )
+        d = r.to_legacy_dict()
+        assert d["committed_issue_renumbers"] == [
+            {"old_id": "005", "new_id": "011", "status_dir": "open"}
+        ]
+
     def test_merged_branches_alias(self) -> None:
         r = MergeReport()
         r.add_outcome(MergeOutcome(branch="feat/a", success=True))

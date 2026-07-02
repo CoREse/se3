@@ -1,0 +1,58 @@
+id: '246'
+description: '现场(flow 20260701-110644_b2f4c0ee,已用 /proc + fdinfo 完整取证):
+
+
+  - `se3 run --resume`(PID 2504448,7/1 11:17 起,pts/23 前台)把 flow 一路推到 09_test completed(17:54:17),10_self_check
+  建为 pending 后**连 history 文件都没写出**就停了;
+
+  - 该进程此后 40+ 小时:无任何子进程(LLM 子进程已死),主线程阻塞在**裸 tty 读**(wchan=wait_woken,即 input()/readline
+  式读 stdin,不是 prompt_toolkit 的 epoll 等待);
+
+  - 全程**持有 se3/state/merge.lock(fd 4)**,期间所有其它同步 run/merge 被全局互斥锁挡死;
+
+  - engine.json 始终 status=running / step=pending → **webui 显示 RUNNING**,daemon/webui
+  对"其实在等终端输入"一无所知;
+
+  - se3/calls/ 里没有该步的任何 retry_decision/confirm call 文件 → 挂点**不是** failure-decision
+  双通道路径(那条路无条件先写 call 文件,run.py `_route_failure_decision`);
+
+  - 附:进程 fd 40/41 是从 VS Code 终端环境**继承泄漏**的别的终端(pts/19/22)的 pty master,与本挂死无关(红鲱鱼,已排除)。
+
+
+  机制(高置信):某个**只面向终端的阻塞式 stdin 提示**在 flow 中途触发,而它既不写 call 文件、也不把 flow 状态翻成 paused/pending_input、也无超时。已核实的候选点(stable
+  run.py):
+
+  - `prompt_user_choice()` 的裸 `input("Select (number): ")`(run.py:395)——全包唯一裸 input();
+
+  - 最吻合的调用方:`_handle_step_interrupt`(step 执行中收到 KeyboardInterrupt → 弹 "Additional
+  Instruction" 多行输入)。注意 Ctrl+C 发给整个前台进程组,**LLM 子进程同刻被 SIGINT 杀死**——这同时解释了"子进程死了"和"父进程随后在等输入";
+
+  - 次候选:confirm 人工审阅菜单(run.py:289,同样无 call 文件、无状态翻转)。
+
+  精确到行可在复现/下次挂死时用 `sudo py-spy dump --pid <pid>` 一锤定音。
+
+
+  修复要求:
+
+  1. 【单一收口】所有 flow 中途的人工等待(含 step-interrupt 附加指令、confirm 审阅、任何菜单)必须走统一 helper:先写 call
+  文件(webui 出 chip)+ 把 flow 状态翻成 paused/pending_input,再做"终端 vs webui"双通道竞速——retry_decision
+  的 `_await_terminal_or_web_choice` 已是正确样板,把其余提示全部路由过去;
+
+  2. 【锁卫生】等待人工输入期间不得持有 merge.lock:要么等待前释放、要么带超时(超时→自动 pause 落 resumable 并释放锁);
+
+  3. 【状态诚实】engine.json 的 status 必须反映"等待输入",webui 不得把等输入的 flow 显示为 RUNNING;
+
+  4. 验收:终端 run 中按 Ctrl+C 后不理会 → webui 数秒内出现 pending-input,merge.lock 可被其它 run 获取,flow
+  可从 webui 应答或安全 pause。
+
+
+  关联:本次实际后果 = flow 假死 40h + 全局 merge 阻塞 + webui 误报 RUNNING(用户以为 self_check 卡死)。恢复方法:到
+  pts/23 终端应答或 Ctrl+C 结束,再 se3 run --resume(state 在 17:54 有完整 checkpoint,无损)。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-02T10:18:53.663240'
+updated_at: '2026-07-02T10:18:53.663240'
+title: 终端 run 的裸 stdin 提示可无限挂起 flow:不写 call 文件、不改状态、还扣着 merge.lock
+priority: high
+type: bug

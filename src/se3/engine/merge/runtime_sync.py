@@ -23,7 +23,18 @@ from pathlib import Path
 from typing import Final, Iterator, Optional
 
 from .cleanup import _get_worktree_path_for_branch
-from .issue_renumber import strip_renumber_traces
+from .issue_renumber import (
+    _REF_TOKEN,
+    _issue_files,
+    append_description_note,
+    find_issue_id_owner,
+    format_ambiguous_reference_note,
+    live_reference_count,
+    mask_issue_references,
+    parse_renumber_traces,
+    rewrite_issue_references_bulk,
+    strip_renumber_traces,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +479,13 @@ class SyncReport:
     # the source worktree contained issues absent (by content) from the main
     # project.
     issues_merged: list[IssueMergeRecord] = field(default_factory=list)
+    # ``#<old>`` references left un-rewritten because SEVERAL adopted worktree
+    # issues shared one old numeric ID (so the token has no single provable
+    # target). Each entry is ``{"file", "old_id", "candidates"}`` — the same
+    # shape the committed-issue channel writes into
+    # ``MergeReport.ambiguous_issue_references`` — so both channels surface
+    # ambiguities uniformly in the CLI summary and serialized report.
+    ambiguous_issue_references: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -486,33 +504,157 @@ class IssueMergeRecord:
     status_dir: str
 
 
+def _norm_text(text: "str | None") -> str:
+    """Collapse whitespace and fold case so trivially-different renderings
+    of the same text do not defeat the dedup comparison."""
+    return " ".join((text or "").split()).strip().lower()
+
+
 def _issue_content_signature(issue: "Issue") -> tuple[str, str, str]:
-    """Return a normalized content signature used for dedup during merge.
+    """Return the masked candidate-lookup signature used for dedup during merge.
 
-    Two issues are considered the same content (pre-fork copies, or genuine
+    Two issues can only be the same content (pre-fork copies, or genuine
     duplicates) when their normalized display title, description, and type
-    match. Whitespace is collapsed and case is folded so trivially-different
-    renderings of the same text do not defeat the dedup.
+    match with every ``#<digits>`` reference masked out. Masking is needed
+    because a renumber rewrites the adopted copy's live references
+    (``see #001`` → ``see #004``) while the worktree source keeps the old
+    digits; the trace line the adopted copy carries is stripped for the same
+    re-run-idempotency reason.
 
-    The renumber-trace line an already-adopted main-project issue carries is
-    stripped before signing so it still matches its un-renumbered worktree
-    source on a re-run — otherwise dedup would miss and the issue would be
-    wrongly re-adopted, breaking idempotency.
+    Masking is deliberately only a PREFILTER: two genuinely different issues
+    whose text differs solely by referenced number also mask identically, and
+    skipping on the masked match alone would silently drop one of them —
+    breaking the "never lose an issue" guarantee. Callers must confirm a
+    masked hit with :func:`_issue_matches_modulo_renumber`, which accepts a
+    digit difference only when it is a recorded renumber.
     """
-
-    def _norm(text: str | None) -> str:
-        return " ".join((text or "").split()).strip().lower()
-
     return (
-        _norm(issue.display_title),
-        _norm(strip_renumber_traces(issue.description)),
-        _norm(issue.type),
+        _norm_text(mask_issue_references(issue.display_title)),
+        _norm_text(
+            mask_issue_references(strip_renumber_traces(issue.description))
+        ),
+        _norm_text(issue.type),
+    )
+
+
+def _texts_match_modulo_renumber(
+    wt_text: "str | None",
+    main_text: "str | None",
+    trace_pairs: "set[tuple[int, int]]",
+) -> bool:
+    """Whether two normalized texts are equal up to RECORDED renumbers.
+
+    Splits both texts on standalone ``#<digits>`` tokens and requires the
+    surrounding prose to match exactly; at each reference position the digits
+    must either be the same number (zero-padding ignored) or form an
+    (old, new) pair some adopted issue's renumber trace actually recorded.
+    That is exactly the set of rewrites the merge itself performed, so a
+    re-run still recognises the rewritten adopted copy, while an issue that
+    merely references a DIFFERENT number (``… #001`` vs ``… #002`` with no
+    such renumber on record) stays distinct and is not lost to dedup.
+    """
+    wt_parts = _REF_TOKEN.split(_norm_text(wt_text))
+    main_parts = _REF_TOKEN.split(_norm_text(main_text))
+    if len(wt_parts) != len(main_parts):
+        return False
+    for idx, (wt_part, main_part) in enumerate(zip(wt_parts, main_parts)):
+        if idx % 2:  # captured reference digits
+            if (
+                int(wt_part) != int(main_part)
+                and (int(wt_part), int(main_part)) not in trace_pairs
+            ):
+                return False
+        elif wt_part != main_part:
+            return False
+    return True
+
+
+def _admissible_trace_pairs(
+    wt_issue: "Issue",
+    main_issue: "Issue",
+    trace_pairs: "set[tuple[int, int]]",
+    vouched_pairs: "set[tuple[int, int]]",
+) -> "set[tuple[int, int]]":
+    """Which recorded renumber pairs may excuse digit differences here.
+
+    Reference rewrites only ever happen inside files the merge machinery
+    itself touched, so a reference-digit difference may be excused by
+    recorded renumber pairs only when the candidate can actually be the copy
+    the merge produced from THIS worktree issue:
+
+    * The candidate carries a renumber trace whose old number is the worktree
+      issue's number — it is provably that issue's renumbered adopted copy,
+      so the full pair set is admitted (a batch rewrite plants batch-mates'
+      pairs inside every adopted file, not just the mate that was traced).
+    * The candidate merely kept the worktree issue's number (adoption whose
+      fresh ID happened to equal the old one, or a pre-fork copy whose
+      merge-added references the git-channel reconcile rewrote). Such a copy
+      carries no trace of its own, so bare numeric equality proves nothing
+      about provenance — worktree counters are independent, and an unrelated
+      main issue sharing the number would absorb a genuinely different
+      worktree issue whenever ANY issue in the store recorded the same
+      old→new pair, losing it. Only the *vouched* pairs are admitted: pairs
+      whose renumber demonstrably originated from an issue of this very
+      worktree (see :func:`merge_worktree_issues`), which are exactly the
+      rewrites that can appear inside a same-numbered copy taken from it.
+
+    Any other candidate must match with references digit-equal, so a trace
+    recorded on an unrelated issue can never make two different issues look
+    like one.
+    """
+    # Local import mirrors merge_worktree_issues: avoids import-cycle risk
+    # at module load time.
+    from ..issue_manager import _numeric_id_or_none
+
+    wt_num = _numeric_id_or_none(wt_issue.id)
+    if wt_num is None:
+        return set()
+    if any(
+        old == wt_num
+        for old, _new in parse_renumber_traces(main_issue.description or "")
+    ):
+        return trace_pairs
+    main_num = _numeric_id_or_none(main_issue.id)
+    if main_num is not None and main_num == wt_num:
+        return vouched_pairs
+    return set()
+
+
+def _issue_matches_modulo_renumber(
+    wt_issue: "Issue",
+    main_issue: "Issue",
+    trace_pairs: "set[tuple[int, int]]",
+    vouched_pairs: "set[tuple[int, int]]",
+) -> bool:
+    """Whether *wt_issue* is already represented in main by *main_issue*.
+
+    Confirms a masked-signature candidate: title and (trace-stripped)
+    description must match with every reference difference vouched for by an
+    admissible recorded renumber pair (:func:`_admissible_trace_pairs`), and
+    the type must match. Against a candidate with no provable tie to the
+    worktree issue the references must match exactly, so a trace recorded on
+    some unrelated issue can never make two different issues look like one.
+    """
+    allowed_pairs = _admissible_trace_pairs(
+        wt_issue, main_issue, trace_pairs, vouched_pairs,
+    )
+    return (
+        _texts_match_modulo_renumber(
+            wt_issue.display_title, main_issue.display_title, allowed_pairs,
+        )
+        and _texts_match_modulo_renumber(
+            strip_renumber_traces(wt_issue.description or ""),
+            strip_renumber_traces(main_issue.description or ""),
+            allowed_pairs,
+        )
+        and _norm_text(wt_issue.type) == _norm_text(main_issue.type)
     )
 
 
 def merge_worktree_issues(
     project_root: Path,
     source_worktree: Path,
+    ambiguous_refs_out: Optional[list] = None,
 ) -> list[IssueMergeRecord]:
     """Fold worktree-created issues back into the main project, renumbering.
 
@@ -535,13 +677,24 @@ def merge_worktree_issues(
     Args:
         project_root: The main project's root (the merge target).
         source_worktree: The merged branch's bound worktree root.
+        ambiguous_refs_out: Optional list the caller passes to receive one
+            ``{"file", "old_id", "candidates"}`` entry per file left holding an
+            unresolvable ``#<old>`` reference. The committed-issue channel
+            records the same shape into ``MergeReport.ambiguous_issue_references``
+            so the CLI summary and serialized report surface BOTH channels'
+            ambiguities; without this the runtime-sync ambiguity lived only in a
+            per-file note and a log line, invisible to the report.
 
     Returns:
         One :class:`IssueMergeRecord` per renumbered issue (empty when the
         worktree had no new issues).
     """
     # Local import to avoid any import-cycle risk at module load time.
-    from ..issue_manager import IssueManager, _CLOSED_DIR_STATUSES
+    from ..issue_manager import (
+        IssueManager,
+        _CLOSED_DIR_STATUSES,
+        _numeric_id_or_none,
+    )
 
     source_issues_dir = source_worktree / "se3" / "issues"
     if not source_issues_dir.exists():
@@ -550,26 +703,105 @@ def merge_worktree_issues(
     main_mgr = IssueManager(project_root)
     wt_mgr = IssueManager(source_worktree)
 
-    existing_sigs = {
-        _issue_content_signature(i)
-        for i in main_mgr.list_issues(include_closed=True)
-    }
+    # The masked signature only shortlists candidates; a hit is confirmed by
+    # comparing the actual reference digits against the renumber pairs the
+    # traces on record vouch for. Skipping on the masked match alone would
+    # collapse two different issues that differ only by referenced number.
+    # The pair set is collected store-wide because an adopted file's
+    # rewritten references can stem from a batch-mate's renumber (the pair
+    # is traced on the mate, not on the file itself) — but the matcher only
+    # admits pairs against candidates with a provable tie to the worktree
+    # issue (_admissible_trace_pairs), so a trace on one issue can never
+    # excuse a digit difference in an unrelated one.
+    main_issues = main_mgr.list_issues(include_closed=True)
+    candidate_index: dict[tuple[str, str, str], list["Issue"]] = {}
+    trace_pairs: set[tuple[int, int]] = set()
+    for main_issue in main_issues:
+        candidate_index.setdefault(
+            _issue_content_signature(main_issue), [],
+        ).append(main_issue)
+        trace_pairs.update(parse_renumber_traces(main_issue.description or ""))
+
+    # list_issues sorts by ID, giving a deterministic adoption order; loaded
+    # once because the vouching scan below needs the same set.
+    wt_issues = wt_mgr.list_issues(include_closed=True)
+
+    # A same-numbered main candidate carries no trace of its own, so the only
+    # sound license for excusing its digit differences is proof that the
+    # rewrite in question stemmed from THIS worktree: a pair is vouched when
+    # its trace-carrying main issue really is the adopted copy of a worktree
+    # issue bearing the pair's old number. Batch-mate rewrites inside this
+    # worktree's own adopted copies then still dedup on re-runs, while an
+    # unrelated main issue that merely shares a worktree issue's number
+    # cannot borrow a stranger's trace and absorb it.
+    wt_by_num: dict[int, list["Issue"]] = {}
+    for wt_issue in wt_issues:
+        wt_num = _numeric_id_or_none(wt_issue.id)
+        if wt_num is not None:
+            wt_by_num.setdefault(wt_num, []).append(wt_issue)
+    vouched_pairs: set[tuple[int, int]] = set()
+    for main_issue in main_issues:
+        for old, new in parse_renumber_traces(main_issue.description or ""):
+            # The carrier holds a trace whose old number equals the source's,
+            # so this match runs down the own-adopted-copy branch and needs no
+            # vouched pairs itself — no recursion.
+            if any(
+                _issue_matches_modulo_renumber(
+                    source, main_issue, trace_pairs, set(),
+                )
+                for source in wt_by_num.get(old, [])
+            ):
+                vouched_pairs.add((old, new))
 
     merged: list[IssueMergeRecord] = []
-    # list_issues sorts by ID, giving a deterministic adoption order.
-    for issue in wt_mgr.list_issues(include_closed=True):
+    # (adopted file, old numeric id, new id) per adoption — the per-file old
+    # id is needed at rewrite time, see below.
+    adopted_entries: list[tuple[Path, Optional[int], str]] = []
+    # Old → new IDs for the issues this batch actually renumbered. Reference
+    # rewriting and trace appends are deferred to AFTER the adoption loop:
+    # worktree issues may reference each other (in either direction), so the
+    # full mapping only exists once every member has its new ID, and the
+    # rewrite must be one simultaneous bulk pass — per-issue passes would
+    # chain a rewritten token through a later pair whose old ID it equals.
+    # Every new ID per old ID is kept (not just the last): an old ID that
+    # several adopted issues shared has MULTIPLE new IDs, and which one a
+    # peer's ``#<old>`` reference meant is not decidable — see below.
+    id_map: dict[int, list[str]] = {}
+    # EVERY adoption per old ID, including one that happened to keep its old
+    # number (the main counter can hand out exactly the incoming number).
+    # Ambiguity must be judged against this full group: a keeper is a live
+    # ``#<old>`` target just like a renumbered peer, so judging on id_map
+    # alone would call a two-way collision "unambiguous" whenever one copy
+    # kept the number.
+    adopted_by_old: dict[int, list[str]] = {}
+    renumbered: list[tuple[str, str]] = []
+    for issue in wt_issues:
         sig = _issue_content_signature(issue)
-        if sig in existing_sigs:
+        if any(
+            _issue_matches_modulo_renumber(
+                issue, candidate, trace_pairs, vouched_pairs,
+            )
+            for candidate in candidate_index.get(sig, [])
+        ):
             # Pre-fork copy or duplicate content — already represented in the
             # main project, so do not re-add it.
             continue
-        adopted = main_mgr.adopt_issue(issue)
-        existing_sigs.add(sig)
+        adopted = main_mgr.adopt_issue(issue, defer_renumber_finalize=True)
+        candidate_index.setdefault(sig, []).append(issue)
         status_dir = (
             "closed"
             if adopted.status in _CLOSED_DIR_STATUSES
             else "open"
         )
+        old_num = _numeric_id_or_none(issue.id)
+        filepath = main_mgr._find_issue_file(adopted.id)
+        if filepath is not None:
+            adopted_entries.append((filepath, old_num, adopted.id))
+        if old_num is not None:
+            adopted_by_old.setdefault(old_num, []).append(adopted.id)
+            if old_num != int(adopted.id):
+                id_map.setdefault(old_num, []).append(adopted.id)
+                renumbered.append((issue.id, adopted.id))
         merged.append(
             IssueMergeRecord(
                 old_id=issue.id,
@@ -577,6 +809,119 @@ def merge_worktree_issues(
                 status_dir=status_dir,
             )
         )
+
+    # Scope stays on the adopted files: a #<old> in a main-project file still
+    # points at the main issue that kept that number and must not move.
+    #
+    # Two source issues can SHARE an old ID (the worktree itself held a
+    # collision). A shared old ID is genuinely ambiguous EVERYWHERE — even
+    # inside one of the colliding files themselves, a ``#<old>`` token could
+    # mean the issue itself or its colliding peer, and rewriting it to any
+    # candidate (e.g. the holder's own new ID, or whichever was adopted last)
+    # would silently corrupt a peer reference into a self-reference. Shared
+    # old IDs are therefore excluded from the rewrite map entirely: the token
+    # stays as written, and the ambiguity is recorded below. The group is
+    # counted over the WORKTREE store (wt_by_num), not over the renumbered
+    # map: a colliding copy that kept its old number, or one skipped as a
+    # content duplicate, is a live ``#<old>`` target all the same, and only
+    # the source store shows every peer the token could have meant.
+    ambiguous_old = {
+        old for old in id_map if len(wt_by_num.get(old, [])) > 1
+    }
+    shared_map = {
+        old: news[0]
+        for old, news in id_map.items()
+        if old not in ambiguous_old
+    }
+    adopted_files = [fp for fp, _old, _new in adopted_entries]
+    if shared_map:
+        # Per-pair scope, mirroring the single-shot adopt_issue path: whether a
+        # ``#<old>`` in a PRE-EXISTING (non-adopted) file follows the renumber
+        # hinges on whether the retired number still has a kept owner on disk.
+        #
+        # A ``#<old>`` is ambiguous ONLY when some kept issue still owns that
+        # number — it may name that kept issue, not the incoming one — so its
+        # rewrite stays confined to the incoming (adopted) files, where a
+        # ``#<old>`` can only be the incoming issue's own self-reference. When
+        # NO surviving issue owns the old number, this adoption retired it
+        # entirely: every ``#<old>`` across the store meant the incoming issue,
+        # so it is repointed store-wide — otherwise those references would be
+        # stranded on a number that now belongs to nobody. Ownership is resolved
+        # by parsed-``id``-then-filename authority (find_issue_id_owner), and the
+        # adopted files (which now carry new IDs) are excluded from the probe so
+        # they never masquerade as a kept side.
+        store_wide_map = {
+            old: new
+            for old, new in shared_map.items()
+            if find_issue_id_owner(
+                project_root, old, exclude_files=adopted_files,
+            ) is None
+        }
+        # Adopted (incoming) files receive the FULL map: both retired-number and
+        # kept-owner-scoped pairs apply to their own self-references.
+        rewrite_issue_references_bulk(
+            project_root, shared_map, scope_files=adopted_files,
+        )
+        # Pre-existing files receive only the retired-number pairs. The two
+        # passes act on DISJOINT file sets (adopted vs. everything else), so
+        # splitting the one-shot rewrite across two calls cannot re-chain one
+        # pass's output through the other — the single-pass soundness contract
+        # holds within each disjoint scope.
+        if store_wide_map:
+            adopted_set = {fp.resolve() for fp in adopted_files}
+            other_files = [
+                p
+                for p in _issue_files(project_root / "se3" / "issues")
+                if p.resolve() not in adopted_set
+            ]
+            rewrite_issue_references_bulk(
+                project_root, store_wide_map, scope_files=other_files,
+            )
+    # Ambiguity notes before traces: the note detection reads the adopted
+    # files, and a trace's embedded historical "#<old>" must not register as
+    # a live ambiguous reference (live_reference_count strips pre-existing
+    # audit lines; ordering guards this batch's own).
+    for old_num in sorted(ambiguous_old):
+        candidates = list(adopted_by_old.get(old_num, []))
+        # A colliding worktree copy NOT adopted this run (content-dedup skip)
+        # is represented in main by its counterpart, which most plausibly
+        # still holds the old number — keep #<old> itself on the candidate
+        # list so the note names every live target the token could mean.
+        if len(wt_by_num.get(old_num, [])) > len(candidates):
+            old_ref = f"{old_num:03d}"
+            if old_ref not in candidates:
+                candidates.append(old_ref)
+        note = format_ambiguous_reference_note(old_num, candidates)
+        for filepath, _own_old, _new_id in adopted_entries:
+            if not filepath.exists():
+                continue
+            if live_reference_count(filepath, old_num):
+                append_description_note(filepath, note)
+                logger.warning(
+                    "Issue merge: #%03d was shared by %d worktree issues "
+                    "(candidates %s); the #%03d reference in %s is ambiguous "
+                    "and was left un-rewritten — recorded in the issue.",
+                    old_num, len(wt_by_num.get(old_num, [])),
+                    ", ".join("#" + n for n in candidates),
+                    old_num, filepath.name,
+                )
+                # Surface the ambiguity to the merge report too, mirroring the
+                # committed-issue channel — otherwise it lives only in the note
+                # and log, invisible to the CLI summary and serialized report.
+                if ambiguous_refs_out is not None:
+                    try:
+                        rel = filepath.relative_to(project_root).as_posix()
+                    except ValueError:
+                        rel = str(filepath)
+                    ambiguous_refs_out.append({
+                        "file": rel,
+                        "old_id": f"{old_num:03d}",
+                        "candidates": list(candidates),
+                    })
+    # Traces go on last so the bulk rewrite can never repoint their embedded
+    # historical "#<old>".
+    for old_id, new_id in renumbered:
+        main_mgr.append_renumber_trace(new_id, old_id)
     return merged
 
 
@@ -2272,7 +2617,10 @@ def sync_branch_runtime(
     # but BEFORE ``--delete-merged`` cleanup archives/removes the worktree.
     # Best-effort: a failure must never abort the merge sequence.
     try:
-        report.issues_merged = merge_worktree_issues(project_root, source_wt)
+        report.issues_merged = merge_worktree_issues(
+            project_root, source_wt,
+            ambiguous_refs_out=report.ambiguous_issue_references,
+        )
         if report.issues_merged:
             logger.info(
                 "Runtime sync renumbered %d worktree issue(s) into main "

@@ -1,0 +1,67 @@
+id: '248'
+description: '背景（实证案例）：flow 20260701-110644_b2f4c0ee（issue 永不丢失+号永不重复）跑了 48 个 step、19
+  次 fix iteration（上限 100）、29+ 小时才被人工叫停。根因是任务描述自相矛盾：「新号取全库 max(ID)+1 / .next_id 与全库最大
+  ID 一致」（字面归一化要求）与「号永不重复」硬保证（并发下领先的 .next_id 是活预留、必须保留）不可两立。self_check 审查者每轮各引用其中一条，advance_next_id_to_max
+  被来回翻转至少 7 次（step 14/27/31/33/37/42/47 交替 flag 相反方向），previous_issue_resolutions 里已标记
+  fixed 的行为三轮后被当作新 issue 再次 flag。引擎没有任何机制发现"这次的 fix 撤销了三轮前的 fix"。本次靠人工停机改写 engine.json
+  中的 refined_description（裁决单调计数器语义 + 引用重写歧义边界）解围，备份见 se3/state/engine.json.bak-pre-adjudication。
+
+
+  == 机制设计 ==
+
+
+  1. 触发：信号优先，周期保底
+
+  - 指纹账本：为每个 self_check issue 记录指纹（evidence 位置 + expectation_source 引文 + 期望方向），跨轮持久化在
+  flow state，resume 后连续。
+
+  - 立即触发：(a) 同一代码位置被相反期望方向 flag（振荡）；(b) 某次 fix 撤销了 previous_issue_resolutions 中已 fixed
+  的行为（打脸）；(c) 同一指纹在修复后第三次出现。
+
+  - 周期保底：每 N（默认 10）次 fix iteration 强制跑一次警察，抓前面没有检测出来的震荡。
+
+
+  2. 警察 step 的职责与权限
+
+  - 输入：结构化跨轮 issue 账本 + 当前生效任务描述/plan（不需要全量 transcript，便宜）。
+
+  - 判定：规范内部矛盾 / 规范与硬约束冲突 / 审查发散，并给出裁决。
+
+  - 产出为覆盖式补丁，不是追加式：产出 adjudicated_description（及需要时 adjudicated plan），存于警察 step 自身
+  outputs，原 discovery/plan 记录一字不动；生效文本优先级 adjudicated > refined > 原始 task_description（与
+  refined_description 同构，多代裁决取最新，带理由与时间戳可审计）。追加式（additional instructions）明确否决：verbatim_quote
+  校验只查子串，旧条款仍在合成文本中就仍可被引用，止不住振荡；覆盖式让死条款从引用池消失，新 issue 再引用会被 validation 直接丢弃。
+
+  - 确认门：裁决动任务描述默认走 confirmation（per-step dict，reviewer: human）；改 plan/测试期望可配 LLM reviewer
+  或免确认。
+
+  - 裁决落地后继续正常 fix loop。不做 issue 泄压——session 内的问题在 session 内解决，不留烂摊子。
+
+
+  3. 明确不改的部分
+
+  - self_check 双 pass 结构维持现状：两遍独立审查、pass 2 对 pass 1 的 deferred issue 无否决权。理由：审查层职责是报告"实现与规范的偏差"，不是裁决"规范本身对不对"；本案例
+  step 45 中 pass 2 曾自行判定偏差属 correct improvement，那正是审查者越权行使裁决权，不应制度化。裁决权统一收敛到警察层（有确认门、有记录），审查层保持独立高召回。规范矛盾被裁决后，"正确偏差被反复
+  flag"的病灶自然消失。
+
+
+  == 验收 ==
+
+  - 集成用例：构造含矛盾条款的任务描述，两个方向的 issue 交替出现后 ≤2 轮内警察触发，裁决补丁生效后 flip 停止、flow 收敛完成。
+
+  - 指纹账本跨 resume 连续。
+
+  - 裁决不修改 discovery/plan 原 outputs；历史可见每代裁决及理由。
+
+  - 每 N 轮保底触发有测试覆盖。
+
+  - self_check 的 verbatim_quote 源池切换到 adjudicated 版本后，引用已废除条款的 issue 被 validation
+  丢弃（有测试）。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-02T17:15:36.003089'
+updated_at: '2026-07-02T17:15:36.003089'
+title: fix-loop 警察机制：振荡/冲突检测 + 规范裁决 step
+priority: high
+type: feature

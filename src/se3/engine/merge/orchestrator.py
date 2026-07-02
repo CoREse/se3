@@ -41,8 +41,13 @@ from .guardrails import (
 from .human_call import HumanCallWriter
 from .issue_renumber import (
     advance_next_id_to_max,
+    append_description_note,
+    format_ambiguous_reference_note,
     format_renumber_trace,
+    live_reference_count,
+    reserve_next_id,
     rewrite_issue_references,
+    rewrite_references_in_added_lines,
 )
 from ...commands.merge.failure_reason import FailureReason
 from ...commands.merge.postcondition import (
@@ -2994,6 +2999,15 @@ class MergeOrchestrator:
                     report.runtime_sync_idempotent_records.extend(
                         sync_report.idempotent_bypass_records
                     )
+                if sync_report.ambiguous_issue_references:
+                    # Both merge channels satisfy the same guarantee set,
+                    # including "record ambiguous #old references in the merge
+                    # report" — carry the runtime-sync channel's ambiguities
+                    # into the report so the CLI summary and serialized report
+                    # expose them exactly as the committed channel's are.
+                    report.ambiguous_issue_references.extend(
+                        sync_report.ambiguous_issue_references
+                    )
         except RuntimeSyncCollision as exc:
             self._log(f"Runtime sync collision for '{branch}': {exc}")
             report.failure_reason = FailureReason.RUNTIME_SYNC_COLLISION.legacy_string
@@ -3053,8 +3067,170 @@ class MergeOrchestrator:
             return False
         return res.returncode == 0
 
+    def _issue_relpaths_at_ref(self, ref: str) -> set[str]:
+        """Repo-relative paths of every issue YAML *committed* at *ref*.
+
+        The committed-issue channel must decide authorship from the git trees,
+        never from the dirty working directory: globbing ``se3/issues`` sweeps
+        in the user's UNTRACKED issue drafts and their uncommitted edits, which
+        belong to the runtime-sync / uncommitted domain, not to this merge.
+        Renumbering or committing them here would rewrite a kept-side reference
+        or publish private drafts, and — if a never-committed draft were picked
+        as a collision loser — a rollback could not restore it from HEAD,
+        destroying the issue outright. Returns an empty set when the ref is
+        empty or git cannot answer, so callers fall back to touching nothing
+        rather than to the unsafe working-tree glob.
+        """
+        if not ref:
+            return set()
+        try:
+            res = _run_git(
+                self.project_root,
+                "ls-tree",
+                "-r",
+                "--name-only",
+                ref,
+                "--",
+                "se3/issues/open",
+                "se3/issues/closed",
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return set()
+        if res.returncode != 0:
+            return set()
+        return {
+            line.strip()
+            for line in res.stdout.splitlines()
+            if line.strip().endswith(".yaml")
+        }
+
+    def _merge_authored_issue_paths(
+        self, pre_merge_sha: str,
+    ) -> tuple[set[str], set[str]]:
+        """Issue relpaths the merge ADDED / MODIFIED, from committed git trees.
+
+        Authorship is decided by diffing the pre-merge commit against HEAD (the
+        merge commit) — two committed trees — instead of comparing the working
+        directory against *pre_merge_sha*. A working-tree comparison mistakes an
+        untracked draft (absent at *pre_merge_sha*) for a merge-introduced file
+        and an uncommitted edit (disk != baseline) for a merge modification, and
+        would then rewrite the user's ``#old`` references or stage their private
+        drafts into the renumber fix-up commit. ``--no-renames`` keeps a rename
+        as delete+add so the added side is classified purely by presence.
+
+        Returns ``(added_relpaths, modified_relpaths)``; both empty when the ref
+        is missing or git cannot answer, so classification touches nothing.
+        """
+        if not pre_merge_sha:
+            return set(), set()
+        try:
+            res = _run_git(
+                self.project_root,
+                "diff",
+                "--name-status",
+                "--no-renames",
+                pre_merge_sha,
+                "HEAD",
+                "--",
+                "se3/issues/open",
+                "se3/issues/closed",
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return set(), set()
+        if res.returncode != 0:
+            return set(), set()
+        added: set[str] = set()
+        modified: set[str] = set()
+        for line in res.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            status, relpath = parts[0].strip(), parts[1].strip()
+            if not relpath.endswith(".yaml"):
+                continue
+            if status.startswith("A"):
+                added.add(relpath)
+            elif status.startswith("M"):
+                modified.add(relpath)
+        return added, modified
+
+    def _parse_committed_issue_numeric_id(self, path: Path) -> Optional[int]:
+        """Numeric identity of a committed issue file.
+
+        The record's parsed ``id`` field is the authority — that is the number
+        cross-references and ``IssueManager`` lookups resolve, so two files
+        whose ``id`` fields agree collide even when their filename prefixes
+        differ. The filename prefix is only the fallback for a record whose
+        ``id`` is missing or unparsable.
+        """
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            data = None
+        return self._numeric_id_from_body(data, path.name)
+
+    def _numeric_id_from_body(
+        self, data: object, filename: str,
+    ) -> Optional[int]:
+        """Resolve a numeric ID from a parsed issue mapping + its filename.
+
+        Shared by the working-tree and committed-blob readers so the ``id``
+        field / ``NNN_`` filename-prefix fallback precedence is identical no
+        matter which source the body came from.
+        """
+        if isinstance(data, dict) and data.get("id") is not None:
+            try:
+                return int(str(data["id"]).strip())
+            except ValueError:
+                pass
+        match = re.match(r"^(\d+)_", filename)
+        return int(match.group(1)) if match else None
+
+    def _committed_issue_numeric_id(
+        self, ref: str, path: Path,
+    ) -> Optional[int]:
+        """Numeric identity of an issue file AS COMMITTED at *ref*.
+
+        Collision detection must read the ``id`` from the merge commit's tree,
+        not the working tree: a tracked issue file carrying an uncommitted
+        local edit to its ``id`` field would otherwise inject a
+        working-tree-only number into the committed-issue collision set. That
+        number is absent from the committed merge tree, so acting on it would
+        renumber a genuinely-unique committed issue (and rewrite its
+        references, and cut a fix-up commit) purely on the strength of a dirty
+        edit — exactly the ``git commit``-tree guarantee this channel exists to
+        uphold. Falls back to the filename prefix (which the merge tree carries
+        too) when the committed body has no parsable ``id`` or git cannot read
+        the blob.
+        """
+        content: Optional[str] = None
+        if ref:
+            try:
+                res = _run_git(
+                    self.project_root,
+                    "show",
+                    f"{ref}:{self._issue_relpath(path)}",
+                    check=False,
+                    timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                res = None
+            if res is not None and res.returncode == 0:
+                content = res.stdout
+        data: object = None
+        if content is not None:
+            try:
+                data = yaml.safe_load(content)
+            except yaml.YAMLError:
+                data = None
+        return self._numeric_id_from_body(data, path.name)
+
     def _detect_committed_id_collisions(
-        self, issues_root: Path,
+        self, issues_root: Path, ref: str, tracked_relpaths: set[str],
     ) -> list[tuple[int, list[Path]]]:
         """Group committed issue files by numeric ID and return collisions.
 
@@ -3063,6 +3239,18 @@ class MergeOrchestrator:
         file), so any group of size >= 2 is a genuine "two different issues,
         one ID" collision — git already folds a byte-identical same-path
         issue into one file, so it never reaches here.
+
+        Only files present in *tracked_relpaths* (the issue YAMLs committed at
+        the merge commit) take part, and each file's grouping number is read
+        from its blob AS COMMITTED at *ref* — never the working tree. Two
+        different filters would let a tracked file with an uncommitted ``id``
+        edit slip into the committed set under a number the merge tree never
+        held. An untracked main-side draft that happens to share a number with
+        a merged issue belongs to the uncommitted / runtime-sync domain, not
+        this channel: renumbering it would rewrite and commit the user's
+        private draft, and — if it were picked as the loser — a rollback could
+        not restore it from HEAD (it was never committed), deleting the issue
+        outright.
         """
         groups: dict[int, list[Path]] = {}
         for sub in ("open", "closed"):
@@ -3070,9 +3258,11 @@ class MergeOrchestrator:
             if not directory.exists():
                 continue
             for f in sorted(directory.glob("*.yaml")):
-                match = re.match(r"^(\d+)_", f.name)
-                if match:
-                    groups.setdefault(int(match.group(1)), []).append(f)
+                if self._issue_relpath(f) not in tracked_relpaths:
+                    continue
+                numeric_id = self._committed_issue_numeric_id(ref, f)
+                if numeric_id is not None:
+                    groups.setdefault(numeric_id, []).append(f)
         return [
             (numeric_id, paths)
             for numeric_id, paths in sorted(groups.items())
@@ -3082,20 +3272,51 @@ class MergeOrchestrator:
     def _choose_kept_issue(self, paths: list[Path], pre_merge_sha: str) -> Path:
         """Pick which colliding file keeps its ID; the rest are renumbered.
 
-        The file that already existed at *pre_merge_sha* is the current
-        branch's copy and is kept (matching ``adopt_issue``'s "keep the main
-        copy, renumber the incoming one" semantics). When that is ambiguous
-        (zero survivors, or a pre-existing duplicate with more than one), fall
-        back to the lexicographically smallest repo-relative path so repeated
-        runs converge on the same keeper.
+        A file that already existed at *pre_merge_sha* is the current
+        branch's copy and wins over anything merge-introduced (matching
+        ``adopt_issue``'s "keep the main copy, renumber the incoming one"
+        semantics) — even when a pre-existing duplicate leaves SEVERAL
+        survivors, the keeper is still picked among them, never from the
+        incoming side. Ties (several survivors, or zero when every colliding
+        file is merge-introduced) break on the lexicographically smallest
+        repo-relative path so repeated runs converge on the same keeper.
         """
         survivors = [p for p in paths if self._path_in_ref(pre_merge_sha, p)]
-        if len(survivors) == 1:
-            return survivors[0]
-        return min(paths, key=self._issue_relpath)
+        return min(survivors or paths, key=self._issue_relpath)
+
+    def _keeper_lived_on_branch(self, branch: str, keep: Path) -> bool:
+        """Whether the kept file also existed in the merged branch's own tree.
+
+        When it did, the branch's store already held TWO issues under the
+        colliding number (the inherited keeper plus its own new file), so a
+        branch-authored ``#old`` could mean the keeper just as well as the
+        renumbered loser. Fails toward True (ambiguous) when git cannot
+        answer: a reference is only rewritten on proof, never on a failed
+        check.
+        """
+        if not branch:
+            return True
+        try:
+            res = _run_git(
+                self.project_root,
+                "cat-file",
+                "-e",
+                f"{branch}:{self._issue_relpath(keep)}",
+                check=False,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return True
+        return res.returncode == 0
 
     def _current_max_issue_id(self) -> int:
-        """Highest numeric issue ID across ``se3/issues/{open,closed}``."""
+        """Highest numeric issue ID across ``se3/issues/{open,closed}``.
+
+        Takes the max over BOTH the filename prefix and the parsed ``id``
+        field of every file: a fresh number must clear whichever is higher,
+        or the renumber itself would mint a new collision (e.g. a record
+        whose ``id`` exceeds every filename prefix).
+        """
         issues_root = self.project_root / "se3" / "issues"
         max_id = 0
         for sub in ("open", "closed"):
@@ -3106,71 +3327,182 @@ class MergeOrchestrator:
                 match = re.match(r"^(\d+)_", f.name)
                 if match:
                     max_id = max(max_id, int(match.group(1)))
+                parsed = self._parse_committed_issue_numeric_id(f)
+                if parsed is not None:
+                    max_id = max(max_id, parsed)
         return max_id
 
-    def _renumber_committed_issue(self, path: Path) -> Optional[IssueMergeRecord]:
-        """Renumber one colliding issue file to ``max(ID)+1`` in place.
+    @staticmethod
+    def _dump_issue_yaml(data: dict) -> str:
+        return yaml.dump(
+            data, default_flow_style=False, allow_unicode=True, sort_keys=False,
+        )
 
-        Renames the file, rewrites the in-file ``id``, appends an old->new
-        trace to the description, and repoints every ``#old`` cross-reference
-        across the store to ``#new`` via the shared G1 primitive. All writes
-        stay inside ``se3/issues/``. The new ID is recomputed from the current
-        on-disk maximum each call, so several renumbers in one reconcile each
-        get a distinct fresh ID.
+    def _renumber_committed_issue(
+        self, path: Path, old_num: int,
+    ) -> tuple[IssueMergeRecord, Path]:
+        """Rename one colliding issue file to ``max(ID)+1`` and rewrite its ``id``.
+
+        ONLY the rename + in-file ``id`` rewrite happen here. Cross-reference
+        rewriting and the old->new trace are deferred to the caller's batch
+        passes: a group can hold several incoming files sharing one old ID,
+        in which case any remaining ``#old`` token is ambiguous — rewriting
+        ``#old`` store-wide per renumber would silently repoint it at the
+        FIRST loser's new number. Only the batch, which sees the whole group,
+        can tell the unambiguous single-loser case from the ambiguous one.
+        The new ID is recomputed from the current on-disk maximum each call,
+        so several renumbers in one reconcile each get a distinct fresh ID.
+
+        A file whose body is not an issue mapping (corrupt / hand-edited
+        YAML) was still counted into its collision group — via the filename
+        prefix — so skipping it would leave the duplicate ID in place
+        unrepaired. Its filename IS its numeric identity in that case, so a
+        rename alone restores uniqueness; the body is left byte-identical
+        (there is no ``id`` field to rewrite) and the skipped in-file rewrite
+        is surfaced as a WARNING.
+
+        The replacement number is reserved through the SHARED
+        :func:`reserve_next_id` primitive — the same fcntl-locked allocator
+        ``se3 issue create`` / ``adopt_issue`` use — rather than a bare
+        working-tree ``max(ID)+1`` scan. None of the concurrent creators
+        contend on the merge lock, so scanning the max alone could re-mint a
+        number a concurrent ``se3 issue create`` had just reserved (its counter
+        bump lands before its ``N_*.yaml`` file exists). Reserving under the
+        counter lock both honours that reservation and advances the counter, so
+        each renumber in a reconcile also gets a distinct fresh number without
+        depending on the prior renumbered file already being on disk.
+
+        Returns:
+            ``(record, new_path)``.
         """
-        match = re.match(r"^(\d+)_(.*)\.yaml$", path.name)
-        if not match:
-            return None
-        old_id = match.group(1)
-        slug = match.group(2)
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            data = None
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return None
+        old_id = f"{old_num:03d}"
+        # The identity is the parsed id, so the filename need not carry a
+        # numeric prefix; reuse its stem as the slug when it does not.
+        stem_match = re.match(r"^\d+_(.*)$", path.stem)
+        slug = stem_match.group(1) if stem_match else path.stem
 
-        new_id = f"{self._current_max_issue_id() + 1:03d}"
-        data["id"] = new_id
-
-        # Write the renamed file WITHOUT the trace first, then unlink the old
-        # one, so the store holds exactly one #new_id-bearing file before the
-        # reference rewrite runs.
+        new_id = f"{reserve_next_id(self.project_root):03d}"
         new_path = path.parent / f"{new_id}_{slug}.yaml"
-
-        def _dump(d: dict) -> str:
-            return yaml.dump(
-                d, default_flow_style=False, allow_unicode=True, sort_keys=False,
+        if isinstance(data, dict):
+            data["id"] = new_id
+            new_path.write_text(self._dump_issue_yaml(data), encoding="utf-8")
+            path.unlink()
+        else:
+            path.rename(new_path)
+            self._log(
+                f"Issue-ID reconciliation: '{self._issue_relpath(path)}' does "
+                f"not parse to an issue mapping; renamed to "
+                f"'{new_path.name}' to restore ID uniqueness, but its body "
+                f"carries no rewritable 'id' field or renumber trace.",
+                level=logging.WARNING,
             )
 
-        new_path.write_text(_dump(data), encoding="utf-8")
-        path.unlink()
+        status_dir = "closed" if path.parent.name == "closed" else "open"
+        record = IssueMergeRecord(
+            old_id=old_id, new_id=new_id, status_dir=status_dir,
+        )
+        return record, new_path
 
-        # Rewrite live cross-references across the store now (the new file is
-        # on disk so its own body is scanned too; new_id is max+1 so nothing
-        # pre-existing already reads ``#new_id``). This MUST happen before the
-        # trace is appended, otherwise the rewrite would clobber the ``#old``
-        # inside the trace — the trace is a historical record, not a live ref.
-        rewrite_issue_references(self.project_root, old_id, new_id)
+    def _classify_merge_scope(
+        self, pre_merge_sha: str, created_paths: list[Path],
+    ) -> tuple[list[Path], list[tuple[Path, str]]]:
+        """Split the issue store by what the merge wrote, against *pre_merge_sha*.
 
-        # Append the old->new trace at the tail so it never shifts the first
-        # non-empty description line (which display_title / slug derive from).
-        # Re-read so any reference rewrite to this file's own body is kept.
-        data = yaml.safe_load(new_path.read_text(encoding="utf-8"))
+        Returns ``(incoming_files, merge_modified)``:
+          * *incoming_files* — files the merge INTRODUCED (present at HEAD,
+            absent at *pre_merge_sha*); every line in them was authored by the
+            merged branch. The renamed collision losers *created_paths* this
+            reconcile produced are included too: their content is merge-authored
+            but lives at a fresh path absent from HEAD, so the tree diff alone
+            would miss them. A loser's original HEAD path is dropped here — it
+            was renamed away and no longer exists on disk.
+          * *merge_modified* — ``(path, baseline_text)`` for files that existed
+            at *pre_merge_sha* but whose committed content the merge changed;
+            only their merge-ADDED lines belong to the branch.
+
+        Membership is read from the committed git trees, never the working
+        directory: a working-tree scan would classify the user's untracked
+        drafts as incoming and their uncommitted edits as merge-modified, then
+        rewrite their references or stage them into the fix-up commit.
+        """
+        added, modified = self._merge_authored_issue_paths(pre_merge_sha)
+        incoming_files: list[Path] = []
+        for relpath in sorted(added):
+            path = self.project_root / relpath
+            # A merge-introduced file renamed away by phase 1 no longer exists
+            # at its committed path; its content now lives at the renamed new
+            # path, appended from created_paths below.
+            if path.exists():
+                incoming_files.append(path)
+        incoming_files.extend(created_paths)
+
+        merge_modified: list[tuple[Path, str]] = []
+        for relpath in sorted(modified):
+            path = self.project_root / relpath
+            if not path.exists():
+                continue
+            baseline = _read_file_from_ref(
+                self.project_root, relpath, pre_merge_sha,
+            )
+            if baseline is None:
+                continue
+            merge_modified.append((path, baseline))
+        return incoming_files, merge_modified
+
+    def _append_renumber_trace_to_file(
+        self, path: Path, old_id: str, new_id: str,
+    ) -> None:
+        """Append the old->new trace to *path*'s description tail.
+
+        Appended at the tail so it never shifts the first non-empty
+        description line (which display_title / slug derive from). A file
+        that does not parse to an issue mapping is left untouched — there is
+        no description to carry the trace, and clobbering unknown content
+        would be worse than the missing line (the renumber itself was already
+        surfaced as a WARNING and a report record).
+        """
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            return
+        if not isinstance(data, dict):
+            return
         trace = format_renumber_trace(old_id, new_id)
         desc = str(data.get("description", "") or "")
         data["description"] = (
             desc.rstrip() + "\n\n" + trace if desc.strip() else trace
         )
-        new_path.write_text(_dump(data), encoding="utf-8")
-
-        status_dir = "closed" if path.parent.name == "closed" else "open"
-        return IssueMergeRecord(old_id=old_id, new_id=new_id, status_dir=status_dir)
+        path.write_text(self._dump_issue_yaml(data), encoding="utf-8")
 
     def _commit_issue_reconciliation(
-        self, branch: str, records: list[IssueMergeRecord],
+        self,
+        branch: str,
+        records: list[IssueMergeRecord],
+        created_paths: list[Path],
+        restore_relpaths: set[str],
     ) -> bool:
-        """Stage ``se3/issues`` and commit the renumber as a fix-up commit."""
+        """Stage the reconcile's touched paths and commit them as a fix-up commit.
+
+        Stages ONLY the exact paths this reconcile wrote — the renamed losers,
+        the files whose references it rewrote, and ``.next_id`` — never
+        ``git add -A -- se3/issues``. A blanket add would sweep pre-existing
+        untracked issue files (issues the user is still drafting) into the
+        renumber fix-up commit, silently publishing unrelated work.
+        """
+        created_relpaths = {self._issue_relpath(p) for p in created_paths}
+        stage_relpaths = sorted(restore_relpaths | created_relpaths)
+        if not stage_relpaths:
+            # Nothing to stage means nothing was renumbered; treat as a no-op
+            # success rather than running a pathspec-less ``git add -A`` that
+            # would stage the entire tree.
+            return True
         add = _run_git(
-            self.project_root, "add", "-A", "--", "se3/issues",
+            self.project_root, "add", "-A", "--", *stage_relpaths,
             check=False, timeout=30,
         )
         if add.returncode != 0:
@@ -3197,26 +3529,80 @@ class MergeOrchestrator:
             return False
         return True
 
-    def _restore_issues_worktree(self) -> None:
-        """Restore ``se3/issues`` to the current commit (drop uncommitted renumber).
+    def _restore_issues_worktree(
+        self, created_paths: list[Path], restore_relpaths: set[str],
+    ) -> None:
+        """Undo THIS reconcile's issue-store writes without disturbing anything else.
 
-        Used to keep the working tree clean when reconciliation aborts after
-        touching files but before committing — so the already-successful git
-        merge is left intact and the next branch's ``git merge`` sees a clean
-        tree. Confined to ``se3/issues`` to honour the "only touch the issue
-        store" contract.
+        Reconciliation runs on top of the already-committed merge, so an abort
+        (fix-up commit failed, or an exception escaped) must roll back ONLY the
+        paths this run wrote. The old blanket ``git reset``/``git checkout``/
+        ``git clean -fdq`` over ``se3/issues`` was destructive: ``git clean``
+        irrecoverably deletes EVERY untracked file under ``se3/issues`` —
+        including pre-existing uncommitted issue YAMLs the reconciliation never
+        touched — and ``git checkout`` discards unrelated uncommitted edits to
+        tracked issue files. That is the very "never lose an issue" guarantee
+        this machinery exists to uphold, so the rollback is now surgical:
+        created files (the renamed losers, absent at HEAD, which ``git
+        checkout`` cannot restore-by-removal) are unlinked directly, and every
+        tracked path this run modified or renamed away from is restored to HEAD
+        one exact path at a time. Confined to ``se3/issues`` throughout.
         """
-        for args in (
-            ("reset", "-q", "HEAD", "--", "se3/issues"),
-            ("checkout", "--", "se3/issues"),
-            ("clean", "-fdq", "--", "se3/issues"),
-        ):
+        created_relpaths = {self._issue_relpath(p) for p in created_paths}
+        # Unstage exactly the paths this reconcile wrote (a prior failed fix-up
+        # commit's ``git add`` may have staged them). Scoping to the explicit
+        # list keeps unrelated untracked/edited issue files out of it.
+        stage_relpaths = sorted(restore_relpaths | created_relpaths)
+        if stage_relpaths:
             try:
-                _run_git(self.project_root, *args, check=False, timeout=15)
+                _run_git(
+                    self.project_root, "reset", "-q", "HEAD", "--",
+                    *stage_relpaths, check=False, timeout=15,
+                )
             except subprocess.TimeoutExpired as exc:
                 self._log(
-                    f"Timed out restoring se3/issues working tree "
-                    f"({' '.join(args)}): {exc}",
+                    f"Timed out unstaging se3/issues during reconcile "
+                    f"rollback: {exc}",
+                    level=logging.ERROR,
+                )
+        # Delete the renumbered-loser files this run created; they are absent
+        # at HEAD, so no ``git checkout`` can restore-by-removal.
+        for path in created_paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                self._log(
+                    f"Could not remove reconcile artifact "
+                    f"'{self._issue_relpath(path)}': {exc}",
+                    level=logging.ERROR,
+                )
+        # Restore each tracked path individually so one path missing from HEAD
+        # (e.g. a not-yet-committed ``.next_id``) cannot abort the whole batch
+        # and leave the others un-restored. Created paths are excluded — they
+        # were just unlinked and do not exist at HEAD. ``.next_id`` is ALSO
+        # excluded: the counter is strictly monotonic and must never move
+        # backwards. Checking it out to HEAD (the merge commit's committed
+        # value) would erase any advance made since — including a live
+        # reservation written by a concurrent allocator that does not hold the
+        # merge lock — and the next allocation would re-mint that reserved
+        # number, producing the very duplicate ID this machinery prevents.
+        # Its advanced value is harmless (number-range holes are fine); leaving
+        # it in place is the safe rollback. Unstaging it above is still correct
+        # — that only clears the failed fix-up's index entry, not the value.
+        for relpath in sorted(
+            restore_relpaths - created_relpaths - {"se3/issues/.next_id"}
+        ):
+            try:
+                _run_git(
+                    self.project_root, "checkout", "HEAD", "--", relpath,
+                    check=False, timeout=15,
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._log(
+                    f"Timed out restoring '{relpath}' during reconcile "
+                    f"rollback: {exc}",
                     level=logging.ERROR,
                 )
 
@@ -3226,9 +3612,10 @@ class MergeOrchestrator:
         """Renumber committed issues that collide on a numeric ID after merge.
 
         A clean ``git merge`` can bring in an issue file whose numeric ID
-        (parsed from its ``NNN_slug.yaml`` filename) already names a
-        *different* issue on the current branch. Left alone that is a silent
-        duplicate ID. Detection and repair are confined to
+        (the record's parsed ``id`` field, falling back to the ``NNN_slug.yaml``
+        filename prefix) already names a *different* issue on the current
+        branch. Left alone that is a silent duplicate ID. Detection and repair
+        are confined to
         ``se3/issues/{open,closed}`` (the issue files plus the ``.next_id``
         counter) and never touch other ``se3/`` runtime state.
 
@@ -3236,7 +3623,16 @@ class MergeOrchestrator:
         merge-introduced side is renumbered to ``max(ID)+1`` via the shared G1
         primitives (rename, old->new trace, cross-reference rewrite, advance
         ``.next_id``), then staged and committed as an independent fix-up on
-        top of the merge commit.
+        top of the merge commit. When ``#old`` could have named more than one
+        issue from the merged branch's perspective — several renumbered
+        losers, a merge-introduced keeper that kept the number, or a
+        pre-existing keeper that was ALSO part of the branch's own tree
+        (it predated the fork) — a remaining ``#old``
+        reference has no provable target;
+        it is left un-rewritten and the ambiguity is recorded durably — a
+        note appended to each affected issue plus a
+        ``MergeReport.ambiguous_issue_references`` entry — never silently
+        repointed at a guess.
 
         Best-effort: any failure is logged, the working tree is restored to
         the merge commit's ``se3/issues`` state, and the already-successful
@@ -3248,33 +3644,193 @@ class MergeOrchestrator:
         if not issues_root.exists():
             return None
 
+        # Exactly what THIS reconcile writes, so both the fix-up commit's
+        # staging and any rollback touch only these paths — never a blanket
+        # sweep of se3/issues, which would delete pre-existing untracked issue
+        # files or discard unrelated uncommitted edits. ``created_paths`` are
+        # the renamed losers (absent at HEAD, removed by unlink on rollback);
+        # ``restore_relpaths`` are tracked paths modified or renamed away from
+        # (restored to HEAD). ``.next_id`` is always included — it is advanced.
+        created_paths: list[Path] = []
+        restore_relpaths: set[str] = {"se3/issues/.next_id"}
+
         try:
-            collisions = self._detect_committed_id_collisions(issues_root)
+            # Authorship for BOTH detection and reference-scope classification
+            # is read from the committed merge commit, never the working tree,
+            # so untracked drafts / uncommitted edits stay out of this channel.
+            head_tracked = self._issue_relpaths_at_ref("HEAD")
+            collisions = self._detect_committed_id_collisions(
+                issues_root, "HEAD", head_tracked,
+            )
             if not collisions:
                 return None
 
-            records: list[IssueMergeRecord] = []
-            for _numeric_id, paths in collisions:
+            # Phase 1 — rename + re-id every merge-introduced colliding file.
+            # References are NOT rewritten yet: only once every loser holds
+            # its final ID is "which #old token means which issue" decidable.
+            renumbered: list[tuple[IssueMergeRecord, Path, int]] = []
+            # Old IDs whose KEEPER is itself merge-introduced (no colliding
+            # copy existed at pre_merge_sha, so the lexicographic fallback
+            # picked one of the branch's own files). The branch then shipped
+            # SEVERAL issues under that number even when only one loser was
+            # renumbered — a remaining ``#old`` may equally mean the keeper
+            # (which still holds it), so the group is ambiguous regardless of
+            # the loser count.
+            incoming_keeper_old: set[int] = set()
+            # Old IDs whose PRE-EXISTING keeper was also part of the merged
+            # branch's own tree (it predated the fork). The branch's store
+            # then held two issues under that number, so a branch-authored
+            # ``#old`` could mean the inherited keeper just as well as the
+            # branch's own (renumbered) file — the group stays ambiguous
+            # even with a single loser.
+            keeper_on_branch_old: set[int] = set()
+            for numeric_id, paths in collisions:
                 keep = self._choose_kept_issue(paths, pre_merge_sha)
+                if not self._path_in_ref(pre_merge_sha, keep):
+                    incoming_keeper_old.add(numeric_id)
+                elif self._keeper_lived_on_branch(branch, keep):
+                    keeper_on_branch_old.add(numeric_id)
                 for path in paths:
                     if path == keep:
                         continue
-                    record = self._renumber_committed_issue(path)
-                    if record is not None:
-                        records.append(record)
+                    # The loser's HEAD-committed path is renamed away — record
+                    # it so a rollback restores it (its content lives at HEAD).
+                    restore_relpaths.add(self._issue_relpath(path))
+                    result = self._renumber_committed_issue(path, numeric_id)
+                    renumbered.append((*result, numeric_id))
+                    created_paths.append(result[1])
 
-            if not records:
+            if not renumbered:
                 return None
+            records = [record for record, _path, _num in renumbered]
+
+            incoming_files, merge_modified = self._classify_merge_scope(
+                pre_merge_sha, created_paths,
+            )
+
+            # Tracked files the reconcile may rewrite (cross-references,
+            # ambiguity notes): merge-introduced files still committed at HEAD
+            # and pre-existing files the merge edited. The renamed losers this
+            # run created are absent at HEAD, so they are excluded here and
+            # rolled back by unlink instead of checkout.
+            created_relpaths = {self._issue_relpath(p) for p in created_paths}
+            for f in incoming_files:
+                rp = self._issue_relpath(f)
+                if rp not in created_relpaths:
+                    restore_relpaths.add(rp)
+            for f, _baseline in merge_modified:
+                restore_relpaths.add(self._issue_relpath(f))
+
+            new_ids_by_old: dict[int, list[str]] = {}
+            for record, _new_path, old_num in renumbered:
+                new_ids_by_old.setdefault(old_num, []).append(record.new_id)
+
+            # Phase 2a — a renumbered file's OWN ``#old`` tokens are provably
+            # self-references only when the old ID named a SINGLE issue in
+            # the branch's store: one loser, no merge-introduced keeper, and
+            # no inherited pre-fork keeper. Otherwise a ``#old`` inside a
+            # loser could equally mean a colliding peer or the keeper, so
+            # forcing it to the file's own new ID would silently turn a peer
+            # reference into a self-reference — those files are left for the
+            # ambiguity pass below instead.
+            for record, new_path, old_num in renumbered:
+                if (
+                    len(new_ids_by_old[old_num]) == 1
+                    and old_num not in incoming_keeper_old
+                    and old_num not in keeper_on_branch_old
+                ):
+                    rewrite_issue_references(
+                        self.project_root, old_num, record.new_id,
+                        scope_files=[new_path],
+                    )
+
+            # Phase 2b — the branch's remaining ``#old`` references (in other
+            # merge-introduced files, and in merge-added lines of pre-existing
+            # files it edited). Unambiguous only when ``#old`` named exactly
+            # ONE issue in the branch's own store: a single renumbered loser
+            # and no keeper the branch could see. Otherwise the branch's
+            # store was already ambiguous — no context can prove which
+            # issue a remaining ``#old`` meant (this includes the
+            # renumbered files' own bodies), and rewriting it to a guess would
+            # silently corrupt the reference. Those tokens stay in place, but
+            # each affected file is found and the ambiguity is recorded
+            # durably (a note in the file + a report entry) instead of only
+            # leaving them pointing at the keeper unannounced.
+            ambiguous_refs: list[tuple[Path, int, list[str]]] = []
+            for old_num, new_ids in new_ids_by_old.items():
+                # A keeper the branch could see is a live candidate target
+                # too — whether merge-introduced (it kept ``#old`` itself) or
+                # pre-existing but inherited by the branch before the fork.
+                # Either way it joins the renumbered peers on the candidate
+                # list and forces the group ambiguous even with a single
+                # loser.
+                candidates = (
+                    [f"{old_num:03d}"]
+                    if (
+                        old_num in incoming_keeper_old
+                        or old_num in keeper_on_branch_old
+                    )
+                    else []
+                ) + list(new_ids)
+                if len(candidates) > 1:
+                    for f in incoming_files:
+                        if f.exists() and live_reference_count(f, old_num):
+                            ambiguous_refs.append((f, old_num, candidates))
+                    for f, baseline in merge_modified:
+                        if rewrite_references_in_added_lines(
+                            f, baseline, old_num, old_num, dry_run=True,
+                        ):
+                            ambiguous_refs.append((f, old_num, candidates))
+                    self._log(
+                        f"Issue-ID reconciliation: old ID #{old_num:03d} "
+                        f"named more than one issue from the merged branch's "
+                        f"perspective; remaining "
+                        f"#{old_num:03d} references are ambiguous "
+                        f"(candidates: "
+                        f"{', '.join('#' + n for n in candidates)}) and were "
+                        f"left un-rewritten; the ambiguity is recorded in "
+                        f"the affected issue(s) and the merge report.",
+                        level=logging.WARNING,
+                    )
+                    continue
+                rewrite_issue_references(
+                    self.project_root, old_num, new_ids[0],
+                    scope_files=incoming_files,
+                )
+                for f, baseline in merge_modified:
+                    rewrite_references_in_added_lines(
+                        f, baseline, old_num, new_ids[0],
+                    )
+
+            # Phase 3 — traces and ambiguity notes last, after every rewrite
+            # pass, so a pass can never repoint their embedded ``#old``.
+            for record, new_path, _old_num in renumbered:
+                self._append_renumber_trace_to_file(
+                    new_path, record.old_id, record.new_id,
+                )
+            ambiguity_entries: list[dict] = []
+            for f, old_num, new_ids in ambiguous_refs:
+                append_description_note(
+                    f, format_ambiguous_reference_note(old_num, new_ids),
+                )
+                ambiguity_entries.append({
+                    "file": self._issue_relpath(f),
+                    "old_id": f"{old_num:03d}",
+                    "candidates": list(new_ids),
+                })
 
             # Push .next_id to the new global max so no future allocation
             # re-collides with a number we just assigned.
             advance_next_id_to_max(self.project_root)
 
-            if not self._commit_issue_reconciliation(branch, records):
-                self._restore_issues_worktree()
+            if not self._commit_issue_reconciliation(
+                branch, records, created_paths, restore_relpaths,
+            ):
+                self._restore_issues_worktree(created_paths, restore_relpaths)
                 return None
 
             report.committed_issue_renumbers.extend(records)
+            report.ambiguous_issue_references.extend(ambiguity_entries)
             self._last_branch_reconcile_left_fixup = True
             for rec in records:
                 self._log(
@@ -3290,7 +3846,7 @@ class MergeOrchestrator:
                 level=logging.ERROR,
                 exc_info=True,
             )
-            self._restore_issues_worktree()
+            self._restore_issues_worktree(created_paths, restore_relpaths)
             return None
         return None
 
@@ -4528,6 +5084,14 @@ class MergeOrchestrator:
         )
         if pc_result is not None:
             return pc_result
+        # Two issue files sharing one numeric ID live at DIFFERENT paths, so
+        # they merge cleanly even inside an otherwise-conflicted merge — the
+        # hard "no duplicate numeric ID" guarantee therefore applies to the
+        # LLM-resolved path exactly as to the clean-merge path. Mirrors the
+        # clean path's ordering: after the post-condition check (so the
+        # fix-up lands on a verified merge commit), before runtime-sync.
+        # Best-effort: it never fails the merge.
+        self._reconcile_committed_issue_ids(branch, pre_merge_sha, report)
         sync_result = self._sync_runtime(branch, report)
         if sync_result:
             return sync_result
