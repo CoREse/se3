@@ -19,7 +19,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.config import DEFAULT_MAX_FIX_ITERATIONS, ConfigError
+from se3.config import DEFAULT_MAX_FIX_ITERATIONS, ConfigError, WorkflowConfig
 from se3.engine.state_machine import StateMachine
 
 
@@ -518,8 +518,15 @@ class TestSentinelModeTriggerStepCoverage:
         # Past any sane upper bound — the sentinel must still allow continuation.
         flow.state.fix_iterations = 200
 
+        # This test locks the exhaustion-bypass contract, which is orthogonal to
+        # the SELF_CHECK adjudication routing. Disable the periodic adjudication
+        # backstop (adjudicate_period=0) so a fix_iterations=200 SELF_CHECK is not
+        # diverted to ADJUDICATE — the fix-loop grant we assert here stays on the
+        # implement path. (Adjudication routing has its own dedicated tests.)
         mock_discovery = Mock()
         with patch.object(state_machine, "_get_max_fix_iterations", return_value=0), \
+             patch.object(state_machine, "_get_workflow_config",
+                          return_value=WorkflowConfig(adjudicate_period=0)), \
              patch.object(state_machine, "_get_issue_discovery", return_value=mock_discovery):
             next_step = state_machine.transition_to_next(flow)
 

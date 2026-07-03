@@ -24,6 +24,7 @@ from .models import (
     get_default_step_sequence,
     get_step_info,
 )
+from . import adjudication
 from .chat_history import _history_dir
 from .llm_caller import clear_phase1_cache
 from .token_usage import accumulate_step_usage, UsageTotals
@@ -792,6 +793,19 @@ class StateMachine:
                 flow.status = FlowStatus.FAILED
                 return None
             else:
+                # Adjudication routing (fix-loop 警察). Only SELF_CHECK feeds the
+                # cross-round ledger, so only a SELF_CHECK-sourced REVISION_NEEDED
+                # can trip the oscillation triggers; TEST / INVARIANT_CHECK keep
+                # the original fix routing unchanged. Evaluated BEFORE
+                # _transition_to_fix, after the max_fix_iterations exhaustion
+                # guard above (so the global bound still caps a flow that keeps
+                # adjudicating without converging).
+                if current_step.step_type == StepType.SELF_CHECK:
+                    adjudicate_step = self._maybe_transition_to_adjudicate(
+                        flow, current_step, current_iteration,
+                    )
+                    if adjudicate_step:
+                        return adjudicate_step
                 fix_step = self._transition_to_fix(flow, current_step)
                 if fix_step:
                     return fix_step
@@ -1120,6 +1134,144 @@ class StateMachine:
         print(f"{'='*60}\n")
 
         return implement_step
+
+    def _maybe_transition_to_adjudicate(
+        self,
+        flow: FlowInstance,
+        trigger_step: Step,
+        current_iteration: int,
+    ) -> Optional[Step]:
+        """Evaluate the oscillation triggers on a SELF_CHECK REVISION_NEEDED.
+
+        Structural trigger evaluation only — the truth verdict (is a candidate
+        oscillation a *real* spec contradiction?) is delegated to the ADJUDICATE
+        step's LLM. When any trigger fires (candidate oscillation / 打脸 /
+        reproduction, or the periodic backstop), routes to a dynamically-inserted
+        ADJUDICATE step via ``_transition_to_adjudicate`` and returns it;
+        otherwise returns ``None`` so the caller falls back to the normal
+        ``_transition_to_fix``.
+
+        The caller MUST gate this on ``trigger_step`` being SELF_CHECK: only
+        SELF_CHECK records into the ledger, so TEST / INVARIANT_CHECK have no
+        history to evaluate and must keep their fix routing unchanged.
+        """
+        issues = trigger_step.outputs.get("issues", []) or []
+        # ``adjudicate_period`` is the periodic backstop (every N fix iterations).
+        # Degrade to 0 (disabled) on any config error so a malformed yaml never
+        # crashes a transition — the structural signals still fire.
+        try:
+            period_n = self._get_workflow_config().adjudicate_period
+        except Exception:
+            logger.warning(
+                "Failed to read workflow.adjudicate_period; periodic backstop "
+                "disabled for this transition", exc_info=True,
+            )
+            period_n = 0
+
+        try:
+            decision = adjudication.evaluate_triggers(
+                flow.state.context, issues, current_iteration, period_n=period_n,
+            )
+        except Exception:
+            logger.warning(
+                "Adjudication trigger evaluation failed; falling back to the "
+                "normal fix loop", exc_info=True,
+            )
+            return None
+
+        if not decision.triggered:
+            return None
+
+        logger.info(
+            "Adjudication triggered (reasons=%s) at fix iteration %d; routing to "
+            "ADJUDICATE instead of the fix loop",
+            decision.reasons, current_iteration,
+        )
+        return self._transition_to_adjudicate(
+            flow, trigger_step, current_iteration, decision,
+        )
+
+    def _transition_to_adjudicate(
+        self,
+        flow: FlowInstance,
+        trigger_step: Step,
+        current_iteration: int,
+        decision: "adjudication.AdjudicationDecision",
+    ) -> Optional[Step]:
+        """Insert an ADJUDICATE step ahead of the current SELF_CHECK slot.
+
+        ADJUDICATE is a dynamically-inserted step (like the fix loop's re-entry
+        into implement). It is inserted immediately *before* the SELF_CHECK slot
+        the trigger step occupies so that, once it completes, normal progression
+        re-runs SELF_CHECK — skipping IMPLEMENT/TEST, since the ruling changed no
+        code. The new step and the mutated ``selected_steps`` both round-trip
+        through persistence, so a ``--resume`` can recover at the ADJUDICATE
+        break point (``StepType.ADJUDICATE`` is a first-class step type).
+
+        Returns the ADJUDICATE step, or ``None`` if SELF_CHECK is somehow absent
+        from the sequence (the caller then falls back to the fix loop).
+        """
+        selected = flow.state.selected_steps
+        # Prefer the live ``current_step_index`` when it already points at a
+        # SELF_CHECK slot (so a re-adjudication inserts ahead of the *current*
+        # SELF_CHECK, not the first one in a sequence that already carries an
+        # earlier inserted ADJUDICATE). Otherwise locate the first SELF_CHECK.
+        cur = flow.state.current_step_index
+        if 0 <= cur < len(selected) and selected[cur] == StepType.SELF_CHECK:
+            insert_index = cur
+        else:
+            try:
+                insert_index = selected.index(StepType.SELF_CHECK)
+            except ValueError:
+                logger.warning(
+                    "SELF_CHECK not in selected sequence; cannot route to "
+                    "ADJUDICATE, falling back to fix loop"
+                )
+                return None
+
+        selected.insert(insert_index, StepType.ADJUDICATE)
+
+        inputs = self._build_step_inputs(flow, StepType.ADJUDICATE)
+        # Surface the structural trigger result to the handler so its prompt can
+        # focus the ruling on the flagged positions/fingerprints. The full
+        # cross-round ledger lives on ``flow.state.context`` and is read there.
+        inputs["adjudication_decision"] = {
+            "reasons": list(decision.reasons),
+            "triggering_positions": list(decision.triggering_positions),
+            "triggering_fingerprints": list(decision.triggering_fingerprints),
+            "details": copy.deepcopy(decision.details),
+        }
+        inputs["fix_iteration"] = current_iteration
+
+        step = Step(
+            step_type=StepType.ADJUDICATE,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        flow.state.current_step_index = insert_index
+
+        # Anchor the periodic backstop to this adjudication so the next periodic
+        # sweep measures elapsed fix iterations from here, not from flow start.
+        try:
+            adjudication.note_adjudication_ran(flow.state.context, current_iteration)
+        except Exception:
+            logger.warning(
+                "Failed to reset adjudication period baseline", exc_info=True
+            )
+
+        self.persistence.save_flow(flow)
+
+        print(f"\n{'='*60}")
+        print("⚖️  ADJUDICATE: SPEC-CONTRADICTION RULING")
+        print(f"{'='*60}")
+        print(f"Trigger reasons: {', '.join(decision.reasons) or '(none)'}")
+        print(f"Fix iteration: {current_iteration}")
+        print(f"Source: self_check (oscillation detected)")
+        print(f"{'='*60}\n")
+
+        return step
 
     def _get_max_fix_iterations(self) -> int:
         """Get the maximum number of fix iterations allowed.

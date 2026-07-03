@@ -13,6 +13,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from .. import adjudication
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..prompt_markers import inject_boundary
@@ -791,6 +792,32 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["validation_stats"] = validation_stats
         step.outputs["previous_issue_resolutions"] = prev_issue_resolutions
 
+        # Adjudication ledger accounting (fix-loop 警察). Record this round into
+        # the cross-round ledger on ``flow.state.context`` BEFORE any early
+        # return, so every SELF_CHECK execution — clean, converged, deferred, or
+        # fix-bound — contributes its issues. Resolutions are recorded BEFORE the
+        # issues, sharing one ``round_id``: ``record_fix_resolutions`` relies on
+        # ``record_self_check_round`` to register the round_id for --resume
+        # idempotency, so the resolutions call must run first (while the id is
+        # still absent) and the issues call second (which registers it).
+        # ``step.step_id`` is stable across a --resume replay of the same PENDING
+        # step, so a replayed round is not double-counted (which would corrupt
+        # reproduction counting).
+        try:
+            if prev_issue_resolutions:
+                adjudication.record_fix_resolutions(
+                    flow.state.context,
+                    _pair_resolutions_with_prev(prev_issue_resolutions, prev_issues),
+                    round_id=step.step_id,
+                )
+            adjudication.record_self_check_round(
+                flow.state.context, kept_issues, round_id=step.step_id,
+            )
+        except Exception:
+            # Ledger bookkeeping is an observability side-channel; a failure here
+            # must never break the review itself.
+            logger.warning("Adjudication ledger recording failed", exc_info=True)
+
         if not kept_issues:
             if dropped > 0:
                 logger.info(
@@ -854,9 +881,29 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # tail it must be fixed. Convergence is preserved unchanged only when
         # deferral is disabled (threshold 0/null, the default).
         convergence_blocked_by_defer = defer_enabled
+
+        # Oscillation guard for the convergence shortcut. When a structural
+        # oscillation trigger (a/b/c) would fire on this round, convergence MUST
+        # NOT be allowed to silently mark the flow COMPLETED "converged-but-
+        # diseased": a spec contradiction re-flagged in opposite directions looks
+        # like convergence (same signatures round over round) but must instead be
+        # routed to the adjudicator. The ledger already reflects this round (it
+        # was recorded above), so ``should_suppress_convergence`` sees full
+        # history.
+        try:
+            suppress_convergence = adjudication.should_suppress_convergence(
+                flow.state.context, issues,
+            )
+        except Exception:
+            logger.warning(
+                "Adjudication convergence-suppression check failed", exc_info=True
+            )
+            suppress_convergence = False
+
         if (
             convergence_enabled
             and not convergence_blocked_by_defer
+            and not suppress_convergence
             and not _has_critical_or_high(issues)
             and _issues_converged(issues, prev_issues)
         ):
@@ -1067,6 +1114,35 @@ def _build_fix_outputs(
     # so a downstream reader cannot mistake it for still-pending deferrals.
     step.outputs["self_check_deferred_issues"] = []
     return StepStatus.REVISION_NEEDED
+
+
+def _pair_resolutions_with_prev(
+    resolutions: list, prev_issues: list | None
+) -> list:
+    """Pair each ``previous_issue_resolution`` with its previous issue by position.
+
+    The raw ``previous_issue_resolutions`` schema carries only a prose paraphrase
+    (``prev_issue_summary`` + ``status``) with no machine-readable identity, but
+    the prompt requires exactly one entry per previously-reported issue, in order
+    (SELF_CHECK_PROMPT: "For EACH previously-reported issue, include exactly one
+    entry"). Pairing by index reunites each verdict with the full prev-issue dict
+    so the adjudication ledger can fingerprint it — trigger (b) ("打脸") reads
+    these ``fixed`` verdicts back and compares them by fingerprint against the
+    current round. Extra resolutions without a matching prev issue are passed
+    through unpaired (they contribute an empty fingerprint and carry no weight).
+    """
+    paired: list = []
+    prev = prev_issues or []
+    for i, res in enumerate(resolutions or []):
+        if not isinstance(res, dict):
+            continue
+        entry = dict(res)
+        if i < len(prev) and isinstance(prev[i], dict):
+            # ``setdefault`` so an already-paired resolution (future callers)
+            # keeps its own ``issue``.
+            entry.setdefault("issue", prev[i])
+        paired.append(entry)
+    return paired
 
 
 def _issues_converged(current_issues: list, prev_issues: list | None) -> bool:
