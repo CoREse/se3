@@ -1316,6 +1316,12 @@ class StateMachine:
             "details": copy.deepcopy(decision.details),
         }
         inputs["fix_iteration"] = current_iteration
+        # Hand the triggering SELF_CHECK's pending fix_instructions to the
+        # handler so the ruling can record them as superseded (audit): the
+        # reflow drops them unimplemented, but the record of *what* was dissolved
+        # must survive. Without this the supersede audit would always be empty in
+        # the live path (only pre-seeded test inputs carried it before).
+        inputs["fix_instructions"] = trigger_step.outputs.get("fix_instructions", "") or ""
 
         step = Step(
             step_type=StepType.ADJUDICATE,

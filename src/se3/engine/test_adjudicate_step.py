@@ -358,3 +358,84 @@ def test_handler_fails_gracefully_on_unparseable_llm(tmp_path):
         status = adjmod.adjudicate_handler(step, flow)
     assert status == StepStatus.FAILED
     assert step.error_message
+
+
+# --------------------------------------------------------------------------- #
+# Acceptance: every generation of a ruling stays auditable
+# --------------------------------------------------------------------------- #
+
+def test_multi_generation_rulings_are_each_auditable(tmp_path):
+    """Each ADJUDICATE generation keeps its own rationale + timestamp in its own
+    outputs, and the effective-text layer resolves to the newest — so the full
+    ruling history remains inspectable (acceptance: 历史可见每代裁决及理由与时间戳)."""
+    flow = _flow_with_ledger(tmp_path)
+
+    step1 = _adj_step(flow)
+    with patch.object(adjmod, "LLMCaller", _mock_call({
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Gen-1: return None when x is None.",
+        "adjudication_rationale": "generation one rationale",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    })):
+        # The executor writes the returned status back; the effective-text layer
+        # only considers COMPLETED rulings, so mirror that here.
+        step1.status = adjmod.adjudicate_handler(step1, flow)
+
+    # A second oscillation later → a second generation ruling.
+    adj.record_self_check_round(flow.state.context, [_issue(expected="raise again")], round_id="r3")
+    adj.record_self_check_round(flow.state.context, [_issue(expected="return again")], round_id="r4")
+    step2 = _adj_step(flow)
+    with patch.object(adjmod, "LLMCaller", _mock_call({
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Gen-2: raise ValueError when x is None.",
+        "adjudication_rationale": "generation two rationale",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    })):
+        step2.status = adjmod.adjudicate_handler(step2, flow)
+
+    # Both generations' audit records survive independently.
+    assert step1.outputs["adjudication_rationale"] == "generation one rationale"
+    assert step2.outputs["adjudication_rationale"] == "generation two rationale"
+    assert step1.outputs["adjudicated_at"] and step2.outputs["adjudicated_at"]
+    assert step1.outputs["adjudicated_description"].startswith("Gen-1")
+    # The effective description resolves to the LATEST generation.
+    assert adjmod._latest_adjudicated(flow, "adjudicated_description").startswith("Gen-2")
+
+
+# --------------------------------------------------------------------------- #
+# Acceptance: source-pool switch drops a dead-clause issue after a ruling
+# --------------------------------------------------------------------------- #
+
+def test_ruling_description_drops_dead_clause_issue_via_source_pool(tmp_path):
+    """A handler ruling's adjudicated_description becomes the verbatim-quote
+    source pool: a subsequent issue re-quoting the abolished clause is dropped
+    by validation (acceptance: 源池切换后引用已废条款 issue 被 validation 丢弃)."""
+    from se3.engine.steps.self_check import _validate_and_filter_issues
+
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    with patch.object(adjmod, "LLMCaller", _mock_call({
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep the return branch",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    })):
+        adjmod.adjudicate_handler(step, flow)
+
+    adjudicated = step.outputs["adjudicated_description"]
+    # Post-ruling self_check inputs: source pool switched to the adjudicated text
+    # (the superseded original still carried the now-dead "raise ..." clause).
+    sc_inputs = {
+        "task_description_base": adjudicated,
+        "original_task_description": "Return None when x is None, and raise when x is None",
+        "adjudicated_description": adjudicated,
+        "changes_made": {"files_changed": ["src/foo.py"]},
+    }
+    dead = _issue(quote="raise when x is None", expected="raise ValueError")
+    live = _issue(quote="Return None when x is None", expected="return None")
+
+    kept, stats = _validate_and_filter_issues([dead, live], sc_inputs)
+    # The dead-clause issue is dropped; the live one survives.
+    assert stats["quote_not_in_source_count"] == 1
+    assert len(kept) == 1
+    assert kept[0]["expectation_source"]["verbatim_quote"] == "Return None when x is None"
