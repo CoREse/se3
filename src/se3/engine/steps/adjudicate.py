@@ -24,19 +24,34 @@ Handler responsibilities (group G4):
     spec-vs-hard-constraint / review divergence), decide whether to patch the
     description or the plan, emit a minimal override patch, and rule each
     candidate oscillation true (real contradiction) or benign.
-  * Parse the ruling into this step's own ``outputs``
-    (adjudicated_description / adjudicated_plan / adjudication_rationale /
-    adjudicated_at / superseded_fix_instructions / rejected_candidates),
-    supersede the pending ``fix_instructions`` for audit, mark ledger entries
-    grounded on now-defunct clauses ``abolished``, and record benign candidate
-    positions so they never re-trigger.
+  * Parse the ruling into this step's own ``outputs`` and route by a **gated
+    two-phase** rule keyed on whether a real spec contradiction exists:
+      - Real contradiction (internal spec contradiction / spec-vs-hard-constraint)
+        → the patch path (unchanged): write adjudicated_description /
+        adjudicated_plan / adjudication_rationale / adjudicated_at /
+        superseded_fix_instructions / rejected_candidates, supersede the pending
+        ``fix_instructions`` for audit, mark ledger entries grounded on
+        now-defunct clauses ``abolished``, and record benign candidate positions
+        so they never re-trigger. The state machine then reflows to a fresh
+        SELF_CHECK pass #1 (counting one fix iteration).
+      - No real contradiction (all candidates benign / ``review_divergence``,
+        including a period-baseline sweep that found nothing) → ADJUDICATE is a
+        **transparent no-op**: mark ``adjudication_noop`` and record the
+        audit-only verdict (candidate_verdicts / rationale), but do NOT
+        supersede fix_instructions, clear issues, abolish, or reflow. The state
+        machine routes straight to IMPLEMENT with the triggering round's
+        untouched fix_instructions — as if ADJUDICATE had never been inserted.
+        Only two mechanical bookkeeping effects remain: benign positions written
+        to ``rejected_positions`` (trigger-layer filter) and the already-done
+        ``period_baseline`` reset.
 
 The handler does NOT emit self_check-style ``issues`` (권责 stays split: review
 reports deviations, adjudicate rules on the spec) and does NOT touch the
-original discovery/plan step outputs. Routing of the ruling (skip
-IMPLEMENT/TEST, re-run SELF_CHECK at pass #1) and the human/LLM confirmation
-gate live in the state machine (later groups); a description-changing ruling is
-gated by an inserted CONFIRM step (``confirmation.steps.adjudicate``).
+original discovery/plan step outputs. Routing of the ruling — the patch path's
+reflow to SELF_CHECK pass #1 vs. the no-op path's transparent pass-through to
+IMPLEMENT — and the human/LLM confirmation gate live in the state machine; a
+description-changing (patch-path) ruling is gated by an inserted CONFIRM step
+(``confirmation.steps.adjudicate``).
 """
 
 from __future__ import annotations
@@ -700,13 +715,24 @@ def _apply_ruling(
 ) -> None:
     """Write the ruling to ``step.outputs`` and stage its ledger side effects.
 
-    Records the override patch (description/plan), the rationale, an ISO
-    timestamp, and the superseded pending fix_instructions (audit). Maps each
-    LLM candidate verdict back to a ledger position: "contradiction" *stages*
-    abolition of the position's active fingerprints — but only for positions
-    whose quoted clause actually left the now-effective source pool (a preserved
-    clause keeps counting). "benign" stages the position as a rejected candidate
-    so it never re-triggers. Never writes self_check-style ``issues``.
+    Gated two-phase: if the ruling found NO real contradiction (a
+    ``review_divergence`` — its override, if any, is discarded first so
+    ``has_patch`` is False), take the transparent **no-op** path: mark
+    ``adjudication_noop`` and record the audit-only verdict + benign
+    ``rejected_positions``, then return WITHOUT writing
+    adjudicated_description / adjudicated_plan / superseded_fix_instructions /
+    fix_instructions_superseded and WITHOUT abolishing anything. The state
+    machine then routes to IMPLEMENT with the triggering round's fix_instructions
+    intact.
+
+    Otherwise (a real contradiction) take the patch path: record the override
+    patch (description/plan), the rationale, an ISO timestamp, and the superseded
+    pending fix_instructions (audit). Map each LLM candidate verdict back to a
+    ledger position: "contradiction" *stages* abolition of the position's active
+    fingerprints — but only for positions whose quoted clause actually left the
+    now-effective source pool (a preserved clause keeps counting). "benign"
+    stages the position as a rejected candidate so it never re-triggers. Never
+    writes self_check-style ``issues``.
 
     The ledger is NOT mutated here: the abolish/reject effects are staged into
     ``step.outputs`` and applied by ``apply_landed_ledger_effects`` only once the
@@ -797,6 +823,64 @@ def _apply_ruling(
                 }
             )
 
+        # No real contradiction survived (every candidate benign / a
+        # review_divergence verdict — including a period-baseline sweep that
+        # found nothing): ADJUDICATE becomes a transparent no-op. It writes an
+        # audit-only verdict but must NOT supersede the pending fix_instructions,
+        # clear issues, abolish ledger entries, or reflow — the state machine
+        # reads ``adjudication_noop`` and routes straight to IMPLEMENT with the
+        # triggering round's untouched fix_instructions, as if ADJUDICATE had
+        # never been inserted. Exactly two mechanical bookkeeping effects are
+        # kept: the benign positions staged into ``rejected_positions`` (a
+        # trigger-layer filter that stops the same benign flip re-invoking the
+        # LLM every round), landed by ``apply_landed_ledger_effects``; and the
+        # ``period_baseline`` reset, already done at insertion time. Deliberately
+        # absent: adjudicated_description / adjudicated_plan /
+        # superseded_fix_instructions / fix_instructions_superseded.
+        step.outputs["adjudication_noop"] = True
+        step.outputs["contradiction_type"] = contradiction_type
+        step.outputs["adjudication_rationale"] = rationale
+        step.outputs["adjudicated_at"] = datetime.now(timezone.utc).isoformat()
+        step.outputs["candidate_verdicts"] = verdicts
+        step.outputs["rejected_candidates"] = rejected_records
+        step.outputs["rejected_positions"] = rejected_positions
+        # REMOVE the patch/supersede-path keys rather than writing falsy sentinels.
+        # The no-op output contract is that adjudicated_description / adjudicated_plan
+        # / superseded_fix_instructions / fix_instructions_superseded are ABSENT, so an
+        # audit consumer (history renderer, --resume replay) sees the transparent
+        # no-op shape and cannot mistake a sentinel None/""/False for an override or
+        # supersede that actually happened. Popping also clears any stale value a prior
+        # in-place run left behind: this step may re-run (a rejected patch ruling →
+        # _transition_to_revision keeps step.outputs → the revision re-run now rules
+        # review_divergence). Were a rejected, never-approved override left lingering,
+        # _latest_adjudicated_output / _effective_task_description_base would pick up the
+        # stale adjudicated_description and every downstream step would silently operate
+        # on the spec rewrite the human explicitly rejected, bypassing the confirmation
+        # gate. Consumers all read these via .get()/truthiness, so absence is equivalent
+        # to the old sentinels for routing while keeping the audit trail honest.
+        for _patch_key in (
+            "adjudicated_description",
+            "adjudicated_plan",
+            "superseded_fix_instructions",
+            "fix_instructions_superseded",
+        ):
+            step.outputs.pop(_patch_key, None)
+        # No patch → nothing to abolish; abolished_fingerprints stays empty so
+        # apply_landed_ledger_effects skips mark_abolished and only lands the
+        # benign rejected_positions.
+        step.outputs["abolished_fingerprints"] = []
+        step.outputs["ledger_effects_applied"] = False
+        step.outputs["candidates_considered"] = [
+            {"file": c["file"], "quote": c["quote"], "position_key": c["position_key"]}
+            for c in candidates
+        ]
+        logger.info(
+            "Adjudication ruled '%s' (no-op): no real contradiction; "
+            "staged_rejected=%d, no supersede/abolish/reflow (transparent pass-through)",
+            contradiction_type, len(rejected_positions),
+        )
+        return
+
     # Only abolish a position whose quoted clause is GONE from the now-effective
     # source pool: a plan-only fix (description unchanged) or a description
     # rewrite that kept a quoted hard constraint must NOT clear the history of a
@@ -818,17 +902,25 @@ def _apply_ruling(
     )
     abolished_fps = _position_fingerprints(ledger, abolishable_positions)
 
-    # Supersede the pending fix_instructions (kept only for audit) for EVERY
-    # landed ruling — a patch and a no-op (review_divergence) alike. The
-    # post-ruling reflow always re-runs SELF_CHECK from pass #1 rather than
-    # feeding the pre-adjudication instructions into IMPLEMENT: those
-    # instructions come from the oscillating round and applying them would chase
-    # the very knot the ruling just examined (and, for a patch, would ignore the
-    # switched source pool). Re-running instead reproduces any still-valid issue
-    # and routes it through the normal fix loop, while the recorded rejected
-    # candidates keep a benign flip from re-triggering ADJUDICATE.
+    # Supersede the pending fix_instructions (kept only for audit). Only the
+    # patch path reaches here — a no-op (review_divergence) ruling returned above
+    # WITHOUT superseding, so its triggering-round instructions flow untouched
+    # into IMPLEMENT. For a real contradiction the post-ruling reflow re-runs
+    # SELF_CHECK from pass #1 rather than feeding the pre-adjudication
+    # instructions into IMPLEMENT: those instructions come from the oscillating
+    # round and applying them would chase the very knot the ruling just examined
+    # while ignoring the switched source pool. Re-running instead reproduces any
+    # still-valid issue and routes it through the normal fix loop, while the
+    # recorded rejected candidates keep a benign flip from re-triggering ADJUDICATE.
     superseded = step.inputs.get("fix_instructions", "") or ""
 
+    # This step may re-run in place: a prior run could have produced a no-op
+    # ruling (adjudication_noop=True), and this re-run is now a real
+    # contradiction taking the patch path. Force the flag false so
+    # transition_to_next never treats a *stale* True as authoritative and routes
+    # a real-contradiction ruling through the no-op pass-through — bypassing the
+    # confirmation gate, supersede, abolition and SELF_CHECK reflow it requires.
+    step.outputs["adjudication_noop"] = False
     step.outputs["contradiction_type"] = contradiction_type
     step.outputs["adjudicated_description"] = adjudicated_description
     step.outputs["adjudicated_plan"] = adjudicated_plan

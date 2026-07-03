@@ -191,6 +191,19 @@ _RULING = {
     "candidate_verdicts": [{"id": 0, "verdict": "contradiction", "reason": "opposing"}],
 }
 
+# A no-op ruling: the flagged position is NOT a real spec contradiction — the
+# reviewers merely diverged. Carries no override patch (review_divergence).
+_BENIGN_RULING = {
+    "contradiction_type": "review_divergence",
+    "adjudicated_description": None,
+    "adjudicated_plan": None,
+    "adjudication_rationale": (
+        "The two rounds reflect reviewer taste, not a spec conflict; the "
+        "description is internally consistent, so there is nothing to adjudicate."
+    ),
+    "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "reviewer divergence"}],
+}
+
 
 # --------------------------------------------------------------------------- #
 # 1. Full contradiction → adjudicate → converge
@@ -534,3 +547,76 @@ class TestPeriodicBackstop:
 
         assert nxt.step_type == StepType.IMPLEMENT
         assert StepType.ADJUDICATE not in flow.state.selected_steps
+
+
+# --------------------------------------------------------------------------- #
+# 4. No-op ruling (review_divergence) → transparent pass-through to IMPLEMENT
+# --------------------------------------------------------------------------- #
+
+class TestBenignNoop:
+    def test_oscillation_then_benign_ruling_passes_through_to_implement(self, tmp_path):
+        """End-to-end: an oscillation trips ADJUDICATE, but the LLM rules the
+        flagged position a review_divergence (no real contradiction). ADJUDICATE
+        must then be a transparent no-op — the triggering round's fix_instructions
+        flow UNTOUCHED into IMPLEMENT (not a fresh SELF_CHECK), with no extra fix
+        iteration and the issue left intact — exactly as if ADJUDICATE had never
+        been inserted. Only two mechanical effects survive: the ADJUDICATE slot is
+        stripped and the benign position lands in ``rejected_positions``."""
+        cfg = _cfg()
+        sm = _make_sm(tmp_path, cfg)
+        flow, implement, test = _make_flow(tmp_path)
+
+        # --- Round 1: reviewer demands "raise" at the contradictory clause. ---
+        sc1 = _new_self_check(sm, flow)
+        _run_self_check(sc1, flow, [_issue(expected="raise ValueError")])
+        nxt = sm.transition_to_next(flow)
+        assert nxt.step_type == StepType.IMPLEMENT
+        nxt.status = StepStatus.COMPLETED
+        nxt.outputs = {"files_changed": [{"path": "src/foo.py", "action": "modify"}]}
+
+        # --- Round 2: reviewer flips to "return None" → oscillation → ADJUDICATE. ---
+        sc2 = _new_self_check(sm, flow)
+        _run_self_check(sc2, flow, [_issue(expected="return None")])
+        adj = sm.transition_to_next(flow)
+        assert adj.step_type == StepType.ADJUDICATE
+        fix_iter_at_ruling = flow.state.get_fix_iteration()
+        pending_fix = sc2.outputs["fix_instructions"]
+        assert pending_fix  # the round's real pending instructions
+        # ``_transition_to_adjudicate`` reset the period baseline at insertion
+        # (this sweep actually ran); the no-op pass-through must NOT touch it
+        # again — the reset is one of the two mechanical effects it preserves.
+        ledger_at_ruling = flow.state.context[adjudication.LEDGER_KEY]
+        baseline_at_insertion = ledger_at_ruling["period_baseline"]
+
+        # --- The ruling: benign (review_divergence), no override patch. ---
+        assert _run_adjudicate(adj, flow, _BENIGN_RULING) == StepStatus.COMPLETED
+        assert adj.outputs["adjudication_noop"] is True
+        # No-op leaves supersede/override fields ABSENT (transparent audit shape),
+        # and pops any stale value a prior rejected patch ruling re-run in place
+        # left behind so it cannot leak a never-approved rewrite.
+        assert "superseded_fix_instructions" not in adj.outputs
+        assert "fix_instructions_superseded" not in adj.outputs
+        assert "adjudicated_description" not in adj.outputs
+        assert "adjudicated_plan" not in adj.outputs
+        # Audit verdicts are recorded.
+        assert adj.outputs["candidate_verdicts"]
+        assert adj.outputs["adjudication_rationale"]
+
+        # --- Transparent pass-through: straight to IMPLEMENT, untouched fix. ---
+        impl = sm.transition_to_next(flow)
+        assert impl.step_type == StepType.IMPLEMENT
+        assert impl.inputs["fix_instructions"] == pending_fix
+        # Exactly one increment (owned by _transition_to_fix) — no extra count.
+        assert flow.state.get_fix_iteration() == fix_iter_at_ruling + 1
+        # The oscillation issue was NOT cleared.
+        assert sc2.outputs["issues"]
+        # The inserted ADJUDICATE slot was stripped; the fix loop can't re-run it.
+        assert StepType.ADJUDICATE not in flow.state.selected_steps
+        # The benign position landed in the ledger (trigger-layer filter) so the
+        # same flip won't re-invoke the adjudicator every round.
+        ledger = flow.state.context[adjudication.LEDGER_KEY]
+        assert ledger["rejected_positions"]
+        # The period baseline stays at its insertion-time reset value — the no-op
+        # path performs no second reset (only rejected_positions + the already-done
+        # baseline reset are its mechanical bookkeeping).
+        assert ledger["period_baseline"] == baseline_at_insertion

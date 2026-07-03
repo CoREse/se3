@@ -330,8 +330,11 @@ def test_null_string_override_coerced_to_none(tmp_path):
     }
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         adjmod.adjudicate_handler(step, flow)
-    assert step.outputs["adjudicated_description"] is None
-    assert step.outputs["adjudicated_plan"] is None
+    # review_divergence ⇒ transparent no-op: the coerced null overrides are not
+    # written (the no-op path never emits adjudicated_description/plan at all).
+    assert step.outputs["adjudication_noop"] is True
+    assert step.outputs.get("adjudicated_description") is None
+    assert step.outputs.get("adjudicated_plan") is None
 
 
 def test_override_without_verdicts_still_abolishes_candidates(tmp_path):
@@ -867,7 +870,10 @@ def test_review_divergence_needs_no_patch(tmp_path):
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         status = adjmod.adjudicate_handler(step, flow)
     assert status == StepStatus.COMPLETED
-    assert step.outputs["adjudicated_description"] is None
+    # No real contradiction ⇒ transparent no-op: no override patch is written.
+    assert step.outputs["adjudication_noop"] is True
+    assert step.outputs.get("adjudicated_description") is None
+    assert step.outputs.get("adjudicated_plan") is None
 
 
 def test_review_divergence_blank_rationale_is_rejected(tmp_path):
@@ -979,10 +985,171 @@ def test_review_divergence_with_patch_discards_override(tmp_path):
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         status = adjmod.adjudicate_handler(step, flow)
     assert status == StepStatus.COMPLETED
-    # The override is discarded — no spec rewrite lands.
-    assert step.outputs["adjudicated_description"] is None
-    assert step.outputs["adjudicated_plan"] is None
+    # The override is discarded — no spec rewrite lands (no-op path omits both
+    # override keys entirely).
+    assert step.outputs["adjudication_noop"] is True
+    assert step.outputs.get("adjudicated_description") is None
+    assert step.outputs.get("adjudicated_plan") is None
     # Nothing abolished; the candidate is instead staged rejected so it stops
     # re-triggering without clearing its audit history.
     assert step.outputs["abolished_fingerprints"] == []
     assert pos_key in step.outputs["rejected_positions"]
+
+
+def test_review_divergence_is_transparent_noop(tmp_path):
+    """A no-real-contradiction ruling is a transparent no-op: it flags
+    ``adjudication_noop``, records an audit-only verdict (candidate_verdicts +
+    rationale) and the benign ``rejected_positions`` mechanical bookkeeping, but
+    deliberately writes NONE of the supersede/override fields — so the state
+    machine can route straight to IMPLEMENT with the triggering round's
+    fix_instructions intact, as if ADJUDICATE had never been inserted (G1)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow, fix_instructions="ORIGINAL fix instructions")
+    verdicts = [{"id": 0, "verdict": "benign", "reason": "different scopes"}]
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "the flip was a review misfire, not a contradiction",
+        "candidate_verdicts": verdicts,
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+
+    # No-op contract flag + audit trail recorded.
+    assert step.outputs["adjudication_noop"] is True
+    assert step.outputs["candidate_verdicts"] == verdicts
+    assert step.outputs["adjudication_rationale"].strip()
+    assert step.outputs["contradiction_type"] == "review_divergence"
+    assert step.outputs["adjudicated_at"]
+
+    # Benign rejected_positions mechanical bookkeeping is preserved (the only
+    # ledger-facing effect of the no-op path).
+    pos_key = adjmod._ledger(flow)["observations"][0]["position_key"]
+    assert pos_key in step.outputs["rejected_positions"]
+    assert step.outputs["rejected_candidates"][0]["position_key"] == pos_key
+
+    # Supersede/override fields are ABSENT from the no-op output (the transparent
+    # audit shape), not present as falsy sentinels: a benign audit record must be
+    # indistinguishable from "no supersede/override ever happened". A rejected patch
+    # ruling can re-run this SAME step in place (outputs kept), so the no-op branch
+    # must POP any lingering override rather than leave a never-approved rewrite
+    # behind — else it would leak past the confirmation gate as the effective task
+    # description. Absent, IMPLEMENT sees the original fix_instructions untouched and
+    # no reflow/abolish is staged.
+    assert "superseded_fix_instructions" not in step.outputs
+    assert "fix_instructions_superseded" not in step.outputs
+    assert "adjudicated_description" not in step.outputs
+    assert "adjudicated_plan" not in step.outputs
+    assert step.outputs["abolished_fingerprints"] == []
+    assert step.outputs["ledger_effects_applied"] is False
+
+
+def test_real_contradiction_is_not_a_noop(tmp_path):
+    """A real contradiction keeps the current patch-path behavior: it supersedes
+    the pending fix_instructions and writes the override, and ``adjudication_noop``
+    is never set (routing treats its absence as False → reflow, not pass-through)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow, fix_instructions="OLD pending instructions")
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudicated_plan": None,
+        "adjudication_rationale": "the spec demanded both; keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert step.outputs.get("adjudication_noop") is not True
+    assert step.outputs["adjudicated_description"] == "Return None when x is None."
+    assert step.outputs["superseded_fix_instructions"] == "OLD pending instructions"
+    assert step.outputs["fix_instructions_superseded"] is True
+
+
+def test_noop_reruling_clears_rejected_patch_ruling(tmp_path):
+    """Regression: a rejected patch ruling re-runs the SAME step in place
+    (_transition_to_revision keeps step.outputs), then rules review_divergence.
+    The no-op branch MUST remove the earlier ruling's adjudicated_description /
+    adjudicated_plan / superseded_fix_instructions / fix_instructions_superseded —
+    otherwise the never-approved rewrite lingers and _latest_adjudicated_output
+    would silently make it the effective task description, bypassing the human
+    rejection at the confirmation gate."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow, fix_instructions="ORIGINAL fix instructions")
+
+    # --- First ruling: real contradiction with a description patch. ---
+    patch_payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "REJECTED rewrite the human refused.",
+        "adjudicated_plan": None,
+        "adjudication_rationale": "keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(patch_payload)):
+        adjmod.adjudicate_handler(step, flow)
+    assert step.outputs["adjudicated_description"] == "REJECTED rewrite the human refused."
+    assert step.outputs["fix_instructions_superseded"] is True
+
+    # --- Confirmation门 rejects → step re-runs in place; outputs are kept. ---
+    # --- Revision re-run: LLM now rules review_divergence (no-op). ---
+    noop_payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "on reflection this was a review misfire",
+        "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "different scopes"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(noop_payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert step.outputs["adjudication_noop"] is True
+
+    # The rejected patch ruling must be fully wiped — no stale override survives,
+    # and the no-op leaves the patch/supersede keys absent (not falsy sentinels).
+    assert "adjudicated_description" not in step.outputs
+    assert "adjudicated_plan" not in step.outputs
+    assert "superseded_fix_instructions" not in step.outputs
+    assert "fix_instructions_superseded" not in step.outputs
+
+
+def test_contradiction_reruling_clears_stale_noop_flag(tmp_path):
+    """Regression: a no-op (review_divergence) ruling re-runs the SAME step in
+    place, then rules a real contradiction. The patch branch MUST force
+    ``adjudication_noop`` back to False — otherwise transition_to_next reads the
+    stale True and routes the real-contradiction ruling through the no-op
+    pass-through, skipping the confirmation gate / supersede / abolition /
+    SELF_CHECK reflow the ruling requires."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow, fix_instructions="ORIGINAL fix instructions")
+
+    # --- First ruling: review_divergence (no-op) sets adjudication_noop=True. ---
+    noop_payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "review misfire",
+        "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "different scopes"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(noop_payload)):
+        adjmod.adjudicate_handler(step, flow)
+    assert step.outputs["adjudication_noop"] is True
+
+    # --- Re-run in place: LLM now rules a real internal contradiction. ---
+    patch_payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudicated_plan": None,
+        "adjudication_rationale": "the spec demanded both; keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(patch_payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+
+    # The stale no-op flag must be cleared so the router takes the patch path.
+    assert step.outputs.get("adjudication_noop") is not True
+    assert step.outputs["adjudicated_description"] == "Return None when x is None."
+    assert step.outputs["superseded_fix_instructions"] == "ORIGINAL fix instructions"
+    assert step.outputs["fix_instructions_superseded"] is True

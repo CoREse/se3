@@ -77,6 +77,16 @@
 
 
 
+
+## 11.7.1 - 2026-07-03
+
+- Gate the ADJUDICATE LLM ruling into two phases: only a real spec contradiction takes the patch/reflow path
+- Route benign (review_divergence) rulings as a transparent no-op that passes the triggering round's fix_instructions straight into IMPLEMENT
+- Stop charging an extra fix iteration, clearing issues, superseding fix_instructions, or reflowing to SELF_CHECK pass #1 when no true contradiction is found
+- Preserve two mechanical bookkeeping effects on the no-op path: benign positions recorded to rejected_positions and the period_baseline reset
+- Record an audit-only verdict (candidate_verdicts, rationale) on no-op rulings without writing adjudicated_description / adjudicated_plan / superseded_fix_instructions
+- Keep the mechanical trigger layer and the true-contradiction adjudication path behavior unchanged
+- Update engine and integration tests to cover the transparent no-op pass-through and confirm the contradiction path is unaffected
 ## 11.7.0 - 2026-07-03
 
 - Add a new ADJUDICATE step that resolves specification contradictions in the fix loop, breaking review-oscillation deadlocks that previously required manual engine.json edits

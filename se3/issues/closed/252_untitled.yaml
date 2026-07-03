@@ -1,7 +1,7 @@
 id: '252'
 description: 裁决步骤应当先确定是否是震荡，如果不是震荡就无事发生。检查一下裁决步骤的实现是不是这样。
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-03T13:48:42.972786'
-updated_at: '2026-07-03T13:48:42.972786'
+updated_at: '2026-07-03T16:44:37.784516'

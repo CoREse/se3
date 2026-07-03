@@ -888,6 +888,16 @@ class StateMachine:
             current_step.step_type == StepType.ADJUDICATE
             and current_step.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
         ):
+            # No-op ruling (review_divergence — no real contradiction): route the
+            # flow straight into IMPLEMENT with the triggering round's untouched
+            # fix_instructions, as if ADJUDICATE had never been inserted. Routing
+            # consumes the handler's single authoritative ``adjudication_noop``
+            # flag rather than re-deriving contradiction_type here — the handler
+            # owns the full benign-vs-contradiction verdict (incl. the
+            # review_divergence-with-patch discard), so mirroring that judgement in
+            # the router would only invite drift.
+            if current_step.outputs.get("adjudication_noop"):
+                return self._transition_after_adjudicate_noop(flow, current_step)
             confirm_step = self._maybe_confirm_adjudication(flow, current_step)
             if confirm_step:
                 return confirm_step
@@ -912,6 +922,11 @@ class StateMachine:
                 # SELF_CHECK at pass #1, and count the re-run as a fix iteration
                 # (the increment lives in _transition_after_adjudicate so it fires
                 # once on the landing, never on a rejected re-ruling cycle).
+                # No branch for the no-op path here: a no-op ruling carries no
+                # patch, so ``_maybe_confirm_adjudication`` never inserts a CONFIRM
+                # for it — an approved-CONFIRM reflex can only ever land a
+                # real-contradiction ruling, which always reflows via
+                # ``_transition_after_adjudicate``.
                 if review_result.get("step_to_review_type") == StepType.ADJUDICATE.value:
                     adj_id = review_result.get("step_to_review_id")
                     adj_step = flow.state.steps.get(adj_id) if adj_id else None
@@ -1365,16 +1380,21 @@ class StateMachine:
             "details": copy.deepcopy(decision.details),
         }
         inputs["fix_iteration"] = current_iteration
-        # Record which SELF_CHECK triggered this ruling, for audit/history only.
-        # Every ruling (patch or no-op) now reflows uniformly to a fresh
-        # SELF_CHECK, so the trigger step is no longer re-entered — but keeping the
-        # link makes the ledger/history legible.
+        # Record which SELF_CHECK triggered this ruling. Ruling routing is now
+        # gated two-phase: a real-contradiction ruling supersedes and reflows to a
+        # fresh SELF_CHECK pass #1 (this trigger step is not re-entered — the link
+        # is audit/history), while a no-op (review_divergence) ruling reads this
+        # id to route straight back to the triggering SELF_CHECK's untouched
+        # fix_instructions in IMPLEMENT — so for the no-op path it is load-bearing,
+        # not audit-only.
         inputs["adjudication_trigger_step_id"] = trigger_step.step_id
         # Hand the triggering SELF_CHECK's pending fix_instructions to the
-        # handler so the ruling can record them as superseded (audit): the
-        # reflow drops them unimplemented, but the record of *what* was dissolved
-        # must survive. Without this the supersede audit would always be empty in
-        # the live path (only pre-seeded test inputs carried it before).
+        # handler so a real-contradiction ruling can record them as superseded
+        # (audit): its reflow drops them unimplemented, but the record of *what*
+        # was dissolved must survive. A no-op ruling leaves them untouched and the
+        # no-op routing re-feeds them into IMPLEMENT verbatim. Without this the
+        # supersede audit would always be empty in the live path (only pre-seeded
+        # test inputs carried it before).
         inputs["fix_instructions"] = trigger_step.outputs.get("fix_instructions", "") or ""
 
         step = Step(
@@ -1585,15 +1605,15 @@ class StateMachine:
         fresh SELF_CHECK step, or ``None`` if no SELF_CHECK slot exists (the
         caller then falls through to normal progression).
 
-        A no-op ruling (``review_divergence`` — no override patch) reflows the
-        SAME way: its pending fix_instructions are still superseded and
-        IMPLEMENT/TEST are still skipped. The spec did not change, so the re-run
-        reproduces every still-valid issue and routes it through the normal fix
-        loop — but forcing it through a fresh SELF_CHECK (rather than replaying
-        the oscillating round's stale fix_instructions into IMPLEMENT) is what
-        keeps the reflow behavior uniform and lets the source-pool reset and the
-        benign-candidate rejections take effect before the next fix. Its
-        rejections are applied to the ledger below so they stop re-triggering.
+        This is the real-contradiction (override-patch) reflow path. A no-op
+        ruling (``review_divergence`` — no override patch) does NOT come here in
+        the normal case: it is routed by ``_transition_after_adjudicate_noop``
+        straight to IMPLEMENT with the triggering round's fix_instructions
+        untouched (no supersede, no SELF_CHECK reflow, no extra fix iteration), so
+        the effect is as if ADJUDICATE was never inserted. This method remains the
+        no-op path's DEFENSIVE fallback only — reached when that routing cannot
+        locate the triggering SELF_CHECK — so it must still degrade safely; its
+        ledger effects (benign-candidate rejections) are applied below either way.
         """
         # Strip the dynamically-inserted ADJUDICATE slot AND its (optional)
         # CONFIRM slot — they sit immediately before the reflowed SELF_CHECK
@@ -1658,6 +1678,84 @@ class StateMachine:
         print(f"{'='*60}\n")
 
         return self_check_step
+
+    def _transition_after_adjudicate_noop(
+        self,
+        flow: FlowInstance,
+        adjudicate_step: Step,
+    ) -> Optional[Step]:
+        """Transparent pass-through after a no-op (review_divergence) ruling.
+
+        The ruling found no real spec contradiction, so ADJUDICATE must behave as
+        if it had never been inserted: no supersede, no SELF_CHECK reflow at pass
+        #1, no extra fix-iteration increment. Instead we route the flow straight
+        into IMPLEMENT via the SAME ``_transition_to_fix`` path a plain
+        REVISION_NEEDED SELF_CHECK would take, feeding the triggering round's
+        untouched ``fix_instructions``/``fix_context``. Reusing that path (rather
+        than rebuilding the IMPLEMENT inputs here) precisely reproduces the single
+        fix-iteration increment and instruction hand-off of the un-adjudicated
+        flow, and keeps the two entry points from drifting.
+
+        Exactly two mechanical bookkeeping effects survive the no-op (per the
+        gated two-phase design): the inserted ADJUDICATE slot is stripped, and the
+        handler-staged benign ``rejected_positions`` are landed into the ledger via
+        ``apply_landed_ledger_effects`` (``abolished_fingerprints`` is empty here,
+        so ``mark_abolished`` is skipped) — this is the trigger-layer filter that
+        stops the same benign flip re-invoking the LLM every round. The
+        ``period_baseline`` is NOT touched here: ``_transition_to_adjudicate``
+        already reset it via ``note_adjudication_ran`` at insertion time.
+
+        Returns the reused IMPLEMENT step. If the triggering SELF_CHECK cannot be
+        resolved (or ``_transition_to_fix`` declines), defensively falls back to
+        ``_transition_after_adjudicate`` so the flow always advances.
+        """
+        # Resolve the triggering SELF_CHECK first: the no-op reuses its pending
+        # fix_instructions, so without it there is nothing to route into IMPLEMENT.
+        trigger_id = adjudicate_step.inputs.get("adjudication_trigger_step_id")
+        trigger_sc = flow.state.steps.get(trigger_id) if trigger_id else None
+        if not (trigger_sc and trigger_sc.step_type == StepType.SELF_CHECK):
+            logger.warning(
+                "Adjudication no-op could not resolve its triggering SELF_CHECK "
+                "(id=%s); falling back to the standard reflow to guarantee "
+                "forward progress", trigger_id,
+            )
+            return self._transition_after_adjudicate(flow, adjudicate_step)
+
+        # Strip the dynamically-inserted ADJUDICATE slot (a no-op never carries a
+        # patch, so it never inserted a CONFIRM) — same cleanup the patch reflow
+        # does, or a leftover slot would re-enter on the next sequential pass.
+        selected = flow.state.selected_steps
+        cur = flow.state.current_step_index
+        self._strip_inserted_adjudicate_run(selected, cur)
+
+        # Land the benign rejected_positions (only mechanical ledger effect the
+        # no-op keeps). Idempotent, so a --resume re-entry is safe.
+        try:
+            from .steps.adjudicate import apply_landed_ledger_effects
+            apply_landed_ledger_effects(adjudicate_step, flow.state.context)
+        except Exception:
+            logger.warning(
+                "Failed to land benign rejected_positions on adjudication no-op",
+                exc_info=True,
+            )
+
+        # Re-enter IMPLEMENT exactly as an un-adjudicated SELF_CHECK
+        # REVISION_NEEDED would: one fix-iteration increment, triggering round's
+        # instructions/context carried through.
+        fix_step = self._transition_to_fix(flow, trigger_sc)
+        if fix_step:
+            print(f"\n{'='*60}")
+            print("➡️  ADJUDICATION NO-OP: PASS-THROUGH TO IMPLEMENT")
+            print(f"{'='*60}")
+            print("No real contradiction — triggering fix_instructions applied unchanged")
+            print(f"{'='*60}\n")
+            return fix_step
+
+        logger.warning(
+            "Adjudication no-op fix transition returned None; falling back to the "
+            "standard reflow to guarantee forward progress"
+        )
+        return self._transition_after_adjudicate(flow, adjudicate_step)
 
     def _get_max_fix_iterations(self) -> int:
         """Get the maximum number of fix iterations allowed.
