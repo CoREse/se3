@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from . import protocol
+from .disk_json_cache import read_engine_header
 from .history import enumerate_historical_project_roots
 from .supervisor import is_worktree_copy_root, resolve_worktree_main_root
 
@@ -617,7 +618,15 @@ class DaemonAggregator:
                         continue
                 except OSError:  # pragma: no cover - racy unlink
                     continue
-                data = _read_json(entry / "se3" / "state" / "engine.json")
+                # This runs on the daemon's ~1 s hot path across every worktree
+                # subdir, and the gate only needs two top-level keys — so read a
+                # cached header (parsed once per change) rather than a full parse.
+                # A giant *legacy* worktree engine.json degrades to a bounded
+                # head+tail scan inside ``read_engine_header``, so an active
+                # worktree run stays discoverable instead of being skipped.
+                data = read_engine_header(
+                    entry / "se3" / "state" / "engine.json"
+                )
                 if not isinstance(data, dict):
                     continue
                 if not data.get("flow_id") or not data.get("is_worktree_mode"):
@@ -758,7 +767,13 @@ class DaemonAggregator:
         """
         state_dir = root / "se3" / "state"
         engine_json = state_dir / "engine.json"
-        data = _read_json(engine_json)
+        # ``read_engine_header`` returns the FULL parsed dict (cached, once per
+        # change) for a normal-sized engine.json — so ``state`` is present for
+        # progress/current-step rendering — and degrades a giant legacy file to
+        # its hot top-level keys (flow_id/status/…); the ``state``-derived fields
+        # below simply fall back to their empty defaults in that case, keeping the
+        # active flow visible in the WebUI rather than dropping it.
+        data = read_engine_header(engine_json)
 
         pending_calls = self._enumerate_calls(root)
         log_count = _count_dir(root / "se3" / "logs")
@@ -854,7 +869,12 @@ class DaemonAggregator:
             return []
         results: List[FlowSnapshot] = []
         for snap_file in snapshot_files:
-            data = _read_json(snap_file)
+            # Resumable snapshots are ``FlowInstance.to_dict()`` (same shape as
+            # engine.json) and can grow large in-flight, so read them through the
+            # shared cache/guardrail exactly like an engine.json: full parse when
+            # affordable (``state`` present for progress), degraded hot keys when
+            # oversized.
+            data = read_engine_header(snap_file)
             if not isinstance(data, dict):
                 continue
             flow_id = data.get("flow_id")

@@ -412,10 +412,15 @@ class DaemonClient:
             )
             await self._push_status(ws)
             await self._push_history(ws, force_index=True)
-            # Prime the signature so the fast push loop only fires on the *next*
+            # Prime the signatures so the fast push loop only fires on the *next*
             # disk change rather than immediately re-pushing what we just sent.
-            self._history_changed()
-            self._calls_changed()
+            # Both signature scans parse on-disk engine.json (the active-flow
+            # signature, and the calls signature via the aggregator's worktree
+            # scan), so they are offloaded to a worker thread — running them
+            # synchronously here would parse JSON on the event loop, the exact
+            # #209 / #243 starvation this hardening removes.
+            await asyncio.to_thread(self._history_changed)
+            await asyncio.to_thread(self._calls_changed)
             logger.info("Connected to central server; HELLO sent")
 
             recv_task = asyncio.create_task(self._receive_loop(ws, stop_event))
@@ -477,8 +482,14 @@ class DaemonClient:
             now = time.monotonic()
             status_due = (now - last_status) >= self.status_interval
             # A genuine call-file change drives an immediate STATUS_UPDATE so
-            # the web sees the new / drained interjection chip within ~1 s.
-            calls_changed = self._calls_changed()
+            # the web sees the new / drained interjection chip within ~1 s. The
+            # calls signature scans every tracked root AND every active
+            # ``--worktree`` run subdir, and that worktree scan parses each
+            # subdir's engine.json (via the aggregator) — a JSON parse that must
+            # never run on the event loop, so it is offloaded like the history
+            # check below (the push loop is this method's sole caller, so the
+            # off-thread signature-state mutation is race-free).
+            calls_changed = await asyncio.to_thread(self._calls_changed)
             # ``woke_for_fast_push`` is set by ``_handle_interject`` the
             # instant a server-delivered interjection has hit disk — push now
             # rather than waiting for the next ``has_changes``-style scan to
