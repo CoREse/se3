@@ -4,6 +4,7 @@ Handles JSON serialization/deserialization with atomic writes
 to prevent state corruption during interruptions.
 """
 
+import copy
 import json
 import logging
 import os
@@ -15,6 +16,24 @@ from .models import FlowInstance, FlowStatus, State, Step, StepStatus
 from .schema import build_context_from_flow
 
 logger = logging.getLogger(__name__)
+
+# --- engine.json hot/cold split format (issue #244 一期 / Part B) -----------
+# The new-format engine.json is a KB-level *header*: flow identity + status +
+# per-step status table (no inputs/outputs bodies) + the small round-tripped
+# fields. A step's inputs/outputs and the shared State.context are externalised
+# to per-flow *cold* files under ``se3/state/steps/<flow_id>/`` and loaded on
+# demand. The header carries ENGINE_FORMAT_KEY so a reader distinguishes it from
+# the legacy inline format by a single top-level key — no filesystem probing,
+# no aggregator-side format branch (the daemon just reads the KB header whole).
+#
+# Cold data is partitioned by flow_id (not by header file): the live engine.json
+# and a resumable/<flow_id>.json snapshot of the *same* flow reference the one
+# ``steps/<flow_id>/`` directory, so a later flow reusing a sequential step_id
+# (e.g. ``01_analyze_...``) never collides with an earlier flow's cold files.
+ENGINE_FORMAT_KEY = "engine_format"
+NEW_FORMAT_MARKER = "hot-cold/1"
+STEPS_DIRNAME = "steps"
+COLD_CONTEXT_FILENAME = "_context.json"
 
 
 class PersistenceManager:
@@ -50,6 +69,179 @@ class PersistenceManager:
     def ensure_directories(self) -> None:
         """Ensure state directories exist."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- hot/cold split format: detection, cold loaders, (de)serialization ---
+
+    def _steps_root_for(self, flow_id: Optional[str]) -> Path:
+        """Directory holding a flow's externalised cold step / context files.
+
+        Partitioned by flow_id so the live engine.json header and any
+        resumable/<flow_id>.json snapshot of the same flow share one cold
+        directory, while distinct flows never collide on a reused step_id.
+        """
+        return self.state_dir / STEPS_DIRNAME / str(flow_id)
+
+    @staticmethod
+    def _is_new_format(data: Any) -> bool:
+        """True if ``data`` is a hot/cold-split header (vs legacy inline).
+
+        Keyed solely on the top-level marker so detection is O(1) and needs no
+        filesystem probe; a legacy engine.json (no marker) reads as False.
+        """
+        return isinstance(data, dict) and str(
+            data.get(ENGINE_FORMAT_KEY, "")
+        ).startswith("hot-cold")
+
+    @staticmethod
+    def _split_to_new_format(
+        data: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Any]]:
+        """Split a full ``FlowInstance.to_dict()`` into (header, cold_steps, context).
+
+        Pure, no I/O — the single authoritative definition of the on-disk split
+        (the write path serialises with this; the read path / tests reassemble
+        the inverse). The header is a deep copy with each step's inputs/outputs
+        and the shared ``state.context`` removed and the format marker prepended
+        (first key, so it survives end-truncation of a partially-written file).
+
+        Returns:
+            header: KB-level dict destined for engine.json / resumable snapshot.
+            cold_steps: {step_id: {"inputs": ..., "outputs": ...}} for
+                steps/<flow_id>/<step_id>.json.
+            context: the shared State.context for steps/<flow_id>/_context.json.
+        """
+        header: Dict[str, Any] = {ENGINE_FORMAT_KEY: NEW_FORMAT_MARKER}
+        header.update(copy.deepcopy(data))
+        cold_steps: Dict[str, Dict[str, Any]] = {}
+        context: Dict[str, Any] = {}
+
+        state = header.get("state")
+        if isinstance(state, dict):
+            context = state.pop("context", {}) or {}
+            steps = state.get("steps")
+            if isinstance(steps, dict):
+                for step_id, step in steps.items():
+                    if not isinstance(step, dict):
+                        continue
+                    cold_steps[step_id] = {
+                        "inputs": step.pop("inputs", {}),
+                        "outputs": step.pop("outputs", {}),
+                    }
+        return header, cold_steps, context
+
+    def _load_cold_context(
+        self, flow_id: Optional[str], warnings: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Load a flow's externalised shared context (steps/<flow_id>/_context.json).
+
+        Missing file -> empty context, silently: an empty ``state.context`` is a
+        legitimate, common case, so its absence must not spam warnings on every
+        load. A file that exists but cannot be parsed IS data loss -> empty +
+        warning (never raises), so one corrupt cold file cannot fail the load.
+        """
+        if not flow_id:
+            return {}
+        ctx_file = self._steps_root_for(flow_id) / COLD_CONTEXT_FILENAME
+        if not ctx_file.exists():
+            return {}
+        try:
+            loaded = json.loads(ctx_file.read_text(encoding="utf-8"))
+            return loaded if isinstance(loaded, dict) else {}
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            msg = f"Cold context {ctx_file.name} unreadable ({exc}); using empty context"
+            logger.warning("%s", msg)
+            if warnings is not None:
+                warnings.append(msg)
+            return {}
+
+    def _load_cold_step(
+        self,
+        flow_id: Optional[str],
+        step_id: str,
+        warnings: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Load one step's externalised inputs/outputs (steps/<flow_id>/<step_id>.json).
+
+        A step referenced by the header always has a cold file in the new
+        format, so missing OR corrupt is treated as recoverable data loss: the
+        step's inputs/outputs degrade to ``{}`` with a warning rather than
+        crashing the whole flow load (B3 fault tolerance / test (h)).
+        """
+        if not flow_id:
+            return {}
+        step_file = self._steps_root_for(flow_id) / f"{step_id}.json"
+        try:
+            loaded = json.loads(step_file.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("cold step file is not a JSON object")
+            return loaded
+        except FileNotFoundError:
+            msg = f"Cold step file {step_id}.json missing; step inputs/outputs empty"
+            logger.warning("%s", msg)
+            if warnings is not None:
+                warnings.append(msg)
+            return {}
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            msg = f"Cold step file {step_id}.json unreadable ({exc}); step inputs/outputs empty"
+            logger.warning("%s", msg)
+            if warnings is not None:
+                warnings.append(msg)
+            return {}
+
+    def _reassemble_new_format(
+        self, header: Dict[str, Any], warnings: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Inverse of :meth:`_split_to_new_format`: header + cold files -> full dict.
+
+        Backfills each step's inputs/outputs via :meth:`_load_cold_step` and the
+        shared context via :meth:`_load_cold_context`, keyed by the header's
+        flow_id. Cold-file faults degrade in place (empty + warning), so the
+        returned dict is always a valid input to ``FlowInstance.from_dict``.
+
+        Backfill is eager (all cold files read here) because a full-flow load is
+        used by resume / CLI on a single flow — a few MB, acceptable. The daemon
+        hot path never calls this: it reads only the KB header's top-level fields
+        (flow_id/status/is_worktree_mode) directly, so per-tick cost stays bounded
+        regardless of how large the externalised bodies are.
+        """
+        flow_id = header.get("flow_id")
+        result = dict(header)
+        result.pop(ENGINE_FORMAT_KEY, None)
+
+        state = result.get("state")
+        if isinstance(state, dict):
+            state["context"] = self._load_cold_context(flow_id, warnings)
+            steps = state.get("steps")
+            if isinstance(steps, dict):
+                for step_id, step in steps.items():
+                    if not isinstance(step, dict):
+                        continue
+                    cold = self._load_cold_step(flow_id, step_id, warnings)
+                    step["inputs"] = cold.get("inputs", {})
+                    step["outputs"] = cold.get("outputs", {})
+        return result
+
+    def _deserialize_flow(
+        self,
+        data: Dict[str, Any],
+        *,
+        tolerant: bool = False,
+        warnings: Optional[List[str]] = None,
+    ) -> FlowInstance:
+        """Reconstruct a FlowInstance from either on-disk format.
+
+        New format (header marker present) is reassembled from its cold files
+        first; legacy inline data passes straight through. This is the single
+        choke point every read path routes through, so dual-format support lives
+        in exactly one place.
+        """
+        if self._is_new_format(data):
+            data = self._reassemble_new_format(data, warnings)
+        if tolerant:
+            return self._tolerant_from_dict(
+                data, warnings if warnings is not None else []
+            )
+        return FlowInstance.from_dict(data)
 
     def save_flow(self, flow: FlowInstance) -> Path:
         """Save flow instance to state file atomically.
@@ -155,7 +347,7 @@ class PersistenceManager:
         try:
             content = snapshot_file.read_text(encoding="utf-8")
             data = json.loads(content)
-            flow = FlowInstance.from_dict(data)
+            flow = self._deserialize_flow(data)
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             return None
         if flow.flow_id != flow_id:
@@ -191,7 +383,7 @@ class PersistenceManager:
         for snapshot_file in sorted(self.resumable_dir.glob("*.json")):
             try:
                 data = json.loads(snapshot_file.read_text(encoding="utf-8"))
-                flow = FlowInstance.from_dict(data)
+                flow = self._deserialize_flow(data)
             except (json.JSONDecodeError, KeyError, ValueError, OSError):
                 continue
             # Only surface a snapshot whose embedded flow_id matches its
@@ -243,14 +435,14 @@ class PersistenceManager:
         try:
             content = self.state_file.read_text(encoding="utf-8")
             data = json.loads(content)
-            return FlowInstance.from_dict(data)
+            return self._deserialize_flow(data)
         except (json.JSONDecodeError, KeyError, ValueError):
             # Try backup if main file is corrupted
             backup_file = self.state_file.with_suffix(self.BACKUP_EXTENSION)
             if backup_file.exists():
                 content = backup_file.read_text(encoding="utf-8")
                 data = json.loads(content)
-                return FlowInstance.from_dict(data)
+                return self._deserialize_flow(data)
             return None
 
     def load_flow_tolerant(self) -> Tuple[Optional[FlowInstance], List[str]]:
@@ -287,20 +479,25 @@ class PersistenceManager:
                 warnings.append(f"{filepath.name} is empty")
                 continue
 
-            # Try normal parsing first
+            # Try normal parsing first. For a new-format header this still routes
+            # through _deserialize_flow, so a corrupt/missing *cold* file only
+            # degrades that step (warning) instead of failing the whole load —
+            # JSON repair below deliberately applies to the KB header only.
             try:
                 data = json.loads(content)
-                flow = FlowInstance.from_dict(data)
+                flow = self._deserialize_flow(data, warnings=warnings)
                 if filepath != self.state_file:
                     warnings.append(f"Loaded from backup {filepath.name}")
                 return flow, warnings
             except json.JSONDecodeError as e:
                 warnings.append(f"JSON parse error in {filepath.name}: {e}")
-                # Try to repair truncated JSON
+                # Try to repair truncated JSON (the header; cold files are never repaired)
                 repaired = self._try_repair_json(content)
                 if repaired is not None:
                     try:
-                        flow = self._tolerant_from_dict(repaired, warnings)
+                        flow = self._deserialize_flow(
+                            repaired, tolerant=True, warnings=warnings
+                        )
                         warnings.append(f"Recovered from truncated JSON in {filepath.name}")
                         return flow, warnings
                     except Exception as e2:
@@ -310,7 +507,9 @@ class PersistenceManager:
                 # Try with tolerant deserialization
                 try:
                     data = json.loads(content)
-                    flow = self._tolerant_from_dict(data, warnings)
+                    flow = self._deserialize_flow(
+                        data, tolerant=True, warnings=warnings
+                    )
                     return flow, warnings
                 except Exception as e2:
                     warnings.append(f"Tolerant deserialization also failed: {e2}")
@@ -392,6 +591,17 @@ class PersistenceManager:
         if "status" not in data:
             data["status"] = FlowStatus.FAILED.value
             warnings.append("Missing status, defaulting to FAILED")
+
+        # created_at/updated_at are required by FlowInstance.from_dict but, in
+        # the hot/cold header, serialize *after* the (larger) state block — so a
+        # truncated header commonly loses them. Backfill here so a repaired
+        # header still yields a loadable flow rather than a KeyError.
+        if "created_at" not in data:
+            data["created_at"] = datetime.now().isoformat()
+            warnings.append("Missing created_at, using now")
+        if "updated_at" not in data:
+            data["updated_at"] = data["created_at"]
+            warnings.append("Missing updated_at, using created_at")
 
         if "state" not in data or not isinstance(data.get("state"), dict):
             data["state"] = {}
