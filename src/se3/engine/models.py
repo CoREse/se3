@@ -5,14 +5,55 @@ Defines the core data structures: Step, State, Transition, and FlowInstance.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from .token_usage import UsageTotals
+
+logger = logging.getLogger(__name__)
+
+# Marker written into the top level of a new-format engine.json header so a
+# reader can positively identify the hot/cold split without structural
+# guessing. Absent in the legacy inline format; ``from_dict`` also detects the
+# split structurally (via ``context_ref``/``cold_ref``) so an old file with no
+# marker still loads.
+HOT_COLD_FORMAT = "hot_cold/1"
+
+# Reserved cold-storage key for the flow's shared ``State.context``. In the
+# hot/cold split the heavy shared context is externalized next to the per-step
+# cold files under ``se3/state/steps/<flow_id>/<key>.json``; step ids are always
+# ``NN_type_uuid8`` so this sentinel can never collide with a real step file.
+CONTEXT_COLD_KEY = "__context__"
+
+# Callback the load path uses to pull a cold payload by its cold key
+# (a step_id, or ``CONTEXT_COLD_KEY``). Returns the parsed payload dict, or
+# ``None`` when the cold file is absent/unreadable so the caller can degrade
+# gracefully instead of crashing the whole flow load. The persistence layer
+# binds this to a specific flow's steps directory.
+ColdLoader = Callable[[str], Optional[Dict[str, Any]]]
+
+
+def _stable_cold_hash(payload: Any) -> str:
+    """Content hash of a cold payload, stable across processes and dict orderings.
+
+    The write path uses this to rewrite a step's (or the context's) cold file
+    only when its content actually changed, so per-step persistence stays
+    proportional to that step's own output rather than the whole flow. The
+    header embeds the same hash so a reader/writer can compare on-disk cold
+    content without re-reading the file. ``sort_keys`` makes an unchanged
+    payload hash identically regardless of dict insertion order; ``default=str``
+    mirrors how the payload is actually serialized to disk (json.dumps with
+    ``default=str``) so the hash matches the persisted bytes' semantics.
+    """
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 # Sliding-window cap on State.fix_history to keep memory / engine.json size /
 # per-transition deepcopy cost bounded under unlimited mode
@@ -128,10 +169,79 @@ class Step:
             "error_details": self.error_details,
         }
 
+    def extract_cold(self) -> Dict[str, Any]:
+        """Produce this step's cold payload — the heavy, externalized fields.
+
+        inputs/outputs/artifacts are the bulk of a completed flow's engine.json
+        in the legacy inline format (a single 31-step flow reached 50MB). The
+        hot/cold split writes this payload to
+        ``se3/state/steps/<flow_id>/<step_id>.json`` instead, leaving only the
+        KB-scale status table in the header. Artifacts are stringified here so
+        the payload is JSON-ready and hashes deterministically.
+        """
+        return {
+            "inputs": self.inputs,
+            "outputs": self.outputs,
+            "artifacts": [str(p) for p in self.artifacts],
+        }
+
+    def cold_content_hash(self) -> str:
+        """Stable content hash of this step's cold payload (see ``_stable_cold_hash``)."""
+        return _stable_cold_hash(self.extract_cold())
+
+    def to_header_dict(self) -> Dict[str, Any]:
+        """Serialize only the KB-scale status fields for the engine.json header.
+
+        Replaces the inline inputs/outputs/artifacts with a ``cold_ref`` (the
+        cold file key — the step_id) plus a ``content_hash`` of the cold payload
+        so the write path can rewrite the cold file only when it changed and a
+        reader can locate it on demand.
+        """
+        return {
+            "step_id": self.step_id,
+            "step_type": self.step_type.value,
+            "status": self.status.value,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "model": self.model,
+            "fallback_model": self.fallback_model,
+            "error_message": self.error_message,
+            "error_details": self.error_details,
+            # cold_ref names the per-flow cold file key (the step_id); the
+            # loader resolves it to steps/<flow_id>/<step_id>.json on demand.
+            "cold_ref": self.step_id,
+            "content_hash": self.cold_content_hash(),
+        }
+
+    def _apply_cold(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Fill inputs/outputs/artifacts from a loaded cold payload.
+
+        A ``None`` payload (no loader supplied for a header-only read, or a
+        missing/corrupt cold file) degrades to empty fields rather than raising,
+        so one unreadable step file never crashes the whole flow load.
+        """
+        if payload is None:
+            self.inputs = {}
+            self.outputs = {}
+            self.artifacts = []
+            return
+        self.inputs = payload.get("inputs", {})
+        self.outputs = payload.get("outputs", {})
+        self.artifacts = [Path(p) for p in payload.get("artifacts", [])]
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Step:
-        """Deserialize step from dictionary."""
-        return cls(
+    def from_dict(cls, data: Dict[str, Any], cold_loader: Optional[ColdLoader] = None) -> Step:
+        """Deserialize a step, tolerating both the inline and hot/cold formats.
+
+        Old (inline) format carries inputs/outputs/artifacts directly. New
+        (hot/cold) format carries a ``cold_ref``; the heavy fields are pulled
+        through ``cold_loader`` on demand. Without a loader (a daemon
+        header-only read) the step loads with empty inputs/outputs — its status
+        table is intact and that is all the hot read path needs.
+        """
+        step = cls(
             step_type=StepType(data["step_type"]),
             status=StepStatus(data["status"]),
             step_id=data["step_id"],
@@ -141,12 +251,27 @@ class Step:
             max_retries=data.get("max_retries", 3),
             model=data.get("model"),
             fallback_model=data.get("fallback_model"),
-            inputs=data.get("inputs", {}),
-            outputs=data.get("outputs", {}),
-            artifacts=[Path(p) for p in data.get("artifacts", [])],
             error_message=data.get("error_message"),
             error_details=data.get("error_details"),
         )
+        if "cold_ref" in data:
+            payload: Optional[Dict[str, Any]] = None
+            if cold_loader is not None:
+                payload = cold_loader(data["cold_ref"])
+                if payload is None:
+                    # Loader was available but the cold file was missing/corrupt:
+                    # surface it (B3 tolerant degrade) without crashing the load.
+                    logger.warning(
+                        "Cold step file for %r missing or unreadable; loading step "
+                        "with empty inputs/outputs",
+                        data.get("step_id"),
+                    )
+            step._apply_cold(payload)
+        else:
+            step.inputs = data.get("inputs", {})
+            step.outputs = data.get("outputs", {})
+            step.artifacts = [Path(p) for p in data.get("artifacts", [])]
+        return step
 
 
 @dataclass
@@ -365,9 +490,118 @@ class State:
             "session_token_usage": self.session_token_usage.to_dict(),
         }
 
+    def extract_cold_context(self) -> Dict[str, Any]:
+        """Produce the shared-context cold payload for the hot/cold split.
+
+        ``State.context`` accumulates the heavy shared blobs (spec_content,
+        test_results, fix_history, ...) that dominate engine.json size; the
+        split externalizes it to ``steps/<flow_id>/<CONTEXT_COLD_KEY>.json``
+        instead of inlining it in the KB-scale header.
+        """
+        return {"context": self.context}
+
+    def extract_cold_payloads(self) -> Dict[str, Dict[str, Any]]:
+        """All cold payloads for this state, keyed by cold-file name.
+
+        Maps each ``step_id`` -> that step's :meth:`Step.extract_cold`, plus the
+        reserved :data:`CONTEXT_COLD_KEY` -> the externalized context. The write
+        path persists this map under ``steps/<flow_id>/<key>.json``, rewriting
+        only entries whose ``content_hash`` changed so per-step write cost stays
+        proportional to that step's own output.
+        """
+        payloads: Dict[str, Dict[str, Any]] = {
+            sid: step.extract_cold() for sid, step in self.steps.items()
+        }
+        payloads[CONTEXT_COLD_KEY] = self.extract_cold_context()
+        return payloads
+
+    def to_header_dict(self) -> Dict[str, Any]:
+        """Serialize the KB-scale header: status table + small fields only.
+
+        Every heavy field is externalized: per-step inputs/outputs/artifacts
+        become cold refs inside each step's header dict, and the shared context
+        becomes a ``context_ref`` + ``context_hash`` pointing at the reserved
+        cold key. fix_history/review_iterations/baseline stay inline — they are
+        bounded (fix_history is sliding-window capped) and the hot read path
+        wants them.
+        """
+        return {
+            "current_step_id": self.current_step_id,
+            "step_history": self.step_history,
+            "steps": {sid: step.to_header_dict() for sid, step in self.steps.items()},
+            "selected_steps": [s.value for s in self.selected_steps],
+            "current_step_index": self.current_step_index,
+            "review_iterations": self.review_iterations,
+            "fix_iterations": self.fix_iterations,
+            "fix_history": self.fix_history,
+            "baseline_failures": self.baseline_failures,
+            "session_token_usage": self.session_token_usage.to_dict(),
+            # context is the heavy shared blob; externalize it to the reserved
+            # cold key rather than inlining it. context_ref doubles as the
+            # new-format detection marker for from_dict.
+            "context_ref": CONTEXT_COLD_KEY,
+            "context_hash": _stable_cold_hash(self.extract_cold_context()),
+        }
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> State:
-        """Deserialize state from dictionary."""
+    def rehydrate(cls, header: Dict[str, Any], cold_loader: Optional[ColdLoader] = None) -> State:
+        """Reconstruct a State from a hot/cold header, loading cold data on demand.
+
+        The shared context is pulled through ``cold_loader`` (or left empty when
+        no loader is supplied / the cold file is unreadable — B3 tolerant
+        degrade). Each step is rebuilt via :meth:`Step.from_dict`, which pulls
+        that step's own cold file through the same loader; resume can therefore
+        supply a selective loader that only reads the step files it needs.
+        """
+        context_payload: Optional[Dict[str, Any]] = None
+        context_ref = header.get("context_ref")
+        if context_ref is not None and cold_loader is not None:
+            context_payload = cold_loader(context_ref)
+            if context_payload is None:
+                logger.warning(
+                    "Cold context file missing or unreadable; loading flow with "
+                    "empty shared context"
+                )
+        context = context_payload.get("context", {}) if context_payload else {}
+
+        # Mirror from_dict's retroactive sliding-window clamp so a header written
+        # by a build with a larger cap does not carry an oversized fix_history.
+        loaded_history = header.get("fix_history", [])
+        if len(loaded_history) > FIX_HISTORY_MAX_ENTRIES:
+            loaded_history = loaded_history[-FIX_HISTORY_MAX_ENTRIES:]
+
+        state = cls(
+            current_step_id=header.get("current_step_id"),
+            step_history=header.get("step_history", []),
+            context=context,
+            selected_steps=[StepType(s) for s in header.get("selected_steps", [])],
+            current_step_index=header.get("current_step_index", 0),
+            review_iterations=header.get("review_iterations", {}),
+            fix_iterations=header.get("fix_iterations", 0),
+            fix_history=loaded_history,
+            baseline_failures=header.get("baseline_failures"),
+            session_token_usage=UsageTotals.from_dict(header.get("session_token_usage")),
+        )
+        # Keep the context mirror of fix_history consistent with the clamped
+        # list (increment_fix_iteration mirrors it into context).
+        if "fix_history" in state.context:
+            state.context["fix_history"] = loaded_history
+        state.steps = {
+            sid: Step.from_dict(step_data, cold_loader)
+            for sid, step_data in header.get("steps", {}).items()
+        }
+        return state
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], cold_loader: Optional[ColdLoader] = None) -> State:
+        """Deserialize state, tolerating both the inline and hot/cold formats.
+
+        The new (hot/cold) format externalizes context to a cold file, marked by
+        the ``context_ref`` key; detecting it routes to :meth:`rehydrate`. The
+        old (inline) format carries context/inputs/outputs directly.
+        """
+        if "context_ref" in data:
+            return cls.rehydrate(data, cold_loader)
         # Retroactively apply the sliding-window cap: an engine.json written
         # by an older build (or a build with a higher cap) may carry more than
         # ``FIX_HISTORY_MAX_ENTRIES`` entries, and without clamping the
@@ -494,15 +728,55 @@ class FlowInstance:
             data["waiting_for_lock"] = True
         return data
 
+    def to_header_dict(self) -> Dict[str, Any]:
+        """Serialize the KB-scale engine.json header for the hot/cold split.
+
+        Keeps every top-level flow field (flow_id/status/is_worktree_mode and
+        the worktree metadata) so the daemon's hot read path gets identity and
+        worktree status straight from the header, and delegates to
+        :meth:`State.to_header_dict` for the externalized state. The ``format``
+        marker lets a reader positively identify the split.
+        """
+        data: Dict[str, Any] = {
+            "format": HOT_COLD_FORMAT,
+            "flow_id": self.flow_id,
+            "status": self.status.value,
+            "task_description": self.task_description,
+            "task_type": self.task_type,
+            "state": self.state.to_header_dict(),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "change_name": self.change_name,
+            "change_path": str(self.change_path) if self.change_path else None,
+            "source_issue_id": self.source_issue_id,
+            "baseline_commit": self.baseline_commit,
+            "is_worktree_mode": self.is_worktree_mode,
+            "worktree_branch": self.worktree_branch,
+            "worktree_path": self.worktree_path,
+            "worktree_original_branch": self.worktree_original_branch,
+        }
+        # Same conditional as to_dict: only emit when actually waiting so a
+        # --worktree body's header stays free of the field.
+        if self.waiting_for_lock:
+            data["waiting_for_lock"] = True
+        return data
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> FlowInstance:
-        """Deserialize flow instance from dictionary."""
+    def from_dict(cls, data: Dict[str, Any], cold_loader: Optional[ColdLoader] = None) -> FlowInstance:
+        """Deserialize a flow instance, tolerating both formats.
+
+        Format detection is delegated to :meth:`State.from_dict` (via the
+        state sub-dict's ``context_ref`` marker); ``cold_loader`` is threaded
+        through so the hot/cold format can pull per-step and context cold files
+        on demand. The top-level flow fields are identical in both formats.
+        """
         return cls(
             flow_id=data["flow_id"],
             status=FlowStatus(data["status"]),
             task_description=data.get("task_description", ""),
             task_type=data.get("task_type"),
-            state=State.from_dict(data.get("state", {})),
+            state=State.from_dict(data.get("state", {}), cold_loader),
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
             completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
