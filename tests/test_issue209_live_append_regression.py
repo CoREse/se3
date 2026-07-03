@@ -54,6 +54,7 @@ from pathlib import Path
 
 import pytest
 
+import se3.daemon.disk_json_cache as disk_cache
 import se3.daemon.history as history_mod
 from se3.daemon.history import DaemonHistoryReader
 from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
@@ -281,26 +282,25 @@ def test_retry_after_error_same_jsonl_append_surfaces(tmp_path):
 
 
 def _count_engine_parses(monkeypatch) -> dict:
-    """Patch ``history._parse_engine_json`` to count active-engine.json *parses*.
+    """Patch ``disk_json_cache._parse_json`` to count active-engine.json *parses*.
 
-    ``_read_engine_cached`` always *reads* the file (cheap) but only *parses*
-    (``_parse_engine_json``, the GIL-bound ``json.loads``) when the raw content
-    changed; counting that single seam measures exactly the expensive operation
-    the #209 fix collapses. With a single project root there is exactly one
-    ``engine.json``, so every call counts that file's parses.
-
-    Pre-fix the ``_parse_engine_json`` symbol did not exist (``_read_json``
-    parsed inline, uncached), so this patch fails to bind and the test errors —
-    the regression lock biting before the fix.
+    The stat-keyed ``read_engine_header`` skips even the read on an unchanged
+    file and only *full-parses* (``disk_json_cache._parse_json``, the GIL-bound
+    ``json.loads``) when the ``(mtime, size)`` changed; counting that single seam
+    measures exactly the expensive operation the #209 fix collapses. With a
+    single project root there is exactly one ``engine.json``, so every call
+    counts that file's parses. The module-level cache is cleared first so the
+    count starts clean for this file.
     """
+    disk_cache.clear_cache()
     counter = {"n": 0}
-    original = history_mod._parse_engine_json
+    original = disk_cache._parse_json
 
     def counting_parse(raw):
         counter["n"] += 1
         return original(raw)
 
-    monkeypatch.setattr(history_mod, "_parse_engine_json", counting_parse)
+    monkeypatch.setattr(disk_cache, "_parse_json", counting_parse)
     return counter
 
 
