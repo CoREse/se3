@@ -87,12 +87,18 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
     Pool composition:
 
     1. ``task_description_base`` — the clean, un-decorated effective task
-       description (refined-if-discovery-ran, else canonical), populated
-       by ``state_machine._build_step_inputs`` for SELF_CHECK steps.
-       Falls back to ``task_description`` for legacy callers that don't
-       set the base separately.
+       description (adjudicated-if-ruled, else refined-if-discovery-ran, else
+       canonical), populated by ``state_machine._build_step_inputs`` for
+       SELF_CHECK steps. Falls back to ``task_description`` for legacy callers
+       that don't set the base separately.
     2. ``original_task_description`` — the canonical pre-discovery user
-       input, when discovery produced a refined override.
+       input, when discovery produced a refined override. EXCLUDED when an
+       adjudication ruling is in effect (see ``adjudicated_description``
+       below): the covering patch abolished the contradictory clause, so the
+       superseded original/refined text must leave the pool — otherwise a new
+       issue re-quoting the abolished clause would substring-match it and slip
+       past validation. The base entry (#1) already carries the adjudicated
+       text, so dropping the original is all that's needed.
     3. Each entry of ``user_interjections`` — its ``text`` field added
        individually, so an LLM that wants to cite a specific Ctrl-C
        instruction can substring-match against the bare interjection
@@ -110,17 +116,27 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
     """
     pool: list[str] = []
 
+    # An adjudication ruling replaces the effective task_description with a
+    # covering patch; when in effect the pre-ruling original/refined text still
+    # carries the abolished clause and must NOT stay in the pool.
+    adjudicated = step_inputs.get("adjudicated_description")
+    adjudication_in_effect = isinstance(adjudicated, str) and bool(adjudicated)
+
     # Prefer the clean base; fall back to the composed task_description
-    # for older inputs (e.g. unit tests or pre-upgrade resumes).
+    # for older inputs (e.g. unit tests or pre-upgrade resumes). The base is
+    # already the adjudicated text when a ruling is in effect (both resolve
+    # through ``state_machine._effective_task_description_base``).
     base = step_inputs.get("task_description_base")
     if not (isinstance(base, str) and base):
         base = step_inputs.get("task_description")
     if isinstance(base, str) and base:
         pool.append(base)
 
-    orig = step_inputs.get("original_task_description")
-    if isinstance(orig, str) and orig:
-        pool.append(orig)
+    # Skip the superseded original once adjudicated: its clause was ruled out.
+    if not adjudication_in_effect:
+        orig = step_inputs.get("original_task_description")
+        if isinstance(orig, str) and orig:
+            pool.append(orig)
 
     interjections = step_inputs.get("user_interjections") or []
     if isinstance(interjections, list):

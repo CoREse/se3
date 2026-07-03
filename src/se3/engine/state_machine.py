@@ -97,19 +97,59 @@ def _infer_fix_reason(trigger_step_type: str) -> str:
     return reason_map.get(trigger_step_type, trigger_step_type or "unknown")
 
 
+def _latest_adjudicated_output(flow: "FlowInstance", key: str) -> Any:
+    """Latest completed ADJUDICATE step's non-empty ``outputs[key]``.
+
+    Walks ``step_history`` in reverse so multi-generational rulings resolve to
+    the newest override. A later ADJUDICATE that left ``key`` empty (e.g. it
+    only rewrote the plan, not the description) does NOT veto an older
+    generation that did set it — the reverse walk simply skips empty values and
+    keeps the still-live override in effect. Returns ``None`` when no ruling
+    supplied ``key``.
+
+    Shared by the effective-text layer (``_effective_task_description_base``)
+    and the plan-override in ``_build_step_inputs`` so both call points pick up
+    ``adjudicated_description`` / ``adjudicated_plan`` with the same
+    latest-wins semantics.
+    """
+    if not (flow.state and flow.state.step_history):
+        return None
+    for sid in reversed(flow.state.step_history):
+        s = flow.state.steps.get(sid)
+        if (
+            s
+            and s.step_type == StepType.ADJUDICATE
+            and s.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
+        ):
+            val = s.outputs.get(key)
+            if val:
+                return val
+    return None
+
+
 def _effective_task_description_base(flow: "FlowInstance") -> str:
     """Pre-interjection base of the effective task_description.
 
-    Returns ``flow.task_description`` unless a completed DISCOVERY step
-    produced ``refined_description``, in which case the refined version
-    overrides. Does NOT apply user_interjections — that's the
-    ``_compose_effective_task_description`` step. Exposed separately so
-    callers that need to RE-compose after appending an interjection
-    (e.g. ``run.py:_handle_step_interrupt`` on a step whose inputs
-    already carry a previously-composed task_description) can recover
-    the un-decorated base without double-counting prior interjections
-    that are already in the persisted list.
+    Resolution order (highest priority first): a completed ADJUDICATE step's
+    ``adjudicated_description`` (the covering patch that resolves a spec
+    contradiction) > a completed DISCOVERY step's ``refined_description`` >
+    the canonical ``flow.task_description``. Does NOT apply user_interjections
+    — that's the ``_compose_effective_task_description`` step. Exposed
+    separately so callers that need to RE-compose after appending an
+    interjection (e.g. ``run.py:_handle_step_interrupt`` on a step whose
+    inputs already carry a previously-composed task_description) can recover
+    the un-decorated base without double-counting prior interjections that are
+    already in the persisted list.
+
+    Why adjudicated must win over refined/original: the ruling is a *covering*
+    patch, not an addendum. Making it the effective base is what pulls the dead
+    clause out of the verbatim_quote source pool so a re-quote of the abolished
+    text fails validation (see ``self_check._build_source_pool``); an
+    additional-instructions approach would leave the contradiction in the pool.
     """
+    adjudicated = _latest_adjudicated_output(flow, "adjudicated_description")
+    if isinstance(adjudicated, str) and adjudicated:
+        return adjudicated
     base = flow.task_description or ""
     # Walk step_history in reverse to pick up the latest completed
     # DISCOVERY step's refined_description.
@@ -1461,6 +1501,16 @@ class StateMachine:
             inputs["original_task_description"] = inputs["task_description"]
         inputs["task_description"] = _compose_effective_task_description(flow)
 
+        # Adjudication also overrides the plan: prefer the latest ADJUDICATE's
+        # adjudicated_plan over the original PLAN task_groups so every
+        # downstream step — and the self_check verbatim_quote source pool —
+        # audits against the ruled plan rather than the superseded one. Only
+        # override when a ruling actually supplied a plan, leaving the
+        # no-adjudication path (task_groups from the PLAN step) untouched.
+        adjudicated_plan = _latest_adjudicated_output(flow, "adjudicated_plan")
+        if isinstance(adjudicated_plan, list) and adjudicated_plan:
+            inputs["task_groups"] = adjudicated_plan
+
         # Special handling for CONFIRM step
         if step_type == StepType.CONFIRM:
             # Determine which step we're confirming
@@ -1625,6 +1675,16 @@ class StateMachine:
             inputs["user_interjections"] = copy.deepcopy(
                 flow.state.context.get("user_interjections", [])
             )
+
+            # Signal to ``_build_source_pool`` whether an adjudication ruling is
+            # in effect. When present, its adjudicated_description has already
+            # replaced ``task_description_base`` above (both resolve through
+            # ``_effective_task_description_base``); the pool builder then drops
+            # the superseded original/refined text so a new issue that
+            # re-quotes an abolished clause fails validation.
+            adjudicated_desc = _latest_adjudicated_output(flow, "adjudicated_description")
+            if isinstance(adjudicated_desc, str) and adjudicated_desc:
+                inputs["adjudicated_description"] = adjudicated_desc
 
             # Inject prev_self_check_issues whenever this is the first pass
             # of a fix-loop round (pass_index == 1 AND fix_iteration > 0).
