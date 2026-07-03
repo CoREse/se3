@@ -55,12 +55,35 @@ class FlowStatusValue(str, Enum):
     RECOVERING = "recovering"
 
 
+class ColdRefSchema(TypedDict, total=False):
+    """Reference from a header step entry to its externalized cold file.
+
+    New-format (hot/cold split, issue #244 一期) engine.json keeps only the
+    per-step *status table* inline; each step's heavy inputs/outputs/artifacts
+    live in ``se3/state/steps/<flow_id>/<step_id>.json`` and are referenced here.
+    ``hash`` is the cold payload's content hash, letting the incremental write
+    path rewrite only the cold files that actually changed.
+
+    Example:
+        {"file": "01_analyze_844c2cf8.json", "hash": "9f2b...c1"}
+    """
+
+    file: str
+    hash: str
+
+
 class StepSchema(TypedDict, total=False):
     """Schema for a single step in engine.json.
 
-    Example:
+    Two on-disk shapes are accepted (loaders read both — no in-place migration):
+
+    * New format (hot/cold split): inputs/outputs/artifacts are absent inline
+      and a ``cold_ref`` points at the externalized cold file.
+    * Legacy format: inputs/outputs/artifacts are inlined (``cold_ref`` absent).
+
+    Example (new format):
         {
-            "step_id": "a1b2c3d4",
+            "step_id": "01_analyze_844c2cf8",
             "step_type": "analyze",
             "status": "completed",
             "started_at": "2026-02-24T10:30:00",
@@ -69,9 +92,7 @@ class StepSchema(TypedDict, total=False):
             "max_retries": 3,
             "model": "claude-opus-4-6",
             "fallback_model": "claude-haiku-3-5",
-            "inputs": {"task_description": "Implement feature X"},
-            "outputs": {"task_type": "feature", "scope": "backend"},
-            "artifacts": ["src/feature.py"],
+            "cold_ref": {"file": "01_analyze_844c2cf8.json", "hash": "9f2b...c1"},
             "error_message": null,
             "error_details": null
         }
@@ -86,33 +107,49 @@ class StepSchema(TypedDict, total=False):
     max_retries: int
     model: Optional[str]
     fallback_model: Optional[str]
-    inputs: Dict[str, Any]
-    outputs: Dict[str, Any]
-    artifacts: List[str]  # File paths as strings
+    cold_ref: ColdRefSchema  # New format: externalized inputs/outputs/artifacts
+    inputs: Dict[str, Any]  # Legacy format only (inline)
+    outputs: Dict[str, Any]  # Legacy format only (inline)
+    artifacts: List[str]  # Legacy format only (inline); file paths as strings
     error_message: Optional[str]
     error_details: Optional[str]
+
+
+class ContextRefSchema(TypedDict, total=False):
+    """Reference from the header to the externalized shared-context cold file.
+
+    New-format state keeps ``context`` (and ``fix_history``) out of the header,
+    in ``se3/state/steps/<flow_id>/_context.json``, referenced here by hash.
+    """
+
+    file: str
+    hash: str
 
 
 class StateSchema(TypedDict, total=False):
     """Schema for the state object in engine.json.
 
-    Tracks current step, step history, and execution context.
+    Tracks current step, step history, and execution context. In the new hot/cold
+    format the shared ``context`` and ``fix_history`` are externalized and
+    referenced via ``context_ref``; legacy state carries them inline.
 
-    Example:
+    Example (new format):
         {
-            "current_step_id": "a1b2c3d4",
-            "step_history": ["a1b2c3d4", "e5f6g7h8"],
-            "steps": {"a1b2c3d4": {...}, "e5f6g7h8": {...}},
-            "context": {"task_description": "...", "task_type": "feature"},
-            "selected_steps": ["analyze", "plan", "propose", ...],
-            "current_step_index": 2
+            "current_step_id": "01_analyze_844c2cf8",
+            "step_history": ["01_analyze_844c2cf8", "02_plan_e5f6g7h8"],
+            "steps": {"01_analyze_844c2cf8": {...}, "02_plan_e5f6g7h8": {...}},
+            "context_ref": {"file": "_context.json", "hash": "3ac1...9f"},
+            "selected_steps": ["analyze", "plan", "implement", ...],
+            "current_step_index": 2,
+            "session_token_usage": {...}
         }
     """
 
     current_step_id: Optional[str]
     step_history: List[str]
     steps: Dict[str, StepSchema]
-    context: Dict[str, Any]
+    context_ref: ContextRefSchema  # New format: externalized shared context
+    context: Dict[str, Any]  # Legacy format only (inline)
     selected_steps: List[str]  # StepTypeValue values
     current_step_index: int
 
@@ -151,6 +188,10 @@ class FlowInstanceSchema(TypedDict, total=False):
     change_path: Optional[str]
     is_worktree_mode: bool
     worktree_branch: Optional[str]
+    # Hot/cold split marker (issue #244 一期): "hotcold/1" when the header
+    # externalizes step payloads + context to steps/<flow_id>/; absent on a
+    # legacy fully-inline engine.json.
+    engine_format: str
     # Present (and True) only while a synchronous run is queued acquiring the
     # main-worktree mutex before its first non-discovery step; absent otherwise.
     waiting_for_lock: bool
@@ -159,11 +200,26 @@ class FlowInstanceSchema(TypedDict, total=False):
 ENGINE_JSON_SCHEMA: Dict[str, Any] = {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "SE3 Flow Engine State",
-    "description": "State persistence for SE3 flow engine",
+    "description": (
+        "State persistence for SE3 flow engine. Two on-disk layouts are valid "
+        "and both load: the new hot/cold header (engine_format='hotcold/1', where "
+        "step payloads and the shared context are externalized to "
+        "steps/<flow_id>/ and referenced by cold_ref/context_ref) and the legacy "
+        "fully-inline layout (no engine_format; inputs/outputs/context inline). "
+        "New writes always use the hot/cold header; legacy files are read as-is "
+        "with no in-place migration."
+    ),
     "type": "object",
     "required": ["flow_id", "status", "task_description", "state", "created_at", "updated_at"],
     "properties": {
         "flow_id": {"type": "string", "description": "Unique flow identifier"},
+        "engine_format": {
+            "type": "string",
+            "description": (
+                "Hot/cold split marker. 'hotcold/1' => header + externalized cold "
+                "files; absent => legacy fully-inline layout."
+            ),
+        },
         "status": {
             "type": "string",
             "enum": ["init", "running", "paused", "completed", "failed", "recovering"],
@@ -177,7 +233,20 @@ ENGINE_JSON_SCHEMA: Dict[str, Any] = {
             "properties": {
                 "current_step_id": {"type": ["string", "null"]},
                 "step_history": {"type": "array", "items": {"type": "string"}},
+                # Step entries hold the KB-scale status table; each carries either
+                # an inline inputs/outputs body (legacy) or a cold_ref
+                # {file, hash} pointing at steps/<flow_id>/<step_id>.json (new).
                 "steps": {"type": "object"},
+                # New format: shared context externalized to
+                # steps/<flow_id>/_context.json, referenced by hash.
+                "context_ref": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "hash": {"type": "string"},
+                    },
+                },
+                # Legacy format: shared context inlined.
                 "context": {"type": "object"},
                 "selected_steps": {"type": "array", "items": {"type": "string"}},
                 "current_step_index": {"type": "integer"}

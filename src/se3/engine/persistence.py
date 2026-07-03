@@ -4,17 +4,104 @@ Handles JSON serialization/deserialization with atomic writes
 to prevent state corruption during interruptions.
 """
 
+import hashlib
 import json
 import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .models import FlowInstance, FlowStatus, State, Step, StepStatus
 from .schema import build_context_from_flow
 
 logger = logging.getLogger(__name__)
+
+
+# Hot/cold split format marker (issue #244 一期). A header written in the new
+# layout carries this key at top level; its absence identifies a legacy
+# (fully-inline) engine.json / snapshot, which every load path reads verbatim
+# for backward compatibility (no in-place migration — see B3).
+ENGINE_FORMAT_KEY = "engine_format"
+ENGINE_FORMAT_HOTCOLD = "hotcold/1"
+
+
+def _canonical_json(obj: Any) -> str:
+    """Stable JSON encoding for content-hashing cold payloads.
+
+    ``sort_keys`` makes the hash independent of dict ordering so an unchanged
+    step is recognised as unchanged across saves (the whole point of the
+    incremental write path). ``default=str`` mirrors the persistence writer so
+    non-JSON-native values (e.g. Path) hash the same way they serialize.
+    """
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _content_hash(obj: Any) -> str:
+    """Content hash of a cold payload, used to skip rewriting unchanged files."""
+    return hashlib.sha256(_canonical_json(obj).encode("utf-8")).hexdigest()
+
+
+def _is_hotcold(data: Any) -> bool:
+    """True when ``data`` is a new-format (header + cold-ref) engine payload."""
+    return (
+        isinstance(data, dict)
+        and str(data.get(ENGINE_FORMAT_KEY, "")).startswith("hotcold/")
+    )
+
+
+def _split_flow_dict(
+    full: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Split a full ``FlowInstance.to_dict()`` into (header, cold_steps, context_payload).
+
+    The header keeps only KB-scale fields — flow identity, status, the per-step
+    *status table* (timestamps / retry counts / model, but NOT the step's
+    inputs/outputs/artifacts bodies), and small State scalars — with each step's
+    heavy payload replaced by a ``cold_ref`` carrying the payload's content hash.
+    The shared ``State.context`` and ``fix_history`` (the other unbounded
+    growers, the latter able to embed a fix_context copy of test_results) are
+    externalized together into a single per-flow context cold payload, again
+    referenced from the header by hash.
+
+    Returns:
+        header: the header dict to write to engine.json / the snapshot file.
+        cold_steps: step_id -> {"inputs", "outputs", "artifacts"} cold payloads.
+        context_payload: {"context", "fix_history"} shared cold payload.
+    """
+    header = {k: v for k, v in full.items() if k != "state"}
+    header[ENGINE_FORMAT_KEY] = ENGINE_FORMAT_HOTCOLD
+
+    state = dict(full.get("state", {}))
+    steps = state.pop("steps", {}) or {}
+    context = state.pop("context", {})
+    fix_history = state.pop("fix_history", [])
+
+    cold_steps: Dict[str, Dict[str, Any]] = {}
+    header_steps: Dict[str, Any] = {}
+    for sid, sdata in steps.items():
+        cold = {
+            "inputs": sdata.get("inputs", {}),
+            "outputs": sdata.get("outputs", {}),
+            "artifacts": sdata.get("artifacts", []),
+        }
+        cold_steps[sid] = cold
+        entry = {
+            k: v
+            for k, v in sdata.items()
+            if k not in ("inputs", "outputs", "artifacts")
+        }
+        entry["cold_ref"] = {"file": f"{sid}.json", "hash": _content_hash(cold)}
+        header_steps[sid] = entry
+
+    context_payload = {"context": context, "fix_history": fix_history}
+    state["steps"] = header_steps
+    state["context_ref"] = {
+        "file": PersistenceManager.CONTEXT_COLD_FILENAME,
+        "hash": _content_hash(context_payload),
+    }
+    header["state"] = state
+    return header, cold_steps, context_payload
 
 
 class PersistenceManager:
@@ -28,6 +115,12 @@ class PersistenceManager:
     CONTEXT_FILENAME = "context.json"
     BACKUP_EXTENSION = ".bak"
     RESUMABLE_DIRNAME = "resumable"
+    # Hot/cold split (issue #244 一期): heavy per-step inputs/outputs and the
+    # shared context are externalized to se3/state/steps/<flow_id>/. Partitioned
+    # by flow_id so a resumable snapshot's cold files never collide with a later
+    # flow that reuses the same auto-generated step ids.
+    STEPS_DIRNAME = "steps"
+    CONTEXT_COLD_FILENAME = "_context.json"
 
     def __init__(self, project_root: Path):
         """Initialize with project root.
@@ -46,10 +139,112 @@ class PersistenceManager:
         # normally, so a paused/interrupted/recoverable-failed flow stays
         # resumable even after a later run overwrites engine.json.
         self.resumable_dir = self.state_dir / self.RESUMABLE_DIRNAME
+        # Root of the per-flow cold-file partitions (steps/<flow_id>/). The
+        # engine.json header and the resumable snapshot header for the same flow
+        # both reference this one partition, so a snapshot adds only its KB-scale
+        # header — never a second copy of the cold data.
+        self.steps_dir = self.state_dir / self.STEPS_DIRNAME
 
     def ensure_directories(self) -> None:
         """Ensure state directories exist."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cold_dir(self, flow_id: str) -> Path:
+        """Path to a flow's cold-file partition (steps/<flow_id>/)."""
+        return self.steps_dir / str(flow_id)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, data: Any) -> None:
+        """Atomically write ``data`` as pretty JSON (temp file + rename).
+
+        The single write seam for the header and every cold file, so the
+        incremental-write regression tests can patch/observe exactly which files
+        a persist touched. A distinct ``<name>.tmp`` sibling (not ``with_suffix``)
+        keeps two files that share a stem — e.g. ``engine.json`` cold refs — from
+        colliding on the temp name.
+        """
+        content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        temp_file = path.with_name(path.name + ".tmp")
+        try:
+            temp_file.write_text(content, encoding="utf-8")
+            temp_file.replace(path)
+        except Exception:
+            if temp_file.exists():
+                temp_file.unlink(missing_ok=True)
+            raise
+
+    def _prior_cold_hashes(
+        self, header_path: Path, flow_id: str
+    ) -> Tuple[Dict[str, str], Optional[str]]:
+        """Read the hashes recorded by the last header written to ``header_path``.
+
+        Returns (per-step-hash, context-hash) for the *same* flow's previously
+        persisted header, enabling the incremental write path to skip cold files
+        whose content is unchanged. Any condition that makes reuse unsafe —
+        missing file, unreadable/legacy-inline header, or a header describing a
+        *different* flow (the single-slot engine.json now holds another run) —
+        returns empty hashes so every cold file is (re)written.
+        """
+        if not header_path.exists():
+            return {}, None
+        try:
+            data = json.loads(header_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}, None
+        if not _is_hotcold(data) or str(data.get("flow_id")) != str(flow_id):
+            return {}, None
+        state = data.get("state", {}) if isinstance(data, dict) else {}
+        per_step: Dict[str, str] = {}
+        for sid, entry in (state.get("steps", {}) or {}).items():
+            cold_ref = entry.get("cold_ref") if isinstance(entry, dict) else None
+            if isinstance(cold_ref, dict) and "hash" in cold_ref:
+                per_step[sid] = cold_ref["hash"]
+        context_ref = state.get("context_ref") or {}
+        ctx_hash = context_ref.get("hash") if isinstance(context_ref, dict) else None
+        return per_step, ctx_hash
+
+    @staticmethod
+    def _dirty_step_ids(
+        header: Dict[str, Any], prior_step_hashes: Dict[str, str]
+    ) -> Set[str]:
+        """Step ids whose cold payload differs from the last persisted header."""
+        dirty: Set[str] = set()
+        for sid, entry in header.get("state", {}).get("steps", {}).items():
+            new_hash = entry.get("cold_ref", {}).get("hash")
+            if prior_step_hashes.get(sid) != new_hash:
+                dirty.add(sid)
+        return dirty
+
+    def _write_cold(
+        self,
+        flow_id: str,
+        header: Dict[str, Any],
+        cold_steps: Dict[str, Dict[str, Any]],
+        context_payload: Dict[str, Any],
+        prior_step_hashes: Dict[str, str],
+        prior_ctx_hash: Optional[str],
+    ) -> None:
+        """Write only the cold files whose content changed since the last persist.
+
+        Write volume is proportional to what actually changed this step, not to
+        the flow's step count (issue #244 B2). Completed/archived cold files are
+        never rewritten because their hash keeps matching.
+        """
+        dirty = self._dirty_step_ids(header, prior_step_hashes)
+        new_ctx_hash = header["state"]["context_ref"]["hash"]
+        ctx_dirty = new_ctx_hash != prior_ctx_hash
+
+        if not dirty and not ctx_dirty:
+            return
+
+        cold_dir = self._cold_dir(flow_id)
+        cold_dir.mkdir(parents=True, exist_ok=True)
+        for sid in dirty:
+            self._atomic_write_json(cold_dir / f"{sid}.json", cold_steps[sid])
+        if ctx_dirty:
+            self._atomic_write_json(
+                cold_dir / self.CONTEXT_COLD_FILENAME, context_payload
+            )
 
     def save_flow(self, flow: FlowInstance) -> Path:
         """Save flow instance to state file atomically.
@@ -66,21 +261,26 @@ class PersistenceManager:
         from datetime import datetime
         flow.updated_at = datetime.now()
 
-        # Serialize to JSON
-        data = flow.to_dict()
-        json_content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
-
-        # Atomic write: write to temp file, then rename
-        temp_file = self.state_file.with_suffix(".tmp")
-        try:
-            temp_file.write_text(json_content, encoding="utf-8")
-            # Atomic rename on POSIX systems
-            temp_file.replace(self.state_file)
-        except Exception:
-            # Clean up temp file on failure
-            if temp_file.exists():
-                temp_file.unlink(missing_ok=True)
-            raise
+        # Hot/cold split (issue #244 一期): engine.json holds only the KB-scale
+        # header; per-step inputs/outputs and the shared context live in
+        # steps/<flow_id>/. Compare against the header already on disk so only
+        # the cold files that actually changed this step are rewritten — the
+        # write volume then tracks the step's own output, not the flow's step
+        # count. Cold files first, then the header (which references them), so a
+        # crash between the two never leaves the header pointing at absent data.
+        header, cold_steps, context_payload = _split_flow_dict(flow.to_dict())
+        prior_step_hashes, prior_ctx_hash = self._prior_cold_hashes(
+            self.state_file, flow.flow_id
+        )
+        self._write_cold(
+            flow.flow_id,
+            header,
+            cold_steps,
+            context_payload,
+            prior_step_hashes,
+            prior_ctx_hash,
+        )
+        self._atomic_write_json(self.state_file, header)
 
         # Per-flow resumable snapshot bookkeeping. save_flow is the single
         # convergence point for every pause/interrupt/failure/step-advance
@@ -94,7 +294,11 @@ class PersistenceManager:
             if flow.status == FlowStatus.COMPLETED:
                 self.clear_resumable_snapshot(flow.flow_id)
             else:
-                self.save_resumable_snapshot(flow)
+                # Reuse the header save_flow just built and the cold files it
+                # just wrote: the snapshot references the same steps/<flow_id>/
+                # partition, so it costs only a KB-scale header write and never
+                # duplicates the cold payloads.
+                self.save_resumable_snapshot(flow, _header=header)
         except Exception:
             logger.debug(
                 "Failed to update resumable snapshot for flow %s",
@@ -104,17 +308,103 @@ class PersistenceManager:
 
         return self.state_file
 
-    def save_resumable_snapshot(self, flow: FlowInstance) -> Path:
+    @staticmethod
+    def _read_cold_json(
+        path: Path, label: str, warnings: Optional[List[str]]
+    ) -> Optional[Any]:
+        """Read+parse a cold file; return None (and warn) if missing/corrupt.
+
+        Tolerant by design (issue #244 B3): a missing or damaged cold file must
+        degrade that step's payload to empty, never crash the whole flow load.
+        """
+        if not path.exists():
+            msg = f"Cold file missing for {label}: {path.name}; using empty payload"
+            logger.warning("Cold file missing (%s): %s", label, path)
+            if warnings is not None:
+                warnings.append(msg)
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            msg = f"Cold file unreadable for {label}: {exc}; using empty payload"
+            logger.warning("Cold file unreadable (%s): %s: %s", label, path, exc)
+            if warnings is not None:
+                warnings.append(msg)
+            return None
+
+    def _reconstruct_full_dict(
+        self, header: Dict[str, Any], warnings: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Inline a new-format header's cold files back into a full flow dict.
+
+        Legacy (fully-inline) payloads are returned unchanged, so the same load
+        path serves both formats (B3). A new-format header has its per-step
+        ``cold_ref`` and the shared ``context_ref`` resolved from
+        steps/<flow_id>/ back into the inline shape ``FlowInstance.from_dict``
+        expects; missing/corrupt cold files degrade to empty payloads.
+        """
+        if not _is_hotcold(header):
+            return header
+
+        cold_dir = self._cold_dir(header.get("flow_id"))
+        full = {k: v for k, v in header.items() if k != ENGINE_FORMAT_KEY}
+        state = dict(full.get("state", {}))
+
+        context_ref = state.pop("context_ref", None)
+        payload = None
+        if isinstance(context_ref, dict) and context_ref.get("file"):
+            payload = self._read_cold_json(
+                cold_dir / context_ref["file"], "context", warnings
+            )
+        if isinstance(payload, dict):
+            state["context"] = payload.get("context", {})
+            state["fix_history"] = payload.get("fix_history", [])
+        else:
+            state["context"] = {}
+            state["fix_history"] = []
+
+        rebuilt_steps: Dict[str, Any] = {}
+        for sid, entry in (state.get("steps", {}) or {}).items():
+            step = {k: v for k, v in entry.items() if k != "cold_ref"}
+            cold_ref = entry.get("cold_ref") if isinstance(entry, dict) else None
+            cold = None
+            if isinstance(cold_ref, dict) and cold_ref.get("file"):
+                cold = self._read_cold_json(
+                    cold_dir / cold_ref["file"], f"step {sid}", warnings
+                )
+            if isinstance(cold, dict):
+                step["inputs"] = cold.get("inputs", {})
+                step["outputs"] = cold.get("outputs", {})
+                step["artifacts"] = cold.get("artifacts", [])
+            else:
+                step["inputs"] = {}
+                step["outputs"] = {}
+                step["artifacts"] = []
+            rebuilt_steps[sid] = step
+        state["steps"] = rebuilt_steps
+
+        full["state"] = state
+        return full
+
+    def save_resumable_snapshot(
+        self, flow: FlowInstance, *, _header: Optional[Dict[str, Any]] = None
+    ) -> Path:
         """Persist a per-flow resumable snapshot to resumable/<flow_id>.json.
 
-        The snapshot format is identical to engine.json (``FlowInstance.to_dict``)
-        and is written atomically (temp file + rename). It is the durable,
-        per-flow copy that survives a later ``se3 run`` overwriting the
-        single-slot engine.json, so an interrupted/paused/failed flow can still
-        be located and resumed by flow_id.
+        The snapshot uses the same header + cold-reference layout as engine.json
+        and shares the same ``steps/<flow_id>/`` cold partition, so it is only a
+        KB-scale header write — it no longer grows linearly with an in-flight
+        flow's inputs/outputs (issue #244 B2). It is the durable, per-flow copy
+        that survives a later ``se3 run`` overwriting the single-slot
+        engine.json, so an interrupted/paused/failed flow can still be located
+        and resumed by flow_id.
 
         Args:
             flow: Flow instance to snapshot
+            _header: internal fast-path — the header already built (and whose
+                cold files were already written) by ``save_flow`` for this same
+                persist. When omitted (a standalone call), the snapshot recomputes
+                the split and writes any changed cold files itself.
 
         Returns:
             Path to the snapshot file.
@@ -122,18 +412,23 @@ class PersistenceManager:
         self.resumable_dir.mkdir(parents=True, exist_ok=True)
         snapshot_file = self.resumable_dir / f"{flow.flow_id}.json"
 
-        data = flow.to_dict()
-        json_content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        if _header is None:
+            header, cold_steps, context_payload = _split_flow_dict(flow.to_dict())
+            prior_step_hashes, prior_ctx_hash = self._prior_cold_hashes(
+                snapshot_file, flow.flow_id
+            )
+            self._write_cold(
+                flow.flow_id,
+                header,
+                cold_steps,
+                context_payload,
+                prior_step_hashes,
+                prior_ctx_hash,
+            )
+        else:
+            header = _header
 
-        temp_file = snapshot_file.with_suffix(".tmp")
-        try:
-            temp_file.write_text(json_content, encoding="utf-8")
-            temp_file.replace(snapshot_file)
-        except Exception:
-            if temp_file.exists():
-                temp_file.unlink(missing_ok=True)
-            raise
-
+        self._atomic_write_json(snapshot_file, header)
         return snapshot_file
 
     def load_resumable_snapshot(self, flow_id: str) -> Optional[FlowInstance]:
@@ -155,7 +450,7 @@ class PersistenceManager:
         try:
             content = snapshot_file.read_text(encoding="utf-8")
             data = json.loads(content)
-            flow = FlowInstance.from_dict(data)
+            flow = FlowInstance.from_dict(self._reconstruct_full_dict(data))
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             return None
         if flow.flow_id != flow_id:
@@ -191,7 +486,7 @@ class PersistenceManager:
         for snapshot_file in sorted(self.resumable_dir.glob("*.json")):
             try:
                 data = json.loads(snapshot_file.read_text(encoding="utf-8"))
-                flow = FlowInstance.from_dict(data)
+                flow = FlowInstance.from_dict(self._reconstruct_full_dict(data))
             except (json.JSONDecodeError, KeyError, ValueError, OSError):
                 continue
             # Only surface a snapshot whose embedded flow_id matches its
@@ -243,14 +538,14 @@ class PersistenceManager:
         try:
             content = self.state_file.read_text(encoding="utf-8")
             data = json.loads(content)
-            return FlowInstance.from_dict(data)
+            return FlowInstance.from_dict(self._reconstruct_full_dict(data))
         except (json.JSONDecodeError, KeyError, ValueError):
             # Try backup if main file is corrupted
             backup_file = self.state_file.with_suffix(self.BACKUP_EXTENSION)
             if backup_file.exists():
                 content = backup_file.read_text(encoding="utf-8")
                 data = json.loads(content)
-                return FlowInstance.from_dict(data)
+                return FlowInstance.from_dict(self._reconstruct_full_dict(data))
             return None
 
     def load_flow_tolerant(self) -> Tuple[Optional[FlowInstance], List[str]]:
@@ -287,10 +582,15 @@ class PersistenceManager:
                 warnings.append(f"{filepath.name} is empty")
                 continue
 
-            # Try normal parsing first
+            # Try normal parsing first. The JSON-repair path (below) operates on
+            # the KB-scale *header*; the cold files it references are resolved
+            # after repair and degrade independently to empty payloads (B3), so a
+            # truncated header never blocks recovery of intact cold data.
             try:
                 data = json.loads(content)
-                flow = FlowInstance.from_dict(data)
+                flow = FlowInstance.from_dict(
+                    self._reconstruct_full_dict(data, warnings)
+                )
                 if filepath != self.state_file:
                     warnings.append(f"Loaded from backup {filepath.name}")
                 return flow, warnings
@@ -300,7 +600,9 @@ class PersistenceManager:
                 repaired = self._try_repair_json(content)
                 if repaired is not None:
                     try:
-                        flow = self._tolerant_from_dict(repaired, warnings)
+                        flow = self._tolerant_from_dict(
+                            self._reconstruct_full_dict(repaired, warnings), warnings
+                        )
                         warnings.append(f"Recovered from truncated JSON in {filepath.name}")
                         return flow, warnings
                     except Exception as e2:
@@ -310,7 +612,9 @@ class PersistenceManager:
                 # Try with tolerant deserialization
                 try:
                     data = json.loads(content)
-                    flow = self._tolerant_from_dict(data, warnings)
+                    flow = self._tolerant_from_dict(
+                        self._reconstruct_full_dict(data, warnings), warnings
+                    )
                     return flow, warnings
                 except Exception as e2:
                     warnings.append(f"Tolerant deserialization also failed: {e2}")
