@@ -1,13 +1,14 @@
-I'll inspect the actual merged callers and test files to determine which version's API the rest of the tree expects, rather than trusting the embedded narrative.History.py production code requires the `parse=` kwarg, so I need to see the full picture. Let me read the conflicted regions and the key definitions.Key finding: history.py's G7 side calls `read_engine_header(path, parse=_parse_engine_json)` (needs the `parse=` kwarg), while the new staged acceptance test `test_issue243_disk_json_cache.py` patches `_parse_json_file` — both are G7 signatures. Let me verify what G7 vs HEAD contain for the seam and the old #209 tests, decisively.Critical insight: `_read_engine_cached` (the only `parse=` caller) is never actually invoked — all hot-path call sites use `read_engine_header(path)` positionally. And the three committed `#209` tests (HEAD only, not on G7) patch `_parse_json`, while the new staged acceptance test patches `_parse_json_file`. Both families run in the final tree. Let me read the exact test expectations to build a reconciling resolution.Both test families impose precise, simultaneous constraints. Decisive:
-- `test_issue243` patches `_parse_json_file(path)` and needs degraded extraction of `is_worktree_mode` **and** `worktree_branch`.
-- `test_daemon_history_readpath_cache` patches `_parse_json(raw)` (takes raw text) — a **different** seam that must also count each full parse.
+I'll verify which symbols and seams the merged tree actually requires before committing to a resolution, since the two sides expose different APIs (`MAX_PARSE_BYTES` vs `SIZE_GUARD_BYTES`, `parse=` kwarg, and different parse seams).Very informative. The merged tree requires `MAX_PARSE_BYTES` (not `SIZE_GUARD_BYTES`), a `_parse_json(raw)` seam, and a `_json_loads(raw)` seam — all confirmed by committed tests. Let me check the two committed disk-cache test files directly to nail down the exact seam contracts.Both `SIZE_GUARD_BYTES` and `MAX_PARSE_BYTES` are required by different committed tests, and both `_parse_json` and `_json_loads` seams. Let me check the third test file's contract.I now have the complete, decisive picture. The merged tree's committed tests impose these simultaneous constraints:
 
-Both run in the final tree, so the module needs both seams chained (`_parse_json_file` reads then delegates to `_parse_json`). Let me confirm the third committed test's seam signature and inspect the pre-broken G2 test.I now have the complete picture. There are **three** parse-counting seams live in the merged tree that must all work simultaneously:
-- `_parse_json_file(path)` — new staged acceptance test (`test_issue243`)
-- `_parse_json(raw)` — three committed #209 tests (patch takes `raw`)
-- `_json_loads(raw)` + `_CACHE` — committed `test_daemon_readpath_cache`
+- `test_disk_json_cache.py` imports **`SIZE_GUARD_BYTES`**, patches `_parse_json`, needs degraded extraction of the tail key `is_worktree_mode`, and `read_json_cached` size-guard behavior.
+- `test_issue243_disk_json_cache.py` patches **`_parse_json_file`**, uses `MAX_PARSE_BYTES`, requires degraded extraction of both `is_worktree_mode` **and** `worktree_branch`, and `read_json_cached` returning `None` for over-guard files.
+- `test_daemon_history_readpath_cache.py` patches `_parse_json`, uses `MAX_PARSE_BYTES`.
+- `test_daemon_readpath_cache.py` patches **`_json_loads`**, uses `MAX_PARSE_BYTES`.
+- `#209` tests patch `_parse_json`.
 
-And the degraded header must extract `worktree_branch` (test243 line 112), which only G7's richer key set has. The correct resolution is G7's structure with the three seams **chained 1:1** (`_parse_json_file` → `_parse_json` → `_json_loads`) so patching any one counts each full parse exactly once, plus `parse=` kwarg support for history.py's G7 side. Let me write it and validate.Now writing the resolved file:Now let me validate the resolution against both test families (the module's own tests can run even though sibling files `history.py` still have conflict markers):History.py still has conflict markers (a separate conflict, out of scope for this file). The package import chain fails there, so I'll validate my module's logic in isolation by loading it directly and exercising both test families' seam-patching contracts.All three seam contracts, degraded head+tail extraction (including the `worktree_branch`/`project_root` tail keys), warn-once, oversized-never-cached, and reparse-on-change pass in isolation. The resolution reconciles the entire merged tree (the `history.py` sibling conflict is out of scope for this file). Here is the fully resolved file content:
+So the module needs: both `MAX_PARSE_BYTES` and `SIZE_GUARD_BYTES` (same 5 MiB value), all three chained seams (`_parse_json_file` → `_parse_json` → `_json_loads`), the richer header key set including `worktree_branch`, and `read_json_cached` returning `None` over-guard. That is exactly the HEAD structure — it only lacks the `SIZE_GUARD_BYTES` alias that `test_disk_json_cache.py` imports. I'll take HEAD (stripping the narrative garbage before the docstring) and add the alias, then write and validate.Now I'll write the fully resolved file:Now let me validate the resolved module against the committed test suites in isolation:The sibling files `aggregator.py` and `history.py` still contain unresolved conflicts/narrative corruption (out of scope for this file). I'll validate my module in isolation by loading it directly, exercising all three seam contracts and degraded extraction:Just my test harness passed `str` instead of `Path` (the real tests use `tmp_path / ...`). Fixing:All contracts pass in isolation: the three chained parse seams (`_parse_json_file` → `_parse_json` → `_json_loads`) each count a full parse exactly once, parse-once-per-change holds, degraded head+tail extraction recovers the old-format tail keys `is_worktree_mode` and `worktree_branch` without any full parse, over-guard files return `None` from `read_json_cached`, and degraded failure warns once. Both `MAX_PARSE_BYTES` and `SIZE_GUARD_BYTES` are exported. (The sibling `aggregator.py`/`history.py` conflicts are separate and out of scope for this file.)
+
+Here is the fully resolved file content:
 
 """Unified, thread-safe disk-JSON parse cache for the daemon control plane.
 
@@ -69,6 +70,10 @@ logger = logging.getLogger(__name__)
 #: freeze. A new-format engine.json (header only) is always far below this, so
 #: the guard never degrades a current-format read.
 MAX_PARSE_BYTES = 5 * 1024 * 1024
+
+#: Alias for :data:`MAX_PARSE_BYTES`. Both names refer to the same 5 MiB
+#: ceiling; callers and tests use whichever reads best in context.
+SIZE_GUARD_BYTES = MAX_PARSE_BYTES
 
 #: (path) -> (mtime, size, parsed dict or None when the file was unparseable).
 #: Only entries for at-or-under-guard files are ever stored.
@@ -181,8 +186,8 @@ def read_json_cached(
     too, so a persistently broken small file is not re-parsed every tick.
 
     *parse* overrides the parse seam so a caller can keep its own
-    parse-counting hook (history's ``_parse_engine_json``); the cache store is
-    still shared and keyed by ``(path, mtime, size)``.
+    parse-counting hook; the cache store is still shared and keyed by
+    ``(path, mtime, size)``.
     """
     stat = _safe_stat(path)
     if stat is None:
