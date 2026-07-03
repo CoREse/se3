@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import se3.daemon.disk_json_cache as disk_cache
 import se3.daemon.history as history_mod
 from se3.daemon.history import DaemonHistoryReader
 
@@ -64,25 +65,29 @@ def _write_jsonl(path: Path, n_lines: int) -> None:
 
 
 def _count_engine_parses(monkeypatch, engine_path: Path) -> dict:
-    """Patch ``history._parse_engine_json`` to count engine.json *parses*.
+    """Patch ``disk_json_cache._parse_json`` to count engine.json *full parses*.
 
-    Returns a mutable ``{"n": int}`` counter.  ``_read_engine_cached`` always
-    *reads* the file (cheap) but only *parses* (``_parse_engine_json``, the
-    GIL-bound ``json.loads``) when the content actually changed; counting that
-    seam measures exactly the expensive operation the #209 fix collapses.
+    Returns a mutable ``{"n": int}`` counter.  The stat-keyed
+    ``read_engine_header`` skips even the read on an unchanged file and only
+    *full-parses* (``disk_json_cache._parse_json``, the GIL-bound ``json.loads``)
+    when the ``(mtime, size)`` changed; counting that seam measures exactly the
+    expensive operation the #209 fix collapses.  The module-level cache is
+    cleared first so the count starts from a clean slate for this file.
+
+    ``_parse_json`` is only ever reached for the whole-file parse of an
+    engine-shaped state file; per-step jsonl reads parse via ``read_flow``'s own
+    ``json.loads``.  With a single root there is exactly one engine.json, so
+    counting every call measures that file's parses.
     """
+    disk_cache.clear_cache()
     counter = {"n": 0}
-    original = history_mod._parse_engine_json
+    original = disk_cache._parse_json
 
-    # ``_parse_engine_json`` is only ever called for an ``engine.json`` (from
-    # ``_read_engine_cached``); per-step jsonl reads parse via ``read_flow``'s
-    # own ``json.loads``.  With a single root there is exactly one engine.json,
-    # so counting every call measures that file's parses.
     def counting_parse(raw):
         counter["n"] += 1
         return original(raw)
 
-    monkeypatch.setattr(history_mod, "_parse_engine_json", counting_parse)
+    monkeypatch.setattr(disk_cache, "_parse_json", counting_parse)
     return counter
 
 

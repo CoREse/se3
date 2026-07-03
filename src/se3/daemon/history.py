@@ -41,13 +41,13 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
+from .disk_json_cache import read_engine_header, read_json_cached
 from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 from .supervisor import resolve_worktree_main_root
 
@@ -578,7 +578,7 @@ class DaemonHistoryReader:
         if meta.source != "active":
             return False
         engine_json = Path(meta.project_root) / "se3" / "state" / "engine.json"
-        data = _read_engine_cached(engine_json)
+        data = read_engine_header(engine_json)
         if not isinstance(data, dict):
             return False
         # Confirm the engine.json still describes *this* flow.  Without this
@@ -605,7 +605,7 @@ class DaemonHistoryReader:
         state_dir = root / "se3" / "state"
 
         # 1. Active flow from engine.json.
-        data = _read_engine_cached(state_dir / "engine.json")
+        data = read_engine_header(state_dir / "engine.json")
         if isinstance(data, dict) and data.get("flow_id"):
             flow_id = str(data["flow_id"])
             self._claim(
@@ -620,7 +620,10 @@ class DaemonHistoryReader:
         archive_dir = state_dir / "archive"
         if archive_dir.is_dir():
             for archive_file in sorted(archive_dir.glob("engine_*.json")):
-                adata = _read_json(archive_file)
+                # An archived flow's engine.json never changes again, so the
+                # stat-keyed cache parses it once; a giant legacy archive is
+                # degraded to its hot keys rather than fully parsed.
+                adata = read_engine_header(archive_file)
                 if not isinstance(adata, dict):
                     continue
                 flow_id = str(adata.get("flow_id") or "")
@@ -650,7 +653,10 @@ class DaemonHistoryReader:
         resumable_dir = state_dir / "resumable"
         if resumable_dir.is_dir():
             for snap_file in sorted(resumable_dir.glob("*.json")):
-                sdata = _read_json(snap_file)
+                # A resumable snapshot is engine-shaped; the stat-keyed cache
+                # parses it once, and a bloated in-flight snapshot is degraded to
+                # its hot keys (flow_id / status suffice for the claim below).
+                sdata = read_engine_header(snap_file)
                 if not isinstance(sdata, dict):
                     continue
                 flow_id = str(sdata.get("flow_id") or "")
@@ -799,7 +805,7 @@ class DaemonHistoryReader:
         cached = self._history_meta_cache.get(sig_key)
         if cached is not None and cached[0] == sig:
             return cached[1]
-        meta = _read_json(flow_dir / "_meta.json") or {}
+        meta = read_json_cached(flow_dir / "_meta.json") or {}
         updated = datetime.fromtimestamp(latest).isoformat() if latest else ""
         result = SessionMeta(
             flow_id=flow_id,
@@ -1640,7 +1646,7 @@ class DaemonHistoryReader:
         signature: Dict[str, Any] = {}
         for root in self._iter_roots():
             engine_json = root / "se3" / "state" / "engine.json"
-            data = _read_engine_cached(engine_json)
+            data = read_engine_header(engine_json)
             if not isinstance(data, dict):
                 continue
             flow_id = str(data.get("flow_id") or "")
@@ -1683,74 +1689,21 @@ class DaemonHistoryReader:
         """
         ids: Set[str] = set()
         for root in self._iter_roots():
-            data = _read_engine_cached(root / "se3" / "state" / "engine.json")
+            data = read_engine_header(root / "se3" / "state" / "engine.json")
             if isinstance(data, dict) and data.get("flow_id"):
                 ids.add(str(data["flow_id"]))
         return ids
 
 
 # -- module-level file helpers --------------------------------------------
-
-
-def _read_json(path: Path) -> Optional[dict]:
-    """Read and parse a JSON file; return ``None`` on any error."""
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-# -- active engine.json parse cache ---------------------------------------
 #
-# The daemon's per-tick push loop / aggregator touches the *active*
-# ``engine.json`` through several readers every tick
-# (``active_flow_signature`` + ``build_index`` → ``_index_root`` +
-# ``read_active_flows`` → ``_is_still_active`` + ``live_flow_ids``).  Reading
-# the file is cheap, but ``json.loads`` on a multi-MB ``engine.json`` is a
-# GIL-bound parse that, repeated tick × reader, starves the event loop and was
-# a root cause of the #209 WebUI freeze (the live-append frame never got
-# pushed).  Collapse the repeated parses to *one per actual content change* by
-# keying the parsed result on the raw file content.
-
-_ENGINE_PARSE_CACHE: Dict[str, Tuple[str, Optional[dict]]] = {}
-_ENGINE_PARSE_CACHE_LOCK = threading.Lock()
-
-
-def _parse_engine_json(raw: str) -> Optional[dict]:
-    """Parse the raw text of an ``engine.json`` into a dict (or ``None``).
-
-    This is the single GIL-bound ``json.loads`` seam the #209 fix collapses;
-    it is patched by the regression tests to count active-engine.json parses.
-    """
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _read_engine_cached(path: Path) -> Optional[dict]:
-    """Read an active ``engine.json`` and parse it at most once per change.
-
-    Always *reads* the file (cheap), but only *parses* (``_parse_engine_json``)
-    when the raw content differs from the last parse cached for *path*.  The
-    cache is module-level (shared across reader instances) and keyed by the raw
-    file content, so a genuine rewrite — a step transition or a retry — is
-    re-parsed while an unchanged file across many ticks parses only once.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    key = str(path)
-    with _ENGINE_PARSE_CACHE_LOCK:
-        cached = _ENGINE_PARSE_CACHE.get(key)
-        if cached is not None and cached[0] == raw:
-            return cached[1]
-    parsed = _parse_engine_json(raw)
-    with _ENGINE_PARSE_CACHE_LOCK:
-        _ENGINE_PARSE_CACHE[key] = (raw, parsed)
-    return parsed
+# All engine.json / archive / resumable snapshot / _meta.json parsing is now
+# served by the module-level, ``(path, mtime, size)``-keyed
+# ``se3.daemon.disk_json_cache`` (``read_engine_header`` / ``read_json_cached``),
+# which supersedes the earlier content-keyed ``_read_engine_cached`` /
+# ``_ENGINE_PARSE_CACHE``: it skips even the ``read_text`` on an unchanged file
+# and never full-parses an oversized legacy file (bounded head+tail degraded
+# read instead), closing the #209 per-tick CPU sink at its source.
 
 
 def _safe_mtime(path: Path) -> Optional[float]:
@@ -1948,7 +1901,11 @@ def enumerate_historical_project_roots(
         if archive_dir.is_dir():
             for archive_file in sorted(archive_dir.glob("engine_*.json")):
                 has_artifacts = True
-                data = _read_json(archive_file)
+                # Only the top-level ``project_root`` is needed here, so an
+                # oversized legacy archive is degraded to its hot keys instead of
+                # fully parsed; ``read_engine_header`` returns ``None`` on an
+                # unreadable / unextractable file so it is warned-once and skipped.
+                data = read_engine_header(archive_file)
                 if data is None:
                     _warn_once_unreadable(archive_file, "archive file")
                     continue
@@ -1963,7 +1920,9 @@ def enumerate_historical_project_roots(
                 meta_path = flow_dir / "_meta.json"
                 if not meta_path.is_file():
                     continue
-                data = _read_json(meta_path)
+                # ``_meta.json`` is small and re-scanned on every enumeration;
+                # the stat-keyed cache parses an unchanged one only once.
+                data = read_json_cached(meta_path)
                 if data is None:
                     _warn_once_unreadable(meta_path, "meta file")
                     continue
