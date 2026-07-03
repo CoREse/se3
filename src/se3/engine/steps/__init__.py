@@ -7,6 +7,7 @@ Handlers are registered with the state machine and called during flow execution.
 import logging
 
 from ..models import StepType
+from .adjudicate import adjudicate_handler
 from .analyze import analyze_handler
 from .charter_freshness import charter_freshness_handler
 from .commit import commit_handler
@@ -76,6 +77,7 @@ STEP_HANDLERS = {
     StepType.IMPLEMENT: implement_handler,
     StepType.TEST: test_handler,
     StepType.SELF_CHECK: self_check_handler,
+    StepType.ADJUDICATE: adjudicate_handler,
     StepType.INVARIANT_CHECK: invariant_check_handler,
     StepType.CHARTER_FRESHNESS: charter_freshness_handler,
     StepType.VERSION_ANALYZE: version_analyze_handler,
@@ -85,6 +87,7 @@ STEP_HANDLERS = {
 
 __all__ = [
     "discovery_handler",
+    "adjudicate_handler",
     "analyze_handler",
     "project_summary_handler",
     "project_summary_stub_handler",

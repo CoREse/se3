@@ -50,6 +50,15 @@ confirmation:
     plan:
       # reviewer omitted → LLM review via llm_caller.defaults
       max_iterations: 3
+    # Adjudicate rules on spec contradictions and emits an override patch to the
+    # task description and/or plan. Overriding the *task description* is a
+    # high-impact act, so it defaults to human review via se3/calls (PAUSED
+    # approval). If a ruling only touches the plan / test expectations (not the
+    # task description), you may instead point `reviewer` at an LLM agent name
+    # for automated review, or drop this entry entirely to skip confirmation.
+    adjudicate:
+      reviewer: human
+      max_iterations: 3
 
 # Version Bumping Configuration
 # Automatically bump version on commit step based on task type
@@ -97,6 +106,14 @@ workflow:
   # identical to se3.local.yaml so the local override does not silently shadow a
   # different value (config loading is whole-file select-one, not key-merge).
   max_fix_iterations: 100
+
+  # Period (in fix iterations) of the adjudicate step's catch-all safety net:
+  # even when no oscillation signal fires, every N fix iterations force one
+  # adjudicate run to catch drift the structural triggers missed. Set to 0 (or
+  # null) to disable the periodic net (adjudicate then runs only on the
+  # structural signal triggers: candidate oscillation / contradiction / recur).
+  # Default: 10.
+  adjudicate_period: 10
 
   # Defer-fix threshold for nested self_check chains. When a non-final
   # self_check pass finds FEWER than this many issues and none is critical/high

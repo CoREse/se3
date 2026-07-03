@@ -54,6 +54,7 @@ class StepType(Enum):
     IMPLEMENT = "implement"  # Write code (most critical step)
     TEST = "test"  # Run tests (program execution, not LLM)
     SELF_CHECK = "self_check"  # Code self-review: logic completeness and robustness
+    ADJUDICATE = "adjudicate"  # Spec-contradiction adjudication: rule on task/plan contradictions that oscillate the fix loop
     INVARIANT_CHECK = "invariant_check"  # Anchored check: diff vs recorded binding invariants (charter + why-comments + task)
     CHARTER_FRESHNESS = "charter_freshness"  # Advisory: does this diff touch charter's three content classes?
     VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency (deprecated by the charter refactor)
@@ -621,6 +622,42 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "read_only": True,
         "inputs": ["changes_made", "test_results", "spec_content", "task_description"],
         "outputs": ["self_check_result", "issues", "actionable_count"],
+    },
+    StepType.ADJUDICATE: {
+        "name": "adjudicate",
+        # Why a distinct adjudication layer (not folded into self_check): the
+        # review layer stays high-recall and reports *deviations*; adjudicate is
+        # the single place that rules on *spec contradictions*. When the same
+        # location is flagged in opposite directions across rounds, self_check
+        # cannot break the tie without mixing adjudication into review. This step
+        # reads the cross-round fingerprint ledger + the currently-effective
+        # task_description/plan (no full transcript) and emits an override patch:
+        # adjudicated_description overrides task_description and/or
+        # adjudicated_plan overrides the latest plan's task_groups, minimally.
+        # Named for its products (adjudicated_description/adjudicated_plan),
+        # mirroring self_check/invariant_check duty-based naming.
+        "description": (
+            "Spec-contradiction adjudication (the fix-loop 'police'): given the "
+            "cross-round issue-fingerprint ledger and the currently-effective "
+            "task_description/plan, rule on internal spec contradictions, "
+            "spec-vs-hard-constraint conflicts, and review divergence. Emits an "
+            "override patch (adjudicated_description / adjudicated_plan) with "
+            "rationale + timestamp so downstream steps take the latest ruling "
+            "while the original discovery/plan outputs stay untouched."
+        ),
+        "uses_llm": True,
+        # Writes only its own outputs (no file edits), but those products drive
+        # the flow via the adjudicated > refined > original effective-text layer.
+        "read_only": False,
+        "inputs": ["adjudication_ledger", "task_description", "plan"],
+        "outputs": [
+            "adjudicated_description",
+            "adjudicated_plan",
+            "adjudication_rationale",
+            "adjudicated_at",
+            "superseded_fix_instructions",
+            "rejected_candidates",
+        ],
     },
     StepType.INVARIANT_CHECK: {
         "name": "invariant_check",

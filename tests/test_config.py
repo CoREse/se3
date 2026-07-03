@@ -15,6 +15,7 @@ import pytest
 
 from se3.config import (
     ConfigError,
+    DEFAULT_ADJUDICATE_PERIOD,
     DEFAULT_BASELINE_FIX_MAX_ATTEMPTS,
     DEFAULT_MAX_FIX_ITERATIONS,
     DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
@@ -201,6 +202,48 @@ class TestWorkflowConfigFromDict:
         symmetric with self_check_passes_required."""
         cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": True}})
         assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+    # -- adjudicate_period (adjudicate step periodic safety-net trigger) --
+
+    def test_adjudicate_period_default_is_10(self):
+        assert DEFAULT_ADJUDICATE_PERIOD == 10
+        assert WorkflowConfig().adjudicate_period == 10
+        assert WorkflowConfig.from_dict({}).adjudicate_period == 10
+
+    def test_custom_adjudicate_period(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": 5}})
+        assert cfg.adjudicate_period == 5
+
+    def test_adjudicate_period_null_disables(self):
+        """null/None normalizes to 0 (periodic safety net disabled)."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": None}})
+        assert cfg.adjudicate_period == 0
+
+    def test_adjudicate_period_zero_preserved(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": 0}})
+        assert cfg.adjudicate_period == 0
+
+    def test_adjudicate_period_string_coercion(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": "7"}})
+        assert cfg.adjudicate_period == 7
+
+    def test_adjudicate_period_negative_raises(self):
+        with pytest.raises(ConfigError, match="must be >= 0"):
+            WorkflowConfig.from_dict({"workflow": {"adjudicate_period": -1}})
+
+    def test_adjudicate_period_invalid_falls_back_to_default(self):
+        cfg = WorkflowConfig.from_dict(
+            {"workflow": {"adjudicate_period": "not_a_number"}}
+        )
+        assert cfg.adjudicate_period == DEFAULT_ADJUDICATE_PERIOD
+
+    def test_adjudicate_period_bool_falls_back_to_default(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": True}})
+        assert cfg.adjudicate_period == DEFAULT_ADJUDICATE_PERIOD
+
+    def test_adjudicate_period_float_falls_back_to_default(self):
+        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": 3.0}})
+        assert cfg.adjudicate_period == DEFAULT_ADJUDICATE_PERIOD
 
         cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": False}})
         assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS

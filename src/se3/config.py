@@ -2291,6 +2291,12 @@ DEFAULT_BASELINE_FIX_MAX_ATTEMPTS = 3
 # fix immediately — the historical behavior). Negative values are rejected
 # fail-fast at load.
 DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD = 3
+# Period (in fix iterations) of the adjudicate step's catch-all safety trigger:
+# even when no structural oscillation signal fires, every N fix iterations force
+# one adjudicate run to catch drift the structural triggers missed. ``0`` (or
+# ``null``) disables the periodic safety net (adjudicate then runs only on the
+# structural signal triggers); negative values are rejected fail-fast at load.
+DEFAULT_ADJUDICATE_PERIOD = 10
 
 # Dedup set for the "which config source won" load-time log line, keyed by the
 # resolved active config path. ``WorkflowConfig.load`` is called per step, so
@@ -2319,6 +2325,7 @@ class WorkflowConfig:
     self_check_convergence_enabled: bool = DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
     baseline_fix_max_attempts: int = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
     self_check_defer_fix_threshold: int = DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
+    adjudicate_period: int = DEFAULT_ADJUDICATE_PERIOD
     # Whether ``workflow.self_check_passes_required`` was set explicitly in
     # the YAML. When False and ``llm_caller.steps.self_check`` is a nested
     # per-pass chain, the effective pass count is derived from the number
@@ -2507,12 +2514,47 @@ class WorkflowConfig:
                 f"(use 0 or null to disable deferral)"
             )
 
+        # adjudicate_period: periodic safety-net trigger for the adjudicate step.
+        # ``None`` (null) is normalized to 0 (= periodic net disabled), mirroring
+        # the sentinel handling above. bool/float/non-integer types warn and fall
+        # back to the default; a negative value is rejected fail-fast.
+        if (
+            "adjudicate_period" in workflow_data
+            and workflow_data["adjudicate_period"] is None
+        ):
+            adjudicate_period = 0
+        else:
+            raw_period = workflow_data.get(
+                "adjudicate_period", DEFAULT_ADJUDICATE_PERIOD
+            )
+            if isinstance(raw_period, bool) or isinstance(raw_period, float):
+                logger.warning(
+                    f"workflow.adjudicate_period={raw_period!r} is not a valid integer; "
+                    f"falling back to default {DEFAULT_ADJUDICATE_PERIOD}"
+                )
+                adjudicate_period = DEFAULT_ADJUDICATE_PERIOD
+            else:
+                try:
+                    adjudicate_period = int(raw_period)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"workflow.adjudicate_period={raw_period!r} is not a valid integer; "
+                        f"falling back to default {DEFAULT_ADJUDICATE_PERIOD}"
+                    )
+                    adjudicate_period = DEFAULT_ADJUDICATE_PERIOD
+        if adjudicate_period < 0:
+            raise ConfigError(
+                f"workflow.adjudicate_period={adjudicate_period!r} must be >= 0 "
+                f"(use 0 or null to disable the periodic adjudicate safety net)"
+            )
+
         return cls(
             max_fix_iterations=max_fix,
             self_check_passes_required=passes,
             self_check_convergence_enabled=convergence,
             baseline_fix_max_attempts=baseline_attempts,
             self_check_defer_fix_threshold=defer_threshold,
+            adjudicate_period=adjudicate_period,
             self_check_passes_required_explicit=passes_explicit,
         )
 
