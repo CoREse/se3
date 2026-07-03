@@ -57,11 +57,11 @@ description: '背景（实证案例）：flow 20260701-110644_b2f4c0ee（issue �
 
   - self_check 的 verbatim_quote 源池切换到 adjudicated 版本后，引用已废除条款的 issue 被 validation
   丢弃（有测试）。'
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-02T17:15:36.003089'
-updated_at: '2026-07-02T17:15:36.003089'
+updated_at: '2026-07-02T23:46:05.925527'
 title: fix-loop 警察机制：振荡/冲突检测 + 规范裁决 step
 priority: high
 type: feature

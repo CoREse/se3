@@ -1,0 +1,16 @@
+id: '250'
+description: '自动处理issue的se3 run模式（或者单独弄个比如se3 issue-solver之类的子命令）。会对当前open的issue逐个判定（每个依次开se3
+  run，可以加并发数，并发数大于1的时候，se3 run自动走worktree模式，并发数等于1的时候，也可以通过参数走worktree。
+
+  在run之前会进行以下几种llm判定：1. 该issue是否还存在，还成立，如果不成立，close。2. 该issue描述是否明晰，是否需要进一步的人工阐述细节？如果需要，跳过，保持open。但这里需要通过某种方式记录（缓存）判定的结果，省得下次还要再次判定。3.
+  判断是否是纯粹的进步，还是需要人类来权衡，如果需要权衡，保持open，和2一样要记录。2和3其实都是判断是否要人类介入。
+
+  如果通过了这些llm判定，则进入正常的se3 run解决这个issue。
+
+  你研究一下，看看有什么要补充的。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-03T10:35:00.199614'
+updated_at: '2026-07-03T10:35:00.199614'
+type: feature

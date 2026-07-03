@@ -1,0 +1,8 @@
+id: '253'
+description: testing步骤的位置。把testing放在self check前本意是不让一些机械步骤能检查出来的问题浪费llm算力。但是很多时候，testing都是通过的，而后面self
+  check又要打回去，造成了testing白跑了，很浪费时间。能不能第一次testing成功后，就把testing移到self check后面，这样既保证了一开始弄出一个可靠的基线，后续testing又不浪费时间。
+status: open
+tags: []
+source: human
+created_at: '2026-07-03T14:53:41.594988'
+updated_at: '2026-07-03T14:53:41.594988'

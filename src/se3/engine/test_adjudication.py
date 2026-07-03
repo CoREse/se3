@@ -163,15 +163,22 @@ def test_trigger_b_contradiction_reads_previous_resolutions():
     assert decision.suppress_convergence is True
 
 
-def test_trigger_b_no_fire_when_same_expected_reopens():
-    """Re-reporting the exact fixed fingerprint is reproduction, not 打脸."""
+def test_trigger_b_fires_when_same_fixed_fingerprint_reopens():
+    """Re-reporting the exact fixed fingerprint is an immediate 打脸.
+
+    A resolution declares an issue ``fixed`` yet the same round's self_check
+    re-flags the identical path+quote+expected: the "fixed" claim and the live
+    review are in direct conflict, so (b) must fire now rather than waiting for
+    the slower reproduction threshold (c) to accumulate three post-fix recurrences.
+    """
     ctx = {}
     original = _issue(expected="return None")
     adj.record_self_check_round(ctx, [original])
     adj.record_fix_resolutions(ctx, [{"status": "fixed", "issue": original}])
     adj.record_self_check_round(ctx, [original])  # same fingerprint again
     decision = adj.evaluate_triggers(ctx, [original], fix_iteration=2)
-    assert adj.REASON_CONTRADICTION not in decision.reasons
+    assert adj.REASON_CONTRADICTION in decision.reasons
+    assert decision.suppress_convergence is True
 
 
 def test_trigger_b_ignores_still_present_resolutions():
@@ -208,11 +215,15 @@ def test_trigger_b_accepts_inlined_resolution_fields():
 def test_trigger_c_reproduction_third_appearance_after_fix():
     ctx = {}
     issue = _issue()
-    adj.record_self_check_round(ctx, [issue])                      # 1st
+    adj.record_self_check_round(ctx, [issue])                      # round 0 (flagged)
     adj.record_fix_resolutions(ctx, [{"status": "fixed", "issue": issue}])
-    adj.record_self_check_round(ctx, [issue])                      # 2nd
-    adj.record_self_check_round(ctx, [issue])                      # 3rd
+    adj.record_self_check_round(ctx, [issue])                      # post-fix #1
+    adj.record_self_check_round(ctx, [issue])                      # post-fix #2
+    # Only two genuine post-fix recurrences → below threshold, must not fire yet.
     decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=3)
+    assert adj.REASON_REPRODUCTION not in decision.reasons
+    adj.record_self_check_round(ctx, [issue])                      # post-fix #3
+    decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=4)
     assert adj.REASON_REPRODUCTION in decision.reasons
 
 
@@ -222,6 +233,48 @@ def test_trigger_c_no_fire_before_third_or_without_fix():
     adj.record_self_check_round(ctx, [issue])
     adj.record_self_check_round(ctx, [issue])  # 2nd, but never declared fixed
     decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=2)
+    assert adj.REASON_REPRODUCTION not in decision.reasons
+
+
+def test_trigger_c_pre_fix_flags_do_not_inflate_count():
+    """Flags BEFORE (and AT) the fix must not count toward the threshold.
+
+    A fingerprint flagged twice, THEN declared fixed, THEN recurring twice is
+    only two post-fix reproductions — not a third occurrence. Counting either the
+    earlier pre-fix flag or the fixed flag itself would fire (c) up to two rounds
+    early (the bug). Reproduction is scored STRICTLY AFTER the fixed appearance.
+    """
+    ctx = {}
+    issue = _issue()
+    adj.record_self_check_round(ctx, [issue])                      # round 0 (early flag)
+    adj.record_self_check_round(ctx, [issue])                      # round 1 (flag that gets fixed)
+    adj.record_fix_resolutions(ctx, [{"status": "fixed", "issue": issue}])  # fix_round 1
+    adj.record_self_check_round(ctx, [issue])                      # round 2 (post-fix #1)
+    adj.record_self_check_round(ctx, [issue])                      # round 3 (post-fix #2)
+    # Only two post-fix recurrences (rounds 2, 3 > fix_round 1) → below 3.
+    decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=4)
+    assert adj.REASON_REPRODUCTION not in decision.reasons
+    # A third post-fix recurrence (round 4 > fix_round 1) finally fires.
+    adj.record_self_check_round(ctx, [issue])                      # round 4 (post-fix #3)
+    decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=5)
+    assert adj.REASON_REPRODUCTION in decision.reasons
+
+
+def test_trigger_c_quoteless_fingerprint_never_fires():
+    """A quoteless (regression-type) fingerprint must not fire (c).
+
+    Its position collapses to per-file identity, which the adjudicator's
+    position-based candidate/rejection machinery cannot close out — so firing
+    (c) would re-trigger ADJUDICATE on every subsequent round the issue recurs.
+    Excluded here, mirroring triggers (a)/(b).
+    """
+    ctx = {}
+    issue = _issue(quote="")  # regression-type issue with empty verbatim_quote
+    adj.record_self_check_round(ctx, [issue])                      # 1st
+    adj.record_fix_resolutions(ctx, [{"status": "fixed", "issue": issue}])
+    adj.record_self_check_round(ctx, [issue])                      # 2nd
+    adj.record_self_check_round(ctx, [issue])                      # 3rd
+    decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=3)
     assert adj.REASON_REPRODUCTION not in decision.reasons
 
 
@@ -275,12 +328,14 @@ def test_abolished_entries_excluded_from_triggers():
 def test_abolished_excludes_reproduction():
     ctx = {}
     issue = _issue()
-    adj.record_self_check_round(ctx, [issue])
+    adj.record_self_check_round(ctx, [issue])                      # round 0 (flagged)
     adj.record_fix_resolutions(ctx, [{"status": "fixed", "issue": issue}])
-    adj.record_self_check_round(ctx, [issue])
-    adj.record_self_check_round(ctx, [issue])
+    # Three genuine post-fix recurrences would fire (c) — abolish must veto it.
+    adj.record_self_check_round(ctx, [issue])                      # post-fix #1
+    adj.record_self_check_round(ctx, [issue])                      # post-fix #2
+    adj.record_self_check_round(ctx, [issue])                      # post-fix #3
     adj.mark_abolished(ctx, [adj.fingerprint(issue)])
-    decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=3)
+    decision = adj.evaluate_triggers(ctx, [issue], fix_iteration=4)
     assert adj.REASON_REPRODUCTION not in decision.reasons
 
 
@@ -312,6 +367,26 @@ def test_should_suppress_convergence_false_when_no_signal():
     adj.record_self_check_round(ctx, [stable])
     adj.record_self_check_round(ctx, [stable])
     assert adj.should_suppress_convergence(ctx, [stable]) is False
+
+
+def test_should_suppress_convergence_true_on_due_periodic_backstop():
+    """A due periodic backstop must suppress convergence too — otherwise the
+    convergence shortcut short-circuits to COMPLETED before the state machine's
+    REVISION_NEEDED branch ever evaluates the backstop, silently skipping the
+    every-N-iteration safety net (issue: periodic backstop skipped under
+    convergence)."""
+    ctx = {}
+    stable = _issue(expected="A")
+    adj.record_self_check_round(ctx, [stable])
+    adj.record_self_check_round(ctx, [stable])  # converged, no signal
+    # Below the period: still allowed to converge.
+    assert adj.should_suppress_convergence(
+        ctx, [stable], fix_iteration=5, period_n=10
+    ) is False
+    # At the period edge: convergence must yield so ADJUDICATE can run.
+    assert adj.should_suppress_convergence(
+        ctx, [stable], fix_iteration=10, period_n=10
+    ) is True
 
 
 def test_ledger_survives_dict_round_trip():

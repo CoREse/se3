@@ -2516,8 +2516,12 @@ class WorkflowConfig:
 
         # adjudicate_period: periodic safety-net trigger for the adjudicate step.
         # ``None`` (null) is normalized to 0 (= periodic net disabled), mirroring
-        # the sentinel handling above. bool/float/non-integer types warn and fall
-        # back to the default; a negative value is rejected fail-fast.
+        # the sentinel handling above. Unlike the warn-and-default siblings, an
+        # invalid type is rejected fail-fast (ConfigError): silently defaulting a
+        # malformed adjudicate_period would quietly enable a periodic ADJUDICATE
+        # interval the user never configured. A cleanly integer-valued string
+        # (e.g. YAML-quoted ``"7"``) still coerces; bool, float and non-numeric
+        # values raise. A negative value is likewise rejected fail-fast.
         if (
             "adjudicate_period" in workflow_data
             and workflow_data["adjudicate_period"] is None
@@ -2527,21 +2531,20 @@ class WorkflowConfig:
             raw_period = workflow_data.get(
                 "adjudicate_period", DEFAULT_ADJUDICATE_PERIOD
             )
+            # bool is an int subclass but is not a valid period; reject it (and
+            # float, which is ambiguous) before the int() coercion path.
             if isinstance(raw_period, bool) or isinstance(raw_period, float):
-                logger.warning(
-                    f"workflow.adjudicate_period={raw_period!r} is not a valid integer; "
-                    f"falling back to default {DEFAULT_ADJUDICATE_PERIOD}"
+                raise ConfigError(
+                    f"workflow.adjudicate_period={raw_period!r} must be an integer "
+                    f"(use 0 or null to disable the periodic adjudicate safety net)"
                 )
-                adjudicate_period = DEFAULT_ADJUDICATE_PERIOD
-            else:
-                try:
-                    adjudicate_period = int(raw_period)
-                except (TypeError, ValueError):
-                    logger.warning(
-                        f"workflow.adjudicate_period={raw_period!r} is not a valid integer; "
-                        f"falling back to default {DEFAULT_ADJUDICATE_PERIOD}"
-                    )
-                    adjudicate_period = DEFAULT_ADJUDICATE_PERIOD
+            try:
+                adjudicate_period = int(raw_period)
+            except (TypeError, ValueError):
+                raise ConfigError(
+                    f"workflow.adjudicate_period={raw_period!r} must be an integer "
+                    f"(use 0 or null to disable the periodic adjudicate safety net)"
+                )
         if adjudicate_period < 0:
             raise ConfigError(
                 f"workflow.adjudicate_period={adjudicate_period!r} must be >= 0 "

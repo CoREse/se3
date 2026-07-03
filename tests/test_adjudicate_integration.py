@@ -240,8 +240,11 @@ class TestContradictionConverges:
         # The pending fix_instructions from round 2 are recorded superseded.
         assert adj.outputs["fix_instructions_superseded"] is True
         assert adj.outputs["superseded_fix_instructions"]
-        # Both oscillating observations are abolished so they stop counting.
-        assert all(o["abolished"] for o in ledger["observations"])
+        # The abolition is STAGED but not yet applied — a ruling's ledger side
+        # effects land only after the confirmation门 clears (issue 1).
+        assert adj.outputs["ledger_effects_applied"] is False
+        assert not any(o["abolished"] for o in ledger["observations"])
+        assert adj.outputs["abolished_fingerprints"]
 
         # --- Description change → human confirmation门. ---
         human = {"reviewer": "human", "max_iterations": 3, "agents": None}
@@ -271,6 +274,10 @@ class TestContradictionConverges:
         assert implement.status == StepStatus.COMPLETED  # never reset for a re-run
         # The re-run audits against the adjudicated text.
         assert sc3.inputs["adjudicated_description"] == ADJUDICATED_TASK
+        # Now that the ruling landed (human approved), the staged abolition was
+        # applied: both oscillating observations stop counting toward triggers.
+        assert adj.outputs["ledger_effects_applied"] is True
+        assert all(o["abolished"] for o in ledger["observations"])
 
         # --- Post-ruling round: a new issue re-quoting the dead clause is
         #     dropped by the source-pool switch → clean → COMPLETED. ---
@@ -280,14 +287,37 @@ class TestContradictionConverges:
         assert sc3.outputs["validation_stats"]["quote_not_in_source_count"] == 1
 
         # --- The flip has stopped: the flow advances to COMMIT, not a new
-        #     fix loop or another ADJUDICATE. ---
+        #     fix loop or another ADJUDICATE. The dynamically-inserted ADJUDICATE
+        #     (and its CONFIRM) slot were stripped when the ruling landed, so a
+        #     subsequent fix-loop cycle cannot re-enter a spurious un-triggered
+        #     adjudication (see test_still_valid_issue_after_ruling_*). ---
         nxt = sm.transition_to_next(flow)
         assert nxt.step_type == StepType.COMMIT
-        assert flow.state.selected_steps.count(StepType.ADJUDICATE) == 1
+        assert flow.state.selected_steps.count(StepType.ADJUDICATE) == 0
+        assert flow.state.selected_steps.count(StepType.CONFIRM) == 0
+
+        # --- And the flow converges to terminal COMPLETED. COMMIT is the last
+        #     selected step; running it for real needs git, so we simulate its
+        #     completion (status only) and assert the state machine finalizes the
+        #     flow rather than re-entering any fix loop / ADJUDICATE between
+        #     COMMIT and COMPLETED. ---
+        nxt.status = StepStatus.COMPLETED
+        flow.state.current_step_id = nxt.step_id
+        terminal = sm.transition_to_next(flow)
+        assert terminal is None
+        assert flow.status == FlowStatus.COMPLETED
 
     def test_still_valid_issue_after_ruling_stays_in_fix_loop(self, tmp_path):
         """The reflow does not blanket-silence review: an issue grounded on the
-        surviving clause is kept and drives a normal fix iteration."""
+        surviving clause is kept and drives a normal fix iteration — and the flow
+        then completes a FULL post-ruling fix-loop cycle
+        (IMPLEMENT → TEST → next slot) without re-entering a spurious,
+        un-triggered ADJUDICATE. This is the spec's own primary follow-up
+        scenario: when a landed ruling leaves its inserted ADJUDICATE/CONFIRM
+        slots in ``selected_steps``, the transition after TEST builds a fresh
+        ADJUDICATE and the flow crashes (TransitionError) or re-opens a spurious
+        human gate. Driving the whole cycle here proves the slots were stripped
+        on landing and the flip actually stops."""
         cfg = _cfg()
         sm = _make_sm(tmp_path, cfg)
         flow, implement, test = _make_flow(tmp_path)
@@ -328,6 +358,99 @@ class TestContradictionConverges:
         # surviving grounded issue is no longer an oscillation).
         nxt = sm.transition_to_next(flow)
         assert nxt.step_type == StepType.IMPLEMENT
+        # The landed ruling stripped its inserted ADJUDICATE (+ CONFIRM) slots, so
+        # the fix-loop sequence is back to the clean implement→test→self_check→commit.
+        assert flow.state.selected_steps.count(StepType.ADJUDICATE) == 0
+        assert flow.state.selected_steps.count(StepType.CONFIRM) == 0
+
+        # --- Complete IMPLEMENT (no code change needed for the assertion) and run
+        #     TEST, then drive the transition that used to crash. ---
+        nxt.status = StepStatus.COMPLETED
+        nxt.outputs = {"files_changed": [{"path": "src/foo.py", "action": "modify"}]}
+        flow.state.current_step_id = nxt.step_id
+
+        test2 = sm.transition_to_next(flow)
+        assert test2.step_type == StepType.TEST
+        test2.status = StepStatus.COMPLETED
+        test2.outputs = {"test_results": {"passed": True, "overall_passed": True}}
+        flow.state.current_step_id = test2.step_id
+
+        # The transition after TEST: with the stale slots gone this is the next
+        # SELF_CHECK, NOT a fresh un-triggered ADJUDICATE (which crashed the flow).
+        sc4 = sm.transition_to_next(flow)
+        assert sc4.step_type == StepType.SELF_CHECK
+        assert flow.state.selected_steps.count(StepType.ADJUDICATE) == 0
+
+        # --- A clean re-review converges the flow to COMMIT (the flip stopped). ---
+        assert _run_self_check(sc4, flow, []) == StepStatus.COMPLETED
+        commit = sm.transition_to_next(flow)
+        assert commit.step_type == StepType.COMMIT
+
+    def test_rejected_ruling_does_not_land_ledger_effects(self, tmp_path):
+        """A human rejection re-runs ADJUDICATE; the rejected ruling's abolition
+        must NOT land on the ledger, so the still-unresolved oscillation keeps
+        counting. Only an APPROVED ruling applies its side effects (issue 1)."""
+        cfg = _cfg()
+        sm = _make_sm(tmp_path, cfg)
+        flow, implement, test = _make_flow(tmp_path)
+
+        sc1 = _new_self_check(sm, flow)
+        _run_self_check(sc1, flow, [_issue(expected="raise ValueError")])
+        impl = sm.transition_to_next(flow)
+        impl.status = StepStatus.COMPLETED
+        impl.outputs = {"files_changed": [{"path": "src/foo.py", "action": "modify"}]}
+
+        sc2 = _new_self_check(sm, flow)
+        _run_self_check(sc2, flow, [_issue(expected="return None")])
+        adj = sm.transition_to_next(flow)
+        assert adj.step_type == StepType.ADJUDICATE
+        _run_adjudicate(adj, flow, _RULING)
+        ledger = flow.state.context[adjudication.LEDGER_KEY]
+
+        human = {"reviewer": "human", "max_iterations": 3, "agents": None}
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human
+        ):
+            confirm = sm.transition_to_next(flow)
+        assert confirm.step_type == StepType.CONFIRM
+
+        # --- Human REJECTS the ruling → revision re-runs the SAME ADJUDICATE. ---
+        confirm.status = StepStatus.COMPLETED
+        confirm.outputs = {
+            "review_result": {
+                "approved": False,
+                "step_to_review_id": adj.step_id,
+                "step_to_review_type": StepType.ADJUDICATE.value,
+            },
+            "revision_feedback": "the rewrite dropped a real requirement",
+        }
+        flow.state.current_step_id = confirm.step_id
+        revised = sm.transition_to_next(flow)
+        assert revised.step_type == StepType.ADJUDICATE
+        assert revised.step_id == adj.step_id
+        # The rejected ruling NEVER landed: no observation was abolished.
+        assert not any(o["abolished"] for o in ledger["observations"])
+
+        # --- Re-rule, then APPROVE → now the effects land. ---
+        _run_adjudicate(revised, flow, _RULING)
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human
+        ):
+            confirm2 = sm.transition_to_next(flow)
+        assert confirm2.step_type == StepType.CONFIRM
+        confirm2.status = StepStatus.COMPLETED
+        confirm2.outputs = {
+            "review_result": {
+                "approved": True,
+                "step_to_review_id": adj.step_id,
+                "step_to_review_type": StepType.ADJUDICATE.value,
+            }
+        }
+        flow.state.current_step_id = confirm2.step_id
+        sc3 = sm.transition_to_next(flow)
+        assert sc3.step_type == StepType.SELF_CHECK
+        # The approved ruling applied its staged abolition on landing.
+        assert all(o["abolished"] for o in ledger["observations"])
 
 
 # --------------------------------------------------------------------------- #

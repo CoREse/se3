@@ -156,6 +156,25 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
             if isinstance(content, str) and content:
                 pool.append(content)
 
+    # When a ruling is in effect, an abolished clause must leave EVERY source-pool
+    # path, not just the (already-dropped) original description: a plan task
+    # commonly restates a spec clause verbatim, so a description-only ruling that
+    # reconciled clause C could still leave C quotable via ``plan_task`` and let
+    # the oscillation continue. Drop any plan-task entry that restates an
+    # abolished clause so a new issue re-quoting it is dropped by validation too.
+    abolished_norm: list[str] = []
+    if adjudication_in_effect:
+        for q in step_inputs.get("abolished_clause_quotes") or []:
+            if isinstance(q, str) and q.strip():
+                abolished_norm.append(_normalize_for_quote_match(q))
+        abolished_norm = [q for q in abolished_norm if q]
+
+    def _restates_abolished(text: str) -> bool:
+        if not abolished_norm:
+            return False
+        norm = _normalize_for_quote_match(text)
+        return any(q in norm for q in abolished_norm)
+
     # Plan task text: each task's description + acceptance_criteria, added
     # individually so a ``plan_task`` quote can pin down the one task it audits.
     task_groups = step_inputs.get("task_groups") or []
@@ -170,12 +189,12 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
                 if not isinstance(task, dict):
                     continue
                 desc = task.get("description")
-                if isinstance(desc, str) and desc.strip():
+                if isinstance(desc, str) and desc.strip() and not _restates_abolished(desc):
                     pool.append(desc)
                 criteria = task.get("acceptance_criteria") or []
                 if isinstance(criteria, list):
                     for c in criteria:
-                        if isinstance(c, str) and c.strip():
+                        if isinstance(c, str) and c.strip() and not _restates_abolished(c):
                             pool.append(c)
     return pool
 
@@ -347,21 +366,12 @@ def _validate_and_filter_issues(
             if not norm_quote:
                 stats["empty_quote_count"] += 1
                 continue
-            # _format_task_groups renders each task as a prompt-visible line
-            # "- [<id>] <description>", capping an oversized description with a
-            # trailing ellipsis under budget pressure. The source pool holds only
-            # the raw, un-decorated description, so a reviewer who copies the
-            # visible line verbatim carries BOTH a leading bullet/id prefix and a
-            # trailing ellipsis that the pool lacks. Build relaxed candidates that
-            # strip each so the full task still substring-matches.
-            candidates = [norm_quote]
-            trimmed = norm_quote.rstrip(". ").rstrip()
-            if trimmed and trimmed != norm_quote:
-                candidates.append(trimmed)
-            for c in list(candidates):
-                unprefixed = re.sub(r"^-\s*(\[[^\]]*\]\s*)?", "", c)
-                if unprefixed and unprefixed != c:
-                    candidates.append(unprefixed)
+            # Build the relaxed substring-match candidates (bullet/id-prefix and
+            # trailing-ellipsis variants that ``_format_task_groups`` can add to a
+            # prompt-visible task line the raw pool lacks). Shared with the
+            # adjudicate dead-clause check via ``adjudication.relaxed_quote_candidates``
+            # so abolition and validation accept identically.
+            candidates = adjudication.relaxed_quote_candidates(norm_quote)
             if not any(c in p for c in candidates for p in pool_normalized):
                 stats["quote_not_in_source_count"] += 1
                 continue
@@ -906,9 +916,19 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # routed to the adjudicator. The ledger already reflects this round (it
         # was recorded above), so ``should_suppress_convergence`` sees full
         # history.
+        # Pass the periodic-backstop params too: a due periodic sweep is only
+        # ever evaluated by the state machine in the REVISION_NEEDED branch, so
+        # convergence must yield to it here or the every-N-iteration safety net
+        # would be silently skipped whenever a round converges.
+        adjudicate_period = step.inputs.get("adjudicate_period", 0)
+        try:
+            adjudicate_period = int(adjudicate_period)
+        except (TypeError, ValueError):
+            adjudicate_period = 0
         try:
             suppress_convergence = adjudication.should_suppress_convergence(
                 flow.state.context, issues,
+                fix_iteration=fix_iteration, period_n=adjudicate_period,
             )
         except Exception:
             logger.warning(
@@ -1132,31 +1152,97 @@ def _build_fix_outputs(
     return StepStatus.REVISION_NEEDED
 
 
+def _identity_tokens(text: str) -> set:
+    """Lowercased, deduplicated word tokens (length > 2) of ``text``.
+
+    Length-2 filtering drops pure ordinals/opcode noise (``a``, ``x``, ``to``)
+    that carries no discriminating signal, so the summary↔issue overlap score
+    below keys off substantive words only.
+    """
+    norm = _normalize_for_quote_match(text or "").lower()
+    return {t for t in re.split(r"[^a-z0-9]+", norm) if len(t) > 2}
+
+
+def _issue_identity_tokens(issue: dict) -> set:
+    """Discriminating word tokens that identify a previous issue.
+
+    Drawn from the fields a ``prev_issue_summary`` paraphrase would naturally
+    echo — verbatim_quote, expected/actual behavior, divergence, and the
+    evidence file path (line number stripped) — so a summary that describes a
+    *different* previous issue scores higher against that issue than against its
+    positional partner.
+    """
+    if not isinstance(issue, dict):
+        return set()
+    source = issue.get("expectation_source") or {}
+    quote = source.get("verbatim_quote", "") if isinstance(source, dict) else ""
+    parts = [
+        quote,
+        issue.get("expected_behavior", ""),
+        issue.get("actual_behavior", ""),
+        issue.get("divergence", ""),
+    ]
+    evidence = issue.get("evidence_lines") or []
+    if isinstance(evidence, list):
+        for entry in evidence:
+            if isinstance(entry, str) and entry.strip():
+                parts.append(entry.rsplit(":", 1)[0] if ":" in entry else entry)
+    return _identity_tokens(" ".join(p for p in parts if isinstance(p, str)))
+
+
 def _pair_resolutions_with_prev(
     resolutions: list, prev_issues: list | None
 ) -> list:
-    """Pair each ``previous_issue_resolution`` with its previous issue by position.
+    """Pair each ``previous_issue_resolution`` with the previous issue it refers to.
 
     The raw ``previous_issue_resolutions`` schema carries only a prose paraphrase
     (``prev_issue_summary`` + ``status``) with no machine-readable identity, but
     the prompt requires exactly one entry per previously-reported issue, in order
     (SELF_CHECK_PROMPT: "For EACH previously-reported issue, include exactly one
-    entry"). Pairing by index reunites each verdict with the full prev-issue dict
-    so the adjudication ledger can fingerprint it — trigger (b) ("打脸") reads
-    these ``fixed`` verdicts back and compares them by fingerprint against the
-    current round. Extra resolutions without a matching prev issue are passed
-    through unpaired (they contribute an empty fingerprint and carry no weight).
+    entry"). Reuniting each verdict with the full prev-issue dict lets the
+    adjudication ledger fingerprint it — trigger (b) ("打脸") reads these
+    ``fixed`` verdicts back and compares them by fingerprint against the current
+    round.
+
+    Positional pairing is only trustworthy when the reviewer returned EXACTLY one
+    resolution per previous issue AND kept them in order. Nothing enforces either
+    half of the contract:
+
+    * Cardinality drift (an omitted/extra entry) shifts every index, so when the
+      counts differ we DO NOT pair by position at all.
+    * Even at matching counts the reviewer may REORDER entries. Trusting the
+      index blindly would then stamp a ``fixed`` verdict about issue #2 onto
+      issue #1's fingerprint — spuriously firing trigger (b) for one issue while
+      masking the real 打脸 for the other. So a positional partner is accepted
+      only when it is a (co-)best content match for the resolution's summary:
+      ``prev_issue_summary`` token overlap against its positional partner must be
+      at least as strong as against every other previous issue. A summary that
+      clearly describes a *different* previous issue leaves its positional
+      partner unpaired (empty fingerprint, no trigger weight) rather than record
+      a wrong-issue ``fixed`` verdict. Zero-signal summaries score 0 against all
+      issues, so the positional partner ties as best and the in-order contract is
+      honored.
+
+    A resolution that already carries its own machine-identified ``issue`` keeps
+    it regardless.
     """
-    paired: list = []
     prev = prev_issues or []
-    for i, res in enumerate(resolutions or []):
-        if not isinstance(res, dict):
-            continue
+    res_list = [r for r in (resolutions or []) if isinstance(r, dict)]
+    counts_match = bool(prev) and len(res_list) == len(prev)
+    prev_tokens = (
+        [_issue_identity_tokens(p) for p in prev] if counts_match else []
+    )
+    paired: list = []
+    for i, res in enumerate(res_list):
         entry = dict(res)
-        if i < len(prev) and isinstance(prev[i], dict):
-            # ``setdefault`` so an already-paired resolution (future callers)
-            # keeps its own ``issue``.
-            entry.setdefault("issue", prev[i])
+        if counts_match and "issue" not in entry and isinstance(prev[i], dict):
+            summary_tokens = _identity_tokens(res.get("prev_issue_summary", ""))
+            scores = [len(summary_tokens & pt) for pt in prev_tokens]
+            # Accept the positional partner only when no OTHER previous issue is a
+            # strictly better content match (reorder guard). ``>= max`` keeps the
+            # zero-signal / tied case pairing by position per the prompt contract.
+            if scores[i] >= max(scores):
+                entry["issue"] = prev[i]
         paired.append(entry)
     return paired
 

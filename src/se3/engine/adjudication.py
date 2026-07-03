@@ -91,6 +91,39 @@ def _normalize_for_quote_match(s: Any) -> str:
     return s.strip()
 
 
+def relaxed_quote_candidates(norm_quote: str) -> List[str]:
+    """Relaxed substring-match variants of a normalized quote.
+
+    Single source of truth for the quote-acceptance relaxations shared by
+    ``self_check._validate_and_filter_issues`` (the source-pool check) and
+    ``steps/adjudicate._positions_with_dead_clause`` (the dead-clause check).
+    ``_format_task_groups`` renders each plan task as a prompt-visible line
+    ``- [<id>] <description>`` and may cap an oversized description with a
+    trailing ellipsis, so a reviewer copying the visible line carries a leading
+    bullet/id prefix and/or a trailing ellipsis the raw pool lacks. Emitting the
+    same relaxed candidates from both callers keeps abolition ("would a re-quote
+    now fail validation?") aligned with what validation actually accepts — a
+    clause self_check would still accept must never be judged dead.
+    """
+    if not norm_quote:
+        return []
+    candidates = [norm_quote]
+    trimmed = norm_quote.rstrip(". ").rstrip()
+    if trimmed and trimmed != norm_quote:
+        candidates.append(trimmed)
+    for c in list(candidates):
+        unprefixed = re.sub(r"^-\s*(\[[^\]]*\]\s*)?", "", c)
+        if unprefixed and unprefixed != c:
+            candidates.append(unprefixed)
+    return candidates
+
+
+def _pk_quote(position_key_str: str) -> str:
+    """Return the normalized-quote component of a ``position_key`` (or "")."""
+    parts = position_key_str.split(_KEY_SEP)
+    return parts[1] if len(parts) > 1 else ""
+
+
 def _issue_file(issue: Dict[str, Any]) -> str:
     """Derive the fingerprint's file-path component from an issue dict.
 
@@ -268,12 +301,29 @@ def record_fix_resolutions(
         src = res.get("issue") if isinstance(res.get("issue"), dict) else res
         fp = res.get("fingerprint") or fingerprint(src)
         pk = res.get("position_key") or position_key(src)
+        # The round of the observation this resolution declares fixed — the
+        # LATEST already-recorded observation of the fingerprint (resolutions are
+        # recorded before the current round's issues per the data flow, so the
+        # ledger holds every prior appearance). Reproduction (trigger c) counts
+        # only appearances STRICTLY AFTER this round, so neither this fixed flag
+        # nor any EARLIER pre-fix flag of the same fingerprint can inflate the
+        # count and fire (c) rounds early. Absent any prior observation, anchor
+        # to the current round.
+        fix_round = None
+        for obs in ledger["observations"]:
+            if obs.get("fingerprint") == fp:
+                r = obs.get("round")
+                if isinstance(r, int) and (fix_round is None or r > fix_round):
+                    fix_round = r
+        if fix_round is None:
+            fix_round = ledger["round_count"]
         ledger["resolutions"].append(
             {
                 "status": status,
                 "fingerprint": fp,
                 "position_key": pk,
                 "expected_norm": _issue_expected(src),
+                "fix_round": fix_round,
                 "abolished": False,
             }
         )
@@ -369,7 +419,7 @@ def _detect_oscillation(
     ``current_pos`` maps position_key → this-round expected_norm. A position
     oscillates when it was also flagged in some *prior* round with an expected
     that, normalized, is materially different from this round's. Rejected
-    (adjudicator-cleared) positions are skipped.
+    (adjudicator-cleared) positions and quoteless positions are skipped.
     """
     rejected = set(ledger.get("rejected_positions", []))
     current_round = _current_round_index(ledger)
@@ -377,6 +427,12 @@ def _detect_oscillation(
     hits: List[str] = []
     for pk, cur_expected in current_pos.items():
         if pk in rejected:
+            continue
+        # A quoteless position collapses to per-file identity (all quoteless
+        # regressions in one file share ``file\x1f``), so unrelated findings
+        # would spuriously look like an A/B flip. Only quote-anchored positions
+        # have a stable enough identity to trust the oscillation signal.
+        if not _pk_quote(pk):
             continue
         # Prior-round expected values seen at this position.
         prior_expected = {
@@ -386,9 +442,13 @@ def _detect_oscillation(
         }
         if not prior_expected:
             continue  # never seen before this round → not (yet) oscillating
-        # Materially different = this round's expected absent from every prior
-        # round's expected at the same position.
-        if cur_expected not in prior_expected:
+        # Materially different = SOME prior round demanded an expected other than
+        # this round's. Using set-difference (rather than "cur not in the union")
+        # keeps a genuine cross-round A/B flip detectable even when one earlier
+        # round self-contradicted (carried both A and B at this position): that
+        # round contributes both to ``prior_expected``, and ``prior - {cur}`` is
+        # still non-empty, so the flip fires instead of being masked by the union.
+        if prior_expected - {cur_expected}:
             hits.append(pk)
     return hits
 
@@ -396,33 +456,50 @@ def _detect_oscillation(
 def _detect_contradiction(
     ledger: Dict[str, Any], current_pos: Dict[str, str], current_fps: set
 ) -> List[str]:
-    """Trigger (b) "打脸": current issue re-opens a previously-fixed position
-    with an opposing expectation.
+    """Trigger (b) "打脸": current issue re-opens a previously-fixed position.
 
     Reads the machine-side ``previous_issue_resolutions`` (via the ``fixed``
-    resolutions recorded on the ledger). A contradiction is a current issue at
-    a position that carries a ``fixed`` resolution, whose current fingerprint
-    differs from what was fixed there (i.e. the expectation is now opposed to
-    the one that was declared resolved).
-    """
-    # Positions that were declared fixed, and the fingerprints fixed there.
-    fixed_by_pos: Dict[str, set] = {}
-    for res in ledger["resolutions"]:
-        if res.get("abolished") or res.get("status") != "fixed":
-            continue
-        fixed_by_pos.setdefault(res["position_key"], set()).add(res["fingerprint"])
+    resolutions recorded on the ledger). A contradiction is ANY current issue at
+    a position that carries a ``fixed`` resolution — two shapes, both 打脸:
 
+    * the same fingerprint that was declared fixed re-appears in this round's
+      issues (you said it was resolved, yet self_check re-flags the identical
+      path+quote+expected), or
+    * a *different* fingerprint appears at that position (the location now
+      demands the opposite of what was declared resolved).
+
+    Both mean the "fixed" claim and the live review are in direct conflict, so
+    the mere presence of a current fingerprint at a fixed position fires (b)
+    immediately — waiting for the slower reproduction threshold (c) would miss
+    the required same-fingerprint fixed-resolution signal.
+    """
+    # Positions that carry a live (non-abolished) "fixed" resolution. Only the
+    # position matters now — any current fingerprint landing on one is 打脸, so
+    # the specific fixed fingerprint no longer needs to be retained.
+    fixed_positions = {
+        res["position_key"]
+        for res in ledger["resolutions"]
+        if not res.get("abolished") and res.get("status") == "fixed"
+    }
+
+    # A position the adjudicator already ruled benign must never re-fire ANY
+    # trigger (including 打脸): otherwise a review_divergence ruling — which
+    # abolishes nothing — leaves the ``fixed`` resolution live and (b) re-fires
+    # every round, livelocking adjudicate↔self_check. Quoteless positions share a
+    # per-file identity, so they cannot be trusted for the position match either.
+    rejected = set(ledger.get("rejected_positions", []))
     hits: List[str] = []
     for pk, _cur_expected in current_pos.items():
-        fixed_fps = fixed_by_pos.get(pk)
-        if not fixed_fps:
+        if pk in rejected or not _pk_quote(pk):
             continue
-        # Current fingerprint(s) at this position that were NOT the fixed one =
-        # the same location now demanding the opposite ⇒ 打脸.
-        cur_fps_here = {
-            fp for fp in current_fps if fp.rsplit(_KEY_SEP, 1)[0] == pk
-        }
-        if cur_fps_here - fixed_fps:
+        if pk not in fixed_positions:
+            continue
+        # ANY current fingerprint at a position that was declared fixed is 打脸:
+        # a matching fingerprint means the "fixed" issue is re-flagged verbatim,
+        # a differing one means the location now demands the opposite. Either way
+        # the resolved claim and the live review conflict, so fire immediately
+        # instead of set-differencing (which would drop the same-fingerprint case).
+        if any(fp.rsplit(_KEY_SEP, 1)[0] == pk for fp in current_fps):
             hits.append(pk)
     return hits
 
@@ -432,23 +509,58 @@ def _detect_reproduction(
 ) -> List[str]:
     """Trigger (c): the same full fingerprint reappears a third time after a fix.
 
-    Counts non-abolished flag occurrences of each current fingerprint; fires
-    when a fingerprint that has been declared ``fixed`` at least once has now
-    been flagged ``_REPRODUCTION_THRESHOLD`` (3) times.
+    Counts only the non-abolished flag occurrences that fall STRICTLY AFTER the
+    round the fingerprint was declared ``fixed``; fires when that post-fix count
+    reaches ``_REPRODUCTION_THRESHOLD`` (3). The fixed observation itself is the
+    pre-fix flag, not a post-fix occurrence, so it (and any earlier flag) is
+    excluded — a fingerprint flagged twice, THEN fixed, THEN recurring twice is
+    only two post-fix reproductions, not a third occurrence; counting the fixed
+    flag would fire (c) one round early.
     """
-    # Fingerprints that were declared fixed at some point.
-    fixed_fps = {
-        res["fingerprint"]
-        for res in ledger["resolutions"]
-        if not res.get("abolished") and res.get("status") == "fixed"
-    }
+    # Earliest round each fingerprint was declared fixed. Reproduction is scored
+    # from the FIRST fix forward but excludes the fixed round itself, so a
+    # fingerprint fixed early and repeatedly re-opened accrues only its genuine
+    # post-fix recurrences. Missing ``fix_round`` (legacy ledgers) falls back to 0.
+    fixed_round_by_fp: Dict[str, int] = {}
+    for res in ledger["resolutions"]:
+        if res.get("abolished") or res.get("status") != "fixed":
+            continue
+        fp = res["fingerprint"]
+        fr = res.get("fix_round", 0)
+        if not isinstance(fr, int):
+            fr = 0
+        if fp not in fixed_round_by_fp or fr < fixed_round_by_fp[fp]:
+            fixed_round_by_fp[fp] = fr
+
     counts: Dict[str, int] = {}
     for obs in _active_observations(ledger):
-        counts[obs["fingerprint"]] = counts.get(obs["fingerprint"], 0) + 1
+        fp = obs["fingerprint"]
+        if fp not in fixed_round_by_fp:
+            continue
+        r = obs.get("round")
+        if isinstance(r, int) and r > fixed_round_by_fp[fp]:
+            counts[fp] = counts.get(fp, 0) + 1
 
+    # A fingerprint whose position the adjudicator ruled benign must not re-fire
+    # (c) either — same livelock hazard as (b). ``fingerprint`` = ``position_key``
+    # + expected, so its position is the fingerprint minus the trailing field.
+    rejected = set(ledger.get("rejected_positions", []))
     hits: List[str] = []
     for fp in current_fps:
-        if fp in fixed_fps and counts.get(fp, 0) >= _REPRODUCTION_THRESHOLD:
+        pos = fp.rsplit(_KEY_SEP, 1)[0]
+        if pos in rejected:
+            continue
+        # Skip quoteless fingerprints, mirroring (a)/(b). A quoteless position
+        # collapses to per-file identity, which the adjudicator machinery
+        # (candidate presentation, rejection, abolition) is all position-based
+        # and cannot properly close: the candidate scan (_candidate_positions)
+        # drops quoteless positions, so the LLM never rules on one, never records
+        # it rejected, and the ``pos in rejected`` guard above can never match —
+        # leaving (c) to re-fire on every subsequent round the issue recurs. Not
+        # trusting the quoteless signal here is the consistent, loop-free choice.
+        if not _pk_quote(pos):
+            continue
+        if fp in fixed_round_by_fp and counts.get(fp, 0) >= _REPRODUCTION_THRESHOLD:
             hits.append(fp)
     return hits
 
@@ -529,15 +641,26 @@ def note_adjudication_ran(ctx: Dict[str, Any], fix_iteration: int) -> None:
 
 
 def should_suppress_convergence(
-    ctx: Dict[str, Any], issues: List[Dict[str, Any]]
+    ctx: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+    fix_iteration: int = 0,
+    period_n: int = 0,
 ) -> bool:
-    """True when any structural oscillation trigger (a/b/c) would fire.
+    """True when the convergence shortcut must yield to an adjudication.
 
-    Consumed by the self_check convergence guard: in an oscillation scenario the
-    convergence shortcut must NOT be allowed to silently mark the flow COMPLETED
-    "converged-but-diseased" — the adjudicator must intervene instead. Uses a
-    large ``fix_iteration``/``period_n=0`` so only the signal triggers count,
-    never the periodic backstop.
+    Consumed by the self_check convergence guard: the convergence shortcut must
+    NOT be allowed to silently mark the flow COMPLETED "converged-but-diseased"
+    whenever an ADJUDICATE run is due. That is the case for any structural
+    oscillation trigger (a/b/c) AND for the periodic backstop: the backstop is
+    only ever evaluated in the state machine's REVISION_NEEDED branch, so a due
+    periodic sweep that convergence short-circuits to COMPLETED would silently
+    skip the safety net. Passing ``fix_iteration``/``period_n`` here lets the
+    guard also suppress convergence when the backstop is due, so the round
+    returns REVISION_NEEDED and the state machine can insert ADJUDICATE.
+    Defaults (``period_n=0``) keep only the signal triggers active for callers
+    that do not supply the period.
     """
-    decision = evaluate_triggers(ctx, issues, fix_iteration=0, period_n=0)
-    return decision.suppress_convergence
+    decision = evaluate_triggers(
+        ctx, issues, fix_iteration=fix_iteration, period_n=period_n,
+    )
+    return decision.triggered

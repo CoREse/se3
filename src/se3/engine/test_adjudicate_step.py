@@ -96,6 +96,103 @@ def test_candidate_positions_honors_explicit_trigger(tmp_path):
     assert len(cands) == 1
 
 
+def test_candidate_positions_skips_quoteless(tmp_path):
+    """Two unrelated quoteless (evidence-only) findings in one file collapse to a
+    per-file position_key ('file\\x1f'). Their differing expectations must NOT be
+    presented as a bogus A/B oscillation candidate — mirror the trigger layer's
+    quote-anchored guard (_detect_oscillation/_detect_contradiction)."""
+    flow = _flow_with_ledger(tmp_path, oscillate=False)
+    ctx = flow.state.context
+    # Two regression-type issues: empty verbatim_quote, same file, differing
+    # expectations across rounds. Same file → same 'file\x1f' position_key.
+    adj.record_self_check_round(
+        ctx, [_issue(quote="", expected="behavior A")], round_id="q0"
+    )
+    adj.record_self_check_round(
+        ctx, [_issue(quote="", expected="behavior B")], round_id="q1"
+    )
+    ledger = adjmod._ledger(flow)
+    cands = adjmod._candidate_positions(ledger)
+    # Only the (nonexistent here) quote-anchored candidates would surface; the
+    # quoteless per-file collapse is dropped.
+    assert all(c["quote"] for c in cands)
+    assert cands == []
+
+
+def test_handler_reads_flat_trigger_inputs(tmp_path):
+    """The handler consumes the FLAT trigger keys the state machine writes
+    (adjudication_reasons / adjudication_triggering_positions): the prompt renders
+    the real trigger reasons and a reproduction-only position with a single
+    expectation still surfaces as a candidate because it was unioned in
+    explicitly (issue: input-key mismatch)."""
+    # No oscillation on the ledger — the ONLY reason this position is a candidate
+    # is the explicit trigger union.
+    flow = _flow_with_ledger(tmp_path, oscillate=False)
+    ledger = adjmod._ledger(flow)
+    pk = ledger["observations"][0]["position_key"]
+    step = _adj_step(
+        flow,
+        adjudication_reasons=[adj.REASON_REPRODUCTION],
+        adjudication_triggering_positions=[pk],
+    )
+    prompts: list[str] = []
+
+    class _Caller:
+        def __init__(self, *a, **k):
+            pass
+
+        def call(self, *a, **k):
+            prompts.append(k.get("prompt", a[0] if a else ""))
+            return json.dumps(
+                {
+                    "contradiction_type": "review_divergence",
+                    "adjudication_rationale": "no real contradiction",
+                    "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "x"}],
+                }
+            )
+
+    with patch.object(adjmod, "LLMCaller", _Caller):
+        adjmod.adjudicate_handler(step, flow)
+
+    # The prompt names the real trigger reason (not the periodic-backstop default)
+    # and surfaces the explicitly-triggered position as a candidate.
+    assert adj.REASON_REPRODUCTION in prompts[0]
+    assert "no structural candidate on record" not in prompts[0]
+
+
+# --------------------------------------------------------------------------- #
+# Issue 5: adjudicate over the pre-interjection base (no double-composition)
+# --------------------------------------------------------------------------- #
+
+def test_effective_task_description_ignores_interjection_composed_input(tmp_path):
+    """The handler adjudicates over the PRE-interjection base, not the
+    interjection-composed ``task_description`` input ``_build_step_inputs``
+    injects. Otherwise the LLM rewrite (a full corrected description) would bake
+    the ``## Additional Instructions`` section into the base layer, after which
+    the composer re-appends the same interjections — duplicating them in every
+    post-ruling prompt and in the self_check source pool (issue 5)."""
+    flow = FlowInstance(task_description="Base spec text")
+    flow.change_path = tmp_path / "c"
+    step = _adj_step(
+        flow,
+        task_description=(
+            "Base spec text\n\n## Additional Instructions\nDo the extra thing"
+        ),
+    )
+    eff = adjmod._effective_task_description(step, flow)
+    assert eff == "Base spec text"
+    assert "Additional Instructions" not in eff
+
+
+def test_effective_task_description_honors_clean_base_input(tmp_path):
+    """A clean ``task_description_base`` input (no interjection decoration) is used
+    verbatim, keeping the handler testable in isolation (issue 5)."""
+    flow = FlowInstance(task_description="Original")
+    flow.change_path = tmp_path / "c"
+    step = _adj_step(flow, task_description_base="Refined base spec")
+    assert adjmod._effective_task_description(step, flow) == "Refined base spec"
+
+
 # --------------------------------------------------------------------------- #
 # Handler: product writing + ledger update
 # --------------------------------------------------------------------------- #
@@ -148,11 +245,21 @@ def test_contradiction_verdict_abolishes_position(tmp_path):
     }
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         adjmod.adjudicate_handler(step, flow)
+    ledger = adjmod._ledger(flow)
+    # Ledger side effects are DEFERRED until the ruling lands: the handler only
+    # STAGES the abolition; the persisted ledger is untouched at this point.
+    assert step.outputs["ledger_effects_applied"] is False
+    assert not any(o["abolished"] for o in ledger["observations"])
+    assert len(step.outputs["abolished_fingerprints"]) == 2
+
+    # Landing the ruling (approved / 免确认) applies the staged effects.
+    count = adjmod.apply_landed_ledger_effects(step, flow.state.context)
+    assert count == 2
+    assert step.outputs["abolished_count"] == 2
+    assert step.outputs["ledger_effects_applied"] is True
     # Both round observations at the oscillating position are now abolished, so
     # the position no longer counts toward any trigger.
-    ledger = adjmod._ledger(flow)
     assert all(o["abolished"] for o in ledger["observations"])
-    assert step.outputs["abolished_count"] == 2
     # A fresh self_check round citing the same position no longer oscillates:
     # the prior observations are abolished, so it is a lone (unpaired) entry.
     adj.record_self_check_round(flow.state.context, [_issue(expected="raise ValueError")], round_id="r2")
@@ -175,10 +282,16 @@ def test_benign_verdict_records_rejected_candidate(tmp_path):
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         adjmod.adjudicate_handler(step, flow)
     ledger = adjmod._ledger(flow)
-    # Position recorded as rejected → excluded from future oscillation triggers.
-    assert ledger["observations"][0]["position_key"] in ledger["rejected_positions"]
+    # Staged only: the rejection is not recorded on the ledger until the ruling
+    # lands (a benign ruling needs no confirmation, so it lands immediately).
+    assert step.outputs["rejected_positions"]
     assert step.outputs["rejected_candidates"]
     assert step.outputs["rejected_candidates"][0]["reason"] == "different scopes"
+    assert ledger["observations"][0]["position_key"] not in ledger["rejected_positions"]
+
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+    # Position recorded as rejected → excluded from future oscillation triggers.
+    assert ledger["observations"][0]["position_key"] in ledger["rejected_positions"]
     # No override, so nothing abolished.
     assert step.outputs["abolished_count"] == 0
     # And the previously-oscillating position no longer suppresses convergence.
@@ -222,7 +335,8 @@ def test_null_string_override_coerced_to_none(tmp_path):
 
 
 def test_override_without_verdicts_still_abolishes_candidates(tmp_path):
-    """A patch with no explicit verdicts abolishes the flagged candidates anyway."""
+    """A patch with no explicit verdicts abolishes the flagged candidates anyway
+    (their quoted clause is gone from the adjudicated text)."""
     flow = _flow_with_ledger(tmp_path)
     step = _adj_step(flow)
     payload = {
@@ -234,31 +348,44 @@ def test_override_without_verdicts_still_abolishes_candidates(tmp_path):
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         adjmod.adjudicate_handler(step, flow)
     ledger = adjmod._ledger(flow)
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
     assert all(o["abolished"] for o in ledger["observations"])
 
 
 def test_handler_does_not_touch_prior_step_outputs(tmp_path):
-    """Discovery/plan step outputs stay byte-for-byte untouched by adjudication."""
+    """Discovery AND plan step outputs stay byte-for-byte untouched by adjudication."""
     flow = _flow_with_ledger(tmp_path)
+    # A completed DISCOVERY step whose refined_description must NOT be rewritten
+    # in place — the ruling layers its override onto its own outputs instead.
+    discovery_step = Step(step_type=StepType.DISCOVERY)
+    discovery_step.status = StepStatus.COMPLETED
+    discovery_step.outputs["refined_description"] = "Return None when x is None."
+    discovery_step.outputs["discovery_summary"] = "clarified"
+    flow.state.add_step(discovery_step)
+    discovery_snapshot = json.dumps(discovery_step.outputs, sort_keys=True)
+
     plan_step = Step(step_type=StepType.PLAN)
     original_groups = [{"group_id": "G1", "name": "orig", "tasks": [{"id": 1, "description": "d"}]}]
     plan_step.status = StepStatus.COMPLETED
     plan_step.outputs["task_groups"] = original_groups
     flow.state.add_step(plan_step)
-    snapshot = json.dumps(plan_step.outputs, sort_keys=True)
+    plan_snapshot = json.dumps(plan_step.outputs, sort_keys=True)
 
     step = _adj_step(flow)
     payload = {
         "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None only.",
         "adjudicated_plan": [{"group_id": "G1", "name": "changed", "tasks": []}],
         "adjudication_rationale": "override plan",
         "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
     }
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         adjmod.adjudicate_handler(step, flow)
-    # Original PLAN outputs unchanged; the override lives only on the adj step.
-    assert json.dumps(plan_step.outputs, sort_keys=True) == snapshot
+    # Original DISCOVERY + PLAN outputs unchanged; overrides live only on adj step.
+    assert json.dumps(discovery_step.outputs, sort_keys=True) == discovery_snapshot
+    assert json.dumps(plan_step.outputs, sort_keys=True) == plan_snapshot
     assert step.outputs["adjudicated_plan"][0]["name"] == "changed"
+    assert step.outputs["adjudicated_description"] == "Return None when x is None only."
 
 
 def test_effective_task_groups_prefers_prior_adjudication(tmp_path):
@@ -439,3 +566,423 @@ def test_ruling_description_drops_dead_clause_issue_via_source_pool(tmp_path):
     assert stats["quote_not_in_source_count"] == 1
     assert len(kept) == 1
     assert kept[0]["expectation_source"]["verbatim_quote"] == "Return None when x is None"
+
+
+# --------------------------------------------------------------------------- #
+# Issue 1: deferred ledger side effects — a rejected ruling never lands
+# --------------------------------------------------------------------------- #
+
+def test_handler_stages_but_does_not_apply_ledger_effects(tmp_path):
+    """The handler only STAGES abolish/reject; the persisted ledger stays clean
+    until the ruling lands via ``apply_landed_ledger_effects`` (issue 1)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        adjmod.adjudicate_handler(step, flow)
+    ledger = adjmod._ledger(flow)
+    assert step.outputs["ledger_effects_applied"] is False
+    assert not any(o["abolished"] for o in ledger["observations"])
+    assert ledger["rejected_positions"] == []
+    # "abolished_count" is written only at landing time.
+    assert "abolished_count" not in step.outputs
+
+
+def test_rejected_ruling_leaves_ledger_untouched(tmp_path):
+    """A ruling the confirmation门 rejects (its revision re-runs ADJUDICATE) must
+    not leave abolish/reject side effects on the ledger (issue 1). The re-run
+    simply overwrites the staged outputs; nothing was ever applied."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    rejected = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "first ruling (will be rejected)",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(rejected)):
+        adjmod.adjudicate_handler(step, flow)
+    ledger = adjmod._ledger(flow)
+    assert not any(o["abolished"] for o in ledger["observations"])
+
+    # Simulate the revision re-run of the SAME step with a corrected ruling.
+    revised = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None; keep requirement.",
+        "adjudication_rationale": "second ruling after human feedback",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    step.inputs["is_revision"] = True
+    step.inputs["revision_feedback"] = "restore the requirement"
+    with patch.object(adjmod, "LLMCaller", _mock_call(revised)):
+        adjmod.adjudicate_handler(step, flow)
+    # Still nothing applied — the rejected ruling's effects never touched the
+    # ledger, and the revised ruling is likewise only staged.
+    assert not any(o["abolished"] for o in ledger["observations"])
+    assert step.outputs["adjudication_rationale"].startswith("second ruling")
+    assert step.outputs["ledger_effects_applied"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Issue 2: abolish only positions whose clause actually left the source pool
+# --------------------------------------------------------------------------- #
+
+def test_plan_only_override_keeps_live_description_clause_counting(tmp_path):
+    """A plan-only fix must NOT abolish a description-grounded position whose
+    quoted clause still lives in the (unchanged) task description (issue 2)."""
+    flow = FlowInstance(task_description="Keep the hard constraint X and also do Y")
+    flow.change_path = tmp_path / "c"
+    ctx = flow.state.context
+    q = "Keep the hard constraint X"
+    adj.record_self_check_round(ctx, [_issue(quote=q, expected="enforce X")], round_id="r0")
+    adj.record_self_check_round(ctx, [_issue(quote=q, expected="drop X")], round_id="r1")
+
+    step = _adj_step(flow)
+    groups = [{"group_id": "G1", "name": "fixed", "tasks": []}]
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": None,   # description untouched
+        "adjudicated_plan": groups,        # only the plan changed
+        "adjudication_rationale": "resolve in the plan; keep constraint X",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        adjmod.adjudicate_handler(step, flow)
+    # The quoted clause survives in the effective (unchanged) description, so the
+    # position is not staged for abolition — it keeps counting toward triggers.
+    assert step.outputs["abolished_fingerprints"] == []
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+    ledger = adjmod._ledger(flow)
+    assert not any(o["abolished"] for o in ledger["observations"])
+    # A next round at the same live position still oscillates (a THIRD distinct
+    # expectation) → suppress convergence, because the history was not abolished.
+    decision = adj.evaluate_triggers(
+        ctx, [_issue(quote=q, expected="mangle X")], fix_iteration=1, period_n=0
+    )
+    assert decision.suppress_convergence
+
+
+def test_description_rewrite_abolishes_only_the_removed_clause(tmp_path):
+    """A description rewrite that keeps one quoted hard constraint abolishes ONLY
+    the position whose clause was removed; the preserved clause keeps its history
+    (issue 2)."""
+    flow = FlowInstance(task_description="Do A. Never delete user data. Do B differently.")
+    flow.change_path = tmp_path / "c"
+    ctx = flow.state.context
+    survive = "Never delete user data"
+    dead = "Do B differently"
+    adj.record_self_check_round(ctx, [
+        _issue(file="src/a.py", quote=survive, expected="guard deletes"),
+        _issue(file="src/b.py", quote=dead, expected="do B one way"),
+    ], round_id="r0")
+    adj.record_self_check_round(ctx, [
+        _issue(file="src/a.py", quote=survive, expected="allow deletes"),
+        _issue(file="src/b.py", quote=dead, expected="do B other way"),
+    ], round_id="r1")
+
+    step = _adj_step(flow)
+    # Rewrite keeps the data-safety constraint, drops the contradictory B clause.
+    payload = {
+        "contradiction_type": "hard_constraint_conflict",
+        "adjudicated_description": "Do A. Never delete user data.",
+        "adjudicated_plan": None,
+        "adjudication_rationale": "keep data-safety; drop the contradictory B demand",
+        "candidate_verdicts": [
+            {"id": 0, "verdict": "contradiction"},
+            {"id": 1, "verdict": "contradiction"},
+        ],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        adjmod.adjudicate_handler(step, flow)
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+
+    ledger = adjmod._ledger(flow)
+    surviving = [o for o in ledger["observations"] if o["file"] == "src/a.py"]
+    removed = [o for o in ledger["observations"] if o["file"] == "src/b.py"]
+    # The preserved-clause position keeps its history; only the removed one dies.
+    assert not any(o["abolished"] for o in surviving)
+    assert all(o["abolished"] for o in removed)
+
+
+def test_description_only_ruling_keeps_clause_the_live_plan_still_restates(tmp_path):
+    """A description-only ruling must NOT abolish a clause the (un-overridden) plan
+    still restates. When no ``adjudicated_plan`` is supplied the latest plan stays
+    authoritative — self_check keeps validating ``plan_task`` quotes against it — so
+    a clause still present there remains quotable. Abolishing it on the strength of
+    a description rewrite alone would let the next SELF_CHECK drop a valid
+    plan-grounded issue as quote_not_in_source and silently erase an unchanged plan
+    requirement; only a ruling that also overrides the plan may retire that clause.
+    """
+    from se3.engine.steps.self_check import _validate_and_filter_issues
+
+    flow = FlowInstance(
+        task_description="Return None when x is None, and raise when x is None"
+    )
+    flow.change_path = tmp_path / "c"
+    ctx = flow.state.context
+    dead_clause = "raise when x is None"
+    # The oscillating position cites the clause the description rewrite drops.
+    adj.record_self_check_round(
+        ctx, [_issue(quote=dead_clause, expected="raise ValueError")], round_id="r0"
+    )
+    adj.record_self_check_round(
+        ctx, [_issue(quote=dead_clause, expected="return None")], round_id="r1"
+    )
+
+    # The effective plan still restates the clause verbatim — and, with no
+    # ``adjudicated_plan``, it remains authoritative.
+    live_plan = [
+        {
+            "group_id": "G1",
+            "name": "impl",
+            "tasks": [
+                {
+                    "description": "Handle empty input: raise when x is None",
+                    "acceptance_criteria": [],
+                }
+            ],
+        }
+    ]
+    step = _adj_step(flow, task_groups=live_plan)
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudicated_plan": None,  # plan left untouched (still restates the clause)
+        "adjudication_rationale": "keep the return branch; drop the raise demand",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        adjmod.adjudicate_handler(step, flow)
+
+    # The clause survives in the effective (unchanged) plan, so it is NOT staged for
+    # abolition despite leaving the adjudicated description.
+    assert step.outputs["abolished_fingerprints"] == []
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+    ledger = adjmod._ledger(flow)
+    assert not any(o["abolished"] for o in ledger["observations"])
+
+    # Downstream: nothing was abolished, so the self_check source pool still carries
+    # the live plan task, and a valid plan-grounded issue re-quoting the clause is
+    # KEPT (not silently dropped by validation).
+    abolished_quotes = [
+        o["quote_norm"] for o in ledger["observations"] if o["abolished"]
+    ]
+    assert abolished_quotes == []
+    sc_inputs = {
+        "task_description_base": "Return None when x is None.",
+        "adjudicated_description": "Return None when x is None.",
+        "abolished_clause_quotes": abolished_quotes,
+        "task_groups": live_plan,
+        "changes_made": {"files_changed": ["src/foo.py"]},
+    }
+    live_issue = _issue(quote="raise when x is None", expected="raise ValueError")
+    live_issue["expectation_source"]["type"] = "plan_task"
+    kept, stats = _validate_and_filter_issues([live_issue], sc_inputs)
+    assert stats["quote_not_in_source_count"] == 0
+    assert len(kept) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Issue 3: a no-op contradiction ruling is rejected (never reflows unchanged)
+# --------------------------------------------------------------------------- #
+
+def test_noop_contradiction_ruling_fails_after_retries(tmp_path):
+    """A real-contradiction verdict with NO covering patch is rejected instead of
+    reflowing to SELF_CHECK against an unchanged spec (issue 3)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "these two clauses conflict",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.FAILED
+    assert "override patch" in step.error_message
+    # Nothing was written or staged.
+    ledger = adjmod._ledger(flow)
+    assert not any(o["abolished"] for o in ledger["observations"])
+    assert "adjudicated_at" not in step.outputs
+
+
+def test_noop_contradiction_ruling_retries_then_succeeds(tmp_path):
+    """The first no-op ruling is re-asked with a strict patch demand; a corrected
+    second ruling lands normally (issue 3, the retry branch)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    noop = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "conflict",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    good = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    responses = [json.dumps(noop), json.dumps(good)]
+    prompts = []
+
+    class _Caller:
+        def __init__(self, *a, **k):
+            pass
+
+        def call(self, *a, **k):
+            prompts.append(k.get("prompt", a[0] if a else ""))
+            return responses.pop(0)
+
+    with patch.object(adjmod, "LLMCaller", _Caller):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert step.outputs["adjudicated_description"] == "Return None when x is None."
+    # The second attempt's prompt carried the strict re-prompt demanding a
+    # covering patch (and rationale).
+    assert "was rejected" in prompts[1].lower()
+    assert "covering override patch" in prompts[1].lower()
+
+
+def test_review_divergence_needs_no_patch(tmp_path):
+    """A ``review_divergence`` verdict legitimately lands with no override patch
+    (issue 3: only real contradictions require a covering patch)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "no real contradiction; the flip was a misfire",
+        "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "scopes differ"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert step.outputs["adjudicated_description"] is None
+
+
+def test_review_divergence_blank_rationale_is_rejected(tmp_path):
+    """Every ruling — including ``review_divergence`` — must carry a non-blank
+    ``adjudication_rationale`` before it can land: it is the audit justification
+    AND the dismissal reason stamped onto benign candidates. A whitespace-only
+    rationale is non-actionable, so the handler retries and (still blank) FAILS
+    rather than writing a blank audit and whitespace-reason rejected candidates
+    (issue 2)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "   ",  # whitespace only → not actionable
+        "candidate_verdicts": [],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.FAILED
+    # No ruling landed: no blank audit, no whitespace-reason rejected candidates.
+    assert "rejected_candidates" not in step.outputs
+
+
+def test_review_divergence_without_verdicts_rejects_all_candidates(tmp_path):
+    """A no-patch ``review_divergence`` ruling that omits candidate_verdicts must
+    still close out its candidates: every flagged position is staged rejected so
+    the same oscillation cannot re-trigger ADJUDICATE next round.
+
+    Regression: previously such a ruling landed with an empty rejected list, so
+    the candidate stayed live and ADJUDICATE re-fired on it every round —
+    recreating the loop the rejected-candidate ledger exists to prevent.
+    """
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    pos_key = adjmod._ledger(flow)["observations"][0]["position_key"]
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "review misfire",
+        "candidate_verdicts": [],  # LLM forgot to enumerate benign verdicts
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    # The candidate is staged rejected with the rationale as its reason.
+    assert pos_key in step.outputs["rejected_positions"]
+    assert step.outputs["rejected_candidates"][0]["position_key"] == pos_key
+    assert step.outputs["rejected_candidates"][0]["reason"] == "review misfire"
+    # Nothing to abolish (no override patch).
+    assert step.outputs["abolished_fingerprints"] == []
+
+    # After the ruling lands, the position is on the ledger's rejected list and no
+    # longer suppresses convergence / re-triggers ADJUDICATE.
+    ledger = adjmod._ledger(flow)
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+    assert pos_key in ledger["rejected_positions"]
+    decision = adj.evaluate_triggers(
+        flow.state.context, [_issue(expected="raise ValueError")], fix_iteration=1, period_n=0
+    )
+    assert not decision.suppress_convergence
+
+
+def test_review_divergence_stray_contradiction_verdict_is_rejected(tmp_path):
+    """A no-patch ``review_divergence`` ruling with a stray per-candidate
+    "contradiction" verdict still rejects the position — with no patch there is
+    nothing to abolish, so leaving it as a contradiction would re-trigger."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    pos_key = adjmod._ledger(flow)["observations"][0]["position_key"]
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "no real contradiction",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert pos_key in step.outputs["rejected_positions"]
+    assert step.outputs["abolished_fingerprints"] == []
+
+
+def test_review_divergence_with_patch_discards_override(tmp_path):
+    """A ``review_divergence`` ruling that ALSO carries an override patch must not
+    rewrite the spec or abolish anything: the non-contradiction classification
+    strips its own authority to patch, so the override is discarded and every
+    candidate is staged rejected.
+
+    Regression: previously ``has_patch`` was computed before the override was
+    dropped, so a benign oscillation returning
+    {contradiction_type:"review_divergence", adjudicated_description:"rewritten"}
+    landed the task-description override and staged abolition against the patched
+    source pool — even though the adjudicator ruled it not a real contradiction.
+    """
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    pos_key = adjmod._ledger(flow)["observations"][0]["position_key"]
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": "a rewritten task description the LLM should not land",
+        "adjudicated_plan": [{"group_id": "G1", "name": "x", "tasks": []}],
+        "adjudication_rationale": "the flip was a scope misfire, not a contradiction",
+        "candidate_verdicts": [],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    # The override is discarded — no spec rewrite lands.
+    assert step.outputs["adjudicated_description"] is None
+    assert step.outputs["adjudicated_plan"] is None
+    # Nothing abolished; the candidate is instead staged rejected so it stops
+    # re-triggering without clearing its audit history.
+    assert step.outputs["abolished_fingerprints"] == []
+    assert pos_key in step.outputs["rejected_positions"]

@@ -171,15 +171,103 @@ class TestResolutionRecording:
         assert paired[0]["issue"] is prev[0]
         assert paired[1]["issue"] is prev[1]
 
-    def test_pair_extra_resolution_passes_through(self):
+    def test_pair_cardinality_mismatch_skips_positional_pairing(self):
+        """When the reviewer returns a different COUNT than prev_issues the
+        positional alignment cannot be trusted (an omitted/extra entry shifts
+        every index), so NO resolution is paired by index — they pass through
+        unpaired (empty fingerprint, no trigger weight) rather than record a
+        'fixed' verdict against the wrong issue's fingerprint (issue 6)."""
         prev = [_issue()]
         resolutions = [
             {"status": "fixed"},
-            {"status": "fixed"},  # no matching prev issue
+            {"status": "fixed"},  # count (2) != prev count (1)
         ]
         paired = _pair_resolutions_with_prev(resolutions, prev)
-        assert "issue" in paired[0]
+        assert "issue" not in paired[0]
         assert "issue" not in paired[1]
+
+    def test_pair_omitted_first_entry_does_not_mislabel(self):
+        """The finding's concrete case: 3 prev issues but only 2 resolutions
+        (first omitted). Index-pairing would stamp resolution[0] (about issue #2)
+        onto issue #1's fingerprint. The cardinality guard refuses to pair, so no
+        wrong-fingerprint 'fixed' verdict is produced (issue 6)."""
+        prev = [
+            _issue(expected="A"),
+            _issue(expected="B", quote=_QUOTE),
+            _issue(expected="C"),
+        ]
+        resolutions = [
+            {"prev_issue_summary": "issue #2", "status": "fixed"},
+            {"prev_issue_summary": "issue #3", "status": "still_present"},
+        ]
+        paired = _pair_resolutions_with_prev(resolutions, prev)
+        assert all("issue" not in p for p in paired)
+
+    def test_pair_preserves_already_identified_issue_on_mismatch(self):
+        """A resolution that already carries its own machine-identified ``issue``
+        keeps it even when the counts diverge — only the untrustworthy positional
+        inference is suppressed."""
+        prev = [_issue(expected="A")]
+        own = _issue(expected="Z", quote=_QUOTE)
+        resolutions = [
+            {"status": "fixed", "issue": own},
+            {"status": "fixed"},  # count mismatch → no positional pairing
+        ]
+        paired = _pair_resolutions_with_prev(resolutions, prev)
+        assert paired[0]["issue"] is own
+        assert "issue" not in paired[1]
+
+    def test_pair_reordered_entries_refuses_wrong_fingerprint(self):
+        """Matching COUNT but REVERSED order: the reviewer returned the verdict
+        about issue B first and A second. Blind positional pairing would stamp
+        B's ``fixed`` verdict onto A's fingerprint (spuriously firing trigger (b)
+        for A, masking the real 打脸 for B). The content-match reorder guard sees
+        each summary describes a DIFFERENT prev issue than its positional partner
+        and leaves both unpaired (empty fingerprint, no trigger weight)."""
+        issue_a = _issue(
+            expected="parser returns None on empty input",
+            quote="handle the empty-input edge case",
+            path="parser.py",
+        )
+        issue_b = _issue(
+            expected="tokenizer raises ValueError on malformed token",
+            quote="reject the malformed token stream",
+            path="tokenizer.py",
+        )
+        prev = [issue_a, issue_b]
+        # Summaries are in the OPPOSITE order to prev.
+        resolutions = [
+            {"prev_issue_summary": "tokenizer malformed token ValueError",
+             "status": "fixed"},
+            {"prev_issue_summary": "parser empty input returns None",
+             "status": "fixed"},
+        ]
+        paired = _pair_resolutions_with_prev(resolutions, prev)
+        assert all("issue" not in p for p in paired)
+
+    def test_pair_in_order_signal_pairs_correctly(self):
+        """Matching count, IN order, discriminating summaries: each positional
+        partner is the best content match, so both pair by position."""
+        issue_a = _issue(
+            expected="parser returns None on empty input",
+            quote="handle the empty-input edge case",
+            path="parser.py",
+        )
+        issue_b = _issue(
+            expected="tokenizer raises ValueError on malformed token",
+            quote="reject the malformed token stream",
+            path="tokenizer.py",
+        )
+        prev = [issue_a, issue_b]
+        resolutions = [
+            {"prev_issue_summary": "parser empty input returns None",
+             "status": "fixed"},
+            {"prev_issue_summary": "tokenizer malformed token ValueError",
+             "status": "fixed"},
+        ]
+        paired = _pair_resolutions_with_prev(resolutions, prev)
+        assert paired[0]["issue"] is issue_a
+        assert paired[1]["issue"] is issue_b
 
     def test_fixed_resolution_recorded_with_fingerprint(self, tmp_path):
         """A pass-#1 fix round's ``fixed`` verdict lands on the ledger paired to

@@ -76,6 +76,16 @@
 
 
 
+
+## 11.7.0 - 2026-07-03
+
+- Add a new ADJUDICATE step that resolves specification contradictions in the fix loop, breaking review-oscillation deadlocks that previously required manual engine.json edits
+- Introduce a cross-iteration fingerprint ledger persisted in flow context that survives --resume and accumulates self_check issues and fix resolutions
+- Add three oscillation triggers (candidate oscillation, contradiction/'打脸', recurrence) plus a periodic fallback governed by the configurable adjudicate_period (default 10) fix iterations
+- Emit override-style adjudication patches (adjudicated_description / adjudicated_plan) that take effect at highest priority (adjudicated > refined > original) while leaving original discovery/plan outputs untouched and fully auditable
+- Switch self_check verbatim_quote validation to the adjudicated source pool so issues citing abolished clauses are dropped, and rerun SELF_CHECK from pass #1 after adjudication while skipping IMPLEMENT/TEST
+- Add a human confirmation gate for task-description adjudications via existing se3 calls / PAUSED approval, with LLM/no-confirm options for plan- or test-only rulings
+- Suppress the convergence shortcut when an oscillation fingerprint fires so buggy flows cannot silently reach COMPLETED
 ## 11.6.0 - 2026-07-02
 
 - Guarantee that no issue is lost during `se3 merge` across both git three-way merge and runtime-sync channels

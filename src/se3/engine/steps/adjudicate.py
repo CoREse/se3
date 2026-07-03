@@ -111,6 +111,15 @@ def _candidate_positions(
     explicit_set = set(explicit or [])
     candidates: List[Dict[str, Any]] = []
     for pos_key, entries in by_pos.items():
+        # Quoteless positions collapse to per-file identity (all quoteless
+        # regressions in one file share ``file\x1f``), so two unrelated findings
+        # would spuriously look like an A/B flip. Mirror the trigger layer
+        # (_detect_oscillation/_detect_contradiction) and never present them as a
+        # candidate — only quote-anchored positions have a stable enough identity.
+        # (Explicit triggers are already quote-filtered upstream by
+        # evaluate_triggers, so this drops nothing legitimate.)
+        if not adjudication._pk_quote(pos_key):
+            continue
         expected_values = {e.get("expected_norm", "") for e in entries}
         # Oscillation signal (≥2 distinct expected) OR an explicit trigger hit.
         if len(expected_values) < 2 and pos_key not in explicit_set:
@@ -202,14 +211,24 @@ def _latest_adjudicated(flow: FlowInstance, key: str) -> Any:
 
 
 def _effective_task_description(step: Step, flow: FlowInstance) -> str:
-    """Currently-effective task_description for the ruling prompt."""
-    injected = step.inputs.get("task_description")
-    if isinstance(injected, str) and injected:
-        return injected
-    prior = _latest_adjudicated(flow, "adjudicated_description")
-    if isinstance(prior, str) and prior:
-        return prior
-    # Fall back to the pre-interjection base (handles discovery refinement).
+    """Currently-effective *pre-interjection* task_description for the prompt.
+
+    Deliberately resolves the un-decorated base (``adjudicated > refined >
+    original``), NOT the interjection-composed ``step.inputs['task_description']``
+    that ``_build_step_inputs`` injects (that value carries the
+    ``## Additional Instructions`` section). The LLM is asked for a *full
+    corrected task description* which is then installed at the BASE layer by
+    ``_effective_task_description_base``; feeding it the composed text would bake
+    the interjections into the base, after which the composer re-appends the same
+    interjections — duplicating every interjection in every post-ruling prompt
+    and in the self_check ``task_description_base`` source-pool entry. A clean
+    ``task_description_base`` input is honored when present (so the handler stays
+    testable in isolation); otherwise the flow's effective base is recomputed
+    here (which already folds in any prior adjudication / discovery refinement).
+    """
+    injected_base = step.inputs.get("task_description_base")
+    if isinstance(injected_base, str) and injected_base:
+        return injected_base
     from ..state_machine import _effective_task_description_base
     return _effective_task_description_base(flow)
 
@@ -378,6 +397,156 @@ def _build_prompt(
 
 
 # --------------------------------------------------------------------------- #
+# Ruling validation (covering-patch requirement)
+# --------------------------------------------------------------------------- #
+#
+# A real-contradiction ruling MUST carry a covering override patch. These
+# helpers gate the LLM output before it is allowed to land so a malformed no-op
+# ruling cannot silently reflow to SELF_CHECK against an unchanged spec.
+
+# Contradiction classes that REQUIRE a covering override patch. Only
+# ``review_divergence`` (no real contradiction) may legitimately return none.
+_PATCH_REQUIRED_TYPES = ("internal_contradiction", "hard_constraint_conflict")
+
+# Bounded semantic-retry count for a no-op contradiction ruling.
+_MAX_RULING_ATTEMPTS = 2
+
+_NOOP_RULING_REPROMPT = (
+    "\n\n## Your previous ruling was rejected\n"
+    "Your ruling (\"{contradiction_type}\") was not actionable. EVERY ruling MUST "
+    "carry a non-empty `adjudication_rationale` explaining the verdict (it is the "
+    "recorded justification and the dismissal reason for benign candidates). A "
+    "ruling that classifies a REAL contradiction (internal_contradiction / "
+    "hard_constraint_conflict) MUST additionally carry a covering override patch "
+    "(`adjudicated_description` and/or `adjudicated_plan`) so the effective spec "
+    "actually changes. Provide the missing field(s); if there is in fact no real "
+    "contradiction, reclassify as \"review_divergence\" — but still give a "
+    "rationale saying why.\n"
+)
+
+
+def _normalized_overrides(result: Dict[str, Any]) -> tuple:
+    """Coerce + type-validate the two override fields to (description, plan).
+
+    Returns each as its accepted value or ``None``. A description is accepted
+    only as a non-empty string; a plan only as a non-empty list of task groups.
+    Shared by the actionability gate and ``_apply_ruling`` so both judge a patch
+    "present" by identical rules.
+    """
+    desc = _coerce_override(result.get("adjudicated_description"))
+    if desc is not None and not (isinstance(desc, str) and desc.strip()):
+        desc = None
+    plan = _coerce_override(result.get("adjudicated_plan"))
+    if plan is not None and not (isinstance(plan, list) and plan):
+        plan = None
+    return desc, plan
+
+
+def _ruling_is_actionable(result: Dict[str, Any]) -> bool:
+    """True when the ruling is safe to land.
+
+    ``review_divergence`` legitimately carries no patch (nothing to change). Any
+    other classification (a real contradiction) MUST carry a covering override
+    in ``adjudicated_description`` and/or ``adjudicated_plan`` — otherwise
+    landing it would re-run SELF_CHECK against the same effective spec and let
+    the loop keep oscillating. EVERY ruling — including ``review_divergence`` —
+    MUST additionally carry a non-empty ``adjudication_rationale``: it is the sole
+    recorded justification for the human confirmer and the audit trail, and it is
+    reused as the dismissal reason stamped onto each benign candidate. A blank or
+    whitespace-only rationale would leave the audit empty and stamp whitespace
+    reasons onto rejected candidates, so treat it as non-actionable and let the
+    semantic retry re-ask for one.
+    """
+    rationale = str(result.get("adjudication_rationale", "") or "").strip()
+    if not rationale:
+        return False
+    ctype = str(result.get("contradiction_type", "")).strip().lower()
+    if ctype == "review_divergence":
+        return True
+    desc, plan = _normalized_overrides(result)
+    return bool(desc or plan)
+
+
+# --------------------------------------------------------------------------- #
+# Effective source pool (dead-clause detection for abolish filtering)
+# --------------------------------------------------------------------------- #
+
+
+def _effective_source_pool(description: Any, task_groups: Any) -> List[str]:
+    """Source-pool entries the *adjudicated* spec exposes to quote validation.
+
+    Mirrors ``self_check._build_source_pool`` composition for the parts an
+    override can touch: the task description plus each plan task's description
+    and acceptance_criteria. Used to decide whether a candidate's quoted clause
+    actually left the effective spec after the ruling.
+    """
+    pool: List[str] = []
+    if isinstance(description, str) and description:
+        pool.append(description)
+    if isinstance(task_groups, list):
+        for group in task_groups:
+            if not isinstance(group, dict):
+                continue
+            tasks = group.get("tasks") or []
+            if not isinstance(tasks, list):
+                continue
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                desc = task.get("description")
+                if isinstance(desc, str) and desc.strip():
+                    pool.append(desc)
+                criteria = task.get("acceptance_criteria") or []
+                if isinstance(criteria, list):
+                    for c in criteria:
+                        if isinstance(c, str) and c.strip():
+                            pool.append(c)
+    return pool
+
+
+def _positions_with_dead_clause(
+    positions: List[str],
+    quote_by_pos: Dict[str, str],
+    effective_desc: Any,
+    effective_groups: Any,
+) -> List[str]:
+    """Filter ``positions`` to those whose quoted clause is GONE from the pool.
+
+    Abolishing by position alone (the old behavior) wrongly clears history for a
+    clause the ruling PRESERVED — a plan-only fix, or a description rewrite that
+    kept one quoted hard constraint. Only a position whose normalized quote no
+    longer substring-matches any entry of the now-effective source pool has
+    truly been abolished; a still-live quote keeps counting toward triggers
+    (a)/(b)/(c). A position with no quote at all is left counting: an override
+    cannot be shown to have removed a clause that was never quoted (e.g. a
+    regression grounded only in evidence_lines).
+
+    The match mirrors self_check's quote validation exactly (via the shared
+    ``adjudication.relaxed_quote_candidates``): a clause is dead only when NONE of
+    its relaxed variants (bullet/id-prefix- or trailing-ellipsis-stripped) match
+    the pool — otherwise a decorated ledger quote self_check would still accept
+    would be judged dead and its live oscillation history wrongly cleared.
+    """
+    pool_norm = [
+        adjudication._normalize_for_quote_match(s)
+        for s in _effective_source_pool(effective_desc, effective_groups)
+    ]
+    pool_norm = [p for p in pool_norm if p]
+    dead: List[str] = []
+    for pos in positions:
+        quote = quote_by_pos.get(pos)
+        if quote is None:
+            # Defensive: recover the normalized-quote component from the key.
+            quote = adjudication._pk_quote(pos)
+        if not quote:
+            continue
+        candidates = adjudication.relaxed_quote_candidates(quote)
+        if not any(c in p for c in candidates for p in pool_norm):
+            dead.append(pos)
+    return dead
+
+
+# --------------------------------------------------------------------------- #
 # Handler
 # --------------------------------------------------------------------------- #
 
@@ -431,35 +600,72 @@ def adjudicate_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     fix_iteration = step.inputs.get("fix_iteration", 0)
-    try:
-        retry_count = step.inputs.get("retry_count", 0)
-        caller = LLMCaller(
-            project_root,
-            flow_id=flow.flow_id,
-            step_id=step.step_id,
-            step_type=step.step_type.value,
-            external_attempt=retry_count,
-            fix_iteration=fix_iteration,
-        )
-        response = caller.call(
-            prompt=prompt,
-            json_mode="two_phase",
-            json_schema_hint=(
-                '{"contradiction_type": "internal_contradiction|hard_constraint_conflict|review_divergence", '
-                '"adjudicated_description": "... or null", '
-                '"adjudicated_plan": [{"group_id": "G1", "name": "...", "tasks": []}], '
-                '"adjudication_rationale": "...", '
-                '"candidate_verdicts": [{"id": 0, "verdict": "contradiction|benign", "reason": "..."}]}'
-            ),
-            required_keys=["adjudication_rationale"],
-        )
-        result = parse_json_response(response, required_keys=["adjudication_rationale"])
-    except Exception as e:  # pragma: no cover - defensive; LLMCaller has its own retries
-        step.error_message = f"Adjudication LLM call failed: {e}"
-        return StepStatus.FAILED
+    retry_count = step.inputs.get("retry_count", 0)
 
-    if not result:
-        step.error_message = "Failed to parse adjudication result from LLM response"
+    # A ruling that classifies a REAL contradiction must carry a covering
+    # override patch (adjudicated_description and/or adjudicated_plan). A no-op
+    # contradiction ruling (patches both null) would reflow to SELF_CHECK with
+    # the effective spec unchanged and let the loop keep oscillating — the exact
+    # failure the adjudicator exists to break. Re-ask the LLM with a strict
+    # patch demand before giving up; only ``review_divergence`` may return no
+    # patch. LLMCaller has its own transport retries; this bounded loop is a
+    # *semantic* retry layered on top.
+    result: Optional[Dict[str, Any]] = None
+    strict_suffix = ""
+    for attempt in range(_MAX_RULING_ATTEMPTS):
+        try:
+            caller = LLMCaller(
+                project_root,
+                flow_id=flow.flow_id,
+                step_id=step.step_id,
+                step_type=step.step_type.value,
+                external_attempt=retry_count + attempt,
+                fix_iteration=fix_iteration,
+            )
+            response = caller.call(
+                prompt=prompt + strict_suffix,
+                json_mode="two_phase",
+                json_schema_hint=(
+                    '{"contradiction_type": "internal_contradiction|hard_constraint_conflict|review_divergence", '
+                    '"adjudicated_description": "... or null", '
+                    '"adjudicated_plan": [{"group_id": "G1", "name": "...", "tasks": []}], '
+                    '"adjudication_rationale": "...", '
+                    '"candidate_verdicts": [{"id": 0, "verdict": "contradiction|benign", "reason": "..."}]}'
+                ),
+                required_keys=["adjudication_rationale"],
+            )
+            result = parse_json_response(response, required_keys=["adjudication_rationale"])
+        except Exception as e:  # pragma: no cover - defensive; LLMCaller has its own retries
+            step.error_message = f"Adjudication LLM call failed: {e}"
+            return StepStatus.FAILED
+
+        if not result:
+            step.error_message = "Failed to parse adjudication result from LLM response"
+            return StepStatus.FAILED
+
+        if _ruling_is_actionable(result):
+            break
+
+        strict_suffix = _NOOP_RULING_REPROMPT.format(
+            contradiction_type=result.get("contradiction_type", "")
+        )
+        logger.warning(
+            "Adjudication returned a no-op contradiction ruling "
+            "(attempt %d/%d); re-asking with a strict patch demand",
+            attempt + 1, _MAX_RULING_ATTEMPTS,
+        )
+
+    if not _ruling_is_actionable(result):
+        # A ruling that never became actionable survived every retry (missing
+        # rationale, or a real-contradiction verdict with no covering patch):
+        # fail rather than reflow with an unchanged/unaudited spec (which would
+        # let the oscillation continue indefinitely).
+        step.error_message = (
+            "Adjudication ruling was not actionable "
+            f"(type='{result.get('contradiction_type', '')}': missing rationale "
+            "and/or override patch) after retries; refusing to reflow with an "
+            "unchanged spec"
+        )
         return StepStatus.FAILED
 
     _apply_ruling(step, ctx, ledger, result, candidates, task_description, task_groups)
@@ -492,31 +698,42 @@ def _apply_ruling(
     task_description: str,
     task_groups: List[Dict[str, Any]],
 ) -> None:
-    """Write the ruling to ``step.outputs`` and update the ledger.
+    """Write the ruling to ``step.outputs`` and stage its ledger side effects.
 
     Records the override patch (description/plan), the rationale, an ISO
     timestamp, and the superseded pending fix_instructions (audit). Maps each
-    LLM candidate verdict back to a ledger position: "contradiction" abolishes
-    every active fingerprint at that position (its grounding clause is gone),
-    "benign" records the position as a rejected candidate so it never
-    re-triggers. Never writes self_check-style ``issues``.
+    LLM candidate verdict back to a ledger position: "contradiction" *stages*
+    abolition of the position's active fingerprints — but only for positions
+    whose quoted clause actually left the now-effective source pool (a preserved
+    clause keeps counting). "benign" stages the position as a rejected candidate
+    so it never re-triggers. Never writes self_check-style ``issues``.
+
+    The ledger is NOT mutated here: the abolish/reject effects are staged into
+    ``step.outputs`` and applied by ``apply_landed_ledger_effects`` only once the
+    ruling LANDS (approved by the confirmation门, or when免确认). A rejected
+    ruling's revision re-runs ADJUDICATE and overwrites these pending outputs, so
+    a rejected ruling never lands its side effects on the persisted ledger.
     """
     contradiction_type = result.get("contradiction_type", "")
-    adjudicated_description = _coerce_override(result.get("adjudicated_description"))
-    adjudicated_plan = _coerce_override(result.get("adjudicated_plan"))
+    is_review_divergence = str(contradiction_type).strip().lower() == "review_divergence"
+    adjudicated_description, adjudicated_plan = _normalized_overrides(result)
+    # A review_divergence ruling asserts there is NO real contradiction, so it has
+    # no authority to rewrite the spec. Discard any override the LLM emitted next
+    # to that classification *before* has_patch is computed: otherwise a benign
+    # oscillation returning {contradiction_type:"review_divergence",
+    # adjudicated_description:"..."} would land a task-description/plan override and
+    # stage abolition against the patched source pool — exactly the behavior a
+    # non-contradiction verdict must never produce. Only a real-contradiction
+    # classification may carry a covering patch.
+    if is_review_divergence:
+        adjudicated_description = None
+        adjudicated_plan = None
     rationale = result.get("adjudication_rationale", "")
     verdicts = result.get("candidate_verdicts") or []
-
-    # Only accept a plan override that is a non-empty list of task groups.
-    if adjudicated_plan is not None and not (
-        isinstance(adjudicated_plan, list) and adjudicated_plan
-    ):
-        adjudicated_plan = None
-    # Only accept a description override that is a non-empty string.
-    if adjudicated_description is not None and not isinstance(adjudicated_description, str):
-        adjudicated_description = None
+    has_patch = bool(adjudicated_description or adjudicated_plan)
 
     # Map verdicts (by candidate id) to positions.
+    quote_by_pos = {c["position_key"]: c["quote"] for c in candidates}
     contradiction_positions: List[str] = []
     rejected_positions: List[str] = []
     rejected_records: List[Dict[str, Any]] = []
@@ -545,19 +762,71 @@ def _apply_ruling(
             )
 
     # A description/plan override with no explicit contradiction verdicts still
-    # means the flagged candidates were resolved — abolish them too, so a ruling
+    # means the flagged candidates were resolved — consider them all, so a ruling
     # is never silently ignored by the trigger layer on the next round.
-    if (adjudicated_description or adjudicated_plan) and not contradiction_positions:
+    if has_patch and not contradiction_positions:
         contradiction_positions = [c["position_key"] for c in candidates]
 
-    # Abolish ledger entries grounded on now-removed clauses; record benign ones.
-    abolished_fps = _position_fingerprints(ledger, contradiction_positions)
-    abolished_count = adjudication.mark_abolished(ctx, abolished_fps) if abolished_fps else 0
-    adjudication.record_rejected_candidates(ctx, rejected_positions)
+    # A review_divergence ruling asserts there is NO real contradiction, so its
+    # override was dropped above (has_patch is therefore always False here) and it
+    # abolishes nothing. Any triggering candidate it leaves un-rejected (e.g. an
+    # empty/omitted candidate_verdicts list, or a stray per-candidate
+    # "contradiction" verdict that has no patch behind it to abolish) would stay
+    # live and re-trigger ADJUDICATE next round — the exact loop the
+    # rejected-candidate ledger exists to break. Close out every candidate:
+    # default the ones the LLM did not explicitly rule benign to rejected, so a
+    # no-contradiction ruling can never re-fire on the same position.
+    if is_review_divergence and not has_patch:
+        contradiction_positions = []
+        # ``_ruling_is_actionable`` already guarantees a non-blank rationale, but
+        # strip defensively so a whitespace-only string can never become a benign
+        # candidate's dismissal reason (a bare-space reason reads as "no reason").
+        clean_rationale = rationale.strip() if isinstance(rationale, str) else ""
+        default_reason = clean_rationale or "adjudicated as review divergence — no real contradiction"
+        for c in candidates:
+            pos_key = c["position_key"]
+            if pos_key in rejected_positions:
+                continue
+            rejected_positions.append(pos_key)
+            rejected_records.append(
+                {
+                    "position_key": pos_key,
+                    "file": c["file"],
+                    "quote": c["quote"],
+                    "reason": default_reason,
+                }
+            )
 
-    # Supersede the pending fix_instructions (kept only for audit): the ruling
-    # dissolved the deadlock, so implementing the old instructions would chase a
-    # spec knot that no longer exists.
+    # Only abolish a position whose quoted clause is GONE from the now-effective
+    # source pool: a plan-only fix (description unchanged) or a description
+    # rewrite that kept a quoted hard constraint must NOT clear the history of a
+    # still-live clause, or renewed oscillation there would evade the triggers.
+    effective_desc = adjudicated_description if adjudicated_description else task_description
+    # When no ``adjudicated_plan`` is supplied the latest plan (``task_groups``)
+    # stays authoritative: self_check keeps validating ``plan_task`` quotes against
+    # it, so a clause still present there remains quotable and must NOT be
+    # abolished. Only a plan override actually rewrites the plan; a description-only
+    # ruling has no authority to erase a plan requirement it never overrode.
+    # Judging dead-clause against an empty plan here would abolish a still-live
+    # plan-grounded quote, and self_check would then drop the valid issue re-raising
+    # it as quote_not_in_source — silently converging on an unchanged plan
+    # requirement. So a clause is dead only when gone from BOTH the effective
+    # description and the effective (latest, or overridden) plan.
+    effective_groups = adjudicated_plan if adjudicated_plan else task_groups
+    abolishable_positions = _positions_with_dead_clause(
+        contradiction_positions, quote_by_pos, effective_desc, effective_groups,
+    )
+    abolished_fps = _position_fingerprints(ledger, abolishable_positions)
+
+    # Supersede the pending fix_instructions (kept only for audit) for EVERY
+    # landed ruling — a patch and a no-op (review_divergence) alike. The
+    # post-ruling reflow always re-runs SELF_CHECK from pass #1 rather than
+    # feeding the pre-adjudication instructions into IMPLEMENT: those
+    # instructions come from the oscillating round and applying them would chase
+    # the very knot the ruling just examined (and, for a patch, would ignore the
+    # switched source pool). Re-running instead reproduces any still-valid issue
+    # and routes it through the normal fix loop, while the recorded rejected
+    # candidates keep a benign flip from re-triggering ADJUDICATE.
     superseded = step.inputs.get("fix_instructions", "") or ""
 
     step.outputs["contradiction_type"] = contradiction_type
@@ -568,8 +837,10 @@ def _apply_ruling(
     step.outputs["superseded_fix_instructions"] = superseded
     step.outputs["fix_instructions_superseded"] = bool(superseded)
     step.outputs["rejected_candidates"] = rejected_records
+    # Staged (not yet applied) ledger side effects — see docstring / issue 1.
     step.outputs["abolished_fingerprints"] = abolished_fps
-    step.outputs["abolished_count"] = abolished_count
+    step.outputs["rejected_positions"] = rejected_positions
+    step.outputs["ledger_effects_applied"] = False
     # Audit view of what was ruled against, for history renderers.
     step.outputs["candidates_considered"] = [
         {"file": c["file"], "quote": c["quote"], "position_key": c["position_key"]}
@@ -578,11 +849,38 @@ def _apply_ruling(
 
     logger.info(
         "Adjudication ruled '%s': description_patch=%s plan_patch=%s "
-        "abolished=%d rejected=%d superseded_fix=%s",
+        "staged_abolish=%d staged_rejected=%d superseded_fix=%s (pending landing)",
         contradiction_type,
         bool(adjudicated_description),
         bool(adjudicated_plan),
-        abolished_count,
+        len(abolished_fps),
         len(rejected_positions),
         bool(superseded),
     )
+
+
+def apply_landed_ledger_effects(step: Step, ctx: Dict[str, Any]) -> int:
+    """Apply a ruling's staged ledger side effects once it has LANDED.
+
+    Called by the state machine only after the ruling is APPROVED by the
+    confirmation门 (or when免确认) — never on a rejected ruling. This is where
+    ``abolished`` marking and rejected-candidate recording actually mutate the
+    persisted ledger, so a ruling the human rejects leaves the ledger untouched
+    and the oscillation it failed to resolve keeps counting toward the triggers.
+
+    Idempotent: ``mark_abolished`` and ``record_rejected_candidates`` both skip
+    already-applied entries, so a ``--resume`` replay of the landing is safe.
+    Returns the number of ledger entries newly flagged abolished.
+    """
+    fps = step.outputs.get("abolished_fingerprints") or []
+    count = adjudication.mark_abolished(ctx, fps) if fps else 0
+    positions = step.outputs.get("rejected_positions") or []
+    adjudication.record_rejected_candidates(ctx, positions)
+    step.outputs["abolished_count"] = count
+    step.outputs["ledger_effects_applied"] = True
+
+    logger.info(
+        "Adjudication ruling landed: abolished=%d entries, rejected=%d position(s)",
+        count, len(positions),
+    )
+    return count

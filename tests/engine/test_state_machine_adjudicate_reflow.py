@@ -114,7 +114,13 @@ def _make_post_adjudicate_flow(
     adjudicate = Step(
         step_type=StepType.ADJUDICATE,
         status=StepStatus.COMPLETED,
-        inputs={"fix_instructions": "fix the empty-input path"},
+        inputs={
+            "fix_instructions": "fix the empty-input path",
+            # A no-op (review_divergence) ruling routes the triggering round's
+            # fix_instructions into the normal fix loop; it recovers that round
+            # via this id.
+            "adjudication_trigger_step_id": self_check.step_id,
+        },
         outputs=adj_outputs,
     )
     flow.state.add_step(adjudicate)
@@ -127,7 +133,11 @@ def _make_post_adjudicate_flow(
 _BENIGN = {
     "adjudicated_description": None,
     "adjudicated_plan": None,
-    "fix_instructions_superseded": False,
+    # A no-op (review_divergence) ruling still supersedes the round's pending
+    # fix_instructions: every landed ruling reflows uniformly to a fresh
+    # SELF_CHECK rather than replaying the oscillating round's instructions.
+    "fix_instructions_superseded": True,
+    "superseded_fix_instructions": "fix the empty-input path",
 }
 
 _DESC_PATCH = {
@@ -151,8 +161,13 @@ _PLAN_PATCH = {
 
 class TestReflow:
     def test_benign_ruling_reflows_to_self_check(self, tmp_path):
-        """A ruling with no override needs no confirmation; reflow re-runs
-        SELF_CHECK directly (IMPLEMENT/TEST skipped)."""
+        """A no-op (review_divergence) ruling reflows exactly like a patch ruling:
+        the round's pending fix_instructions are superseded, IMPLEMENT/TEST are
+        skipped, and a fresh SELF_CHECK is constructed directly. The spec did not
+        change, so the re-run reproduces any still-valid issue and routes it
+        through the normal fix loop — but forcing it through SELF_CHECK (not
+        replaying the oscillating round's stale instructions into IMPLEMENT) is
+        what keeps the reflow uniform and the source-pool reset honored."""
         sm = _make_state_machine(tmp_path)
         flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
             tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=2,
@@ -162,37 +177,49 @@ class TestReflow:
 
         assert next_step is not None
         assert next_step.step_type == StepType.SELF_CHECK
-        assert next_step.step_id != self_check.step_id  # a fresh SELF_CHECK
-        assert flow.state.current_step_id == next_step.step_id
-        # IMPLEMENT/TEST skipped — untouched from their prior COMPLETED run.
+        assert next_step.inputs["self_check_pass_index"] == 1
+        # The re-run is counted so max_fix_iterations still caps the loop.
+        assert flow.state.get_fix_iteration() == 3
+        # IMPLEMENT was NOT re-run with the superseded instructions.
         assert implement.status == StepStatus.COMPLETED
-        assert "fix_instructions" not in implement.inputs
-        assert test.status == StepStatus.COMPLETED
+        assert implement.inputs.get("fix_instructions") is None
+        # The inserted ADJUDICATE slot was removed so the loop doesn't re-run it.
+        assert StepType.ADJUDICATE not in flow.state.selected_steps
 
     def test_reflow_starts_at_pass_1_and_resets_stash(self, tmp_path):
+        # A ruling that TAKES EFFECT (plan override, 免确认) reflows to SELF_CHECK.
         sm = _make_state_machine(tmp_path)
         flow, *_ , adj = _make_post_adjudicate_flow(
             tmp_path,
-            adj_outputs=dict(_BENIGN),
+            adj_outputs=dict(_PLAN_PATCH),
             fix_iterations=3,
             deferred_stash=[{"stale": "issue"}],
         )
 
-        next_step = sm.transition_to_next(flow)
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            next_step = sm.transition_to_next(flow)
 
+        assert next_step.step_type == StepType.SELF_CHECK
         assert next_step.inputs["self_check_pass_index"] == 1
         # pass #1 mechanically resets the cross-pass deferred stash.
         assert flow.state.context["self_check_deferred_issues"] == []
         assert next_step.inputs["self_check_deferred_issues"] == []
 
     def test_reflow_counts_as_fix_iteration(self, tmp_path):
+        # A landing ruling (plan override) reflows and counts the re-run.
         sm = _make_state_machine(tmp_path)
         flow, *_ , adj = _make_post_adjudicate_flow(
-            tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=3,
+            tmp_path, adj_outputs=dict(_PLAN_PATCH), fix_iterations=3,
         )
 
-        next_step = sm.transition_to_next(flow)
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            next_step = sm.transition_to_next(flow)
 
+        assert next_step.step_type == StepType.SELF_CHECK
         assert flow.state.get_fix_iteration() == 4
         assert next_step.inputs["fix_iteration"] == 4
 
@@ -220,13 +247,17 @@ class TestReflow:
         text layer instead."""
         sm = _make_state_machine(tmp_path)
         flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
-            tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=1,
+            tmp_path, adj_outputs=dict(_PLAN_PATCH), fix_iterations=1,
         )
 
-        next_step = sm.transition_to_next(flow)
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            next_step = sm.transition_to_next(flow)
 
         # The fresh SELF_CHECK carries no injected pending issue list of its own;
         # its only issue provenance is prev_self_check_issues (the audit echo).
+        assert next_step.step_type == StepType.SELF_CHECK
         assert "issues" not in next_step.outputs
         assert next_step.outputs == {}
 
@@ -236,10 +267,13 @@ class TestReflow:
         cfg = WorkflowConfig(max_fix_iterations=2, adjudicate_period=0)
         sm = _make_state_machine(tmp_path, cfg)
         flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
-            tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=1,
+            tmp_path, adj_outputs=dict(_PLAN_PATCH), fix_iterations=1,
         )
 
-        rerun = sm.transition_to_next(flow)
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            rerun = sm.transition_to_next(flow)
         assert rerun.step_type == StepType.SELF_CHECK
         assert flow.state.get_fix_iteration() == 2  # now at the bound
 
@@ -282,6 +316,36 @@ class TestConfirmationGate:
         assert flow.state.selected_steps[adj_idx + 1] == StepType.CONFIRM
         # Not yet counted as a fix iteration — the gate has not cleared.
         assert flow.state.get_fix_iteration() == 1
+
+    def test_confirm_baseline_is_pre_ruling_task_not_the_rewrite(self, tmp_path):
+        """Issue: a CONFIRM gating an unapproved description rewrite must review
+        the proposal against the PRE-ruling task_description, not against the
+        ruling's own not-yet-approved rewrite. If the baseline had already moved
+        to the proposed text, an LLM reviewer would compare the rewrite to itself
+        and could approve a bad rewrite."""
+        sm = _make_state_machine(tmp_path)
+        flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
+            tmp_path, adj_outputs=dict(_DESC_PATCH), fix_iterations=1,
+        )
+        original_task = flow.task_description
+        assert _DESC_PATCH["adjudicated_description"] != original_task
+        human_cfg = {"reviewer": "human", "max_iterations": 3, "agents": None}
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
+        ):
+            next_step = sm.transition_to_next(flow)
+
+        assert next_step.step_type == StepType.CONFIRM
+        # The reviewer's baseline is the pre-ruling task, NOT the proposed rewrite.
+        assert next_step.inputs["task_description"] == original_task
+        assert (
+            next_step.inputs["task_description"]
+            != _DESC_PATCH["adjudicated_description"]
+        )
+        # The proposal still reaches the reviewer via the reviewed step's outputs.
+        assert adj.outputs["adjudicated_description"] == (
+            _DESC_PATCH["adjudicated_description"]
+        )
 
     def test_description_change_forces_human_when_unconfigured(self, tmp_path):
         """A description rewrite is high-impact: with no confirmation config it
@@ -328,6 +392,25 @@ class TestConfirmationGate:
 
         assert next_step.step_type == StepType.CONFIRM
         assert next_step.inputs["reviewer"] is None  # LLM (default chain)
+
+    def test_plan_only_human_reviewer_skips_confirmation(self, tmp_path):
+        """A plan-only ruling is never human-gated: the default human reviewer
+        on ``confirmation.steps.adjudicate`` governs description rewrites only.
+        With the checked-in default (reviewer=human), a plan-only ruling must
+        reflow straight to SELF_CHECK — pausing an unattended run for a mere
+        plan override is exactly what the spec forbids."""
+        sm = _make_state_machine(tmp_path)
+        flow, *_ , adj = _make_post_adjudicate_flow(
+            tmp_path, adj_outputs=dict(_PLAN_PATCH), fix_iterations=1,
+        )
+        human_cfg = {"reviewer": "human", "max_iterations": 3, "agents": None}
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
+        ):
+            next_step = sm.transition_to_next(flow)
+
+        assert next_step.step_type == StepType.SELF_CHECK
+        assert StepType.CONFIRM not in flow.state.selected_steps
 
     def test_confirm_approved_reflows_and_counts(self, tmp_path):
         """An approved adjudicate-CONFIRM reflows exactly like a direct ruling."""
@@ -398,3 +481,52 @@ class TestConfirmationGate:
         assert flow.state.get_review_iteration(adj.step_id) == 1
         # A rejected gate does not consume a fix iteration.
         assert flow.state.get_fix_iteration() == 1
+
+    def test_rejected_then_benign_reruling_removes_stale_confirm_slot(self, tmp_path):
+        """Chained rejection → benign re-ruling: a description-patch ruling
+        inserts CONFIRM, the human rejects it, the revision re-runs ADJUDICATE
+        which now rules review_divergence (no patch). The no-op reflow must remove
+        the orphaned CONFIRM slot the same way a patch ruling does — else the next
+        fix round's TEST→SELF_CHECK progression enters the stale CONFIRM and
+        PAUSEs on a spurious human approval of the TEST step, re-pausing every
+        round (high-severity issue 3)."""
+        sm = _make_state_machine(tmp_path)
+        # Benign (review_divergence) re-ruling: no override patch.
+        flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
+            tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=2,
+        )
+        # Reconstruct the sequence left by an earlier description-patch ruling
+        # whose CONFIRM was rejected: CONFIRM sits between ADJUDICATE and
+        # SELF_CHECK, current index parked on the re-run ADJUDICATE.
+        adj_idx = flow.state.selected_steps.index(StepType.ADJUDICATE)
+        flow.state.selected_steps.insert(adj_idx + 1, StepType.CONFIRM)
+        flow.state.current_step_index = adj_idx
+        # A rejected CONFIRM already lives in history (the one that bounced the
+        # earlier over-reaching rewrite).
+        rejected_confirm = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "review_result": {
+                    "approved": False,
+                    "step_to_review_id": adj.step_id,
+                    "step_to_review_type": "adjudicate",
+                },
+                "revision_feedback": "over-reaching rewrite",
+            },
+        )
+        flow.state.add_step(rejected_confirm)
+        # Re-point at the re-run ADJUDICATE (as _transition_to_revision would).
+        flow.state.current_step_id = adj.step_id
+        flow.state.current_step_index = adj_idx
+
+        next_step = sm.transition_to_next(flow)
+
+        # No-op ruling reflows to a fresh SELF_CHECK (uniform with patch rulings).
+        assert next_step is not None
+        assert next_step.step_type == StepType.SELF_CHECK
+        # Both transient slots are gone — the fix loop can never enter them.
+        assert StepType.ADJUDICATE not in flow.state.selected_steps
+        assert StepType.CONFIRM not in flow.state.selected_steps
+        # The flow keeps running; it does NOT pause on a spurious TEST confirmation.
+        assert flow.status == FlowStatus.RUNNING

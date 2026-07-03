@@ -203,6 +203,9 @@ class TestWorkflowConfigFromDict:
         cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": True}})
         assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
 
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": False}})
+        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
     # -- adjudicate_period (adjudicate step periodic safety-net trigger) --
 
     def test_adjudicate_period_default_is_10(self):
@@ -231,22 +234,21 @@ class TestWorkflowConfigFromDict:
         with pytest.raises(ConfigError, match="must be >= 0"):
             WorkflowConfig.from_dict({"workflow": {"adjudicate_period": -1}})
 
-    def test_adjudicate_period_invalid_falls_back_to_default(self):
-        cfg = WorkflowConfig.from_dict(
-            {"workflow": {"adjudicate_period": "not_a_number"}}
-        )
-        assert cfg.adjudicate_period == DEFAULT_ADJUDICATE_PERIOD
+    def test_adjudicate_period_invalid_raises(self):
+        # A malformed type must fail configuration validation rather than
+        # silently enabling the default periodic ADJUDICATE interval.
+        with pytest.raises(ConfigError, match="must be an integer"):
+            WorkflowConfig.from_dict(
+                {"workflow": {"adjudicate_period": "not_a_number"}}
+            )
 
-    def test_adjudicate_period_bool_falls_back_to_default(self):
-        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": True}})
-        assert cfg.adjudicate_period == DEFAULT_ADJUDICATE_PERIOD
+    def test_adjudicate_period_bool_raises(self):
+        with pytest.raises(ConfigError, match="must be an integer"):
+            WorkflowConfig.from_dict({"workflow": {"adjudicate_period": True}})
 
-    def test_adjudicate_period_float_falls_back_to_default(self):
-        cfg = WorkflowConfig.from_dict({"workflow": {"adjudicate_period": 3.0}})
-        assert cfg.adjudicate_period == DEFAULT_ADJUDICATE_PERIOD
-
-        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": False}})
-        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+    def test_adjudicate_period_float_raises(self):
+        with pytest.raises(ConfigError, match="must be an integer"):
+            WorkflowConfig.from_dict({"workflow": {"adjudicate_period": 3.0}})
 
     def test_max_fix_iterations_float_warns_and_falls_back(self):
         """Float max_fix_iterations warns and falls back to default —

@@ -98,7 +98,9 @@ def _infer_fix_reason(trigger_step_type: str) -> str:
     return reason_map.get(trigger_step_type, trigger_step_type or "unknown")
 
 
-def _latest_adjudicated_output(flow: "FlowInstance", key: str) -> Any:
+def _latest_adjudicated_output(
+    flow: "FlowInstance", key: str, exclude_step_id: Optional[str] = None
+) -> Any:
     """Latest completed ADJUDICATE step's non-empty ``outputs[key]``.
 
     Walks ``step_history`` in reverse so multi-generational rulings resolve to
@@ -108,6 +110,12 @@ def _latest_adjudicated_output(flow: "FlowInstance", key: str) -> Any:
     keeps the still-live override in effect. Returns ``None`` when no ruling
     supplied ``key``.
 
+    ``exclude_step_id`` skips one ADJUDICATE step, resolving to the effective
+    text/plan *before* that ruling. The confirmation门 uses it so the reviewer
+    compares a not-yet-approved ruling against the pre-ruling baseline instead
+    of against the ruling's own unapproved rewrite (which, being at the tail, is
+    otherwise what the newest-wins walk would surface).
+
     Shared by the effective-text layer (``_effective_task_description_base``)
     and the plan-override in ``_build_step_inputs`` so both call points pick up
     ``adjudicated_description`` / ``adjudicated_plan`` with the same
@@ -116,6 +124,8 @@ def _latest_adjudicated_output(flow: "FlowInstance", key: str) -> Any:
     if not (flow.state and flow.state.step_history):
         return None
     for sid in reversed(flow.state.step_history):
+        if exclude_step_id is not None and sid == exclude_step_id:
+            continue
         s = flow.state.steps.get(sid)
         if (
             s
@@ -128,7 +138,9 @@ def _latest_adjudicated_output(flow: "FlowInstance", key: str) -> Any:
     return None
 
 
-def _effective_task_description_base(flow: "FlowInstance") -> str:
+def _effective_task_description_base(
+    flow: "FlowInstance", exclude_step_id: Optional[str] = None
+) -> str:
     """Pre-interjection base of the effective task_description.
 
     Resolution order (highest priority first): a completed ADJUDICATE step's
@@ -142,13 +154,20 @@ def _effective_task_description_base(flow: "FlowInstance") -> str:
     the un-decorated base without double-counting prior interjections that are
     already in the persisted list.
 
+    ``exclude_step_id`` skips one ADJUDICATE ruling, yielding the base that was
+    effective *before* it — used when building a confirmation门 that gates that
+    same (still-unapproved) ruling, so the reviewer's baseline is the pre-ruling
+    text, not the proposed rewrite.
+
     Why adjudicated must win over refined/original: the ruling is a *covering*
     patch, not an addendum. Making it the effective base is what pulls the dead
     clause out of the verbatim_quote source pool so a re-quote of the abolished
     text fails validation (see ``self_check._build_source_pool``); an
     additional-instructions approach would leave the contradiction in the pool.
     """
-    adjudicated = _latest_adjudicated_output(flow, "adjudicated_description")
+    adjudicated = _latest_adjudicated_output(
+        flow, "adjudicated_description", exclude_step_id=exclude_step_id
+    )
     if isinstance(adjudicated, str) and adjudicated:
         return adjudicated
     base = flow.task_description or ""
@@ -168,7 +187,9 @@ def _effective_task_description_base(flow: "FlowInstance") -> str:
     return base
 
 
-def _compose_effective_task_description(flow: "FlowInstance") -> str:
+def _compose_effective_task_description(
+    flow: "FlowInstance", exclude_step_id: Optional[str] = None
+) -> str:
     """Compute the effective task_description for any step in the flow.
 
     Resolution order (matches ``_build_step_inputs``):
@@ -184,8 +205,12 @@ def _compose_effective_task_description(flow: "FlowInstance") -> str:
     original task_description, dropping any discovery refinement and any
     Ctrl-C interjections — making mid-flow corrections invisible to every
     fix iteration.
+
+    ``exclude_step_id`` is forwarded to ``_effective_task_description_base`` so a
+    confirmation门 gating an unapproved ADJUDICATE ruling composes against the
+    pre-ruling base (see that helper).
     """
-    base = _effective_task_description_base(flow)
+    base = _effective_task_description_base(flow, exclude_step_id=exclude_step_id)
     interjections = flow.state.context.get("user_interjections", [])
     if interjections:
         from .task_description import compose_task_description_with_interjections
@@ -1138,6 +1163,15 @@ class StateMachine:
         # discovery-refined wording and any Ctrl-C user interjections —
         # making mid-flow corrections invisible to every fix iteration.
         implement_step.inputs["task_description"] = _compose_effective_task_description(flow)
+        # Mirror ``_build_step_inputs``: a plan-changing adjudication ruling must
+        # reach the REUSED implement step too, or it would write
+        # ``implemented_groups`` from the superseded pre-adjudication plan (which
+        # then flows into the next SELF_CHECK prompt, version_analyze, and the
+        # history renderer as stale audit/telemetry). Freshly built steps already
+        # get this; the reused one did not.
+        adjudicated_plan = _latest_adjudicated_output(flow, "adjudicated_plan")
+        if isinstance(adjudicated_plan, list) and adjudicated_plan:
+            implement_step.inputs["task_groups"] = adjudicated_plan
         implement_step.inputs["fix_instructions"] = fix_instructions
         implement_step.inputs["fix_context"] = fix_context
         implement_step.inputs["is_fix_iteration"] = True
@@ -1306,9 +1340,24 @@ class StateMachine:
         selected.insert(insert_index, StepType.ADJUDICATE)
 
         inputs = self._build_step_inputs(flow, StepType.ADJUDICATE)
-        # Surface the structural trigger result to the handler so its prompt can
-        # focus the ruling on the flagged positions/fingerprints. The full
+        # Surface the structural trigger result to the handler under the FLAT keys
+        # it actually reads (``adjudication_triggering_positions`` /
+        # ``adjudication_reasons``): the prompt renders the real trigger reasons
+        # and the handler unions the explicit positions into its candidate list.
+        # A reproduction-only trigger yields a fingerprint whose position may have
+        # a single expected value (so the ≥2-distinct candidate scan would miss
+        # it); fold each triggering fingerprint back to its position_key so that
+        # position is still presented to the LLM for a ruling. The full
         # cross-round ledger lives on ``flow.state.context`` and is read there.
+        positions = list(decision.triggering_positions)
+        for fp in decision.triggering_fingerprints:
+            pk = fp.rsplit(adjudication._KEY_SEP, 1)[0]
+            if pk not in positions:
+                positions.append(pk)
+        inputs["adjudication_triggering_positions"] = positions
+        inputs["adjudication_reasons"] = list(decision.reasons)
+        # Kept for audit/history (structured trigger detail); not read by the
+        # handler, which consumes the flat keys above.
         inputs["adjudication_decision"] = {
             "reasons": list(decision.reasons),
             "triggering_positions": list(decision.triggering_positions),
@@ -1316,6 +1365,11 @@ class StateMachine:
             "details": copy.deepcopy(decision.details),
         }
         inputs["fix_iteration"] = current_iteration
+        # Record which SELF_CHECK triggered this ruling, for audit/history only.
+        # Every ruling (patch or no-op) now reflows uniformly to a fresh
+        # SELF_CHECK, so the trigger step is no longer re-entered — but keeping the
+        # link makes the ledger/history legible.
+        inputs["adjudication_trigger_step_id"] = trigger_step.step_id
         # Hand the triggering SELF_CHECK's pending fix_instructions to the
         # handler so the ruling can record them as superseded (audit): the
         # reflow drops them unimplemented, but the record of *what* was dissolved
@@ -1363,9 +1417,13 @@ class StateMachine:
         A ruling that rewrites the **task description** is a high-impact act, so
         by default it is confirmed by a human (``confirmation.steps.adjudicate``,
         reviewer=human → PAUSED / se3 calls). A ruling that only overrides the
-        **plan / test expectations** follows the same config entry — which may
-        point at an LLM reviewer or be omitted entirely for no confirmation. A
-        benign ruling (no override patch at all) needs no confirmation.
+        **plan / test expectations** is 免确认 by default and is *never*
+        human-gated: it inserts a CONFIRM only when the same config entry points
+        at an explicit **LLM** reviewer, and skips confirmation entirely when the
+        entry is absent or its reviewer is human (the human default belongs to
+        description rewrites, not plan-only overrides — pausing an unattended run
+        for a plan tweak is exactly what the spec forbids). A benign ruling (no
+        override patch at all) needs no confirmation.
 
         Returns the inserted CONFIRM step (routing the flow to approval) when a
         gate is required and not yet satisfied, or ``None`` so the caller reflows
@@ -1394,8 +1452,7 @@ class StateMachine:
         # Resolve the reviewer to decide whether a gate applies. A description
         # rewrite always confirms — falling back to human when unconfigured,
         # since silently rewriting the task on an unattended run is the exact
-        # failure mode the gate exists to prevent. A plan-only override with no
-        # ``confirmation.steps.adjudicate`` entry is 免确认 (skip the gate).
+        # failure mode the gate exists to prevent.
         try:
             resolved = resolve_confirm_inputs(
                 self.project_root, StepType.ADJUDICATE.value,
@@ -1407,8 +1464,17 @@ class StateMachine:
             )
             resolved = None
 
-        if resolved is None and not desc_changed:
-            return None
+        # A plan-only ruling is never human-gated. The default human reviewer
+        # on ``confirmation.steps.adjudicate`` governs *description rewrites*
+        # (the high-impact act); a plan / test-expectation ruling is 免确认
+        # unless an *LLM* reviewer is explicitly configured. So for a plan-only
+        # ruling, skip the gate whenever the resolved reviewer is absent (None)
+        # or human — pausing an unattended run for human approval of a mere plan
+        # override is the exact behaviour the spec forbids. Only a non-human
+        # (LLM) reviewer inserts a CONFIRM here.
+        if not desc_changed:
+            if resolved is None or resolved.get("reviewer") == "human":
+                return None
 
         return self._insert_adjudicate_confirm(flow, adjudicate_step)
 
@@ -1453,6 +1519,49 @@ class StateMachine:
 
         return confirm_step
 
+    def _strip_inserted_adjudicate_run(
+        self, selected: list, from_index: int
+    ) -> Optional[int]:
+        """Remove the dynamically-inserted ADJUDICATE + trailing CONFIRM slots.
+
+        These transient slots sit immediately before the reflowed SELF_CHECK
+        (ADJUDICATE inserted before SELF_CHECK; a confirmation门 CONFIRM, if any,
+        between them). The post-ADJUDICATE reflow — uniform now across patch and
+        no-op (review_divergence) rulings — must clear them, or the next fix-loop
+        cycle's sequential progression after TEST enters a leftover slot: a stale
+        CONFIRM resolves 'the most recent unconfirmed non-confirm step' to TEST and
+        PAUSEs the flow on a spurious human approval of a TEST step (re-pausing
+        every subsequent round), while a leftover ADJUDICATE re-runs un-triggered.
+        A CONFIRM from an earlier rejected description-patch ruling that has since
+        been re-ruled benign must be stripped too — hence the walk-back over the
+        whole contiguous CONFIRM/ADJUDICATE run rather than just the ADJUDICATE.
+
+        Locates the first SELF_CHECK at/after ``from_index`` (falling back to the
+        first anywhere), then walks back removing the contiguous CONFIRM/ADJUDICATE
+        run, stopping once the ADJUDICATE is popped. Returns the SELF_CHECK index
+        after the removals, or ``None`` (nothing removed) if no SELF_CHECK slot
+        exists.
+        """
+        sc_index: Optional[int] = None
+        for i in range(max(from_index, 0), len(selected)):
+            if selected[i] == StepType.SELF_CHECK:
+                sc_index = i
+                break
+        if sc_index is None:
+            try:
+                sc_index = selected.index(StepType.SELF_CHECK)
+            except ValueError:
+                return None
+        j = sc_index - 1
+        while j >= 0 and selected[j] in (StepType.ADJUDICATE, StepType.CONFIRM):
+            is_adjudicate = selected[j] == StepType.ADJUDICATE
+            selected.pop(j)
+            sc_index -= 1
+            if is_adjudicate:
+                break
+            j -= 1
+        return sc_index
+
     def _transition_after_adjudicate(
         self,
         flow: FlowInstance,
@@ -1475,22 +1584,46 @@ class StateMachine:
         could oscillate forever without ever advancing the counter). Returns the
         fresh SELF_CHECK step, or ``None`` if no SELF_CHECK slot exists (the
         caller then falls through to normal progression).
+
+        A no-op ruling (``review_divergence`` — no override patch) reflows the
+        SAME way: its pending fix_instructions are still superseded and
+        IMPLEMENT/TEST are still skipped. The spec did not change, so the re-run
+        reproduces every still-valid issue and routes it through the normal fix
+        loop — but forcing it through a fresh SELF_CHECK (rather than replaying
+        the oscillating round's stale fix_instructions into IMPLEMENT) is what
+        keeps the reflow behavior uniform and lets the source-pool reset and the
+        benign-candidate rejections take effect before the next fix. Its
+        rejections are applied to the ledger below so they stop re-triggering.
         """
+        # Strip the dynamically-inserted ADJUDICATE slot AND its (optional)
+        # CONFIRM slot — they sit immediately before the reflowed SELF_CHECK
+        # (ADJUDICATE inserted before SELF_CHECK, CONFIRM between them). Every
+        # ruling (patch or no-op) reflows identically via
+        # ``_strip_inserted_adjudicate_run`` so their cleanup can never diverge
+        # (see that helper for why the leftover slots must go).
         selected = flow.state.selected_steps
         cur = flow.state.current_step_index
-        sc_index: Optional[int] = None
-        for i in range(max(cur, 0), len(selected)):
-            if selected[i] == StepType.SELF_CHECK:
-                sc_index = i
-                break
+        sc_index = self._strip_inserted_adjudicate_run(selected, cur)
         if sc_index is None:
-            try:
-                sc_index = selected.index(StepType.SELF_CHECK)
-            except ValueError:
-                logger.warning(
-                    "SELF_CHECK slot missing after ADJUDICATE; cannot reflow"
-                )
-                return None
+            logger.warning(
+                "SELF_CHECK slot missing after ADJUDICATE; cannot reflow"
+            )
+            return None
+
+        # Apply the ruling's DEFERRED ledger side effects now that it has landed
+        # (this reflow point is reached only after the confirmation门 approved,
+        # or when免确认). A rejected ruling never reaches here, so its staged
+        # abolish/reject effects never touch the persisted ledger. Applied before
+        # the SELF_CHECK re-run so the abolished entries do not count toward the
+        # next round's triggers.
+        try:
+            from .steps.adjudicate import apply_landed_ledger_effects
+            apply_landed_ledger_effects(adjudicate_step, flow.state.context)
+        except Exception:
+            logger.warning(
+                "Failed to apply adjudication ledger effects on landing",
+                exc_info=True,
+            )
 
         # Count the reflow as a fix iteration BEFORE building the SELF_CHECK
         # inputs so the pass sees ``fix_iteration > 0`` (which drives the source-
@@ -1872,6 +2005,9 @@ class StateMachine:
         # audits against the ruled plan rather than the superseded one. Only
         # override when a ruling actually supplied a plan, leaving the
         # no-adjudication path (task_groups from the PLAN step) untouched.
+        # Capture the pre-ruling plan first so a CONFIRM gating an unapproved
+        # ruling (below) can restore it as the reviewer's baseline.
+        pre_ruling_task_groups = inputs.get("task_groups")
         adjudicated_plan = _latest_adjudicated_output(flow, "adjudicated_plan")
         if isinstance(adjudicated_plan, list) and adjudicated_plan:
             inputs["task_groups"] = adjudicated_plan
@@ -1914,6 +2050,27 @@ class StateMachine:
                 reviewed_type = last_non_confirm_step.step_type.value
                 inputs["step_to_review_id"] = last_non_confirm_step.step_id
                 inputs["step_to_review_type"] = reviewed_type
+
+                # A CONFIRM gating an ADJUDICATE ruling must review the proposed
+                # patch against the PRE-ruling effective task/plan — not against
+                # the ruling's own not-yet-approved rewrite. The generic overrides
+                # above already installed the (tail) adjudicated_description/plan
+                # as the effective text; recompute the baseline EXCLUDING this
+                # unapproved ruling so the reviewer's comparison anchor hasn't
+                # already moved before the gate clears. The proposed rewrite still
+                # reaches the reviewer via the reviewed step's own outputs.
+                if last_non_confirm_step.step_type == StepType.ADJUDICATE:
+                    adj_id = last_non_confirm_step.step_id
+                    inputs["task_description"] = _compose_effective_task_description(
+                        flow, exclude_step_id=adj_id
+                    )
+                    pre_ruling_plan = _latest_adjudicated_output(
+                        flow, "adjudicated_plan", exclude_step_id=adj_id
+                    )
+                    if isinstance(pre_ruling_plan, list) and pre_ruling_plan:
+                        inputs["task_groups"] = pre_ruling_plan
+                    else:
+                        inputs["task_groups"] = pre_ruling_task_groups
 
                 # Single YAML read for the entire CONFIRM resolution —
                 # consolidates what used to be three separate config
@@ -2004,6 +2161,11 @@ class StateMachine:
             inputs["self_check_passes_required"] = self._get_self_check_passes_required()
             inputs["self_check_convergence_enabled"] = workflow_cfg.self_check_convergence_enabled
             inputs["self_check_defer_fix_threshold"] = workflow_cfg.self_check_defer_fix_threshold
+            # Periodic-backstop period, so the convergence guard can suppress the
+            # shortcut when a periodic ADJUDICATE is due (it would otherwise
+            # short-circuit to COMPLETED before the state machine's
+            # REVISION_NEEDED branch could route to ADJUDICATE).
+            inputs["adjudicate_period"] = workflow_cfg.adjudicate_period
 
             # Defer-fix stash (item 1) lifecycle. pass #1 is the start of every
             # fix-loop round (and the very first round), so it resets the
@@ -2050,6 +2212,19 @@ class StateMachine:
             adjudicated_desc = _latest_adjudicated_output(flow, "adjudicated_description")
             if isinstance(adjudicated_desc, str) and adjudicated_desc:
                 inputs["adjudicated_description"] = adjudicated_desc
+                # Hand the abolished clause quotes to the source-pool builder so
+                # an abolished clause a plan task still restates verbatim is
+                # dropped from the pool too (a description-only ruling leaves the
+                # plan text otherwise quotable). See _build_source_pool.
+                ledger = flow.state.context.get(adjudication.LEDGER_KEY)
+                if isinstance(ledger, dict):
+                    abolished_quotes = [
+                        o.get("quote_norm")
+                        for o in ledger.get("observations", [])
+                        if o.get("abolished") and o.get("quote_norm")
+                    ]
+                    if abolished_quotes:
+                        inputs["abolished_clause_quotes"] = abolished_quotes
 
             # Inject prev_self_check_issues whenever this is the first pass
             # of a fix-loop round (pass_index == 1 AND fix_iteration > 0).
