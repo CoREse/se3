@@ -852,6 +852,28 @@ class StateMachine:
                 # No implement step found — fall through to normal progression
                 logger.info("Fix transition returned None, falling through to next step")
 
+        # Handle the ADJUDICATE ruling reflow (fix-loop 警察). A ruling changes
+        # the *spec*, not the code, so re-running IMPLEMENT/TEST would chase a
+        # knot the ruling already dissolved. A description-changing ruling is
+        # gated behind the confirmation门 first (default human via se3/calls);
+        # once that clears (or when no confirmation is required), the pending
+        # fix_instructions are dropped (superseded, recorded in the ADJUDICATE
+        # outputs for audit) and the flow re-runs SELF_CHECK directly at pass #1.
+        if (
+            current_step.step_type == StepType.ADJUDICATE
+            and current_step.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
+        ):
+            confirm_step = self._maybe_confirm_adjudication(flow, current_step)
+            if confirm_step:
+                return confirm_step
+            reflow_step = self._transition_after_adjudicate(flow, current_step)
+            if reflow_step:
+                return reflow_step
+            # No SELF_CHECK slot to re-run — fall through to normal progression.
+            logger.info(
+                "Adjudication reflow found no SELF_CHECK slot; falling through"
+            )
+
         # Handle review loop: if current step is CONFIRM and revision was requested
         if current_step.step_type == StepType.CONFIRM:
             review_result = current_step.outputs.get("review_result", {})
@@ -860,6 +882,18 @@ class StateMachine:
             if approved:
                 # Approval received - continue to next step
                 logger.info(f"Confirmation approved for {review_result.get('step_to_review_type', 'unknown')}")
+                # A CONFIRM approving an ADJUDICATE ruling reflows exactly like a
+                # direct ADJUDICATE completion: skip IMPLEMENT/TEST, re-run
+                # SELF_CHECK at pass #1, and count the re-run as a fix iteration
+                # (the increment lives in _transition_after_adjudicate so it fires
+                # once on the landing, never on a rejected re-ruling cycle).
+                if review_result.get("step_to_review_type") == StepType.ADJUDICATE.value:
+                    adj_id = review_result.get("step_to_review_id")
+                    adj_step = flow.state.steps.get(adj_id) if adj_id else None
+                    if adj_step:
+                        reflow_step = self._transition_after_adjudicate(flow, adj_step)
+                        if reflow_step:
+                            return reflow_step
             else:
                 # Revision requested - go back to the step being reviewed
                 # Get step_to_review_id from review_result (set by confirm_handler)
@@ -1312,6 +1346,179 @@ class StateMachine:
         print(f"{'='*60}\n")
 
         return step
+
+    def _maybe_confirm_adjudication(
+        self,
+        flow: FlowInstance,
+        adjudicate_step: Step,
+    ) -> Optional[Step]:
+        """Gate an ADJUDICATE ruling behind the confirmation门 when required.
+
+        A ruling that rewrites the **task description** is a high-impact act, so
+        by default it is confirmed by a human (``confirmation.steps.adjudicate``,
+        reviewer=human → PAUSED / se3 calls). A ruling that only overrides the
+        **plan / test expectations** follows the same config entry — which may
+        point at an LLM reviewer or be omitted entirely for no confirmation. A
+        benign ruling (no override patch at all) needs no confirmation.
+
+        Returns the inserted CONFIRM step (routing the flow to approval) when a
+        gate is required and not yet satisfied, or ``None`` so the caller reflows
+        straight to SELF_CHECK. Idempotent across a re-entry: once an *approved*
+        CONFIRM has reviewed this same ADJUDICATE step, it returns ``None``.
+        """
+        outputs = adjudicate_step.outputs
+        desc_changed = bool(outputs.get("adjudicated_description"))
+        plan_changed = bool(outputs.get("adjudicated_plan"))
+        if not (desc_changed or plan_changed):
+            return None
+
+        # Already approved for this ruling? Then the gate is cleared. (A
+        # non-approved CONFIRM does not count — its revision re-ran ADJUDICATE,
+        # producing a fresh ruling that must be re-confirmed.)
+        for sid in flow.state.step_history:
+            s = flow.state.steps.get(sid)
+            if s and s.step_type == StepType.CONFIRM:
+                rr = s.outputs.get("review_result", {})
+                if (
+                    rr.get("step_to_review_id") == adjudicate_step.step_id
+                    and rr.get("approved") is True
+                ):
+                    return None
+
+        # Resolve the reviewer to decide whether a gate applies. A description
+        # rewrite always confirms — falling back to human when unconfigured,
+        # since silently rewriting the task on an unattended run is the exact
+        # failure mode the gate exists to prevent. A plan-only override with no
+        # ``confirmation.steps.adjudicate`` entry is 免确认 (skip the gate).
+        try:
+            resolved = resolve_confirm_inputs(
+                self.project_root, StepType.ADJUDICATE.value,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to resolve adjudicate confirmation config; defaulting to "
+                "human confirmation", exc_info=True,
+            )
+            resolved = None
+
+        if resolved is None and not desc_changed:
+            return None
+
+        return self._insert_adjudicate_confirm(flow, adjudicate_step)
+
+    def _insert_adjudicate_confirm(
+        self,
+        flow: FlowInstance,
+        adjudicate_step: Step,
+    ) -> Step:
+        """Insert a CONFIRM step reviewing the ADJUDICATE ruling.
+
+        Placed immediately after the ADJUDICATE slot (before the SELF_CHECK the
+        ruling re-runs). ``_build_step_inputs`` resolves the reviewer from
+        ``confirmation.steps.adjudicate`` (the most-recent unconfirmed non-confirm
+        step is this ADJUDICATE), so a human reviewer PAUSEs on a se3/calls file
+        and an LLM reviewer runs synchronously — reusing confirm.py wholesale, no
+        new counter. A rejected review flows back through the shared
+        ``_transition_to_revision`` path (review_iterations-bounded) to re-run
+        ADJUDICATE with the reviewer's feedback.
+        """
+        selected = flow.state.selected_steps
+        cur = flow.state.current_step_index
+        insert_at = cur + 1 if 0 <= cur < len(selected) else len(selected)
+        selected.insert(insert_at, StepType.CONFIRM)
+
+        inputs = self._build_step_inputs(flow, StepType.CONFIRM)
+        confirm_step = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+        flow.state.add_step(confirm_step)
+        flow.state.current_step_id = confirm_step.step_id
+        flow.state.current_step_index = insert_at
+
+        self.persistence.save_flow(flow)
+
+        print(f"\n{'='*60}")
+        print("🔎 ADJUDICATE CONFIRMATION REQUESTED")
+        print(f"{'='*60}")
+        print(f"Reviewer: {inputs.get('reviewer', 'human')}")
+        print(f"{'='*60}\n")
+
+        return confirm_step
+
+    def _transition_after_adjudicate(
+        self,
+        flow: FlowInstance,
+        adjudicate_step: Step,
+    ) -> Optional[Step]:
+        """Reflow after an ADJUDICATE ruling lands: re-run SELF_CHECK at pass #1.
+
+        The ruling changed the spec, not the code, so this skips IMPLEMENT/TEST
+        entirely and re-runs SELF_CHECK against the now-adjudicated effective
+        text (``_build_step_inputs`` switches the verbatim-quote source pool and,
+        at pass #1, resets the deferred stash). The pending fix_instructions from
+        the triggering SELF_CHECK are superseded — recorded in the ADJUDICATE
+        outputs for audit and never fed to IMPLEMENT. No synthetic "description
+        changed" issue is created: IMPLEMENT picks up the new text naturally via
+        ``_effective_task_description_base`` if a still-valid issue routes it
+        there.
+
+        The re-run is counted as a fix iteration so ``max_fix_iterations`` keeps
+        bounding a ruling that fails to converge (else an ineffective adjudication
+        could oscillate forever without ever advancing the counter). Returns the
+        fresh SELF_CHECK step, or ``None`` if no SELF_CHECK slot exists (the
+        caller then falls through to normal progression).
+        """
+        selected = flow.state.selected_steps
+        cur = flow.state.current_step_index
+        sc_index: Optional[int] = None
+        for i in range(max(cur, 0), len(selected)):
+            if selected[i] == StepType.SELF_CHECK:
+                sc_index = i
+                break
+        if sc_index is None:
+            try:
+                sc_index = selected.index(StepType.SELF_CHECK)
+            except ValueError:
+                logger.warning(
+                    "SELF_CHECK slot missing after ADJUDICATE; cannot reflow"
+                )
+                return None
+
+        # Count the reflow as a fix iteration BEFORE building the SELF_CHECK
+        # inputs so the pass sees ``fix_iteration > 0`` (which drives the source-
+        # pool switch and prev-issue injection) and the global bound advances.
+        iteration = flow.state.increment_fix_iteration(
+            fix_context={
+                "trigger_step_id": adjudicate_step.step_id,
+                "trigger_step_type": StepType.ADJUDICATE.value,
+                "reason": "adjudication_reflow",
+            }
+        )
+
+        inputs = self._build_step_inputs(flow, StepType.SELF_CHECK)
+        self_check_step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+        flow.state.add_step(self_check_step)
+        flow.state.current_step_id = self_check_step.step_id
+        flow.state.current_step_index = sc_index
+
+        self.persistence.save_flow(flow)
+
+        print(f"\n{'='*60}")
+        print("♻️  ADJUDICATION LANDED: RE-RUNNING SELF_CHECK (pass #1)")
+        print(f"{'='*60}")
+        print(f"Fix iteration: {iteration}")
+        print("Skipped: IMPLEMENT + TEST (ruling changed spec, not code)")
+        if adjudicate_step.outputs.get("fix_instructions_superseded"):
+            print("Superseded: pending fix_instructions dropped")
+        print(f"{'='*60}\n")
+
+        return self_check_step
 
     def _get_max_fix_iterations(self) -> int:
         """Get the maximum number of fix iterations allowed.

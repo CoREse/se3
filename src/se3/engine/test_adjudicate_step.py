@@ -281,6 +281,68 @@ def test_effective_task_groups_prefers_prior_adjudication(tmp_path):
     assert groups[0]["name"] == "gen1"
 
 
+def test_handler_threads_revision_feedback_into_prompt(tmp_path):
+    """A confirmation-门 rejection re-runs ADJUDICATE with the reviewer's
+    feedback; the handler must surface it in the ruling prompt so the re-ruling
+    can address the objection (group G6, task 2 revision回流)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(
+        flow,
+        fix_instructions="fix it",
+        is_revision=True,
+        revision_feedback="the rewrite dropped a real requirement",
+    )
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None; keep the requirement.",
+        "adjudication_rationale": "restore the dropped requirement",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    captured = {}
+
+    class _Caller:
+        def __init__(self, *a, **k):
+            pass
+
+        def call(self, *a, **k):
+            captured["prompt"] = k.get("prompt", a[0] if a else "")
+            return json.dumps(payload)
+
+    with patch.object(adjmod, "LLMCaller", _Caller):
+        status = adjmod.adjudicate_handler(step, flow)
+
+    assert status == StepStatus.COMPLETED
+    assert "the rewrite dropped a real requirement" in captured["prompt"]
+    assert "rejected your previous ruling" in captured["prompt"].lower()
+
+
+def test_handler_ignores_revision_feedback_when_not_revision(tmp_path):
+    """Without ``is_revision`` the feedback section is absent (the normal path
+    that all other handler tests exercise stays unchanged)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow, fix_instructions="fix it", revision_feedback="stray")
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    captured = {}
+
+    class _Caller:
+        def __init__(self, *a, **k):
+            pass
+
+        def call(self, *a, **k):
+            captured["prompt"] = k.get("prompt", a[0] if a else "")
+            return json.dumps(payload)
+
+    with patch.object(adjmod, "LLMCaller", _Caller):
+        adjmod.adjudicate_handler(step, flow)
+
+    assert "rejected your previous ruling" not in captured["prompt"].lower()
+
+
 def test_handler_fails_gracefully_on_unparseable_llm(tmp_path):
     flow = _flow_with_ledger(tmp_path)
     step = _adj_step(flow)

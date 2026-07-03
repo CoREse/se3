@@ -413,6 +413,18 @@ def adjudicate_handler(step: Step, flow: FlowInstance) -> StepStatus:
         project_root,
     )
 
+    # When the confirmation门 rejected a prior ruling, the reviewer's feedback is
+    # threaded back here (via the shared _transition_to_revision path) so the
+    # re-ruling can address the objection rather than re-emit the same override.
+    revision_feedback = step.inputs.get("revision_feedback")
+    if step.inputs.get("is_revision") and revision_feedback:
+        prompt += (
+            "\n\n## Reviewer rejected your previous ruling — revise accordingly\n"
+            "A reviewer declined the ruling above. Address this feedback and "
+            "emit a corrected minimal override patch:\n"
+            f"{revision_feedback}\n"
+        )
+
     logger.info(
         "Running adjudication (flow %s): %d candidate(s), reasons=%s",
         flow.flow_id, len(candidates), trigger_reasons or "periodic",
