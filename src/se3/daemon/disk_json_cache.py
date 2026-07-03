@@ -1,44 +1,52 @@
-I need to see what the already-merged callers expect from this module to pick the right resolution. Let me inspect the codebase.Both callers use `read_engine_header` and `read_json_cached` — both versions provide these. Now let me check which internal parse seam the tests patch.The staged/merged test files (`test_issue_209_push_starvation.py`, `test_issue209_live_append_regression.py`, `test_daemon_history_readpath_cache.py`) all patch `_parse_json` — the G3 seam. Let me confirm the other test's status and check `history.py`'s expectations more closely.`test_daemon_readpath_cache.py` (from G2, committed) patches `_json_loads`, while three other tests patch `_parse_json`. Both test files are tracked. I need the resolved file to satisfy both. Let me read the G2 test in detail.This is now clear. The resolution must be the **G3 version**:
+I'll inspect the actual merged callers and test files to determine which version's API the rest of the tree expects, rather than trusting the embedded narrative.History.py production code requires the `parse=` kwarg, so I need to see the full picture. Let me read the conflicted regions and the key definitions.Key finding: history.py's G7 side calls `read_engine_header(path, parse=_parse_engine_json)` (needs the `parse=` kwarg), while the new staged acceptance test `test_issue243_disk_json_cache.py` patches `_parse_json_file` — both are G7 signatures. Let me verify what G7 vs HEAD contain for the seam and the old #209 tests, decisively.Critical insight: `_read_engine_cached` (the only `parse=` caller) is never actually invoked — all hot-path call sites use `read_engine_header(path)` positionally. And the three committed `#209` tests (HEAD only, not on G7) patch `_parse_json`, while the new staged acceptance test patches `_parse_json_file`. Both families run in the final tree. Let me read the exact test expectations to build a reconciling resolution.Both test families impose precise, simultaneous constraints. Decisive:
+- `test_issue243` patches `_parse_json_file(path)` and needs degraded extraction of `is_worktree_mode` **and** `worktree_branch`.
+- `test_daemon_history_readpath_cache` patches `_parse_json(raw)` (takes raw text) — a **different** seam that must also count each full parse.
 
-- The merged `history.py` and `aggregator.py` import `read_engine_header`/`read_json_cached` and their comments match G3's semantics (returns `None` on failure; caller warns).
-- The three staged/modified tests (`test_issue_209_push_starvation.py`, `test_issue209_live_append_regression.py`, `test_daemon_history_readpath_cache.py`) all patch `_parse_json` — the G3 seam.
-- The one test aligned with HEAD's `_json_loads`/`_CACHE` (`test_daemon_readpath_cache.py`, from G2) is *already broken independently* against the merged tree: its `_patch_all_parse_seams` patches `history_mod._parse_engine_json` and `history_mod._read_json`, both of which the merged `history.py` removed. It cannot pass regardless and is out of scope for this file.
+Both run in the final tree, so the module needs both seams chained (`_parse_json_file` reads then delegates to `_parse_json`). Let me confirm the third committed test's seam signature and inspect the pre-broken G2 test.I now have the complete picture. There are **three** parse-counting seams live in the merged tree that must all work simultaneously:
+- `_parse_json_file(path)` — new staged acceptance test (`test_issue243`)
+- `_parse_json(raw)` — three committed #209 tests (patch takes `raw`)
+- `_json_loads(raw)` + `_CACHE` — committed `test_daemon_readpath_cache`
 
-So I take the G3 side wholesale.
+And the degraded header must extract `worktree_branch` (test243 line 112), which only G7's richer key set has. The correct resolution is G7's structure with the three seams **chained 1:1** (`_parse_json_file` → `_parse_json` → `_json_loads`) so patching any one counts each full parse exactly once, plus `parse=` kwarg support for history.py's G7 side. Let me write it and validate.Now writing the resolved file:Now let me validate the resolution against both test families (the module's own tests can run even though sibling files `history.py` still have conflict markers):History.py still has conflict markers (a separate conflict, out of scope for this file). The package import chain fails there, so I'll validate my module's logic in isolation by loading it directly and exercising both test families' seam-patching contracts.All three seam contracts, degraded head+tail extraction (including the `worktree_branch`/`project_root` tail keys), warn-once, oversized-never-cached, and reparse-on-change pass in isolation. The resolution reconciles the entire merged tree (the `history.py` sibling conflict is out of scope for this file). Here is the fully resolved file content:
 
-Here is the fully resolved file content:
+"""Unified, thread-safe disk-JSON parse cache for the daemon control plane.
 
-```python
-"""Unified ``(path, mtime, size)``-keyed disk-JSON parse cache for the daemon.
+Every periodic daemon reader (aggregator snapshot build, history index,
+historical-root enumeration) touches the same on-disk JSON artifacts —
+``engine.json``, archived ``engine_*.json`` snapshots, per-flow ``resumable``
+snapshots, per-history ``_meta.json`` — once or more *per push tick* (~1s).
+Two failure modes fall out of parsing them naively:
 
-The daemon's control plane is a *pure reader* of the files ``se3 run`` leaves on
-disk. Its hot paths (the aggregator's per-tick ``_active_worktree_run_roots`` /
-snapshot builds and the history reader's index / historical-root enumeration)
-re-touch the SAME ``engine.json`` / archive snapshot / resumable snapshot /
-``_meta.json`` files on every ~1 s push tick. ``json.loads`` of a multi-MB
-``engine.json`` is a GIL-bound parse; repeated tick × reader it starves the
-event loop and was a root cause of the #209 WebUI freeze (the live-append frame
-never got pushed).
+* **Event-loop freeze (#243 病灶 1).** A completed worktree run can leave a
+  tens-of-MB legacy ``engine.json`` on disk. Re-``json.loads``-ing it every
+  tick pins a CPU core inside ``raw_decode`` and starves the push loop, which
+  is the root cause of the observed WebUI freeze.
+* **Executor saturation (#243 病灶 2).** Historical/archive re-enumeration
+  parses large archive snapshots (up to ~100MB) in full only to read a couple
+  of top-level keys.
 
-This module is the single seam that fixes it, superseding the earlier
+This module collapses both to a bounded cost, superseding the earlier
 content-keyed ``history._read_engine_cached`` (which still ``read_text``'d the
-whole file and held a raw copy in memory every tick). Two guarantees:
+whole file and held a raw copy in memory every tick):
 
-* **stat-keyed caching** — a parse is keyed by ``(path, mtime, size)``. When a
-  file has not changed since the last read the cached result is returned WITHOUT
-  re-reading OR re-parsing it. A completed / archived flow's file never changes
-  again, so it is parsed exactly once for the life of the process.
+* A single module-level cache keyed by ``(path, mtime, size)`` — an unchanged
+  file is neither re-read nor re-parsed. completed / archived files never
+  change again, so they are parsed exactly once for the daemon's lifetime.
+* A size guard (:data:`MAX_PARSE_BYTES`): a file above the threshold is never
+  fully parsed and its content/result is never cached (so a giant legacy file
+  cannot inflate daemon memory). The hot path instead uses
+  :func:`read_engine_header`, which extracts just the few top-level keys it
+  needs from a bounded head+tail read.
 
-* **size guard + degraded read** — a file larger than :data:`MAX_PARSE_BYTES`
-  (5 MiB) is *never* fully parsed. Instead a bounded head+tail window is read and
-  the few top-level *hot* keys the daemon actually needs (``flow_id``,
-  ``status``, ``is_worktree_mode``, ``project_root``) are scanned out of it,
-  relying on the stable ``json.dumps(..., indent=2)`` two-space top-level
-  indentation ``se3.engine.persistence`` writes. Oversized files' content and
-  results are NEVER cached (bounding memory); the bounded re-scan per tick is the
-  guardrail that keeps a 50 MB legacy ``engine.json`` from pinning a CPU. A
-  degraded read that extracts nothing usable returns ``None`` so the caller skips
-  the file (and warns once via its own dedup).
+The cache lives here (not in ``aggregator`` / ``history``) so both subsystems
+share one keyed store and one size guard, per the #243 design.
+
+Parsing routes through a small chain of patchable seams so the #209/#243
+parse-counting regression tests can bind at whichever level they target:
+:func:`_parse_json_file` (read + parse a path) delegates to :func:`_parse_json`
+(parse raw text into a dict) which delegates to :func:`_json_loads` (the
+GIL-bound ``json.loads`` itself). Each cache-miss full parse invokes all three
+exactly once, so patching any one measures the same expensive operation.
 
 Callers on the event-loop thread MUST invoke these via ``asyncio.to_thread`` —
 even the degraded read still does bounded blocking disk I/O.
@@ -51,56 +59,69 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-#: Files strictly larger than this are never fully parsed — only a bounded
-#: head+tail window is read and scanned for the hot top-level keys. 5 MiB is the
-#: decided threshold: comfortably above a healthy new-format header (KB-level)
-#: and a normal ~1 MB long-running-flow ``engine.json``, but below the pathological
-#: tens-of-MB legacy files that triggered the freeze.
+#: Files larger than this are never fully parsed nor cached. 5 MiB is the
+#: #243 decision: comfortably above any KB-scale new-format header while well
+#: below the tens-of-MB legacy engine.json / archive snapshots that caused the
+#: freeze. A new-format engine.json (header only) is always far below this, so
+#: the guard never degrades a current-format read.
 MAX_PARSE_BYTES = 5 * 1024 * 1024
 
-#: Bytes read from each end of an oversized file during a degraded read. The hot
-#: keys live at the extremes of a legacy ``engine.json``: ``flow_id`` / ``status``
-#: head the file, while ``is_worktree_mode`` / ``worktree_*`` trail the giant
-#: ``state`` blob at the tail (see ``FlowInstance.to_dict``). 128 KiB per end is
-#: generous slack for those bands while keeping the per-tick read bounded.
-HEAD_TAIL_WINDOW_BYTES = 128 * 1024
-
-#: The top-level *hot* keys a degraded read extracts. These are the only fields
-#: the daemon's periodic hot paths consult (flow identity, liveness, worktree
-#: mode, owning project root); everything else — inputs/outputs, the step table,
-#: token usage — is irrelevant to those paths and is intentionally not recovered
-#: from an oversized file.
-_HOT_KEYS: Tuple[str, ...] = ("flow_id", "status", "is_worktree_mode", "project_root")
-
-#: Precompiled per-key matchers for a top-level (exactly two-space-indented)
-#: scalar entry in an ``indent=2`` JSON object. The value is captured
-#: non-greedily up to an optional trailing comma so it decodes as a standalone
-#: JSON token. A nested key (>=4 spaces) never matches, so a ``"status"`` buried
-#: inside the ``state`` blob cannot be mistaken for the flow's top-level status.
-_HOT_KEY_PATTERNS: Dict[str, "re.Pattern[str]"] = {
-    key: re.compile(r'(?m)^  "' + re.escape(key) + r'":[ \t]+(.+?),?[ \t]*$')
-    for key in _HOT_KEYS
-}
-
-# Cache: path-string -> ((mtime, size), parsed-or-None). Module-level and
-# thread-safe so every reader instance and every executor thread shares one
-# parse per actual file change.
+#: (path) -> (mtime, size, parsed dict or None when the file was unparseable).
+#: Only entries for at-or-under-guard files are ever stored.
+_CACHE: Dict[str, Tuple[float, int, Optional[dict]]] = {}
 _CACHE_LOCK = threading.Lock()
-_cache: Dict[str, Tuple[Tuple[float, int], Optional[Dict[str, Any]]]] = {}
+
+#: Paths already warned about (degraded extraction failure), so a persistently
+#: broken oversized file warns once rather than every tick.
+_WARNED: set = set()
+_WARNED_LOCK = threading.Lock()
+
+#: Bounded head/tail window for degraded oversized-file header extraction.
+#: The top-level identity keys of an ``indent=2`` engine.json live at the very
+#: start of the file (``flow_id`` / ``status`` / ``task_description``) or at the
+#: very end, after the giant ``state`` object (``is_worktree_mode`` and the
+#: ``worktree_*`` fields). 128 KiB each side comfortably covers both bands.
+_DEGRADED_WINDOW = 128 * 1024
+
+#: Top-level string keys the daemon hot path needs from any engine snapshot.
+_STR_HEADER_KEYS = (
+    "flow_id",
+    "status",
+    "task_description",
+    "task_type",
+    "project_root",
+    "updated_at",
+    "worktree_branch",
+    "worktree_path",
+    "worktree_original_branch",
+)
+
+#: Top-level boolean keys the daemon hot path needs.
+_BOOL_HEADER_KEYS = ("is_worktree_mode", "waiting_for_lock")
 
 
 def clear_cache() -> None:
-    """Drop the entire parse cache. For tests / explicit invalidation only."""
+    """Drop all cached parses (used by tests for isolation)."""
     with _CACHE_LOCK:
-        _cache.clear()
+        _CACHE.clear()
+    with _WARNED_LOCK:
+        _WARNED.clear()
+
+
+def _warn_once(path: Path, message: str) -> None:
+    key = str(path)
+    with _WARNED_LOCK:
+        if key in _WARNED:
+            return
+        _WARNED.add(key)
+    logger.warning(message)
 
 
 def _safe_stat(path: Path) -> Optional[Tuple[float, int]]:
-    """Return *path*'s ``(mtime, size)``, or ``None`` when it is unreadable."""
     try:
         st = path.stat()
     except OSError:
@@ -108,24 +129,39 @@ def _safe_stat(path: Path) -> Optional[Tuple[float, int]]:
     return (st.st_mtime, st.st_size)
 
 
-def _parse_json(raw: str) -> Optional[Dict[str, Any]]:
-    """Full ``json.loads`` of a whole file's text into a dict (or ``None``).
+def _json_loads(raw: str) -> Any:
+    """Innermost GIL-bound decode seam — a thin ``json.loads`` wrapper.
 
-    This is the single GIL-bound full-parse seam the #209 fix collapses to one
-    call per actual change; the parse-counting regression tests patch exactly
-    this symbol. The bounded degraded read deliberately does NOT route through
-    here (it decodes only a handful of tiny scalar tokens), so a count on this
-    seam measures only the expensive whole-file parses.
+    Kept as a distinct module-level symbol so a parse-counting test can bind at
+    the raw-decode level; :func:`_parse_json` invokes it by module-global name,
+    so a patch here is seen by the whole parse chain.
+    """
+    return json.loads(raw)
+
+
+def _parse_json(raw: str) -> Optional[dict]:
+    """Parse whole-file JSON *text* into a dict (or ``None``).
+
+    The GIL-bound full-parse seam the #209 fix collapses to one call per actual
+    content change; the regression tests patch it to count active-engine.json
+    parses. Routes the decode through :func:`_json_loads` (patchable) and only
+    accepts a top-level object.
     """
     try:
-        data = json.loads(raw)
+        data = _json_loads(raw)
     except (ValueError, TypeError):
         return None
     return data if isinstance(data, dict) else None
 
 
-def _load_and_parse(path: Path) -> Optional[Dict[str, Any]]:
-    """Read *path*'s whole text and full-parse it (both may fail → ``None``)."""
+def _parse_json_file(path: Path) -> Optional[dict]:
+    """Read + parse a file into a dict (or ``None``).
+
+    The outer parse seam the #243 fix collapses to one call per actual content
+    change; the regression tests patch it to count full-file parses. Reads the
+    text (both read and decode failures degrade to ``None``) and delegates the
+    decode to :func:`_parse_json`.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -133,107 +169,120 @@ def _load_and_parse(path: Path) -> Optional[Dict[str, Any]]:
     return _parse_json(raw)
 
 
-def _read_head_tail(path: Path, size: int) -> Optional[str]:
-    """Read a bounded head+tail window of an oversized file as text.
+def read_json_cached(
+    path: Path, parse: Optional[Callable[[Path], Optional[dict]]] = None
+) -> Optional[dict]:
+    """Parse *path* at most once per ``(mtime, size)`` change; skip oversized.
 
-    Returns the head window concatenated with the tail window (separated by a
-    newline so a partial line truncated at either window edge can never fuse
-    into a spurious cross-window match). Because this is only ever called for a
-    file above :data:`MAX_PARSE_BYTES` the two windows never overlap. Undecodable
-    bytes are replaced rather than raising, so a window that slices a multi-byte
-    UTF-8 sequence still yields scannable text.
+    Returns the parsed dict, or ``None`` when the file is missing, unparseable,
+    or **over the size guard** (in which case the caller that needs only a few
+    top-level keys should fall back to :func:`read_engine_header`). An
+    unchanged file is neither re-read nor re-parsed; parse failures are cached
+    too, so a persistently broken small file is not re-parsed every tick.
+
+    *parse* overrides the parse seam so a caller can keep its own
+    parse-counting hook (history's ``_parse_engine_json``); the cache store is
+    still shared and keyed by ``(path, mtime, size)``.
     """
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(HEAD_TAIL_WINDOW_BYTES)
-            fh.seek(max(0, size - HEAD_TAIL_WINDOW_BYTES))
-            tail = fh.read(HEAD_TAIL_WINDOW_BYTES)
-    except OSError:
-        return None
-    return head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace")
-
-
-def _scan_hot_keys(blob: str) -> Dict[str, Any]:
-    """Extract the top-level hot keys present in an ``indent=2`` text *blob*.
-
-    Only keys whose value decodes as a standalone JSON scalar are included; a
-    key absent from the scanned windows (or one whose captured token fails to
-    decode) is simply omitted. Returns a possibly-empty dict — the caller treats
-    empty as a degraded-extraction failure.
-    """
-    out: Dict[str, Any] = {}
-    for key, pattern in _HOT_KEY_PATTERNS.items():
-        m = pattern.search(blob)
-        if not m:
-            continue
-        try:
-            out[key] = json.loads(m.group(1))
-        except ValueError:
-            continue
-    return out
-
-
-def _degraded_header(path: Path, size: int) -> Optional[Dict[str, Any]]:
-    """Bounded head+tail extraction of the hot keys from an oversized file.
-
-    Never full-parses and never caches (guarding memory against a 50 MB file).
-    Returns the extracted-keys dict, or ``None`` when the window is unreadable
-    or yields no usable key so the caller skips (and warns once about) the file.
-    """
-    blob = _read_head_tail(path, size)
-    if blob is None:
-        return None
-    header = _scan_hot_keys(blob)
-    return header or None
-
-
-def read_json_cached(path: Path) -> Optional[Dict[str, Any]]:
-    """Return the parsed JSON object at *path*, cached by ``(path, mtime, size)``.
-
-    An unchanged file is served from the cache with neither a re-read nor a
-    re-parse. A file over :data:`MAX_PARSE_BYTES` is degraded to a bounded
-    head+tail hot-key extraction (never cached). Returns ``None`` on any read /
-    parse / extraction failure.
-
-    Used for arbitrary small daemon JSON (e.g. ``_meta.json``); for engine-shaped
-    state files prefer the intent-named :func:`read_engine_header`.
-    """
-    return _read_cached(path)
-
-
-def read_engine_header(path: Path) -> Optional[Dict[str, Any]]:
-    """Return the header of an ``engine.json`` / archive / resumable snapshot.
-
-    A new-format engine file is a KB-level header, so the full parse *is* the
-    header; a small legacy file is parsed in full and its hot keys read off the
-    resulting dict. Either way the result is cached by ``(path, mtime, size)`` and
-    parsed at most once per change. An oversized legacy file is degraded to a
-    bounded head+tail hot-key extraction (``flow_id`` / ``status`` /
-    ``is_worktree_mode`` / ``project_root``) so an active worktree run with a
-    giant legacy ``engine.json`` stays visible in the WebUI without a full parse.
-    Returns ``None`` on failure so the caller skips the file.
-    """
-    return _read_cached(path)
-
-
-def _read_cached(path: Path) -> Optional[Dict[str, Any]]:
-    """Core stat-keyed read shared by the public readers (see their docstrings)."""
     stat = _safe_stat(path)
     if stat is None:
         return None
     mtime, size = stat
+    # Oversized files are never parsed nor cached: parsing would pin a core and
+    # caching would pin the multi-MB result in daemon memory.
+    if size > MAX_PARSE_BYTES:
+        return None
+
     key = str(path)
     with _CACHE_LOCK:
-        entry = _cache.get(key)
-        if entry is not None and entry[0] == (mtime, size):
-            return entry[1]
-    # Oversized: bounded degraded read, never cached (memory guard). A completed
-    # legacy file is stat-stable, so the per-tick cost is a bounded head+tail
-    # re-read, not a tens-of-MB re-parse.
-    if size > MAX_PARSE_BYTES:
-        return _degraded_header(path, size)
-    parsed = _load_and_parse(path)
+        cached = _CACHE.get(key)
+        if cached is not None and cached[0] == mtime and cached[1] == size:
+            return cached[2]
+
+    parser = parse or _parse_json_file
+    parsed = parser(path)
+
     with _CACHE_LOCK:
-        _cache[key] = ((mtime, size), parsed)
+        _CACHE[key] = (mtime, size, parsed)
     return parsed
-```
+
+
+def read_engine_header(
+    path: Path, parse: Optional[Callable[[Path], Optional[dict]]] = None
+) -> Optional[dict]:
+    """Return the small top-level header of an engine.json / snapshot file.
+
+    The daemon hot path only ever needs a handful of top-level keys
+    (``flow_id`` / ``status`` / ``is_worktree_mode`` / ``project_root`` and a
+    few decorative fields). This returns exactly that, cheaply, for both
+    formats:
+
+    * **At/under the guard** — a full cached parse (new-format headers are KB
+      and legacy small files parse once); the whole dict is returned, so
+      callers that also want ``state`` (progress) keep working unchanged.
+    * **Over the guard** — a bounded head+tail read scans for the top-level
+      keys directly. The oversized body is never fully parsed nor cached, so a
+      giant legacy engine.json belonging to a still-active worktree run stays
+      *visible* in the WebUI without ever freezing the loop. Degraded
+      extraction that cannot even find ``flow_id`` returns ``None`` and
+      warns once.
+    """
+    stat = _safe_stat(path)
+    if stat is None:
+        return None
+    _mtime, size = stat
+    if size <= MAX_PARSE_BYTES:
+        return read_json_cached(path, parse=parse)
+    return _degraded_header(path, size)
+
+
+def _degraded_header(path: Path, size: int) -> Optional[dict]:
+    """Extract top-level header keys from an oversized ``indent=2`` JSON file.
+
+    Reads only a bounded head and tail window (never the whole file) and
+    regex-scans for the two-space-indented top-level keys the daemon needs.
+    Relies on ``persistence.py`` writing engine.json via
+    ``json.dumps(..., indent=2)``, which gives every top-level key a stable
+    ``\n  "key": value`` shape. Token decoding uses ``json.loads`` directly
+    (never the counted parse seams), so a degraded read never registers as a
+    full parse.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_DEGRADED_WINDOW)
+            if size > _DEGRADED_WINDOW * 2:
+                fh.seek(size - _DEGRADED_WINDOW)
+                tail = fh.read(_DEGRADED_WINDOW)
+            else:
+                # Small overlap region: head already reached (or passed) the
+                # tail band, so re-reading from the window boundary avoids
+                # double-counting while still covering the file's end.
+                tail = fh.read()
+    except OSError:
+        return None
+
+    # Join with a newline so a key sitting exactly at the head boundary still
+    # has the ``\n  "`` anchor the regexes below require.
+    text = head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace")
+
+    result: Dict[str, Any] = {}
+    for key in _STR_HEADER_KEYS:
+        m = re.search(r'\n  "' + re.escape(key) + r'":\s*"((?:[^"\\]|\\.)*)"', text)
+        if m is not None:
+            try:
+                result[key] = json.loads('"' + m.group(1) + '"')
+            except ValueError:
+                result[key] = m.group(1)
+    for key in _BOOL_HEADER_KEYS:
+        m = re.search(r'\n  "' + re.escape(key) + r'":\s*(true|false)', text)
+        if m is not None:
+            result[key] = m.group(1) == "true"
+
+    if "flow_id" not in result:
+        _warn_once(
+            path,
+            "disk_json_cache: degraded header extraction failed for oversized "
+            f"file {path} (no flow_id found in head+tail window); skipping",
+        )
+        return None
+    return result

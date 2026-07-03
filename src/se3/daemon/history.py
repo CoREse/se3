@@ -1,3 +1,4 @@
+I'll investigate the actual codebase state to resolve the functional conflict correctly (whether `_parse_engine_json`/`_read_engine_cached` should be kept).All five conflicts are pure comments except the one at 1710–1757, which is the functional one: HEAD removes the `_parse_engine_json`/`_read_engine_cached` seams, G7 keeps them. Let me confirm which side the active tests require.Confirmed. Only the stale G2 test binds `history._parse_engine_json`/`_read_json` — and `_read_json` exists in neither side, so it's broken regardless (superseded by G3's `test_daemon_history_readpath_cache.py`, which patches `djc._parse_json`). All active tests patch `disk_json_cache._parse_json`, which works with HEAD's seam-free version, and the task explicitly says to *replace* `_read_engine_cached`. HEAD side is correct for the functional conflict; the rest are cosmetic comments. Resolving all conflicts to HEAD while preserving clean-merge regions:The file resolved cleanly and parses. Let me read the remainder to produce the full output.```python
 """Historical-session reading for the SE3 daemon.
 
 :class:`DaemonHistoryReader` enumerates the ``se3 history`` artifacts of every
@@ -1997,3 +1998,4 @@ def _extract_history_summary(flow_dir: Path) -> str:
         return str(content)
     except Exception:
         return "(no state data)"
+```
