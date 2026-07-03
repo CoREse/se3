@@ -39,6 +39,15 @@ from .token_usage import UsageTotals
 # ``State.increment_fix_iteration``.
 FIX_HISTORY_MAX_ENTRIES = 100
 
+# Marker written at the top level of a *split-format* engine.json / resumable
+# snapshot (issue #244 一期). Its presence tells every loader that the file is
+# a KB-scale header whose per-step inputs/outputs and shared context live in
+# external cold files under ``se3/state/steps/<flow_id>/``; its absence means
+# the legacy inline format (inputs/outputs/context embedded in the file). Old
+# readers ignore the unknown key, and old files simply lack it, so the marker
+# is the sole, backward-compatible format discriminator.
+ENGINE_FORMAT_SPLIT = "split"
+
 
 class StepType(Enum):
     """Types of workflow steps in the step pool."""
@@ -128,9 +137,44 @@ class Step:
             "error_details": self.error_details,
         }
 
+    def to_header_dict(self) -> Dict[str, Any]:
+        """Serialize the step's *small* status fields for the split-format header.
+
+        Identical to :meth:`to_dict` minus the two potentially large fields —
+        ``inputs`` and ``outputs`` — which are written to the step's external
+        cold file (``se3/state/steps/<flow_id>/<step_id>.json``) instead. The
+        step's status table (id/type/status/timestamps/retries/model/artifacts/
+        error) stays KB-scale and remains in engine.json so the daemon hot path
+        and progress rendering never touch cold files. ``artifacts`` are kept
+        here deliberately: they are a short list of path strings, not payload.
+        """
+        return {
+            "step_id": self.step_id,
+            "step_type": self.step_type.value,
+            "status": self.status.value,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "model": self.model,
+            "fallback_model": self.fallback_model,
+            "artifacts": [str(p) for p in self.artifacts],
+            "error_message": self.error_message,
+            "error_details": self.error_details,
+        }
+
+    def cold_payload(self) -> Dict[str, Any]:
+        """Return the step's cold data (inputs/outputs) for its external file."""
+        return {"inputs": self.inputs, "outputs": self.outputs}
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Step:
-        """Deserialize step from dictionary."""
+        """Deserialize step from dictionary.
+
+        Tolerant of the split-format header where ``inputs``/``outputs`` are
+        absent (they live in an external cold file, hydrated separately by the
+        PersistenceManager after this returns): both default to ``{}``.
+        """
         return cls(
             step_type=StepType(data["step_type"]),
             status=StepStatus(data["status"]),
@@ -365,9 +409,64 @@ class State:
             "session_token_usage": self.session_token_usage.to_dict(),
         }
 
+    # Key under which the shared ``context`` and ``fix_history`` are stored in
+    # the per-flow cold meta file (steps/<flow_id>/_context.json). Both can
+    # embed large payloads (spec_content, test_results, fix_context snapshots),
+    # so they are externalized to keep the engine.json header KB-scale.
+    COLD_META_CONTEXT_KEY = "context"
+    COLD_META_FIX_HISTORY_KEY = "fix_history"
+
+    def to_header_dict(self) -> Dict[str, Any]:
+        """Serialize the *small* state fields for the split-format header.
+
+        Like :meth:`to_dict` but with the two unbounded fields externalized to
+        the per-flow cold meta file:
+
+        * ``steps`` carry only their status table (:meth:`Step.to_header_dict`),
+          not inputs/outputs;
+        * ``context`` is dropped from the header (an empty ``{}`` is emitted so
+          an old reader still sees the key) and written to
+          ``steps/<flow_id>/_context.json`` — it can hold copied spec_content /
+          test_results;
+        * ``fix_history`` is emitted empty for the same reason (a stuck fix loop
+          embeds large ``fix_context`` blobs per entry) and stored alongside the
+          context in the cold meta file.
+
+        Everything else (selected_steps / step_history / review_iterations /
+        counters / baseline_failures / session_token_usage) is bounded and stays
+        in the header so the daemon reads only KB.
+        """
+        return {
+            "current_step_id": self.current_step_id,
+            "step_history": self.step_history,
+            "steps": {sid: step.to_header_dict() for sid, step in self.steps.items()},
+            "context": {},
+            "selected_steps": [s.value for s in self.selected_steps],
+            "current_step_index": self.current_step_index,
+            "review_iterations": self.review_iterations,
+            "fix_iterations": self.fix_iterations,
+            "fix_history": [],
+            "baseline_failures": self.baseline_failures,
+            "session_token_usage": self.session_token_usage.to_dict(),
+        }
+
+    def cold_meta(self) -> Dict[str, Any]:
+        """Return the state's cold shared data (context + fix_history)."""
+        return {
+            self.COLD_META_CONTEXT_KEY: self.context,
+            self.COLD_META_FIX_HISTORY_KEY: self.fix_history,
+        }
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> State:
-        """Deserialize state from dictionary."""
+        """Deserialize state from dictionary.
+
+        Tolerant of the split-format header: ``context`` reads as ``{}`` and
+        ``fix_history`` as ``[]`` (both live in the external cold meta file and
+        are hydrated by the PersistenceManager after this returns); per-step
+        ``inputs``/``outputs`` are absent and default empty in
+        :meth:`Step.from_dict`.
+        """
         # Retroactively apply the sliding-window cap: an engine.json written
         # by an older build (or a build with a higher cap) may carry more than
         # ``FIX_HISTORY_MAX_ENTRIES`` entries, and without clamping the
@@ -492,6 +591,23 @@ class FlowInstance:
         # round-tripping a True value for a synchronous run that is queued.
         if self.waiting_for_lock:
             data["waiting_for_lock"] = True
+        return data
+
+    def to_header_dict(self) -> Dict[str, Any]:
+        """Serialize the flow to a split-format KB-scale header (issue #244).
+
+        Identical top-level identity/status fields to :meth:`to_dict` — so the
+        daemon hot path reads ``flow_id`` / ``status`` / ``is_worktree_mode`` /
+        ``task_description`` etc. without touching any cold file — but the
+        embedded ``state`` is serialized via :meth:`State.to_header_dict`
+        (per-step inputs/outputs and shared context/fix_history externalized).
+        The :data:`ENGINE_FORMAT_SPLIT` marker flags the file so loaders know to
+        hydrate the cold files. Written by ``PersistenceManager`` together with
+        the per-step and context cold files.
+        """
+        data = self.to_dict()
+        data["state"] = self.state.to_header_dict()
+        data["engine_format"] = ENGINE_FORMAT_SPLIT
         return data
 
     @classmethod

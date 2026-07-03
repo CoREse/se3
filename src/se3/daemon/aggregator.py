@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from . import protocol
+from .disk_json_cache import read_engine_header
 from .history import enumerate_historical_project_roots
 from .supervisor import is_worktree_copy_root, resolve_worktree_main_root
 
@@ -617,7 +618,11 @@ class DaemonAggregator:
                         continue
                 except OSError:  # pragma: no cover - racy unlink
                     continue
-                data = _read_json(entry / "se3" / "state" / "engine.json")
+                # Header-only, (path,mtime,size)-cached, size-guarded read: a
+                # completed worktree's tens-of-MB legacy engine.json is scanned
+                # head+tail for just flow_id / is_worktree_mode rather than
+                # re-parsed whole every tick — the #243 病灶 1 event-loop freeze.
+                data = read_engine_header(entry / "se3" / "state" / "engine.json")
                 if not isinstance(data, dict):
                     continue
                 if not data.get("flow_id") or not data.get("is_worktree_mode"):
@@ -758,7 +763,11 @@ class DaemonAggregator:
         """
         state_dir = root / "se3" / "state"
         engine_json = state_dir / "engine.json"
-        data = _read_json(engine_json)
+        # Header read: a new-format engine.json is KB and fully parsed (cached),
+        # so ``state`` (progress / current step) is present; an oversized legacy
+        # engine.json degrades to identity-only (flow_id/status), which the
+        # progress fallbacks below handle gracefully.
+        data = read_engine_header(engine_json)
 
         pending_calls = self._enumerate_calls(root)
         log_count = _count_dir(root / "se3" / "logs")
@@ -854,7 +863,7 @@ class DaemonAggregator:
             return []
         results: List[FlowSnapshot] = []
         for snap_file in snapshot_files:
-            data = _read_json(snap_file)
+            data = read_engine_header(snap_file)
             if not isinstance(data, dict):
                 continue
             flow_id = data.get("flow_id")
