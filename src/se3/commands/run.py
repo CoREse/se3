@@ -138,13 +138,23 @@ def _interpret_confirm_answer(text: str) -> tuple[bool, Optional[str]]:
 
     # Match the first word / whole-string against known approval tokens so a
     # longer note like "approve, looks good" still counts as approval.
+    # NOTE: the web frontend keeps a mirror of these token sets to decide
+    # locally whether a free-text reply is an approval, a rejection, or an
+    # unrecognized note needing a "this will be treated as a revision request"
+    # confirmation (see G3). Keep the two lists in sync when editing either.
     approve_tokens = {
         "approve", "approved", "yes", "y", "ok", "okay", "lgtm",
         "accept", "accepted", "continue", "proceed", "pass", "skip",
+        # Chinese approval words — the web console is operated in Chinese, so
+        # an operator's first instinct is "同意"/"通过"/"批准" rather than an
+        # English token. Without these they fell through to revision-request.
+        "同意", "通过", "批准", "确认", "允许", "接受",
     }
     reject_tokens = {
         "no", "n", "reject", "rejected", "deny", "denied",
         "request changes", "changes", "revise", "revision",
+        # Chinese rejection words — mirror of the approval additions above.
+        "驳回", "拒绝", "打回", "否决", "不通过", "重做", "重拟",
     }
 
     lowered = stripped.lower()

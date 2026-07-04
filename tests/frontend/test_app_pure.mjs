@@ -3746,6 +3746,22 @@ mobileResponsiveMod.registerMobileResponsiveTests({ app, check, findOne, findAll
 const replySendErrMod = await import("./reply_send_error_handling.test.mjs");
 await replySendErrMod.registerReplySendErrorHandlingTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the G3 CONFIRM approval-gate chip tests: kind=='confirm' renders the
+// 批准/打回 buttons + note textarea, both button clicks and the recognized
+// free-text words POST a structured {response:{approved,feedback}} decision, an
+// unrecognized note ("1") is only sent after an explicit second-guess, and a
+// legacy kind-less confirm degrades to the plain free-text box.
+const confirmChipMod = await import("./confirm_chip.test.mjs");
+await confirmChipMod.registerConfirmChipTests({ app, check, checkAsync, findOne, findAll });
+
+// Register the G4 ADJUDICATE approval-review tests: when a confirm chip reviews
+// an adjudicate ruling, renderAdjudicateReview surfaces the adjudication_rationale
+// panel + a baseline→adjudicated_description before/after diff (reusing the shared
+// diff renderer); a non-adjudicate target renders nothing, and missing fields
+// degrade gracefully instead of throwing.
+const adjudicateReviewMod = await import("./adjudicate_review.test.mjs");
+await adjudicateReviewMod.registerAdjudicateReviewTests({ app, check, checkAsync, findOne, findAll });
+
 // Register the G3 live-append-after-respond tests (symptom A/B alignment).
 // These lock the #193 leftover "消息不显示" half: after a respond/interject the
 // daemon-pushed `mode: append` increments (re-broadcast by G1's ws.py fix) keep

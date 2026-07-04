@@ -61,15 +61,17 @@ def test_call_kind_constants_are_complete_and_distinct():
         protocol.CALL_KIND_RETRY_DECISION,
         protocol.CALL_KIND_CLI_CONFIRM,
         protocol.CALL_KIND_DISCOVERY_CONFIRM,
+        protocol.CALL_KIND_CONFIRM,
     }
-    # The five kinds are distinct string literals.
+    # The six kinds are distinct string literals.
     assert len({
         protocol.CALL_KIND_CALL,
         protocol.CALL_KIND_INTERJECTION,
         protocol.CALL_KIND_RETRY_DECISION,
         protocol.CALL_KIND_CLI_CONFIRM,
         protocol.CALL_KIND_DISCOVERY_CONFIRM,
-    }) == 5
+        protocol.CALL_KIND_CONFIRM,
+    }) == 6
 
 
 def test_decode_still_rejects_unknown_types():

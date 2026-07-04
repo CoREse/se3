@@ -204,15 +204,27 @@ def _position_fingerprints(
 # which wins over the raw original.
 
 
-def _latest_adjudicated(flow: FlowInstance, key: str) -> Any:
-    """Most recent completed ADJUDICATE step's ``key`` output, if any.
+def _latest_adjudicated_output(
+    flow: FlowInstance, key: str, exclude_step_id: Optional[str] = None
+) -> Any:
+    """Most recent completed ADJUDICATE step's non-empty ``outputs[key]``.
 
     Walks step_history in reverse so multi-generational rulings resolve to the
-    latest. The *current* step is excluded (its outputs are being written now).
+    latest. Empty/falsy values are skipped, so a later ruling that left ``key``
+    unset (e.g. it only rewrote the plan) does not veto an older generation that
+    did set it — the still-live override stays in effect.
+
+    ``exclude_step_id`` skips one ADJUDICATE step, yielding the value effective
+    *before* that ruling. The confirm gate uses it to fetch the **pre-ruling
+    baseline** (the adjudicated description just before the ruling under review)
+    so the reviewer diffs the reviewed ruling against the prior effective spec
+    rather than against the ruling's own not-yet-approved rewrite.
     """
     if not flow.state:
         return None
     for sid in reversed(flow.state.step_history):
+        if exclude_step_id is not None and sid == exclude_step_id:
+            continue
         s = flow.state.steps.get(sid)
         if (
             s
@@ -223,6 +235,16 @@ def _latest_adjudicated(flow: FlowInstance, key: str) -> Any:
             if val:
                 return val
     return None
+
+
+def _latest_adjudicated(flow: FlowInstance, key: str) -> Any:
+    """Most recent completed ADJUDICATE step's ``key`` output, if any.
+
+    Thin wrapper over :func:`_latest_adjudicated_output` with no exclusion; the
+    *current* step is naturally excluded because its outputs are still empty
+    while being written.
+    """
+    return _latest_adjudicated_output(flow, key)
 
 
 def _effective_task_description(step: Step, flow: FlowInstance) -> str:

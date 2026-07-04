@@ -354,15 +354,19 @@
              title="本次 flow 已消耗的 token 与成本合计"></div>
         <form id="flow-reply-form" class="flow-reply">
           <div id="flow-interventions" class="flow-interventions"></div>
+          <!-- Both the context text and the textarea placeholder are static
+               fallbacks; updateReplyBox() rewrites them per selected chip
+               (a confirm gate lists 批准/打回/approve/reject and its
+               "will be treated as a revision request" fallback wording). -->
           <div id="flow-reply-context" class="flow-reply-context">
-            No pending interaction right now.
+            目前没有待处理的交互项。
           </div>
           <div class="flow-reply-row">
             <button type="button" id="flow-interject-btn"
                     class="reply-icon-btn interject hidden"
                     title="Interject into this running flow">&#9998;</button>
             <textarea id="flow-reply-input" rows="6"
-                      placeholder="No pending interaction&hellip;"></textarea>
+                      placeholder="暂无待处理项&hellip;"></textarea>
             <button type="submit" id="flow-reply-submit" disabled>Send</button>
           </div>
         </form>
