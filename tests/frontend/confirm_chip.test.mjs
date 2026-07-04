@@ -243,6 +243,35 @@ export async function registerConfirmChipTests(ctx) {
     restoreGlobals();
   });
 
+  // ---- double-send guard: a second click while in flight sends nothing -----
+  await checkAsync("G3 a second confirm click while the first is in flight is ignored (one POST)", async () => {
+    // Keep the first send in flight: fetch never resolves, so pendingSendSettleKey
+    // stays set and the re-entry guard must swallow every subsequent decision.
+    fetchCalls = 0;
+    lastReq = null;
+    globalThis.setTimeout = () => 0;
+    globalThis.fetch = (input, init) => {
+      fetchCalls += 1;
+      lastReq = { input: String(input), init: init || {}, body: init && init.body != null ? JSON.parse(init.body) : null };
+      return new Promise(() => {}); // never settles — the daemon has not yet consumed the call
+    };
+    const { ctx } = renderConfirmChip({ callId: "cfDbl" });
+    // First click approves; second click (double-click / 批准→打回 flip) must be dropped.
+    findOne(ctx, "flow-reply-confirm-approve").dispatch("click");
+    await flush();
+    findOne(ctx, "flow-reply-confirm-reject").dispatch("click");
+    await flush();
+    // A direct call is guarded too — belt and suspenders for the button-less path.
+    await app.sendConfirmDecision("flow-x", app.state.flowInterventions[0], false, "late flip");
+    await flush();
+    assert.equal(fetchCalls, 1, "only the first decision is POSTed; the guard drops the rest");
+    assert.deepEqual(lastReq.body, {
+      response: { approved: true, feedback: null },
+      call_id: "cfDbl",
+    }, "the persisted decision is the operator's FIRST explicit choice, not the last click");
+    restoreGlobals();
+  });
+
   // ---- pure token mirror stays in lockstep with run.py ---------------------
   check("G3 interpretConfirmAnswer mirrors run.py: EN + ZH approve/reject, unknown falls through", () => {
     for (const w of ["approve", "yes", "ok", "同意", "通过", "批准", "确认"]) {

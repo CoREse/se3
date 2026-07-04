@@ -3298,6 +3298,13 @@ function updateReplyBox(flow) {
       e.preventDefault();
       sendConfirmDecision(state.selectedFlowId, target, false, note.value);
     });
+    // Mirror the docked Send button: while a decision is in flight the gate key
+    // is set, so render the pair disabled to match sendConfirmDecision's
+    // re-entry guard — the buttons look locked instead of clickable-but-inert.
+    if (state.pendingSendSettleKey) {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+    }
     btnRow.append(approveBtn, rejectBtn);
     decide.append(note, btnRow);
     ctx.appendChild(decide);
@@ -3508,6 +3515,16 @@ function armPendingSend(target) {
 // optimistic echo behave identically for a button click and a typed reply.
 async function sendConfirmDecision(flowId, target, approved, feedback) {
   if (!flowId || !target) return;
+  // Re-entry guard: the 批准/打回 buttons live in the context panel, separate
+  // from #flow-reply-submit, so disabling Send does NOT stop a second click on
+  // them. Without this, a double-click — or 批准 then 打回 before the daemon
+  // consumes the call — would POST several structured responses for the SAME
+  // call_id; the daemon overwrites the one <call_id>.response.json each time, so
+  // the persisted decision becomes whichever request lands last rather than the
+  // operator's first explicit choice. Ignore any send while one is already in
+  // flight (pendingSendSettleKey stays set until the ws delta or 8s fallback
+  // settles it), so exactly one structured decision lands per click.
+  if (state.pendingSendSettleKey) return;
   const submit = $("flow-reply-submit");
   submit.disabled = true;
   armPendingSend(target);

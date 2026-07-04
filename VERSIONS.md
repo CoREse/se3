@@ -80,6 +80,15 @@
 
 
 
+
+## 11.9.0 - 2026-07-04
+
+- Add approve/reject buttons with an optional note box to confirm chips in the webui, replying with a structured {approved, feedback} payload instead of only free text
+- Render an adjudicate review panel on confirm chips showing the adjudication rationale and the adjudicated-description diff against the pre-adjudication baseline
+- Enrich confirm-call data contract with a dedicated CALL_KIND_CONFIRM kind and human-readable prompt so the frontend can render structured controls
+- Expand free-text answer interpretation to recognize common Chinese approval/rejection words (同意/通过/批准/驳回/拒绝/打回)
+- Add a second-confirmation prompt and placeholder hint for free-text replies that would be treated as a revision request, eliminating silent misjudgment of inputs like "1"
+- Keep the free-text reply channel fully backward compatible alongside the new structured payload
 ## 11.8.1 - 2026-07-04
 
 - Fix daemon/webui-initiated flows hanging at human confirm gates (plan confirm, adjudication approval): CONFIRM pauses now set engine.json status to PAUSED and exit 0 instead of exiting 130 with status left at 'running'
