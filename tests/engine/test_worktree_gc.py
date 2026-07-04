@@ -217,15 +217,49 @@ class TestGcMergedBranch:
         # Branch deleted, worktree removed.
         assert not _branch_exists(tmp_path, "feat-merged")
         assert not wt.exists()
-        # Archive landed under se3/worktrees/.archive/<slug>-<epoch>.
+        # Archive landed under se3/worktrees/.archive/worktree_<name>-<epoch>
+        # (named from the RUN name, not the branch slug).
         _name, archive_path, _bytes = report.archived[0]
         assert archive_path is not None
         assert archive_path.parent == tmp_path / "se3" / "worktrees" / ".archive"
-        assert re.fullmatch(r"feat-merged-\d+", archive_path.name)
+        assert re.fullmatch(r"worktree_merged-\d+", archive_path.name)
         assert archive_path.is_dir()
         # Terminal state promoted into the main archive.
         assert (tmp_path / "se3" / "state" / "archive"
                 / "engine_flow-merged.json").exists()
+
+    def test_deletes_merged_branch_when_head_on_unrelated_branch(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression: the branch is provably merged into its RECORDED original
+        # branch (base), but GC runs while the main checkout sits on an
+        # unrelated branch that does NOT contain it. ``git branch -d`` evaluates
+        # its fully-merged gate against the current checkout/upstream (not the
+        # recorded base), so it would refuse the delete and the merged branch
+        # would be wrongly retained+warned. GC must still delete it because our
+        # own ancestor check against the correct base already proved the merge.
+        base = _init_repo(tmp_path)
+        # Capture the initial commit BEFORE feat-merged exists so ``release`` can
+        # branch from it — a release that merely branched off ``base`` after the
+        # helper's fast-forward merge would itself contain feat-merged and thus
+        # not reproduce the ``git branch -d`` refusal.
+        initial = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        wt = _make_worktree_run(
+            tmp_path, name="merged", branch="feat-merged", base=base,
+            merged=True, age_seconds=48 * 3600,
+        )
+        # Move HEAD onto a divergent branch that does NOT contain feat-merged.
+        _git(tmp_path, "checkout", "-b", "release", initial)
+        (tmp_path / "release.txt").write_text("release only\n")
+        _git(tmp_path, "add", "release.txt")
+        _git(tmp_path, "commit", "-m", "release-only work")
+
+        report = gc_worktree_runs(tmp_path, max_age_seconds=24 * 3600)
+
+        assert [n for n, _p, _b in report.archived] == ["merged"]
+        assert report.retained_unmerged == []
+        assert not _branch_exists(tmp_path, "feat-merged")
+        assert not wt.exists()
 
 
 class TestGcUnmergedBranch:
@@ -246,6 +280,70 @@ class TestGcUnmergedBranch:
         assert branch == "feat-unmerged"
         assert original == base
         assert report.reclaimed_bytes > 0
+
+
+class TestGcUnresolvableBase:
+    """Merge must be proven against the recorded original branch only — never a
+    HEAD fallback. A run whose original branch is gone (or was never recorded)
+    is undecidable and MUST retain its branch even if that branch happens to be
+    an ancestor of the current HEAD.
+    """
+
+    def _rewrite_original_branch(self, wt: Path, value) -> None:
+        engine_json = wt / "se3" / "state" / "engine.json"
+        header = json.loads(engine_json.read_text())
+        if value is None:
+            header.pop("worktree_original_branch", None)
+        else:
+            header["worktree_original_branch"] = value
+        engine_json.write_text(json.dumps(header, indent=2) + "\n")
+        old = time.time() - 48 * 3600
+        os.utime(engine_json, (old, old))
+
+    def test_retains_branch_when_original_branch_missing_ref(
+        self, tmp_path: Path
+    ) -> None:
+        base = _init_repo(tmp_path)
+        # merged=True makes feat-ghost an ancestor of HEAD, so a (removed) HEAD
+        # fallback would wrongly classify it merged. The recorded original branch
+        # no longer resolves, so merge into the INTENDED base is unproven.
+        wt = _make_worktree_run(
+            tmp_path, name="ghostbase", branch="feat-ghost", base=base,
+            merged=True, age_seconds=48 * 3600,
+        )
+        self._rewrite_original_branch(wt, "deleted-original-branch")
+
+        report = gc_worktree_runs(tmp_path, max_age_seconds=24 * 3600)
+
+        assert [n for n, _p, _b in report.archived] == ["ghostbase"]
+        assert not wt.exists()
+        # Branch ref MUST survive despite being an ancestor of HEAD.
+        assert _branch_exists(tmp_path, "feat-ghost")
+        assert len(report.retained_unmerged) == 1
+        branch, original, reason = report.retained_unmerged[0]
+        assert branch == "feat-ghost"
+        assert original == "deleted-original-branch"
+        assert "no longer resolvable" in reason
+
+    def test_retains_branch_when_no_original_branch_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        base = _init_repo(tmp_path)
+        wt = _make_worktree_run(
+            tmp_path, name="nobase", branch="feat-nobase", base=base,
+            merged=True, age_seconds=48 * 3600,
+        )
+        self._rewrite_original_branch(wt, None)
+
+        report = gc_worktree_runs(tmp_path, max_age_seconds=24 * 3600)
+
+        assert [n for n, _p, _b in report.archived] == ["nobase"]
+        assert not wt.exists()
+        assert _branch_exists(tmp_path, "feat-nobase")
+        assert len(report.retained_unmerged) == 1
+        branch, _original, reason = report.retained_unmerged[0]
+        assert branch == "feat-nobase"
+        assert "no recorded original branch" in reason
 
 
 class TestGcDryRun:
@@ -295,6 +393,34 @@ class TestGcArchiveFailure:
         assert report.errors[0][0] == "archfail"
         assert "archive" in report.errors[0][1]
 
+    def test_removal_failure_not_reported_as_reclaimed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``remove_worktree`` swallows git failures (locked / permission) and
+        # only logs; simulate a removal that leaves the directory in place and
+        # assert the GC records an error rather than a phantom reclamation.
+        base = _init_repo(tmp_path)
+        wt = _make_worktree_run(
+            tmp_path, name="stuck", branch="feat-stuck", base=base,
+            merged=True, age_seconds=48 * 3600,
+        )
+
+        def _noop_remove(project_root, wt_path):
+            # Directory intentionally left in place — the leak persists.
+            return None
+
+        monkeypatch.setattr(worktree_gc, "remove_worktree", _noop_remove)
+        report = gc_worktree_runs(tmp_path, max_age_seconds=24 * 3600)
+
+        # Nothing reclaimed, error recorded, branch kept intact for a re-run.
+        assert wt.exists()
+        assert _branch_exists(tmp_path, "feat-stuck")
+        assert report.archived == []
+        assert report.reclaimed_bytes == 0
+        assert len(report.errors) == 1
+        assert report.errors[0][0] == "stuck"
+        assert "removal failed" in report.errors[0][1]
+
 
 class TestGcRunIsolation:
     def test_one_failure_does_not_abort_sweep(
@@ -312,10 +438,10 @@ class TestGcRunIsolation:
 
         real_archive = worktree_gc._archive_worktree
 
-        def _selective(project_root, branch, wt_path):
+        def _selective(project_root, branch, wt_path, **kwargs):
             if branch == "feat-bad":
                 raise OSError("boom")
-            return real_archive(project_root, branch, wt_path)
+            return real_archive(project_root, branch, wt_path, **kwargs)
 
         monkeypatch.setattr(worktree_gc, "_archive_worktree", _selective)
         report = gc_worktree_runs(tmp_path, max_age_seconds=24 * 3600)

@@ -20,11 +20,11 @@ description: 'worktree run 的清理只挂在 _finalize_worktree_merge(run.py:29
   分支"(本次 webui-discovery 就是漏网案例,pause 后 resume 完成却从未 merge 的 flow 同理,如 20260630-174542_632f6407);
 
   - gc 报告列出:归档了什么、保留了哪些未 merge 分支、腾出多少空间。'
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-07-02T10:03:28.083931'
-updated_at: '2026-07-02T10:03:28.083931'
+updated_at: '2026-07-05T02:28:51.097481'
 title: worktree 生命周期 GC:completed/failed 的 worktree run 泄漏无人清理
 priority: medium
 type: enhancement

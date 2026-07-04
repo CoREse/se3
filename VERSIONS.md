@@ -83,6 +83,15 @@
 
 
 
+
+## 11.11.0 - 2026-07-05
+
+- Add `se3 worktree gc` command that archives completed/failed worktree runs older than a threshold into se3/worktrees/.archive/ and prunes stale git worktrees
+- Reclaim disk and unblock the daemon event loop by reaping leaked worktree runs that were never merged after a pause/resume or manual merge
+- Preserve refs for unmerged branches during GC and emit an explicit warning listing completed-but-unmerged worktree branches so no work is silently lost
+- Delete branches that are already merged as part of cleanup, keeping the worktree directory tidy without risking unmerged work
+- Report each GC run: what was archived, which unmerged branches were retained, and how much space was freed
+- Run GC automatically as a low-frequency daemon tick (offloaded to a background thread) in addition to the on-demand CLI command
 ## 11.10.1 - 2026-07-04
 
 - Fix implement/fix steps silently running the wrong model: the spec-write guard no longer overrides the agent's --settings (model, permissions, effortLevel), so oclaude correctly reports claude-opus-4-8[1m] again

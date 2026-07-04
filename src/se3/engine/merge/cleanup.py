@@ -363,6 +363,8 @@ def _archive_worktree(
     project_root: Path,
     branch: str,
     wt_path: Path,
+    *,
+    archive_name: Optional[str] = None,
 ) -> Path:
     """Copy a worktree directory to ``se3/worktrees/.archive/<slug>-<ts>/``
     before it is removed by ``delete_merged_branches``.
@@ -384,9 +386,18 @@ def _archive_worktree(
     Args:
         project_root: The merge command's project root (parent of
             ``se3/worktrees/.archive/``).
-        branch: The branch whose worktree is being archived (used for
-            the slug + recorded in ``.se3-archive-meta.json``).
+        branch: The branch whose worktree is being archived (always
+            recorded in ``.se3-archive-meta.json`` as the authoritative
+            recovery pointer; also the slug source when ``archive_name``
+            is not given).
         wt_path: Absolute path to the worktree directory on disk.
+        archive_name: Optional override for the archive-directory slug.
+            When given it — not ``branch`` — names the archive dir (still
+            timestamp-suffixed). The GC safety net passes the
+            ``worktree_<run-name>`` form here so a leaked run archives under
+            the requested ``worktree_<name>-<epoch>`` convention (its branch
+            may be an opaque SHA-ish name that would make an unrecognizable
+            slug), while the branch identity is still preserved in metadata.
 
     Returns:
         Path to the resulting archive directory.
@@ -399,7 +410,7 @@ def _archive_worktree(
     archive_root = project_root / "se3" / "worktrees" / ".archive"
     archive_root.mkdir(parents=True, exist_ok=True)
 
-    slug = re.sub(r"[^A-Za-z0-9._-]", "_", branch)
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", archive_name or branch)
     ts = int(time.time())
     base = f"{slug}-{ts}"
     dest = archive_root / base

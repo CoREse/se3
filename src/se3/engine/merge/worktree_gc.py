@@ -46,7 +46,6 @@ from typing import Optional
 from ..worktree import _run_git, has_new_commits, remove_worktree
 from .cleanup import (
     _archive_worktree,
-    _is_branch_ancestor_of_head,
     _promote_completed_engine_state,
     _run_git_locale,
 )
@@ -118,54 +117,53 @@ def _branch_is_merged(
     """Decide whether *branch* is safely merged into *base* (fail-closed).
 
     Returns ``(merged, reason)``. ``merged`` is ``True`` ONLY when we can
-    positively prove the branch is contained in the base history; any
-    ambiguity — git failure, missing ref, an undecidable ``None`` from the
-    ancestor probe — yields ``False`` so an unmerged (or unknowable) branch is
-    always retained rather than deleted. This is the core safety invariant of
-    the GC: never delete a branch we cannot prove is merged.
+    positively prove the branch is contained in the recorded base's history;
+    any ambiguity — a falsy/unrecorded base, a base ref that no longer
+    resolves, a git failure — yields ``False`` so an unmerged (or unknowable)
+    branch is always retained rather than deleted. This is the core safety
+    invariant of the GC: never delete a branch we cannot prove is merged.
 
-    ``base`` defaults to ``HEAD`` when it is falsy or is not a resolvable ref
-    (the worktree's recorded original branch may have since been renamed or
-    deleted). Against ``HEAD`` the shared ``_is_branch_ancestor_of_head`` primitive
-    is used; against any other base an equivalent ``merge-base --is-ancestor``
-    probe is run through the same locale-pinned git wrapper.
+    Merge is proven ONLY against the run's own recorded original branch, never
+    against ``HEAD``. Falling back to ``HEAD`` when the base is missing or stale
+    would "prove" merge against whatever branch merely happens to be checked out
+    now — which is not the intended integration target. For a completed run
+    whose ``worktree_original_branch`` was since renamed or deleted, that
+    fallback could classify the branch as merged and delete it even though the
+    merge into its intended base was never verified. So a missing/unresolvable
+    base is treated as undecidable and the branch is retained with a reason.
     """
-    resolved_base = base or "HEAD"
-    if resolved_base != "HEAD":
-        verify = _run_git_locale(
-            project_root, "rev-parse", "--verify", "--quiet", resolved_base,
-            check=False, timeout=15,
-        )
-        if verify.returncode != 0:
-            # Original branch ref no longer resolvable — fall back to HEAD so we
-            # can still make a positive merged-determination against the
-            # currently checked-out integration branch instead of failing closed
-            # purely because the recorded base name is stale.
-            resolved_base = "HEAD"
+    if not base:
+        # No recorded original branch → the intended merge target is unknown.
+        # Undecidable, so retain (see the HEAD-fallback hazard above).
+        return False, "no recorded original branch to verify merge against"
 
-    if resolved_base == "HEAD":
-        status = _is_branch_ancestor_of_head(project_root, branch)
-        if status is True:
-            return True, "branch is an ancestor of HEAD (merged)"
-        if status is False:
-            # Corroborate with has_new_commits so the retained reason is precise
-            # about whether the branch actually carries unmerged commits.
-            if has_new_commits(project_root, branch, "HEAD"):
-                return False, "branch has commits not in HEAD (unmerged)"
-            return False, "branch is not an ancestor of HEAD (unmerged)"
-        return False, "could not verify merge status against HEAD"
+    verify = _run_git_locale(
+        project_root, "rev-parse", "--verify", "--quiet", base,
+        check=False, timeout=15,
+    )
+    if verify.returncode != 0:
+        # Recorded original branch ref no longer resolvable (renamed/deleted).
+        # Merge into the intended base cannot be proven → retain.
+        return False, (
+            f"recorded original branch '{base}' no longer resolvable; "
+            f"merge status unverifiable — retaining"
+        )
 
     result = _run_git_locale(
-        project_root, "merge-base", "--is-ancestor", branch, resolved_base,
+        project_root, "merge-base", "--is-ancestor", branch, base,
         check=False, timeout=15,
     )
     if result.returncode == 0:
-        return True, f"branch is an ancestor of {resolved_base} (merged)"
+        return True, f"branch is an ancestor of {base} (merged)"
     if result.returncode == 1:
-        return False, f"branch is not an ancestor of {resolved_base} (unmerged)"
+        # Corroborate with has_new_commits so the retained reason is precise
+        # about whether the branch actually carries unmerged commits.
+        if has_new_commits(project_root, branch, base):
+            return False, f"branch has commits not in {base} (unmerged)"
+        return False, f"branch is not an ancestor of {base} (unmerged)"
     # Any other exit (128 = bad ref, etc.) is undecidable → fail closed.
     return False, (
-        f"could not verify merge status against {resolved_base} "
+        f"could not verify merge status against {base} "
         f"(git exit {result.returncode})"
     )
 
@@ -314,7 +312,16 @@ def gc_worktree_runs(
             # Archive BEFORE any destructive op. A failure here preserves the
             # worktree + branch so an operator can fix the cause and re-run.
             try:
-                archive_path = _archive_worktree(project_root, branch, wt_path)
+                # Name the archive from the worktree RUN name, not the branch
+                # slug: the requested convention is ``worktree_<name>-<epoch>``
+                # (e.g. ``worktree_worktree-run-webui-discovery-m-20260623-…``),
+                # and a leaked run's branch is often an opaque SHA-ish name that
+                # would make an unrecognizable archive dir. The branch identity
+                # is still preserved in the archive metadata.
+                archive_path = _archive_worktree(
+                    project_root, branch, wt_path,
+                    archive_name=f"worktree_{name}",
+                )
             except (OSError, shutil.Error) as exc:
                 report.errors.append(
                     (
@@ -344,27 +351,52 @@ def gc_worktree_runs(
 
             # Remove the worktree working directory (both merged and unmerged
             # runs free their disk here; the archive is the safety copy).
+            # ``remove_worktree`` swallows git failures (locked worktree,
+            # permission denied) and only logs — so we must probe the disk
+            # ourselves: unless the directory is actually gone we have NOT
+            # reclaimed anything and MUST NOT delete the branch. Reporting it as
+            # archived/reclaimed here would hide the still-present leak and let a
+            # later sweep re-archive the same run.
             remove_worktree(project_root, wt_path)
+            if wt_path.exists():
+                report.errors.append(
+                    (
+                        name,
+                        f"worktree removal failed (directory still present at "
+                        f"{wt_path}); leak retained — branch kept intact",
+                    )
+                )
+                continue
+
             report.archived.append((name, archive_path, size))
             report.reclaimed_bytes += size
 
             if merged:
-                # Safe lowercase ``-d``: even having proven the branch merged,
-                # git's own fully-merged gate is a second safety net. If git
-                # still refuses, keep the ref and surface it as retained.
+                # Force-delete with ``-D`` rather than ``-d`` here. We already
+                # proved (``_branch_is_merged`` → ancestor check) that the branch
+                # is contained in its OWN recorded original branch, which is the
+                # authoritative integration target. ``git branch -d``'s built-in
+                # "fully merged" gate is instead evaluated against the CURRENT
+                # checkout / upstream — a base that may legitimately differ from
+                # the run's recorded original branch (e.g. GC runs while the main
+                # checkout is on ``release`` but the branch was merged into
+                # ``master``). Deferring to that gate would refuse the delete and
+                # wrongly retain+warn about an already-merged branch. Our own
+                # ancestor check against the correct base IS the safety gate, so
+                # ``-D`` here is safe, not a bypass of one.
                 delete_result = _run_git_locale(
-                    project_root, "branch", "-d", branch,
+                    project_root, "branch", "-D", branch,
                     check=False, timeout=15,
                 )
                 if delete_result.returncode != 0:
                     stderr = delete_result.stderr.strip()
                     logger.warning(
-                        "branch -d refused for merged branch '%s' "
+                        "branch -D failed for merged branch '%s' "
                         "(keeping ref): %s", branch, stderr,
                     )
                     report.retained_unmerged.append(
                         (branch, str(original or ""),
-                         f"git branch -d refused: {stderr}")
+                         f"git branch -D failed: {stderr}")
                     )
                 else:
                     logger.info(
