@@ -3065,6 +3065,79 @@ function buildCollapsiblePrompt(promptText, opts) {
   return wrap;
 }
 
+// Render the ADJUDICATE approval-review block for a confirm target, or null.
+//
+// A CONFIRM gate that reviews an ADJUDICATE ruling is un-actionable without the
+// ruling in view — the operator has no way to judge 批 vs 打回. The backend
+// (build_adjudicate_review_context) injects the ruling's `adjudication_rationale`,
+// the post-ruling `adjudicated_description`, and the pre-ruling `baseline` into
+// `target.context`; here we surface the rationale panel plus a
+// baseline→adjudicated_description before/after diff (reusing the shared
+// unified-diff renderer `renderDiffPanel`).
+//
+// Every field is best-effort: an older call file (or a ruling that changed no
+// description) may omit any subset, so each sub-block is gated independently and
+// the whole thing degrades to "only what's available" rather than throwing. A
+// non-adjudicate target (context missing, or step_to_review_type !== 'adjudicate')
+// returns null so the block never renders for a plain call / plan confirm.
+function renderAdjudicateReview(target) {
+  const ctx = target && target.context;
+  if (!ctx || String(ctx.step_to_review_type || "") !== "adjudicate") return null;
+
+  const rationale = String(ctx.adjudication_rationale || "").trim();
+  const baseline = String(ctx.baseline == null ? "" : ctx.baseline);
+  const adjudicated = String(
+    ctx.adjudicated_description == null ? "" : ctx.adjudicated_description,
+  );
+
+  // Nothing worth showing — no rationale and no description on either side.
+  // Degrade to rendering nothing so a bare adjudicate confirm still shows only
+  // its 批准/打回 buttons rather than an empty framed panel.
+  if (!rationale && !adjudicated && !baseline) return null;
+
+  const wrap = el("div", "flow-reply-adjudicate");
+  wrap.appendChild(el("div", "flow-reply-adjudicate-title", "裁决审批"));
+
+  if (rationale) {
+    const panel = el("div", "flow-reply-adjudicate-rationale");
+    panel.appendChild(el("div", "flow-reply-adjudicate-label", "裁决理由"));
+    panel.appendChild(
+      el("div", "flow-reply-adjudicate-rationale-body", rationale),
+    );
+    wrap.appendChild(panel);
+  }
+
+  // Description before/after. Only diff when the ruling actually rewrote the
+  // description (adjudicated non-empty) AND it differs from the baseline — an
+  // empty/null rewrite means "description unchanged", so a full-delete diff would
+  // misrepresent the ruling; render an explicit note instead. A missing baseline
+  // still produces a sensible all-added diff via _toolUnifiedDiff.
+  const diffWrap = el("div", "flow-reply-adjudicate-diff");
+  diffWrap.appendChild(el("div", "flow-reply-adjudicate-label", "任务描述"));
+  if (!adjudicated) {
+    diffWrap.appendChild(
+      el("p", "flow-reply-adjudicate-note", "本次裁决未修改任务描述。"),
+    );
+  } else if (adjudicated === baseline) {
+    diffWrap.appendChild(
+      el("p", "flow-reply-adjudicate-note", "任务描述与基线一致(无变更)。"),
+    );
+  } else {
+    const diff = _toolUnifiedDiff(baseline, adjudicated, "adjudicated_description");
+    diffWrap.appendChild(
+      renderDiffPanel({
+        kind: "edit_diff",
+        diff: diff,
+        old_start_line: 1,
+        new_start_line: 1,
+        truncated: false,
+      }),
+    );
+  }
+  wrap.appendChild(diffWrap);
+  return wrap;
+}
+
 // Sync the docked reply box to the current intervention selection. When at
 // least one chip exists, the textarea + submit are enabled and the reply-
 // context panel above them materializes the selected chip's full content:
@@ -3183,6 +3256,15 @@ function updateReplyBox(flow) {
   // prompt, so a separate context block only duplicated content below the
   // prompt. Suppressing it for all kinds keeps the reply panel free of
   // redundant context, matching the prior discovery_confirm-only behavior.
+
+  // ADJUDICATE approval gate: an adjudicate confirm cannot be judged without the
+  // ruling in view, so surface the rationale + baseline→adjudicated_description
+  // diff above the decision buttons. Guarded internally on
+  // context.step_to_review_type, so this is a no-op (null) for any other target —
+  // including a plain call / plan confirm — and degrades gracefully when the
+  // context omits some fields.
+  const adjudicateReview = renderAdjudicateReview(target);
+  if (adjudicateReview) ctx.appendChild(adjudicateReview);
 
   // CONFIRM approval gate: render an explicit 批准/打回 pair plus an optional
   // note textarea so a decision is one click and always lands as a structured
@@ -11869,6 +11951,9 @@ if (typeof module !== "undefined" && module.exports) {
     // CONFIRM approval gate (G3): structured decision send + free-text mirror,
     // exposed for tests/frontend/confirm_chip.test.mjs.
     sendConfirmDecision,
+    // ADJUDICATE approval-review block (G4): rationale panel + baseline→
+    // adjudicated_description diff, exposed for tests/frontend/adjudicate_review.test.mjs.
+    renderAdjudicateReview,
     submitReply,
     updateReplyBox,
     interpretConfirmAnswer,
