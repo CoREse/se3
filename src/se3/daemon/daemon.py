@@ -31,9 +31,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from .aggregator import DaemonAggregator, MachineStatus
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; runtime import is lazy in _gc_once
+    from ..engine.merge.worktree_gc import WorktreeGCReport
 from .disk_json_cache import read_engine_header
 from .history import DaemonHistoryReader
 from .spawner import DaemonSpawner, SpawnedProcess
@@ -123,6 +126,14 @@ class DaemonConfig:
             client samples active flows' on-disk signature to drive incremental
             history pushes off real ``engine.json`` / jsonl changes instead of
             only the 5 s status tick.
+        gc_interval: Low-frequency cadence (seconds) at which the daemon sweeps
+            leaked ``se3 run --worktree`` runs (see
+            :func:`se3.engine.merge.worktree_gc.gc_worktree_runs`). Deliberately
+            decoupled from ``poll_interval`` (2 s): GC is heavy IO and reclaiming
+            stranded worktrees needs no high frequency. ``<= 0`` disables it.
+        gc_max_age_seconds: Idle threshold a terminal worktree run must exceed
+            before GC reclaims it, forwarded to ``gc_worktree_runs`` so a
+            just-completed run awaiting a human merge is left alone.
     """
 
     server_url: Optional[str] = None
@@ -133,6 +144,8 @@ class DaemonConfig:
     project_roots: List[str] = field(default_factory=list)
     shutdown_grace: float = 10.0
     history_poll_interval: float = 1.0
+    gc_interval: float = 3600.0
+    gc_max_age_seconds: float = 86400.0
 
     def __post_init__(self) -> None:
         self.pid_dir = Path(self.pid_dir)
@@ -200,6 +213,11 @@ class Daemon:
         # The outbound WebSocket client to the central server. Created lazily
         # in serve() only when a server_url is configured.
         self._client: Optional["object"] = None
+        # Wall-clock timestamp of the last worktree-GC sweep, gating the sweep
+        # to ``gc_interval`` cadence even though it is polled from the 2 s
+        # ``_poll_loop``. ``None`` means "never run", so the first eligible poll
+        # runs one sweep at startup (leaks are the problem GC exists to fix).
+        self._last_gc_at: Optional[float] = None
 
     # -- public control surface -------------------------------------------
 
@@ -645,6 +663,13 @@ class Daemon:
                 await self._poll_once()
             except Exception:  # pragma: no cover - defensive
                 logger.exception("Daemon poll iteration failed")
+            # Piggy-backed on the poll tick but internally gated to the far
+            # lower ``gc_interval`` cadence, so no poll tick ever pays the GC
+            # cost unless a full interval has elapsed.
+            try:
+                await self._maybe_run_gc()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("Daemon GC iteration failed")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self.config.poll_interval
@@ -699,6 +724,80 @@ class Daemon:
             # already-main root.
             main_root = resolve_worktree_main_root(record.project_root)
             self.aggregator.add_project_root(main_root or record.project_root)
+
+    # -- periodic worktree GC ----------------------------------------------
+
+    async def _maybe_run_gc(self) -> None:
+        """Run one worktree-GC sweep at most once per ``gc_interval``.
+
+        Invoked from the high-frequency ``_poll_loop`` but gated on
+        ``_last_gc_at`` so the destructive sweep fires only at the low
+        ``gc_interval`` cadence, never on every 2 s poll tick. The sweep itself
+        (git subprocesses, ``copytree``, json parsing) is offloaded wholesale
+        via :meth:`asyncio.to_thread`, keeping the loop thread free of blocking
+        IO and json parsing per the #243 hot-path constraint.
+        """
+        interval = self.config.gc_interval
+        if interval <= 0:  # opt-out: a non-positive interval disables GC.
+            return
+        now = time.time()
+        if self._last_gc_at is not None and (now - self._last_gc_at) < interval:
+            return
+        # Stamp before running so a slow sweep cannot double-trigger and so a
+        # sweep that raises still waits a full interval before retrying.
+        self._last_gc_at = now
+        await asyncio.to_thread(self._gc_once)
+
+    def _gc_once(self) -> None:
+        """Sweep leaked worktree runs across every tracked project root.
+
+        Worker-thread only (dispatched from :meth:`_maybe_run_gc` via
+        ``asyncio.to_thread``). Sweeps each *main* project root — not
+        ``all_observable_roots`` (which includes the worktree run subdirs GC is
+        reclaiming) — and logs every retained-unmerged branch at WARNING so an
+        operator sees a completed-but-never-merged worktree branch the safety
+        net deliberately kept. One root's failure never aborts the others.
+
+        Imported lazily so the engine merge package is only pulled in when GC
+        actually runs, not on daemon import.
+        """
+        from ..engine.merge.worktree_gc import gc_worktree_runs
+
+        for root in self.aggregator.all_project_roots():
+            try:
+                report = gc_worktree_runs(
+                    Path(root),
+                    max_age_seconds=self.config.gc_max_age_seconds,
+                )
+            except Exception:  # pragma: no cover - defensive isolation
+                logger.exception(
+                    "Worktree GC failed for project root %s", root
+                )
+                continue
+            self._log_gc_report(root, report)
+
+    def _log_gc_report(self, root: str, report: "WorktreeGCReport") -> None:
+        """Emit a worktree-GC sweep's outcome to the daemon log.
+
+        Retained-unmerged branches are the safety-critical signal (a completed
+        flow whose work was never merged back), so each one is a WARNING an
+        operator can act on; reclamations and per-run errors are logged for
+        auditability.
+        """
+        if report.archived:
+            logger.info(
+                "Worktree GC (%s): archived %d run(s), reclaimed %d bytes",
+                root, len(report.archived), report.reclaimed_bytes,
+            )
+        for branch, original, reason in report.retained_unmerged:
+            logger.warning(
+                "存在 completed 但未 merge 的 worktree 分支: kept ref '%s' "
+                "(original: %s) — %s. Merge or delete it manually; GC never "
+                "removes unmerged work.",
+                branch, original or "?", reason,
+            )
+        for name, reason in report.errors:
+            logger.warning("Worktree GC error for run '%s': %s", name, reason)
 
     # -- signal handling ---------------------------------------------------
 
