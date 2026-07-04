@@ -3122,6 +3122,16 @@ def _finalize_worktree_merge(
 
     Returns the merge exit code (0 on success).
     """
+    # LEAK SITE: worktree cleanup (archive + branch delete + state promotion)
+    # rides ONLY on this normal end-of-flow finalize path. Two flows escape it
+    # and strand the whole worktree — including a multi-MB engine.json — under
+    # se3/worktrees/ indefinitely: a flow that was paused and later resumed
+    # completes without re-triggering finalize, and a human who merges the
+    # branch back by hand never runs finalize at all. The safety net for both
+    # is the standalone worktree GC — `se3 worktree gc` (or the daemon's
+    # periodic sweep) — which reclaims terminal, over-age worktree runs while
+    # always retaining any not-provably-merged branch. See
+    # se3.engine.merge.worktree_gc.
     from .merge_cmd import run_merge
 
     target = worktree_original_branch or "the original branch"
