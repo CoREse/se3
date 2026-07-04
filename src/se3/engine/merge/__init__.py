@@ -51,6 +51,11 @@ from .version_aggregator import (
     max_bump,
     read_version_at_ref,
 )
+from .worktree_gc import (
+    WorktreeGCReport,
+    find_stale_worktree_runs,
+    gc_worktree_runs,
+)
 
 __all__ = [
     "advance_next_id_to_max",
@@ -68,7 +73,10 @@ __all__ = [
     "ConflictResolver",
     "DecisionAction",
     "DEST_HASH_UNAVAILABLE",
+    "find_stale_worktree_runs",
     "FileResolution",
+    "gc_worktree_runs",
+    "WorktreeGCReport",
     "format_renumber_trace",
     "GuardrailReport",
     "GuardrailViolation",
