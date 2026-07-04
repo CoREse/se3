@@ -169,6 +169,16 @@ CALL_KIND_CLI_CONFIRM = "cli_confirm"
 #: value is ``"1"`` so the web console can render both the ``输入 1 确认``
 #: textual fallback and a GUI confirm button.
 CALL_KIND_DISCOVERY_CONFIRM = "discovery_confirm"
+#: A human review/approval gate for a completed step (plan / adjudicate / …):
+#: the flow is PAUSED waiting for the operator to approve the reviewed step or
+#: request changes. The call carries a human-readable ``prompt`` and, in its
+#: ``context``, ``step_to_review_type`` / ``step_to_review_id`` (and, for an
+#: ``adjudicate`` gate, the ruling's ``adjudication_rationale`` /
+#: ``adjudicated_description`` / pre-ruling ``baseline``) so the web console can
+#: render an Approve/Reject button pair plus the diff instead of forcing the
+#: operator to guess a free-text answer. The structured reply travels back as
+#: ``{"approved": bool, "feedback": ...}`` through the existing respond path.
+CALL_KIND_CONFIRM = "confirm"
 #: Every recognised interaction-call kind.
 CALL_KINDS: FrozenSet[str] = frozenset(
     {
@@ -177,6 +187,7 @@ CALL_KINDS: FrozenSet[str] = frozenset(
         CALL_KIND_RETRY_DECISION,
         CALL_KIND_CLI_CONFIRM,
         CALL_KIND_DISCOVERY_CONFIRM,
+        CALL_KIND_CONFIRM,
     }
 )
 

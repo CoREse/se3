@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 from ..daemon.protocol import (
     CALL_KIND_CALL,
     CALL_KIND_CLI_CONFIRM,
+    CALL_KIND_CONFIRM,
     CALL_KIND_DISCOVERY_CONFIRM,
     CALL_KIND_INTERJECTION,
     CALL_KIND_RETRY_DECISION,
@@ -50,6 +51,7 @@ from ..daemon.protocol import (
 __all__ = [
     "CALL_KIND_CALL",
     "CALL_KIND_CLI_CONFIRM",
+    "CALL_KIND_CONFIRM",
     "CALL_KIND_DISCOVERY_CONFIRM",
     "CALL_KIND_INTERJECTION",
     "CALL_KIND_RETRY_DECISION",

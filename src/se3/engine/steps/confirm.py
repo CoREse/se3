@@ -6,7 +6,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from ..context_builder import build_llm_review_prompt, build_plan_confirm_prompt
+from ..context_builder import (
+    build_adjudicate_review_context,
+    build_confirm_prompt,
+    build_llm_review_prompt,
+    build_plan_confirm_prompt,
+)
+from ..interaction_calls import CALL_KIND_CONFIRM
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..utils.json_parser import parse_json_response
@@ -111,6 +117,21 @@ def _create_call_file(step: Step, flow: FlowInstance, project_root: Path) -> Pat
     step_to_review_id = step.inputs.get('step_to_review_id')
     step_to_review_type = step.inputs.get('step_to_review_type', 'unknown')
 
+    context: Dict[str, Any] = {
+        'flow_id': flow.flow_id,
+        'step_id': step.step_id,
+        'step_to_review_type': step_to_review_type,
+        'step_to_review_id': step_to_review_id,
+    }
+
+    # An adjudicate approval gate is un-actionable without the ruling in view:
+    # inject the rationale plus the pre-ruling baseline vs. post-ruling
+    # description so the web console can render a before/after diff. Non-adjudicate
+    # confirms carry none of these fields (helper returns {}), keeping their
+    # payload unchanged.
+    if step_to_review_type == 'adjudicate':
+        context.update(build_adjudicate_review_context(flow, step_to_review_id))
+
     call_data = {
         'step': step.step_id,
         'step_id': step.step_id,
@@ -119,17 +140,17 @@ def _create_call_file(step: Step, flow: FlowInstance, project_root: Path) -> Pat
         'step_to_review_type': step_to_review_type,
         'step_to_review_id': step_to_review_id,
         'timestamp': timestamp,
+        # ``type`` is the legacy field kept for backward compatibility; ``kind``
+        # is the canonical CALL_KIND_* discriminant the daemon aggregator / web
+        # console dispatch on to render the Approve/Reject UI.
         'type': 'confirm',
-        'context': {
-            'flow_id': flow.flow_id,
-            'step_id': step.step_id,
-            'step_to_review_type': step_to_review_type,
-            'step_to_review_id': step_to_review_id,
-        },
+        'kind': CALL_KIND_CONFIRM,
+        'prompt': build_confirm_prompt(step_to_review_type),
+        'context': context,
     }
 
     with open(call_file, 'w') as f:
-        json.dump(call_data, f, indent=2)
+        json.dump(call_data, f, indent=2, ensure_ascii=False)
 
     logger.info(f"Created confirmation call file: {call_file}")
     return call_file

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config import LanguageConfig
+    from .models import FlowInstance
 
 logger = logging.getLogger(__name__)
 
@@ -1028,3 +1029,67 @@ requirements with specific, actionable feedback.
 {lang_instruction}"""
 
     return prompt
+
+
+def build_confirm_prompt(step_to_review_type: str) -> str:
+    """Human-readable one-line prompt for a CONFIRM approval gate.
+
+    The web console renders Approve/Reject buttons for a ``confirm``-kind call,
+    but a legacy free-text responder (and the daemon call list) still shows the
+    ``prompt`` string, so it must stand on its own as the question being asked.
+    """
+    label = (step_to_review_type or "step").replace("_", " ")
+    if step_to_review_type == "adjudicate":
+        return (
+            "Review the adjudication ruling below (rationale + description diff) "
+            "and approve it, or request changes."
+        )
+    return f"Review the {label} output and approve it, or request changes."
+
+
+def build_adjudicate_review_context(
+    flow: "FlowInstance", step_to_review_id: Optional[str]
+) -> Dict[str, Any]:
+    """Assemble the adjudicate-approval display payload for a confirm call.
+
+    When a CONFIRM gate reviews an ADJUDICATE ruling the web console needs to
+    show *what* is being approved: the ruling's ``adjudication_rationale``, the
+    post-ruling ``adjudicated_description``, and the pre-ruling ``baseline`` it
+    replaces — so the operator reads a before/after diff instead of guessing.
+
+    ``baseline`` is the description effective *before* this ruling: a prior
+    adjudication's description if one exists, else the discovery-refined /
+    original base. It is resolved via ``_effective_task_description_base`` with
+    the reviewed step excluded, so the ruling's own not-yet-approved rewrite is
+    never mistaken for its own baseline.
+
+    Returns a dict with ``adjudication_rationale`` / ``adjudicated_description`` /
+    ``baseline`` (each a string, possibly empty); an empty dict when the reviewed
+    step is missing or is not an ADJUDICATE ruling (so a non-adjudicate confirm
+    call carries none of these fields).
+    """
+    from .models import StepType
+
+    if not (flow.state and step_to_review_id):
+        return {}
+    reviewed = flow.state.steps.get(step_to_review_id)
+    if reviewed is None or reviewed.step_type != StepType.ADJUDICATE:
+        return {}
+
+    rationale = reviewed.outputs.get("adjudication_rationale") or ""
+    adjudicated_description = reviewed.outputs.get("adjudicated_description") or ""
+
+    # Resolve the pre-ruling baseline through the shared effective-text layer so
+    # the diff anchor matches exactly what the flow considered effective before
+    # this ruling landed (prior adjudication > discovery-refined > original).
+    from .state_machine import _effective_task_description_base
+
+    baseline = (
+        _effective_task_description_base(flow, exclude_step_id=step_to_review_id) or ""
+    )
+
+    return {
+        "adjudication_rationale": rationale,
+        "adjudicated_description": adjudicated_description,
+        "baseline": baseline,
+    }
