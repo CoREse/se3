@@ -2681,6 +2681,15 @@ const KIND_META = {
     hint: "Discovery 已生成精炼后的任务描述。输入 1 确认并继续,或回复其它内容继续完善需求。",
     icon: "✓",
   },
+  // A CONFIRM approval gate (plan 确认 / adjudicate 裁决审批 / per-step review).
+  // Unlike discovery_confirm's "type 1 to continue", this renders explicit
+  // 批准/打回 buttons that POST a structured {approved, feedback} decision, so
+  // an operator can never silently mis-approve/mis-reject via free text.
+  confirm: {
+    label: "需要审批",
+    hint: "运行流程正在等待你的审批。点击 批准 通过,或 打回 并说明需要修改之处。",
+    icon: "✓",
+  },
 };
 
 // Canonicalize a raw `kind` field; unknown kinds degrade to a plain "call".
@@ -3107,9 +3116,16 @@ function updateReplyBox(flow) {
   // a Send already in flight stays locked here even though the chip remains
   // selected. `settlePendingSend()` (or the 8s fallback) clears the gate.
   submit.disabled = !!state.pendingSendSettleKey;
-  input.placeholder = target.kind === "interjection"
-    ? "输入要插入运行流程的指令…"
-    : "输入你的回复…";
+  input.placeholder =
+    target.kind === "interjection"
+      ? "输入要插入运行流程的指令…"
+      : target.kind === "confirm"
+        // Free-text fallback for the CONFIRM gate. List the words that are
+        // recognized as an outright approval/rejection so the operator knows
+        // what maps to which; anything else prompts a "will be treated as a
+        // revision request" second-guess before it is sent.
+        ? "批准/通过/approve 直接通过,打回/拒绝/reject 直接打回,其它文本将按修改请求处理…"
+        : "输入你的回复…";
 
   ctx.className = "flow-reply-context active kind-" + target.kind;
   ctx.innerHTML = "";
@@ -3167,6 +3183,43 @@ function updateReplyBox(flow) {
   // prompt, so a separate context block only duplicated content below the
   // prompt. Suppressing it for all kinds keeps the reply panel free of
   // redundant context, matching the prior discovery_confirm-only behavior.
+
+  // CONFIRM approval gate: render an explicit 批准/打回 pair plus an optional
+  // note textarea so a decision is one click and always lands as a structured
+  // {approved, feedback} payload — never a free-text guess. Legacy (kind-less)
+  // confirm calls normalize to "call" and never reach this branch, so they keep
+  // the plain free-text box (the required降级). The docked #flow-reply-input
+  // stays available underneath as the word-list-mirrored free-text fallback.
+  if (target.kind === "confirm") {
+    const decide = el("div", "flow-reply-confirm");
+    const note = el("textarea", "flow-reply-confirm-note");
+    note.placeholder = "备注(可选;打回时说明需要修改之处)…";
+    const btnRow = el("div", "flow-reply-confirm-actions");
+    const approveBtn = el(
+      "button",
+      "flow-reply-option flow-reply-option-primary flow-reply-confirm-approve",
+      "批准",
+    );
+    approveBtn.type = "button";
+    approveBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      // A blank note is normalized to null inside sendConfirmDecision.
+      sendConfirmDecision(state.selectedFlowId, target, true, note.value);
+    });
+    const rejectBtn = el(
+      "button",
+      "flow-reply-option flow-reply-confirm-reject",
+      "打回",
+    );
+    rejectBtn.type = "button";
+    rejectBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      sendConfirmDecision(state.selectedFlowId, target, false, note.value);
+    });
+    btnRow.append(approveBtn, rejectBtn);
+    decide.append(note, btnRow);
+    ctx.appendChild(decide);
+  }
 
   // Optional options — render as one-click reply buttons. Clicking sends the
   // option text directly via sendReply, same path the inline option click on
@@ -3228,6 +3281,61 @@ function truncate(text, max) {
 }
 
 // ---------------------------------------------------------------------------
+// CONFIRM free-text interpretation (client-side mirror of the backend)
+// ---------------------------------------------------------------------------
+//
+// A CONFIRM gate's primary UI is the 批准/打回 buttons, but the retained
+// free-text box must never silently mis-classify an operator's answer. These
+// token sets MIRROR run.py:_interpret_confirm_answer (see the NOTE there) so
+// the frontend can locally decide, BEFORE sending, whether a typed reply is an
+// approval, a rejection, or an unrecognized note that should trigger a "this
+// will be treated as a revision request — sure?" second-guess. Keep the two
+// lists in sync when editing either — a divergence would let "同意"/"批准" fall
+// into the confirm-dialog branch here even though the backend would approve it.
+const CONFIRM_APPROVE_TOKENS = new Set([
+  "approve", "approved", "yes", "y", "ok", "okay", "lgtm",
+  "accept", "accepted", "continue", "proceed", "pass", "skip",
+  "同意", "通过", "批准", "确认", "允许", "接受",
+]);
+const CONFIRM_REJECT_TOKENS = new Set([
+  "no", "n", "reject", "rejected", "deny", "denied",
+  "request changes", "changes", "revise", "revision",
+  "驳回", "拒绝", "打回", "否决", "不通过", "重做", "重拟",
+]);
+
+// Classify a free-text CONFIRM answer as "approve" | "reject" | "unknown".
+// Matches whole-string OR first-word against the token sets — the same
+// semantics as the backend — so "approve, looks good" still reads as approval
+// while "request changes" only matches as a whole string. Anything unmatched
+// is "unknown": the caller second-guesses it rather than silently rejecting.
+function interpretConfirmAnswer(text) {
+  const stripped = String(text == null ? "" : text).trim();
+  if (!stripped) return "unknown";
+  const lowered = stripped.toLowerCase();
+  const firstWord = lowered.split(/\s+/)[0] || lowered;
+  if (CONFIRM_APPROVE_TOKENS.has(lowered) || CONFIRM_APPROVE_TOKENS.has(firstWord)) {
+    return "approve";
+  }
+  if (CONFIRM_REJECT_TOKENS.has(lowered) || CONFIRM_REJECT_TOKENS.has(firstWord)) {
+    return "reject";
+  }
+  return "unknown";
+}
+
+// Second-guess an unrecognized CONFIRM free-text answer before it is sent as a
+// revision request. window.confirm is absent in the DOM-stub test env; default
+// to proceeding there (the pure logic is still asserted by stubbing
+// globalThis.confirm), while the browser shows the real dialog.
+function confirmRevisionIntent() {
+  const c =
+    typeof globalThis !== "undefined" && typeof globalThis.confirm === "function"
+      ? globalThis.confirm
+      : null;
+  if (!c) return true;
+  return !!c("你的回复将被视为修改请求,确定?");
+}
+
+// ---------------------------------------------------------------------------
 // Reply submission
 // ---------------------------------------------------------------------------
 //
@@ -3250,24 +3358,34 @@ function submitReply(event) {
     showToast("error", "Response must not be empty.");
     return;
   }
+  // CONFIRM gates route the free-text box through the structured decision
+  // payload so a typed "同意"/"批准" is a real approval and a "1"/unknown note
+  // is only ever sent as a revision AFTER an explicit second-guess — never
+  // silently. Legacy (kind-less) confirm chips normalize to "call" and keep the
+  // plain free-text path below.
+  if (target.kind === "confirm") {
+    const verdict = interpretConfirmAnswer(text);
+    if (verdict === "approve") {
+      sendConfirmDecision(state.selectedFlowId, target, true, null);
+    } else if (verdict === "reject") {
+      sendConfirmDecision(state.selectedFlowId, target, false, text);
+    } else if (confirmRevisionIntent()) {
+      sendConfirmDecision(state.selectedFlowId, target, false, text);
+    }
+    // A cancelled second-guess sends nothing — the operator can re-edit.
+    return;
+  }
   sendReply(state.selectedFlowId, target, text);
 }
 
-async function sendReply(flowId, target, text) {
-  if (!flowId || !target || !text) return;
-  const submit = $("flow-reply-submit");
-  const input = $("flow-reply-input");
-  // Only the Send button locks — the textarea stays enabled at all times so
-  // the user can keep editing / drafting a follow-up while the request is in
-  // flight. Locking the textarea would block the docked-chat UX the spec
-  // calls for. Repeated Send clicks are debounced by the disabled button.
-  submit.disabled = true;
-
-  // Capture the call_id set as it stood at submit time. The Send button
-  // re-enables only after `maybeSettleViaPendingCallsDiff` sees a delta on
-  // a subsequent ws-driven refresh (or an `interjection_event` matches),
-  // proving the daemon has observed the submission. The 8s fallback below
-  // catches a stuck ws so the UI does not stall forever.
+// Arm the pending-Send settle gate shared by `sendReply` and
+// `sendConfirmDecision`: snapshot the call_id baseline, set the settle key, and
+// start the 8s fallback that force-unlocks Send if the daemon's ws delta never
+// arrives. Extracted so the structured confirm-decision send reuses the EXACT
+// same settlement bookkeeping as a free-text reply (no divergence in how a
+// pending Send re-enables), while keeping `submit.disabled = true` at the two
+// call sites where each also touches its own input state.
+function armPendingSend(target) {
   const flow = state.flowDetail;
   state.pendingSendBaselineCallIds = new Set(
     (flow && flow.pending_calls ? flow.pending_calls : [])
@@ -3298,6 +3416,88 @@ async function sendReply(flowId, target, text) {
     }
     settlePendingSend();
   }, 8000);
+}
+
+// Send a structured CONFIRM approval decision: POST /respond with
+// {response: {approved, feedback}, call_id}. The daemon writes the inner dict
+// through untouched (see run.py "Unwrap the daemon envelope"), so the reviewed
+// step gets a real approve/reject rather than a free-text guess. Mirrors
+// sendReply's success/failure/settle handling so the pending-Send gate and the
+// optimistic echo behave identically for a button click and a typed reply.
+async function sendConfirmDecision(flowId, target, approved, feedback) {
+  if (!flowId || !target) return;
+  const submit = $("flow-reply-submit");
+  submit.disabled = true;
+  armPendingSend(target);
+
+  // Normalize the note to null when blank so an approval carries no spurious
+  // feedback (matching _interpret_confirm_answer's approve → (True, None)).
+  const note =
+    feedback == null || String(feedback).trim() === ""
+      ? null
+      : String(feedback).trim();
+  const decision = { approved: !!approved, feedback: note };
+
+  try {
+    const resp = await authedFetch(
+      `/api/flows/${encodeURIComponent(flowId)}/respond`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ response: decision, call_id: target.callId }),
+      },
+    );
+    if (resp.ok) {
+      // Success decided solely by resp.ok — clear the free-text box (the note
+      // textarea lives in the rebuilt context panel and is discarded on the
+      // finally re-render) and toast before the best-effort echo, same as
+      // sendReply (issue #193 boundary).
+      if (state.selectedFlowId === flowId) {
+        $("flow-reply-input").value = "";
+        autoGrowReplyTextarea();
+      }
+      showToast("success", approved ? "已批准。" : "已打回。");
+      // Optimistic echo as a human-readable user bubble so the decision shows
+      // immediately without waiting for the next history_data push.
+      const echo = approved
+        ? note
+          ? `批准:${note}`
+          : "批准"
+        : note
+          ? `打回:${note}`
+          : "打回";
+      appendLocalReply(flowId, target, echo);
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      const message = detail.detail || `Server returned ${resp.status}.`;
+      showToast("error", `Could not send: ${message}`);
+      settlePendingSend();
+    }
+  } catch (_) {
+    showToast("error", "Could not send — network error reaching the server.");
+    settlePendingSend();
+  } finally {
+    if (state.selectedFlowId === flowId && state.flowDetail) {
+      renderInterventions(state.flowDetail);
+    }
+  }
+}
+
+async function sendReply(flowId, target, text) {
+  if (!flowId || !target || !text) return;
+  const submit = $("flow-reply-submit");
+  const input = $("flow-reply-input");
+  // Only the Send button locks — the textarea stays enabled at all times so
+  // the user can keep editing / drafting a follow-up while the request is in
+  // flight. Locking the textarea would block the docked-chat UX the spec
+  // calls for. Repeated Send clicks are debounced by the disabled button.
+  submit.disabled = true;
+
+  // The Send button re-enables only after `maybeSettleViaPendingCallsDiff` sees
+  // a delta on a subsequent ws-driven refresh (or an `interjection_event`
+  // matches), proving the daemon has observed the submission; the 8s fallback
+  // catches a stuck ws so the UI does not stall forever.
+  armPendingSend(target);
 
   try {
     let resp;
@@ -11666,6 +11866,14 @@ if (typeof module !== "undefined" && module.exports) {
     // can be asserted, not just the appendLocalReply helper in isolation.
     appendLocalReply,
     sendReply,
+    // CONFIRM approval gate (G3): structured decision send + free-text mirror,
+    // exposed for tests/frontend/confirm_chip.test.mjs.
+    sendConfirmDecision,
+    submitReply,
+    updateReplyBox,
+    interpretConfirmAnswer,
+    CONFIRM_APPROVE_TOKENS,
+    CONFIRM_REJECT_TOKENS,
     showToast,
     settlePendingSend,
     // Reconnect incremental load paths (G4) — exposed for the DOM-stub load

@@ -715,6 +715,40 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   background: rgba(76, 175, 106, 0.12);
 }
 
+/* CONFIRM approval gate: an optional note textarea stacked above the
+   批准/打回 button pair. Reuses the reply-option button visual language —
+   批准 keeps `.flow-reply-option-primary` (green) and 打回 gets the red danger
+   accent below so an approve/reject reads at a glance in both themes. */
+.flow-reply-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-reply-confirm-note {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  font-size: 12px;
+}
+.flow-reply-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.flow-reply-confirm-actions .flow-reply-option {
+  padding: 5px 18px;
+  font-size: 12.5px;
+}
+.flow-reply-confirm-reject {
+  border-color: var(--red);
+  color: var(--red);
+  font-weight: 600;
+}
+.flow-reply-confirm-reject:hover:not(:disabled) {
+  border-color: var(--red);
+  background: rgba(224, 86, 75, 0.12);
+}
+
 .flow-reply-row {
   display: flex;
   align-items: stretch;
