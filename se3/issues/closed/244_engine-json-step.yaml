@@ -21,11 +21,11 @@ description: 'flow 引擎把每个 step 的完整 inputs/outputs 内联持久化
   方案(二期,可选):大工件按引用传递——inputs 存上游 step 引用或内容寻址 artifacts/<sha>.json,消灭 25 份拷贝和嵌套复制。
 
   验收:同规模 flow 的 engine.json 头部 <100KB;每步持久化写入量与该步产出成正比,不随 step 数累积。'
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-07-02T10:03:27.713485'
-updated_at: '2026-07-02T10:03:27.713485'
+updated_at: '2026-07-04T16:07:16.698017'
 title: engine.json 热/冷拆分:step 工件按值复制导致状态文件膨胀到 50MB
 priority: high
 type: refactor

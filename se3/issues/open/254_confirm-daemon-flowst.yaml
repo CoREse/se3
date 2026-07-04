@@ -43,11 +43,11 @@ description: '== 现象（今日在 flow 20260704-003700_4055d799 上复现两�
   - webui 回复 confirm 后（MSG_RESPOND_CALL 通道）flow 在无人工干预下自动 re-spawn 并消费响应继续。
 
   - 交互式终端路径行为不变（进程内轮询，不退出）。'
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-07-04T13:54:41.375512'
-updated_at: '2026-07-04T13:54:41.375512'
+updated_at: '2026-07-04T16:08:41.009470'
 title: CONFIRM 暂停在 daemon 模式不置 FlowStatus.PAUSED，webui 回复后无法自动 resume
 priority: high
 type: bug

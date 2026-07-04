@@ -1599,6 +1599,12 @@ def _handle_discovery_programmatic_confirm(
 # persist the flow and exit so the web "Respond to Flow" interaction can answer.
 _DISCOVERY_AWAITING = object()
 
+# Sentinel returned by the non-interactive CONFIRM pause handler once the flow
+# has been persisted PAUSED with its call file on disk: the run loop must emit
+# FLOW_PAUSED and exit 0 so the daemon can re-spawn --resume after the web
+# answer lands. Mirrors _DISCOVERY_AWAITING for the CONFIRM gate.
+_CONFIRM_AWAITING = object()
+
 
 def _discovery_call_question(current_step: Any) -> str:
     """Build the human-readable prompt for a discovery *question* call file."""
@@ -1781,6 +1787,51 @@ def _handle_discovery_pause_noninteractive(
     persistence.save_flow(flow)
     logger.info("Discovery paused for web response: wrote call file %s", call_file)
     return _DISCOVERY_AWAITING
+
+
+def _handle_confirm_pause_noninteractive(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Path,
+) -> Any:
+    """Handle a CONFIRM pause without a terminal (daemon ``--output-format json``).
+
+    The CONFIRM step handler has already written the ``confirm_*.json`` call
+    file and stashed its path in ``current_step.outputs['call_file']`` before
+    returning PAUSED, so there is nothing to prompt for here: the web console
+    answers the call through the daemon's MSG_RESPOND_CALL channel, which writes
+    a ``<stem>.response.json`` sibling consumed by :func:`_check_confirm_response`
+    on the next resume.
+
+    The only job left is to persist ``FlowStatus.PAUSED`` to the engine.json
+    top-level status. The daemon keys its resume decision off exactly that
+    on-disk status (``daemon/daemon.py`` ``_resume_paused_flow`` only re-spawns a
+    flow whose status == "PAUSED"), so without this the process would exit while
+    the flow's top-level status was still "running" and the answered call would
+    never be consumed — the "approved but nothing happens" deadlock this fixes.
+    Mirrors the DISCOVERY json branch's on-disk-status contract.
+
+    Returns :data:`_CONFIRM_AWAITING`; the caller emits FLOW_PAUSED and exits 0.
+    """
+    call_file = current_step.outputs.get("call_file")
+    if not call_file or not Path(call_file).exists():
+        # Fail-safe: the confirm handler is expected to have written the call
+        # file before returning PAUSED. If it is somehow missing we still pause
+        # (rather than silently exit non-PAUSED and wedge the flow), but warn so
+        # the anomaly is visible — a paused flow with no call file simply cannot
+        # be answered and will surface for manual intervention.
+        logger.warning(
+            "CONFIRM pause has no call file on disk (step %s); persisting PAUSED "
+            "anyway to avoid a stuck non-PAUSED flow", current_step.step_id
+        )
+    flow.status = FlowStatus.PAUSED
+    persistence.save_flow(flow)
+    logger.info(
+        "Confirm paused for web response (non-interactive): flow %s status=PAUSED",
+        flow.flow_id,
+    )
+    return _CONFIRM_AWAITING
 
 
 def make_cli_confirm_handler(
@@ -2520,6 +2571,11 @@ def _run_flow_impl(
             _ensure_main_lock_for_step(
                 main_lock, flow, current_step, project_root, persistence)
         except KeyboardInterrupt:
+            # AUDIT (return-130 non-interactive reachability, issue: CONFIRM json
+            # pause): triggered only by an operator Ctrl+C while blocked on the
+            # main-worktree lock. A daemon-spawned json run has no TTY and never
+            # receives KeyboardInterrupt, so this exit is unreachable in json
+            # mode — no "non-interactive exit left status=running" bug here.
             # The flow is no longer actively queued for the lock once the
             # process exits, so clear waiting_for_lock before persisting.
             # Otherwise engine.json records status=running + waiting_for_lock=True
@@ -2604,6 +2660,11 @@ def _run_flow_impl(
                     result = state_machine.run_step(
                         flow, current_step, on_running=_emit_step_started)
                 except KeyboardInterrupt:
+                    # AUDIT (return-130 non-interactive reachability): only a
+                    # KeyboardInterrupt reaches here, and _handle_step_interrupt
+                    # returns None only on an interactive Ctrl+C exit. Daemon
+                    # json runs have no TTY and never raise it, so this exit is
+                    # unreachable in json mode — no missing-PAUSED bug here.
                     result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                     if result is None:
                         emitter.emit(new_event(
@@ -2629,6 +2690,10 @@ def _run_flow_impl(
                 result = state_machine.run_step(
                     flow, current_step, on_running=_emit_step_started)
             except KeyboardInterrupt:
+                # AUDIT (return-130 non-interactive reachability): same as the
+                # CONFIRM-resume branch above — reachable only via interactive
+                # Ctrl+C (_handle_step_interrupt → None). Not reachable in json/
+                # daemon mode, so no non-interactive-exit-without-PAUSED defect.
                 result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                 if result is None:
                     emitter.emit(new_event(
@@ -2757,9 +2822,30 @@ def _run_flow_impl(
                 current_step.status = StepStatus.PENDING
                 persistence.save_flow(flow)
                 continue
+            if output_format == "json":
+                # Non-interactive (daemon spawn): the confirm handler already
+                # wrote the confirm_*.json call file, so there is nothing to
+                # prompt for — persist FlowStatus.PAUSED and exit 0 so the
+                # daemon re-spawns --resume once the web answer lands. Without
+                # this the process would return 130 with the top-level status
+                # still "running", so _resume_paused_flow's status == "PAUSED"
+                # check never fires and the answered confirm is never consumed
+                # ("approved but nothing happens"). Mirrors the DISCOVERY json
+                # branch below.
+                _handle_confirm_pause_noninteractive(
+                    flow, current_step, persistence, project_root
+                )
+                emitter.emit(new_event(
+                    EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                    step_id=current_step.step_id, step_type=step_type_value,
+                ))
+                return 0
             confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root, prompt_history)
             if confirm_result is None:
-                # User chose to exit
+                # User chose to exit. This is an interactive Ctrl+C / explicit
+                # "Exit" choice (return 130 distinguishes a user-initiated exit
+                # from a normal pause) — unreachable in json/daemon mode, which
+                # takes the branch above and never prompts.
                 emitter.emit(new_event(
                     EventType.FLOW_PAUSED, flow_id=flow.flow_id,
                     step_id=current_step.step_id, step_type=step_type_value,
@@ -2806,7 +2892,12 @@ def _run_flow_impl(
                 )
 
                 if user_response is None:
-                    # User chose to exit
+                    # User chose to exit. AUDIT (return-130 non-interactive
+                    # reachability): this is the *interactive* discovery branch
+                    # (output_format != "json"); the json branch above handles
+                    # the daemon path and persists PAUSED + returns 0. A daemon
+                    # run never enters this else, so this 130 exit is unreachable
+                    # in json mode — no missing-PAUSED defect.
                     emitter.emit(new_event(
                         EventType.FLOW_PAUSED, flow_id=flow.flow_id,
                         step_id=current_step.step_id, step_type=step_type_value,

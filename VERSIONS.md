@@ -79,6 +79,14 @@
 
 
 
+
+## 11.8.1 - 2026-07-04
+
+- Fix daemon/webui-initiated flows hanging at human confirm gates (plan confirm, adjudication approval): CONFIRM pauses now set engine.json status to PAUSED and exit 0 instead of exiting 130 with status left at 'running'
+- Make the CONFIRM pause path honor --output-format json non-interactively, mirroring the DISCOVERY pause branch, so the daemon re-spawns and consumes the response automatically after a webui reply
+- Preserve interactive-terminal confirm behavior unchanged (in-process polling, no process exit)
+- Audit and annotate the remaining non-interactive pause exits in run.py to guard against the same 'exit without setting PAUSED' failure mode
+- Add regression test covering CONFIRM non-interactive pause: PAUSED status, exit code 0, call file, and FLOW_PAUSED event, plus a guardrail for the interactive path
 ## 11.8.0 - 2026-07-04
 
 - Add a unified (path, mtime, size)-keyed disk-JSON parse cache for the daemon so unchanged engine.json, archive, and snapshot files are parsed at most once, eliminating per-tick full re-parsing that froze the event loop and pinned executor threads
