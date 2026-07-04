@@ -7,11 +7,13 @@ proving the acceptance criteria as one connected flow rather than per-unit:
   * A self-contradictory task description makes SELF_CHECK flag the same code
     location in opposite directions on consecutive rounds; within ≤2 rounds the
     oscillation trigger routes to ADJUDICATE instead of the fix loop.
-  * The ruling's override description is gated by the human confirmation门; once
-    approved the flow reflows — skipping IMPLEMENT/TEST — and re-runs SELF_CHECK
-    at pass #1 against the adjudicated text. The dead-clause issue that re-quotes
-    the abolished clause is dropped by the source-pool switch, the flip stops,
-    and the flow converges to COMMIT.
+  * Adjudicate confirmation is opt-in: by default (no
+    ``confirmation.steps.adjudicate`` entry) a ruling auto-passes with no门. When
+    ``reviewer: human`` is opted in, the ruling's override description is gated
+    by the human confirmation门; once approved the flow reflows — skipping
+    IMPLEMENT/TEST — and re-runs SELF_CHECK at pass #1 against the adjudicated
+    text. The dead-clause issue that re-quotes the abolished clause is dropped by
+    the source-pool switch, the flip stops, and the flow converges to COMMIT.
   * The cross-round fingerprint ledger accumulates across a ``--resume``
     boundary (State.to_dict / from_dict round-trip), so an oscillation split
     across the resume is still detected.
@@ -206,6 +208,61 @@ _BENIGN_RULING = {
 
 
 # --------------------------------------------------------------------------- #
+# 0. Confirmation门 default: opt-in, not opt-out
+# --------------------------------------------------------------------------- #
+
+class TestConfirmationGate:
+    """Adjudicate confirmation is a standard opt-in step. With no
+    ``confirmation.steps.adjudicate`` entry (``resolve_confirm_inputs`` → None) a
+    ruling — *even one that rewrites the task description* — auto-passes with no
+    CONFIRM, reflowing straight to SELF_CHECK against the adjudicated text. The
+    explicit ``reviewer: human`` gate is exercised by TestContradictionConverges;
+    here we prove the flipped default放行 path."""
+
+    def _drive_to_desc_ruling(self, sm, flow):
+        """Oscillate two SELF_CHECK rounds → ADJUDICATE → apply a description-
+        rewrite ruling, returning the COMPLETED ADJUDICATE (gate unresolved)."""
+        sc1 = _new_self_check(sm, flow)
+        _run_self_check(sc1, flow, [_issue(expected="raise ValueError")])
+        impl = sm.transition_to_next(flow)
+        impl.status = StepStatus.COMPLETED
+        impl.outputs = {"files_changed": [{"path": "src/foo.py", "action": "modify"}]}
+        sc2 = _new_self_check(sm, flow)
+        _run_self_check(sc2, flow, [_issue(expected="return None")])
+        adj = sm.transition_to_next(flow)
+        assert adj.step_type == StepType.ADJUDICATE
+        assert _run_adjudicate(adj, flow, _RULING) == StepStatus.COMPLETED
+        assert adj.outputs["adjudicated_description"] == ADJUDICATED_TASK
+        return adj
+
+    def test_unregistered_adjudicate_auto_passes_without_confirm(self, tmp_path):
+        cfg = _cfg()
+        sm = _make_sm(tmp_path, cfg)
+        flow, implement, test = _make_flow(tmp_path)
+        adj = self._drive_to_desc_ruling(sm, flow)
+
+        # Not registered under confirmation.steps → auto-pass. Even a description
+        # rewrite inserts NO CONFIRM and reflows straight to SELF_CHECK.
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            sc3 = sm.transition_to_next(flow)
+        assert sc3.step_type == StepType.SELF_CHECK
+        # No confirmation门 was ever inserted — neither in the sequence nor as a
+        # materialized step.
+        assert flow.state.selected_steps.count(StepType.CONFIRM) == 0
+        assert not any(
+            s.step_type == StepType.CONFIRM for s in flow.state.steps.values()
+        )
+        # The adjudicated text is in force for the re-run at pass #1.
+        assert sc3.inputs["self_check_pass_index"] == 1
+        assert sc3.inputs["adjudicated_description"] == ADJUDICATED_TASK
+        # The ruling landed on the auto-pass exactly as an approved gate would:
+        # the staged abolition was applied (no human approval needed).
+        assert adj.outputs["ledger_effects_applied"] is True
+
+
+# --------------------------------------------------------------------------- #
 # 1. Full contradiction → adjudicate → converge
 # --------------------------------------------------------------------------- #
 
@@ -259,7 +316,9 @@ class TestContradictionConverges:
         assert not any(o["abolished"] for o in ledger["observations"])
         assert adj.outputs["abolished_fingerprints"]
 
-        # --- Description change → human confirmation门. ---
+        # --- Description change + opted-in reviewer: human → confirmation门.
+        #     (Human is opt-in now; the default no-entry auto-pass is covered by
+        #     TestConfirmationGate.) ---
         human = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
             "se3.engine.state_machine.resolve_confirm_inputs", return_value=human

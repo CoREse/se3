@@ -35,11 +35,11 @@ description: '== 现象 ==
   - adjudicate 审批门在 webui 可见裁决理由与描述 diff。
 
   - 自由文本输入 "1"/"同意" 不再被静默当作打回（要么正确识别，要么显式二次确认）。'
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-04T13:55:03.683771'
-updated_at: '2026-07-04T16:08:51.399401'
+updated_at: '2026-07-04T17:32:40.814824'
 title: webui confirm 审批缺快捷回复按钮；自由文本词表陷阱会把批准误判为打回
 priority: medium
 type: feature

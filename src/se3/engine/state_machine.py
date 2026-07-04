@@ -890,11 +890,15 @@ class StateMachine:
 
         # Handle the ADJUDICATE ruling reflow (fix-loop 警察). A ruling changes
         # the *spec*, not the code, so re-running IMPLEMENT/TEST would chase a
-        # knot the ruling already dissolved. A description-changing ruling is
-        # gated behind the confirmation门 first (default human via se3/calls);
-        # once that clears (or when no confirmation is required), the pending
-        # fix_instructions are dropped (superseded, recorded in the ADJUDICATE
-        # outputs for audit) and the flow re-runs SELF_CHECK directly at pass #1.
+        # knot the ruling already dissolved. Adjudication is unconfirmed by
+        # default: unless `adjudicate` is explicitly opted into
+        # confirmation.steps, `_maybe_confirm_adjudication` returns None and the
+        # ruling auto-passes; only when opted in is a description-changing ruling
+        # gated behind the confirmation门 (human review via se3/calls, or an LLM
+        # reviewer) first. Once confirmation clears (or when none is required),
+        # the pending fix_instructions are dropped (superseded, recorded in the
+        # ADJUDICATE outputs for audit) and the flow re-runs SELF_CHECK directly
+        # at pass #1.
         if (
             current_step.step_type == StepType.ADJUDICATE
             and current_step.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
@@ -1445,16 +1449,24 @@ class StateMachine:
     ) -> Optional[Step]:
         """Gate an ADJUDICATE ruling behind the confirmation门 when required.
 
-        A ruling that rewrites the **task description** is a high-impact act, so
-        by default it is confirmed by a human (``confirmation.steps.adjudicate``,
-        reviewer=human → PAUSED / se3 calls). A ruling that only overrides the
-        **plan / test expectations** is 免确认 by default and is *never*
-        human-gated: it inserts a CONFIRM only when the same config entry points
-        at an explicit **LLM** reviewer, and skips confirmation entirely when the
-        entry is absent or its reviewer is human (the human default belongs to
-        description rewrites, not plan-only overrides — pausing an unattended run
-        for a plan tweak is exactly what the spec forbids). A benign ruling (no
-        override patch at all) needs no confirmation.
+        Adjudicate is a **standard opt-in** confirmation step: like every other
+        non-plan step, it is confirmed **iff** it is registered under
+        ``confirmation.steps.adjudicate``. When the entry is absent
+        (``resolve_confirm_inputs`` → ``None``), *any* ruling — including one
+        that rewrites the **task description** — auto-passes with no CONFIRM. The
+        trade-off is deliberate: the default is unattended-friendly, so a
+        contradiction ruling may silently rewrite the task description; opt in to
+        ``adjudicate: {reviewer: human}`` when that rewrite must be human-gated.
+
+        When the entry *is* present, the reviewer decides: reviewer=human →
+        PAUSED / se3 calls; an LLM reviewer → synchronous review. One carve-out
+        survives the flipped default: a ruling that only overrides the **plan /
+        test expectations** (no description rewrite) is *never* human-gated even
+        when explicitly configured ``reviewer: human`` — human review guards
+        high-impact description rewrites, and pausing an unattended run for a
+        mere plan tweak is exactly what the spec forbids. A plan-only ruling thus
+        inserts a CONFIRM only under an explicit **LLM** reviewer. A benign
+        ruling (no override patch at all) needs no confirmation.
 
         Returns the inserted CONFIRM step (routing the flow to approval) when a
         gate is required and not yet satisfied, or ``None`` so the caller reflows
@@ -1480,32 +1492,34 @@ class StateMachine:
                 ):
                     return None
 
-        # Resolve the reviewer to decide whether a gate applies. A description
-        # rewrite always confirms — falling back to human when unconfigured,
-        # since silently rewriting the task on an unattended run is the exact
-        # failure mode the gate exists to prevent.
+        # Resolve the reviewer to decide whether a gate applies. Adjudicate is
+        # opt-in: an absent entry means auto-pass, so a resolve failure defaults
+        # the same way (auto-pass + warning) rather than reviving the old human
+        # fallback — keeping the default consistent even on the exception edge.
         try:
             resolved = resolve_confirm_inputs(
                 self.project_root, StepType.ADJUDICATE.value,
             )
         except Exception:
             logger.warning(
-                "Failed to resolve adjudicate confirmation config; defaulting to "
-                "human confirmation", exc_info=True,
+                "Failed to resolve adjudicate confirmation config; "
+                "auto-passing the ruling (no confirmation)", exc_info=True,
             )
-            resolved = None
+            return None
 
-        # A plan-only ruling is never human-gated. The default human reviewer
-        # on ``confirmation.steps.adjudicate`` governs *description rewrites*
-        # (the high-impact act); a plan / test-expectation ruling is 免确认
-        # unless an *LLM* reviewer is explicitly configured. So for a plan-only
-        # ruling, skip the gate whenever the resolved reviewer is absent (None)
-        # or human — pausing an unattended run for human approval of a mere plan
-        # override is the exact behaviour the spec forbids. Only a non-human
-        # (LLM) reviewer inserts a CONFIRM here.
-        if not desc_changed:
-            if resolved is None or resolved.get("reviewer") == "human":
-                return None
+        # Not registered under confirmation.steps → auto-pass. This is the new
+        # default: adjudicate rulings (including description rewrites) take
+        # effect with no human/LLM门 unless the step is explicitly opted in.
+        if resolved is None:
+            return None
+
+        # A plan-only ruling is never human-gated even when configured
+        # ``reviewer: human`` — human review guards *description rewrites* (the
+        # high-impact act), and pausing an unattended run for a mere plan /
+        # test-expectation override is the exact behaviour the spec forbids.
+        # Only a non-human (LLM) reviewer inserts a CONFIRM for a plan-only ruling.
+        if not desc_changed and resolved.get("reviewer") == "human":
+            return None
 
         return self._insert_adjudicate_confirm(flow, adjudicate_step)
 

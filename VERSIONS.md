@@ -81,6 +81,15 @@
 
 
 
+
+## 11.10.0 - 2026-07-04
+
+- Make adjudicate rulings auto-pass by default so unattended runs no longer pause for human confirmation
+- Add opt-in human/LLM review for adjudicate via a standard `confirmation.steps.adjudicate` config entry
+- Preserve the carve-out that plan-only rulings are never human-gated, even when `reviewer: human` is configured
+- Update se3.yaml, `se3 init` scaffold, and config.py docs to document the免确认 default and opt-in human review
+- Default the config-resolution failure edge to auto-pass (with a warning) instead of reviving the old human fallback
+- Add integration/reflow tests covering both the auto-pass default and the explicit human opt-in paths
 ## 11.9.0 - 2026-07-04
 
 - Add approve/reject buttons with an optional note box to confirm chips in the webui, replying with a structured {approved, feedback} payload instead of only free text

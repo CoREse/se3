@@ -51,14 +51,16 @@ confirmation:
       # reviewer omitted → LLM review via llm_caller.defaults
       max_iterations: 3
     # Adjudicate rules on spec contradictions and emits an override patch to the
-    # task description and/or plan. Overriding the *task description* is a
-    # high-impact act, so it defaults to human review via se3/calls (PAUSED
-    # approval). If a ruling only touches the plan / test expectations (not the
-    # task description), you may instead point `reviewer` at an LLM agent name
-    # for automated review, or drop this entry entirely to skip confirmation.
-    adjudicate:
-      reviewer: human
-      max_iterations: 3
+    # task description and/or plan. It is 免确认 by default: with no entry here,
+    # a ruling (including one that rewrites the *task description*) auto-passes
+    # with no human/LLM门. Overriding the task description is high-impact, so if
+    # an unattended run must NOT silently rewrite it, opt in to human review via
+    # se3/calls (PAUSED approval) by uncommenting the block below. A plan-only
+    # ruling is never human-gated even then; point `reviewer` at an LLM agent
+    # name to auto-review plan-only overrides.
+    # adjudicate:
+    #   reviewer: human
+    #   max_iterations: 3
 
 # Version Bumping Configuration
 # Automatically bump version on commit step based on task type

@@ -1901,14 +1901,18 @@ def resolve_confirm_inputs(
 
     Returns ``None`` when ``reviewed_step_type`` is not configured for
     confirmation (i.e. absent from ``confirmation.steps``), so the caller
-    can defensively fall back without an extra read.
+    applies its own unconfigured behavior without an extra read. Notably
+    ``adjudicate`` is unconfirmed by default: when it is absent from
+    ``confirmation.steps`` this returns None and the state machine auto-passes
+    the ruling (human review is opt-in via an explicit
+    ``confirmation.steps.adjudicate`` entry).
 
     Exception: ``plan`` is always-on. When ``reviewed_step_type == 'plan'``
     and no ``confirmation.steps.plan`` entry exists, a default entry is
     synthesized (reviewer=None → default ``llm_caller.defaults`` chain,
     default max_iterations) rather than returning None, so plan-confirm
-    never degrades into state_machine's human fallback. An explicit
-    ``confirmation.steps.plan`` entry still overrides reviewer /
+    always resolves to a usable CONFIRM input regardless of config presence.
+    An explicit ``confirmation.steps.plan`` entry still overrides reviewer /
     max_iterations.
 
     Otherwise returns ``{"reviewer": str|None, "max_iterations": int|None,
@@ -1947,9 +1951,10 @@ def resolve_confirm_inputs(
         # entry it must resolve to a usable CONFIRM input. Synthesize the
         # default entry (reviewer=None → default llm_caller chain, default
         # max_iterations) instead of returning None. This keeps the
-        # always-on guarantee decoupled from config presence and prevents
-        # state_machine's resolved-is-None→human fallback from firing for
-        # plan. Non-plan steps still return None when unconfigured.
+        # always-on guarantee decoupled from config presence. Non-plan steps
+        # (including adjudicate) still return None when unconfigured, leaving
+        # the caller to apply its own default — for adjudicate the state
+        # machine auto-passes the ruling, so human review is opt-in only.
         if reviewed_step_type != _PLAN_STEP_NAME:
             return None
         step_cfg = {"reviewer": None, "max_iterations": None}

@@ -1,9 +1,10 @@
 """Tests for the post-ADJUDICATE reflow and confirmation门 (group G6).
 
 Once an ADJUDICATE step completes, the state machine must:
-  * for a REAL-contradiction ruling: gate a task-description rewrite behind the
-    confirmation门 (default human via se3/calls); a plan-only override follows
-    ``confirmation.steps.adjudicate`` (LLM reviewer or 免确认);
+  * for a REAL-contradiction ruling: adjudicate is 免确认 by default — when
+    ``confirmation.steps.adjudicate`` is unconfigured a task-description rewrite
+    auto-passes with no gate; human/LLM review of the rewrite happens only when
+    the step is explicitly opted in via ``confirmation.steps.adjudicate``;
   * on a cleared gate (or no gate), reflow: skip IMPLEMENT/TEST and re-run
     SELF_CHECK directly at pass #1 (deferred stash reset), dropping the pending
     fix_instructions (superseded, kept for audit) rather than implementing them;
@@ -447,9 +448,11 @@ class TestConfirmationGate:
             _DESC_PATCH["adjudicated_description"]
         )
 
-    def test_description_change_forces_human_when_unconfigured(self, tmp_path):
-        """A description rewrite is high-impact: with no confirmation config it
-        still confirms (human fallback), never silently reflowing."""
+    def test_description_change_auto_passes_when_unconfigured(self, tmp_path):
+        """Adjudicate is opt-in: with no confirmation config even a description
+        rewrite auto-passes — it reflows straight to SELF_CHECK with no CONFIRM,
+        and the rewritten description takes effect. Human gating is opt-in via
+        ``adjudicate: {reviewer: human}``."""
         sm = _make_state_machine(tmp_path)
         flow, *_ , adj = _make_post_adjudicate_flow(
             tmp_path, adj_outputs=dict(_DESC_PATCH), fix_iterations=1,
@@ -459,8 +462,8 @@ class TestConfirmationGate:
         ):
             next_step = sm.transition_to_next(flow)
 
-        assert next_step.step_type == StepType.CONFIRM
-        assert next_step.inputs["reviewer"] == "human"
+        assert next_step.step_type == StepType.SELF_CHECK
+        assert StepType.CONFIRM not in flow.state.selected_steps
 
     def test_plan_only_no_config_skips_confirmation(self, tmp_path):
         sm = _make_state_machine(tmp_path)
@@ -494,9 +497,9 @@ class TestConfirmationGate:
         assert next_step.inputs["reviewer"] is None  # LLM (default chain)
 
     def test_plan_only_human_reviewer_skips_confirmation(self, tmp_path):
-        """A plan-only ruling is never human-gated: the default human reviewer
+        """A plan-only ruling is never human-gated: an opted-in human reviewer
         on ``confirmation.steps.adjudicate`` governs description rewrites only.
-        With the checked-in default (reviewer=human), a plan-only ruling must
+        Even with reviewer=human explicitly configured, a plan-only ruling must
         reflow straight to SELF_CHECK — pausing an unattended run for a mere
         plan override is exactly what the spec forbids."""
         sm = _make_state_machine(tmp_path)

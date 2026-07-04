@@ -1074,8 +1074,8 @@ def test_noop_reruling_clears_rejected_patch_ruling(tmp_path):
     The no-op branch MUST remove the earlier ruling's adjudicated_description /
     adjudicated_plan / superseded_fix_instructions / fix_instructions_superseded —
     otherwise the never-approved rewrite lingers and _latest_adjudicated_output
-    would silently make it the effective task description, bypassing the human
-    rejection at the confirmation gate."""
+    would silently make it the effective task description, bypassing the
+    reviewer's rejection at the (opted-in) confirmation gate."""
     flow = _flow_with_ledger(tmp_path)
     step = _adj_step(flow, fix_instructions="ORIGINAL fix instructions")
 

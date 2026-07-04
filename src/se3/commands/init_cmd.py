@@ -48,10 +48,14 @@ version:
 # Confirmation steps (optional)
 # Per-step dict: list a step here to insert a CONFIRM after it.
 # Steps NOT listed are not confirmed (there is no global toggle).
+# `adjudicate` is 免确认 by default — a ruling (even one that rewrites the
+# task description) auto-passes with no门. Opt in to human review as below
+# if an unattended run must not silently rewrite the task description.
 # confirmation:
 #   steps:
 #     plan: {{reviewer: human}}
 #     design: {{reviewer: reviewer_bot, max_iterations: 3}}
+#     adjudicate: {{reviewer: human}}
 
 # Agent registry (optional) — referenced by name from llm_caller / confirmation.
 # agents:
