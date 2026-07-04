@@ -410,6 +410,11 @@ from .commands.code_index_cmd import app as code_index_app
 # Import migrate command (registry-based version/format migration channel)
 from .commands.migrate_cmd import migrate_app
 
+# Import worktree command (isolation-worktree operator surface: `gc` reclaims
+# leaked terminal --worktree runs). Imports only the engine GC core, no server
+# deps, so core/server dependency isolation is preserved.
+from .commands.worktree_cmd import worktree_app
+
 
 @app.command(name="init")
 def init_cmd(
@@ -617,6 +622,10 @@ app.add_typer(
 
 # Register migrate command (registry-based version/format migration channel)
 app.add_typer(migrate_app, name="migrate", help="Run a registered version/format migration")
+
+# Register worktree command (isolation-worktree operator surface; `se3 worktree
+# gc` reclaims leaked terminal --worktree runs stranded under se3/worktrees/)
+app.add_typer(worktree_app, name="worktree", help="Manage se3 run --worktree isolation worktrees")
 
 
 # ---------------------------------------------------------------------------

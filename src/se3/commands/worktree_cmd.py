@@ -1,0 +1,182 @@
+"""SE3 ``worktree`` command group — operator surface for isolation worktrees.
+
+Today it carries a single subcommand, ``gc``, the manual trigger face for the
+worktree garbage collector (:mod:`se3.engine.merge.worktree_gc`). The GC core
+lives in the engine layer so both trigger surfaces — this CLI command and the
+daemon's periodic task — drive the exact same reclamation logic; this module is
+only the thin render/exit-code shell around it.
+
+``se3 worktree gc`` reclaims leaked ``se3 run --worktree`` runs (terminal +
+idle worktrees stranded under ``se3/worktrees/`` when a paused-then-resumed or
+hand-merged flow never runs the finalize/merge cleanup). The rendered report is
+deliberately three-part so an operator can see, at a glance: what was archived
+and how much space it freed, which unmerged branches were KEPT (the core safety
+promise — no unmerged work is ever silently deleted), and what was skipped or
+errored.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from ..engine.merge.worktree_gc import gc_worktree_runs
+
+console = Console()
+
+
+def _format_bytes(num: int) -> str:
+    """Render a byte count as a compact human-readable size (e.g. ``50.0 MB``).
+
+    Binary (1024) units are used because the figure describes on-disk space
+    reclaimed, which filesystems report in KiB/MiB.
+    """
+    size = float(num)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} TB"
+
+
+worktree_app = typer.Typer(
+    name="worktree",
+    help="Manage se3 run --worktree isolation worktrees",
+)
+
+
+@worktree_app.command(name="gc")
+def gc_command(
+    max_age_hours: float = typer.Option(
+        24.0,
+        "--max-age-hours",
+        help=(
+            "Only reclaim terminal worktree runs whose engine.json has been "
+            "idle at least this long (default: 24). Guards a just-completed run "
+            "still awaiting a human merge."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report what WOULD be reclaimed without touching disk or branches.",
+    ),
+    project_root: Optional[str] = typer.Option(
+        None,
+        "--project-root",
+        "-p",
+        help="Project root directory (default: auto-detect).",
+    ),
+) -> None:
+    """Garbage-collect leaked terminal ``se3 run --worktree`` runs.
+
+    Enumerates worktree runs under ``se3/worktrees/`` whose engine.json is in a
+    terminal state (COMPLETED / FAILED) and has been idle at least
+    ``--max-age-hours``, then per run: archives it into
+    ``se3/worktrees/.archive/``, promotes its terminal state into the main
+    archive, removes the worktree, and — ONLY when the branch is provably
+    merged — deletes the branch. An unmerged branch's ref is ALWAYS kept and
+    surfaced with a loud warning so no unmerged work is silently lost.
+
+    Exits non-zero if any run errored (so scripted/cron callers can detect a
+    partial sweep); a clean or empty sweep exits 0.
+
+    Examples:
+        se3 worktree gc --dry-run
+        se3 worktree gc --max-age-hours 48
+    """
+    if project_root:
+        root = Path(project_root)
+    else:
+        from .run import get_project_root
+
+        root = get_project_root()
+
+    report = gc_worktree_runs(
+        root,
+        max_age_seconds=max_age_hours * 3600.0,
+        dry_run=dry_run,
+    )
+
+    mode = "[cyan]DRY RUN[/cyan] — " if dry_run else ""
+    console.print()
+    console.print(
+        f"{mode}Worktree GC over [bold]{root}[/bold] "
+        f"(max age {max_age_hours:g}h)"
+    )
+
+    # --- Section 1: archived + reclaimed space --------------------------------
+    if report.archived:
+        table = Table(
+            title=(
+                "Archived (dry run — would archive)"
+                if dry_run
+                else "Archived"
+            ),
+        )
+        table.add_column("Worktree", style="cyan")
+        table.add_column("Archive path")
+        table.add_column("Size", justify="right")
+        for name, archive_path, size in report.archived:
+            table.add_row(
+                name,
+                str(archive_path) if archive_path else "(dry run)",
+                _format_bytes(size),
+            )
+        console.print()
+        console.print(table)
+    else:
+        console.print()
+        console.print("No worktree runs matched for reclamation.")
+
+    console.print(
+        f"\nReclaimed space: [bold]{_format_bytes(report.reclaimed_bytes)}[/bold]"
+        + (" (projected)" if dry_run else "")
+    )
+
+    # --- Section 2: retained unmerged branches (the safety promise) -----------
+    if report.retained_unmerged:
+        console.print()
+        console.print(
+            "[bold yellow]⚠ WARNING: completed worktree branches were kept "
+            "because they are NOT merged.[/bold yellow]"
+        )
+        console.print(
+            "[yellow]These refs were preserved so no unmerged work is lost. "
+            "Merge or delete them manually once reviewed.[/yellow]"
+        )
+        table = Table(title="Retained unmerged branches")
+        table.add_column("Branch", style="yellow")
+        table.add_column("Original branch")
+        table.add_column("Reason")
+        for branch, original, reason in report.retained_unmerged:
+            table.add_row(branch, original or "(unknown)", reason)
+        console.print(table)
+
+    # --- Section 3: skipped + errors ------------------------------------------
+    if report.skipped:
+        table = Table(title="Skipped")
+        table.add_column("Worktree", style="dim")
+        table.add_column("Reason")
+        for name, reason in report.skipped:
+            table.add_row(name, reason)
+        console.print()
+        console.print(table)
+
+    if report.errors:
+        table = Table(title="Errors")
+        table.add_column("Worktree", style="red")
+        table.add_column("Reason")
+        for name, reason in report.errors:
+            table.add_row(name, reason)
+        console.print()
+        console.print(table)
+
+    console.print()
+    raise typer.Exit(1 if report.errors else 0)
