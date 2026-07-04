@@ -989,6 +989,104 @@ class TestDaemonLifecycle:
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["snapshot"]["flows"]
 
+    def test_poll_once_offloads_flow_discovery(self, tmp_path):
+        """External-flow discovery must not parse engine.json on the loop.
+
+        ``discover_flows`` -> ``_scan_external`` -> ``register`` ->
+        ``_read_flow_id`` -> ``read_engine_header`` parses an at-or-under-guard
+        engine.json synchronously (issue #243 A3). Running discovery on the loop
+        would block heartbeats for that parse's duration. This installs a
+        blocking ``discover_flows`` and proves a concurrent coroutine keeps
+        advancing while it runs — only possible if it is offloaded via
+        ``asyncio.to_thread``.
+        """
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+
+        real_discover = daemon.supervisor.discover_flows
+        discover_started = threading.Event()
+        release_discover = threading.Event()
+
+        def _blocking_discover(*args, **kwargs):
+            discover_started.set()
+            assert release_discover.wait(timeout=5.0)
+            return real_discover(*args, **kwargs)
+
+        daemon.supervisor.discover_flows = _blocking_discover
+
+        async def _drive():
+            ticks = 0
+
+            async def _heartbeat():
+                nonlocal ticks
+                while not discover_started.is_set():
+                    await asyncio.sleep(0)
+                for _ in range(3):
+                    ticks += 1
+                    await asyncio.sleep(0)
+                release_discover.set()
+
+            await asyncio.gather(daemon._poll_once(), _heartbeat())
+            return ticks
+
+        ticks = asyncio.run(_drive())
+        assert ticks == 3
+        assert config.status_file.exists()
+
+    def test_poll_once_offloads_root_registration(self, tmp_path):
+        """Registering a discovered flow's root must not run on the loop.
+
+        ``add_project_root`` for a *genuinely new* root writes through to
+        ``registry_persist`` -> ``_read_project_roots`` -> ``json.loads`` of
+        project_roots.json (issue #243 A3). Doing that on the event loop while
+        iterating discovered flows would block heartbeats for the parse's
+        duration. This installs a blocking ``add_project_root`` and proves a
+        concurrent coroutine keeps advancing while it runs — only possible if the
+        registration loop is offloaded via ``asyncio.to_thread``.
+        """
+        import types
+
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+
+        # A discovered flow whose root is not yet tracked, so registration takes
+        # the new-root (persisting, parse-bearing) path.
+        record = types.SimpleNamespace(project_root=str(proj))
+        daemon.supervisor.discover_flows = lambda *a, **k: [record]
+
+        register_started = threading.Event()
+        release_register = threading.Event()
+
+        def _blocking_add(path):
+            register_started.set()
+            assert release_register.wait(timeout=5.0)
+
+        daemon.aggregator.add_project_root = _blocking_add
+
+        async def _drive():
+            ticks = 0
+
+            async def _heartbeat():
+                nonlocal ticks
+                while not register_started.is_set():
+                    await asyncio.sleep(0)
+                for _ in range(3):
+                    ticks += 1
+                    await asyncio.sleep(0)
+                release_register.set()
+
+            await asyncio.gather(daemon._poll_once(), _heartbeat())
+            return ticks
+
+        ticks = asyncio.run(_drive())
+        assert ticks == 3
+
     def test_write_status_without_client(self, tmp_path):
         """No server_url configured -> connection fields mark local-only."""
         proj = tmp_path / "proj"

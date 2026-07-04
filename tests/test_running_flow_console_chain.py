@@ -98,6 +98,8 @@ def _run_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = flow
+        mock_pm.load_flow_by_id.return_value = flow
+        mock_pm._peek_active_flow_id.return_value = flow.flow_id
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm

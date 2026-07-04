@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .aggregator import DaemonAggregator, MachineStatus
+from .disk_json_cache import read_engine_header
 from .history import DaemonHistoryReader
 from .spawner import DaemonSpawner, SpawnedProcess
 from .supervisor import (
@@ -264,20 +265,19 @@ class Daemon:
         # Locate the flow by id. Prefer the active engine.json when it holds
         # the requested flow; otherwise fall back to the resumable snapshot so
         # a flow whose engine.json slot was overwritten by a later run can
-        # still be resumed.
+        # still be resumed. Both reads use the size-guarded header extractor
+        # (issue #243 A2/A3): this preflight only needs flow_id/status, so a
+        # tens-of-MB legacy engine.json / resumable snapshot is read head+tail
+        # rather than fully parsed — the whole call runs off the event loop
+        # (dispatched via asyncio.to_thread in the client), but the guard also
+        # keeps it from burning a core there.
         data: Optional[Dict[str, Any]] = None
-        try:
-            engine_data = json.loads(engine_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            engine_data = None
+        engine_data = read_engine_header(engine_json, active=True)
         if engine_data is not None and str(engine_data.get("flow_id") or "") == flow_id:
             data = engine_data
         else:
             snapshot_file = state_dir / "resumable" / f"{flow_id}.json"
-            try:
-                snapshot_data = json.loads(snapshot_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                snapshot_data = None
+            snapshot_data = read_engine_header(snapshot_file)
             # The snapshot's embedded flow_id MUST match the requested id; a
             # snapshot whose payload describes a different flow (stale, misnamed,
             # or operator-created artifact) is rejected so the resume preflight
@@ -457,7 +457,10 @@ class Daemon:
         ``stop_event``.
         """
         self.config.pid_dir.mkdir(parents=True, exist_ok=True)
-        self._write_pidfile()
+        # _write_pidfile reads the existing pidfile via json.loads; run it off the
+        # loop thread so no disk JSON parse ever executes on the event loop (A3),
+        # even for this tiny one-time startup read.
+        await asyncio.to_thread(self._write_pidfile)
         self._stop_event = asyncio.Event()
         self._running = True
         self._install_signal_handlers()
@@ -597,9 +600,12 @@ class Daemon:
         """
         root = Path(project_root).resolve() if project_root else Path.cwd()
         engine_json = root / "se3" / "state" / "engine.json"
-        try:
-            data = json.loads(engine_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Only flow_id/status are needed, so read the size-guarded header rather
+        # than fully parsing a possibly tens-of-MB legacy engine.json (issue
+        # #243 A2). The caller dispatches this via asyncio.to_thread, so the
+        # guard is the second line of defence against burning a core.
+        data = read_engine_header(engine_json, active=True)
+        if not isinstance(data, dict):
             logger.debug("No readable engine.json under %s; skipping resume", root)
             return
         flow_id = data.get("flow_id")
@@ -649,22 +655,40 @@ class Daemon:
     async def _poll_once(self) -> None:
         """A single aggregation tick: discover flows, snapshot, persist status.
 
-        Process discovery and spawner reaping are cheap, bounded probes (psutil
-        scan + a handful of stat/read calls) and stay on the event loop. The
-        snapshot build, however, fans out through ``get_snapshot`` ->
-        ``_merge_project_roots`` -> ``all_project_roots`` ->
-        ``enumerate_historical_project_roots`` into a full ``se3/history`` walk
-        (reading every ``_meta.json``) whenever the aggregator's historical-root
-        TTL cache is cold, expired, or freshly invalidated — and
-        ``add_project_root`` invalidates that cache exactly when a brand-new
-        project root is registered (e.g. a SPAWN_FLOW for a never-before-seen
-        project). Running that walk on the loop would block heartbeats and
-        inbound SPAWN_FLOW for its whole duration, the very hazard the offload in
-        :meth:`DaemonClient._push_status` was meant to relieve. Offload it to a
-        worker thread with the same ``asyncio.to_thread`` pattern so no
-        history-sized disk traversal ever executes synchronously on the loop.
+        Discovery, root registration, and the snapshot build can each parse
+        engine.json / project_roots.json off disk, so all three are offloaded to
+        worker threads and nothing on this loop touches ``json.loads``.
+        ``discover_flows`` reaps dead pids then scans for external ``se3 run``
+        processes; registering a newly-discovered external flow calls
+        ``_read_flow_id`` -> ``read_engine_header``, which parses an
+        at-or-under-guard engine.json synchronously (issue #243 A3 — no disk
+        JSON parse may run on the loop thread). Registration itself
+        (``add_project_root``) is likewise offloaded: a brand-new root triggers
+        ``registry_persist`` -> ``_read_project_roots`` -> ``json.loads`` of
+        project_roots.json, which must not run on the loop either. The snapshot
+        build fans out through ``get_snapshot`` -> ``_merge_project_roots`` ->
+        ``all_project_roots`` -> ``enumerate_historical_project_roots`` into a
+        full ``se3/history`` walk (reading every ``_meta.json``) whenever the
+        aggregator's historical-root TTL cache is cold, expired, or freshly
+        invalidated — and ``add_project_root`` invalidates that cache exactly
+        when a brand-new project root is registered. Running any of these on the
+        loop would block heartbeats and inbound SPAWN_FLOW for its whole
+        duration, the very hazard the offload in
+        :meth:`DaemonClient._push_status` was meant to relieve.
         """
-        flows = self.supervisor.discover_flows()
+        flows = await asyncio.to_thread(self.supervisor.discover_flows)
+        await asyncio.to_thread(self._register_discovered_roots, flows)
+        self.spawner.reap()
+        snapshot = await asyncio.to_thread(self.aggregator.get_snapshot)
+        self._write_status(snapshot, flows)
+
+    def _register_discovered_roots(self, flows: List["object"]) -> None:
+        """Register each discovered flow's project root (worker-thread only).
+
+        Runs off the event loop because ``add_project_root`` can, for a
+        genuinely new root, synchronously parse project_roots.json via
+        ``registry_persist`` (issue #243 A3 — no disk JSON parse on the loop).
+        """
         for record in flows:
             # Defense in depth: a flow whose root is a ``se3/worktrees/`` copy
             # is attributed back to its main project root, so an isolation
@@ -675,9 +699,6 @@ class Daemon:
             # already-main root.
             main_root = resolve_worktree_main_root(record.project_root)
             self.aggregator.add_project_root(main_root or record.project_root)
-        self.spawner.reap()
-        snapshot = await asyncio.to_thread(self.aggregator.get_snapshot)
-        self._write_status(snapshot, flows)
 
     # -- signal handling ---------------------------------------------------
 

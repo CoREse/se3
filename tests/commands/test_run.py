@@ -116,6 +116,9 @@ class TestResumeDetection:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         # Setup mock state machine
         mock_sm = MagicMock()
@@ -146,6 +149,9 @@ class TestResumeDetection:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -174,8 +180,11 @@ class TestResumeDetection:
         mock_pm_class.return_value = mock_pm
         # engine.json no longer holds this flow (overwritten by a later run).
         mock_pm.load_flow.return_value = None
+        mock_pm._peek_active_flow_id.return_value = None
         # ...but a stale completed snapshot survives under se3/state/resumable/.
         mock_pm.load_resumable_snapshot.return_value = self.flow
+        # load_flow_by_id resolves the snapshot when engine.json lacks the flow.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -204,6 +213,9 @@ class TestResumeDetection:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         # Setup mock state machine
         mock_sm = MagicMock()
@@ -277,6 +289,9 @@ class TestResumeDetection:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         # Setup mock state machine
         mock_sm = MagicMock()
@@ -313,6 +328,9 @@ class TestResumeDetection:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         # Setup mock state machine
         mock_sm = MagicMock()
@@ -348,6 +366,9 @@ class TestResumeDetection:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         # Setup mock state machine
         mock_sm = MagicMock()
@@ -436,6 +457,9 @@ class TestResumeFailedFlow:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -461,6 +485,9 @@ class TestResumeFailedFlow:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -494,6 +521,9 @@ class TestResumeFailedFlow:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -520,6 +550,9 @@ class TestResumeFailedFlow:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -550,6 +583,9 @@ class TestResumeFailedFlow:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
@@ -868,6 +904,9 @@ class TestOutputFormatEventStream:
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = self.flow
+        # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
+        # legacy load_flow stub is retained for any non-resume caller.
+        mock_pm.load_flow_by_id.return_value = self.flow
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm

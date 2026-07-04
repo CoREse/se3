@@ -1,0 +1,45 @@
+id: '255'
+description: '== 现象 ==
+
+  webui 对 confirm 类 call（plan 确认、adjudicate 裁决审批等）只有一个自由文本回复框，没有 批准/打回 快捷按钮。自由文本经
+  run.py:120 _interpret_confirm_answer 解析，白名单制：
+
+  - 批准词（全串或首词命中）：approve/approved/yes/y/ok/okay/lgtm/accept/accepted/continue/proceed/pass/skip（全英文）
+
+  - 拒绝词：no/n/reject/revise/request changes 等
+
+  - **其余任何文本（包括 "1"、中文"同意/通过/批准"）一律按 revision request 处理**，原文作为 feedback 打回被审步骤。
+
+
+  实际踩坑：2026-07-04 审批 adjudicate 裁决（flow 20260704-003700 的 65_confirm）时，操作者第一反应是输入
+  "1" ——若真输了，一份正确的裁决补丁会被静默打回重拟，且无任何提示说明发生了什么。
+
+
+  == 改进 ==
+
+  1. 【核心】webui 对 type=confirm 的 call 渲染 批准/打回 按钮 + 可选备注框，回复走结构化 payload（{"approved":
+  true/false, "feedback": ...}）。run.py 的响应适配层已支持内层 dict（response 内嵌 {approved, feedback}
+  即用之，见 run.py 消费路径"Unwrap the daemon envelope"段），前端无需等后端改动。
+
+  2. 【裁决审批的呈现】step_to_review_type == "adjudicate" 时，前端应展示裁决内容：adjudication_rationale
+  + adjudicated_description 相对裁决前基线的 diff（后端 _latest_adjudicated_output 的 exclude_step_id
+  参数即为此设计），否则审批者在 webui 上无从判断批还是不批。
+
+  3. 【兜底】保留自由文本通道时：词表加入中文常用词（同意/通过/批准/驳回/拒绝/打回）；输入框 placeholder 明示可用词汇；对未命中词表、即将按"打回"处理的输入给一次确认提示（"你的回复将被视为修改请求，确定？"），消除静默误判。
+
+
+  == 验收 ==
+
+  - confirm chip 上一键批准/打回可用，落盘为结构化 response。
+
+  - adjudicate 审批门在 webui 可见裁决理由与描述 diff。
+
+  - 自由文本输入 "1"/"同意" 不再被静默当作打回（要么正确识别，要么显式二次确认）。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-04T13:55:03.683771'
+updated_at: '2026-07-04T13:55:03.683771'
+title: webui confirm 审批缺快捷回复按钮；自由文本词表陷阱会把批准误判为打回
+priority: medium
+type: feature

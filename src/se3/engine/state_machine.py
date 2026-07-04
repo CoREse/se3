@@ -548,6 +548,17 @@ class StateMachine:
         step.status = StepStatus.RUNNING
         step.error_message = None
         step.started_at = datetime.now()
+        # This step is now genuinely (re-)producing its body via its handler, so
+        # its in-memory inputs/outputs are the authoritative value — not a disk
+        # proxy. Flip ``cold_loaded`` True (the execution/assignment path B3-i
+        # requires) so: (1) a later keyed access via the lazy step dict no longer
+        # re-fires the hydrator and wipes the freshly produced body back to {},
+        # and (2) _split_flow detects the changed payload and rewrites this
+        # step's cold file. Without this, a resumed step whose cold file was
+        # missing/corrupt (cold_loaded stayed False after apply_cold(None)) would
+        # have its re-produced outputs silently lost — the header would re-emit
+        # the stale cold_ref on every save (issue #244 B3-i).
+        step.cold_loaded = True
         flow.status = FlowStatus.RUNNING
         self.persistence.save_flow(flow)
 

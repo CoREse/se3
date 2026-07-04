@@ -547,7 +547,34 @@ def _promote_completed_engine_state(
     slug = re.sub(r"[^A-Za-z0-9._-]", "_", flow_id_str)
     dest = archive_dir / f"engine_{slug}.json"
 
+    # New-format (hot/cold split, issue #244) worktree flows keep each step's
+    # inputs/outputs and the shared context in a per-flow cold partition at
+    # ``<wt>/se3/state/steps/<flow_id>/`` — the promoted engine.json is only the
+    # KB-scale header carrying ``cold_ref`` entries that point into that dir. The
+    # worktree (and its state/, which is gitignored and never runtime-synced) is
+    # destroyed right after this promotion, so unless the cold partition is moved
+    # into the *main* archive alongside its header, every step's payload and the
+    # context are lost and ``se3 history show`` / context export degrade to empty.
+    # Mirror ``PersistenceManager.clear_state``'s archival: copy the cold dir into
+    # ``<main>/se3/state/archive/steps/<flow_id>/`` so the archived flow stays
+    # whole (issue #244 B5). Legacy inline worktree engine.json has no cold dir,
+    # so this is a no-op and the byte-for-byte legacy behavior is preserved.
+    if _is_hotcold_header(data) and not _promote_cold_partition(
+        archive_dir, wt_path, flow_id_str, data
+    ):
+        # Fail closed: the cold partition could not be copied into the main
+        # archive, so writing the header would publish a promoted archive whose
+        # cold_ref entries point at missing files — ``se3 history show`` /
+        # context export would then silently degrade every step to empty. Skip
+        # the promotion entirely; the flow's full-fidelity data still lives in
+        # the worktree archive (``se3/worktrees/.archive/``, written just before
+        # this promotion), so nothing is lost — only the brief "Completed" chip
+        # is (non-fatal, as documented).
+        return None
+
     # Atomic write: write to a temp file in the same directory, then replace.
+    # The header is written AFTER the cold partition is in place so a reader that
+    # discovers the archive header never sees it before its cold files exist.
     tmp = archive_dir / f".engine_{slug}.json.tmp"
     try:
         tmp.write_text(
@@ -571,6 +598,98 @@ def _promote_completed_engine_state(
         flow_id_str, dest,
     )
     return dest
+
+
+# Mirror ``PersistenceManager``'s cold-partition layout without importing the
+# whole engine.persistence module here (avoids a merge → engine import cycle and
+# keeps the constants local to the promotion path). These MUST stay in sync with
+# ``PersistenceManager.STEPS_DIRNAME`` / ``ENGINE_FORMAT_HOTCOLD``.
+_STEPS_DIRNAME = "steps"
+_ENGINE_FORMAT_KEY = "engine_format"
+
+
+def _is_hotcold_header(data: dict) -> bool:
+    """True when *data* is a new-format (hot/cold split) engine header."""
+    return str(data.get(_ENGINE_FORMAT_KEY, "")).startswith("hotcold/")
+
+
+def _promote_cold_partition(
+    archive_dir: Path,
+    wt_path: Path,
+    flow_id: str,
+    header: dict,
+) -> bool:
+    """Copy a new-format flow's cold partition into the main archive.
+
+    The worktree keeps per-step inputs/outputs and the shared context under
+    ``<wt>/se3/state/steps/<flow_id>/``; this copies that dir to
+    ``<archive>/steps/<flow_id>/`` so ``load_archived_flow_by_id`` (which resolves
+    each ``cold_ref`` against ``archive/steps/<partition>/``) still finds every
+    payload after the worktree is deleted. If a prior archive already owns
+    ``archive/steps/<flow_id>/``, the copy goes to a timestamp-suffixed partition
+    and that name is stamped into the header's ``state.cold_partition`` so header
+    and cold files stay reference-consistent — exactly what ``clear_state`` does.
+
+    Returns ``True`` when the cold files are safely in place (including the
+    no-op case of a missing cold dir — a legacy-inline flow has nothing to
+    preserve). Returns ``False`` when the destination root cannot be created or
+    the copy fails: the caller then fails CLOSED and refuses to write the header,
+    so no promoted archive is left advertising ``cold_ref`` entries whose files
+    never arrived (which would silently degrade every step to empty). The flow's
+    full-fidelity data still lives in the worktree archive, so this only costs
+    the brief "Completed" chip, never the data (self-check fix).
+    """
+    cold_src = wt_path / "se3" / "state" / _STEPS_DIRNAME / flow_id
+    if not cold_src.is_dir():
+        return True
+
+    archive_steps = archive_dir / _STEPS_DIRNAME
+    try:
+        archive_steps.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to create archive cold-partition root %s for flow %s: %s",
+            archive_steps, flow_id, exc,
+        )
+        return False
+
+    cold_dst = archive_steps / flow_id
+    if cold_dst.exists():
+        # Same-flow_id collision with a prior archive: route this flow's cold
+        # files to a suffixed partition and record it in the header so its
+        # cold_ref entries resolve to its own data, not the sibling's. Probe
+        # past an already-occupied timestamped name too — promoting the same
+        # flow_id twice within one second collides on steps/<flow_id>_<ts>, and
+        # copytree would raise onto the existing dir and fail the whole
+        # promotion (dropping the completed flow from the archive) instead of
+        # using a further suffix, exactly as ``clear_state`` probes (self-check
+        # fix).
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        candidate = archive_steps / f"{flow_id}_{timestamp}"
+        suffix = 1
+        while candidate.exists():
+            candidate = archive_steps / f"{flow_id}_{timestamp}_{suffix}"
+            suffix += 1
+        cold_dst = candidate
+        state = header.get("state")
+        if isinstance(state, dict):
+            state["cold_partition"] = cold_dst.name
+
+    try:
+        shutil.copytree(cold_src, cold_dst)
+    except (OSError, shutil.Error) as exc:
+        logger.warning(
+            "Failed to promote cold data for worktree flow %s (%s -> %s); "
+            "skipping header promotion to keep the archive full-fidelity: %s",
+            flow_id, cold_src, cold_dst, exc,
+        )
+        # Drop any partial copy so a retry / listing never sees a half-written
+        # partition, then signal the caller to fail closed.
+        if cold_dst.exists():
+            shutil.rmtree(cold_dst, ignore_errors=True)
+        return False
+
+    return True
 
 
 def _is_worktree_clean(wt_path: Path) -> bool:

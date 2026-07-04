@@ -27,11 +27,11 @@ description: 'daemon 控制面会被磁盘上的大 engine.json 打瘫/打满,�
 
   关联:tests/ISSUE_209_FREEZE_DIAGNOSIS.md(starved _push_loop)、issue #241。根源性的状态文件瘦身另立
   issue(engine.json 热/冷拆分)。'
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-02T10:03:27.357074'
-updated_at: '2026-07-02T10:03:27.357074'
+updated_at: '2026-07-04T00:41:14.202423'
 title: daemon 热路径反复解析大 JSON:缓存+大小护栏+挪出事件循环
 priority: high
 type: bug

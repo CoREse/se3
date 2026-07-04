@@ -18,28 +18,49 @@ from typing import Any, Dict, List, Optional, TypedDict
 # ============================================================================
 
 class StepStatusValue(str, Enum):
-    """Valid step status values."""
+    """Valid step status values.
+
+    Mirrors :class:`se3.engine.models.StepStatus` — every value the model layer
+    can emit into (and load from) engine.json must appear here, or a valid
+    new-format file would be rejected by this schema's enum.
+    """
 
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     RETRYING = "retrying"
     PAUSED = "paused"
+    REVISION_NEEDED = "revision_needed"
 
 
 class StepTypeValue(str, Enum):
-    """Valid step type values."""
+    """Valid step type values.
 
+    Mirrors :class:`se3.engine.models.StepType` — every step type the model
+    layer can serialize must appear here so a valid engine.json containing e.g.
+    a ``confirm`` or ``self_check`` step is not rejected by this schema.
+    """
+
+    DISCOVERY = "discovery"
     ANALYZE = "analyze"
+    PROJECT_SUMMARY = "project_summary"
     PLAN = "plan"
     PROPOSE = "propose"  # deprecated: use PLAN
     DESIGN = "design"  # deprecated: use PLAN
     PLAN_TASKS = "plan_tasks"  # deprecated: use PLAN
+    CONFIRM = "confirm"
     IMPLEMENT = "implement"
     TEST = "test"
-    VERIFY_SPEC = "verify_spec"
-    UPDATE_SPEC = "update_spec"
+    SELF_CHECK = "self_check"
+    ADJUDICATE = "adjudicate"
+    INVARIANT_CHECK = "invariant_check"
+    CHARTER_FRESHNESS = "charter_freshness"
+    VERIFY_SPEC = "verify_spec"  # deprecated by the charter refactor
+    UPDATE_SPEC = "update_spec"  # deprecated by the charter refactor
+    SPEC_GATE = "spec_gate"  # deprecated by the charter refactor
+    VERSION_ANALYZE = "version_analyze"
     COMMIT = "commit"
     SUMMARIZE = "summarize"
 
@@ -152,6 +173,14 @@ class StateSchema(TypedDict, total=False):
     context: Dict[str, Any]  # Legacy format only (inline)
     selected_steps: List[str]  # StepTypeValue values
     current_step_index: int
+    # Small scalar counters/usage the header keeps inline in BOTH formats — the
+    # hot/cold split only externalizes the two unbounded growers (context and
+    # fix_history), never these KB-scale fields (see State.to_header_dict).
+    review_iterations: Dict[str, int]  # step_id -> review pass count
+    fix_iterations: int  # test-verify-fix loop counter
+    baseline_failures: Optional[Any]  # pre-implementation failing-test baseline
+    session_token_usage: Dict[str, Any]  # UsageTotals.to_dict()
+    fix_history: List[Dict[str, Any]]  # Legacy inline only; new format externalizes with context
 
 
 class FlowInstanceSchema(TypedDict, total=False):
@@ -186,8 +215,12 @@ class FlowInstanceSchema(TypedDict, total=False):
     completed_at: Optional[str]  # ISO format datetime
     change_name: Optional[str]
     change_path: Optional[str]
+    source_issue_id: Optional[str]
+    baseline_commit: Optional[str]
     is_worktree_mode: bool
     worktree_branch: Optional[str]
+    worktree_path: Optional[str]
+    worktree_original_branch: Optional[str]
     # Hot/cold split marker (issue #244 一期): "hotcold/1" when the header
     # externalizes step payloads + context to steps/<flow_id>/; absent on a
     # legacy fully-inline engine.json.
@@ -249,7 +282,20 @@ ENGINE_JSON_SCHEMA: Dict[str, Any] = {
                 # Legacy format: shared context inlined.
                 "context": {"type": "object"},
                 "selected_steps": {"type": "array", "items": {"type": "string"}},
-                "current_step_index": {"type": "integer"}
+                "current_step_index": {"type": "integer"},
+                # Small scalar counters/usage kept inline in the header for BOTH
+                # formats (the hot/cold split externalizes only context +
+                # fix_history, not these); see State.to_header_dict.
+                "review_iterations": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                },
+                "fix_iterations": {"type": "integer"},
+                "baseline_failures": {"type": ["object", "array", "null"]},
+                "session_token_usage": {"type": "object"},
+                # Legacy fully-inline layout only; the new format externalizes
+                # fix_history alongside context into steps/<flow_id>/_context.json.
+                "fix_history": {"type": "array", "items": {"type": "object"}}
             }
         },
         "created_at": {"type": "string", "format": "date-time"},
@@ -257,8 +303,16 @@ ENGINE_JSON_SCHEMA: Dict[str, Any] = {
         "completed_at": {"type": ["string", "null"], "format": "date-time"},
         "change_name": {"type": ["string", "null"]},
         "change_path": {"type": ["string", "null"]},
+        "source_issue_id": {"type": ["string", "null"]},
+        "baseline_commit": {"type": ["string", "null"]},
         "is_worktree_mode": {"type": "boolean"},
-        "worktree_branch": {"type": ["string", "null"]}
+        "worktree_branch": {"type": ["string", "null"]},
+        "worktree_path": {"type": ["string", "null"]},
+        "worktree_original_branch": {"type": ["string", "null"]},
+        # Present (and True) only while a synchronous run is queued acquiring the
+        # main-worktree mutex before its first non-discovery step; absent otherwise
+        # (FlowInstance.to_dict only emits it when True).
+        "waiting_for_lock": {"type": "boolean"}
     }
 }
 

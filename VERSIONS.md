@@ -78,6 +78,16 @@
 
 
 
+
+## 11.8.0 - 2026-07-04
+
+- Add a unified (path, mtime, size)-keyed disk-JSON parse cache for the daemon so unchanged engine.json, archive, and snapshot files are parsed at most once, eliminating per-tick full re-parsing that froze the event loop and pinned executor threads
+- Add a 5 MiB size guardrail with bounded head+tail degraded reading that extracts flow_id/status/is_worktree_mode/project_root from oversized legacy engine.json files without full parsing, keeping worktree runs visible in the webui while capping CPU and memory
+- Ensure all daemon disk-JSON parsing runs off the asyncio event loop, restoring reliable webui push updates so new tasks respond even with tens-of-MB engine.json files present
+- Introduce a hot/cold engine.json format that keeps a KB-scale header and stores each step's inputs/outputs in per-flow external step files, bounding the header below 100KB regardless of step count
+- Make step persistence incremental, rewriting only the header and the changed step's cold file so write volume scales with per-step output instead of accumulating across steps; resumable snapshots use the same split format
+- Read both legacy inline and new split engine.json formats without migrating existing files, tolerating missing or corrupt cold step files by degrading in-memory only and never overwriting the on-disk cold file
+- Adapt resume, se3 history, context export, and daemon/webui read paths to the new format with lazy cold-data loading and full-fidelity archiving on clear_state
 ## 11.7.1 - 2026-07-03
 
 - Gate the ADJUDICATE LLM ruling into two phases: only a real spec contradiction takes the patch/reflow path

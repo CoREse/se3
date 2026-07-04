@@ -92,16 +92,33 @@ def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
     if not archive_dir.exists():
         return []
 
+    from ..engine.persistence import _read_snapshot_header
+
     archived = []
     for archive_file in sorted(archive_dir.glob("engine_*.json")):
         try:
-            # Extract timestamp from filename
+            # Extract timestamp from filename. clear_state resolves same-second
+            # archive-name collisions by appending a numeric suffix
+            # (engine_<ts>_<n>.json, persistence.py); parse only the leading
+            # YYYYMMDD_HHMMSS and tolerate the suffix, falling back to file mtime,
+            # so a collision-suffixed archive is never dropped from the listing.
             timestamp_str = archive_file.stem.replace("engine_", "")
-            dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+            parts = timestamp_str.split("_")
+            dt = None
+            if len(parts) >= 2:
+                try:
+                    dt = datetime.strptime(f"{parts[0]}_{parts[1]}", "%Y%m%d_%H%M%S")
+                except ValueError:
+                    dt = None
+            if dt is None:
+                dt = datetime.fromtimestamp(archive_file.stat().st_mtime)
 
-            # Load flow data to get more details
-            content = archive_file.read_text(encoding="utf-8")
-            data = json.loads(content)
+            # Size-guarded header read: only the top-level identity keys are
+            # needed for the listing, so a giant legacy archived engine.json is
+            # scanned head+tail rather than fully parsed (issue #243).
+            data = _read_snapshot_header(archive_file)
+            if not isinstance(data, dict):
+                continue
 
             archived.append({
                 "flow_id": data.get("flow_id", "unknown"),
@@ -157,21 +174,18 @@ def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
 
 
 def _load_archived_flow(project_root: Path, flow_id: str) -> Optional[Any]:
-    """Try to load a FlowInstance from archive files matching flow_id."""
-    from ..engine.models import FlowInstance
+    """Try to load a FlowInstance from archive files matching flow_id.
 
-    archive_dir = project_root / "se3" / "state" / "archive"
-    if not archive_dir.exists():
-        return None
-
-    for archive_file in archive_dir.glob("engine_*.json"):
-        try:
-            data = json.loads(archive_file.read_text(encoding="utf-8"))
-            if data.get("flow_id") == flow_id:
-                return FlowInstance.from_dict(data)
-        except (json.JSONDecodeError, KeyError, ValueError, IOError):
-            continue
-    return None
+    Delegates to the split-aware, size-guarded persistence loader: a new-format
+    archive header has its externalized cold step payloads resolved from
+    ``archive/steps/<flow_id>/`` (so ``se3 history show`` reports each step's
+    real outputs, not empty ones), while a giant legacy archive is read
+    head+tail rather than fully parsed (issue #243 / #244 B5). A legacy archive
+    that can only be read degraded returns ``None``, so the caller falls back to
+    history-only detail rather than blocking on a 100 MB decode.
+    """
+    persistence = PersistenceManager(project_root)
+    return persistence.load_archived_flow_by_id(flow_id)
 
 
 def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]]:

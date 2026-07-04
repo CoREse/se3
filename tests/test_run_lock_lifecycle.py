@@ -268,6 +268,10 @@ def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> No
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
         mock_pm.load_flow.return_value = flow
+        # Resume loads header-first via load_flow_by_id (issue #244 B4); peek the
+        # active flow_id so the snapshot-recovery path is not falsely triggered.
+        mock_pm.load_flow_by_id.return_value = flow
+        mock_pm._peek_active_flow_id.return_value = flow.flow_id
         mock_pm.save_flow.side_effect = lambda f: saved_flags.append(f.waiting_for_lock)
 
         mock_sm_class.return_value = MagicMock()

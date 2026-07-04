@@ -636,6 +636,136 @@ class TestPromoteCompletedEngineState:
         assert [b for b, _ in report.promoted_states] == ["feature"]
 
 
+class TestPromoteColdPartition:
+    """Issue #244 B5: a new-format worktree flow's cold step/context partition
+    must be promoted into the main archive alongside its KB-scale header, so the
+    archived flow retains full step inputs/outputs after the worktree is deleted.
+    """
+
+    @staticmethod
+    def _save_new_format_completed_flow(wt_path: Path) -> str:
+        """Save a hot/cold split COMPLETED flow into *wt_path*'s state; return id."""
+        from se3.engine.models import (
+            FlowInstance,
+            FlowStatus,
+            Step,
+            StepStatus,
+            StepType,
+        )
+        from se3.engine.persistence import PersistenceManager
+
+        flow = FlowInstance(
+            task_description="worktree split-format flow",
+            status=FlowStatus.COMPLETED,
+        )
+        flow.task_type = "feature"
+        flow.is_worktree_mode = True
+        blob = "Z" * 40_000
+        for i in range(4):
+            step = Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED)
+            step.inputs = {"test_results": blob, "idx": i}
+            step.outputs = {"artifact_blob": blob, "ok": True}
+            flow.state.add_step(step)
+        flow.state.selected_steps = [StepType.IMPLEMENT]
+        flow.state.current_step_id = flow.state.step_history[-1]
+        flow.state.context = {"spec_content": blob, "resolved_type": "feature"}
+        PersistenceManager(wt_path).save_flow(flow)
+        return flow.flow_id
+
+    def test_promotes_cold_partition_with_header(self, tmp_path: Path) -> None:
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from se3.engine.persistence import PersistenceManager
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+        flow_id = self._save_new_format_completed_flow(wt_path)
+
+        promoted = _promote_completed_engine_state(project_root, wt_path)
+        assert promoted is not None
+
+        # The cold partition (per-step inputs/outputs + _context.json) is copied
+        # into the MAIN project's archive/steps/<flow_id>/, mirroring clear_state.
+        archive_steps = (
+            project_root / "se3" / "state" / "archive" / "steps" / flow_id
+        )
+        assert archive_steps.is_dir()
+        assert (archive_steps / "_context.json").exists()
+        assert list(archive_steps.glob("*.json"))
+
+        # Simulate the destructive worktree removal that follows promotion.
+        shutil = __import__("shutil")
+        shutil.rmtree(wt_path)
+
+        # The archived flow still reloads at FULL fidelity — every step keeps its
+        # inputs/outputs and the shared context is intact (no empty degradation).
+        loaded = PersistenceManager(project_root).load_archived_flow_by_id(flow_id)
+        assert loaded is not None
+        for sid in loaded.state.step_history:
+            step = loaded.state.steps[sid]
+            assert step.inputs.get("test_results")
+            assert step.outputs.get("artifact_blob")
+        assert loaded.state.context.get("spec_content")
+
+    def test_cold_partition_collision_records_suffixed_partition(
+        self, tmp_path: Path
+    ) -> None:
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from se3.engine.persistence import PersistenceManager
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        # A prior archive already owns archive/steps/<flow_id>/ with different data.
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+        flow_id = self._save_new_format_completed_flow(wt_path)
+        prior = project_root / "se3" / "state" / "archive" / "steps" / flow_id
+        prior.mkdir(parents=True)
+        (prior / "sentinel.json").write_text("{}", encoding="utf-8")
+
+        promoted = _promote_completed_engine_state(project_root, wt_path)
+        assert promoted is not None
+
+        # The prior partition is untouched; this flow's cold files land in a
+        # suffixed partition recorded in the promoted header so its cold_ref
+        # entries resolve to its own data.
+        assert (prior / "sentinel.json").exists()
+        data = json.loads(promoted.read_text(encoding="utf-8"))
+        partition = data["state"]["cold_partition"]
+        assert partition != flow_id and partition.startswith(flow_id)
+        suffixed = (
+            project_root / "se3" / "state" / "archive" / "steps" / partition
+        )
+        assert suffixed.is_dir()
+
+        shutil = __import__("shutil")
+        shutil.rmtree(wt_path)
+        loaded = PersistenceManager(project_root).load_archived_flow_by_id(flow_id)
+        assert loaded is not None
+        for sid in loaded.state.step_history:
+            assert loaded.state.steps[sid].inputs.get("test_results")
+
+    def test_legacy_inline_worktree_has_no_cold_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """A legacy inline worktree engine.json promotes byte-for-byte with no
+        cold partition (nothing to copy) — the pre-#244 behavior is preserved."""
+        from se3.engine.merge.cleanup import _promote_completed_engine_state
+
+        project_root = tmp_path / "main"
+        project_root.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+        _write_worktree_engine_json(wt_path, "flow-legacy", status="completed")
+
+        promoted = _promote_completed_engine_state(project_root, wt_path)
+        assert promoted is not None
+        assert not (
+            project_root / "se3" / "state" / "archive" / "steps"
+        ).exists()
+
+
 class TestParseWorktreePorcelain:
     """Defect J1: porcelain parser rejects malformed blocks deterministically."""
 

@@ -2233,44 +2233,62 @@ def _run_flow_impl(
     # Load or create flow
     try:
         if flow_id:
-            # Prefer the active engine.json; fall back to the per-flow
-            # resumable snapshot (resumable/<flow_id>.json) when engine.json has
-            # since been overwritten by a later ``se3 run``. A normally
-            # COMPLETED flow has no snapshot (cleared on completion), so it is
-            # never resurrected through the snapshot path.
-            flow = persistence.load_flow()
-            if not flow or flow.flow_id != flow_id:
-                # engine.json does not hold the requested flow (e.g. it was
-                # overwritten by a later run). Recover it from its per-flow
-                # resumable snapshot, then write it back as the live
-                # engine.json so the resume bookkeeping below, and the daemon's
-                # single-slot observability, both see a live flow again.
-                flow = persistence.load_resumable_snapshot(flow_id)
-                if not flow:
-                    display_error(f"Flow '{flow_id}' not found")
-                    return 1
-                # Do not write a stale snapshot back as the live engine.json
-                # before the completed-flow guard below has a chance to reject
-                # it — guard first, then persist.
-                if flow.status != FlowStatus.COMPLETED:
-                    persistence.save_flow(flow)
+            # Header-first lazy resume (issue #244 B4). ``load_flow_by_id``
+            # resolves the active engine.json first, else the per-flow resumable
+            # snapshot (resumable/<flow_id>.json) when engine.json has since been
+            # overwritten by a later ``se3 run`` — and in BOTH cases reads only
+            # the KB-scale header, faulting in each step's cold body on first
+            # keyed access. Resuming a paused/interrupted flow with many large
+            # completed step cold files therefore no longer re-materializes every
+            # step payload before reaching the current step (the whole point of
+            # the hot/cold split); the eager ``load_flow`` reconstruct used here
+            # before defeated it. A normally COMPLETED flow has no snapshot
+            # (cleared on completion), so it is never resurrected via the snapshot.
+            #
+            # Peek the active engine.json's flow_id (size-guarded header read)
+            # before loading so we know whether the flow was recovered from its
+            # snapshot and must be written back as the live engine.json.
+            recovered_from_snapshot = (
+                str(persistence._peek_active_flow_id() or "") != str(flow_id)
+            )
+            flow = persistence.load_flow_by_id(flow_id)
+            if not flow:
+                display_error(f"Flow '{flow_id}' not found")
+                return 1
 
             # A COMPLETED flow is terminal and must not be resumed, regardless of
             # whether it came from the active engine.json or a stale per-flow
             # snapshot under se3/state/resumable/. This mirrors the
             # daemon/server/frontend completed-flow guard so the CLI resume path
-            # agrees with the rest of the stack.
+            # agrees with the rest of the stack. Guard BEFORE persisting a
+            # recovered snapshot so a stale COMPLETED snapshot is never
+            # re-materialized as the live engine.json.
             if flow.status == FlowStatus.COMPLETED:
                 display_error(
                     f"Flow '{flow_id}' is already completed and cannot be resumed"
                 )
                 return 1
 
+            # Recovered from its per-flow resumable snapshot (engine.json holds a
+            # different/absent flow): write it back as the live engine.json so the
+            # resume bookkeeping below, and the daemon's single-slot
+            # observability, both see a live flow again. The write is header-only
+            # for the lazily-loaded steps (their unchanged cold bodies already sit
+            # in this flow's steps/<flow_id>/ partition, shared with the snapshot).
+            if recovered_from_snapshot:
+                persistence.save_flow(flow)
+
             # Detect and handle resume of a RUNNING or FAILED step
             current_step = flow.state.get_current_step()
             if current_step and current_step.status == StepStatus.RUNNING:
                 # Step was interrupted - prepare for resumption with context
                 current_step.status = StepStatus.PENDING
+                # We are assigning fresh resume inputs, so this step's in-memory
+                # body is now authoritative — mark it loaded so a later keyed
+                # access (get_current_step / steps.get) does not re-fire the lazy
+                # hydrator and wipe these inputs back to {} when the cold file is
+                # missing/corrupt (issue #244 B3-i, execution/assignment path).
+                current_step.cold_loaded = True
                 current_step.inputs["resumed"] = True
                 # Increment retry_count so LLMCaller picks up conversation history
                 # from the interrupted run via _get_retry_context()
@@ -2281,6 +2299,10 @@ def _run_flow_impl(
             elif current_step and current_step.status == StepStatus.FAILED:
                 # Step failed - prepare for retry from breakpoint
                 current_step.status = StepStatus.PENDING
+                # See the RUNNING branch above: mark the step loaded so the fresh
+                # retry inputs assigned here survive a later lazy-hydrator access
+                # even when the cold file is unreadable (issue #244 B3-i).
+                current_step.cold_loaded = True
                 current_step.inputs["resumed"] = True
                 # Increment retry_count so LLMCaller picks up conversation history (external_attempt)
                 current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1

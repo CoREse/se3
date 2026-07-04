@@ -146,15 +146,27 @@ def is_worktree_copy_root(path: object) -> bool:
 
 
 def _read_flow_id(project_root: str) -> Optional[str]:
-    """Best-effort read of ``flow_id`` from a project's ``engine.json``."""
-    engine_json = Path(project_root) / "se3" / "state" / "engine.json"
-    try:
-        import json
+    """Best-effort read of ``flow_id`` from a project's ``engine.json``.
 
-        data = json.loads(engine_json.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    Routed through the size-guarded header read (issue #243 A2): registering a
+    spawned/discovered flow needs only the one ``flow_id`` top-level key, so a
+    tens-of-MB legacy engine.json is read head+tail rather than fully parsed —
+    register() must never pin a core on a giant file.
+
+    Read with ``active=True`` like every other live-engine.json reader in the
+    daemon: this is the single mutable engine.json, and a completed→new-flow swap
+    can preserve byte size and land in the same mtime tick. A stat-only cache hit
+    would then attribute a just-spawned ``se3 run`` to the previous flow's
+    flow_id, so registration must go through the same-stat window verification
+    rather than trusting the stat key alone.
+    """
+    from .disk_json_cache import read_engine_header
+
+    engine_json = Path(project_root) / "se3" / "state" / "engine.json"
+    header = read_engine_header(engine_json, active=True)
+    if not isinstance(header, dict):
         return None
-    fid = data.get("flow_id")
+    fid = header.get("flow_id")
     return str(fid) if fid else None
 
 

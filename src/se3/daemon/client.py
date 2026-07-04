@@ -639,11 +639,11 @@ class DaemonClient:
         elif message.type == protocol.MSG_SPAWN_FLOW:
             await self._handle_spawn(ws, message.payload)
         elif message.type == protocol.MSG_RESPOND_CALL:
-            self._handle_respond(message.payload)
+            await self._handle_respond(message.payload)
         elif message.type == protocol.MSG_INTERJECT_FLOW:
             await self._handle_interject(message.payload)
         elif message.type == protocol.MSG_END_SESSION:
-            self._handle_end_session(message.payload)
+            await self._handle_end_session(message.payload)
         elif message.type == protocol.MSG_ISSUE_COMMAND:
             await self._handle_issue_command(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
@@ -731,7 +731,14 @@ class DaemonClient:
                 )
                 return
             try:
-                self._resume_handler(resume_flow_id, project_root)
+                # request_resume reads engine.json / a resumable snapshot from
+                # disk (size-guarded, but still blocking I/O + a bounded parse):
+                # run it in a worker thread so no disk-JSON work ever lands on
+                # the event loop (issue #243 A3), keeping heartbeats / pushes /
+                # reconnects responsive while a resume is being preflighted.
+                await asyncio.to_thread(
+                    self._resume_handler, resume_flow_id, project_root
+                )
                 logger.info(
                     "SPAWN_FLOW resume handled: flow %s", resume_flow_id
                 )
@@ -763,7 +770,16 @@ class DaemonClient:
             return
         if self._ensure_handler is not None and project_root:
             try:
-                ensure = self._ensure_handler(project_root)
+                # The ensure hook may run ``se3 init`` (a blocking subprocess,
+                # up to a 120s timeout) for a not-yet-SE3 directory, then
+                # register the root via ``add_project_root`` -> registry persist
+                # -> a project_roots.json json.loads. All of that is blocking
+                # I/O + disk-JSON parsing, so it must run in a worker thread and
+                # never on the event loop (issue #243 A3) — otherwise a New Task
+                # on a fresh path stalls heartbeats/pushes for the whole init.
+                ensure = await asyncio.to_thread(
+                    self._ensure_handler, project_root
+                )
             except Exception as exc:
                 logger.exception(
                     "SPAWN_FLOW ensure-project handler failed for %s; aborting spawn",
@@ -787,15 +803,20 @@ class DaemonClient:
             # passed only when present/true so legacy 4-argument spawn handlers
             # stay backward compatible (a non-isolated fresh spawn keeps the
             # exact 4-positional call shape).
+            # The spawn handler registers the new flow, which reads engine.json
+            # for its flow_id (size-guarded, but still disk I/O), and blocks on
+            # a subprocess launch — run it off the event loop (issue #243 A3).
             spawn_kwargs = {"worktree": True} if worktree else {}
             if from_issue_id:
-                self._spawn_handler(
+                await asyncio.to_thread(
+                    self._spawn_handler,
                     task, project_root, task_type, discover, from_issue_id,
                     **spawn_kwargs,
                 )
                 logger.info("SPAWN_FLOW handled from issue %s", from_issue_id)
             else:
-                self._spawn_handler(
+                await asyncio.to_thread(
+                    self._spawn_handler,
                     task, project_root, task_type, discover, **spawn_kwargs
                 )
                 logger.info("SPAWN_FLOW handled: %s", task[:80])
@@ -811,8 +832,14 @@ class DaemonClient:
         if invalidate is not None:
             invalidate()
 
-    def _handle_respond(self, payload: Dict[str, Any]) -> None:
-        """Route a RESPOND_CALL instruction to the response-file writer."""
+    async def _handle_respond(self, payload: Dict[str, Any]) -> None:
+        """Route a RESPOND_CALL instruction to the response-file writer.
+
+        Both the history-index root resolution and the respond handler itself
+        (which re-spawns a paused flow after reading its engine.json) touch disk
+        JSON, so both are dispatched via ``asyncio.to_thread`` — no disk parse
+        ever runs on the event loop (issue #243 A3).
+        """
         call_id = str(payload.get("call_id") or "").strip()
         if not call_id:
             logger.warning("Ignoring RESPOND_CALL with empty call_id")
@@ -825,13 +852,18 @@ class DaemonClient:
             # session's ``.response`` lands under the root whose history is
             # being read and pushed, rather than falling back to the daemon's
             # own cwd (``_default_respond_handler``), which would never reach
-            # the running ``se3 run`` process.
+            # the running ``se3 run`` process. build_index parses engine.json /
+            # snapshots / _meta.json, so it must not run on the loop.
             flow_id = str(payload.get("flow_id") or "").strip()
             if flow_id:
-                project_root = self._resolve_flow_root_from_index(flow_id)
+                project_root = await asyncio.to_thread(
+                    self._resolve_flow_root_from_index, flow_id
+                )
         response = payload.get("response")
         try:
-            self._respond_handler(call_id, project_root, response)
+            await asyncio.to_thread(
+                self._respond_handler, call_id, project_root, response
+            )
             logger.info("RESPOND_CALL handled for call %s", call_id)
         except Exception:
             logger.exception("RESPOND_CALL handler failed")
@@ -890,8 +922,9 @@ class DaemonClient:
         # set lags a fresh spawn).  Fall back to the history index, which is the
         # authoritative ``project_root`` the history reader itself uses, so an
         # interjection on a ``--worktree`` / discovery session resolves to the
-        # same root its history is read from.
-        return self._resolve_flow_root_from_index(flow_id)
+        # same root its history is read from. build_index parses disk JSON, so
+        # it runs in a worker thread (issue #243 A3).
+        return await asyncio.to_thread(self._resolve_flow_root_from_index, flow_id)
 
     def _resolve_flow_root_from_index(self, flow_id: str) -> str:
         """Resolve *flow_id*'s ``project_root`` from the history index.
@@ -917,16 +950,20 @@ class DaemonClient:
             )
         return ""
 
-    def _handle_end_session(self, payload: Dict[str, Any]) -> None:
+    async def _handle_end_session(self, payload: Dict[str, Any]) -> None:
         """Route an END_SESSION instruction to the daemon's end-session handler.
 
         Resolves the ``flow_id`` (safely ignoring an empty one) and, when the
         payload omits ``project_root``, reverse-resolves it from the history
         index — the same authoritative root the history reader scopes a
         ``--worktree`` / discovery session to — mirroring the RESPOND_CALL /
-        INTERJECT_FLOW resolution. The injected handler does the heavy work off
-        the event loop by spawning ``se3 end-session``, so this stays a cheap
-        synchronous dispatch. A handler exception is caught and logged so a bad
+        INTERJECT_FLOW resolution. That reverse-resolution parses disk JSON
+        (``build_index``), so it runs in a worker thread (issue #243 A3). The
+        injected handler itself can spawn ``se3 end-session`` and inspect
+        supervisor / engine state, so it is dispatched via ``asyncio.to_thread``
+        too — mirroring RESPOND_CALL — keeping the websocket receive loop,
+        heartbeats, and push processing responsive instead of blocking on a
+        synchronous handler. A handler exception is caught and logged so a bad
         end-session request never tears the connection down.
         """
         if self._end_session_handler is None:
@@ -940,10 +977,14 @@ class DaemonClient:
             return
         project_root = str(payload.get("project_root") or "").strip()
         if not project_root:
-            project_root = self._resolve_flow_root_from_index(flow_id)
+            project_root = await asyncio.to_thread(
+                self._resolve_flow_root_from_index, flow_id
+            )
         reason = str(payload.get("reason") or "").strip() or "user terminated"
         try:
-            self._end_session_handler(flow_id, project_root, reason)
+            await asyncio.to_thread(
+                self._end_session_handler, flow_id, project_root, reason
+            )
             logger.info("END_SESSION handled for flow %s", flow_id)
         except Exception:
             logger.exception("END_SESSION handler failed for flow %s", flow_id)
@@ -1280,7 +1321,12 @@ class DaemonClient:
         # snapshot instead of receiving incremental appends. Bounded by the live
         # engine.json flows (one per root), so a fully-drained *and* archived
         # terminal flow still drops and the map stays bounded over a long run.
-        resumable = self._resumable_flow_ids(provider)
+        # Offload: ``live_flow_ids`` reads each root's active engine.json, a disk
+        # JSON parse that must never run on the event loop (#243 / #209 freeze).
+        # It cannot rely on another reader having warmed the stat cache, because
+        # the authoritative active-flow reads are deliberately un-cached fresh
+        # reads, so this call would otherwise cache-miss and parse on the loop.
+        resumable = await asyncio.to_thread(self._resumable_flow_ids, provider)
         for flow_id, cursor in self._history_cursors.items():
             if flow_id not in new_cursors and flow_id in resumable:
                 new_cursors[flow_id] = cursor

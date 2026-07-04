@@ -265,7 +265,7 @@ def test_dispatch_end_session_routes_to_handler():
 def test_handle_end_session_ignores_empty_flow_id():
     received = []
     client = _make_client(end_session_handler=lambda f, p, r: received.append(f))
-    client._handle_end_session({"flow_id": "", "project_root": "/p"})
+    asyncio.run(client._handle_end_session({"flow_id": "", "project_root": "/p"}))
     assert received == []
 
 
@@ -285,14 +285,14 @@ def test_handle_end_session_resolves_root_from_index():
         end_session_handler=lambda f, p, r: received.append((f, p, r)),
         history_provider=_Provider(),
     )
-    client._handle_end_session({"flow_id": "flow-9"})
+    asyncio.run(client._handle_end_session({"flow_id": "flow-9"}))
     assert received == [("flow-9", "/resolved/root", "user terminated")]
 
 
 def test_handle_end_session_without_handler_is_noop():
     client = _make_client()  # no end_session_handler
     # Must not raise even though no handler is configured.
-    client._handle_end_session({"flow_id": "flow-1", "project_root": "/p"})
+    asyncio.run(client._handle_end_session({"flow_id": "flow-1", "project_root": "/p"}))
 
 
 def test_handle_end_session_swallows_handler_exception():
@@ -301,4 +301,4 @@ def test_handle_end_session_swallows_handler_exception():
 
     client = _make_client(end_session_handler=_boom)
     # The exception is caught and logged; the connection must survive.
-    client._handle_end_session({"flow_id": "flow-1", "project_root": "/p"})
+    asyncio.run(client._handle_end_session({"flow_id": "flow-1", "project_root": "/p"}))

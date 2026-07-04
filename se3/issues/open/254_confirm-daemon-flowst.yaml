@@ -1,0 +1,53 @@
+id: '254'
+description: '== 现象（今日在 flow 20260704-003700_4055d799 上复现两次） ==
+
+  60_confirm（12:02）与 65_confirm（13:21，adjudicate 裁决审批门）暂停等待人工时：daemon 拉起的 runner（se3
+  run --output-format json）退出码 130，engine.json 顶层 status 停留在 "running"。webui 回复 "ok"
+  后 daemon-client 正常写入 <call_id>.response.json（13:30），但 flow 不自动继续，两次均需人工 `se3 run
+  --resume --flow-id ...` 才消费响应。
+
+
+  == 根因（代码链，stable 版行号） ==
+
+  1. daemon._handle_respond_request 写完响应文件后调用 _resume_paused_flow（daemon.py:573-590），其
+  docstring 明确写明"写响应只是半件事，必须 re-spawn"。
+
+  2. _resume_paused_flow 只在 engine.json 顶层 status == "PAUSED" 时才 re-spawn（daemon.py:609-612），非
+  PAUSED 一律跳过。
+
+  3. DISCOVERY 的 json 模式暂停分支正确履约：置 flow.status = FlowStatus.PAUSED + save + return
+  0，注释明确"daemon keys its resume decision off this on-disk status"（run.py:2752-2768）。失败重试路径（action
+  == "pause"）也正确置 PAUSED（run.py:2851）。
+
+  4. **CONFIRM 暂停路径没有 json 模式分支**（run.py:2727-2745）：直接走交互式 _handle_confirm_pause，非
+  TTY 下返回 None 被当作"用户选择退出"，return 130，**全程未置 PAUSED、未 save**。于是第 2 步的检查永远不满足。
+
+
+  == 影响 ==
+
+  所有 daemon/webui 发起的 flow，走到任何人工 confirm 门（plan 确认、adjudicate 裁决审批等）都会卡死：webui 能回复、响应能落盘，但
+  flow 永远不动，表现为"批准了没反应"。裁决机制（#248）上线后人工门频率升高，此 bug 影响面随之扩大。
+
+
+  == 修复方向 ==
+
+  CONFIRM PAUSED 分支镜像 DISCOVERY 的非交互处理：output_format == "json" 时跳过交互 prompt（call 文件已由
+  confirm handler 写好），置 flow.status = FlowStatus.PAUSED、persistence.save_flow、return
+  0。顺带审计其余 return 130 的暂停出口（run.py:2518/2591/2616/2745/2792）是否存在同样的"非交互退出未置 PAUSED"。
+
+
+  == 验收 ==
+
+  - daemon 拉起的 flow 在 CONFIRM 门暂停退出后，engine.json 顶层 status == "PAUSED"、退出码 0。
+
+  - webui 回复 confirm 后（MSG_RESPOND_CALL 通道）flow 在无人工干预下自动 re-spawn 并消费响应继续。
+
+  - 交互式终端路径行为不变（进程内轮询，不退出）。'
+status: open
+tags: []
+source: human
+created_at: '2026-07-04T13:54:41.375512'
+updated_at: '2026-07-04T13:54:41.375512'
+title: CONFIRM 暂停在 daemon 模式不置 FlowStatus.PAUSED，webui 回复后无法自动 resume
+priority: high
+type: bug

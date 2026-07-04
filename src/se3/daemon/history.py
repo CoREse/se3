@@ -1,4 +1,3 @@
-I'll investigate the actual codebase state to resolve the functional conflict correctly (whether `_parse_engine_json`/`_read_engine_cached` should be kept).All five conflicts are pure comments except the one at 1710–1757, which is the functional one: HEAD removes the `_parse_engine_json`/`_read_engine_cached` seams, G7 keeps them. Let me confirm which side the active tests require.Confirmed. Only the stale G2 test binds `history._parse_engine_json`/`_read_json` — and `_read_json` exists in neither side, so it's broken regardless (superseded by G3's `test_daemon_history_readpath_cache.py`, which patches `djc._parse_json`). All active tests patch `disk_json_cache._parse_json`, which works with HEAD's seam-free version, and the task explicitly says to *replace* `_read_engine_cached`. HEAD side is correct for the functional conflict; the rest are cosmetic comments. Resolving all conflicts to HEAD while preserving clean-merge regions:The file resolved cleanly and parses. Let me read the remainder to produce the full output.```python
 """Historical-session reading for the SE3 daemon.
 
 :class:`DaemonHistoryReader` enumerates the ``se3 history`` artifacts of every
@@ -579,7 +578,11 @@ class DaemonHistoryReader:
         if meta.source != "active":
             return False
         engine_json = Path(meta.project_root) / "se3" / "state" / "engine.json"
-        data = read_engine_header(engine_json)
+        # active=True read: a matching (path, mtime, size) is trusted (no
+        # re-read), and a real step/status rewrite moves the key and re-parses.
+        # The explicit flow_id guard below is what rejects a superseded flow, so
+        # correctness does not hinge on catching a same-size in-place swap.
+        data = read_engine_header(engine_json, active=True)
         if not isinstance(data, dict):
             return False
         # Confirm the engine.json still describes *this* flow.  Without this
@@ -605,8 +608,12 @@ class DaemonHistoryReader:
         """
         state_dir = root / "se3" / "state"
 
-        # 1. Active flow from engine.json.
-        data = read_engine_header(state_dir / "engine.json")
+        # 1. Active flow from engine.json (active=True). A matching
+        # (path, mtime, size) is trusted without a re-read; a real per-step
+        # rewrite moves the key and re-parses. The expensive, immutable archive /
+        # resumable / meta reads below are stat-cached (no re-read while
+        # unchanged).
+        data = read_engine_header(state_dir / "engine.json", active=True)
         if isinstance(data, dict) and data.get("flow_id"):
             flow_id = str(data["flow_id"])
             self._claim(
@@ -1647,7 +1654,11 @@ class DaemonHistoryReader:
         signature: Dict[str, Any] = {}
         for root in self._iter_roots():
             engine_json = root / "se3" / "state" / "engine.json"
-            data = read_engine_header(engine_json)
+            # active=True read: a matching (path, mtime, size) is trusted, a real
+            # rewrite moves the key and re-parses. The signature below also folds
+            # in the engine.json (mtime, size) directly, so a genuine flow change
+            # always shifts the signature.
+            data = read_engine_header(engine_json, active=True)
             if not isinstance(data, dict):
                 continue
             flow_id = str(data.get("flow_id") or "")
@@ -1690,7 +1701,13 @@ class DaemonHistoryReader:
         """
         ids: Set[str] = set()
         for root in self._iter_roots():
-            data = read_engine_header(root / "se3" / "state" / "engine.json")
+            # active=True read: shares the at-most-once-per-change parse with the
+            # tick's other active readers; a matching (path, mtime, size) is
+            # trusted (no re-read). The caller ``_resumable_flow_ids`` is offloaded
+            # off the event loop, so that parse never runs on it.
+            data = read_engine_header(
+                root / "se3" / "state" / "engine.json", active=True
+            )
             if isinstance(data, dict) and data.get("flow_id"):
                 ids.add(str(data["flow_id"]))
         return ids
@@ -1998,4 +2015,3 @@ def _extract_history_summary(flow_dir: Path) -> str:
         return str(content)
     except Exception:
         return "(no state data)"
-```

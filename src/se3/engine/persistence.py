@@ -1,11 +1,3 @@
-Looking at the actual code dependencies rather than just the guidance labels, I traced which conflict side each non-conflict region requires:
-
-- `save_flow`'s non-conflict tail calls `save_resumable_snapshot(flow, _header=header)` → needs the local `header` var and `_header` param (G5 side only).
-- `save_resumable_snapshot`'s non-conflict signature has `*, _header=None` and its tail calls `self._atomic_write_json(snapshot_file, header)` (G5 side only).
-- The non-conflict `_read_cold_json(path, label, warnings)` + `_reconstruct_full_dict` methods and the module-level `_split_flow_dict`/`_content_hash`/`_is_hotcold` are all G5 (Design B).
-
-So the internally-consistent resolution is the non-HEAD (G5-labeled) side for every conflict. The lone leftover Design-A reference — `clear_state`'s `self._cold_dir_for(...)` — I reconcile to the G5 method name `_cold_dir`, and drop the now-unused `ENGINE_FORMAT_SPLIT` import (only the orphaned side used it).
-
 """State persistence for the flow engine.
 
 Handles JSON serialization/deserialization with atomic writes
@@ -20,7 +12,14 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .models import FlowInstance, FlowStatus, State, Step, StepStatus
+from .models import (
+    FIX_HISTORY_MAX_ENTRIES,
+    FlowInstance,
+    FlowStatus,
+    State,
+    Step,
+    StepStatus,
+)
 from .schema import build_context_from_flow
 
 logger = logging.getLogger(__name__)
@@ -41,6 +40,21 @@ ENGINE_FORMAT_KEY = "engine_format"
 ENGINE_FORMAT_HOTCOLD = "hotcold/1"
 
 
+def _stringify_keys(obj: Any) -> Any:
+    """Recursively coerce every dict key to ``str``.
+
+    Only invoked on the slow path when ``sort_keys`` cannot order a dict's keys
+    because it mixes types (e.g. both ``"1"`` and ``1``). Coercing to str makes
+    the keys mutually comparable — and matches how ``json.dumps`` serializes
+    non-string keys anyway — so hashing succeeds without raising.
+    """
+    if isinstance(obj, dict):
+        return {str(k): _stringify_keys(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_stringify_keys(v) for v in obj]
+    return obj
+
+
 def _canonical_json(obj: Any) -> str:
     """Stable JSON encoding for content-hashing cold payloads.
 
@@ -48,8 +62,19 @@ def _canonical_json(obj: Any) -> str:
     step is recognised as unchanged across saves (the whole point of the
     incremental write path). ``default=str`` mirrors the persistence writer so
     non-JSON-native values (e.g. Path) hash the same way they serialize.
+
+    A step's inputs/outputs/context may hold a dict with *mixed* key types
+    (both ``str`` and ``int``), on which ``sort_keys=True`` raises ``TypeError``
+    while comparing unlike keys — which would make the whole flow unsavable. The
+    common case stays on the fast path; only a genuinely mixed-key payload pays
+    the recursive stringify fallback.
     """
-    return json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str)
+    try:
+        return json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        return json.dumps(
+            _stringify_keys(obj), sort_keys=True, ensure_ascii=False, default=str
+        )
 
 
 def _content_hash(obj: Any) -> str:
@@ -65,57 +90,119 @@ def _is_hotcold(data: Any) -> bool:
     )
 
 
-def _split_flow_dict(
-    full: Dict[str, Any]
-) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Any]]:
-    """Split a full ``FlowInstance.to_dict()`` into (header, cold_steps, context_payload).
+class _LazyStepDict(dict):
+    """``step_id -> Step`` map that hydrates a step's cold body on first access.
 
-    The header keeps only KB-scale fields — flow identity, status, the per-step
-    *status table* (timestamps / retry counts / model, but NOT the step's
-    inputs/outputs/artifacts bodies), and small State scalars — with each step's
-    heavy payload replaced by a ``cold_ref`` carrying the payload's content hash.
-    The shared ``State.context`` and ``fix_history`` (the other unbounded
-    growers, the latter able to embed a fix_context copy of test_results) are
-    externalized together into a single per-flow context cold payload, again
-    referenced from the header by hash.
+    A resume loads only the engine.json header; each step's heavy
+    inputs/outputs/artifacts stay on disk until the engine actually fetches that
+    step by id (``steps.get(sid)`` / ``steps[sid]``), so a many-step flow no
+    longer re-materializes every cold file up front (issue #244 B4). Because the
+    engine reads *other* steps' outputs pervasively (adjudicated/refined/plan/
+    review lookups walk ``step_history`` and pull ``steps.get(sid).outputs``),
+    hydration hangs off keyed access — every such fetch faults in exactly the one
+    step it touches and no more.
+
+    Deliberately, iteration (``values`` / ``items`` / ``for``) does NOT hydrate:
+    the incremental save path re-emits an untouched step's recorded ``cold_ref``
+    without reading its body, and status-only scans (e.g. ``get_progress``) stay
+    cheap. Equality DOES hydrate all (so a header-loaded flow still compares
+    equal to the same flow built in memory for round-trip tests).
+    """
+
+    def __init__(self, hydrator, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hydrator = hydrator
+
+    def __getitem__(self, key):
+        step = super().__getitem__(key)
+        self._hydrator(step)
+        return step
+
+    def get(self, key, default=None):
+        if key not in self:
+            return default
+        return self.__getitem__(key)
+
+    def _hydrate_all(self) -> None:
+        for step in super().values():
+            self._hydrator(step)
+
+    def __eq__(self, other) -> bool:
+        self._hydrate_all()
+        return dict(self) == other
+
+    # dict subclasses that override __eq__ must restate unhashability explicitly.
+    __hash__ = None
+
+
+def _split_flow(
+    flow: "FlowInstance",
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Split a ``FlowInstance`` into (header, cold_steps, context_payload).
+
+    Delegates the structural hot/cold split to the model layer
+    (:meth:`FlowInstance.to_header_dict` / :meth:`Step.cold_payload` /
+    :meth:`State.cold_context`) and layers on only the persistence concerns:
+    content hashing and cold-file naming. The header keeps KB-scale fields — flow
+    identity, status, the per-step *status table*, and small State scalars — with
+    each step's heavy payload replaced by a ``cold_ref`` carrying the payload's
+    content hash. The shared ``State.context`` and ``fix_history`` are
+    externalized together into a single per-flow context cold payload, referenced
+    by hash.
+
+    Lazy-load aware (issue #244 B4): a step loaded header-only for resume and
+    never hydrated (``cold_loaded`` False) has its recorded ``cold_ref``
+    re-emitted verbatim and is *excluded* from ``cold_steps`` — its unchanged
+    body (already on disk in the same ``steps/<flow_id>/`` partition) is never
+    read back into memory just to rewrite it.
 
     Returns:
         header: the header dict to write to engine.json / the snapshot file.
-        cold_steps: step_id -> {"inputs", "outputs", "artifacts"} cold payloads.
+        cold_steps: step_id -> {"inputs", "outputs", "artifacts"} cold payloads,
+            for hydrated steps only.
         context_payload: {"context", "fix_history"} shared cold payload.
     """
-    header = {k: v for k, v in full.items() if k != "state"}
-    header[ENGINE_FORMAT_KEY] = ENGINE_FORMAT_HOTCOLD
-
-    state = dict(full.get("state", {}))
-    steps = state.pop("steps", {}) or {}
-    context = state.pop("context", {})
-    fix_history = state.pop("fix_history", [])
+    # Put the format marker FIRST so it survives head-truncation. The marker,
+    # like created_at/updated_at, otherwise serializes after the large ``state``
+    # block, so a machine crash mid-write (salvaged via load_flow_tolerant) would
+    # lose it — and a repaired header without the marker is mistaken for a legacy
+    # inline flow, silently degrading every step's cold payload to empty instead
+    # of resolving the intact cold files. Leading it keeps hot/cold recovery
+    # working from just the header's head (issue #244 B3, salvage path).
+    header = {ENGINE_FORMAT_KEY: ENGINE_FORMAT_HOTCOLD, **flow.to_header_dict()}
+    state = header["state"]
+    header_steps: Dict[str, Any] = state.get("steps", {}) or {}
 
     cold_steps: Dict[str, Dict[str, Any]] = {}
-    header_steps: Dict[str, Any] = {}
-    for sid, sdata in steps.items():
-        cold = {
-            "inputs": sdata.get("inputs", {}),
-            "outputs": sdata.get("outputs", {}),
-            "artifacts": sdata.get("artifacts", []),
-        }
-        cold_steps[sid] = cold
-        entry = {
-            k: v
-            for k, v in sdata.items()
-            if k not in ("inputs", "outputs", "artifacts")
-        }
-        entry["cold_ref"] = {"file": f"{sid}.json", "hash": _content_hash(cold)}
-        header_steps[sid] = entry
+    # Iterate the raw step map (a lazy step dict does NOT hydrate on iteration),
+    # so an untouched header-only step is recognised by ``cold_loaded`` and its
+    # body is never faulted in here.
+    for sid, step in flow.state.steps.items():
+        entry = header_steps.get(sid)
+        if entry is None:
+            continue
+        if step.cold_loaded:
+            cold = step.cold_payload()
+            cold_steps[sid] = cold
+            entry["cold_ref"] = {"file": f"{sid}.json", "hash": _content_hash(cold)}
+        else:
+            entry["cold_ref"] = dict(step.cold_ref or {})
 
-    context_payload = {"context": context, "fix_history": fix_history}
-    state["steps"] = header_steps
-    state["context_ref"] = {
-        "file": PersistenceManager.CONTEXT_COLD_FILENAME,
-        "hash": _content_hash(context_payload),
-    }
-    header["state"] = state
+    if flow.state.cold_context_loaded:
+        context_payload = flow.state.cold_context()
+        state["context_ref"] = {
+            "file": PersistenceManager.CONTEXT_COLD_FILENAME,
+            "hash": _content_hash(context_payload),
+        }
+    else:
+        # Header-only load whose externalized context was never materialized (or
+        # whose cold read failed on a transient blip): re-emit the recorded
+        # reference verbatim and hand ``_write_cold`` a ``None`` payload so it
+        # skips the file — never rewriting an intact _context.json with empty
+        # data. The context analogue of an unhydrated step's lazy re-emit
+        # (issue #244 B3-i).
+        context_payload = None
+        state["context_ref"] = dict(flow.state.cold_context_ref or {})
     return header, cold_steps, context_payload
 
 
@@ -168,6 +255,33 @@ class PersistenceManager:
         """Path to a flow's cold-file partition (steps/<flow_id>/)."""
         return self.steps_dir / str(flow_id)
 
+    def _resolve_cold_dir(
+        self,
+        flow_id: Any,
+        state: Optional[Dict[str, Any]],
+        steps_root: Optional[Path] = None,
+    ) -> Path:
+        """Cold partition dir for a header, honoring a recorded override.
+
+        Normally ``steps/<flow_id>/``. An *archived* header may carry an explicit
+        ``state.cold_partition`` — recorded by :meth:`clear_state` when a
+        same-flow_id archive collision forced this flow's cold files into a
+        suffixed ``steps/<flow_id>_<ts>`` dir — so the header's ``cold_ref``
+        entries resolve against the files that actually belong to it rather than
+        a prior archive's (issue #244 B5). The recorded value is a bare partition
+        basename resolved against the steps root.
+
+        *steps_root* overrides that root: a reader rooted at ``archive/`` passes
+        ``archive/steps`` so an archived header's cold refs resolve to the cold
+        files that were archived alongside it (:meth:`load_archived_flow_by_id`),
+        rather than the live ``state/steps`` dir. Defaults to ``self.steps_dir``.
+        """
+        root = steps_root if steps_root is not None else self.steps_dir
+        partition = state.get("cold_partition") if isinstance(state, dict) else None
+        if partition:
+            return root / str(partition)
+        return root / str(flow_id)
+
     @staticmethod
     def _atomic_write_json(path: Path, data: Any) -> None:
         """Atomically write ``data`` as pretty JSON (temp file + rename).
@@ -208,9 +322,18 @@ class PersistenceManager:
             return {}, None
         if not _is_hotcold(data) or str(data.get("flow_id")) != str(flow_id):
             return {}, None
-        state = data.get("state", {}) if isinstance(data, dict) else {}
+        # Degrade to the "rewrite everything" default ({}, None) on any structural
+        # corruption rather than raising: a non-dict 'state' or 'steps' surviving
+        # as valid JSON must not raise AttributeError out of save_flow (which would
+        # stop the running flow from persisting ANY further progress).
+        state = data.get("state") if isinstance(data, dict) else None
+        if not isinstance(state, dict):
+            return {}, None
+        steps = state.get("steps")
+        if not isinstance(steps, dict):
+            steps = {}
         per_step: Dict[str, str] = {}
-        for sid, entry in (state.get("steps", {}) or {}).items():
+        for sid, entry in steps.items():
             cold_ref = entry.get("cold_ref") if isinstance(entry, dict) else None
             if isinstance(cold_ref, dict) and "hash" in cold_ref:
                 per_step[sid] = cold_ref["hash"]
@@ -220,13 +343,30 @@ class PersistenceManager:
 
     @staticmethod
     def _dirty_step_ids(
-        header: Dict[str, Any], prior_step_hashes: Dict[str, str]
+        header: Dict[str, Any],
+        prior_step_hashes: Dict[str, str],
+        cold_dir: Optional[Path] = None,
     ) -> Set[str]:
-        """Step ids whose cold payload differs from the last persisted header."""
+        """Step ids whose cold payload differs from the last persisted header.
+
+        A step whose hash still matches the prior header but whose on-disk cold
+        file has gone missing (externally deleted while engine.json survived) is
+        also reported dirty: the payload is still held in memory this persist, so
+        re-marking it lets ``_write_cold`` repopulate the file instead of leaving
+        it permanently absent — every later save would otherwise keep skipping it
+        on the matching hash and the step's inputs/outputs would silently degrade
+        to empty on the next load (issue #244 B2/B3).
+        """
         dirty: Set[str] = set()
         for sid, entry in header.get("state", {}).get("steps", {}).items():
             new_hash = entry.get("cold_ref", {}).get("hash")
             if prior_step_hashes.get(sid) != new_hash:
+                dirty.add(sid)
+            elif (
+                new_hash is not None
+                and cold_dir is not None
+                and not (cold_dir / f"{sid}.json").exists()
+            ):
                 dirty.add(sid)
         return dirty
 
@@ -245,18 +385,43 @@ class PersistenceManager:
         the flow's step count (issue #244 B2). Completed/archived cold files are
         never rewritten because their hash keeps matching.
         """
-        dirty = self._dirty_step_ids(header, prior_step_hashes)
-        new_ctx_hash = header["state"]["context_ref"]["hash"]
+        cold_dir = self._cold_dir(flow_id)
+        # Pass cold_dir so a hash-matching step whose cold file was externally
+        # deleted is re-flagged dirty and rewritten from the in-memory payload.
+        dirty = self._dirty_step_ids(header, prior_step_hashes, cold_dir)
+        new_ctx_ref = header["state"].get("context_ref") or {}
+        new_ctx_hash = new_ctx_ref.get("hash")
         ctx_dirty = new_ctx_hash != prior_ctx_hash
+        ctx_file_missing = (
+            new_ctx_hash is not None
+            and not (cold_dir / self.CONTEXT_COLD_FILENAME).exists()
+        )
+        # A ``None`` payload means the externalized context was never loaded this
+        # session (header-only load whose cold read failed); its intact on-disk
+        # file must be left untouched — never rewritten with empty data — exactly
+        # like an unhydrated step's body (issue #244 B3-i). We also cannot
+        # repopulate a missing file we never read, so ``ctx_file_missing`` self-
+        # heals only on a later load that actually materializes the context.
+        write_ctx = context_payload is not None and (ctx_dirty or ctx_file_missing)
 
-        if not dirty and not ctx_dirty:
+        if not dirty and not write_ctx:
             return
 
-        cold_dir = self._cold_dir(flow_id)
         cold_dir.mkdir(parents=True, exist_ok=True)
         for sid in dirty:
-            self._atomic_write_json(cold_dir / f"{sid}.json", cold_steps[sid])
-        if ctx_dirty:
+            # A "dirty" step with no in-memory cold payload is a header-only
+            # step (loaded lazily, never hydrated) whose prior header — from a
+            # different flow occupying the single-slot engine.json — could not be
+            # matched. Its unchanged body still sits on disk in this flow's own
+            # steps/<flow_id>/ partition, so skip it rather than clobber it with
+            # empty data (issue #244 B4).
+            if sid in cold_steps:
+                self._atomic_write_json(cold_dir / f"{sid}.json", cold_steps[sid])
+        # Rewrite the shared-context cold file when its hash changed or when a
+        # hash-matching file went missing on disk (same repopulation rationale
+        # as the per-step dirty check above) — but only for a genuinely-loaded
+        # payload; a never-loaded context re-emits its reference untouched.
+        if write_ctx:
             self._atomic_write_json(
                 cold_dir / self.CONTEXT_COLD_FILENAME, context_payload
             )
@@ -283,10 +448,20 @@ class PersistenceManager:
         # write volume then tracks the step's own output, not the flow's step
         # count. Cold files first, then the header (which references them), so a
         # crash between the two never leaves the header pointing at absent data.
-        header, cold_steps, context_payload = _split_flow_dict(flow.to_dict())
+        header, cold_steps, context_payload = _split_flow(flow)
         prior_step_hashes, prior_ctx_hash = self._prior_cold_hashes(
             self.state_file, flow.flow_id
         )
+        # Capture whom the single-slot engine.json held before this write. When
+        # a fresh run overwrites a *different* prior flow (typically a prior
+        # COMPLETED flow whose resumable snapshot was already cleared on
+        # completion), that prior flow's steps/<prior_id>/ partition loses its
+        # last reference and must be reclaimed after the swap — otherwise it
+        # leaks forever (self-check fix, issue #244 B5).
+        prior_flow_id: Optional[str] = None
+        if self.state_file.exists():
+            prior_header = _read_snapshot_header(self.state_file) or {}
+            prior_flow_id = prior_header.get("flow_id")
         self._write_cold(
             flow.flow_id,
             header,
@@ -296,6 +471,8 @@ class PersistenceManager:
             prior_ctx_hash,
         )
         self._atomic_write_json(self.state_file, header)
+        if prior_flow_id and str(prior_flow_id) != str(flow.flow_id):
+            self._prune_cold_partition_if_orphan(str(prior_flow_id))
 
         # Per-flow resumable snapshot bookkeeping. save_flow is the single
         # convergence point for every pause/interrupt/failure/step-advance
@@ -348,7 +525,10 @@ class PersistenceManager:
             return None
 
     def _reconstruct_full_dict(
-        self, header: Dict[str, Any], warnings: Optional[List[str]] = None
+        self,
+        header: Dict[str, Any],
+        warnings: Optional[List[str]] = None,
+        steps_root: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Inline a new-format header's cold files back into a full flow dict.
 
@@ -357,33 +537,73 @@ class PersistenceManager:
         ``cold_ref`` and the shared ``context_ref`` resolved from
         steps/<flow_id>/ back into the inline shape ``FlowInstance.from_dict``
         expects; missing/corrupt cold files degrade to empty payloads.
+
+        *steps_root* overrides the cold-file root (see :meth:`_resolve_cold_dir`)
+        so an archived header reconstructs against ``archive/steps`` rather than
+        the live state dir.
         """
         if not _is_hotcold(header):
             return header
 
-        cold_dir = self._cold_dir(header.get("flow_id"))
+        cold_dir = self._resolve_cold_dir(
+            header.get("flow_id"), header.get("state"), steps_root=steps_root
+        )
         full = {k: v for k, v in header.items() if k != ENGINE_FORMAT_KEY}
         state = dict(full.get("state", {}))
 
+        # ``cold_partition`` is a persistence-layer routing marker (see
+        # _resolve_cold_dir); it must not leak into the inlined FlowInstance dict.
+        state.pop("cold_partition", None)
         context_ref = state.pop("context_ref", None)
+        cold_ref_present = isinstance(context_ref, dict) and bool(context_ref.get("file"))
         payload = None
-        if isinstance(context_ref, dict) and context_ref.get("file"):
+        if cold_ref_present:
             payload = self._read_cold_json(
                 cold_dir / context_ref["file"], "context", warnings
             )
+        # ``or {}`` / ``or []`` (not ``.get(k, default)``): a cold _context.json
+        # that parses but holds explicit nulls ({"context": null}) must degrade to
+        # empty, matching the lazy _build_lazy_flow path. Without this, a null
+        # context reaches State.from_dict and crashes with TypeError (len(None)),
+        # which load_flow's except (JSONDecodeError/KeyError/ValueError) does not
+        # catch — the eager and lazy loaders would then diverge on identical input.
         if isinstance(payload, dict):
-            state["context"] = payload.get("context", {})
-            state["fix_history"] = payload.get("fix_history", [])
+            state["context"] = payload.get("context") or {}
+            state["fix_history"] = payload.get("fix_history") or []
+            context_loaded = True
         else:
             state["context"] = {}
             state["fix_history"] = []
+            # A referenced-but-unreadable context is NOT genuinely empty: mark it
+            # unloaded (and preserve the reference) so a resume-then-save through
+            # the eager path re-emits the reference instead of persisting {} over
+            # the intact cold file (issue #244 B3-i). No reference at all means the
+            # empty context is real and should persist normally.
+            context_loaded = not cold_ref_present
+        # Provenance markers consumed by State.from_dict; absent for legacy inline
+        # payloads (which default to loaded).
+        state["_cold_context_loaded"] = context_loaded
+        state["_cold_context_ref"] = context_ref if isinstance(context_ref, dict) else None
 
         rebuilt_steps: Dict[str, Any] = {}
-        for sid, entry in (state.get("steps", {}) or {}).items():
+        # Guard steps/entry against structural corruption BEFORE calling .items():
+        # a valid-JSON header whose 'steps' is a non-dict, or whose step entry is a
+        # non-dict, must not raise an uncaught AttributeError out of this
+        # reconstructor (that would violate load_flow_tolerant's never-raises
+        # contract). A non-dict step entry is passed through untouched so the
+        # downstream FlowInstance.from_dict raises a *caught* TypeError/ValueError.
+        raw_steps = state.get("steps")
+        if not isinstance(raw_steps, dict):
+            raw_steps = {}
+        for sid, entry in raw_steps.items():
+            if not isinstance(entry, dict):
+                rebuilt_steps[sid] = entry
+                continue
             step = {k: v for k, v in entry.items() if k != "cold_ref"}
-            cold_ref = entry.get("cold_ref") if isinstance(entry, dict) else None
+            cold_ref = entry.get("cold_ref")
+            cold_ref_present = isinstance(cold_ref, dict) and bool(cold_ref.get("file"))
             cold = None
-            if isinstance(cold_ref, dict) and cold_ref.get("file"):
+            if cold_ref_present:
                 cold = self._read_cold_json(
                     cold_dir / cold_ref["file"], f"step {sid}", warnings
                 )
@@ -391,15 +611,168 @@ class PersistenceManager:
                 step["inputs"] = cold.get("inputs", {})
                 step["outputs"] = cold.get("outputs", {})
                 step["artifacts"] = cold.get("artifacts", [])
+                step["_cold_loaded"] = True
             else:
                 step["inputs"] = {}
                 step["outputs"] = {}
                 step["artifacts"] = []
+                # A referenced-but-unreadable step body is NOT genuinely empty:
+                # mark it not-loaded and preserve the reference (consumed by
+                # Step.from_dict) so a subsequent save through the eager path
+                # re-emits the cold_ref instead of persisting {} over the intact
+                # on-disk cold file — the per-step analogue of the context guard
+                # above (issue #244 B3-i). A step with no reference at all is
+                # legacy/genuinely-empty and stays loaded so it persists normally.
+                step["_cold_loaded"] = not cold_ref_present
+                step["_cold_ref"] = cold_ref if isinstance(cold_ref, dict) else None
             rebuilt_steps[sid] = step
         state["steps"] = rebuilt_steps
 
         full["state"] = state
         return full
+
+    def hydrate_step(self, flow: FlowInstance, step_id: str) -> Optional[Step]:
+        """Load one step's externalized cold payload on demand (issue #244 B4).
+
+        A header-only ``FlowInstance`` (loaded from just the engine.json header,
+        its per-step inputs/outputs still empty) can pull a single step's cold
+        data without materializing every other step — the lazy counterpart to
+        :meth:`load_flow`'s eager reconstruct, so a resume that only needs a few
+        steps never re-inlines the whole flow. The step is mutated in place and
+        returned; a missing/corrupt cold file degrades it to empty IO (B3)
+        rather than raising. Returns ``None`` when *step_id* is unknown.
+        """
+        # Fetch the raw stored step (dict.get, not the lazy-dict override) so a
+        # header-only flow does not double-hydrate; this method IS the hydration.
+        step = dict.get(flow.state.steps, step_id)
+        if step is None:
+            return None
+        # No-op on an already-materialized step, matching _make_step_hydrator's
+        # guard. Re-applying cold here would re-read the file and clobber the
+        # in-memory body — and for an eagerly-loaded legacy flow (no cold file)
+        # apply_cold(None) degrades real inputs/outputs to empty IO. The two
+        # hydration entry points must share identical semantics so this public
+        # on-demand API can never destroy loaded or dirty step data.
+        if step.cold_loaded:
+            return step
+        fname = None
+        if isinstance(step.cold_ref, dict):
+            fname = step.cold_ref.get("file")
+        cold = self._read_cold_json(
+            self._cold_dir(flow.flow_id) / (fname or f"{step_id}.json"),
+            f"step {step_id}",
+            None,
+        )
+        # apply_cold degrades a missing/corrupt payload to empty IO and marks the
+        # step loaded either way, so a broken cold file is not re-read every call.
+        step.apply_cold(cold)
+        return step
+
+    def _make_step_hydrator(self, cold_dir: Path):
+        """Return a callable that hydrates a header-only Step in place.
+
+        Bound into a :class:`_LazyStepDict` by :meth:`_build_lazy_flow`, it faults
+        in a single step's cold body on first keyed access (from ``cold_dir``, the
+        partition already resolved by the caller) and is a no-op once the step is
+        loaded (or was never header-only).
+        """
+
+        def _hydrate(step: Step) -> None:
+            if step.cold_loaded:
+                return
+            fname = None
+            if isinstance(step.cold_ref, dict):
+                fname = step.cold_ref.get("file")
+            cold = self._read_cold_json(
+                cold_dir / (fname or f"{step.step_id}.json"),
+                f"step {step.step_id}",
+                None,
+            )
+            step.apply_cold(cold)
+
+        return _hydrate
+
+    def _build_lazy_flow(
+        self, data: Dict[str, Any], flow_id: str
+    ) -> Optional[FlowInstance]:
+        """Build a header-only FlowInstance whose step bodies load on demand.
+
+        The resume/by-id counterpart to :meth:`load_flow`'s eager
+        :meth:`_reconstruct_full_dict`: it reads only the KB-scale header, wiring
+        each step to a lazy hydrator (:class:`_LazyStepDict`) so a many-step flow
+        no longer faults in every cold file before execution can continue
+        (issue #244 B4). The shared ``context`` / ``fix_history`` cold payload IS
+        loaded eagerly — it is a single per-flow file the engine reads broadly,
+        and it is small relative to the per-step bodies that caused the blow-up.
+
+        A legacy (fully-inline) payload has no cold files, so it is returned
+        complete via :meth:`FlowInstance.from_dict`. Returns ``None`` if the
+        header cannot be deserialized.
+        """
+        if not _is_hotcold(data):
+            try:
+                return FlowInstance.from_dict(data)
+            except (KeyError, ValueError, TypeError):
+                return None
+
+        try:
+            flow = FlowInstance.from_header_dict(data)
+        except (KeyError, ValueError, TypeError):
+            return None
+
+        cold_dir = self._resolve_cold_dir(flow_id, data.get("state"))
+        state = flow.state
+        context_ref = (data.get("state") or {}).get("context_ref")
+        # Remember the recorded reference so a *failed* context read can re-emit
+        # it verbatim on the next save instead of clobbering the intact cold file.
+        state.cold_context_ref = context_ref if isinstance(context_ref, dict) else None
+        if isinstance(context_ref, dict) and context_ref.get("file"):
+            payload = self._read_cold_json(
+                cold_dir / context_ref["file"], "context", None
+            )
+            if isinstance(payload, dict):
+                state.context = payload.get("context", {}) or {}
+                # Mirror State.from_dict's retroactive sliding-window clamp so the
+                # lazy resume path and the eager load_flow path return the same
+                # state for one on-disk flow — otherwise an oversized externalized
+                # list (written under a higher cap) would be deepcopied per
+                # transition and re-persisted unclamped on every save.
+                loaded_history = payload.get("fix_history", []) or []
+                if len(loaded_history) > FIX_HISTORY_MAX_ENTRIES:
+                    loaded_history = loaded_history[-FIX_HISTORY_MAX_ENTRIES:]
+                state.fix_history = loaded_history
+                # The body is now materialized: a subsequent persist may write it.
+                state.cold_context_loaded = True
+            # A failed read leaves cold_context_loaded False (set by
+            # from_header_dict), so save re-emits cold_context_ref untouched.
+        else:
+            # No externalized context to defer — the empty context IS the real
+            # value and must persist normally, so mark it loaded.
+            state.cold_context_loaded = True
+        # Keep context['fix_history'] consistent with the externalized list, as
+        # State.from_dict does for the inline format.
+        if "fix_history" in state.context:
+            state.context["fix_history"] = state.fix_history
+
+        lazy = _LazyStepDict(self._make_step_hydrator(cold_dir))
+        lazy.update(state.steps)
+        state.steps = lazy
+        return flow
+
+    def _peek_active_flow_id(self) -> Optional[str]:
+        """Return the flow_id currently held by engine.json, header-only.
+
+        A size-guarded head read (never a full parse of a giant legacy file), so
+        the resume path can cheaply tell whether it recovered a flow from the
+        live engine.json or from a resumable snapshot.
+        """
+        if not self.state_file.exists():
+            return None
+        header = _read_snapshot_header(self.state_file)
+        if isinstance(header, dict):
+            fid = header.get("flow_id")
+            return str(fid) if fid is not None else None
+        return None
 
     def save_resumable_snapshot(
         self, flow: FlowInstance, *, _header: Optional[Dict[str, Any]] = None
@@ -428,7 +801,7 @@ class PersistenceManager:
         snapshot_file = self.resumable_dir / f"{flow.flow_id}.json"
 
         if _header is None:
-            header, cold_steps, context_payload = _split_flow_dict(flow.to_dict())
+            header, cold_steps, context_payload = _split_flow(flow)
             prior_step_hashes, prior_ctx_hash = self._prior_cold_hashes(
                 snapshot_file, flow.flow_id
             )
@@ -449,6 +822,14 @@ class PersistenceManager:
     def load_resumable_snapshot(self, flow_id: str) -> Optional[FlowInstance]:
         """Load the per-flow resumable snapshot for ``flow_id``.
 
+        Loaded **header-only with lazy per-step hydration** (issue #244 B4),
+        exactly like :meth:`load_flow_by_id`: only the KB-scale header and the
+        shared context cold file are read up front, and each step's heavy
+        inputs/outputs fault in on first keyed access. Selecting a paused flow
+        with many large completed steps therefore no longer re-materializes every
+        step cold file before resume/display — the whole point of the split
+        format. A legacy fully-inline snapshot is returned complete.
+
         The snapshot's embedded ``flow_id`` MUST match the requested ``flow_id``;
         a snapshot whose payload describes a different flow (a stale, misnamed,
         or operator-created artifact) is rejected and treated as not found,
@@ -462,11 +843,11 @@ class PersistenceManager:
         snapshot_file = self.resumable_dir / f"{flow_id}.json"
         if not snapshot_file.exists():
             return None
-        try:
-            content = snapshot_file.read_text(encoding="utf-8")
-            data = json.loads(content)
-            flow = FlowInstance.from_dict(self._reconstruct_full_dict(data))
-        except (json.JSONDecodeError, KeyError, ValueError, OSError):
+        data = self._read_flow_file(snapshot_file)
+        if not isinstance(data, dict):
+            return None
+        flow = self._build_lazy_flow(data, flow_id)
+        if flow is None:
             return None
         if flow.flow_id != flow_id:
             logger.warning(
@@ -480,15 +861,74 @@ class PersistenceManager:
         return flow
 
     def clear_resumable_snapshot(self, flow_id: str) -> None:
-        """Remove the per-flow resumable snapshot for ``flow_id`` (best effort)."""
+        """Remove the per-flow resumable snapshot for ``flow_id`` (best effort).
+
+        The snapshot is a *reference* to the shared ``steps/<flow_id>/`` cold
+        partition, so dropping it can leave that partition orphaned. The two
+        real callers (``se3 end-session`` / ``se3 salvage``) do exactly this:
+        they ``clear_state()`` — which, seeing the still-live snapshot, only
+        *copies* the cold files into the archive and leaves the live partition
+        in place (its snapshot_alive guard) — and then call this to drop the
+        snapshot. Without pruning here, that live partition would be referenced
+        by nothing yet never deleted (self-check fix, issue #244 B5). So after
+        unlinking the snapshot, reclaim the partition if it is now unreferenced.
+        """
         snapshot_file = self.resumable_dir / f"{flow_id}.json"
         try:
             snapshot_file.unlink(missing_ok=True)
         except OSError:
             pass
+        self._prune_cold_partition_if_orphan(flow_id)
+
+    def _prune_cold_partition_if_orphan(self, flow_id: str) -> None:
+        """Delete ``steps/<flow_id>/`` when nothing references it any more.
+
+        A *live* cold partition has exactly two possible references: the
+        single-slot engine.json (while it holds this flow) and a resumable
+        snapshot (which shares the same partition rather than duplicating it).
+        Archives always own a separate copy under ``archive/steps/``, never the
+        live partition. So once engine.json holds a different flow AND no
+        resumable snapshot survives, the partition is dead weight — nothing will
+        ever read it again. Leaving it turns every end-session/salvage of a
+        paused new-format flow (and every new run overwriting a prior COMPLETED
+        flow's engine.json) into a permanent multi-MB leak under
+        ``se3/state/steps/``. Best effort: a failed removal only leaves a
+        harmless orphan, so log rather than raise.
+        """
+        if not flow_id:
+            return
+        partition = self._cold_dir(str(flow_id))
+        if not partition.is_dir():
+            return
+        # Referenced by the live engine.json? (size-guarded header read)
+        if self.state_file.exists():
+            header = _read_snapshot_header(self.state_file) or {}
+            if str(header.get("flow_id") or "") == str(flow_id):
+                return
+        # Referenced by a resumable snapshot sharing this same partition?
+        if (self.resumable_dir / f"{flow_id}.json").exists():
+            return
+        import shutil
+
+        try:
+            shutil.rmtree(partition)
+        except OSError:
+            logger.warning(
+                "Failed to prune orphaned cold partition %s for flow %s; "
+                "harmless leftover",
+                partition,
+                flow_id,
+                exc_info=True,
+            )
 
     def list_resumable_snapshots(self) -> List[FlowInstance]:
         """List all per-flow resumable snapshots.
+
+        Each snapshot is loaded **header-only with lazy per-step hydration**
+        (issue #244 B4): the resume picker only reads header fields (flow_id /
+        status / task_description / current_step_id), so enumerating N paused
+        flows must not read and parse every step cold file of every one of them.
+        A step's body faults in only if that step is later fetched by id.
 
         Returns:
             A list of reconstructed FlowInstance objects, one per readable
@@ -499,10 +939,11 @@ class PersistenceManager:
         if not self.resumable_dir.is_dir():
             return flows
         for snapshot_file in sorted(self.resumable_dir.glob("*.json")):
-            try:
-                data = json.loads(snapshot_file.read_text(encoding="utf-8"))
-                flow = FlowInstance.from_dict(self._reconstruct_full_dict(data))
-            except (json.JSONDecodeError, KeyError, ValueError, OSError):
+            data = self._read_flow_file(snapshot_file)
+            if not isinstance(data, dict):
+                continue
+            flow = self._build_lazy_flow(data, snapshot_file.stem)
+            if flow is None:
                 continue
             # Only surface a snapshot whose embedded flow_id matches its
             # filename (resumable/<flow_id>.json). A mismatched payload is a
@@ -533,13 +974,124 @@ class PersistenceManager:
         completion by :meth:`save_flow`), so it is never resurrected through the
         snapshot path; only the still-active engine.json can return it.
 
+        The flow is loaded **header-only with lazy per-step hydration**
+        (issue #244 B4): only the KB-scale header (plus the shared context cold
+        file) is read up front, and each step's heavy inputs/outputs fault in on
+        first keyed access (``state.steps.get(sid)``). Resuming a flow with many
+        large completed steps therefore no longer re-materializes every cold file
+        before execution — a legacy fully-inline flow is still returned complete.
+
         Returns:
             The matching FlowInstance, or None when neither source holds it.
         """
-        active = self.load_flow()
-        if active is not None and active.flow_id == flow_id:
-            return active
-        return self.load_resumable_snapshot(flow_id)
+        # 1. Active engine.json — header read only (no eager cold reconstruct).
+        if self.state_file.exists():
+            data = self._read_flow_file(self.state_file)
+            if isinstance(data, dict) and str(data.get("flow_id") or "") == str(flow_id):
+                flow = self._build_lazy_flow(data, flow_id)
+                if flow is not None:
+                    return flow
+
+        # 2. Per-flow resumable snapshot.
+        snapshot_file = self.resumable_dir / f"{flow_id}.json"
+        if not snapshot_file.exists():
+            return None
+        data = self._read_flow_file(snapshot_file)
+        if not isinstance(data, dict):
+            return None
+        flow = self._build_lazy_flow(data, flow_id)
+        if flow is None:
+            return None
+        if flow.flow_id != flow_id:
+            # The snapshot's payload describes a different flow (a stale, misnamed
+            # or operator-created artifact); reject rather than resume the wrong
+            # flow — mirrors load_resumable_snapshot's identity guard.
+            logger.warning(
+                "Resumable snapshot %s contains mismatched flow_id %r (requested %r); "
+                "treating as not found",
+                snapshot_file,
+                flow.flow_id,
+                flow_id,
+            )
+            return None
+        return flow
+
+    def load_archived_flow_by_id(self, flow_id: str) -> Optional[FlowInstance]:
+        """Load an archived flow by id — split-aware and size-guarded.
+
+        Scans ``se3/state/archive/engine_*.json`` for the header whose
+        ``flow_id`` matches. The read is size-guarded (:func:`_read_snapshot_header`):
+
+        * A **new-format** archive header (KB-scale) is parsed whole, then its
+          per-step ``cold_ref`` / ``context_ref`` are resolved against
+          ``archive/steps/<partition>/`` — the cold files ``clear_state`` archived
+          alongside it — so the flow retains its full step inputs/outputs
+          (issue #244 B5). Missing/corrupt cold files degrade that step to empty.
+        * A **giant legacy** archive is NOT fully parsed: only its top-level
+          identity keys are scanned from a bounded head+tail window, so a
+          ``se3 history show`` / listing never stalls decoding a 100 MB snapshot.
+          Such a degraded header lacks ``state``/timestamps, so it cannot be
+          reconstructed into a full FlowInstance and returns ``None`` — the
+          caller then falls back to history-only detail rather than freezing.
+
+        Returns the matching FlowInstance, or ``None`` when no archive holds the
+        flow (or a giant legacy archive could only be read degraded).
+        """
+        archive_dir = self.state_dir / "archive"
+        if not archive_dir.is_dir():
+            return None
+        archive_steps = archive_dir / self.STEPS_DIRNAME
+        # Newest-first: the same flow_id can hold several archives (archive ->
+        # history restore -> resume -> complete -> re-archive), and
+        # ``se3 history show`` should present the most recent one. Iterating
+        # oldest-first would surface a stale earlier snapshot, and a degraded
+        # oversized-legacy older archive (whose size-guarded read yields only a
+        # header from_dict can't reconstruct) would mask a fully loadable newer
+        # split-format archive of the same flow. So walk newest-first and, on a
+        # from_dict failure, continue to the next-older candidate instead of
+        # giving up (issue #244 B5 / mixed old-new display).
+        #
+        # Order by file mtime, NOT lexical filename: two naming schemes coexist
+        # in archive/ — ``clear_state`` writes engine_<YYYYMMDD_HHMMSS>[_n].json
+        # while worktree cold-partition promotion (merge/cleanup.py) writes
+        # engine_<flow-id-slug>.json. Descending-lexical is not descending-recency
+        # across schemes ('-' sorts before '_', so a timestamp name always
+        # outranks a slug name regardless of age), which would reconstruct a stale
+        # older archive over a newer one. mtime is the true recency signal and
+        # only costs a stat per candidate (self-check fix).
+        def _mtime(p: Path) -> int:
+            try:
+                return p.stat().st_mtime_ns
+            except OSError:
+                return 0
+
+        for archive_file in sorted(
+            archive_dir.glob("engine_*.json"), key=_mtime, reverse=True
+        ):
+            header = _read_snapshot_header(archive_file)
+            if not isinstance(header, dict):
+                continue
+            if str(header.get("flow_id") or "") != str(flow_id):
+                continue
+            full = self._reconstruct_full_dict(header, steps_root=archive_steps)
+            try:
+                return FlowInstance.from_dict(full)
+            except (KeyError, ValueError, TypeError):
+                # A degraded (oversized-legacy) header lacks the fields
+                # from_dict requires; skip it and try an older archive of the
+                # same flow_id rather than fully parsing the giant file or
+                # masking a loadable sibling.
+                continue
+        return None
+
+    @staticmethod
+    def _read_flow_file(path: Path) -> Optional[Dict[str, Any]]:
+        """Parse a header/engine.json/snapshot file to a dict (or None)."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def load_flow(self) -> Optional[FlowInstance]:
         """Load flow instance from state file.
@@ -622,7 +1174,11 @@ class PersistenceManager:
                         return flow, warnings
                     except Exception as e2:
                         warnings.append(f"Failed to deserialize repaired JSON: {e2}")
-            except (KeyError, ValueError, TypeError) as e:
+            except (KeyError, ValueError, TypeError, AttributeError) as e:
+                # AttributeError is included so a structurally corrupt-but-valid
+                # JSON header (e.g. a non-dict 'steps' reaching the legacy
+                # State.from_dict path, which calls .items() on it) degrades here
+                # instead of escaping load_flow_tolerant's never-raises contract.
                 warnings.append(f"Deserialization error in {filepath.name}: {e}")
                 # Try with tolerant deserialization
                 try:
@@ -768,12 +1324,26 @@ class PersistenceManager:
         archived header keeps its ``engine_format`` marker and cold files sit at
         ``archive/steps/<flow_id>/``, mirroring the live layout, so a full-
         fidelity reload against the archive dir still finds them; the history /
-        archive *listing* only needs the header (``read_engine_header``). A
-        legacy inline engine.json has no cold dir and archives as a single file,
-        exactly as before.
+        archive *listing* only needs the header (``read_engine_header``). If a
+        prior archive of the same flow_id already owns that dir, this archive's
+        cold files go to a timestamp-suffixed partition and the archived header
+        records it (``state.cold_partition``) so header and cold files stay
+        reference-consistent — stamped into the header dict and written atomically
+        to the archive path (never published unstamped). A legacy
+        inline engine.json has no cold dir and archives as a single file, exactly
+        as before.
+
+        If a resumable snapshot for this flow still exists (a non-completed flow
+        archived by ``se3 end-session`` / ``se3 salvage``), its cold refs point at
+        this very live partition, so the cold files are *copied* into the archive
+        and the live partition is left in place — the snapshot keeps resuming at
+        full fidelity instead of silently degrading to empty payloads. Only when
+        no snapshot survives is the partition moved (the cheaper path).
         """
         if not self.state_file.exists():
             return
+
+        import shutil
 
         # Move to archive instead of deleting
         archive_dir = self.state_dir / "archive"
@@ -787,31 +1357,138 @@ class PersistenceManager:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         archived = archive_dir / f"engine_{timestamp}.json"
+        # Second-granular timestamps collide when two flows in the same project
+        # are archived within the same second. On POSIX the second Path.rename
+        # would silently replace the first archived header, orphaning its cold
+        # partition and dropping that flow from list_all_flows / history show. So
+        # probe for a free name — every archived header (with its cold files)
+        # must be preserved (issue #244 B5). Consumers glob ``engine_*.json`` and
+        # read identity from header content, so a numeric suffix stays matched.
+        if archived.exists():
+            suffix = 1
+            while True:
+                candidate = archive_dir / f"engine_{timestamp}_{suffix}.json"
+                if not candidate.exists():
+                    archived = candidate
+                    break
+                suffix += 1
 
-        self.state_file.rename(archived)
-
-        # Archive the flow's cold-data directory alongside its header, keeping
-        # the flow fully self-contained under archive/.
+        # Archive the cold-data directory BEFORE the header, and never publish the
+        # header until every cold file is in place. The header carries ``cold_ref``
+        # entries; if it were archived first (the old order) and the cold
+        # copy/move then failed — permissions, disk exhaustion after the header
+        # write, a destination collision — the archive would advertise cold files
+        # that never arrived, and load_archived_flow_by_id / ``se3 history show`` /
+        # context export would silently degrade every step and the context to
+        # empty payloads. So archival now fails CLOSED: any failure before the
+        # header moves re-raises with the live flow (engine.json + its
+        # steps/<flow_id>/ partition) fully intact, and the callers (end-session /
+        # salvage) report it as a failed archive rather than a lost flow.
+        #
+        # The cold files are COPIED, never renamed, so a failed header move can
+        # leave the live partition untouched. The redundant live partition is
+        # removed only AFTER the header is safely archived — turning copy+remove
+        # into a fail-closed move (self-check fix, issue #244 B5).
+        cold_src: Optional[Path] = None
+        cold_dst: Optional[Path] = None
+        collision = False
+        # A resumable snapshot for this flow shares this same live cold partition
+        # (issue #244 B2 — snapshot and engine.json reference one steps/<flow_id>/
+        # to avoid duplicating cold payloads). Removing the live partition would
+        # strand it: the flow is still advertised as resumable (history reads it
+        # from resumable/*.json), yet every step body and the shared context would
+        # resolve to a now-missing file and silently degrade to empty. So when
+        # such a snapshot survives this archival, the live partition is LEFT in
+        # place so the snapshot still resumes at full fidelity.
+        snapshot_alive = False
         if flow_id:
             cold_src = self._cold_dir(str(flow_id))
             if cold_src.is_dir():
                 archive_steps = archive_dir / self.STEPS_DIRNAME
                 archive_steps.mkdir(exist_ok=True)
                 cold_dst = archive_steps / str(flow_id)
-                # A prior archive of the same flow_id would collide; suffix with
-                # the timestamp to keep both intact rather than clobbering.
+                # A prior archive of the same flow_id already owns
+                # archive/steps/<flow_id>; suffix this archive's cold dir to keep
+                # both intact rather than clobbering. The archived header's
+                # cold_ref entries otherwise resolve to steps/<flow_id>/ — the
+                # *previous* archive's files — so the suffixed partition name is
+                # recorded in the header below (after it lands), keeping header
+                # and cold files reference-consistent (issue #244 B5). Probe for a
+                # free suffixed name just like the header above: re-archiving the
+                # same flow_id twice within one second collides on
+                # steps/<flow_id>_<timestamp> too, and copytree would raise onto
+                # the existing dir and abort the whole archive.
                 if cold_dst.exists():
-                    cold_dst = archive_steps / f"{flow_id}_{timestamp}"
+                    collision = True
+                    candidate = archive_steps / f"{flow_id}_{timestamp}"
+                    suffix = 1
+                    while candidate.exists():
+                        candidate = archive_steps / f"{flow_id}_{timestamp}_{suffix}"
+                        suffix += 1
+                    cold_dst = candidate
+                snapshot_alive = (self.resumable_dir / f"{flow_id}.json").exists()
                 try:
-                    cold_src.rename(cold_dst)
-                except OSError:
-                    logger.warning(
-                        "Failed to archive cold data for flow %s (%s -> %s)",
-                        flow_id,
-                        cold_src,
-                        cold_dst,
-                        exc_info=True,
-                    )
+                    shutil.copytree(cold_src, cold_dst)
+                except (OSError, shutil.Error):
+                    # Fail closed: drop any partial copy and leave the live flow
+                    # whole rather than move the header onto missing cold files.
+                    if cold_dst.exists():
+                        shutil.rmtree(cold_dst, ignore_errors=True)
+                    raise
+
+        # Header last: the archive is only *published* once its cold files exist.
+        # On a same-flow_id collision the archived header MUST already carry its
+        # suffixed cold_partition at the instant it becomes visible. The old order
+        # — publish via rename, then stamp the partition into the published header
+        # — left a crash window in which the newer archive's header was live but
+        # unstamped, so its cold_ref entries resolved to steps/<flow_id>/, the
+        # OLDER sibling archive's partition: `se3 history show` would silently
+        # render the FIRST run's data as the second's. So for the collision case
+        # we stamp the partition into the header dict and write it atomically to
+        # the archive path, then drop the live header (copy+remove = fail-closed
+        # move) — mirroring merge/cleanup._promote_cold_partition (issue #244 B5).
+        try:
+            if collision and cold_dst is not None:
+                data = self._read_flow_file(self.state_file)
+                if isinstance(data, dict) and _is_hotcold(data):
+                    state = data.get("state")
+                    if isinstance(state, dict):
+                        state["cold_partition"] = cold_dst.name
+                    self._atomic_write_json(archived, data)
+                    self.state_file.unlink()
+                else:
+                    # Unreadable/legacy header (a legacy inline flow has no cold
+                    # partition to misresolve anyway): fall back to a plain rename.
+                    self.state_file.rename(archived)
+            else:
+                self.state_file.rename(archived)
+        except OSError:
+            # The header could not be archived; drop the just-copied cold files
+            # so no orphaned archive partition is left behind, and keep the live
+            # flow intact (its cold_src was copied, never moved).
+            if cold_dst is not None and cold_dst.exists():
+                shutil.rmtree(cold_dst, ignore_errors=True)
+            raise
+        # Guard on cold_dst (a cold partition was actually found AND copied), not
+        # cold_src (set for any readable flow_id): a legacy inline engine.json has
+        # no steps/<flow_id>/ partition, so removing the never-existent live dir
+        # would raise FileNotFoundError and emit a spurious warning on every
+        # legacy archival. Legacy archival stays the silent single-file rename.
+        if cold_dst is not None and not snapshot_alive:
+            # The archive copy is complete, so the live partition is redundant
+            # (copy+remove = fail-closed move). A failed removal only leaves a
+            # harmless orphan dir — nothing references it once the header is gone
+            # — so log, never raise: the archive is already whole.
+            try:
+                shutil.rmtree(cold_src)
+            except OSError:
+                logger.warning(
+                    "Archived cold data for flow %s but failed to remove live "
+                    "partition %s; harmless leftover",
+                    flow_id,
+                    cold_src,
+                    exc_info=True,
+                )
 
     def list_active_flows(self) -> List[Dict[str, Any]]:
         """List all active (non-archived) flow states.
@@ -1037,6 +1714,19 @@ class PersistenceManager:
         Returns:
             Path to the saved context file
         """
+        # A flow from a lazy loader (load_flow_by_id / load_resumable_snapshot /
+        # list_resumable_snapshots) carries header-only steps whose cold bodies
+        # are NOT faulted in by iteration — _LazyStepDict deliberately skips
+        # hydration on items()/values() so incremental saves and status scans
+        # stay cheap. But a context export is a full-fidelity serialization:
+        # flow.to_dict() iterates the step map, so without hydrating first we
+        # would emit every step with empty inputs/outputs/artifacts and silently
+        # write a hollow context.json. Hydrate all cold bodies up front so the
+        # export carries each step's real IO regardless of which loader produced
+        # the flow (a legacy/eager-loaded flow has a plain dict and no-ops here).
+        hydrate_all = getattr(flow.state.steps, "_hydrate_all", None)
+        if callable(hydrate_all):
+            hydrate_all()
         context = build_context_from_flow(flow.to_dict())
         return self.save_context(context)
 
@@ -1150,15 +1840,33 @@ def _read_snapshot_header(path: Path) -> Optional[Dict[str, Any]]:
             if size > _HEADER_WINDOW * 2:
                 fh.seek(size - _HEADER_WINDOW)
                 tail = fh.read(_HEADER_WINDOW)
+                separate = True
             else:
                 tail = fh.read()
+                separate = False
     except OSError:
         return None
 
-    text = head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace")
+    head_text = head.decode("utf-8", "replace")
+    tail_text = tail.decode("utf-8", "replace")
+    if separate:
+        # The seeked tail begins mid-line at an arbitrary byte; its partial
+        # first line is usually a deeply-indented step/context copy of a hot key
+        # inside the giant ``state`` block. Fabricating a ``\n`` before it would
+        # forge a top-level ``\n  "key"`` anchor from a nested key truncated to
+        # two-space indent, misreading e.g. a nested ``is_worktree_mode`` as the
+        # file's real value. Drop up to and including the first genuine newline
+        # so only real line-starts can match (self-check fix).
+        nl = tail_text.find("\n")
+        tail_text = tail_text[nl:] if nl != -1 else ""
+    text = head_text + tail_text
     result: Dict[str, Any] = {}
     for key in _HEADER_STR_KEYS:
-        m = _re.search(r'\n  "' + _re.escape(key) + r'":\s*"((?:[^"\\]|\\.)*)"', text)
+        # Exclude a raw newline from the value class (mirrors the daemon twin in
+        # disk_json_cache._degraded_header): a boundary-truncated top-level string
+        # would otherwise produce a seam-spanning match capturing head-remainder +
+        # tail garbage as the value. Barring raw newlines makes it a clean miss.
+        m = _re.search(r'\n  "' + _re.escape(key) + r'":\s*"((?:[^"\\\n]|\\.)*)"', text)
         if m is not None:
             try:
                 result[key] = json.loads('"' + m.group(1) + '"')

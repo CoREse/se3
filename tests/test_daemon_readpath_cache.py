@@ -170,11 +170,19 @@ def test_changed_engine_json_is_reparsed(tmp_path, monkeypatch):
 
 
 def _patch_all_parse_seams(monkeypatch, sink: list) -> None:
-    """Record the calling thread ident on every daemon disk-JSON parse seam."""
+    """Record the calling thread ident on every daemon disk-JSON parse seam.
+
+    Post-#243 every daemon disk-JSON parse (aggregator worktree scan, history
+    index, historical-root enumeration) funnels through the unified
+    ``disk_json_cache`` chain, so ``djc._json_loads`` is the single chokepoint
+    that observes them all — history no longer parses engine.json through its
+    own private seams. ``djc._parse_json_file`` is patched too so a degraded
+    head+tail read (which decodes tokens without hitting ``_json_loads``) is
+    still attributed to a thread.
+    """
     for mod, name in (
         (djc, "_json_loads"),
-        (history_mod, "_parse_engine_json"),
-        (history_mod, "_read_json"),
+        (djc, "_parse_json_file"),
     ):
         original = getattr(mod, name)
 
