@@ -1294,9 +1294,9 @@ class LLMCaller:
         return None
 
     def _resolve_spec_guard_settings(self) -> Optional[Path]:
-        """Resolve the spec-write guard ``--settings`` path for this step.
+        """Resolve the spec-write guard ``--plugin-dir`` path for this step.
 
-        Returns the controlled settings file (installing the PreToolUse
+        Returns the guard plugin directory (installing the PreToolUse
         spec-write hook) when this step must be barred from writing
         ``se3/specs/``, else ``None``.
 
@@ -1310,9 +1310,9 @@ class LLMCaller:
         prevents that drift.
 
         The result is computed once and cached on the instance (config read +
-        idempotent settings-file generation), then reused across internal
-        attempts. Any failure degrades safely to ``None`` (no hook) — the
-        post-step diff fallback remains as the second line of defense.
+        idempotent plugin generation), then reused across internal attempts. Any
+        failure degrades safely to ``None`` (no hook) — the post-step diff
+        fallback remains as the second line of defense.
         """
         if self._spec_guard_settings_computed:
             return self._spec_guard_settings_value
@@ -1331,9 +1331,9 @@ class LLMCaller:
             if not cfg.hook_enabled:
                 return None
 
-            from .spec_write_hook import ensure_guard_settings
+            from .spec_write_hook import ensure_guard_plugin
 
-            self._spec_guard_settings_value = ensure_guard_settings(self.project_root)
+            self._spec_guard_settings_value = ensure_guard_plugin(self.project_root)
         except Exception:
             logger.debug(
                 "Failed to prepare spec-write guard settings for step '%s'",
@@ -1763,7 +1763,7 @@ class LLMCaller:
                     prompt=effective_prompt,
                     read_only=is_step_read_only(self.step_type),
                     context_files=context_files,
-                    spec_guard_settings=self._resolve_spec_guard_settings(),
+                    spec_guard_plugin=self._resolve_spec_guard_settings(),
                 )
                 logger.debug(
                     f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, "

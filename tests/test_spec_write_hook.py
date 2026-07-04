@@ -2,9 +2,9 @@
 
 Covers:
   * ``spec_write_hook.main()`` — PreToolUse deny/allow decisions
-  * ``spec_write_hook.ensure_guard_settings`` — controlled settings generator
+  * ``spec_write_hook.ensure_guard_plugin`` — controlled guard-plugin generator
   * ``spec_write_hook.snapshot_spec_files`` / ``diff_spec_files`` helpers
-  * ``ClaudeCodeRunner.build_call_args`` ``--settings`` wiring
+  * ``ClaudeCodeRunner.build_call_args`` ``--plugin-dir`` wiring
   * ``LLMCaller._resolve_spec_guard_settings`` enable decision via the shared
     ``SPEC_WRITE_ALLOWED_STEPS`` exemption set (esp. sync_respond not enabled)
   * ``SpecWriteProtectionConfig`` defaults / explicit-off / invalid-value
@@ -178,14 +178,26 @@ class TestHookDefensive:
 
 
 # ---------------------------------------------------------------------------
-# ensure_guard_settings
+# ensure_guard_plugin
 # ---------------------------------------------------------------------------
 
-class TestEnsureGuardSettings:
+class TestEnsureGuardPlugin:
     def test_structure(self, tmp_path):
-        path = spec_write_hook.ensure_guard_settings(tmp_path)
-        assert path == tmp_path / "se3" / "tmp" / "spec_write_guard_settings.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
+        plugin_dir = spec_write_hook.ensure_guard_plugin(tmp_path)
+        assert plugin_dir == tmp_path / "se3" / "tmp" / "spec_write_guard_plugin"
+        assert plugin_dir.is_dir()
+
+        manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
+        hooks_path = plugin_dir / "hooks" / "hooks.json"
+        assert manifest_path.is_file()
+        assert hooks_path.is_file()
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest.get("name")
+        assert manifest.get("version")
+        assert manifest.get("description")
+
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
         pre = data["hooks"]["PreToolUse"]
         assert isinstance(pre, list) and len(pre) == 1
         assert pre[0]["matcher"] == "Write|Edit|NotebookEdit"
@@ -196,19 +208,25 @@ class TestEnsureGuardSettings:
         # Carries ONLY the hook — no permissions.deny re-introduced.
         assert "permissions" not in data
 
-    def test_idempotent_returns_same_path(self, tmp_path):
-        p1 = spec_write_hook.ensure_guard_settings(tmp_path)
-        p2 = spec_write_hook.ensure_guard_settings(tmp_path)
+    def test_idempotent_returns_same_dir(self, tmp_path):
+        p1 = spec_write_hook.ensure_guard_plugin(tmp_path)
+        p2 = spec_write_hook.ensure_guard_plugin(tmp_path)
         assert p1 == p2
-        assert p1.read_text() == p2.read_text()
+        hooks = p1 / "hooks" / "hooks.json"
+        assert hooks.read_text() == (p2 / "hooks" / "hooks.json").read_text()
 
     def test_idempotent_no_rewrite_when_identical(self, tmp_path):
-        path = spec_write_hook.ensure_guard_settings(tmp_path)
-        os.utime(path, (1_000_000, 1_000_000))
-        before = path.stat().st_mtime
-        spec_write_hook.ensure_guard_settings(tmp_path)
+        plugin_dir = spec_write_hook.ensure_guard_plugin(tmp_path)
+        hooks_path = plugin_dir / "hooks" / "hooks.json"
+        manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
+        os.utime(hooks_path, (1_000_000, 1_000_000))
+        os.utime(manifest_path, (1_000_000, 1_000_000))
+        before_hooks = hooks_path.stat().st_mtime
+        before_manifest = manifest_path.stat().st_mtime
+        spec_write_hook.ensure_guard_plugin(tmp_path)
         # Identical content => no rewrite => mtime unchanged.
-        assert path.stat().st_mtime == before
+        assert hooks_path.stat().st_mtime == before_hooks
+        assert manifest_path.stat().st_mtime == before_manifest
 
     def test_interpreter_path_with_space_is_shell_quoted(
         self, tmp_path, monkeypatch
@@ -221,8 +239,10 @@ class TestEnsureGuardSettings:
 
         spaced = "/home/user/my env/bin/python"
         monkeypatch.setattr(spec_write_hook.sys, "executable", spaced)
-        path = spec_write_hook.ensure_guard_settings(tmp_path)
-        data = json.loads(path.read_text(encoding="utf-8"))
+        plugin_dir = spec_write_hook.ensure_guard_plugin(tmp_path)
+        data = json.loads(
+            (plugin_dir / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        )
         command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         # The path is quoted, and the shell would parse the first token back to
         # the original interpreter path.
@@ -339,37 +359,42 @@ class TestCaptureRestore:
 
 
 # ---------------------------------------------------------------------------
-# ClaudeCodeRunner.build_call_args — --settings wiring
+# ClaudeCodeRunner.build_call_args — --plugin-dir wiring
 # ---------------------------------------------------------------------------
 
 class TestBuildCallArgs:
-    def test_settings_appended_when_provided(self, tmp_path):
+    def test_plugin_dir_appended_when_provided(self, tmp_path):
         runner = _claude_runner(tmp_path)
-        settings = tmp_path / "se3" / "tmp" / "guard.json"
+        plugin_dir = tmp_path / "se3" / "tmp" / "spec_write_guard_plugin"
         args = runner.build_call_args(
-            "the prompt", read_only=False, spec_guard_settings=settings
+            "the prompt", read_only=False, spec_guard_plugin=plugin_dir
         )
-        assert "--settings" in args
-        idx = args.index("--settings")
-        assert args[idx + 1] == str(settings)
+        assert "--plugin-dir" in args
+        idx = args.index("--plugin-dir")
+        assert args[idx + 1] == str(plugin_dir)
+        # The guard must NOT be injected via a second --settings flag: a
+        # duplicated --settings clobbers the agent's own --settings (and model).
+        assert "--settings" not in args
 
     def test_argv_byte_identical_when_none(self, tmp_path):
         runner = _claude_runner(tmp_path)
         base = runner.build_call_args("the prompt", read_only=False)
         explicit_none = runner.build_call_args(
-            "the prompt", read_only=False, spec_guard_settings=None
+            "the prompt", read_only=False, spec_guard_plugin=None
         )
         assert base == explicit_none
+        assert "--plugin-dir" not in base
         assert "--settings" not in base
 
-    def test_settings_composes_with_read_only(self, tmp_path):
+    def test_plugin_dir_composes_with_read_only(self, tmp_path):
         runner = _claude_runner(tmp_path)
-        settings = tmp_path / "guard.json"
+        plugin_dir = tmp_path / "guard_plugin"
         args = runner.build_call_args(
-            "p", read_only=True, spec_guard_settings=settings
+            "p", read_only=True, spec_guard_plugin=plugin_dir
         )
         assert "--disallowedTools" in args
-        assert "--settings" in args
+        assert "--plugin-dir" in args
+        assert "--settings" not in args
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +414,9 @@ class TestResolveSpecGuardSettings:
         caller = _caller(tmp_path, "implement")
         path = caller._resolve_spec_guard_settings()
         assert path is not None
-        assert path.exists()
-        assert path.name == "spec_write_guard_settings.json"
+        assert path.is_dir()
+        assert path.name == "spec_write_guard_plugin"
+        assert (path / "hooks" / "hooks.json").is_file()
 
     @pytest.mark.parametrize(
         "step",

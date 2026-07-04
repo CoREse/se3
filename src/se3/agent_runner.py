@@ -108,7 +108,7 @@ class AgentRunner(ABC):
         prompt: str,
         read_only: bool,
         context_files: Optional[List[Path]] = None,
-        spec_guard_settings: Optional[Path] = None,
+        spec_guard_plugin: Optional[Path] = None,
     ) -> List[str]:
         """Build CLI arguments from intent-level parameters.
 
@@ -127,9 +127,9 @@ class AgentRunner(ABC):
             context_files: Optional list of files to include as context.
                 Runners translate this into agent-specific file-inclusion
                 flags (or inline the content when no flag exists).
-            spec_guard_settings: Optional path to a controlled settings file
+            spec_guard_plugin: Optional path to the guard plugin directory
                 installing the spec-write PreToolUse hook.  Only
-                ``ClaudeCodeRunner`` honors it (via ``--settings``); other
+                ``ClaudeCodeRunner`` honors it (via ``--plugin-dir``); other
                 runners ignore the intent (their sandboxing is handled
                 separately).
 

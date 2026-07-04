@@ -54,14 +54,14 @@ description: '现场(flow 20260701-110644_b2f4c0ee,已实测复现+归因):
   - 该步骤内 Write/Edit/NotebookEdit 写 se3/specs/ 仍被拒且带自定义理由,写其它路径不受影响;
 
   - update_spec 与全部 sync 步骤照旧豁免。'
-status: open
+status: in-progress
 tags:
 - llm-caller
 - claude-runner
 - spec-guard
 source: human
 created_at: '2026-07-02T15:34:29.098050'
-updated_at: '2026-07-02T15:34:29.098050'
+updated_at: '2026-07-04T20:45:45.605948'
 title: spec-write guard 用第二个 --settings 注入 hook,整体覆盖 agent wrapper 的 --settings(model
   被静默替换)
 priority: high

@@ -1,4 +1,4 @@
-"""PreToolUse hook + controlled-settings generator for spec-file write protection.
+"""PreToolUse hook + controlled-plugin generator for spec-file write protection.
 
 This module has two responsibilities and depends only on the standard library,
 with **no import-time side effects**, so it can be imported freely by the engine
@@ -10,18 +10,27 @@ and run as a standalone hook subprocess (``python -m se3.engine.spec_write_hook`
    ``<cwd>/se3/specs/``. Every other write is allowed. The hook is deliberately
    **step-agnostic**: it always rejects spec writes and never inspects the step
    exemption set. Whether the hook is installed at all for a given step is decided
-   upstream in ``llm_caller`` (only non-exempt steps receive the controlled
-   settings file via ``--settings``), so by the time the hook actually runs, a
-   spec write is by definition illegal. A PreToolUse hook is *not* suppressed by
+   upstream in ``llm_caller`` (only non-exempt steps receive the guard plugin via
+   ``--plugin-dir``), so by the time the hook actually runs, a spec write is by
+   definition illegal. A PreToolUse hook is *not* suppressed by
    ``--dangerously-skip-permissions``, so this is an enforcement layer the
    sub-agent cannot bypass.
 
-2. :func:`ensure_guard_settings` — generates/caches a minimal Claude settings file
-   containing only the PreToolUse hook and returns its path, so ``llm_caller`` can
-   pass it through ``--settings <path>``. The settings file carries only the hook
-   (it is loaded *additively* by Claude CLI), never any ``permissions.deny``
-   entries, so it does not re-introduce the downstream-settings hazard that the
-   default ``--setting-sources user`` isolation guards against.
+2. :func:`ensure_guard_plugin` — generates/caches a minimal Claude *plugin*
+   carrying only the PreToolUse hook and returns its directory, so ``llm_caller``
+   can inject it through ``--plugin-dir <dir>``. This deliberately avoids a second
+   ``--settings`` flag: Claude CLI treats a repeated ``--settings`` as a full
+   *replacement* of the prior one (its "additional settings" merge semantics apply
+   only across the user/project setting *sources*, not to a duplicated flag), so a
+   guard passed via a second ``--settings`` silently clobbered the agent's own
+   ``--settings opus.json`` — dropping its ``model`` back to the user settings. A
+   ``--plugin-dir`` is a pure CLI argument, session-scoped, repeatable, and
+   loaded *additively* without participating in ``--settings`` override semantics,
+   so the agent's flag settings (model, permissions, effortLevel) are preserved
+   while the guard hook is still installed. The plugin carries only the hook,
+   never any ``permissions.deny`` entries, so it does not re-introduce the
+   downstream-settings hazard that the default ``--setting-sources user``
+   isolation guards against.
 
 It also exposes :func:`snapshot_spec_files` / :func:`diff_spec_files` content-hash
 helpers, reused by the post-step diff fallback guard (the second hard layer) to
@@ -44,8 +53,8 @@ from typing import Dict, List, Optional
 # and the settings-file location below.
 _SPECS_RELPATH = ("se3", "specs")
 
-# The controlled settings file is written under se3/tmp/ (gitignored runtime dir).
-_GUARD_SETTINGS_RELPATH = ("se3", "tmp", "spec_write_guard_settings.json")
+# The controlled guard plugin is written under se3/tmp/ (gitignored runtime dir).
+_GUARD_PLUGIN_RELPATH = ("se3", "tmp", "spec_write_guard_plugin")
 
 # Tool-input keys that carry the target path for the write tools we match.
 _FILE_PATH_KEYS = ("file_path", "notebook_path")
@@ -170,11 +179,23 @@ def main() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Controlled settings generator
+# Controlled guard-plugin generator
 # ---------------------------------------------------------------------------
 
-def _guard_settings_payload() -> dict:
-    """Return the controlled settings dict carrying ONLY the PreToolUse hook."""
+def _guard_plugin_manifest() -> dict:
+    """Return the minimal ``.claude-plugin/plugin.json`` manifest dict."""
+    return {
+        "name": "se3-spec-write-guard",
+        "version": "1.0.0",
+        "description": (
+            "SE3 spec-write protection: a PreToolUse hook that denies "
+            "Write/Edit/NotebookEdit targeting se3/specs/."
+        ),
+    }
+
+
+def _guard_plugin_hooks_payload() -> dict:
+    """Return the plugin ``hooks/hooks.json`` dict carrying ONLY the PreToolUse hook."""
     # Claude CLI runs hook commands through a shell, so the interpreter path MUST
     # be shell-quoted: a venv whose path contains a space (e.g.
     # ``/home/user/my env/bin/python``) would otherwise be split by the shell and
@@ -198,33 +219,62 @@ def _guard_settings_payload() -> dict:
     }
 
 
-def ensure_guard_settings(project_root) -> Path:
-    """Generate/cache the controlled settings file and return its path.
+def _write_if_changed(path: Path, desired: str) -> None:
+    """Write *desired* to *path* only when it differs from the current content.
 
-    The file contains only the PreToolUse spec-write hook (no ``permissions``),
-    written to ``<project_root>/se3/tmp/spec_write_guard_settings.json``. The call
-    is idempotent: it only writes to disk when the desired content differs from
-    what is already there, so repeated calls across a flow do not churn the file.
+    Keeps :func:`ensure_guard_plugin` idempotent so repeated calls across a flow
+    do not churn the generated files' mtimes.
+    """
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except Exception:
+        existing = None
+    if existing != desired:
+        path.write_text(desired, encoding="utf-8")
+
+
+def ensure_guard_plugin(project_root) -> Path:
+    """Generate/cache the controlled guard plugin and return its directory.
+
+    Materializes a minimal Claude plugin under
+    ``<project_root>/se3/tmp/spec_write_guard_plugin/``::
+
+        .claude-plugin/plugin.json   # minimal manifest (name/version/description)
+        hooks/hooks.json             # PreToolUse spec-write hook, no permissions
+
+    ``llm_caller`` injects this via ``--plugin-dir <dir>`` rather than a second
+    ``--settings`` flag: a repeated ``--settings`` is treated by Claude CLI as a
+    full replacement of the prior one, which silently clobbered the agent's own
+    ``--settings opus.json`` (and its ``model``). ``--plugin-dir`` is loaded
+    additively and does not participate in ``--settings`` override semantics.
+
+    The call is idempotent: each generated file is rewritten only when its
+    desired content differs from what is already on disk.
 
     Args:
         project_root: The target project root (the ``cwd`` of the Claude subprocess).
 
     Returns:
-        Absolute path to the controlled settings file.
+        Absolute path to the plugin directory.
     """
     root = Path(project_root)
-    settings_path = root.joinpath(*_GUARD_SETTINGS_RELPATH)
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_dir = root.joinpath(*_GUARD_PLUGIN_RELPATH)
 
-    desired = json.dumps(_guard_settings_payload(), indent=2, sort_keys=True)
-    try:
-        existing = settings_path.read_text(encoding="utf-8")
-    except Exception:
-        existing = None
-    if existing != desired:
-        settings_path.write_text(desired, encoding="utf-8")
+    manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
+    hooks_path = plugin_dir / "hooks" / "hooks.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
-    return settings_path
+    _write_if_changed(
+        manifest_path,
+        json.dumps(_guard_plugin_manifest(), indent=2, sort_keys=True),
+    )
+    _write_if_changed(
+        hooks_path,
+        json.dumps(_guard_plugin_hooks_payload(), indent=2, sort_keys=True),
+    )
+
+    return plugin_dir
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ class TestLLMCallerRetryMode:
         mock_result.success = True
         mock_result.output = '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
         mock_runner.run_with_monitor.return_value = mock_result
-        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_settings=None: [
+        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_plugin=None: [
             "--output-format", "stream-json", "--verbose", "-p", prompt,
         ]
         mock_runner_cls.return_value = mock_runner
@@ -78,7 +78,7 @@ class TestLLMCallerRetryMode:
         mock_result.success = True
         mock_result.output = '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
         mock_runner.run_with_monitor.return_value = mock_result
-        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_settings=None: [
+        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_plugin=None: [
             "--output-format", "stream-json", "--verbose", "-p", prompt,
         ]
         mock_runner_cls.return_value = mock_runner
@@ -112,7 +112,7 @@ class TestLLMCallerRetryMode:
         mock_result.success = True
         mock_result.output = '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
         mock_runner.run_with_monitor.return_value = mock_result
-        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_settings=None: [
+        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_plugin=None: [
             "--output-format", "stream-json", "--verbose", "-p", prompt,
         ]
         mock_runner_cls.return_value = mock_runner

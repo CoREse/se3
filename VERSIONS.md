@@ -82,6 +82,14 @@
 
 
 
+
+## 11.10.1 - 2026-07-04
+
+- Fix implement/fix steps silently running the wrong model: the spec-write guard no longer overrides the agent's --settings (model, permissions, effortLevel), so oclaude correctly reports claude-opus-4-8[1m] again
+- Deliver the spec-write guard hook via --plugin-dir instead of a second --settings flag, which the claude CLI replaces rather than merges
+- Generate an idempotent guard plugin at se3/tmp/spec_write_guard_plugin (.claude-plugin/plugin.json + hooks/hooks.json) in place of the guard settings file
+- Preserve spec-write protection behavior: writes to se3/specs/ are still denied with the custom reason, writes elsewhere are unaffected, and update_spec plus sync steps remain exempt
+- Keep the post-step spec-diff snapshot/capture as an unchanged second line of defense
 ## 11.10.0 - 2026-07-04
 
 - Make adjudicate rulings auto-pass by default so unattended runs no longer pause for human confirmation

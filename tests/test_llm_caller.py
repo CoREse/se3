@@ -194,7 +194,7 @@ class _ArgsCapturingRunner:
         self.captured_args = None
 
     def build_call_args(
-        self, prompt, read_only, context_files=None, spec_guard_settings=None
+        self, prompt, read_only, context_files=None, spec_guard_plugin=None
     ):
         args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
         if read_only:
@@ -205,8 +205,8 @@ class _ArgsCapturingRunner:
                 "NotebookEdit",
                 "AskUserQuestion",
             ]
-        if spec_guard_settings is not None:
-            args += ["--settings", str(spec_guard_settings)]
+        if spec_guard_plugin is not None:
+            args += ["--plugin-dir", str(spec_guard_plugin)]
         if context_files:
             for f in context_files:
                 if f.exists():
