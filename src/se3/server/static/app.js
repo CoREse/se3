@@ -404,6 +404,7 @@ function flowsSignature(machine, selectedId, resumeRequests) {
       step_index: (f && f.current_step_index) || 0,
       total_steps: (f && f.total_steps) || 0,
       waiting_lock: isWaitingForLock(f),
+      merging: isMerging(f),
       pending: hasPendingCall(f),
       resumable: isFlowResumable(f),
       resuming: resuming(f && f.flow_id),
@@ -643,9 +644,32 @@ function isWaitingForLock(flow) {
   return String(flow.status || "").toLowerCase() === "running";
 }
 
-// Human-facing status label that folds the waiting-for-lock running sub-state
-// into the displayed text (e.g. "running · waiting for lock"). Pure.
+// Whether a worktree flow's body has finished and it is now merging back into
+// its original branch (possibly blocked queueing for the main-worktree lock).
+// Unlike waiting_for_lock — which layers on a RUNNING flow — merging layers on
+// the flow's COMPLETED body, so this deliberately does NOT require status
+// running; requiring it would filter the sub-state out entirely. The only
+// defence is dropping archived/history-only snapshots: a successful merge
+// archives the worktree engine.json and the flag disappears with it, but a
+// stale flag on such a snapshot must never keep reading as merging. Pure.
+function isMerging(flow) {
+  if (!flow || !flow.merging) return false;
+  const src = String(flow.source || "").toLowerCase();
+  if (src === "archived" || src === "history") return false;
+  return true;
+}
+
+// Human-facing status label that folds a running/terminal sub-state into the
+// displayed text. The merging sub-state overrides the underlying (completed)
+// status with 合并中 — and appends ·等待主分支锁 while the merge is queued for
+// the main-worktree lock (checked via the raw waiting_for_lock flag, since the
+// merging body's status is completed so isWaitingForLock would reject it).
+// Otherwise the waiting-for-lock running sub-state folds in as
+// "running · waiting for lock". Pure.
 function flowStatusLabel(flow) {
+  if (isMerging(flow)) {
+    return flow && flow.waiting_for_lock ? "合并中·等待主分支锁" : "合并中";
+  }
   const base = (flow && flow.status) || "unknown";
   return isWaitingForLock(flow) ? `${base} · waiting for lock` : base;
 }
@@ -1549,8 +1573,15 @@ function renderFlowCard(flow) {
   const task = el("span", "flow-task",
     flow.task_description || flow.flow_id || "(untitled flow)");
   task.title = flow.task_description || "";
-  const sc = statusClass(flow.status);
-  const badge = el("span", "badge badge-" + sc, flow.status || "unknown");
+  // The merging sub-state layers on the flow's COMPLETED body, so it overrides
+  // the terminal badge with 合并中 (·等待主分支锁) rather than reading as 已完成;
+  // for every other flow the badge stays the raw status. isWaitingForLock keeps
+  // its own separate ⏳ badge below (it layers on running, not completed).
+  const merging = isMerging(flow);
+  const sc = merging ? "merging" : statusClass(flow.status);
+  const badge = el(
+    "span", "badge badge-" + sc,
+    merging ? flowStatusLabel(flow) : (flow.status || "unknown"));
   head.append(task, badge);
 
   // Annotate which project this running flow belongs to so flows from
@@ -2383,6 +2414,7 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
     project_root: f.project_root ?? null,
     status: f.status ?? null,
     waiting_lock: isWaitingForLock(f),
+    merging: isMerging(f),
     task_type: f.task_type ?? null,
     current_step_index: f.current_step_index ?? null,
     total_steps: f.total_steps ?? null,
@@ -5433,10 +5465,19 @@ function normalizeRecord(rec) {
   // running-and-waiting-for-lock, and — sharing the step's `stepId` — it is
   // superseded in place by the later `step_started` running anchor and the
   // terminal report once the lock is acquired and the step proceeds.
+  //
+  // `merging` (persisted by chat_history.record_merging) is the isomorphic
+  // anchor for the worktree-merge sub-state: once a worktree flow's body has
+  // completed, its final step gets a `merging` anchor while the flow is merged
+  // back into its original branch (possibly blocked queueing for the
+  // main-worktree lock, which additionally rides the waiting_for_lock anchor).
+  // It shares that last step's `stepId`, so a later, more-current anchor for
+  // the same region supersedes it in place.
   if (
     eventType === "step_started"
     || eventType === "step_status"
     || eventType === "waiting_for_lock"
+    || eventType === "merging"
   ) {
     return {
       role: "step-event",
@@ -5451,7 +5492,9 @@ function normalizeRecord(rec) {
             ? "running"
             : eventType === "waiting_for_lock"
               ? "waiting_for_lock"
-              : "paused"),
+              : eventType === "merging"
+                ? "merging"
+                : "paused"),
       ).toLowerCase(),
       stepReport: null,
       raw: { raw_json: [msg], raw_ndjson: null },
@@ -6184,6 +6227,7 @@ const STEP_STATUS_DISPLAY = {
   failed: { icon: "✗", text: "失败" },
   partial: { icon: "◑", text: "部分完成" },
   waiting_for_lock: { icon: "⏳", text: "等待锁" },
+  merging: { icon: "🔀", text: "合并中" },
 };
 
 // Pure: resolve a step's status display ({icon, text}); unknown statuses fall
@@ -6364,15 +6408,16 @@ function addConversationRecords(container, st, records, startIndex) {
       bubble.__convTurnKey = progressTurnKey(norm);
     }
     // Tag the step lifecycle status anchors (step_started / step_status /
-    // waiting_for_lock) so a later, more-current anchor for the SAME step
-    // region supersedes the earlier one — the region then shows only its
-    // current state (等待锁 → 进行中 → 已暂停) rather than stacking redundant
-    // status rows.
+    // waiting_for_lock / merging) so a later, more-current anchor for the SAME
+    // step region supersedes the earlier one — the region then shows only its
+    // current state (等待锁 → 进行中 → 已暂停, or 合并中 on the final step) rather
+    // than stacking redundant status rows.
     bubble.__convStatusRow = !!(
       norm
       && (norm.kind === "step_started"
         || norm.kind === "step_status"
-        || norm.kind === "waiting_for_lock"));
+        || norm.kind === "waiting_for_lock"
+        || norm.kind === "merging"));
     // Tag the terminal report rows (step_completed / step_failed). Once a step
     // region has a terminal report, ITS non-terminal status anchors (进行中 /
     // 已暂停 / 重试中) are stale — the report card itself conveys the final
@@ -9225,6 +9270,7 @@ function renderConversationRecord(norm) {
     norm.kind === "step_started"
     || norm.kind === "step_status"
     || norm.kind === "waiting_for_lock"
+    || norm.kind === "merging"
   ) {
     return renderStepStartedRecord(norm);
   }
@@ -9427,7 +9473,9 @@ function renderStepStartedRecord(norm) {
     ? "step_status"
     : norm.kind === "waiting_for_lock"
       ? "waiting_for_lock"
-      : "step_started";
+      : norm.kind === "merging"
+        ? "merging"
+        : "step_started";
   const row = el(
     "div",
     "history-record conv-record role-step-event kind-" + kind + " "
@@ -12105,6 +12153,9 @@ if (typeof module !== "undefined" && module.exports) {
     // in tests/frontend/waiting_for_lock.test.mjs.
     isWaitingForLock,
     flowStatusLabel,
+    // Worktree-merge sub-state (G4) — exposed for the DOM-free tests in
+    // tests/frontend/merging.test.mjs.
+    isMerging,
     // Local interjection lifecycle helpers (G4) — exposed for the DOM-free
     // tests in tests/frontend/test_app_pure.mjs.
     bindLocalInterjectionToCallId,

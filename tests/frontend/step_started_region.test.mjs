@@ -147,8 +147,8 @@ export function registerStepStartedRegionTests(ctx) {
   check("G2 stepStatusDisplay is case-insensitive and falls back safely", () => {
     assert.equal(app.stepStatusDisplay("RUNNING").text, "进行中");
     // Unknown status keeps its raw token rather than dropping it.
-    const unknown = app.stepStatusDisplay("merging");
-    assert.equal(unknown.text, "merging");
+    const unknown = app.stepStatusDisplay("quiescing");
+    assert.equal(unknown.text, "quiescing");
     assert.ok(unknown.icon, "unknown status still gets a neutral icon");
     // Empty / null degrade to a running default rather than a dangling label.
     assert.equal(app.stepStatusDisplay(null).text, "running");
