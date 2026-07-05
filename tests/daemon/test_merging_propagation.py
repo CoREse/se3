@@ -196,6 +196,49 @@ def test_history_index_carries_merging_on_active_flow(tmp_path: Path) -> None:
     assert meta.to_dict()["merging"] is True
 
 
+def test_history_index_carries_waiting_for_lock_on_merging_flow(tmp_path: Path) -> None:
+    """A COMPLETED worktree flow queued behind the merge lock carries
+    waiting_for_lock into the SessionMeta.
+
+    During the queue-and-wait window the worktree engine.json is status=completed,
+    merging=True, waiting_for_lock=True. Because ``active`` is False for a
+    completed flow, waiting_for_lock must be gated like ``merging`` (source
+    active + mid-merge) rather than behind ``active`` — otherwise the history
+    list can never render '合并中·等待主分支锁', diverging from the machine
+    flow-list card which does show the suffix.
+    """
+    cache_mod.clear_cache()
+    _write(
+        tmp_path / "se3" / "state" / "engine.json",
+        _merging_engine("hist-merging-wait", merging=True, waiting_for_lock=True),
+    )
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [tmp_path])
+    meta = reader.build_index()[0]
+    assert meta.flow_id == "hist-merging-wait"
+    assert meta.source == "active"
+    assert meta.merging is True
+    assert meta.waiting_for_lock is True
+    assert meta.to_dict()["waiting_for_lock"] is True
+
+
+def test_history_completed_flow_not_merging_ignores_waiting_for_lock(
+    tmp_path: Path,
+) -> None:
+    """A plain COMPLETED flow (not merging) with a stale waiting_for_lock flag
+    does not surface as queued — waiting_for_lock requires the flow be active or
+    mid-merge, so a terminal non-merging snapshot stays clean."""
+    cache_mod.clear_cache()
+    _write(
+        tmp_path / "se3" / "state" / "engine.json",
+        _merging_engine("hist-done", merging=False, waiting_for_lock=True),
+    )
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [tmp_path])
+    meta = reader.build_index()[0]
+    assert meta.flow_id == "hist-done"
+    assert meta.merging is False
+    assert meta.waiting_for_lock is False
+
+
 def test_history_archived_flow_never_merging(tmp_path: Path) -> None:
     """An archived snapshot is never reported as merging, even with a stale flag
     — merging is only read from the live "active" source."""

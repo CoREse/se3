@@ -8,9 +8,15 @@ Two surfaces are covered:
   a free / stale lock fires neither; and the no-callback path is exactly the
   legacy unconditional blocking acquire.
 * ``run._finalize_worktree_merge`` — flags the worktree flow ``merging=True``
-  (with a ``record_merging`` anchor) before handing off to ``run_merge`` and
-  clears the flag on the failure path (worktree preserved) while leaving a
-  successful --delete-merged path alone (worktree archived away).
+  (with a ``record_merging`` anchor) before handing off to ``run_merge``. On the
+  failure path (worktree preserved) it clears the flag + supersedes the anchor
+  on the worktree; on the successful --delete-merged path (worktree archived
+  away) the engine.json flag vanishes with the worktree, but because ``se3/
+  history`` is runtime-synced into the main root during the merge, the "合并中"
+  anchor is superseded on the MAIN root instead.
+* The lock-acquired callback re-emits ``record_merging`` (not a generic
+  "进行中" running anchor) so the transcript keeps reading "合并中" for the rest
+  of a lock-contended merge.
 """
 
 from __future__ import annotations
@@ -180,7 +186,7 @@ class TestFinalizeWorktreeMergeStatus:
         assert callable(captured["on_lock_wait"])
         assert callable(captured["on_lock_acquired"])
 
-    def test_success_archives_worktree_no_clear_needed(self, tmp_path):
+    def test_success_archives_worktree_flag_vanishes(self, tmp_path):
         rc, worktree_path, flow, step, captured = self._run(
             tmp_path, merge_rc=0, delete_on_merge=True
         )
@@ -188,6 +194,74 @@ class TestFinalizeWorktreeMergeStatus:
         # --delete-merged removed the worktree (engine.json and all); the flag
         # vanished with it rather than being explicitly cleared.
         assert not worktree_path.exists()
+
+    def test_success_supersedes_merging_anchor_on_main(self, tmp_path):
+        # se3/history is a Tier A runtime-sync dir: run_merge copies the
+        # worktree's history — the "合并中" anchor included — into the main root
+        # DURING the merge, then --delete-merged archives the worktree away. The
+        # success path must supersede that stale anchor ON THE MAIN ROOT so the
+        # merged flow's transcript does not freeze on a live-looking "合并中" row.
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+        flow, step = _make_worktree_flow(worktree_path)
+
+        def fake_run_merge(branches, project_root, on_lock_wait=None,
+                           on_lock_acquired=None):
+            # Runtime-sync the worktree history (with the "合并中" anchor) into
+            # the main root, as run_merge's Tier A sync does mid-merge…
+            shutil.copytree(
+                worktree_path / "se3" / "history",
+                Path(project_root) / "se3" / "history",
+            )
+            # …then --delete-merged archives + removes the worktree.
+            shutil.rmtree(worktree_path)
+            return 0
+
+        with patch("se3.commands.merge_cmd.run_merge", side_effect=fake_run_merge), \
+                patch("se3.commands.run.render_full"), \
+                patch("se3.commands.run.get_console"), \
+                patch("se3.commands.run.display_success"):
+            rc = run._finalize_worktree_merge(
+                tmp_path, "worktree/x", "master", worktree_path
+            )
+        assert rc == 0
+        assert not worktree_path.exists()
+        events = _anchor_events(tmp_path, flow.flow_id, step.step_id)
+        kinds = [e.get("type") for e in events]
+        # The synced "合并中" anchor is present, and a clearing step_status
+        # (the step's terminal status) is appended AFTER it as the trailing row
+        # so removeSupersededStatusRows keeps the truthful completed state.
+        assert "merging" in kinds
+        assert events[-1].get("type") == "step_status"
+        assert events[-1].get("status") == "completed"
+
+    def test_lock_acquired_reemits_merging_not_running(self, tmp_path):
+        # A contended lock: on acquire the transcript must fall back to "合并中"
+        # (a re-emitted merging anchor), NOT a generic "进行中" running anchor,
+        # for the rest of the still-running merge.
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+        flow, step = _make_worktree_flow(worktree_path)
+        wt_flow, anchor = run._mark_worktree_merging(worktree_path)
+        on_wait, on_acq = run._make_worktree_lock_wait_callbacks(
+            worktree_path, wt_flow, anchor
+        )
+        on_wait()
+        on_acq()
+        events = _anchor_events(worktree_path, flow.flow_id, step.step_id)
+        kinds = [e.get("type") for e in events]
+        # merging (mark) → waiting_for_lock (wait) → merging (acquire).
+        assert "waiting_for_lock" in kinds
+        assert kinds[-1] == "merging"
+        # No generic "running" step_status was written by the acquire hook.
+        assert not any(
+            e.get("type") == "step_status" and e.get("status") == "running"
+            for e in events
+        )
+        # waiting_for_lock flag was cleared on acquire.
+        engine = worktree_path / "se3" / "state" / "engine.json"
+        data = json.loads(engine.read_text(encoding="utf-8"))
+        assert data.get("waiting_for_lock", False) is False
 
     def test_failure_clears_merging_flag_and_writes_clear_anchor(self, tmp_path):
         rc, worktree_path, flow, step, captured = self._run(

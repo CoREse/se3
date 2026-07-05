@@ -962,6 +962,78 @@ def record_group_status(
         )
 
 
+def record_index_progress(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    *,
+    path: str,
+    kind: str,
+    done: int,
+    total: int,
+    phase: str,
+    timestamp: Optional[str] = None,
+) -> None:
+    """Append a single code-index update-progress line to the step jsonl.
+
+    The commit step regenerates ``se3/code-index.md`` before staging, re-
+    summarising every source node this flow touched. That rebuild can take a
+    while and is otherwise invisible in the web console. To surface live
+    progress, the build's per-node progress callback emits one of these lines as
+    each file/dir node finishes summarising: a self-contained NDJSON record
+    carrying the node ``path`` / ``kind``, the running ``done`` / ``total``
+    counts, and the ``phase`` (``"file"`` or ``"dir"``).
+
+    Like :func:`record_group_status`, appending this line shifts the daemon's
+    history-directory fingerprint (``DaemonHistoryReader.active_flow_signature``
+    fingerprints each ``*.jsonl`` by ``(name, mtime, size)``), so it rides the
+    existing ``history_data`` push channel to the frontend with **zero** daemon /
+    server protocol change and **zero** server import on the engine side — the
+    engine only writes a plain file.
+
+    The line is NOT a :class:`ChatMessage`; it carries ``type='index_progress'``
+    plus a ``system`` role. :func:`get_step_history` skips ``index_progress``
+    lines so CLI history rendering and retry-context construction
+    (``format_history_for_retry``, which reads through ``get_step_history``)
+    never ingest them.
+
+    Follows :func:`record_group_status`'s write semantics — ``mkdir`` + a single
+    whole-line ``write`` (so a half-written line cannot corrupt earlier lines)
+    wrapped in an ``OSError`` guard so a write failure never breaks the in-flight
+    build. Missing ``flow_id`` / ``step_id`` is a soft no-op (the read-side
+    freshness refresh has no flow context and must not write anything).
+    """
+    if not flow_id or not step_id:
+        return
+    record = {
+        "type": "index_progress",
+        "role": "system",
+        "step_type": step_type,
+        "path": path,
+        "kind": kind,
+        "done": done,
+        "total": total,
+        "phase": phase,
+        "timestamp": timestamp or datetime.now().isoformat(),
+    }
+    fpath = _history_file(project_root, flow_id, step_id)
+    try:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        with fpath.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning(
+            "Failed to record index progress for %s/%s (%s %d/%d): %s",
+            flow_id,
+            step_id,
+            path,
+            done,
+            total,
+            exc,
+        )
+
+
 def get_step_history(
     project_root: Path, flow_id: str, step_id: str
 ) -> Optional[ChatSession]:
@@ -1008,6 +1080,13 @@ def get_step_history(
             # for the web console only; CLI history and retry-context
             # construction (format_history_for_retry) MUST NOT ingest them.
             if isinstance(data, dict) and data.get("type") == "group_status":
+                continue
+            # Index-progress records (written by record_index_progress) carry a
+            # ``role`` ("system") and would otherwise deserialize as a
+            # ChatMessage. They are lightweight code-index rebuild progress
+            # markers for the web console only; CLI history and retry-context
+            # construction (format_history_for_retry) MUST NOT ingest them.
+            if isinstance(data, dict) and data.get("type") == "index_progress":
                 continue
             msg = ChatMessage.from_dict(data)
             messages.append(msg)

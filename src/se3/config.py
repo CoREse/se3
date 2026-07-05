@@ -3140,6 +3140,12 @@ DEFAULT_CODE_INDEX_CHUNK_BYTES = 16 * 1024  # 16 KiB
 # this), which is the right altitude — function/method detail is pulled on demand.
 DEFAULT_CODE_INDEX_VIEW_BUDGET_BYTES = 8 * 1024  # 8 KiB
 
+# Default parallelism for LLM summarisation during a (re)build. Conservative on
+# purpose: the ceiling is LLM quota/rate-limit bound (I/O-bound calls, not CPU),
+# so a small default is safe across agent backends and users raise it to match
+# their own quota.
+DEFAULT_CODE_INDEX_MAX_CONCURRENCY = 4
+
 
 @dataclass
 class CodeIndexConfig:
@@ -3173,6 +3179,11 @@ class CodeIndexConfig:
             top level). Empty (the default) means auto-detect the code-bearing
             top-level directories. Entries may be given with or without a
             trailing slash (``src`` or ``src/``).
+        max_concurrency: Upper bound on how many per-file LLM summarisation calls
+            run concurrently during a (re)build. Default 4. The ceiling is quota/
+            rate-limit bound rather than CPU bound, so it is a knob to match the
+            active agent backend's limits; an illegal value falls back to the
+            default with a warning like every other field.
     """
 
     degrade_trigger_lines: int = DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_LINES
@@ -3182,6 +3193,7 @@ class CodeIndexConfig:
     exclude: list = field(default_factory=list)
     view_budget_bytes: int = DEFAULT_CODE_INDEX_VIEW_BUDGET_BYTES
     primary_roots: list = field(default_factory=list)
+    max_concurrency: int = DEFAULT_CODE_INDEX_MAX_CONCURRENCY
 
     @staticmethod
     def _coerce_positive_int(data: dict, key: str, default: int) -> int:
@@ -3283,6 +3295,9 @@ class CodeIndexConfig:
                 data, "view_budget_bytes", DEFAULT_CODE_INDEX_VIEW_BUDGET_BYTES
             ),
             primary_roots=cls._coerce_primary_roots(data),
+            max_concurrency=cls._coerce_positive_int(
+                data, "max_concurrency", DEFAULT_CODE_INDEX_MAX_CONCURRENCY
+            ),
         )
 
     @classmethod

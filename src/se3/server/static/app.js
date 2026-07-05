@@ -405,6 +405,12 @@ function flowsSignature(machine, selectedId, resumeRequests) {
       total_steps: (f && f.total_steps) || 0,
       waiting_lock: isWaitingForLock(f),
       merging: isMerging(f),
+      // A merging card's badge is flowStatusLabel(flow), whose ·等待主分支锁
+      // suffix rides the RAW waiting_for_lock flag — not isWaitingForLock (which
+      // requires status===running and so is always false on the completed+merging
+      // body). Capture the raw flag too, else toggling it mid-merge leaves the
+      // signature unchanged and the badge freezes on 合并中 / 合并中·等待主分支锁.
+      raw_waiting_lock: !!(f && f.waiting_for_lock),
       pending: hasPendingCall(f),
       resumable: isFlowResumable(f),
       resuming: resuming(f && f.flow_id),
@@ -2415,6 +2421,12 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
     status: f.status ?? null,
     waiting_lock: isWaitingForLock(f),
     merging: isMerging(f),
+    // Overview Status is flowStatusLabel(flow), whose ·等待主分支锁 suffix rides
+    // the RAW waiting_for_lock flag — not isWaitingForLock (which requires
+    // status===running and so is always false on the completed+merging body).
+    // Capture the raw flag too, else toggling it mid-merge (lock acquired) leaves
+    // the signature unchanged and the Status freezes on 合并中·等待主分支锁.
+    raw_waiting_lock: !!(f.waiting_for_lock),
     task_type: f.task_type ?? null,
     current_step_index: f.current_step_index ?? null,
     total_steps: f.total_steps ?? null,
@@ -4206,8 +4218,17 @@ function renderHistoryList() {
     const task = el("span", "history-task",
       s.task_description || s.flow_id || "(untitled session)");
     task.title = s.task_description || s.flow_id || "";
-    const sc = statusClass(s.status);
-    head.append(task, el("span", "badge badge-" + sc, s.status || "unknown"));
+    // A merging worktree session enters the history list from its active
+    // engine.json (source "active", so isMerging does not drop it). Its body
+    // is COMPLETED, so the raw status reads 已完成; fold in the merging
+    // sub-state here — exactly as the machine flow-list card does — so this
+    // list surface also shows 合并中 (·等待主分支锁) during the merge window.
+    const merging = isMerging(s);
+    const sc = merging ? "merging" : statusClass(s.status);
+    head.append(
+      task,
+      el("span", "badge badge-" + sc,
+        merging ? flowStatusLabel(s) : (s.status || "unknown")));
     if (s.active) head.appendChild(el("span", "badge badge-live", "● live"));
     const resumeBtn = makeResumeButton(s);
     if (resumeBtn) head.appendChild(resumeBtn);
@@ -5539,6 +5560,47 @@ function normalizeRecord(rec) {
     };
   }
 
+  // Code-index update-progress records (written by chat_history.record_index_progress
+  // from the commit step's code-index rebuild callback). The commit step
+  // re-summarises every touched source node before staging; that rebuild is
+  // otherwise invisible, so each file/dir node emits one self-contained NDJSON
+  // line carrying its `path` / node `kind` (file|dir), the running `done`/`total`
+  // counts and the `phase`. Like group_status they ride the conversation channel
+  // as a lightweight, time-ordered status marker — NOT a chat turn — and are
+  // recognized here before the generic role path so the dedicated renderer
+  // (renderIndexProgressRecord) can pick them up and update ONE progress line in
+  // place as the counts advance.
+  if (recType === "index_progress") {
+    const totalRaw = Number(pick("total"));
+    const doneRaw = Number(pick("done"));
+    return {
+      role: "index-progress",
+      kind: "index_progress",
+      path: pick("path") != null ? String(pick("path")) : "",
+      // The record's own `kind` field is the node kind (file|dir); keep it under
+      // a distinct name so it never collides with the normalized `kind` marker
+      // discriminator above.
+      indexKind: pick("kind") != null ? String(pick("kind")) : "",
+      done: Number.isFinite(doneRaw) ? doneRaw : 0,
+      total: Number.isFinite(totalRaw) ? totalRaw : 0,
+      phase: pick("phase") != null ? String(pick("phase")) : "",
+      content: "",
+      timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
+      // record_index_progress always tags these `commit` (the only step that
+      // rebuilds the index with a flow context); honor an explicit envelope /
+      // inner step_type when present, else default to commit so the marker groups
+      // under the COMMIT step header.
+      stepType: pickStepType() || "commit",
+      stepId: pick("step_id") || "",
+      raw: { raw_json: [msg], raw_ndjson: null },
+      attempt: null,
+      // Index-progress markers have no LLM turn of their own, so they carry no
+      // agent/model badge (each per-node summary runs its own throwaway caller).
+      agentName: null,
+      modelName: null,
+    };
+  }
+
   // Stream-progress records (written by record_stream_progress, daemon-read
   // and pushed BEFORE the turn's final result) are in-progress process output.
   // They carry `type:'stream_progress'` and/or `partial:true` and are always
@@ -6251,6 +6313,45 @@ function groupStatusLabel(groupId, status) {
   return text ? `${gid} ${text}` : gid;
 }
 
+// Code-index update-progress → leading status icon. A node that has just
+// finished a running wave shows the "working" spinner glyph; once done reaches
+// total the marker flips to a completed check. The rest of the visual
+// distinction comes from the `.status-<state>` CSS class.
+const INDEX_PROGRESS_ICON = {
+  running: "◐",
+  completed: "✓",
+};
+
+// Pure: the lifecycle state of a code-index progress marker — "completed" once
+// every node is summarised (done >= total, total > 0), else "running". Exposed
+// for unit testing and reused by the renderer + the supersede reconciliation so
+// the terminal state is decided in exactly one place.
+function indexProgressState(done, total) {
+  const d = Number(done);
+  const t = Number(total);
+  if (Number.isFinite(t) && t > 0 && Number.isFinite(d) && d >= t) {
+    return "completed";
+  }
+  return "running";
+}
+
+// Pure: render a code-index update-progress marker label, e.g.
+// indexProgressLabel("src/se3/cli.py", 3, 12) →
+// "更新 code-index：src/se3/cli.py (3/12)". A missing path degrades to "…"
+// rather than a dangling label, and the (done/total) suffix is dropped when no
+// total is known so a bare running marker never shows "(0/0)". Exposed for
+// unit testing.
+function indexProgressLabel(path, done, total) {
+  const p = String(path == null ? "" : path).trim() || "…";
+  const t = Number(total);
+  if (Number.isFinite(t) && t > 0) {
+    const d = Number(done);
+    const shown = Number.isFinite(d) ? d : 0;
+    return `更新 code-index：${p} (${shown}/${t})`;
+  }
+  return `更新 code-index：${p}`;
+}
+
 // Resolve the conversation step-header label for a step type. Known step types
 // map to their paradigm heading; unknown ones fall back to the original step
 // key/label so the strict time order and separator rebuild are never broken.
@@ -6445,6 +6546,19 @@ function addConversationRecords(container, st, records, startIndex) {
       bubble.__convGroupStatusTerminal =
         ["completed", "failed", "skipped"].includes(gStatus);
     }
+    // Tag code-index update-progress markers so a step's successive markers
+    // (one per file/dir node, each with a higher `done`) converge to a SINGLE
+    // progress line that updates in place. Unlike group_status these key on the
+    // step_id ALONE: one commit step rebuilds ONE index, so every marker of the
+    // step is the same climbing line. removeSupersededIndexProgressRows keeps the
+    // latest (terminal-preferred) marker per step so the count advances and the
+    // icon flips to ✓ instead of stacking one row per file.
+    if (norm && norm.kind === "index_progress") {
+      bubble.__convIndexProgressRow = true;
+      bubble.__convIndexProgressKey = String(norm.stepId || stepKey(norm));
+      bubble.__convIndexProgressTerminal =
+        indexProgressState(norm.done, norm.total) === "completed";
+    }
     insertBubbleSorted(container, bubble);
   }
   // Advance the cursor before the (stateless) header rebuild so the count is
@@ -6459,7 +6573,59 @@ function addConversationRecords(container, st, records, startIndex) {
   removeSupersededProgress(container, records);
   removeSupersededStatusRows(container);
   removeSupersededGroupStatusRows(container);
+  removeSupersededIndexProgressRows(container);
   rebuildStepHeaders(container);
+}
+
+// Reconcile code-index update-progress markers so each step (keyed by step_id,
+// `__convIndexProgressKey`) keeps exactly ONE progress line that updates in
+// place as the rebuild advances. A commit step emits one marker per summarised
+// node (done = 1, 2, 3, … N); keeping only the LATEST (or the terminal
+// done>=total) marker is visually equivalent to a single line whose count
+// climbs and whose icon flips to ✓ at completion — the stacking of one row per
+// file disappears.
+//
+// Keyed by step_id ALONE (not a composite): one commit step rebuilds exactly
+// one index, so all its markers ARE the same climbing line — unlike
+// group_status where many groups share a step_id and must stay independent.
+// Within a bucket the LATEST record by (__convTs, __convIdx) wins, with NO
+// terminal preference — deliberately unlike removeSupersededGroupStatusRows.
+// A group runs once, so its terminal card is final; but a commit step can
+// REBUILD the index more than once under the same step_id (a step retry after
+// source files changed between attempts), appending a fresh done=1..M run after
+// the first run's done=N,total=N terminal. Preferring the terminal would freeze
+// the line on the earlier rebuild's "✓ (N/N)" and hide the second rebuild's
+// live progress until it too completes. Latest-wins is also correct within a
+// single rebuild: the terminal marker is the last node summarised, so it has
+// the highest (ts, idx) and naturally wins. Records are read from the append-
+// ordered NDJSON in file order, so __convIdx reflects emission order and there
+// is no out-of-order case to guard against. Only index_progress markers are
+// touched — every other record is left exactly as-is. Markers are affordance-
+// free, so removing them never disturbs surrounding fold / raw / chip state.
+function removeSupersededIndexProgressRows(container) {
+  const markers = Array.from(container.children).filter(
+    (c) => c.__convIndexProgressRow === true);
+  const byKey = new Map();
+  for (const c of markers) {
+    let arr = byKey.get(c.__convIndexProgressKey);
+    if (!arr) { arr = []; byKey.set(c.__convIndexProgressKey, arr); }
+    arr.push(c);
+  }
+  const newer = (a, b) =>
+    a.__convTs > b.__convTs
+    || (a.__convTs === b.__convTs && a.__convIdx > b.__convIdx);
+  const toRemove = [];
+  for (const arr of byKey.values()) {
+    if (arr.length < 2) continue;
+    let keep = null;
+    for (const c of arr) {
+      if (!keep || newer(c, keep)) keep = c;
+    }
+    for (const c of arr) {
+      if (c !== keep) toRemove.push(c);
+    }
+  }
+  for (const c of toRemove) container.removeChild(c);
 }
 
 // Reconcile per-group DAG status markers so each group (uniquely identified by
@@ -9291,6 +9457,14 @@ function renderConversationRecord(norm) {
     return renderGroupStatusRecord(norm);
   }
 
+  // Code-index update-progress — a lightweight, self-contained progress line
+  // (not a chat turn, no fold/raw affordances) inserted into the commit step's
+  // time line so the user watches the pre-commit code-index rebuild advance
+  // file by file.
+  if (norm.kind === "index_progress") {
+    return renderIndexProgressRecord(norm);
+  }
+
   const known = ["user", "assistant", "system"].includes(norm.role);
   const role = known ? norm.role : "other";
   const content = typeof norm.content === "string" ? norm.content : "";
@@ -9442,6 +9616,40 @@ function renderGroupStatusRecord(norm) {
     const badge = el("span", "agent-badge group-status-agent", badgeText);
     row.appendChild(badge);
   }
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Code-index update-progress markers (index_progress)
+// ---------------------------------------------------------------------------
+
+// Build the conversation-row form of a code-index update-progress record. The
+// commit step rebuilds se3/code-index.md before staging, re-summarising every
+// touched node; each node emits one of these markers so the web console shows a
+// live "更新 code-index：<path> (i/N)" line as the rebuild advances. Like the
+// group_status marker it is intentionally affordance-free (no fold, no raw
+// toggle, no chip) so it never disturbs the surrounding chat bubbles, and
+// addConversationRecords' removeSupersededIndexProgressRows pass folds all
+// markers of one step down to a SINGLE line that updates in place — the count
+// climbs and the icon flips to ✓ when done reaches total, rather than stacking
+// one row per file.
+function renderIndexProgressRecord(norm) {
+  const state = indexProgressState(norm.done, norm.total);
+  const row = el(
+    "div",
+    "history-record conv-record role-index-progress index-progress-marker status-" +
+      state,
+  );
+  row.appendChild(
+    el("span", "index-progress-icon", INDEX_PROGRESS_ICON[state] || "•"),
+  );
+  row.appendChild(
+    el(
+      "span",
+      "index-progress-text",
+      indexProgressLabel(norm.path, norm.done, norm.total),
+    ),
+  );
   return row;
 }
 
@@ -11998,6 +12206,11 @@ if (typeof module !== "undefined" && module.exports) {
     groupStatusLabel,
     GROUP_STATUS_TEXT,
     renderGroupStatusRecord,
+    // Code-index update-progress marker (G3) — exposed for the DOM-free +
+    // DOM-stub tests in tests/frontend/index_progress.test.mjs.
+    indexProgressLabel,
+    indexProgressState,
+    renderIndexProgressRecord,
     STEP_STATUS_DISPLAY,
     stepStatusDisplay,
     renderStepStartedRecord,

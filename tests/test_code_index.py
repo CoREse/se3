@@ -1031,7 +1031,8 @@ class TestCodeIndexCLI:
 
         recorder = RecordingSummarizer()
         monkeypatch.setattr(
-            ci, "_make_llm_summarizer", lambda project_root: recorder
+            ci, "_make_llm_summarizer",
+            lambda project_root, max_concurrency=1, on_node=None: recorder,
         )
 
         result = runner.invoke(app, ["code-index", "rebuild", "--force"])

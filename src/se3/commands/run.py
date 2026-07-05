@@ -3406,6 +3406,11 @@ def _mark_worktree_merging(
         return None, None
     anchor = _worktree_merge_anchor_step(flow)
     flow.merging = True
+    # Re-arm from a clean lock-wait state: a prior merge attempt killed inside the
+    # queue-and-wait window (after on_lock_wait fired) leaves waiting_for_lock=True
+    # on disk. Without resetting it here, a resume-driven retry whose lock is free
+    # (callbacks never fire) would render "合并中·等待主分支锁" for the whole retry.
+    flow.waiting_for_lock = False
     try:
         PersistenceManager(worktree_path).save_flow(flow)
     except Exception:
@@ -3438,7 +3443,9 @@ def _make_worktree_lock_wait_callbacks(
     They reuse the completed flow's ``waiting_for_lock`` sub-state to express
     "等待主分支锁" during the blocking main-lock acquisition inside ``run_merge``:
     ``on_lock_wait`` sets ``waiting_for_lock=True`` + persists + writes a "等待锁"
-    anchor; ``on_lock_acquired`` clears it + writes the clearing anchor. Returns
+    anchor; ``on_lock_acquired`` clears it and re-emits the "合并中" anchor (the
+    merge is still running, so the row falls back to "合并中", not a generic
+    "进行中"). Returns
     ``(None, None)`` when the flow / anchor could not be resolved so ``run_merge``
     falls back to its plain blocking acquire. All hook failures are swallowed so
     the merge is never affected.
@@ -3481,10 +3488,19 @@ def _make_worktree_lock_wait_callbacks(
                 "failed to persist waiting_for_lock=False (worktree merge)",
                 exc_info=True,
             )
+        # Re-emit the "合并中" anchor (NOT record_lock_acquired's generic
+        # "进行中" running anchor): the merge is still running, so the step body
+        # is merging — not about-to-run — and the transcript must keep reading
+        # "合并中" for the rest of the merge, layering off the "等待主分支锁" row.
+        # record_merging also carries no (step, "running") idempotency guard, so
+        # a retry of a previously-contended merge for the SAME step still writes
+        # a fresh, later anchor that supersedes the second attempt's "等待锁" row
+        # (record_lock_acquired would no-op on the pre-existing "running" record
+        # and freeze the transcript on "等待主分支锁").
         try:
-            from ..engine.chat_history import record_lock_acquired
+            from ..engine.chat_history import record_merging
 
-            record_lock_acquired(
+            record_merging(
                 project_root=worktree_path,
                 flow_id=flow.flow_id,
                 step_id=step_id,
@@ -3492,7 +3508,8 @@ def _make_worktree_lock_wait_callbacks(
             )
         except Exception:
             logger.debug(
-                "failed to record lock-acquired anchor (worktree merge)",
+                "failed to re-record merging anchor after lock acquire "
+                "(worktree merge)",
                 exc_info=True,
             )
 
@@ -3518,6 +3535,10 @@ def _clear_worktree_merging(
     if flow is None:
         return
     flow.merging = False
+    # Also clear a lingering waiting_for_lock: if the merge died mid-acquire (after
+    # on_lock_wait persisted it True) or on_lock_acquired never ran, the flag would
+    # otherwise persist and leave "·等待主分支锁" showing when nothing is queued.
+    flow.waiting_for_lock = False
     try:
         PersistenceManager(worktree_path).save_flow(flow)
     except Exception:
@@ -3542,6 +3563,44 @@ def _clear_worktree_merging(
             )
 
 
+def _supersede_merging_anchor_on_main(
+    project_root: Path,
+    flow: Optional[FlowInstance],
+    anchor: Optional[Tuple[str, str, str]],
+) -> None:
+    """Clear the synced "合并中" anchor in the MAIN root after a successful merge.
+
+    On a successful ``--delete-merged`` merge the worktree (its engine.json AND
+    history) is archived+removed, so ``_clear_worktree_merging`` — which writes
+    into the worktree — never runs. But ``se3/history`` is a Tier A runtime-sync
+    directory: ``run_merge`` copies the worktree's history — the streamed "合并中"
+    anchor included — into THIS main root DURING the merge. That anchor
+    timestamps after the step's terminal ``step_completed`` report, so the
+    frontend's ``removeSupersededStatusRows`` keeps it as the trailing open-
+    segment status row and the merged flow's transcript would forever show a
+    live-looking "合并中" (or "进行中") on its final step. Appending the step's own
+    terminal status here supersedes it in the synced transcript so it falls back
+    to the real completed state. Best-effort — never affects the merge exit code.
+    """
+    if flow is None or anchor is None:
+        return
+    step_id, step_type, status = anchor
+    try:
+        from ..engine.chat_history import record_step_status
+
+        record_step_status(
+            project_root=project_root,
+            flow_id=flow.flow_id,
+            step_id=step_id,
+            step_type=step_type,
+            status=status,
+        )
+    except Exception:
+        logger.debug(
+            "failed to supersede merging anchor on main root", exc_info=True
+        )
+
+
 def _finalize_worktree_merge(
     project_root: Path,
     worktree_branch: str,
@@ -3562,9 +3621,11 @@ def _finalize_worktree_merge(
     ``merging=True`` (and, if the merge blocks queueing for the main lock,
     ``waiting_for_lock=True`` via injected ``run_merge`` callbacks) so the web UI
     shows the completed flow as "合并中 / 合并中·等待主分支锁" rather than sitting on
-    "已完成". On success the worktree (and the flag) is archived away; on failure
-    the flag is cleared here. All of this status bookkeeping is best-effort and
-    never alters the merge exit code.
+    "已完成". On success the worktree (and its engine.json flag) is archived away,
+    but its history — the "合并中" anchor included — was runtime-synced into the
+    main root during the merge, so the anchor is superseded here; on failure the
+    flag and anchor are cleared on the surviving worktree. All of this status
+    bookkeeping is best-effort and never alters the merge exit code.
 
     Returns the merge exit code (0 on success).
     """
@@ -3617,6 +3678,12 @@ def _finalize_worktree_merge(
             _clear_worktree_merging(worktree_path, wt_flow, anchor)
 
     if rc == 0:
+        # The worktree (engine.json + history) has been archived away, but
+        # run_merge already runtime-synced its history — the "合并中" anchor
+        # included — into THIS main root during the merge. Supersede that stale
+        # anchor here so the merged flow's transcript on the main root does not
+        # freeze on a live-looking "合并中"/"进行中" row after the merge finished.
+        _supersede_merging_anchor_on_main(project_root, wt_flow, anchor)
         display_success(f"Merged '{worktree_branch}' back into '{target}'.")
     else:
         lines = [

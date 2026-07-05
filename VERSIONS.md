@@ -86,6 +86,14 @@
 
 
 
+
+## 11.12.0 - 2026-07-06
+
+- Add `code_index.max_concurrency` config to generate file/dir summaries concurrently across multiple LLM tasks, with output identical to the serial path
+- Preserve resumability and single-group failure isolation so a concurrent index build can recover from interruptions without aborting the whole run
+- Emit per-node index-build progress (path, kind, done, total) recorded as NDJSON history via `record_index_progress` during the commit step
+- Show live 'updating code-index: <path> (done/total)' progress in the WebUI, themed via style.css, reusing the existing history push channel
+- Keep engine/server isolation intact — progress reporting adds no server imports on the engine side
 ## 11.11.2 - 2026-07-06
 
 - Fix source issue staying in-progress when a `--from-issue --worktree` flow is paused then resumed to completion by a new process (daemon or `se3 run --resume`)

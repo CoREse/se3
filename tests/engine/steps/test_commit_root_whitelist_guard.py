@@ -312,6 +312,47 @@ class TestCommitHandlerIntegration:
             r for r in caplog.records if "Root-whitelist guard" in r.message
         ]
 
+    def test_forwards_flow_and_step_context_to_code_index_refresh(
+        self, tmp_path: Path
+    ) -> None:
+        # Pin the commit→code-index integration seam. The write-side refresh MUST
+        # carry the flow's flow_id and the step's step_id so the incremental
+        # rebuild streams per-node progress to the running flow's web console.
+        # Every other commit-step test stubs ensure_code_index_fresh with a
+        # no-op that ignores its kwargs, so without this assertion a refactor
+        # that drops/misnames these kwargs (e.g. reverting to the bare
+        # ``ensure_code_index_fresh(project_root)``) keeps the suite green while
+        # every production commit silently falls back to the no-emitter path and
+        # the webui never shows code-index update progress again.
+        repo = _init_git_repo(tmp_path, _ROOT_DENY)
+        (repo / "src.py").write_text("print('x')\n")
+
+        flow = _make_flow(repo)
+        flow.flow_id = "flow-xyz"
+        step = _make_step()
+        step.step_id = "step-abc"
+        step.step_type = StepType.COMMIT
+
+        with patch(
+            "se3.engine.steps.commit._load_version_config",
+            return_value=_disabled_version_config(),
+        ), patch(
+            "se3.engine.steps.commit._generate_commit_message",
+            return_value="feature: change",
+        ), patch(
+            "se3.engine.context_builder.ensure_code_index_fresh",
+        ) as mock_fresh:
+            result = commit_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_fresh.assert_called_once()
+        call = mock_fresh.call_args
+        # project_root is positional; the flow/step context rides as keywords.
+        assert call.args[0] == repo
+        assert call.kwargs.get("flow_id") == "flow-xyz"
+        assert call.kwargs.get("step_id") == "step-abc"
+        assert call.kwargs.get("step_type") == "commit"
+
     def test_detector_return_value_does_not_feed_control_flow(
         self, tmp_path: Path
     ) -> None:

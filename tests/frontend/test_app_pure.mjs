@@ -3670,6 +3670,12 @@ chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 const groupStatusMod = await import("./group_status.test.mjs");
 groupStatusMod.registerGroupStatusTests({ app, check, findOne, findAll });
 
+// Register the G3 code-index update-progress marker tests (separate module —
+// same `check` reporter, same `app` module, same shared DOM stub already
+// installed above).
+const indexProgressMod = await import("./index_progress.test.mjs");
+indexProgressMod.registerIndexProgressTests({ app, check, findOne, findAll });
+
 // Register the G2 step_started RUNNING-region tests (separate module — same
 // `check` reporter, same `app` module, same shared DOM stub already installed
 // above).

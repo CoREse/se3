@@ -476,9 +476,24 @@ def get_code_index_injection(project_root: Path) -> str:
     )
 
 
-def ensure_code_index_fresh(project_root: Path) -> None:
+def ensure_code_index_fresh(
+    project_root: Path,
+    *,
+    flow_id: Optional[str] = None,
+    step_id: Optional[str] = None,
+    step_type: str = "commit",
+) -> None:
     """Trigger the lazy-incremental code-index rebuild so a consuming flow step
     sees a fresh map, mirroring ``spec_index``'s ``load_or_build`` invalidation.
+
+    When both ``flow_id`` and ``step_id`` are supplied (the commit path, which
+    owns a flow + step context), a progress emitter is constructed and passed to
+    ``load_or_build`` so the rebuild streams per-node progress to the running
+    flow's web console via ``chat_history.record_index_progress`` — writing a
+    plain jsonl line the daemon's existing ``history_data`` channel forwards, so
+    the engine takes on **no** ``se3.server`` import. Without a flow context
+    (e.g. the read-side refresh before implement) the emitter is ``None`` and the
+    rebuild is silent, exactly as before.
 
     A flow step that injects the code-index (analyze / plan / implement / …)
     calls this immediately before :func:`get_code_index_injection`, so the
@@ -506,7 +521,27 @@ def ensure_code_index_fresh(project_root: Path) -> None:
             # No built map yet — leave the initial build to migrate / the
             # explicit rebuild command; there is nothing to keep fresh.
             return
-        code_index.load_or_build(root)
+
+        emitter = None
+        if flow_id and step_id:
+            from .chat_history import record_index_progress
+
+            def emitter(path: str, kind: str, done: int, total: int, phase: str) -> None:
+                # record_index_progress is itself OSError-guarded, so a write
+                # hiccup never surfaces here and never breaks the rebuild.
+                record_index_progress(
+                    root,
+                    flow_id,
+                    step_id,
+                    step_type,
+                    path=path,
+                    kind=kind,
+                    done=done,
+                    total=total,
+                    phase=phase,
+                )
+
+        code_index.load_or_build(root, progress=emitter)
     except Exception as exc:  # noqa: BLE001 — never break prompt construction
         logger.warning("code_index: lazy freshness refresh failed: %s", exc)
 

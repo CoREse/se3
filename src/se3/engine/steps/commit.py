@@ -481,7 +481,19 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # rebuild hiccup must never block the commit (it only reads + writes the
         # tracked map under se3/, which `git add -A` then stages).
         from ..context_builder import ensure_code_index_fresh
-        ensure_code_index_fresh(project_root)
+        # Pass the flow/step context so the rebuild streams per-node progress to
+        # the running flow's web console (chat_history.record_index_progress);
+        # without it the refresh stays silent as on the read side. The context is
+        # a best-effort progress channel, so identifiers are read defensively —
+        # a stray flow/step missing one just falls back to a silent refresh
+        # rather than aborting the commit.
+        _step_type_val = getattr(getattr(step, "step_type", None), "value", None)
+        ensure_code_index_fresh(
+            project_root,
+            flow_id=getattr(flow, "flow_id", None),
+            step_id=getattr(step, "step_id", None),
+            step_type=_step_type_val or "commit",
+        )
 
         # Add all changes
         result = subprocess.run(

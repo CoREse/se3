@@ -55,6 +55,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional
@@ -328,6 +329,15 @@ class SummaryTarget:
 
 # A summariser maps a batch of targets to ``{target.id: one-line summary}``.
 Summarizer = Callable[[List[SummaryTarget]], Dict[str, str]]
+
+# A build progress callback, invoked once per file/dir node as it finishes
+# summarising, with ``(path, kind, done, total, phase)``: the node's relpath /
+# kind, the running done/total counts of file+dir nodes being (re)summarised in
+# this build, and the phase (``"file"`` or ``"dir"``). Default ``None`` (no-op)
+# keeps every non-web caller — and the whole read-side freshness path —
+# byte-for-byte unchanged. The commit step wires in an emitter that writes each
+# call to the flow's step jsonl (see ``chat_history.record_index_progress``).
+ProgressCallback = Callable[[str, str, int, int, str], None]
 
 
 # ---------------------------------------------------------------------------
@@ -1028,24 +1038,47 @@ def _heuristic_summary(target: SummaryTarget) -> str:
     return f"{target.kind} {target.name}"
 
 
-def _make_llm_summarizer(project_root: Path) -> Summarizer:
+def _make_llm_summarizer(
+    project_root: Path,
+    max_concurrency: int = 1,
+    *,
+    on_node: Optional[Callable[[SummaryTarget], None]] = None,
+) -> Summarizer:
     """Construct the default LLM-backed summariser (lazy LLMCaller import).
 
     Batches targets per owning path into one ``LLMCaller.call`` each, asking for
-    a JSON ``{id: summary}`` map. Any failure degrades to the heuristic summary
-    for that batch so a build is never aborted by a flaky LLM call.
+    a JSON ``{id: summary}`` map. The per-path groups of a single wave run
+    concurrently on a ``ThreadPoolExecutor`` bounded by ``max_concurrency``.
+
+    **Each concurrent group constructs its OWN ``LLMCaller`` — a caller is never
+    shared across threads.** The charter reserves multi-command rotation/fallback
+    to a single LLMCaller instance, and that rotation/retry state is not
+    thread-safe; a fresh caller per group therefore keeps every concurrent call
+    inside the existing execution-stack boundary and makes the parallelism safe
+    by construction (no locking, no cross-thread caller state).
+
+    ``on_node`` (default ``None``) is fired once per group the instant ITS OWN
+    call returns — from the worker thread, before the wave's other in-flight
+    groups finish. A group is one path, so the fire reports that file/dir (a
+    symbol group reports its owning file, which the emitter rolls up and dedups).
+    Firing here (rather than after the whole wave is assigned) gives the web
+    console a per-file live update instead of a per-wave burst; the emitter is
+    lock-guarded, so concurrent fires are safe.
+
+    Any failure degrades to the heuristic summary for that group so a build is
+    never aborted by a flaky LLM call, and one group's failure never affects the
+    others.
     """
 
-    def _summarize(targets: List[SummaryTarget]) -> Dict[str, str]:
+    def _summarize_group(item: tuple[str, List[SummaryTarget]]) -> Dict[str, str]:
+        # A single per-file group: build the prompt, call this group's OWN caller,
+        # and map the JSON result back onto the group's targets. Runs on a worker
+        # thread; owns its LLMCaller so no caller state is shared across threads.
         from .llm_caller import LLMCaller
 
-        result: Dict[str, str] = {}
-        by_file: Dict[str, List[SummaryTarget]] = {}
-        for t in targets:
-            by_file.setdefault(t.path, []).append(t)
-
-        caller = LLMCaller(project_root=project_root, step_type="code_index")
-        for relpath, group in by_file.items():
+        relpath, group = item
+        parsed: object = {}
+        try:
             listing = "\n".join(
                 f"- id={t.id!r} kind={t.kind} name={t.name!r}\n```\n{t.content[:_SUMMARY_CONTENT_CAP]}\n```"
                 for t in group
@@ -1060,19 +1093,51 @@ def _make_llm_summarizer(project_root: Path) -> Summarizer:
                 "one-sentence summary.\n\n"
                 f"Path: {relpath}\n\nNodes:\n{listing}"
             )
-            try:
-                raw = caller.call(prompt, json_mode="two_phase")
-                parsed = json.loads(raw) if isinstance(raw, str) else {}
-            except Exception as exc:  # noqa: BLE001 — never let a build crash
-                logger.warning(
-                    "code_index: LLM summary failed for %s: %s", relpath, exc
-                )
-                parsed = {}
-            for t in group:
-                val = parsed.get(t.id) if isinstance(parsed, dict) else None
-                result[t.id] = (
-                    _flatten_summary(val) if val else _heuristic_summary(t)
-                )
+            caller = LLMCaller(project_root=project_root, step_type="code_index")
+            raw = caller.call(prompt, json_mode="two_phase")
+            parsed = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception as exc:  # noqa: BLE001 — never let a build crash
+            logger.warning(
+                "code_index: LLM summary failed for %s: %s", relpath, exc
+            )
+            parsed = {}
+        out: Dict[str, str] = {}
+        for t in group:
+            val = parsed.get(t.id) if isinstance(parsed, dict) else None
+            out[t.id] = _flatten_summary(val) if val else _heuristic_summary(t)
+        # Report this group's file/dir the moment its own call finishes. A group
+        # is one path (all targets share it), so ONE report per group is right:
+        # for a symbol group that path is the owning file, which _on_node rolls
+        # up and dedups — a body-only edit (symbol group, reused file node) still
+        # surfaces its file to the progress display.
+        if on_node is not None and group:
+            on_node(group[0])
+        return out
+
+    def _summarize(targets: List[SummaryTarget]) -> Dict[str, str]:
+        by_file: Dict[str, List[SummaryTarget]] = {}
+        for t in targets:
+            by_file.setdefault(t.path, []).append(t)
+        if not by_file:
+            return {}
+
+        result: Dict[str, str] = {}
+        groups = list(by_file.items())
+        # Cap workers at both the config bound and the number of groups: one
+        # group per file, so more workers than groups would idle. A single group
+        # (or max_concurrency<=1) runs inline — no thread pool overhead and no
+        # behavioural difference from the concurrent path.
+        workers = max(1, min(max_concurrency, len(groups)))
+        if workers == 1:
+            for item in groups:
+                result.update(_summarize_group(item))
+            return result
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for group_result in pool.map(_summarize_group, groups):
+                result.update(group_result)
         return result
 
     return _summarize
@@ -1165,12 +1230,27 @@ def _make_dir_target(
 # ---------------------------------------------------------------------------
 
 def _summarize_wave(
-    summ: Summarizer, targets: List[SummaryTarget], index: CodeIndex
+    summ: Summarizer,
+    targets: List[SummaryTarget],
+    index: CodeIndex,
+    *,
+    on_node: Optional[Callable[[SummaryTarget], None]] = None,
 ) -> None:
     """Summarise one dependency wave and assign the results onto their nodes.
 
     Skips the summariser entirely for an empty wave, so a no-op rebuild (nothing
     changed at any level) never invokes the LLM.
+
+    ``on_node`` (default ``None``) is fired once per assigned target so the build
+    can report progress. The web display tracks FILES and DIRS, not symbols, but
+    a symbol target still fires it: ``_on_node`` rolls a symbol up to a single
+    per-file report (a file whose only stale content is a symbol body is
+    reportable ONLY via its symbols — the file node is reused) and dedups by path
+    so a file stale in both the symbol wave and the file wave is reported once.
+    This wave-level firing (after the whole summariser call has returned) is the
+    path for an INJECTED summariser, which is opaque and cannot report per group;
+    the default LLM summariser instead fires per group the instant each call
+    finishes, so its caller passes ``on_node=None`` here to avoid a double report.
     """
     if not targets:
         return
@@ -1189,6 +1269,10 @@ def _summarize_wave(
                     break
         else:
             index.files[t.id].summary = value
+        # Fire for every level; _on_node normalises a symbol to its owning file
+        # and dedups by path, so symbol-only-stale files still surface once.
+        if on_node is not None:
+            on_node(t)
 
 
 def build_index(
@@ -1196,6 +1280,7 @@ def build_index(
     summarizer: Optional[Summarizer] = None,
     force: bool = False,
     cfg: Optional[CodeIndexConfig] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> CodeIndex:
     """Enumerate the project, extract structure, summarise changed nodes
     bottom-up, and write the authoritative md. The single (re)build entry point.
@@ -1214,7 +1299,7 @@ def build_index(
     cfg = cfg or load_code_index_config(project_root)
 
     with _build_lock(project_root):
-        return _build_index_locked(project_root, summarizer, force, cfg)
+        return _build_index_locked(project_root, summarizer, force, cfg, progress)
 
 
 def _build_index_locked(
@@ -1222,6 +1307,7 @@ def _build_index_locked(
     summarizer: Optional[Summarizer],
     force: bool,
     cfg: CodeIndexConfig,
+    progress: Optional[ProgressCallback] = None,
 ) -> CodeIndex:
     """The body of :func:`build_index`, run while holding the build lock."""
     md_summaries: Dict[str, str] = {}
@@ -1244,7 +1330,6 @@ def _build_index_locked(
     files = file_enum.enumerate_index_files(project_root, cfg.exclude)
     index = CodeIndex(project_root=Path(project_root))
     root = Path(project_root).resolve()
-    summ = summarizer or _make_llm_summarizer(project_root)
 
     # --- structural enumeration (no summaries yet) ---
     for abs_path in files:
@@ -1336,31 +1421,133 @@ def _build_index_locked(
         if _reuse_dir(dir_name):
             index.dir_summaries[dir_name] = md_summaries.get(dir_name, "")
 
-    # --- Pass 2: per file, summarise the STALE nodes bottom-up, then flush ---
-    # --- the md — one file's LLM work, one checkpoint write. ---
-    # The file node depends only on its OWN symbols, so symbols-then-file per file
-    # is strictly bottom-up. After Pass 1 every other node already carries its
-    # reused summary, so each flush is a complete md; a crash loses at most the
-    # one file in flight, and the next build resumes from the partial md.
-    for relpath in sorted(index.files):
-        fe = index.files[relpath]
-        did_work = False
-
-        sym_targets = [
-            _make_target(fe, sym, fe.abs_path)
-            for sym in fe.symbols
-            if not _reuse(fe.symbol_id(sym), sym.sha256)
-        ]
-        if sym_targets:
-            _summarize_wave(summ, sym_targets, index)
-            did_work = True
-
+    # A file needs (re)summarisation when its OWN file node is stale OR any of
+    # its symbols is stale. The symbol case is the COMMON one for a body-only
+    # bugfix commit: editing a function body changes only that symbol's content
+    # fingerprint, leaving the file node's list-fp (its symbol name/kind roster)
+    # unchanged — so the file node is reused, yet the build still makes a real
+    # per-symbol LLM call for that file. Defined here (before progress accounting)
+    # because BOTH the progress total and the Pass 2 stale-file batching key on it.
+    def _file_needs_work(fe: FileEntry) -> bool:
         if fe.kind != "binary" and not _reuse_file(fe):
-            _summarize_wave(summ, [_make_file_target(fe)], index)
-            did_work = True
+            return True
+        return any(
+            not _reuse(fe.symbol_id(sym), sym.sha256) for sym in fe.symbols
+        )
 
-        if did_work:
-            _write_md(project_root, index)
+    # --- Progress accounting (web console during the commit-time rebuild) ---
+    # Total = the FILES and DIRS that will do real (re)summarisation work this
+    # build. A file counts if it needs work for ANY reason — crucially INCLUDING
+    # the body-only-edit case where only a symbol is stale and the file node
+    # itself is reused: that file still makes a genuine LLM call, so the WebUI
+    # must surface it (else a typical bugfix commit shows zero progress for the
+    # whole rebuild). Symbols are not tracked as their own units — a file's stale
+    # symbols roll up to ONE "file being updated" report, carried by the symbol
+    # wave's per-file group (which knows the file's relpath). Each file/dir is
+    # reported EXACTLY ONCE (deduped by path in _on_node), and both the counter
+    # bump AND the emit are taken under the lock so the reported done sequence
+    # stays monotonic in write order (1..total) even when concurrent groups
+    # finish near-together.
+    progress_total = (
+        sum(1 for fe in index.files.values() if _file_needs_work(fe))
+        + sum(1 for d in all_dirs if not _reuse_dir(d))
+    )
+    _progress_lock = threading.Lock()
+    _progress_done = [0]
+    _reported_paths: set[str] = set()
+
+    def _on_node(t: SummaryTarget) -> None:
+        if progress is None or progress_total == 0:
+            return
+        # A symbol target reports its OWNING FILE — the orientation unit the
+        # progress display tracks. A body-only edit re-summarises symbols while
+        # the file node is reused, so the file is reportable ONLY via its symbols;
+        # normalise to the file's kind/level. Dedup by path so a file stale in
+        # BOTH the symbol wave and the file wave is counted (and shown) once.
+        if t.level == "symbol":
+            fe = index.files.get(t.path)
+            path, kind, level = t.path, (fe.kind if fe else t.kind), "file"
+        else:
+            path, kind, level = t.path, t.kind, t.level
+        with _progress_lock:
+            if path in _reported_paths:
+                return
+            _reported_paths.add(path)
+            _progress_done[0] += 1
+            done = _progress_done[0]
+            try:
+                progress(path, kind, done, progress_total, level)
+            except Exception as exc:  # noqa: BLE001 — a progress hiccup never breaks the build
+                logger.debug("code_index: progress callback failed: %s", exc)
+
+    node_progress = _on_node if progress is not None else None
+
+    # The default LLM summariser reports each file the instant its OWN group's
+    # call returns (per-file live updates, including a symbol-only group); an
+    # INJECTED summariser is opaque, so for it the wave fires node_progress after
+    # assignment instead. Passing the emitter down exactly ONE of the two paths —
+    # combined with dedup-by-path in _on_node — keeps every file reported once.
+    if summarizer is not None:
+        summ = summarizer
+        wave_on_node = node_progress
+    else:
+        summ = _make_llm_summarizer(
+            project_root, cfg.max_concurrency, on_node=node_progress
+        )
+        wave_on_node = None
+
+    # --- Pass 2: per BATCH of STALE files, summarise bottom-up, then flush ---
+    # --- one batch's cross-file LLM work, one checkpoint write. ---
+    # Files are independent (a file node depends only on its OWN symbols), so a
+    # batch of up to max_concurrency files is summarised together: one symbol wave
+    # then one file wave across the whole batch, each wave fanning its per-file
+    # groups out concurrently inside the summariser. Batches are formed over the
+    # STALE files ONLY — the files that actually need (re)summarisation — never
+    # over positional slices of the full sorted list: on an incremental rebuild
+    # the touched files are scattered across sort order, so a positional batch
+    # would hold at most one stale file and the summariser would run serially
+    # (workers=1). Batching stale-only files keeps up to max_concurrency LLM
+    # calls genuinely in flight on the commit-time incremental path, not only on a
+    # --force full rebuild. symbols-then-file order stays strictly bottom-up
+    # (every file target is built only after the batch's symbol wave has assigned
+    # its symbol summaries). After Pass 1 every other node already carries its
+    # reused summary, so each per-batch flush is still a complete md and a proper
+    # superset of the prior one; a crash loses at most the one batch in flight, and
+    # the next build resumes from the partial md — the incremental/断点恢复
+    # semantics of the old per-file flush are preserved, only the flush granularity
+    # coarsens from one file to one batch.
+    stale_files = [
+        index.files[r]
+        for r in sorted(index.files)
+        if _file_needs_work(index.files[r])
+    ]
+    batch_size = max(1, cfg.max_concurrency)
+    for start in range(0, len(stale_files), batch_size):
+        batch = stale_files[start : start + batch_size]
+
+        sym_targets: List[SummaryTarget] = []
+        for fe in batch:
+            sym_targets.extend(
+                _make_target(fe, sym, fe.abs_path)
+                for sym in fe.symbols
+                if not _reuse(fe.symbol_id(sym), sym.sha256)
+            )
+        if sym_targets:
+            # A file whose ONLY stale content is a symbol body (its file node is
+            # reused) surfaces to the progress display solely through this wave —
+            # so it must carry the emitter too. _on_node rolls each file's stale
+            # symbols up to ONE per-file report and dedups against the file wave.
+            _summarize_wave(summ, sym_targets, index, on_node=wave_on_node)
+
+        file_targets = [
+            _make_file_target(fe)
+            for fe in batch
+            if fe.kind != "binary" and not _reuse_file(fe)
+        ]
+        if file_targets:
+            _summarize_wave(summ, file_targets, index, on_node=wave_on_node)
+
+        _write_md(project_root, index)
 
     # --- Pass 3: directories, deepest level first (all files now summarised). ---
     for depth in sorted({_depth(d) for d in all_dirs}, reverse=True):
@@ -1369,7 +1556,7 @@ def _build_index_locked(
             for dir_name in sorted(d for d in all_dirs if _depth(d) == depth)
             if not _reuse_dir(dir_name)
         ]
-        _summarize_wave(summ, dir_targets, index)
+        _summarize_wave(summ, dir_targets, index, on_node=wave_on_node)
 
     _write_md(project_root, index)
     return index
@@ -1379,7 +1566,14 @@ def load_or_build(
     project_root: Path,
     summarizer: Optional[Summarizer] = None,
     force: bool = False,
+    progress: Optional[ProgressCallback] = None,
 ) -> CodeIndex:
     """Lazy-incremental (re)build entry point: every call re-enumerates and
-    refreshes only the changed nodes (or everything when ``force``)."""
-    return build_index(project_root, summarizer=summarizer, force=force)
+    refreshes only the changed nodes (or everything when ``force``).
+
+    ``progress`` (default ``None``) is forwarded to :func:`build_index`; the
+    commit step passes an emitter that streams per-node rebuild progress to the
+    running flow's web console (see ``chat_history.record_index_progress``)."""
+    return build_index(
+        project_root, summarizer=summarizer, force=force, progress=progress
+    )

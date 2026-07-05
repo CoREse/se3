@@ -757,10 +757,20 @@ class DaemonHistoryReader:
             active=active,
             source=source,
             step_count=_count_jsonl(root / "se3" / "history" / flow_id),
-            # A flow is only meaningfully "waiting for lock" while it is the live
-            # active flow; an archived/terminal snapshot is never queued. Reading
-            # only on the active source also keeps a stale True out of history.
-            waiting_for_lock=bool(active and data.get("waiting_for_lock", False)),
+            # "waiting for lock" is meaningful in two live cases: a still-running
+            # flow queued behind the merge lock, and a COMPLETED --worktree flow
+            # whose trailing merge is queued (status=='completed' so ``active`` is
+            # False, yet ``merging`` is True and its on_lock_wait callback set
+            # waiting_for_lock). Gate it like ``merging`` — read only from the live
+            # engine.json (source=='active') and require the flow be either active
+            # or mid-merge — so history mirrors the machine flow-list's
+            # '合并中·等待主分支锁' suffix while still keeping a stale True out of
+            # archived/terminal snapshots.
+            waiting_for_lock=bool(
+                source == "active"
+                and (active or data.get("merging", False))
+                and data.get("waiting_for_lock", False)
+            ),
             # ``merging`` is a live worktree-merge sub-state. Unlike
             # ``waiting_for_lock`` it layers on a *completed* worktree flow (the
             # body finished; the trailing merge runs), so it CANNOT be gated on

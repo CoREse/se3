@@ -1,7 +1,7 @@
 id: '228'
 description: commit步骤在更新code index的时候，在webui里显示进度。
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-06-29T16:03:43.657568'
-updated_at: '2026-06-29T16:03:43.657568'
+updated_at: '2026-07-06T01:35:51.397625'

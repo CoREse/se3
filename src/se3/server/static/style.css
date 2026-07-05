@@ -2091,6 +2091,44 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg-dim);
 }
 
+/* -- code-index update-progress marker (index_progress) ------------- */
+/*
+ * A lightweight inline progress pill tiled into the commit step's time line
+ * while the pre-commit code-index rebuild re-summarises each touched node.
+ * Successive markers converge to ONE line that updates in place (count climbs,
+ * icon flips to ✓ at completion), so running vs completed get distinct colors
+ * matching the group-status marker family. Affordance-free (no fold / raw /
+ * chip) so it never disturbs the surrounding chat bubbles.
+ */
+.conv-record.index-progress-marker {
+  align-self: flex-start;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--grey);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg-dim);
+}
+.index-progress-marker .index-progress-icon { font-size: 12px; line-height: 1; }
+.index-progress-marker .index-progress-text { white-space: pre-wrap; }
+.index-progress-marker.status-running {
+  border-left-color: var(--accent);
+  background: rgba(76, 141, 255, 0.10);
+  color: var(--fg);
+}
+.index-progress-marker.status-completed {
+  border-left-color: var(--green);
+  background: rgba(76, 175, 106, 0.10);
+  color: var(--fg);
+}
+
 /* -- per-step RUNNING status row (step_started) --------------------- */
 /*
  * A lightweight "进行中" status line surfaced the instant a step enters
@@ -2227,7 +2265,7 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   border-left-color: var(--step-version_analyze);
   --step-lane: rgba(168, 127, 196, 0.08);
 }
-.history-detail .conv-record.step-type-commit:not(.step-status-row):not(.group-status-marker) {
+.history-detail .conv-record.step-type-commit:not(.step-status-row):not(.group-status-marker):not(.index-progress-marker) {
   border-left-color: var(--step-commit);
   --step-lane: rgba(121, 168, 63, 0.07);
 }

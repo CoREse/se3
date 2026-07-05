@@ -442,9 +442,14 @@ def test_group_status_normalize_extracts_agent_model():
     """
     src = _read_app_js()
     # Isolate the group_status branch: from its `if (recType === "group_status")`
-    # guard up to the next top-level `// Stream-progress records` comment.
+    # guard up to the NEXT normalizeRecord branch guard. Ending at the next
+    # `if (recType === ...)` (rather than a far-away section comment) keeps the
+    # range pinned to just the group_status return block, so a later-inserted
+    # sibling branch — e.g. index_progress, which legitimately hard-codes
+    # agentName/modelName to null (those markers have no agent/model) — is not
+    # swept into the range and does not trip the assertion below.
     start = src.index('recType === "group_status"')
-    end = src.index("Stream-progress records", start)
+    end = src.index("if (recType ===", start)
     branch = src[start:end]
     assert "pick(\"agent_name\")" in branch, (
         "the group_status branch must extract agent_name from the record"

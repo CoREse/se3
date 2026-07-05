@@ -152,4 +152,118 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
         { status: "completed", merging: true, source: "archived" }),
       "completed");
   });
+
+  // -- renderHistoryList folds the merging sub-state into the list badge -----
+  // A merging worktree session enters the history list from its active
+  // engine.json (source "active"), body COMPLETED. The list card badge must
+  // read 合并中 (·等待主分支锁) — like the machine flow-list card — rather than
+  // the raw 已完成/completed status, so every list surface reflects the merge.
+  check("G5 renderHistoryList badge reads 合并中 for a merging active session", () => {
+    app.state.historySessions = [
+      {
+        flow_id: "20260706-000001_merge01",
+        machine_id: "m1",
+        task_description: "Worktree flow merging back",
+        project_root: "/proj/a",
+        status: "completed",
+        source: "active",
+        active: true,
+        merging: true,
+        updated_at: 300,
+      },
+    ];
+    app.state.historyIndexLoading = false;
+    app.state.historyIndexConfirmed = true;
+    app.state.machines = [{ machine_id: "m1", online: true }];
+    app.state.historySelectedProjectRoot = null;
+    app.state.selectedHistoryId = null;
+
+    app.renderHistoryList();
+    const list = document.getElementById("history-list");
+    const item = findOne(list, "history-item");
+    assert.ok(item, "expected a history card");
+    const badge = findOne(item, "badge-merging");
+    assert.ok(badge, "the merging session badge must carry the badge-merging class");
+    assert.ok(badge.textContent.includes("合并中"),
+      `history list badge should read 合并中, got ${badge && badge.textContent}`);
+  });
+
+  check("G5 renderHistoryList badge appends ·等待主分支锁 while queued for the lock", () => {
+    app.state.historySessions = [
+      {
+        flow_id: "20260706-000002_merge02",
+        machine_id: "m1",
+        task_description: "Worktree flow waiting for lock",
+        project_root: "/proj/a",
+        status: "completed",
+        source: "active",
+        active: true,
+        merging: true,
+        waiting_for_lock: true,
+        updated_at: 300,
+      },
+    ];
+    app.state.historyIndexLoading = false;
+    app.state.historyIndexConfirmed = true;
+    app.state.machines = [{ machine_id: "m1", online: true }];
+    app.state.historySelectedProjectRoot = null;
+    app.state.selectedHistoryId = null;
+
+    app.renderHistoryList();
+    const list = document.getElementById("history-list");
+    const badge = findOne(findOne(list, "history-item"), "badge-merging");
+    assert.ok(badge && badge.textContent.includes("合并中·等待主分支锁"),
+      `history list badge should read 合并中·等待主分支锁, got ${badge && badge.textContent}`);
+  });
+
+  check("G5 renderHistoryList keeps the raw status for a non-merging session", () => {
+    app.state.historySessions = [
+      {
+        flow_id: "20260706-000003_done03",
+        machine_id: "m1",
+        task_description: "Plain completed session",
+        project_root: "/proj/a",
+        status: "completed",
+        source: "history",
+        updated_at: 300,
+      },
+    ];
+    app.state.historyIndexLoading = false;
+    app.state.historyIndexConfirmed = true;
+    app.state.machines = [{ machine_id: "m1", online: true }];
+    app.state.historySelectedProjectRoot = null;
+    app.state.selectedHistoryId = null;
+
+    app.renderHistoryList();
+    const list = document.getElementById("history-list");
+    const item = findOne(list, "history-item");
+    assert.equal(findAll(item, "badge-merging").length, 0,
+      "a non-merging session must not get a merging badge");
+    assert.ok(item.textContent.includes("completed"),
+      "a non-merging session keeps its raw status badge");
+  });
+
+  // -- flowsSignature re-keys on the merging card's badge sub-state ----------
+  // A merging card's badge is flowStatusLabel(flow), whose ·等待主分支锁 suffix
+  // rides the RAW waiting_for_lock flag (isWaitingForLock is always false on the
+  // completed+merging body). So toggling waiting_for_lock on a merging flow must
+  // change flowsSignature, else the panel early-returns and the badge freezes.
+  check("G5 flowsSignature changes when waiting_for_lock toggles on a merging flow", () => {
+    const mk = (waiting) => ({
+      machine_id: "m1",
+      hostname: "host",
+      flows: [{
+        flow_id: "f1",
+        status: "completed",
+        merging: true,
+        waiting_for_lock: waiting,
+        source: "daemon",
+      }],
+    });
+    const noLock = app.flowsSignature(mk(false), "m1", new Set());
+    const withLock = app.flowsSignature(mk(true), "m1", new Set());
+    assert.notEqual(
+      noLock, withLock,
+      "signature must differ between 合并中 and 合并中·等待主分支锁 so the card live-updates");
+  });
 }
