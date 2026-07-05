@@ -337,6 +337,12 @@ class SessionMeta:
     # True for an active ("active" source) flow; history-only / archived flows
     # are never waiting.
     waiting_for_lock: bool = False
+    # Running sub-state mirrored from the active engine.json's top-level
+    # ``merging`` flag: True while a completed *worktree* flow is merging its
+    # branch back to main (the queue-and-wait for the main lock included). Only
+    # ever True for an active ("active" source) flow; history-only / archived /
+    # resumable snapshots are never mid-merge.
+    merging: bool = False
     # Authoritative "can this flow be resumed" signal, mirroring the daemon
     # aggregator's ``FlowSnapshot.resumable``. True for a non-completed active
     # flow and for every per-flow resumable snapshot (source ``"resumable"``)
@@ -360,6 +366,7 @@ class SessionMeta:
             "source": self.source,
             "step_count": self.step_count,
             "waiting_for_lock": self.waiting_for_lock,
+            "merging": self.merging,
             "resumable": self.resumable,
         }
 
@@ -754,6 +761,14 @@ class DaemonHistoryReader:
             # active flow; an archived/terminal snapshot is never queued. Reading
             # only on the active source also keeps a stale True out of history.
             waiting_for_lock=bool(active and data.get("waiting_for_lock", False)),
+            # ``merging`` is a live worktree-merge sub-state. Unlike
+            # ``waiting_for_lock`` it layers on a *completed* worktree flow (the
+            # body finished; the trailing merge runs), so it CANNOT be gated on
+            # the ``active`` boolean (which excludes COMPLETED). It is instead
+            # gated on ``source == "active"`` — read only from the live
+            # engine.json, so an archived / resumable snapshot carrying a stale
+            # flag never shows as mid-merge in history.
+            merging=bool(source == "active" and data.get("merging", False)),
             resumable=bool(resumable),
         )
 
