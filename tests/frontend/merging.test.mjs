@@ -1,6 +1,6 @@
 /*
  * DOM-free tests for the worktree-merge sub-state pure helpers in app.js
- * (Group G4): isMerging, flowStatusLabel folding, the STEP_STATUS_DISPLAY entry,
+ * (Group G5): isMerging, flowStatusLabel folding, the STEP_STATUS_DISPLAY entry,
  * and the merging chat status anchor.
  *
  * Registered into the shared harness tests/frontend/test_app_pure.mjs via
@@ -31,7 +31,7 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     timestamp: ts,
   });
 
-  check("G4 normalizeRecord recognizes merging as a status anchor", () => {
+  check("G5 normalizeRecord recognizes merging as a status anchor", () => {
     const norm = app.normalizeRecord(mergeRecord("14_commit_abcd", "commit", 5));
     assert.equal(norm.kind, "merging");
     assert.equal(norm.role, "step-event");
@@ -45,7 +45,7 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     assert.ok(norm.content.includes("合并回主分支"));
   });
 
-  check("G4 merging renders a 合并中 status row, not an empty bubble", () => {
+  check("G5 merging renders a 合并中 status row, not an empty bubble", () => {
     const container = document.createElement("div");
     app.renderConversation(
       container, [mergeRecord("14_commit_ab", "commit", 1)], false);
@@ -65,7 +65,7 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     assert.equal(findAll(row, "raw-toggle").length, 0);
   });
 
-  check("G4 merging anchor is superseded by the same step's later anchor", () => {
+  check("G5 merging anchor is superseded by the same step's later anchor", () => {
     // The merge row and a later status anchor for the SAME step share the step
     // id, so the region must collapse to ONE truthful status rather than
     // stacking both rows.
@@ -80,14 +80,14 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     assert.equal(rows.length, 1, "only the current status anchor should survive");
   });
 
-  check("G4 stepStatusDisplay maps merging to icon + 合并中", () => {
+  check("G5 stepStatusDisplay maps merging to icon + 合并中", () => {
     const d = app.stepStatusDisplay("merging");
     assert.equal(d.text, "合并中");
     assert.ok(d.icon, "merging should carry an icon");
   });
 
   // -- isMerging -------------------------------------------------------------
-  check("G4 isMerging true for a completed flow with the flag set", () => {
+  check("G5 isMerging true for a completed flow with the flag set", () => {
     // Crucially does NOT require status running — merging layers on the
     // completed body.
     assert.equal(
@@ -96,11 +96,11 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     );
   });
 
-  check("G4 isMerging true even when status is running (defensive)", () => {
+  check("G5 isMerging true even when status is running (defensive)", () => {
     assert.equal(app.isMerging({ status: "running", merging: true }), true);
   });
 
-  check("G4 isMerging false when the flag is absent/false", () => {
+  check("G5 isMerging false when the flag is absent/false", () => {
     assert.equal(app.isMerging({ status: "completed" }), false);
     assert.equal(
       app.isMerging({ status: "completed", merging: false }),
@@ -108,7 +108,7 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     );
   });
 
-  check("G4 isMerging ignores a stale flag on an archived/history snapshot", () => {
+  check("G5 isMerging ignores a stale flag on an archived/history snapshot", () => {
     assert.equal(
       app.isMerging({ status: "completed", merging: true, source: "archived" }),
       false,
@@ -119,21 +119,21 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     );
   });
 
-  check("G4 isMerging tolerates null/garbage input", () => {
+  check("G5 isMerging tolerates null/garbage input", () => {
     assert.equal(app.isMerging(null), false);
     assert.equal(app.isMerging(undefined), false);
     assert.equal(app.isMerging({}), false);
   });
 
   // -- flowStatusLabel -------------------------------------------------------
-  check("G4 flowStatusLabel overrides completed with 合并中", () => {
+  check("G5 flowStatusLabel overrides completed with 合并中", () => {
     assert.equal(
       app.flowStatusLabel({ status: "completed", merging: true }),
       "合并中",
     );
   });
 
-  check("G4 flowStatusLabel appends ·等待主分支锁 while queued for the lock", () => {
+  check("G5 flowStatusLabel appends ·等待主分支锁 while queued for the lock", () => {
     assert.equal(
       app.flowStatusLabel(
         { status: "completed", merging: true, waiting_for_lock: true }),
@@ -141,7 +141,7 @@ export function registerMergingTests({ app, check, findOne, findAll }) {
     );
   });
 
-  check("G4 flowStatusLabel falls back to the base status once merging clears", () => {
+  check("G5 flowStatusLabel falls back to the base status once merging clears", () => {
     // merging cleared -> the terminal status is shown again (not 合并中).
     assert.equal(app.flowStatusLabel({ status: "completed" }), "completed");
     assert.equal(

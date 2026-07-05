@@ -1,4 +1,4 @@
-"""Pytest bridge for the web console's worktree-merge sub-state (G4).
+"""Pytest bridge for the web console's worktree-merge sub-state (G5).
 
 Once a ``--worktree`` run's flow body has COMPLETED, it is merged back into its
 origin branch — possibly blocked queueing for the project's main-worktree lock.
@@ -12,7 +12,7 @@ successful merge archives the worktree engine.json).
 The DOM-free pure-helper assertions (``isMerging`` / ``flowStatusLabel``) live in
 ``tests/frontend/merging.test.mjs``, which the Node assertion harness
 ``tests/frontend/test_app_pure.mjs`` loads and runs. This module pulls that
-suite into the pytest run, asserts the G4 checks actually executed, and adds
+suite into the pytest run, asserts the G5 checks actually executed, and adds
 static-source guardrails that the merging CSS exists and the render paths are
 wired.
 """
@@ -35,7 +35,7 @@ MERGING_TEST = REPO_ROOT / "tests" / "frontend" / "merging.test.mjs"
 
 
 def test_merging_module_present():
-    """The G4 mjs module exists and is registered into the harness."""
+    """The G5 mjs module exists and is registered into the harness."""
     assert MERGING_TEST.is_file(), f"missing {MERGING_TEST}"
     harness = FRONTEND_TEST.read_text(encoding="utf-8")
     assert "merging.test.mjs" in harness, (
@@ -45,7 +45,7 @@ def test_merging_module_present():
 
 
 def test_frontend_merging_node_suite_passes():
-    """Run the Node assertion suite and confirm the G4 checks ran.
+    """Run the Node assertion suite and confirm the G5 checks ran.
 
     Skipped if ``node`` is not available on PATH; runnable by hand via
     ``node tests/frontend/test_app_pure.mjs``.
@@ -66,14 +66,14 @@ def test_frontend_merging_node_suite_passes():
         f"frontend test runner exited {result.returncode}:\n{combined}"
     )
     for needle in (
-        "G4 isMerging true for a completed flow with the flag set",
-        "G4 isMerging ignores a stale flag on an archived/history snapshot",
-        "G4 flowStatusLabel overrides completed with 合并中",
-        "G4 flowStatusLabel appends ·等待主分支锁 while queued for the lock",
-        "G4 merging renders a 合并中 status row, not an empty bubble",
+        "G5 isMerging true for a completed flow with the flag set",
+        "G5 isMerging ignores a stale flag on an archived/history snapshot",
+        "G5 flowStatusLabel overrides completed with 合并中",
+        "G5 flowStatusLabel appends ·等待主分支锁 while queued for the lock",
+        "G5 merging renders a 合并中 status row, not an empty bubble",
     ):
         assert needle in combined, (
-            f"expected G4 check {needle!r} in node output:\n{combined}"
+            f"expected G5 check {needle!r} in node output:\n{combined}"
         )
     assert "checks passed" in combined, combined
 
@@ -89,7 +89,7 @@ def test_merging_css_present():
 
 
 def test_merging_render_paths_wired():
-    """The flow card badge and the chat normalizer must use the G4 helpers."""
+    """The flow card badge and the chat normalizer must use the G5 helpers."""
     assert APP_JS.is_file(), f"missing {APP_JS}"
     js = APP_JS.read_text(encoding="utf-8")
     assert "function isMerging(flow)" in js, "isMerging helper is missing"
