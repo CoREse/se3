@@ -1044,7 +1044,16 @@ class TestDiscoverFromIssueCombination:
         assert kwargs["source_issue_id"] == issue.id
 
     def test_discover_from_issue_runs_issue_lifecycle(self, tmp_path):
-        """The issue goes in-progress before the run and resolved on success."""
+        """The issue goes in-progress before the run; final resolve/reopen is
+        no longer decided by the wrapper's exit code.
+
+        Finalization moved into run_flow's terminal branches (keyed off the
+        persisted flow terminal state, not the process exit code) so that a
+        json-mode pause — which also returns 0 — cannot prematurely resolve the
+        issue, and a daemon/`--resume` continuation still finalizes. With
+        run_flow mocked out here the issue therefore stays in-progress: the
+        wrapper only advances it OPEN→in-progress.
+        """
         from se3.engine.issue_manager import IssueManager, IssueStatus
 
         issue = self._make_project_with_issue(tmp_path)
@@ -1055,9 +1064,9 @@ class TestDiscoverFromIssueCombination:
         )
 
         assert result.exit_code == 0
-        # On a successful flow the source issue is resolved (lifecycle intact).
+        # Wrapper set it in-progress but did NOT resolve on exit code 0.
         reloaded = IssueManager(tmp_path).load(issue.id)
-        assert reloaded.status == IssueStatus.RESOLVED
+        assert reloaded.status == IssueStatus.IN_PROGRESS
 
     def test_from_issue_help_mentions_discover_combination(self):
         from typer.testing import CliRunner

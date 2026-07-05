@@ -315,15 +315,15 @@ def run_cmd(
                 output_format=output_format,
             )
 
-        # Update issue status based on result
-        try:
-            if exit_code == 0:
-                issue_mgr.update_status(issue.id, IssueStatus.RESOLVED)
-            else:
-                issue_mgr.update_status(issue.id, IssueStatus.OPEN)
-        except ValueError:
-            pass  # Best effort
-
+        # Issue finalization is NOT done here: exit_code is an unreliable
+        # signal — in json output mode a pause also returns 0, which used to
+        # resolve the issue on the very first pause. It also never fired on a
+        # daemon/`--resume` continuation, which re-enters via run_flow in a new
+        # process without this wrapper. Finalization is instead owned by the
+        # flow's true terminal state: run_flow._finalize_sync_source_issue for
+        # synchronous runs, and the trailing se3 merge for --worktree runs
+        # (only a successful merge-back resolves). Both key off the persisted
+        # flow.source_issue_id, so they are process-independent.
         raise typer.Exit(exit_code)
 
     if resume or flow_id:

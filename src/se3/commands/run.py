@@ -3036,6 +3036,15 @@ def _run_flow_impl(
             EventType.FLOW_COMPLETED, flow_id=flow.flow_id,
         ))
         display_success("Flow completed successfully!")
+        # Synchronous (non-worktree) from-issue finalization: the source issue
+        # is resolved here, at the flow's true terminal state, rather than in
+        # the cli.py wrapper. This is the ONLY point common to both the first
+        # run and a daemon/`--resume` continuation (which re-enters via
+        # resume_run→run_flow without the wrapper), and `flow.source_issue_id`
+        # is restored from engine.json on resume, so it is process-independent.
+        # Worktree flows defer resolve to the trailing merge (run_merge), so
+        # they are skipped here.
+        _finalize_sync_source_issue(project_root, flow, is_worktree_mode, resolved=True)
         # Session-level token/cost summary (sum of every step's usage). Renders
         # nothing when the flow consumed no LLM tokens.
         render_usage_block(flow.state.session_token_usage, title="Session Token Usage")
@@ -3047,12 +3056,54 @@ def _run_flow_impl(
             EventType.FLOW_FAILED, flow_id=flow.flow_id, message=error_msg,
         ))
         display_error(f"Flow failed: {error_msg}")
+        # Failed sync from-issue run: return the source issue to OPEN (existing
+        # semantics), now also covering the resume path.
+        _finalize_sync_source_issue(project_root, flow, is_worktree_mode, resolved=False)
         # Still surface whatever tokens/cost were consumed before the failure.
         render_usage_block(flow.state.session_token_usage, title="Session Token Usage")
         return 1
     else:
         get_console().print(f"[dim]Flow ended with status: {flow.status.value}[/dim]")
         return 0
+
+
+def _finalize_sync_source_issue(
+    project_root: Path,
+    flow: Any,
+    is_worktree_mode: bool,
+    resolved: bool,
+) -> None:
+    """Best-effort finalize the source issue of a synchronous from-issue flow.
+
+    Called from ``run_flow``'s terminal branches. Transitions the issue named
+    by ``flow.source_issue_id`` to RESOLVED (``resolved=True``, flow COMPLETED)
+    or back to OPEN (``resolved=False``, flow FAILED), but ONLY when it is
+    currently IN_PROGRESS — so a re-terminated resume or a manually-touched
+    issue is never clobbered.
+
+    Worktree flows are skipped: their resolve is owned by the trailing
+    ``se3 merge`` (only a successful merge-back should resolve), so this only
+    handles the non-worktree case. Any failure is swallowed — issue
+    bookkeeping must never change the flow's exit code.
+    """
+    source_issue_id = getattr(flow, "source_issue_id", None)
+    if not source_issue_id or is_worktree_mode:
+        return
+    try:
+        from ..engine.issue_manager import IssueManager, IssueStatus
+
+        issue_mgr = IssueManager(project_root)
+        issue = issue_mgr.load(source_issue_id)
+        # Only the run that actually holds the issue in-progress finalizes it;
+        # a pause (persisted status PAUSED, never reaches these branches) thus
+        # cannot resolve, and neither can a second terminal pass.
+        if issue is None or issue.status != IssueStatus.IN_PROGRESS:
+            return
+        target = IssueStatus.RESOLVED if resolved else IssueStatus.OPEN
+        issue_mgr.update_status(source_issue_id, target)
+    except Exception:
+        # Best-effort only — never let issue bookkeeping affect the return code.
+        pass
 
 
 def _slugify_for_branch(text: str) -> str:
