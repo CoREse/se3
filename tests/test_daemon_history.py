@@ -234,6 +234,8 @@ def test_session_meta_to_dict_round_trip():
     assert data["waiting_for_lock"] is False
     # Default is not-resumable; the field is always emitted for wire stability.
     assert data["resumable"] is False
+    # Default is not-merging; the field is always emitted for wire stability.
+    assert data["merging"] is False
     assert set(data) == {
         "flow_id",
         "project_root",
@@ -246,6 +248,7 @@ def test_session_meta_to_dict_round_trip():
         "source",
         "step_count",
         "waiting_for_lock",
+        "merging",
         "resumable",
     }
 

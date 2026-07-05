@@ -140,8 +140,11 @@ _STR_HEADER_KEYS = (
     "worktree_original_branch",
 )
 
-#: Top-level boolean keys the daemon hot path needs.
-_BOOL_HEADER_KEYS = ("is_worktree_mode", "waiting_for_lock")
+#: Top-level boolean keys the daemon hot path needs. ``merging`` is the
+#: worktree-merge sub-state (emit-when-True in engine.json): an oversized legacy
+#: worktree engine.json still merging back to main must surface it via the
+#: degraded head+tail scan, exactly like ``waiting_for_lock``.
+_BOOL_HEADER_KEYS = ("is_worktree_mode", "waiting_for_lock", "merging")
 
 
 def clear_cache() -> None:

@@ -195,6 +195,12 @@ class FlowSnapshot:
     # while a synchronous run is queued behind the main-worktree mutex. The flow
     # stays RUNNING; the frontend renders it as RUNNING·waiting-for-lock.
     waiting_for_lock: bool = False
+    # Running sub-state mirrored from the daemon aggregator's FlowSnapshot: True
+    # while a completed worktree flow is merging its branch back to main (the
+    # queue-and-wait for the main lock included). Orthogonal to
+    # ``waiting_for_lock``; both True means "merging, blocked acquiring the main
+    # lock". The frontend renders the completed flow as 合并中 while it holds.
+    merging: bool = False
     # Authoritative resumability signal computed by the daemon aggregator from
     # the flow's semantic state (a non-completed flow with a valid intermediate
     # state — including a per-flow snapshot superseded in engine.json). When the
@@ -223,6 +229,7 @@ class FlowSnapshot:
             pending_calls=list(data.get("pending_calls") or []),
             step_history=list(data.get("step_history") or []),
             waiting_for_lock=bool(data.get("waiting_for_lock", False)),
+            merging=bool(data.get("merging", False)),
             resumable=bool(data.get("resumable", False)),
         )
 
@@ -242,6 +249,7 @@ class FlowSnapshot:
             "pending_calls": self.pending_calls,
             "step_history": self.step_history,
             "waiting_for_lock": self.waiting_for_lock,
+            "merging": self.merging,
             "resumable": self.resumable,
         }
 
