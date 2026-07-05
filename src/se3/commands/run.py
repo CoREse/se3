@@ -3397,6 +3397,60 @@ def find_resumable_worktree_runs(project_root: Path) -> List[Dict[str, Any]]:
     return runs
 
 
+def find_worktree_source_issue_by_branch(
+    project_root: Path, branch: str
+) -> Optional[str]:
+    """Return the ``source_issue_id`` of the worktree flow on ``branch``.
+
+    Scans both live worktree state
+    (``se3/worktrees/*/se3/state/engine.json``) and archived worktree state
+    (``se3/worktrees/.archive/*/se3/state/engine.json``) for an
+    ``is_worktree_mode`` flow whose ``worktree_branch`` matches ``branch`` and
+    returns its ``source_issue_id``.
+
+    Unlike :func:`find_resumable_worktree_runs`, COMPLETED flows are NOT
+    excluded: by the time ``se3 merge`` resolves a source issue the flow has
+    (by construction) already reached COMPLETED, and a leftover branch whose
+    first merge failed may only be re-merged long after its worktree was GC'd
+    into ``.archive`` — both cases must still map back to the source issue.
+
+    Returns ``None`` when no matching flow is found or the branch carried no
+    source issue. Corrupt / unreadable engine.json files are skipped rather
+    than raised, so a single bad file never blocks the merge's backfill.
+    """
+    if not branch:
+        return None
+    worktrees_dir = project_root / SE3_DIR / "worktrees"
+    if not worktrees_dir.is_dir():
+        return None
+
+    # Live worktrees first (authoritative for a not-yet-archived run), then the
+    # archive: ``--delete-merged`` / worktree GC copies the whole worktree —
+    # including its engine.json — under ``.archive/`` before removing the live
+    # directory, so a retry-merge of a GC'd branch still finds its source issue.
+    engine_files: List[Path] = []
+    engine_files.extend(sorted(worktrees_dir.glob("*/se3/state/engine.json")))
+    engine_files.extend(
+        sorted((worktrees_dir / ".archive").glob("*/se3/state/engine.json"))
+    )
+    for engine_file in engine_files:
+        try:
+            with open(engine_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if not data.get("is_worktree_mode"):
+            continue
+        if data.get("worktree_branch") != branch:
+            continue
+        source_issue_id = data.get("source_issue_id")
+        if source_issue_id:
+            return str(source_issue_id)
+    return None
+
+
 def _find_worktree_run_by_flow_id(
     project_root: Path, flow_id: str
 ) -> Optional[Dict[str, Any]]:
