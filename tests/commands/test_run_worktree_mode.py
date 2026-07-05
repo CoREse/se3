@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import se3.commands.run as run
+from se3.engine.issue_manager import IssueManager, IssueStatus
 
 
 # --------------------------------------------------------------------------
@@ -390,3 +391,249 @@ class TestResumeRun:
         _, kwargs = mock_run_flow.call_args
         assert kwargs["project_root"] == wt_root
         assert "acquire_main_lock" not in kwargs or kwargs["acquire_main_lock"] is True
+
+
+# --------------------------------------------------------------------------
+# worktree source-issue finalization (G3)
+# --------------------------------------------------------------------------
+def _make_in_progress_issue(main_root: Path) -> str:
+    """Create an issue and put it IN_PROGRESS (the state a from-issue run holds)."""
+    mgr = IssueManager(main_root)
+    issue = mgr.create("Fix the bug", type="bug")
+    mgr.update_status(issue.id, IssueStatus.IN_PROGRESS)
+    return issue.id
+
+
+def _write_wt_engine_with_source_issue(
+    wt_path: Path, *, status, source_issue_id, branch="worktree/x-1", original="main"
+):
+    """Write a worktree engine.json carrying a persisted ``source_issue_id``."""
+    state_dir = wt_path / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "flow_id": "wt-1",
+        "status": status,
+        "task_description": "isolated task",
+        "is_worktree_mode": True,
+        "worktree_branch": branch,
+        "worktree_original_branch": original,
+        "worktree_path": str(wt_path),
+        "source_issue_id": source_issue_id,
+        "state": {"current_step_id": "implement"},
+    }
+    (state_dir / "engine.json").write_text(json.dumps(data))
+
+
+class TestFinalizeWorktreeSourceIssue:
+    """Unit coverage for _finalize_worktree_source_issue: FAILED→open, and a
+    no-op for every other terminal/paused status (resolve is run_merge's job)."""
+
+    def test_failed_moves_issue_to_open(self, tmp_path):
+        main = tmp_path / "main"
+        main.mkdir()
+        issue_id = _make_in_progress_issue(main)
+        wt = tmp_path / "wt"
+        _write_wt_engine_with_source_issue(
+            wt, status="failed", source_issue_id=issue_id
+        )
+        run._finalize_worktree_source_issue(main, wt, "failed", None)
+        assert IssueManager(main).load(issue_id).status == IssueStatus.OPEN
+
+    def test_completed_merge_failed_keeps_in_progress(self, tmp_path):
+        # merge_rc != 0 → issue deliberately stays IN_PROGRESS so a later
+        # retry-merge can resolve it.
+        main = tmp_path / "main"
+        main.mkdir()
+        issue_id = _make_in_progress_issue(main)
+        wt = tmp_path / "wt"
+        _write_wt_engine_with_source_issue(
+            wt, status="completed", source_issue_id=issue_id
+        )
+        run._finalize_worktree_source_issue(main, wt, "completed", 1)
+        assert IssueManager(main).load(issue_id).status == IssueStatus.IN_PROGRESS
+
+    def test_completed_merge_success_leaves_resolve_to_run_merge(self, tmp_path):
+        # Even on a successful merge this helper must NOT resolve — the resolve
+        # is owned by run_merge. So COMPLETED is a no-op regardless of merge_rc.
+        main = tmp_path / "main"
+        main.mkdir()
+        issue_id = _make_in_progress_issue(main)
+        wt = tmp_path / "wt"
+        _write_wt_engine_with_source_issue(
+            wt, status="completed", source_issue_id=issue_id
+        )
+        run._finalize_worktree_source_issue(main, wt, "completed", 0)
+        assert IssueManager(main).load(issue_id).status == IssueStatus.IN_PROGRESS
+
+    def test_paused_status_is_noop(self, tmp_path):
+        # A pause must never move the issue (it is not a terminal state).
+        main = tmp_path / "main"
+        main.mkdir()
+        issue_id = _make_in_progress_issue(main)
+        wt = tmp_path / "wt"
+        _write_wt_engine_with_source_issue(
+            wt, status="paused", source_issue_id=issue_id
+        )
+        run._finalize_worktree_source_issue(main, wt, "paused", None)
+        assert IssueManager(main).load(issue_id).status == IssueStatus.IN_PROGRESS
+
+    def test_no_source_issue_is_noop(self, tmp_path):
+        main = tmp_path / "main"
+        main.mkdir()
+        wt = tmp_path / "wt"
+        _write_wt_engine_with_source_issue(
+            wt, status="failed", source_issue_id=None
+        )
+        # No source issue persisted → nothing to do, and no crash.
+        run._finalize_worktree_source_issue(main, wt, "failed", None)
+
+    def test_non_in_progress_issue_not_clobbered(self, tmp_path):
+        # An issue that is not IN_PROGRESS (e.g. manually reopened / resolved) is
+        # never touched, so a second terminal pass can't clobber it.
+        main = tmp_path / "main"
+        main.mkdir()
+        mgr = IssueManager(main)
+        issue = mgr.create("x")  # stays OPEN, never IN_PROGRESS
+        wt = tmp_path / "wt"
+        _write_wt_engine_with_source_issue(
+            wt, status="failed", source_issue_id=issue.id
+        )
+        run._finalize_worktree_source_issue(main, wt, "failed", None)
+        assert mgr.load(issue.id).status == IssueStatus.OPEN
+
+
+class TestRunWorktreeModeSourceIssue:
+    """Integration: run_worktree_mode wires the finalize into its terminal
+    branches, and the merge-failure notice explains the in-progress issue."""
+
+    def _run(self, tmp_path, *, flow_exit, wt_status, merge_rc, issue_id, errors=None):
+        wt = tmp_path / "se3" / "worktrees" / "wt"
+
+        def fake_run_flow(*_a, **kwargs):
+            # Persist the worktree engine.json exactly as a real flow would,
+            # using the branch the wrapper generated so the merge-failure notice
+            # can map the branch back to its source issue.
+            _write_wt_engine_with_source_issue(
+                Path(kwargs["project_root"]),
+                status=wt_status,
+                source_issue_id=issue_id,
+                branch=kwargs["worktree_branch"],
+            )
+            return flow_exit
+
+        def capture_error(msg, *_a, **_kw):
+            if errors is not None:
+                errors.append(str(msg))
+
+        with patch("se3.commands.run.run_flow", side_effect=fake_run_flow), \
+             patch("se3.commands.merge_cmd.run_merge", return_value=merge_rc), \
+             patch("se3.commands.run.display_error", side_effect=capture_error), \
+             patch("se3.engine.worktree.fork_worktree", return_value=wt), \
+             patch("se3.engine.worktree.get_current_branch", return_value="main"), \
+             patch("se3.commands.run.clear_main_repo_root_cache"):
+            rc = run.run_worktree_mode(project_root=tmp_path, task="Fix the bug")
+        return rc
+
+    def test_completed_merge_success_leaves_resolve_to_run_merge(self, tmp_path):
+        # This wrapper must not itself resolve; run_merge (mocked here) owns that.
+        issue_id = _make_in_progress_issue(tmp_path)
+        rc = self._run(
+            tmp_path, flow_exit=0, wt_status="completed", merge_rc=0, issue_id=issue_id
+        )
+        assert rc == 0
+        # Still IN_PROGRESS because the real run_merge is mocked out — the point
+        # is that _finalize_worktree_source_issue did NOT resolve it.
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
+
+    def test_completed_merge_failure_keeps_in_progress_and_warns(self, tmp_path):
+        issue_id = _make_in_progress_issue(tmp_path)
+        errors: list[str] = []
+        rc = self._run(
+            tmp_path, flow_exit=0, wt_status="completed", merge_rc=1,
+            issue_id=issue_id, errors=errors,
+        )
+        assert rc == 1
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
+        msg = "\n".join(errors)
+        assert "in-progress" in msg
+        assert "se3 merge" in msg
+        assert "preserved" in msg
+        assert f"#{issue_id}" in msg
+
+    def test_failed_flow_reopens_issue(self, tmp_path):
+        issue_id = _make_in_progress_issue(tmp_path)
+        rc = self._run(
+            tmp_path, flow_exit=2, wt_status="failed", merge_rc=0, issue_id=issue_id
+        )
+        assert rc == 2
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN
+
+    def test_paused_flow_does_not_touch_issue(self, tmp_path):
+        # exit 0 + on-disk PAUSED (json-mode pause): must NOT resolve/reopen.
+        issue_id = _make_in_progress_issue(tmp_path)
+        rc = self._run(
+            tmp_path, flow_exit=0, wt_status="paused", merge_rc=0, issue_id=issue_id
+        )
+        assert rc == 0
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
+
+
+class TestResumeWorktreeSourceIssue:
+    """Integration: the fresh --resume process finalizes the source issue off
+    the persisted status, decoupled from the original wrapper process."""
+
+    def _resume(self, tmp_path, *, flow_exit, wt_status, merge_rc, issue_id, errors=None):
+        wt = tmp_path / "se3" / "worktrees" / "worktree-x-1"
+
+        def fake_run_flow(*_a, **kwargs):
+            _write_wt_engine_with_source_issue(
+                wt,
+                status=wt_status,
+                source_issue_id=issue_id,
+                branch="worktree/x-1",
+            )
+            return flow_exit
+
+        def capture_error(msg, *_a, **_kw):
+            if errors is not None:
+                errors.append(str(msg))
+
+        # The run must be discoverable as a resumable worktree run; seed a
+        # non-terminal engine.json first so find_resumable_worktree_runs sees it.
+        _write_wt_engine_with_source_issue(
+            wt, status="failed", source_issue_id=issue_id, branch="worktree/x-1"
+        )
+        with patch("se3.commands.run.run_flow", side_effect=fake_run_flow), \
+             patch("se3.commands.run.display_error", side_effect=capture_error), \
+             patch("se3.commands.merge_cmd.run_merge", return_value=merge_rc):
+            rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
+        return rc
+
+    def test_resume_completed_merge_failure_keeps_in_progress(self, tmp_path):
+        issue_id = _make_in_progress_issue(tmp_path)
+        errors: list[str] = []
+        rc = self._resume(
+            tmp_path, flow_exit=0, wt_status="completed", merge_rc=1,
+            issue_id=issue_id, errors=errors,
+        )
+        assert rc == 1
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
+        msg = "\n".join(errors)
+        assert "in-progress" in msg
+        assert "se3 merge" in msg
+
+    def test_resume_failed_reopens_issue(self, tmp_path):
+        issue_id = _make_in_progress_issue(tmp_path)
+        rc = self._resume(
+            tmp_path, flow_exit=3, wt_status="failed", merge_rc=0, issue_id=issue_id
+        )
+        assert rc == 3
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN
+
+    def test_resume_paused_again_does_not_touch_issue(self, tmp_path):
+        issue_id = _make_in_progress_issue(tmp_path)
+        rc = self._resume(
+            tmp_path, flow_exit=0, wt_status="paused", merge_rc=0, issue_id=issue_id
+        )
+        assert rc == 0
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS

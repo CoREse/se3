@@ -3156,6 +3156,69 @@ def _worktree_flow_status(worktree_path: Path) -> Optional[str]:
     return data.get("status")
 
 
+def _read_worktree_source_issue_id(worktree_path: Path) -> Optional[str]:
+    """Read the persisted ``source_issue_id`` from a worktree's ``engine.json``.
+
+    The source-issue finalize decision must NOT depend on the original wrapper
+    process being alive (a paused run may be resumed by a fresh
+    ``se3 run --resume`` process); the only cross-process-stable signal is the
+    id persisted in the worktree's own flow state. Returns ``None`` when the
+    file is missing/unreadable or the flow carried no source issue.
+    """
+    engine_file = worktree_path / SE3_DIR / "state" / "engine.json"
+    try:
+        with open(engine_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    source_issue_id = data.get("source_issue_id")
+    return str(source_issue_id) if source_issue_id else None
+
+
+def _finalize_worktree_source_issue(
+    main_root: Path,
+    worktree_path: Path,
+    status: Optional[str],
+    merge_rc: Optional[int],
+) -> None:
+    """Best-effort finalize the source issue of a ``--worktree`` from-issue run.
+
+    Decision is driven by the flow's *persisted terminal status* (read from the
+    worktree engine.json), never the wrapper's exit code — a json-mode pause
+    also returns 0, so the exit code cannot distinguish pause from completion.
+
+    - ``status == FAILED`` → move the issue back to OPEN (mirrors sync failure).
+    - ``status == COMPLETED`` → the resolve is owned by ``run_merge`` (it only
+      resolves on a successful merge-back, ``merge_rc == 0``); when the merge
+      failed (``merge_rc != 0``) the issue is deliberately left IN_PROGRESS so
+      the retry-merge path (``se3 merge <branch>``) can resolve it later. Either
+      way there is nothing to do here for COMPLETED.
+
+    Only an issue that is currently IN_PROGRESS is touched, so a pause (which
+    never reaches these terminal branches) and a second terminal pass cannot
+    clobber a manually-changed issue. All failures are swallowed — issue
+    bookkeeping must never alter the worktree run's exit code.
+    """
+    if status != FlowStatus.FAILED.value:
+        return
+    source_issue_id = _read_worktree_source_issue_id(worktree_path)
+    if not source_issue_id:
+        return
+    try:
+        from ..engine.issue_manager import IssueManager, IssueStatus
+
+        issue_mgr = IssueManager(main_root)
+        issue = issue_mgr.load(source_issue_id)
+        if issue is None or issue.status != IssueStatus.IN_PROGRESS:
+            return
+        issue_mgr.update_status(source_issue_id, IssueStatus.OPEN)
+    except Exception:
+        # Best-effort only — never let issue bookkeeping affect the return code.
+        pass
+
+
 def _finalize_worktree_merge(
     project_root: Path,
     worktree_branch: str,
@@ -3198,10 +3261,26 @@ def _finalize_worktree_merge(
     if rc == 0:
         display_success(f"Merged '{worktree_branch}' back into '{target}'.")
     else:
-        display_error(
-            f"Merge of '{worktree_branch}' failed (exit {rc}). The worktree and "
-            f"branch are preserved; resolve and re-run `se3 merge {worktree_branch}`."
+        lines = [
+            f"Merge of '{worktree_branch}' failed (exit {rc}).",
+            f"The worktree and branch '{worktree_branch}' are preserved.",
+        ]
+        # Only a successful merge-back resolves the source issue, so a merge
+        # failure leaves it IN_PROGRESS. Tell the operator explicitly, and how a
+        # retry-merge (which backfills the resolve) reaches resolved.
+        source_issue_id = find_worktree_source_issue_by_branch(
+            project_root, worktree_branch
         )
+        if source_issue_id:
+            lines.append(
+                f"Source issue #{source_issue_id} is kept in-progress "
+                "(not resolved) because the merge back did not succeed."
+            )
+        lines.append(
+            f"Retry the merge with: se3 merge {worktree_branch} "
+            "(a successful retry will resolve the source issue)."
+        )
+        display_error("\n".join(lines))
     return rc
 
 
@@ -3300,6 +3379,15 @@ def run_worktree_mode(
         if exit_code != 0:
             # Failed / interrupted: preserve the worktree + branch for --resume
             # and do NOT merge. Mirrors a synchronous run that left state behind.
+            # Finalize the source issue off the PERSISTED status (only a genuine
+            # FAILED moves it back to open; an interrupted/paused run stays
+            # in-progress) — never off exit_code, which cannot tell them apart.
+            _finalize_worktree_source_issue(
+                project_root,
+                worktree_path,
+                _worktree_flow_status(worktree_path),
+                merge_rc=None,
+            )
             render_full(
                 "\n".join(
                     [
@@ -3335,10 +3423,17 @@ def run_worktree_mode(
             )
             return exit_code
 
-        # Success: merge the isolation branch back into the original branch.
-        return _finalize_worktree_merge(
+        # Success: merge the isolation branch back into the original branch. The
+        # source-issue resolve is owned by run_merge (fires only on merge_rc==0);
+        # this trailing call handles the merge-failure case — the issue stays
+        # in-progress so a later retry-merge can resolve it.
+        merge_rc = _finalize_worktree_merge(
             project_root, worktree_branch, original_branch
         )
+        _finalize_worktree_source_issue(
+            project_root, worktree_path, FlowStatus.COMPLETED.value, merge_rc
+        )
+        return merge_rc
     finally:
         _clear_run_pidfile(wt_persistence)
 
@@ -3541,6 +3636,17 @@ def _resume_worktree_run(
         )
 
         if exit_code != 0:
+            # Same persisted-status finalize as the first-run path: a resume that
+            # ends FAILED moves the source issue back to open; an interrupted /
+            # re-paused resume (also exit!=0) leaves it in-progress. Decoupled
+            # from the original wrapper — this fresh --resume process owns the
+            # finalize now.
+            _finalize_worktree_source_issue(
+                project_root,
+                worktree_path,
+                _worktree_flow_status(worktree_path),
+                merge_rc=None,
+            )
             render_full(
                 "\n".join(
                     [
@@ -3579,9 +3685,15 @@ def _resume_worktree_run(
             )
             return 1
 
-        return _finalize_worktree_merge(
+        merge_rc = _finalize_worktree_merge(
             project_root, worktree_branch, worktree_original_branch
         )
+        # Resolve on successful merge is owned by run_merge; this handles the
+        # merge-failure case (issue stays in-progress for a retry-merge).
+        _finalize_worktree_source_issue(
+            project_root, worktree_path, FlowStatus.COMPLETED.value, merge_rc
+        )
+        return merge_rc
     finally:
         _clear_run_pidfile(wt_persistence)
 
