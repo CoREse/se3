@@ -1,7 +1,7 @@
 id: '257'
 description: 将adjudicate步骤的确认改成默认通过（不需要人类确认），如果想要人类确认可以在配置文件里面设置。
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-04T17:21:33.998752'
-updated_at: '2026-07-04T17:35:00.495237'
+updated_at: '2026-07-05T12:26:55.450565'

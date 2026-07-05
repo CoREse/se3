@@ -84,6 +84,15 @@
 
 
 
+
+## 11.11.1 - 2026-07-05
+
+- Stop eagerly rebuilding the open flow's conversation on step progression; wait for the WS incremental path to deliver new records first
+- Add a 5-second grace period after a detected progression, triggering a single silent full rebuild only if no WS increment arrives for that flow in time
+- Keep the healthy push path free of silent full rebuilds, eliminating scroll jumps and stale token-usage badges without exit/reopen
+- Preserve refresh semantics: at most one trigger per progression, current-open-flow only, reply-area draft/focus untouched, pending grace timer cancelled on flow switch/close
+- Update frontend progression-refresh tests to cover the healthy (zero rebuild), fallback (exactly one rebuild), duplicate-snapshot, and stop-state (FAILED/PAUSED) cases
+- Retain the SE3_HISTORY_DIAG gated diagnostic instrumentation (fully lazy by default) for future recurrence diagnosis
 ## 11.11.0 - 2026-07-05
 
 - Add `se3 worktree gc` command that archives completed/failed worktree runs older than a threshold into se3/worktrees/.archive/ and prunes stale git worktrees

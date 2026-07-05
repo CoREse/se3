@@ -1,5 +1,5 @@
 /*
- * Progression-refresh fallback tests (Group G2).
+ * Progression-refresh FAILURE-SAFETY-NET tests (issue #209 wind-down).
  *
  * Loaded by tests/frontend/test_app_pure.mjs after its shared DOM stub
  * (`globalThis.document` / `FakeNode`) is installed. Exposes
@@ -7,14 +7,21 @@
  * so the parent harness drives the same check() reporter and the same `app`
  * module export (mirrors live_append_*, reply_send_error_handling, …).
  *
- * Context: the long-standing "flow advances (step switch / in-step retry) but
- * the main conversation freezes until you exit and re-enter the session" bug.
- * This group adds a CAUSE-IMMUNE fallback, NOT a root-cause fix: it watches the
- * authoritative /api/flows/{id} snapshot (which reliably advances current_step /
- * current_step_index on a step switch, and flips status FAILED/PAUSED→RUNNING on
- * an in-step retry) and, on a detected advance of the open flow, fires exactly
- * one SILENT full /api/history rebuild (the G1 silent path, equivalent to
- * exit-and-re-enter but without the blank flash or scroll jump).
+ * Context: the "flow advances (step switch / in-step retry) but the main
+ * conversation freezes until you exit and re-enter the session" bug (#209). Its
+ * root cause — the daemon _push_loop starved under a heavy root so incremental
+ * history_data never went out — is FIXED by #243/#244 (the push side now reads
+ * engine headers off the event loop, so the WS delta arrives on its own within
+ * ~2s). The former "rebuild on every advance" workaround is therefore DEMOTED to
+ * a failure safety net: on a detected advance of the open flow we start a grace
+ * window and fire the silent /api/history full rebuild ONLY IF the WS push path
+ * failed to deliver an increment for that flow before the window elapsed. On the
+ * healthy path (WS delivers) the fallback never fires — zero silent rebuilds.
+ *
+ * The "WS delivered an increment" signal is `state.flowConversationAppendSeq`, a
+ * monotonic counter bumped ONLY by applyHistoryData's running-flow branch when it
+ * actually lands new records. The grace timer snapshots it at schedule time and,
+ * when it fires, rebuilds only if the counter has not moved past the snapshot.
  *
  * IMPORTANT: the daemon's FlowSnapshot.to_dict() NEVER emits a `step_history`
  * field (the server back-fills it to an empty list), so these tests deliberately
@@ -22,19 +29,29 @@
  * path through the `status` signal — not a synthetic growing step_history that
  * never occurs in production.
  *
+ * The tests use REAL setTimeout (the harness installs no fake timer), so each
+ * shrinks `app.state.progressionGraceMs` to a few ms and awaits just past it.
+ *
  * These tests pin:
- *   (1) first snapshot only establishes a baseline — no refresh;
- *   (2) a current_step change triggers exactly one refresh, and the same
- *       snapshot delivered again does NOT re-trigger;
- *   (3) a status flip with an unchanged current_step (in-step retry: the engine
- *       reuses the step_id so current_step stays put; the flow flips
- *       FAILED/PAUSED→RUNNING) triggers one refresh;
- *   (4) a progression on a flow that is NOT the open one does not trigger;
- *   (5) the silent refresh never pre-clears the container nor shows a Loading
- *       placeholder — the DOM is rebuilt only once the new data arrives;
- *   (6) the silent refresh preserves the reader's scroll position unless they
- *       were already near the bottom;
- *   (7) the silent refresh never touches the reply-region state.
+ *   (1)  first snapshot only establishes a baseline — never arms a timer;
+ *   (2)  HEALTHY: advance + a WS increment within the grace window → zero
+ *        silent rebuilds (the live WS append is the only update);
+ *   (3)  FALLBACK: advance + NO WS increment within the window → exactly one
+ *        silent full (no-after) rebuild once the window elapses;
+ *   (4)  the same advance re-delivered (marker already updated ⇒ not advanced)
+ *        neither re-arms nor re-fires — at most one rebuild per advance;
+ *   (5)  a RUNNING→FAILED / RUNNING→PAUSED halt arms nothing and never rebuilds,
+ *        while the forward-motion FAILED/PAUSED→RUNNING retry/resume does arm;
+ *   (6)  a progression on a flow that is NOT the open one arms nothing;
+ *   (7)  cancelling the grace (flow switch/close) drops a pending fallback;
+ *   (8)  the silent refresh never pre-clears the container nor shows a Loading
+ *        placeholder — the DOM is rebuilt only once the new data arrives;
+ *   (9)  the silent refresh preserves the reader's scroll position unless they
+ *        were already near the bottom;
+ *   (10) the silent refresh never touches the reply-region state;
+ *   (11) refreshFlowDetail drops a stale out-of-order detail response;
+ *   (12) a prior-lifecycle detail response is dropped after close/reopen;
+ *   (13) a failing silent refresh lets an in-flight first-open complete.
  */
 import assert from "node:assert/strict";
 
@@ -80,12 +97,24 @@ export async function registerProgressionRefreshTests(ctx) {
   }
 
   const flush = () => new Promise((r) => setTimeout(r, 0));
+  // Await just past the (shrunk) grace window so a pending fallback fires.
+  const waitGrace = () =>
+    new Promise((r) => setTimeout(r, app.state.progressionGraceMs + 15));
+
+  // Small grace window (real timers, no fake clock) so the two paths resolve in
+  // ~ms rather than the production 5s.
+  const TEST_GRACE_MS = 5;
 
   function resetProgressionState(flowId) {
+    // Cancel any timer a prior test left pending BEFORE swapping the flow, so it
+    // can never fire against this one.
+    app.cancelProgressionGrace();
     app.state.selectedFlowId = flowId;
     app.state.flowConversationRecords = [];
     app.state.flowConversationProgress = null;
     app.state.flowProgressionMarker = null;
+    app.state.flowConversationAppendSeq = 0;
+    app.state.progressionGraceMs = TEST_GRACE_MS;
     const c = document.getElementById("flow-conversation");
     c.innerHTML = "";
     c.__convState = null;
@@ -95,162 +124,192 @@ export async function registerProgressionRefreshTests(ctx) {
     return c;
   }
 
+  const snap = (flowId, step, index, status) => ({
+    flow_id: flowId, current_step: step, current_step_index: index, status,
+  });
+
   // -- (1) first observation only establishes a baseline ---------------------
-  await checkAsync("progression: first snapshot only sets baseline, no refresh", async () => {
+  await checkAsync("progression: first snapshot only sets baseline, no timer", async () => {
     resetProgressionState("F1");
     const saved = globalThis.fetch;
     const calls = installCountingFetch({ records: [], progress: "p", delivery: "full" });
     try {
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "discovery", current_step_index: 0, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 0, "the first snapshot must not trigger a refresh");
+      app.maybeRefreshConversationOnProgression(snap("F1", "discovery", 0, "running"));
+      assert.equal(app.state.progressionGraceTimer, null, "first snapshot must not arm a timer");
       assert.ok(app.state.flowProgressionMarker, "baseline marker must be set");
       assert.equal(app.state.flowProgressionMarker.flowId, "F1");
       assert.equal(app.state.flowProgressionMarker.currentStep, "discovery");
-      assert.equal(app.state.flowProgressionMarker.currentStepIndex, 0);
-      assert.equal(app.state.flowProgressionMarker.status, "running");
+      await waitGrace();
+      assert.equal(calls.length, 0, "the first snapshot must never trigger a refresh");
     } finally {
       globalThis.fetch = saved;
     }
   });
 
-  // -- (2) current_step change triggers exactly once -------------------------
-  await checkAsync("progression: current_step change triggers exactly one refresh", async () => {
+  // -- (2) HEALTHY path: WS increment within the grace window → zero rebuilds -
+  await checkAsync("progression: advance + WS increment within grace → zero silent rebuilds", async () => {
+    const c = resetProgressionState("F1");
+    const saved = globalThis.fetch;
+    const calls = installCountingFetch({ records: [], progress: "p2", delivery: "full" });
+    try {
+      // Baseline at discovery.
+      app.maybeRefreshConversationOnProgression(snap("F1", "discovery", 0, "running"));
+      // Advance discovery → analyze: arms the grace timer (does NOT rebuild now).
+      app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
+      assert.notEqual(app.state.progressionGraceTimer, null, "an advance must arm the grace timer");
+      assert.equal(calls.length, 0, "an advance must NOT rebuild immediately");
+      const seq0 = app.state.flowConversationAppendSeq;
+      // A real WS increment for this flow arrives through applyHistoryData's
+      // running-flow branch — this is the healthy push path recovering on its own.
+      app.applyHistoryData({
+        flow_id: "F1", mode: "append", records: [asstRecord("A", 1, "s2", "analyze")],
+      });
+      assert.equal(app.state.flowConversationAppendSeq, seq0 + 1,
+        "a landed WS append must bump flowConversationAppendSeq");
+      assert.equal(ctx.findAll(c, "conv-bubble").length, 1,
+        "the WS append renders the new record live");
+      // Let the grace window elapse: the fallback must observe the bumped counter
+      // and skip — zero silent rebuilds on the healthy path.
+      await waitGrace();
+      assert.equal(calls.length, 0, "a delivered WS increment must suppress the fallback rebuild");
+    } finally {
+      globalThis.fetch = saved;
+    }
+  });
+
+  // -- (3) FALLBACK path: no WS increment within the window → one rebuild -----
+  await checkAsync("progression: advance + no WS increment → exactly one silent rebuild after grace", async () => {
     resetProgressionState("F1");
     const saved = globalThis.fetch;
     const calls = installCountingFetch({
       records: [asstRecord("A", 1, "s2", "analyze")], progress: "p2", delivery: "full",
     });
     try {
-      // Baseline at discovery.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "discovery", current_step_index: 0, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 0);
-      // Advance discovery → analyze: one refresh.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "analyze", current_step_index: 1, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 1, "an advance must fire exactly one refresh");
+      app.maybeRefreshConversationOnProgression(snap("F1", "discovery", 0, "running"));
+      app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
+      assert.equal(calls.length, 0, "no rebuild before the grace window elapses");
+      // No WS increment arrives; the window elapses → exactly one fallback rebuild.
+      await waitGrace();
+      assert.equal(calls.length, 1, "a silent WS path must trigger exactly one fallback rebuild");
       assert.ok(calls[0].includes("/api/history/"), calls[0]);
-      assert.ok(!calls[0].includes("after="), "silent refresh must be a full (no-after) pull");
-      assert.equal(app.state.flowProgressionMarker.currentStep, "analyze");
-      // The same snapshot delivered again (3s poll re-delivering the WS push)
-      // must NOT re-trigger.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "analyze", current_step_index: 1, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 1, "a duplicate snapshot of the same advance must not re-trigger");
+      assert.ok(!calls[0].includes("after="), "the fallback must be a full (no-after) pull");
+      // The timer reference is cleared after firing so a later advance re-arms cleanly.
+      assert.equal(app.state.progressionGraceTimer, null, "the fired timer reference is cleared");
     } finally {
       globalThis.fetch = saved;
     }
   });
 
-  // -- (3) in-step retry (status flips, current_step / index unchanged) -------
-  // Uses the REAL /api/flows shape (no step_history): when update_spec errors
-  // the flow snapshot keeps current_step == "update_spec" and the same
-  // current_step_index, but status flips RUNNING → FAILED (the failure) and then
-  // FAILED → RUNNING when the operator chooses Retry and the step re-runs. Only
-  // the FORWARD-MOTION transition (FAILED/PAUSED → RUNNING) is an advance: the
-  // failure itself (RUNNING → FAILED) is the flow STOPPING, not advancing, and
-  // must NOT fire a refresh on the open flow. Only the retry that re-runs the
-  // step is a genuine advance → exactly one silent refresh.
-  await checkAsync("progression: only a retry/resume status flip triggers a refresh (not a halt)", async () => {
+  // -- (4) same-advance duplicate snapshot still at most one rebuild ----------
+  await checkAsync("progression: a duplicate snapshot of the same advance re-fires nothing", async () => {
     resetProgressionState("F1");
     const saved = globalThis.fetch;
     const calls = installCountingFetch({ records: [], progress: "p", delivery: "full" });
     try {
-      // Baseline: update_spec running.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 0);
-      // The step errors out: same current_step / index, status → FAILED. This is
-      // the flow halting, not advancing — it must NOT trigger a refresh.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "failed",
-      });
-      await flush();
-      assert.equal(calls.length, 0, "a RUNNING→FAILED halt must NOT trigger a refresh");
-      assert.equal(app.state.flowProgressionMarker.status, "failed");
-      // Operator chooses Retry: the engine reuses the same step_id, so
-      // current_step / index stay put while status flips back to RUNNING. This
-      // forward-motion FAILED→RUNNING transition IS an advance.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 1, "the retry (FAILED→RUNNING) must trigger a refresh");
-      assert.equal(app.state.flowProgressionMarker.status, "running");
-      // A duplicate of the retry snapshot (3s poll re-delivering it) must NOT
-      // re-trigger.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 1, "a duplicate retry snapshot must not re-trigger");
+      app.maybeRefreshConversationOnProgression(snap("F1", "discovery", 0, "running"));
+      // Advance → arm.
+      app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
+      const armed = app.state.progressionGraceTimer;
+      // Same snapshot re-delivered (3s poll re-carrying the WS advance): the
+      // marker already reads analyze, so it is NOT advanced → no re-arm.
+      app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
+      assert.equal(app.state.progressionGraceTimer, armed,
+        "a duplicate snapshot must not re-arm (cancel+reschedule) the grace timer");
+      await waitGrace();
+      assert.equal(calls.length, 1, "a duplicate snapshot of the same advance must not fire a second rebuild");
     } finally {
       globalThis.fetch = saved;
     }
   });
 
-  // -- (3b) a halt-only transition (RUNNING → PAUSED / FAILED) never refreshes -
-  // The flow stopping on the open step is not progression. Neither a pause nor a
-  // failure that keeps current_step / index put may fire a silent reload.
-  await checkAsync("progression: a halt-only status change (RUNNING→PAUSED) never refreshes", async () => {
+  // -- (5) in-step retry arms; a halt (RUNNING→FAILED / →PAUSED) never does ----
+  // Uses the REAL /api/flows shape (no step_history): when update_spec errors the
+  // flow keeps current_step == "update_spec" / same index, status flips
+  // RUNNING→FAILED (halt) then FAILED→RUNNING when the operator retries. Only the
+  // forward-motion transition is an advance; the halt is the flow STOPPING and
+  // must arm nothing.
+  await checkAsync("progression: only a retry/resume status flip arms a fallback (not a halt)", async () => {
     resetProgressionState("F1");
     const saved = globalThis.fetch;
     const calls = installCountingFetch({ records: [], progress: "p", delivery: "full" });
     try {
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 0);
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "paused",
-      });
-      await flush();
-      assert.equal(calls.length, 0, "a RUNNING→PAUSED halt must NOT trigger a refresh");
-      assert.equal(app.state.flowProgressionMarker.status, "paused");
-      // And resuming from the pause (PAUSED → RUNNING) IS forward motion.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "F1", current_step: "update_spec", current_step_index: 5, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 1, "resuming from PAUSED→RUNNING must trigger a refresh");
+      app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "running"));
+      // The step errors: same step/index, status → FAILED. A halt — arms nothing.
+      app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "failed"));
+      assert.equal(app.state.progressionGraceTimer, null, "a RUNNING→FAILED halt must not arm a timer");
+      await waitGrace();
+      assert.equal(calls.length, 0, "a RUNNING→FAILED halt must never rebuild");
+      // Operator retries: current_step / index unchanged, status FAILED→RUNNING.
+      // This forward-motion transition IS an advance → arms the fallback.
+      app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "running"));
+      assert.notEqual(app.state.progressionGraceTimer, null, "a FAILED→RUNNING retry must arm a timer");
+      await waitGrace();
+      assert.equal(calls.length, 1, "the retry, with no WS increment, fires exactly one fallback rebuild");
     } finally {
       globalThis.fetch = saved;
     }
   });
 
-  // -- (4) progression on a non-open flow does not trigger -------------------
-  await checkAsync("progression: only the open flow triggers a refresh", async () => {
+  // -- (5b) a RUNNING→PAUSED halt never rebuilds; PAUSED→RUNNING resumes -------
+  await checkAsync("progression: a halt-only status change (RUNNING→PAUSED) arms nothing", async () => {
+    resetProgressionState("F1");
+    const saved = globalThis.fetch;
+    const calls = installCountingFetch({ records: [], progress: "p", delivery: "full" });
+    try {
+      app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "running"));
+      app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "paused"));
+      assert.equal(app.state.progressionGraceTimer, null, "a RUNNING→PAUSED halt must not arm a timer");
+      await waitGrace();
+      assert.equal(calls.length, 0, "a RUNNING→PAUSED halt must never rebuild");
+      // Resuming (PAUSED → RUNNING) is forward motion.
+      app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "running"));
+      await waitGrace();
+      assert.equal(calls.length, 1, "resuming from PAUSED→RUNNING fires exactly one fallback rebuild");
+    } finally {
+      globalThis.fetch = saved;
+    }
+  });
+
+  // -- (6) progression on a non-open flow arms nothing -----------------------
+  await checkAsync("progression: only the open flow arms a fallback", async () => {
     resetProgressionState("OPEN");          // the open flow is OPEN, not OTHER
     const saved = globalThis.fetch;
     const calls = installCountingFetch({ records: [], progress: "p", delivery: "full" });
     try {
-      // Baseline + advance for a DIFFERENT flow while OPEN stays selected.
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "OTHER", current_step: "discovery", current_step_index: 0, status: "running",
-      });
-      app.maybeRefreshConversationOnProgression({
-        flow_id: "OTHER", current_step: "analyze", current_step_index: 1, status: "running",
-      });
-      await flush();
-      assert.equal(calls.length, 0, "a non-open flow's advance must not trigger a refresh");
+      app.maybeRefreshConversationOnProgression(snap("OTHER", "discovery", 0, "running"));
+      app.maybeRefreshConversationOnProgression(snap("OTHER", "analyze", 1, "running"));
+      assert.equal(app.state.progressionGraceTimer, null, "a non-open flow's advance must not arm a timer");
+      await waitGrace();
+      assert.equal(calls.length, 0, "a non-open flow's advance must never rebuild");
     } finally {
       globalThis.fetch = saved;
     }
   });
 
-  // -- (5) silent refresh: no pre-clear, no Loading placeholder --------------
+  // -- (7) cancelling the grace (flow switch/close) drops a pending fallback ---
+  // openFlowView / doCloseFlowView call cancelProgressionGrace() in their reset
+  // section; this pins that a pending fallback is dropped so it can never rebuild
+  // against a flow that is no longer open.
+  await checkAsync("progression: cancelling the grace drops a pending fallback", async () => {
+    resetProgressionState("F1");
+    const saved = globalThis.fetch;
+    const calls = installCountingFetch({ records: [], progress: "p", delivery: "full" });
+    try {
+      app.maybeRefreshConversationOnProgression(snap("F1", "discovery", 0, "running"));
+      app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
+      assert.notEqual(app.state.progressionGraceTimer, null, "the advance armed a timer");
+      // Simulate the openFlowView / doCloseFlowView reset path.
+      app.cancelProgressionGrace();
+      assert.equal(app.state.progressionGraceTimer, null, "cancel clears the pending timer");
+      assert.equal(app.state.progressionGraceFlowId, null, "cancel clears the target flow id");
+      await waitGrace();
+      assert.equal(calls.length, 0, "a cancelled grace must never rebuild");
+    } finally {
+      globalThis.fetch = saved;
+    }
+  });
+
+  // -- (8) silent refresh: no pre-clear, no Loading placeholder --------------
   await checkAsync("progression: silent refresh keeps the DOM until new data arrives", async () => {
     const c = resetProgressionState("F1");
     const saved = globalThis.fetch;
@@ -291,7 +350,7 @@ export async function registerProgressionRefreshTests(ctx) {
     }
   });
 
-  // -- (6) silent refresh: scroll position preserved unless near bottom ------
+  // -- (9) silent refresh: scroll position preserved unless near bottom ------
   await checkAsync("progression: silent refresh preserves scroll unless near bottom", async () => {
     const saved = globalThis.fetch;
     try {
@@ -333,7 +392,7 @@ export async function registerProgressionRefreshTests(ctx) {
     }
   });
 
-  // -- (7) silent refresh never touches the reply-region state ---------------
+  // -- (10) silent refresh never touches the reply-region state ---------------
   await checkAsync("progression: silent refresh leaves reply-region state untouched", async () => {
     resetProgressionState("F1");
     const saved = globalThis.fetch;
@@ -361,11 +420,11 @@ export async function registerProgressionRefreshTests(ctx) {
     }
   });
 
-  // -- (8) refreshFlowDetail: stale out-of-order response must not regress -----
+  // -- (11) refreshFlowDetail: stale out-of-order response must not regress -----
   // Detail fetches run concurrently (3s poll vs STATUS_UPDATE refresh) and can
   // resolve out of order. A late OLDER response carrying a stale current_step
   // must not overwrite the fresher snapshot, rewind the progression marker, or
-  // re-trigger the silent refresh.
+  // re-arm the fallback.
   await checkAsync("progression: a stale out-of-order detail response does not regress the marker", async () => {
     resetProgressionState("F1");
     app.state.flowDetailReqSeq = 0;
@@ -406,18 +465,22 @@ export async function registerProgressionRefreshTests(ctx) {
       await p2;
       await flush();
       assert.equal(app.state.flowProgressionMarker.currentStep, "analyze");
-      assert.equal(historyCalls.length, 1, "the real advance fires exactly one silent refresh");
-      // Now the OLDER request (seq=1) resolves LATE with the stale snapshot.
+      // The advance armed the fallback; with no WS increment it fires once.
+      await waitGrace();
+      assert.equal(historyCalls.length, 1, "the real advance fires exactly one fallback rebuild");
+      // Now the OLDER request (seq=1) resolves LATE with the stale snapshot. The
+      // seq guard drops it before the detector, so the marker holds and nothing re-arms.
       flowResolvers[0]({
         flow: { flow_id: "F1", current_step: "discovery", current_step_index: 0, status: "running" },
         machine_id: "m1",
       });
       await p1;
       await flush();
+      await waitGrace();
       assert.equal(app.state.flowProgressionMarker.currentStep, "analyze",
         "a stale older response must not rewind the progression marker");
       assert.equal(historyCalls.length, 1,
-        "a stale older response must not fire a second silent refresh");
+        "a stale older response must not fire a second fallback rebuild");
       assert.equal(app.state.flowDetail && app.state.flowDetail.current_step, "analyze",
         "a stale older response must not overwrite the fresher flow detail");
     } finally {
@@ -425,7 +488,7 @@ export async function registerProgressionRefreshTests(ctx) {
     }
   });
 
-  // -- (9) cross-lifecycle stale response (close/reopen the SAME flow) ---------
+  // -- (12) cross-lifecycle stale response (close/reopen the SAME flow) ---------
   // openFlowView/doCloseFlowView reset the seq counters to 0 each lifecycle. A
   // high-seq fetch still in flight from a PRIOR open of the same flow would pass
   // the selectedFlowId check on resolution (same flowId), apply its stale
@@ -495,11 +558,14 @@ export async function registerProgressionRefreshTests(ctx) {
       assert.equal(app.state.flowDetailAppliedSeq, 1,
         "the prior-lifecycle response must not bump the applied seq and suppress future polls");
     } finally {
+      // Drop any fallback the fresh advance (marker null → analyze was a first
+      // observation, so none should be armed, but be defensive) may have left.
+      app.cancelProgressionGrace();
       globalThis.fetch = saved;
     }
   });
 
-  // -- (10) a failing silent refresh must not strand an in-flight first open ---
+  // -- (13) a failing silent refresh must not strand an in-flight first open ---
   // openFlowView fires a normal full load (shows the Loading placeholder) and a
   // step advance can fire a SILENT refresh before that first-open resolves. The
   // silent path must NOT bump the shared conversation epoch up-front: if it did,

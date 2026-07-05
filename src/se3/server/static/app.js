@@ -67,6 +67,40 @@ const state = {
   // reset to null on openFlowView / doCloseFlowView so a prior flow's baseline
   // can never misjudge a freshly-opened flow.
   flowProgressionMarker: null,
+  // Absolute, monotonic count of WS increments that actually landed new records
+  // into the OPEN flow's conversation via applyHistoryData's running-flow branch
+  // (append with non-empty `fresh`, or a `mode:full` replacement). It is the
+  // authoritative "the WS push path is alive for this flow" signal the grace
+  // timer below reads: a real analyze-frame delivered through /ws/ui bumps it.
+  // Chosen over comparing flowConversationRecords.length because that length is
+  // also moved by non-WS mutations (optimistic local echo, reconcileLocalEchoes,
+  // a silent full rebuild) — this counter rises ONLY on a genuine WS landing, so
+  // "did the WS deliver an increment during the grace window" is a clean
+  // seq0→now delta. Deliberately NOT reset on openFlowView / doCloseFlowView:
+  // the grace timer is always cancelled on flow switch/close (cancelProgressionGrace),
+  // so a stale prior-flow count can never be compared across flows, and an
+  // absolute counter needs no per-lifecycle bookkeeping.
+  flowConversationAppendSeq: 0,
+  // Pending grace-timer state for the progression fallback. When the open flow
+  // is observed to advance, we no longer rebuild immediately (issue #209's root
+  // cause — a starved daemon _push_loop — is fixed by #243/#244, so the WS delta
+  // now arrives on its own); instead we start a grace window and only rebuild if
+  // the WS push failed to deliver an increment within it. These hold the pending
+  // setTimeout id, the flow it targets, and the flowConversationAppendSeq snapshot
+  // taken when the timer was scheduled (compared against the live counter when it
+  // fires). All three are cleared by cancelProgressionGrace() — on a fresh
+  // advance (rescheduled to the newest step), and on openFlowView / doCloseFlowView.
+  progressionGraceTimer: null,
+  progressionGraceFlowId: null,
+  progressionGraceAppendSeqAtSchedule: 0,
+  // Grace-window length (ms) before the fallback silent rebuild fires. 5000ms is
+  // far above the healthy push latency (daemon poll_interval=0.4s; an analyze
+  // increment lands via /ws/ui in ~1.9s under load) yet far below the threshold
+  // at which an operator would perceive a freeze. Held as a configurable state
+  // field (not a hardcoded literal) so the DOM-stub tests — which use real
+  // setTimeout, no fake timers — can shrink it to a few ms and cover both the
+  // healthy and fallback paths quickly and deterministically.
+  progressionGraceMs: 5000,
   // Monotonic request-sequence guard for refreshFlowDetail. Each /api/flows/{id}
   // fetch claims the next `flowDetailReqSeq`; a response is applied only when its
   // claimed seq is strictly greater than `flowDetailAppliedSeq` (the highest seq
@@ -1598,6 +1632,9 @@ function openFlowView(flowId) {
   // establishes a baseline (the full first-open load already shows everything);
   // a prior flow's current_step/status must never trigger a refresh here.
   state.flowProgressionMarker = null;
+  // Cancel any grace timer left pending from the prior flow so its fallback
+  // rebuild can never fire against this freshly-opened flow.
+  cancelProgressionGrace();
   // Reset the detail request-sequence guard so this flow's fetches start fresh.
   // A still-in-flight fetch from a PRIOR lifecycle — including a prior open of
   // this same flow — is dropped on resolution by the flowDetailViewGen check
@@ -1676,6 +1713,9 @@ function doCloseFlowView() {
   state.flowConversationProgress = null;
   // Clear the progression baseline so a later openFlowView starts fresh.
   state.flowProgressionMarker = null;
+  // Cancel any pending grace timer so a closed flow never fires a fallback
+  // rebuild against a view that is no longer open.
+  cancelProgressionGrace();
   // Reset the detail request-sequence guard alongside the marker.
   state.flowDetailReqSeq = 0;
   state.flowDetailAppliedSeq = 0;
@@ -2147,13 +2187,27 @@ function noteDetailFetchFailure(message) {
   }
 }
 
-// Cause-immune fallback: detect that a flow advanced and silently rebuild the
-// open conversation. This does NOT fix the underlying incremental-push freeze
-// (step-switch / retry boundaries where the WS history_data append channel goes
-// quiet); it leans on two reliably-observable facts instead — the sidebar's
-// current_step always updates when the flow really moves forward, and a full
-// non-incremental /api/history reload (the silent path) always restores the
-// display. So we use the former as the trigger and the latter as the remedy.
+// Cancel a pending progression grace timer and clear its bookkeeping. Idempotent
+// (a no-op when nothing is pending), so it is safe to call unconditionally from
+// a fresh-advance reschedule and from openFlowView / doCloseFlowView.
+function cancelProgressionGrace() {
+  if (state.progressionGraceTimer != null) {
+    clearTimeout(state.progressionGraceTimer);
+  }
+  state.progressionGraceTimer = null;
+  state.progressionGraceFlowId = null;
+  state.progressionGraceAppendSeqAtSchedule = 0;
+}
+
+// Fallback-when-the-WS-goes-quiet: detect that the open flow advanced and, if
+// the WS push path fails to deliver the increment on its own, silently rebuild
+// the conversation. Issue #209's root cause — the daemon _push_loop starved
+// under a heavy root so incremental history_data never went out — is FIXED by
+// #243/#244 (the push side now reads engine headers off the event loop), so on
+// a step switch / retry the WS delta now arrives on its own within ~2s. This is
+// therefore no longer a trigger-on-every-advance workaround but a FAILURE
+// SAFETY NET: on a detected advance we start a grace window and only fire the
+// silent rebuild if no WS increment landed for this flow before it elapses.
 //
 // Compares `flow`'s current_step / current_step_index / status against the held
 // baseline (`state.flowProgressionMarker`). The first observation of a flow
@@ -2180,12 +2234,18 @@ function noteDetailFetchFailure(message) {
 // retry/resume status transition is the real signal that captures the same-step
 // retry case.
 // If the advanced flow is the one currently open (`state.selectedFlowId`
-// matches), a single silent full rebuild is fired. The baseline is updated on
-// every call regardless, so the same snapshot delivered twice (3s poll + WS)
-// triggers at most once per advance, and a steady-state flow with no advance
-// triggers zero refreshes. Only the conversation region and its state are
-// touched — the reply region (draft / focus / textarea height) is never read or
-// written here.
+// matches), we snapshot flowConversationAppendSeq and arm a grace timer instead
+// of rebuilding immediately. On a fresh advance any earlier pending timer is
+// cancelled and re-armed against the newest step, so a real multi-step burst
+// observes the latest step and a duplicate snapshot (marker already updated ⇒
+// not advanced) neither re-arms nor re-fires — at most one rebuild per advance.
+// When the timer elapses it rebuilds ONLY if the flow is still open and the WS
+// append counter has not moved past the snapshot (the push path stayed silent);
+// otherwise it skips, leaving the live WS append as the sole update — zero
+// rebuilds on the healthy path. The baseline marker is updated on every call
+// regardless, and a steady-state flow with no advance arms nothing. Only the
+// conversation region and its state are touched — the reply region (draft /
+// focus / textarea height) is never read or written here or in the callback.
 function maybeRefreshConversationOnProgression(flow) {
   if (!flow || typeof flow !== "object") return;
   const flowId = flow.flow_id;
@@ -2226,7 +2286,27 @@ function maybeRefreshConversationOnProgression(flow) {
   // at most once.
   state.flowProgressionMarker = { flowId, currentStep, currentStepIndex, status };
   if (advanced && state.selectedFlowId === flowId) {
-    loadFlowConversation(flowId, { silent: true });
+    // Re-arm from a clean slate: cancel any timer still pending from an earlier
+    // advance so a real burst of steps observes only the newest one and cannot
+    // stack multiple fallbacks.
+    cancelProgressionGrace();
+    const seqAtSchedule = state.flowConversationAppendSeq;
+    state.progressionGraceFlowId = flowId;
+    state.progressionGraceAppendSeqAtSchedule = seqAtSchedule;
+    state.progressionGraceTimer = setTimeout(() => {
+      // The pending timer just fired: drop the reference so cancelProgressionGrace
+      // is a no-op and a future advance can re-arm cleanly.
+      state.progressionGraceTimer = null;
+      state.progressionGraceFlowId = null;
+      state.progressionGraceAppendSeqAtSchedule = 0;
+      // Skip the fallback when the flow is no longer open, or when the WS push
+      // path already delivered an increment for it during the grace window
+      // (append counter moved past the snapshot) — the live append is the update.
+      if (state.selectedFlowId !== flowId) return;
+      if (state.flowConversationAppendSeq > seqAtSchedule) return;
+      // WS stayed silent through the whole window: rebuild once as the safety net.
+      loadFlowConversation(flowId, { silent: true });
+    }, state.progressionGraceMs);
   }
 }
 
@@ -3870,12 +3950,19 @@ function applyHistoryData(msg) {
       // running-flow consumer.
       if (!fresh.length) return;            // all duplicates — skip entirely
       merged = state.flowConversationRecords.concat(fresh);
+      // A real WS increment landed for the open flow — mark the push path alive
+      // so a pending progression grace timer skips its fallback rebuild. Only
+      // this genuine-append path counts (the all-duplicates case returned above).
+      state.flowConversationAppendSeq += 1;
     } else {
       state.flowConversationEpoch += 1;
       merged = records;
       // Full push = new server bundle generation; the held delta cursor is now
       // stale, so invalidate it (mirrors the history-view branch above).
       state.flowConversationProgress = null;
+      // A mode:full WS push also delivered fresh authoritative records for the
+      // open flow, so it likewise counts as the push path being alive.
+      state.flowConversationAppendSeq += 1;
     }
     // When the daemon's authoritative user record lands, drop the matching
     // optimistic local echo so the reply is shown once. A mid-list removal
@@ -11989,6 +12076,7 @@ if (typeof module !== "undefined" && module.exports) {
     // Cause-immune progression-refresh fallback (G2) — exposed for the DOM-stub
     // tests in tests/frontend/progression_refresh.test.mjs.
     maybeRefreshConversationOnProgression,
+    cancelProgressionGrace,
     refreshFlowDetail,
     openHistorySession,
     closeHistory,

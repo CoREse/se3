@@ -1,8 +1,8 @@
 id: '249'
 description: 之前为了解决修了n轮修不好的discovery步骤后聊天记录不显示的问题，弄了一个workaround方案，就是在discovery结束后自动模拟一下退出重进。然而这个有个问题：它还是会让当前聊天界面位置变化（会跑到现在的聊天位置的上面一段）。另外，下面的整体token用量统计，还是得等到真退出再重进才显示。
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-03T10:17:06.179094'
-updated_at: '2026-07-03T10:17:06.179094'
+updated_at: '2026-07-05T12:29:23.528888'
 type: bug
