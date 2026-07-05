@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ..engine.display import render_text
 from ..engine.merge.runtime_sync import DEST_HASH_UNAVAILABLE
@@ -846,12 +846,63 @@ def _backfill_resolved_source_issues(
     return resolved
 
 
+def _acquire_merge_lock_with_callbacks(
+    lock,
+    on_lock_wait: Optional[Callable[[], None]],
+    on_lock_acquired: Optional[Callable[[], None]],
+) -> None:
+    """Acquire *lock* (blocking), optionally surfacing a "waiting for lock" state.
+
+    With no ``on_lock_wait`` callback this is exactly
+    ``lock.acquire(blocking=True)`` — the legacy unconditional blocking acquire —
+    so ``se3 merge`` (and any caller that passes no callbacks) is behaviourally
+    unchanged, including the queue-and-wait semantics.
+
+    When ``on_lock_wait`` IS provided, the lock is first probed non-blocking so
+    the caller can distinguish "acquired immediately" (lock free / stale) from
+    "must queue behind a live holder": only the latter fires ``on_lock_wait``
+    (before blocking) and, once the block returns, ``on_lock_acquired``. A stale
+    lock (dead holder) reclaims via the blocking acquire without a real wait, so
+    it does NOT surface a wait state either. Callback exceptions are swallowed so
+    a display/bookkeeping hook can never change the merge's exit code.
+    """
+    if on_lock_wait is None:
+        lock.acquire(blocking=True)
+        return
+
+    from .merge.merge_lock import MergeLockBusy, MergeLockStale
+
+    try:
+        lock.acquire(blocking=False)
+        return  # lock was free — acquired immediately, no wait to surface
+    except MergeLockStale:
+        # Holder PID is dead: the blocking acquire reclaims it without a real
+        # wait, so we do not fire on_lock_wait for this path.
+        lock.acquire(blocking=True)
+        return
+    except MergeLockBusy:
+        pass  # a live holder owns it — fall through to the wait+block path
+
+    try:
+        on_lock_wait()
+    except Exception:  # noqa: BLE001 - callback must never break the merge
+        logger.debug("on_lock_wait callback failed", exc_info=True)
+    lock.acquire(blocking=True)
+    if on_lock_acquired is not None:
+        try:
+            on_lock_acquired()
+        except Exception:  # noqa: BLE001 - callback must never break the merge
+            logger.debug("on_lock_acquired callback failed", exc_info=True)
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "fast",
     delete_merged: bool = True,
     strict_runtime_sync: bool = False,
     project_root: Optional[Path] = None,
+    on_lock_wait: Optional[Callable[[], None]] = None,
+    on_lock_acquired: Optional[Callable[[], None]] = None,
 ) -> int:
     """Run the merge command.
 
@@ -863,6 +914,16 @@ def run_merge(
             the merge sequence. When False (default), collisions are bypassed
             via sidecar files and the sequence continues.
         project_root: Project root directory. Auto-detected if None.
+        on_lock_wait: Optional callback fired once, BEFORE blocking, when the
+            main-worktree merge lock is already held by a live holder and this
+            merge must queue for it. Lets a caller (the worktree merge-back)
+            surface a "等待主分支锁" sub-state while it waits. Not called when the
+            lock is free or stale (acquired without a real wait). Defaults to
+            None, in which case the lock is acquired with the legacy
+            unconditional blocking acquire and behaviour is unchanged.
+        on_lock_acquired: Optional callback fired once, AFTER a contended
+            blocking acquire returns (i.e. only on the path that fired
+            ``on_lock_wait``), so the caller can clear the wait sub-state.
 
     Returns:
         Exit code (0 for success, non-zero for failure).
@@ -997,7 +1058,15 @@ def run_merge(
     # must NOT report a clean success even if the orchestrator's report does.
     stash_pop_incomplete = False
     try:
-        with MergeLock(lock_root, blocking=True):
+        # Blocking acquisition (queue-and-wait) is unchanged when no callbacks
+        # are supplied; ``_acquire_merge_lock_with_callbacks`` only adds a
+        # non-blocking probe so a worktree merge-back can surface "等待主分支锁"
+        # before it queues. We manage the lock explicitly (acquire + finally
+        # release) instead of a ``with`` block so the acquisition can run the
+        # probe-then-callback path while keeping the same release guarantee.
+        lock = MergeLock(lock_root, blocking=True)
+        _acquire_merge_lock_with_callbacks(lock, on_lock_wait, on_lock_acquired)
+        try:
             # Stashing happens INSIDE the lock so two racing ``se3 merge``
             # invocations cannot interleave; the second blocks at lock
             # acquisition above and only proceeds once the first has
@@ -1017,7 +1086,7 @@ def run_merge(
                 delete_merged=delete_merged,
                 strict_runtime_sync=strict_runtime_sync,
                 # The CLI wrapper already holds the merge lock via the
-                # surrounding ``with`` block, so the orchestrator must
+                # surrounding acquire above, so the orchestrator must
                 # NOT re-acquire — fcntl.flock on a second fd of the
                 # same file from the same process would surface as
                 # ``MergeLockBusy`` (the legacy contract here was that
@@ -1037,6 +1106,10 @@ def run_merge(
                     stash_pop_incomplete = _fast_stash_pop(
                         project_root, stash_label, stash_audit_messages,
                     )
+        finally:
+            # Mirror the previous ``with MergeLock(...)`` __exit__ — release the
+            # lock on every exit path, including an orchestrator exception.
+            lock.release()
     except MergeLockBusy as exc:
         render_text(
             f"Another `se3 merge` is in progress (lock held by pid={exc.holder_pid}).\n"

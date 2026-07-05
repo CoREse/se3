@@ -3354,10 +3354,199 @@ def _finalize_worktree_source_issue(
         pass
 
 
+def _worktree_merge_anchor_step(
+    flow: FlowInstance,
+) -> Optional[Tuple[str, str, str]]:
+    """Resolve ``(step_id, step_type, status)`` of the flow's final step.
+
+    The merging / waiting-for-lock lifecycle anchors written during the merge-
+    back are attached to the completed flow's LAST step so they group into that
+    step's existing transcript region (rather than spawning a stray region). The
+    captured status is the step's own terminal status, reused as the value of the
+    failure-path clearing anchor so the transcript falls back to the real state
+    instead of freezing on "合并中". Returns ``None`` when no step is resolvable.
+    """
+    state = flow.state
+    step_id = state.current_step_id
+    if not step_id and state.step_history:
+        step_id = state.step_history[-1]
+    if not step_id:
+        return None
+    step = state.steps.get(step_id)
+    step_type = (
+        step.step_type.value if step is not None and step.step_type else "unknown"
+    )
+    status = (
+        step.status.value if step is not None and step.status else "completed"
+    )
+    return step_id, step_type, status
+
+
+def _mark_worktree_merging(
+    worktree_path: Path,
+) -> Tuple[Optional[FlowInstance], Optional[Tuple[str, str, str]]]:
+    """Best-effort: flag the worktree flow as merging and anchor a "合并中" row.
+
+    Loads the worktree's own ``engine.json``, sets ``merging=True``, persists it
+    (so the daemon aggregator — which already re-homes the worktree's active
+    engine.json onto the main root — surfaces "合并中" on the completed flow while
+    the trailing merge runs), and writes a streaming ``merging`` anchor onto the
+    flow's final step. Returns ``(flow, anchor)`` for the caller to reuse in the
+    lock-wait callbacks and the failure-path clear. Every failure is swallowed —
+    merge-status display must never affect the merge's exit code.
+    """
+    try:
+        flow = PersistenceManager(worktree_path).load_flow()
+    except Exception:
+        logger.debug(
+            "failed to load worktree flow for merging flag", exc_info=True
+        )
+        return None, None
+    if flow is None:
+        return None, None
+    anchor = _worktree_merge_anchor_step(flow)
+    flow.merging = True
+    try:
+        PersistenceManager(worktree_path).save_flow(flow)
+    except Exception:
+        logger.debug(
+            "failed to persist merging=True for worktree flow", exc_info=True
+        )
+    if anchor is not None:
+        step_id, step_type, _status = anchor
+        try:
+            from ..engine.chat_history import record_merging
+
+            record_merging(
+                project_root=worktree_path,
+                flow_id=flow.flow_id,
+                step_id=step_id,
+                step_type=step_type,
+            )
+        except Exception:
+            logger.debug("failed to record merging anchor", exc_info=True)
+    return flow, anchor
+
+
+def _make_worktree_lock_wait_callbacks(
+    worktree_path: Path,
+    flow: Optional[FlowInstance],
+    anchor: Optional[Tuple[str, str, str]],
+) -> Tuple[Optional[Callable[[], None]], Optional[Callable[[], None]]]:
+    """Build ``(on_lock_wait, on_lock_acquired)`` callbacks for ``run_merge``.
+
+    They reuse the completed flow's ``waiting_for_lock`` sub-state to express
+    "等待主分支锁" during the blocking main-lock acquisition inside ``run_merge``:
+    ``on_lock_wait`` sets ``waiting_for_lock=True`` + persists + writes a "等待锁"
+    anchor; ``on_lock_acquired`` clears it + writes the clearing anchor. Returns
+    ``(None, None)`` when the flow / anchor could not be resolved so ``run_merge``
+    falls back to its plain blocking acquire. All hook failures are swallowed so
+    the merge is never affected.
+    """
+    if flow is None or anchor is None:
+        return None, None
+    step_id, step_type, _status = anchor
+
+    def on_lock_wait() -> None:
+        flow.waiting_for_lock = True
+        try:
+            PersistenceManager(worktree_path).save_flow(flow)
+        except Exception:
+            logger.debug(
+                "failed to persist waiting_for_lock=True (worktree merge)",
+                exc_info=True,
+            )
+        try:
+            from ..engine.chat_history import record_waiting_for_lock
+
+            record_waiting_for_lock(
+                project_root=worktree_path,
+                flow_id=flow.flow_id,
+                step_id=step_id,
+                step_type=step_type,
+                message="正在等待主分支锁释放以合并 worktree 分支…",
+            )
+        except Exception:
+            logger.debug(
+                "failed to record waiting_for_lock anchor (worktree merge)",
+                exc_info=True,
+            )
+
+    def on_lock_acquired() -> None:
+        flow.waiting_for_lock = False
+        try:
+            PersistenceManager(worktree_path).save_flow(flow)
+        except Exception:
+            logger.debug(
+                "failed to persist waiting_for_lock=False (worktree merge)",
+                exc_info=True,
+            )
+        try:
+            from ..engine.chat_history import record_lock_acquired
+
+            record_lock_acquired(
+                project_root=worktree_path,
+                flow_id=flow.flow_id,
+                step_id=step_id,
+                step_type=step_type,
+            )
+        except Exception:
+            logger.debug(
+                "failed to record lock-acquired anchor (worktree merge)",
+                exc_info=True,
+            )
+
+    return on_lock_wait, on_lock_acquired
+
+
+def _clear_worktree_merging(
+    worktree_path: Path,
+    flow: Optional[FlowInstance],
+    anchor: Optional[Tuple[str, str, str]],
+) -> None:
+    """Best-effort: clear the merging flag on a still-present worktree flow.
+
+    Called after ``run_merge`` whenever the worktree survives (a failed merge, or
+    the rare success that could not archive+delete): sets ``merging=False``,
+    persists it, and supersedes the streamed "合并中" anchor with a ``step_status``
+    anchor carrying the flow's own terminal step status, so the live transcript
+    falls back to the completed state instead of freezing on "合并中". A successful
+    ``--delete-merged`` removes the worktree entirely, so this is never called for
+    it (the flag and its anchors vanish with the archived engine.json). All
+    failures swallowed — never changes the merge's exit code.
+    """
+    if flow is None:
+        return
+    flow.merging = False
+    try:
+        PersistenceManager(worktree_path).save_flow(flow)
+    except Exception:
+        logger.debug(
+            "failed to persist merging=False for worktree flow", exc_info=True
+        )
+    if anchor is not None:
+        step_id, step_type, status = anchor
+        try:
+            from ..engine.chat_history import record_step_status
+
+            record_step_status(
+                project_root=worktree_path,
+                flow_id=flow.flow_id,
+                step_id=step_id,
+                step_type=step_type,
+                status=status,
+            )
+        except Exception:
+            logger.debug(
+                "failed to record merging-clear anchor", exc_info=True
+            )
+
+
 def _finalize_worktree_merge(
     project_root: Path,
     worktree_branch: str,
     worktree_original_branch: Optional[str],
+    worktree_path: Path,
 ) -> int:
     """Merge a completed ``--worktree`` run's branch back into the main repo.
 
@@ -3368,6 +3557,14 @@ def _finalize_worktree_merge(
     main-worktree mutex (blocking), so this trailing merge serialises against
     synchronous runs and other merges. No extra diff-confirmation interaction is
     issued — a ``--worktree`` run is meant to be invisible to the user.
+
+    While the merge runs, the worktree flow's own ``engine.json`` is flagged
+    ``merging=True`` (and, if the merge blocks queueing for the main lock,
+    ``waiting_for_lock=True`` via injected ``run_merge`` callbacks) so the web UI
+    shows the completed flow as "合并中 / 合并中·等待主分支锁" rather than sitting on
+    "已完成". On success the worktree (and the flag) is archived away; on failure
+    the flag is cleared here. All of this status bookkeeping is best-effort and
+    never alters the merge exit code.
 
     Returns the merge exit code (0 on success).
     """
@@ -3392,7 +3589,33 @@ def _finalize_worktree_merge(
         f"back into '{target}'…",
         title="Worktree Merge",
     )
-    rc = run_merge(branches=[worktree_branch], project_root=project_root)
+
+    # Flag the worktree flow as merging and wire the lock-wait callbacks BEFORE
+    # handing off to run_merge, then clear the flag afterward if the worktree was
+    # preserved. Everything here is best-effort — see the helpers.
+    wt_flow, anchor = _mark_worktree_merging(worktree_path)
+    on_lock_wait, on_lock_acquired = _make_worktree_lock_wait_callbacks(
+        worktree_path, wt_flow, anchor
+    )
+
+    rc = 1
+    try:
+        rc = run_merge(
+            branches=[worktree_branch],
+            project_root=project_root,
+            on_lock_wait=on_lock_wait,
+            on_lock_acquired=on_lock_acquired,
+        )
+    finally:
+        # Clear the merging flag whenever the worktree survives the merge. A
+        # successful --delete-merged has already archived+removed the worktree
+        # (engine.json and all), so ``worktree_path`` is gone and this is
+        # skipped; a failed merge (or an unexpected run_merge exception, with rc
+        # left at its 1 sentinel) leaves the worktree in place, so we actively
+        # clear merging=True and supersede the "合并中" anchor.
+        if worktree_path.exists():
+            _clear_worktree_merging(worktree_path, wt_flow, anchor)
+
     if rc == 0:
         display_success(f"Merged '{worktree_branch}' back into '{target}'.")
     else:
@@ -3563,7 +3786,7 @@ def run_worktree_mode(
         # this trailing call handles the merge-failure case — the issue stays
         # in-progress so a later retry-merge can resolve it.
         merge_rc = _finalize_worktree_merge(
-            project_root, worktree_branch, original_branch
+            project_root, worktree_branch, original_branch, worktree_path
         )
         _finalize_worktree_source_issue(
             project_root, worktree_path, FlowStatus.COMPLETED.value, merge_rc
@@ -3837,7 +4060,7 @@ def _resume_worktree_run(
             return 1
 
         merge_rc = _finalize_worktree_merge(
-            project_root, worktree_branch, worktree_original_branch
+            project_root, worktree_branch, worktree_original_branch, worktree_path
         )
         # Resolve on successful merge is owned by run_merge; this handles the
         # merge-failure case (issue stays in-progress for a retry-merge).

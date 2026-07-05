@@ -141,8 +141,15 @@ class TestRunWorktreeMode:
         assert kwargs["is_worktree_mode"] is True
         assert kwargs["worktree_branch"] == wt_branch
         assert kwargs["worktree_original_branch"] == "main"
-        # success → merge the isolation branch back into main repo
-        mock_merge.assert_called_once_with(branches=[wt_branch], project_root=Path("/repo"))
+        # success → merge the isolation branch back into main repo. The
+        # worktree path here is a fake (its engine.json cannot be loaded), so
+        # the merging-status lock-wait callbacks resolve to None.
+        mock_merge.assert_called_once_with(
+            branches=[wt_branch],
+            project_root=Path("/repo"),
+            on_lock_wait=None,
+            on_lock_acquired=None,
+        )
 
     @patch("se3.commands.merge_cmd.run_merge")
     @patch("se3.commands.run.run_flow", return_value=2)
@@ -298,8 +305,14 @@ class TestResumeRun:
         assert kwargs["acquire_main_lock"] is False
         assert kwargs["flow_id"] == "wt-1"
         assert Path(kwargs["project_root"]).name == "worktree-x-1"
-        # success → trailing merge back
-        mock_merge.assert_called_once_with(tmp_path, "worktree/x-1", "main")
+        # success → trailing merge back (now also threads the worktree path so
+        # the finalizer can flag that flow's engine.json as merging)
+        mock_merge.assert_called_once_with(
+            tmp_path,
+            "worktree/x-1",
+            "main",
+            tmp_path / "se3" / "worktrees" / "worktree-x-1",
+        )
 
     @patch("se3.commands.run._finalize_worktree_merge")
     @patch("se3.commands.run.run_flow", return_value=3)
@@ -364,8 +377,11 @@ class TestResumeRun:
         assert kwargs["acquire_main_lock"] is False
         assert kwargs["flow_id"] == "wt-1"
         assert Path(kwargs["project_root"]) == wt_root
-        # Merge driven from the resolved MAIN repo, not the worktree.
-        mock_merge.assert_called_once_with(Path("/main"), "worktree/x-1", "main")
+        # Merge driven from the resolved MAIN repo, not the worktree; the
+        # worktree path is still threaded through for the merging-status flag.
+        mock_merge.assert_called_once_with(
+            Path("/main"), "worktree/x-1", "main", wt_root
+        )
 
     @patch("se3.commands.run.run_flow", return_value=0)
     def test_self_worktree_run_ignores_completed(self, mock_run_flow, tmp_path):
