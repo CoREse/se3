@@ -179,6 +179,30 @@ class TestFindWorktreeSourceIssueByBranch:
             run.find_worktree_source_issue_by_branch(tmp_path, "feat-c") == "007"
         )
 
+    def test_paused_flow_not_mapped(self, tmp_path):
+        # A --from-issue --worktree flow that PAUSED still holds its issue
+        # IN_PROGRESS. If an operator merges that partial-work branch by hand,
+        # the scanner must NOT map it back to the source issue — resolving it
+        # would mark unfinished work done.
+        _write_worktree_engine_json(
+            tmp_path, name="wt-p", branch="feat-p",
+            source_issue_id="013", status="paused",
+        )
+        assert (
+            run.find_worktree_source_issue_by_branch(tmp_path, "feat-p") is None
+        )
+
+    def test_failed_flow_not_mapped(self, tmp_path):
+        # A FAILED flow's issue is reverted to OPEN elsewhere; merging its
+        # branch must never resolve it.
+        _write_worktree_engine_json(
+            tmp_path, name="wt-f", branch="feat-f",
+            source_issue_id="014", status="failed",
+        )
+        assert (
+            run.find_worktree_source_issue_by_branch(tmp_path, "feat-f") is None
+        )
+
     def test_no_match_returns_none(self, tmp_path):
         _write_worktree_engine_json(
             tmp_path, name="wt-1", branch="feat-1", source_issue_id="042",
@@ -300,16 +324,29 @@ class TestBackfillResolvedSourceIssues:
         assert resolved == []
         assert mgr.load(issue.id).status == IssueStatus.OPEN
 
-    def test_only_newly_merged_branches_considered(self, tmp_path):
-        # A branch present in the map but NOT newly-merged is skipped.
+    def test_only_merged_branches_considered(self, tmp_path):
+        # A branch present in the map but NOT merged this run is skipped.
         issue_id = _make_in_progress_issue(tmp_path, "resolve me")
         resolved = _backfill_resolved_source_issues(
-            tmp_path, newly_merged=[], branch_issue_map={"feat-1": issue_id},
+            tmp_path, merged_branches=[], branch_issue_map={"feat-1": issue_id},
         )
         assert resolved == []
         assert (
             IssueManager(tmp_path).load(issue_id).status
             == IssueStatus.IN_PROGRESS
+        )
+
+    def test_already_ancestor_branch_resolved(self, tmp_path):
+        # An already-ancestor branch is merged back by definition; when its
+        # source issue is still IN_PROGRESS (an earlier merge landed but never
+        # ran this backfill) a retry MUST resolve it.
+        issue_id = _make_in_progress_issue(tmp_path, "leftover, already merged")
+        resolved = _backfill_resolved_source_issues(
+            tmp_path, ["feat-anc"], {"feat-anc": issue_id},
+        )
+        assert resolved == [issue_id]
+        assert (
+            IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
         )
 
     def test_empty_map_returns_empty(self, tmp_path):
@@ -350,6 +387,33 @@ class TestRunMergeBackfill:
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
         )
 
+    def test_merge_of_paused_branch_does_not_resolve(self, tmp_path, monkeypatch):
+        # An operator hand-merges the partial-work branch of a PAUSED
+        # --from-issue --worktree flow. The merge succeeds but the flow never
+        # COMPLETED, so the issue must stay IN_PROGRESS (unfinished work must
+        # not read as resolved).
+        _init_repo(tmp_path)
+        issue_id = _make_in_progress_issue(tmp_path, "paused feature")
+        _write_worktree_engine_json(
+            tmp_path, name="wt-p", branch="feat-paused",
+            source_issue_id=issue_id, status="paused",
+        )
+
+        report = _make_report(
+            merged_branches=["feat-paused"],
+            newly_merged_branches=["feat-paused"],
+        )
+        captured: list[dict] = []
+        _patch_merge(monkeypatch, report, captured)
+
+        exit_code = run_merge(["feat-paused"], project_root=tmp_path)
+        assert exit_code == 0
+        assert "Resolved source issue" not in _merge_complete_body(captured)
+        assert (
+            IssueManager(tmp_path).load(issue_id).status
+            == IssueStatus.IN_PROGRESS
+        )
+
     def test_retry_merge_of_leftover_branch_resolves(self, tmp_path, monkeypatch):
         # req 2: a leftover branch (first merge failed → issue still
         # in-progress) is later re-merged via `se3 merge <branch>`; the
@@ -376,6 +440,53 @@ class TestRunMergeBackfill:
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
         )
 
+    def test_stash_pop_incomplete_still_backfills(self, tmp_path, monkeypatch):
+        # req 1/req 2 decoupling: the branch merge landed (report.success) but
+        # restoring the operator's unrelated WIP failed (stash-pop-incomplete),
+        # so run_merge returns 1. delete_merged has by now archived the
+        # worktree and deleted the isolation branch, so the documented
+        # `se3 merge <branch>` retry would fail at _branch_exists. Therefore the
+        # source issue MUST be backfilled to RESOLVED within THIS run despite
+        # the non-zero exit — otherwise it strands IN_PROGRESS with no path out.
+        _init_repo(tmp_path)
+        issue_id = _make_in_progress_issue(tmp_path, "worktree feature")
+        _write_worktree_engine_json(
+            tmp_path, name="wt-1", branch="feat-1",
+            source_issue_id=issue_id, status="completed",
+        )
+
+        report = _make_report(
+            merged_branches=["feat-1"], newly_merged_branches=["feat-1"],
+        )
+        captured: list[dict] = []
+        _patch_merge(monkeypatch, report, captured)
+        # Force the stash-pop-incomplete recovery path: pretend the operator
+        # had WIP, a stash was taken, and the post-merge pop did not finalize.
+        monkeypatch.setattr(
+            "se3.commands.merge_cmd._has_user_uncommitted_changes",
+            lambda _root: True,
+        )
+        monkeypatch.setattr(
+            "se3.commands.merge_cmd._fast_stash_dirty",
+            lambda _root, _msgs: "se3-fast-stash-label",
+        )
+        monkeypatch.setattr(
+            "se3.commands.merge_cmd._fast_stash_pop",
+            lambda _root, _label, _msgs: True,  # pop did NOT finalize
+        )
+
+        exit_code = run_merge(["feat-1"], strategy="fast", project_root=tmp_path)
+        assert exit_code == 1  # stash-pop-incomplete surfaces as failure
+
+        recovery = next(
+            e for e in captured
+            if e["title"] == "Merge: Stash-Pop Recovery Incomplete"
+        )
+        assert f"Resolved source issue #{issue_id}" in recovery["content"]
+        assert (
+            IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
+        )
+
     def test_success_without_source_issue_no_backfill_line(
         self, tmp_path, monkeypatch
     ):
@@ -391,9 +502,12 @@ class TestRunMergeBackfill:
         assert exit_code == 0
         assert "Resolved source issue" not in _merge_complete_body(captured)
 
-    def test_already_ancestor_branch_not_backfilled(self, tmp_path, monkeypatch):
-        # A branch that was already an ancestor (no fresh merge commit) is NOT
-        # in newly_merged, so its issue is left as-is for this run.
+    def test_retry_already_ancestor_branch_resolves(self, tmp_path, monkeypatch):
+        # A leftover branch whose first merge landed the commit but never ran
+        # the backfill (stash-pop-incomplete early return, or a crash between
+        # commit and backfill) is retried via `se3 merge <branch>`. The branch
+        # now classifies as already-ancestor; the backfill MUST still resolve
+        # its still-IN_PROGRESS source issue — the guaranteed retry path.
         _init_repo(tmp_path)
         issue_id = _make_in_progress_issue(tmp_path, "already merged")
         _write_worktree_engine_json(
@@ -411,8 +525,8 @@ class TestRunMergeBackfill:
 
         exit_code = run_merge(["feat-anc"], project_root=tmp_path)
         assert exit_code == 0
-        assert "Resolved source issue" not in _merge_complete_body(captured)
+        assert f"Resolved source issue #{issue_id}" in _merge_complete_body(captured)
         assert (
             IssueManager(tmp_path).load(issue_id).status
-            == IssueStatus.IN_PROGRESS
+            == IssueStatus.RESOLVED
         )

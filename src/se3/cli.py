@@ -172,6 +172,8 @@ def run_cmd(
         resume_run,
         get_project_root,
         handle_resume_interactive,
+        from_issue_flow_state_exists,
+        snapshot_from_issue_flow_ids,
         SE3_DIR,
     )
     from .engine.prompt_history import get_prompt_history
@@ -289,6 +291,18 @@ def run_cmd(
             render_text(f"Error: {e}", title="Error")
             raise typer.Exit(1)
 
+        # Snapshot the flow_ids that ALREADY carry this source issue BEFORE
+        # dispatching, so the post-dispatch self-recovery below can tell state
+        # THIS dispatch persisted from a stale prior run's leftover engine.json.
+        # The main-repo engine.json is a single reused slot: after an earlier
+        # `--from-issue <id>` run of the SAME (now resolved/open) issue completed,
+        # it still carries that source_issue_id until the next run overwrites it —
+        # so an id-only existence check would see the stale slot and wrongly skip
+        # the revert when the current dispatch fails before persisting anything.
+        prior_flow_ids = snapshot_from_issue_flow_ids(
+            project_root, bool(worktree), issue.id
+        )
+
         # Run flow with issue description. Honour --worktree: an isolated
         # from-issue run goes through run_worktree_mode (which threads
         # source_issue_id through and merges back on success) so the
@@ -315,15 +329,35 @@ def run_cmd(
                 output_format=output_format,
             )
 
-        # Issue finalization is NOT done here: exit_code is an unreliable
+        # Issue finalization is NOT done here on exit_code: it is an unreliable
         # signal — in json output mode a pause also returns 0, which used to
         # resolve the issue on the very first pause. It also never fired on a
         # daemon/`--resume` continuation, which re-enters via run_flow in a new
-        # process without this wrapper. Finalization is instead owned by the
-        # flow's true terminal state: run_flow._finalize_sync_source_issue for
-        # synchronous runs, and the trailing se3 merge for --worktree runs
+        # process without this wrapper. Terminal finalization is instead owned by
+        # the flow's true terminal state: run_flow._finalize_sync_source_issue
+        # for synchronous runs, and the trailing se3 merge for --worktree runs
         # (only a successful merge-back resolves). Both key off the persisted
         # flow.source_issue_id, so they are process-independent.
+        #
+        # ONE gap the terminal hooks cannot cover: a dispatch that fails BEFORE
+        # any flow state is persisted (fork_worktree/get_current_branch raising,
+        # or a pre-flow ConfigError). No engine.json ever carries this
+        # source_issue_id, so nothing downstream can finalize it and the issue
+        # would stay IN_PROGRESS forever — re-running --from-issue is then blocked
+        # by the in-progress gate. Revert the OPEN→IN_PROGRESS transition we just
+        # made, but ONLY when no persisted flow carries the issue: a paused flow
+        # (or a COMPLETED worktree flow whose merge failed, held IN_PROGRESS for a
+        # retry-merge) owns its own finalize and must not be clobbered here.
+        if exit_code != 0 and not from_issue_flow_state_exists(
+            project_root, bool(worktree), issue.id, prior_flow_ids
+        ):
+            try:
+                current = issue_mgr.load(issue.id)
+                if current is not None and current.status == IssueStatus.IN_PROGRESS:
+                    issue_mgr.update_status(issue.id, IssueStatus.OPEN)
+            except Exception:
+                # Best-effort self-recovery — never mask the dispatch's exit code.
+                pass
         raise typer.Exit(exit_code)
 
     if resume or flow_id:

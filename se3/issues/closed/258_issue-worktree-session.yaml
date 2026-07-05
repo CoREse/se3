@@ -1,8 +1,8 @@
 id: '258'
 description: 如果从issue启动一个worktree session，跑完后那个issue是in-progress状态，这是一个回归，怀疑是当时改智能merge
   worktree session的那个修改或者是那个issue特别处理的修改导致的，应该是在主branch里留下的是in-progress，最后合并就按照主branch来了。
-status: open
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-05T12:26:41.922995'
-updated_at: '2026-07-05T12:26:41.922995'
+updated_at: '2026-07-05T17:53:24.605465'

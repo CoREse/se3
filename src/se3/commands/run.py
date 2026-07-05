@@ -23,7 +23,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import typer
 from rich.rule import Rule
@@ -2942,6 +2942,16 @@ def _run_flow_impl(
                 # decision chip, no prompt — unchanged from the prior behavior).
                 flow.status = FlowStatus.FAILED
                 persistence.save_flow(flow)
+                # This is one of the two most common FAILED exits (the other is
+                # the Abort decision below); both return early from inside the
+                # step loop and never reach the bottom terminal FAILED branch,
+                # so a synchronous from-issue run would otherwise leave its
+                # source issue stranded IN_PROGRESS. Finalize here off the
+                # persisted terminal status (worktree flows are a no-op — the
+                # wrapper handles their FAILED→open off the same persisted state).
+                _finalize_sync_source_issue(
+                    project_root, flow, is_worktree_mode, resolved=False
+                )
                 return 1
 
             # Dual-channel failure pause. _resolve_step_failure_action
@@ -3008,6 +3018,13 @@ def _run_flow_impl(
             else:
                 flow.status = FlowStatus.FAILED
                 persistence.save_flow(flow)
+                # 'Abort flow' also returns early from inside the step loop and
+                # bypasses the bottom terminal branch; finalize the source issue
+                # here so a synchronous from-issue abort returns it to OPEN
+                # (worktree flows are a no-op — see the max-retries branch above).
+                _finalize_sync_source_issue(
+                    project_root, flow, is_worktree_mode, resolved=False
+                )
                 return 1
 
         # Handle REVISION_NEEDED status from CONFIRM step
@@ -3085,9 +3102,21 @@ def _finalize_sync_source_issue(
     ``se3 merge`` (only a successful merge-back should resolve), so this only
     handles the non-worktree case. Any failure is swallowed — issue
     bookkeeping must never change the flow's exit code.
+
+    The worktree-skip guard consults the *persisted* ``flow.is_worktree_mode``
+    (restored from engine.json) in addition to the caller's ``is_worktree_mode``
+    argument. On the daemon/``--resume`` path ``_resume_worktree_run`` re-enters
+    ``run_flow`` with a flow that was serialized as worktree-mode, so keying off
+    the persisted flag guarantees a resumed worktree flow can never reach the
+    synchronous finalize (which would mutate the worktree checkout's own issue
+    store) regardless of what the caller passed.
     """
     source_issue_id = getattr(flow, "source_issue_id", None)
-    if not source_issue_id or is_worktree_mode:
+    if (
+        not source_issue_id
+        or is_worktree_mode
+        or getattr(flow, "is_worktree_mode", False)
+    ):
         return
     try:
         from ..engine.issue_manager import IssueManager, IssueStatus
@@ -3104,6 +3133,112 @@ def _finalize_sync_source_issue(
     except Exception:
         # Best-effort only — never let issue bookkeeping affect the return code.
         pass
+
+
+def _collect_from_issue_flow_ids(
+    project_root: Path, worktree: bool, source_issue_id: Optional[str]
+) -> Set[str]:
+    """Collect the ``flow_id`` of every persisted engine.json carrying ``source_issue_id``.
+
+    This exists to tell a *stale prior run's* leftover state apart from state
+    the *current* dispatch actually persisted. The main-repo
+    ``se3/state/engine.json`` is a single reused slot: after a ``--from-issue A``
+    run completes it still carries A's ``source_issue_id`` until the NEXT run's
+    first ``save_flow`` overwrites it. Keying "does a persisted flow own this
+    issue's finalize?" on ``source_issue_id`` alone would therefore mistake that
+    stale slot for the current dispatch's state — so a flow is identified by its
+    (unique) ``flow_id`` and the caller diffs a before/after snapshot: only a
+    ``flow_id`` present AFTER the dispatch but not BEFORE was written by it.
+
+    An engine.json missing a ``flow_id`` is keyed by its file path so an
+    unchanged stale file compares equal across the snapshot (never counted as
+    "new"). Corrupt/unreadable engine.json files are treated as absent.
+    """
+    if not source_issue_id:
+        return set()
+    sid = str(source_issue_id)
+    ids: Set[str] = set()
+
+    def _collect(engine_file: Path) -> None:
+        try:
+            with open(engine_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError, OSError):
+            return
+        if not (
+            isinstance(data, dict)
+            and str(data.get("source_issue_id") or "") == sid
+        ):
+            return
+        fid = data.get("flow_id")
+        ids.add(str(fid) if fid else f"__nofid__:{engine_file}")
+
+    if worktree:
+        # A --worktree flow persists its state in its own worktree engine.json
+        # (live under se3/worktrees/*, or copied into .archive/ once merged/GC'd).
+        # A failure before fork_worktree never creates any of these.
+        worktrees_dir = project_root / SE3_DIR / "worktrees"
+        if not worktrees_dir.is_dir():
+            return ids
+        for ef in worktrees_dir.glob("*/se3/state/engine.json"):
+            _collect(ef)
+        for ef in (worktrees_dir / ".archive").glob("*/se3/state/engine.json"):
+            _collect(ef)
+        return ids
+
+    _collect(project_root / SE3_DIR / "state" / "engine.json")
+    return ids
+
+
+def snapshot_from_issue_flow_ids(
+    project_root: Path, worktree: bool, source_issue_id: Optional[str]
+) -> Set[str]:
+    """Snapshot (BEFORE dispatch) the flow_ids already carrying ``source_issue_id``.
+
+    The ``--from-issue`` wrapper takes this snapshot before dispatching so that
+    :func:`from_issue_flow_state_exists` can later report only flows *this*
+    dispatch persisted, ignoring a prior run's leftover single-slot engine.json
+    (see :func:`_collect_from_issue_flow_ids` for why the id alone is unsafe).
+    """
+    return _collect_from_issue_flow_ids(project_root, worktree, source_issue_id)
+
+
+def from_issue_flow_state_exists(
+    project_root: Path,
+    worktree: bool,
+    source_issue_id: Optional[str],
+    prior_flow_ids: Optional[Set[str]] = None,
+) -> bool:
+    """True when THIS dispatch persisted a flow carrying ``source_issue_id``.
+
+    The ``--from-issue`` wrapper transitions the issue OPEN→IN_PROGRESS *before*
+    dispatching the flow. Finalization then rides entirely on the flow reaching a
+    persisted terminal state, so a dispatch that fails BEFORE any flow state is
+    written — ``get_current_branch`` / ``fork_worktree`` raising in
+    ``run_worktree_mode``, or a pre-flow ``ConfigError`` / flow-load failure in
+    ``run_flow`` — would strand the issue IN_PROGRESS with no resume or merge
+    path able to finalize it. This lets the wrapper tell that apart from a flow
+    that genuinely reached a persisted state (paused / failed / completed): only
+    the former self-recovers by reverting the issue to OPEN.
+
+    A flow that merely paused, or a COMPLETED worktree flow whose merge failed
+    (deliberately left IN_PROGRESS for a retry-merge), owns its own finalize and
+    MUST NOT be reverted — both persist an engine.json carrying the
+    ``source_issue_id``, so this returns ``True`` for them and the wrapper leaves
+    them alone.
+
+    ``prior_flow_ids`` is the caller's pre-dispatch snapshot (see
+    :func:`snapshot_from_issue_flow_ids`). A persisted flow counts as "owned by
+    this dispatch" only when its ``flow_id`` is absent from that snapshot — this
+    is what stops a *stale* prior run's leftover main-repo engine.json (single
+    reused slot, still carrying the same ``source_issue_id`` from an earlier
+    completed run of the same issue) from being mistaken for the current
+    dispatch's state and wrongly suppressing the revert.
+    """
+    if not source_issue_id:
+        return False
+    current = _collect_from_issue_flow_ids(project_root, worktree, source_issue_id)
+    return bool(current - set(prior_flow_ids or ()))
 
 
 def _slugify_for_branch(text: str) -> str:
@@ -3504,14 +3639,19 @@ def find_worktree_source_issue_by_branch(
     returns its ``source_issue_id``.
 
     Unlike :func:`find_resumable_worktree_runs`, COMPLETED flows are NOT
-    excluded: by the time ``se3 merge`` resolves a source issue the flow has
-    (by construction) already reached COMPLETED, and a leftover branch whose
-    first merge failed may only be re-merged long after its worktree was GC'd
-    into ``.archive`` — both cases must still map back to the source issue.
+    excluded — they are in fact the *only* flows this returns: by the time
+    ``se3 merge`` resolves a source issue the flow must (by construction) have
+    already reached COMPLETED, and a leftover branch whose first merge failed
+    may only be re-merged long after its worktree was GC'd into ``.archive`` —
+    both cases still map back to the source issue. A non-COMPLETED flow (e.g.
+    a paused ``--from-issue`` run whose partial-work branch an operator merges
+    by hand) is deliberately *not* mapped: resolving its source issue would
+    mark unfinished work done. So the status gate is a correctness guard, not
+    an optimisation.
 
-    Returns ``None`` when no matching flow is found or the branch carried no
-    source issue. Corrupt / unreadable engine.json files are skipped rather
-    than raised, so a single bad file never blocks the merge's backfill.
+    Returns ``None`` when no matching COMPLETED flow is found or the branch
+    carried no source issue. Corrupt / unreadable engine.json files are skipped
+    rather than raised, so a single bad file never blocks the merge's backfill.
     """
     if not branch:
         return None
@@ -3539,6 +3679,13 @@ def find_worktree_source_issue_by_branch(
         if not data.get("is_worktree_mode"):
             continue
         if data.get("worktree_branch") != branch:
+            continue
+        # Only a COMPLETED flow's source issue may be resolved by a merge:
+        # merging a paused/partial branch by hand must not mark unfinished
+        # work done. The finalizing merge and any retry both run over a flow
+        # that has already reached COMPLETED, so this gate never blocks a
+        # legitimate backfill.
+        if data.get("status", "unknown") != FlowStatus.COMPLETED.value:
             continue
         source_issue_id = data.get("source_issue_id")
         if source_issue_id:
@@ -3629,6 +3776,10 @@ def _resume_worktree_run(
         exit_code = run_flow(
             project_root=worktree_path,
             flow_id=run["id"],
+            # This is a worktree flow: keep the flag truthful so run_flow's
+            # terminal finalize is correctly recognized as worktree-mode (its
+            # resolve is owned by the trailing run_merge, not the sync finalize).
+            is_worktree_mode=True,
             prompt_history=prompt_history,
             output_format=output_format,
             acquire_main_lock=False,

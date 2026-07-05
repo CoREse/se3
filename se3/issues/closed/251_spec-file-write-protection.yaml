@@ -1,8 +1,8 @@
 id: '251'
 description: spec file write protection已经过期，要删掉，找找还有没有和spec相关的遗留没删干净
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-07-03T11:56:45.263563'
-updated_at: '2026-07-03T11:56:45.263563'
+updated_at: '2026-07-05T17:36:12.090385'
 type: bug

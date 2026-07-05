@@ -790,16 +790,28 @@ def _map_branches_to_source_issues(
 
 def _backfill_resolved_source_issues(
     project_root: Path,
-    newly_merged: list[str],
+    merged_branches: list[str],
     branch_issue_map: dict[str, str],
 ) -> list[str]:
-    """Resolve source issues of newly-merged worktree branches (idempotent).
+    """Resolve source issues of successfully-merged worktree branches (idempotent).
 
     This is the single choke point for "merge succeeded → source issue
     resolved". It serves both a worktree run's own finalizing merge (a
     ``--from-issue --worktree`` run merging back on COMPLETED) and a later
     manual ``se3 merge <leftover-branch>`` retry of a branch whose first merge
     failed — both reach a resolved issue through exactly this code.
+
+    *merged_branches* MUST include both newly-merged AND already-ancestor
+    branches. A branch classified as already-ancestor is, by definition,
+    already reachable from the target branch — its commits ARE merged back.
+    When such a branch's source issue is still IN_PROGRESS it means an earlier
+    merge landed the commit but never ran this backfill (the merge returned
+    non-zero via the stash-pop-incomplete recovery path, or the process died
+    between the merge commit and the backfill). The guaranteed retry path is
+    ``se3 merge <branch>``, on which the branch re-classifies as already-
+    ancestor; excluding that bucket would strand the issue IN_PROGRESS with no
+    automated route to RESOLVED. The IN_PROGRESS guard below keeps this safe:
+    a normal repeat merge of an already-resolved branch is a no-op.
 
     Idempotent and best-effort: only an IN_PROGRESS issue is transitioned to
     RESOLVED (an already-resolved issue from a repeat merge, or one re-opened
@@ -818,7 +830,7 @@ def _backfill_resolved_source_issues(
         return resolved
 
     seen_issue_ids: set[str] = set()
-    for branch in newly_merged:
+    for branch in merged_branches:
         issue_id = branch_issue_map.get(branch)
         if not issue_id or issue_id in seen_issue_ids:
             continue
@@ -1069,6 +1081,27 @@ def run_merge(
             "  git stash list             -- the kept pre-merge stash",
             "  git stash show -p stash@{0}",
         ]
+        # Back-fill source-issue resolution HERE too, before the non-zero
+        # return. The branch merge itself landed (``report.success``) — the
+        # commits are now ancestors of the target branch — so a
+        # ``--from-issue --worktree`` finalizing merge has, for source-issue
+        # purposes, "merged back". The failure being reported is purely the
+        # stash-pop recovery of the OPERATOR's unrelated WIP, not of the merged
+        # branch. If we skipped backfill on this path the issue would strand
+        # IN_PROGRESS with no automated route to RESOLVED: delete_merged has by
+        # now archived the worktree and deleted the isolation branch, so the
+        # documented ``se3 merge <branch>`` retry would fail at
+        # ``_branch_exists`` ("branch does not exist"). Backfill is idempotent
+        # and best-effort (only IN_PROGRESS issues transition; failures are
+        # swallowed) so it cannot alter this path's non-zero exit code.
+        newly, already = _split_merged_buckets(report, project_root)
+        resolved_issue_ids = _backfill_resolved_source_issues(
+            project_root, newly + already, branch_issue_map
+        )
+        if resolved_issue_ids:
+            lines.append("")
+            for issue_id in resolved_issue_ids:
+                lines.append(f"Resolved source issue #{issue_id}")
         render_text(
             "\n".join(lines),
             title="Merge: Stash-Pop Recovery Incomplete",
@@ -1141,12 +1174,16 @@ def run_merge(
                 for b, reason in cr.skipped_not_merged:
                     lines.append(f"  - {b}: {reason}")
         # Backfill "merge succeeded → source issue resolved" for any branch
-        # that produced a fresh merge commit and carried a source_issue_id
-        # (captured pre-merge above). Only IN_PROGRESS issues transition, so
-        # this is idempotent across repeat merges and covers both the worktree
-        # run's finalizing merge and a later retry of a leftover branch.
+        # this run merged back — BOTH freshly-committed (``newly``) and
+        # already-ancestor (``already``) — that carried a source_issue_id
+        # (captured pre-merge above). Already-ancestor branches must be
+        # included: on a retry of a leftover branch whose first merge landed
+        # the commit but died before this backfill, the branch re-classifies
+        # as already-ancestor, and skipping that bucket would strand its issue
+        # IN_PROGRESS with no automated path to RESOLVED. Only IN_PROGRESS
+        # issues transition, so this stays idempotent across repeat merges.
         resolved_issue_ids = _backfill_resolved_source_issues(
-            project_root, newly, branch_issue_map
+            project_root, newly + already, branch_issue_map
         )
         if resolved_issue_ids:
             lines.append("")

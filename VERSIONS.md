@@ -85,6 +85,16 @@
 
 
 
+
+## 11.11.2 - 2026-07-06
+
+- Fix source issue staying in-progress when a `--from-issue --worktree` flow is paused then resumed to completion by a new process (daemon or `se3 run --resume`)
+- Base issue finalization on the persisted flow.source_issue_id and flow terminal state instead of the original wrapper process's exit code, so finalization is consistent across original-process, resume, and daemon completion
+- Stop prematurely resolving the source issue on the first pause, which previously happened because json-mode pause returns exit code 0
+- Resolve worktree source issues only when the flow COMPLETED and its commits landed as ancestors of the origin branch; on merge failure keep the issue in-progress and print an explicit notice (merge failed, issue kept in-progress, branch retained, how to retry with `se3 merge`)
+- Backfill still-in-progress source issues to resolved when a later `se3 merge` run lands the branch commits as origin-branch ancestors, including already-ancestor leftover branches from earlier interrupted merges
+- Return a FAILED worktree or sync flow's source issue to open on the resume path, matching existing non-resume semantics
+- Add regression tests covering pause->resume->COMPLETED+merge->resolved, merge-failure kept in-progress, merge-retry backfill, stash-pop-incomplete non-zero exit with commits already landed, no-resolve-on-pause, FAILED->open, and sync from-issue resume finalization
 ## 11.11.1 - 2026-07-05
 
 - Stop eagerly rebuilding the open flow's conversation on step progression; wait for the WS incremental path to deliver new records first

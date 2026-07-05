@@ -1,0 +1,7 @@
+id: '259'
+description: worktree的session执行完正在merge（包括等待主branch释放锁）时，需要在webui的聊天记录和列表页面显示正在merge。
+status: open
+tags: []
+source: human
+created_at: '2026-07-05T22:03:37.361518'
+updated_at: '2026-07-05T22:03:37.361518'

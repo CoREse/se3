@@ -190,16 +190,173 @@ class TestFromIssueWrapperNoExitCodeFinalize:
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
         )
 
-    def test_nonzero_exit_does_not_reopen_via_wrapper(self, tmp_path):
-        # A non-zero return likewise must not be interpreted by the wrapper;
-        # FAILED→open is decided inside run_flow (mocked here), so the issue
-        # remains in-progress and the exit code is passed through faithfully.
+    def test_nonzero_exit_with_persisted_flow_does_not_reopen_via_wrapper(
+        self, tmp_path
+    ):
+        # A non-zero return from a run that DID persist flow state must not be
+        # interpreted by the wrapper: FAILED→open is decided inside run_flow's
+        # terminal branch (mocked out here). Because a persisted engine.json
+        # carries this source_issue_id, the wrapper's early-failure self-recovery
+        # does not fire, so the issue is left exactly as run_flow left it
+        # (in-progress here, since the real finalize is stubbed).
         issue_id = IssueManager(tmp_path).create(
             description="Fix the thing", type="bug"
         ).id
-        result, _ = self._invoke(tmp_path, 1)
+
+        def fake_run_flow(*_a, **kwargs):
+            # Model a real run that reached a persisted terminal state carrying
+            # the source issue — this is what makes the wrapper defer to
+            # run_flow's own finalize rather than reverting.
+            state_dir = tmp_path / "se3" / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "engine.json").write_text(
+                json.dumps(
+                    {
+                        "flow_id": "sync-1",
+                        "status": "failed",
+                        "source_issue_id": kwargs.get("source_issue_id"),
+                        "is_worktree_mode": False,
+                    }
+                )
+            )
+            return 1
+
+        runner = CliRunner()
+        with patch(
+            "se3.commands.run.get_project_root", return_value=tmp_path
+        ), patch("se3.commands.run.run_flow", side_effect=fake_run_flow):
+            result = runner.invoke(
+                app, ["run", "--from-issue", "1"], catch_exceptions=False
+            )
 
         assert result.exit_code == 1
+        assert (
+            IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
+        )
+
+
+class TestFromIssueEarlyDispatchFailureReverts:
+    """A dispatch that fails BEFORE any flow state is persisted strands the
+    source issue IN_PROGRESS with no resume/merge path to finalize it. The
+    wrapper must self-recover by reverting the OPEN→IN_PROGRESS transition it
+    just made — but only when no persisted flow carries the issue."""
+
+    def test_sync_pre_flow_failure_reverts_issue_to_open(self, tmp_path):
+        # run_flow returns non-zero WITHOUT persisting any engine.json (models a
+        # pre-flow ConfigError / flow-load failure). No flow carries the issue,
+        # so the wrapper reverts it to OPEN — otherwise re-running --from-issue
+        # would be blocked forever by the in-progress gate.
+        issue_id = IssueManager(tmp_path).create(
+            description="Fix the thing", type="bug"
+        ).id
+
+        runner = CliRunner()
+        with patch(
+            "se3.commands.run.get_project_root", return_value=tmp_path
+        ), patch("se3.commands.run.run_flow", return_value=2):
+            result = runner.invoke(
+                app, ["run", "--from-issue", "1"], catch_exceptions=False
+            )
+
+        assert result.exit_code == 2
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN
+
+    def test_sync_pre_flow_failure_reverts_despite_stale_prior_engine_json(
+        self, tmp_path
+    ):
+        # Regression: the main-repo engine.json is a single reused slot. An
+        # EARLIER `--from-issue A` run of the same issue completed and left a
+        # stale engine.json still carrying source_issue_id=A (overwritten only by
+        # the NEXT run's first save_flow). A re-run of `--from-issue A` (allowed
+        # once A is resolved/open) that fails BEFORE persisting any new flow state
+        # must still revert A to OPEN — the stale slot must NOT be mistaken for
+        # this dispatch's own persisted flow and suppress the revert (else A is
+        # stranded IN_PROGRESS forever, blocking future --from-issue A).
+        issue_id = IssueManager(tmp_path).create(
+            description="Fix the thing", type="bug"
+        ).id
+        state_dir = tmp_path / "se3" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "engine.json").write_text(
+            json.dumps(
+                {
+                    "flow_id": "stale-prior-run",
+                    "status": "completed",
+                    "source_issue_id": issue_id,
+                    "is_worktree_mode": False,
+                }
+            )
+        )
+
+        runner = CliRunner()
+        with patch(
+            "se3.commands.run.get_project_root", return_value=tmp_path
+        ), patch("se3.commands.run.run_flow", return_value=2):
+            result = runner.invoke(
+                app, ["run", "--from-issue", "1"], catch_exceptions=False
+            )
+
+        assert result.exit_code == 2
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN
+
+    def test_worktree_fork_failure_reverts_issue_to_open(self, tmp_path):
+        # run_worktree_mode returns 1 before any worktree/engine.json exists
+        # (e.g. fork_worktree raised). No persisted flow carries the issue → the
+        # wrapper reverts it to OPEN.
+        issue_id = IssueManager(tmp_path).create(
+            description="Fix the thing", type="bug"
+        ).id
+
+        runner = CliRunner()
+        with patch(
+            "se3.commands.run.get_project_root", return_value=tmp_path
+        ), patch("se3.commands.run.run_worktree_mode", return_value=1):
+            result = runner.invoke(
+                app,
+                ["run", "--from-issue", "1", "--worktree"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 1
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN
+
+    def test_worktree_completed_merge_failure_is_not_reverted(self, tmp_path):
+        # A COMPLETED worktree flow whose trailing merge FAILED returns non-zero,
+        # but its worktree engine.json persists the source_issue_id and the issue
+        # is deliberately kept IN_PROGRESS for a retry-merge. The wrapper must NOT
+        # revert it — the retry-merge path owns its resolve.
+        issue_id = IssueManager(tmp_path).create(
+            description="Fix the thing", type="bug"
+        ).id
+        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-1"
+
+        # The current dispatch itself persists the worktree engine.json (COMPLETED)
+        # and then its trailing merge fails → rc 1. Writing it inside the mocked
+        # run_worktree_mode (rather than before the wrapper runs) mirrors reality:
+        # this dispatch's own flow_id is NOT in the pre-dispatch snapshot, so it is
+        # correctly recognized as state owned by this run and left in-progress.
+        def fake_worktree(*_a, **_kw):
+            _write_wt_engine(
+                wt_path,
+                status="completed",
+                source_issue_id=issue_id,
+                branch="worktree/fix-1",
+            )
+            return 1
+
+        runner = CliRunner()
+        with patch(
+            "se3.commands.run.get_project_root", return_value=tmp_path
+        ), patch("se3.commands.run.run_worktree_mode", side_effect=fake_worktree):
+            result = runner.invoke(
+                app,
+                ["run", "--from-issue", "1", "--worktree"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 1
+        # Persisted worktree flow carries the issue → not reverted; stays
+        # in-progress so `se3 merge <branch>` can still resolve it.
         assert (
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
         )
@@ -496,6 +653,34 @@ class TestSyncFromIssueResumeFinalizeE2E:
         flow.state.current_step_id = "impl-1"
         return FlowInstance.from_dict(flow.to_dict())
 
+    def _persisted_exhausted_flow(self, issue_id):
+        """Like ``_persisted_running_flow`` but the current step has already
+        reached max retries, so the next run_step→FAILED drives run_flow into
+        the mid-loop auto-fail branch (an early ``return 1`` that never reaches
+        the bottom terminal branch).
+
+        The step is left PENDING (not RUNNING/FAILED): the resume prologue resets
+        retry_count to 0 for a RUNNING/FAILED step, which would defeat the
+        max-retries branch — a PENDING step keeps its persisted retry budget."""
+        flow = FlowInstance(
+            flow_id="sync-fail-1",
+            task_description="Fix the thing",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            source_issue_id=issue_id,
+        )
+        flow.state.selected_steps = [StepType.IMPLEMENT]
+        flow.state.current_step_index = 0
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.PENDING,
+            step_id="impl-1",
+            retry_count=3,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = "impl-1"
+        return FlowInstance.from_dict(flow.to_dict())
+
     def test_resume_completed_resolves_source_issue(self, tmp_path):
         issue_id = _make_in_progress_issue(tmp_path)
         flow = self._persisted_running_flow(issue_id)
@@ -525,3 +710,66 @@ class TestSyncFromIssueResumeFinalizeE2E:
         assert (
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
         )
+
+    def test_resume_mid_loop_max_retries_reopens_issue(self, tmp_path):
+        # req 5 on the sync path, exercised through a REAL mid-loop FAILED exit
+        # rather than the helper: when a step exhausts its retries run_flow sets
+        # FAILED and does an early `return 1` from inside the step loop, never
+        # reaching the bottom terminal branch. That early exit must still return
+        # the source issue to OPEN (else it is stranded IN_PROGRESS forever and
+        # re-running --from-issue is blocked by the in-progress gate).
+        issue_id = _make_in_progress_issue(tmp_path)
+        flow = self._persisted_exhausted_flow(issue_id)
+
+        mock_pm = MagicMock()
+        mock_pm.load_flow.return_value = flow
+        mock_pm.load_flow_by_id.return_value = flow
+
+        mock_sm = MagicMock()
+        # The step fails again with retries already exhausted → auto-fail branch.
+        mock_sm.run_step.return_value = StepStatus.FAILED
+
+        with patch("se3.commands.run.PersistenceManager", return_value=mock_pm), \
+             patch("se3.commands.run.StateMachine", return_value=mock_sm), \
+             patch("se3.commands.run.STEP_HANDLERS", {}), \
+             patch("se3.engine.step_renderers.render_step_output"), \
+             patch("se3.commands.run.render_full"):
+            rc = run.resume_run(tmp_path, "sync-fail-1", output_format="cli")
+
+        assert rc == 1
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN
+
+    def test_resume_mid_loop_abort_reopens_issue(self, tmp_path):
+        # The 'Abort flow' decision is the other mid-loop FAILED exit that
+        # returns early from inside the step loop; it too must reopen the source
+        # issue. Retries are NOT exhausted here (retry_count 0), so the failure
+        # routes through the decision resolver, which we drive to 'abort'.
+        issue_id = _make_in_progress_issue(tmp_path)
+        flow = self._persisted_running_flow(issue_id)
+        # _persisted_running_flow leaves the step RUNNING; the resume prologue
+        # flips it to PENDING and zeroes retry_count — exactly the state that
+        # routes a subsequent failure through the abort decision path.
+
+        mock_pm = MagicMock()
+        mock_pm.load_flow.return_value = flow
+        mock_pm.load_flow_by_id.return_value = flow
+
+        mock_sm = MagicMock()
+        mock_sm.run_step.return_value = StepStatus.FAILED
+
+        with patch("se3.commands.run.PersistenceManager", return_value=mock_pm), \
+             patch("se3.commands.run.StateMachine", return_value=mock_sm), \
+             patch("se3.commands.run.STEP_HANDLERS", {}), \
+             patch(
+                 "se3.commands.run._resolve_step_failure_action",
+                 return_value=("decision", "abort"),
+             ), \
+             patch(
+                 "se3.commands.run._failure_decision_to_choice", return_value=2
+             ), \
+             patch("se3.engine.step_renderers.render_step_output"), \
+             patch("se3.commands.run.render_full"):
+            rc = run.resume_run(tmp_path, "sync-1", output_format="cli")
+
+        assert rc == 1
+        assert IssueManager(tmp_path).load(issue_id).status == IssueStatus.OPEN

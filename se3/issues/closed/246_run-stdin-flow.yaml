@@ -48,11 +48,11 @@ description: '现场(flow 20260701-110644_b2f4c0ee,已用 /proc + fdinfo 完整�
 
   关联:本次实际后果 = flow 假死 40h + 全局 merge 阻塞 + webui 误报 RUNNING(用户以为 self_check 卡死)。恢复方法:到
   pts/23 终端应答或 Ctrl+C 结束,再 se3 run --resume(state 在 17:54 有完整 checkpoint,无损)。'
-status: open
+status: closed
 tags: []
 source: human
 created_at: '2026-07-02T10:18:53.663240'
-updated_at: '2026-07-02T10:18:53.663240'
+updated_at: '2026-07-05T17:35:56.055232'
 title: 终端 run 的裸 stdin 提示可无限挂起 flow:不写 call 文件、不改状态、还扣着 merge.lock
 priority: high
 type: bug
