@@ -761,6 +761,79 @@ def _fast_stash_pop(
     return False
 
 
+def _map_branches_to_source_issues(
+    project_root: Path, branches: list[str]
+) -> dict[str, str]:
+    """Capture ``{branch: source_issue_id}`` BEFORE the merge runs.
+
+    A successful ``--delete-merged`` archives then removes each merged
+    worktree, after which the ``source_issue_id`` recorded in its engine.json
+    is no longer readable from a live worktree. The mapping must therefore be
+    captured ahead of the orchestrator so the post-success backfill still has
+    the branch→issue link. Uses a lazy import of the run.py scanner to avoid a
+    circular import at module load (run.py imports from merge_cmd and vice
+    versa). Best-effort: a scan failure yields no entry for that branch, never
+    an exception.
+    """
+    from .run import find_worktree_source_issue_by_branch
+
+    mapping: dict[str, str] = {}
+    for branch in branches:
+        try:
+            issue_id = find_worktree_source_issue_by_branch(project_root, branch)
+        except Exception:  # noqa: BLE001 - mapping capture must never fail the merge
+            issue_id = None
+        if issue_id:
+            mapping[branch] = issue_id
+    return mapping
+
+
+def _backfill_resolved_source_issues(
+    project_root: Path,
+    newly_merged: list[str],
+    branch_issue_map: dict[str, str],
+) -> list[str]:
+    """Resolve source issues of newly-merged worktree branches (idempotent).
+
+    This is the single choke point for "merge succeeded → source issue
+    resolved". It serves both a worktree run's own finalizing merge (a
+    ``--from-issue --worktree`` run merging back on COMPLETED) and a later
+    manual ``se3 merge <leftover-branch>`` retry of a branch whose first merge
+    failed — both reach a resolved issue through exactly this code.
+
+    Idempotent and best-effort: only an IN_PROGRESS issue is transitioned to
+    RESOLVED (an already-resolved issue from a repeat merge, or one re-opened
+    by hand, is left untouched so re-running merge never errors), and any
+    IssueManager failure is swallowed so it can never change the merge exit
+    code. Returns the ids actually resolved, for the caller to surface.
+    """
+    resolved: list[str] = []
+    if not branch_issue_map:
+        return resolved
+    try:
+        from ..engine.issue_manager import IssueManager, IssueStatus
+
+        issue_mgr = IssueManager(project_root)
+    except Exception:  # noqa: BLE001 - backfill must never fail the merge
+        return resolved
+
+    seen_issue_ids: set[str] = set()
+    for branch in newly_merged:
+        issue_id = branch_issue_map.get(branch)
+        if not issue_id or issue_id in seen_issue_ids:
+            continue
+        seen_issue_ids.add(issue_id)
+        try:
+            issue = issue_mgr.load(issue_id)
+            if issue is None or issue.status != IssueStatus.IN_PROGRESS:
+                continue
+            issue_mgr.update_status(issue_id, IssueStatus.RESOLVED)
+            resolved.append(str(issue_id))
+        except Exception:  # noqa: BLE001 - one bad issue must not fail the merge
+            continue
+    return resolved
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "fast",
@@ -865,6 +938,12 @@ def run_merge(
                 title="Merge Error",
             )
             return 1
+
+    # Capture {branch: source_issue_id} BEFORE the orchestrator runs: a
+    # successful --delete-merged archives then removes each merged worktree,
+    # after which its engine.json (holding source_issue_id) is gone. The
+    # post-success backfill uses this map to resolve the source issue.
+    branch_issue_map = _map_branches_to_source_issues(project_root, branches)
 
     # Run the orchestrator under the main-worktree mutex so that two
     # `se3 merge` invocations (and any synchronous `se3 run` holding the
@@ -1061,6 +1140,18 @@ def run_merge(
                 lines.append("Skipped (not fully merged):")
                 for b, reason in cr.skipped_not_merged:
                     lines.append(f"  - {b}: {reason}")
+        # Backfill "merge succeeded → source issue resolved" for any branch
+        # that produced a fresh merge commit and carried a source_issue_id
+        # (captured pre-merge above). Only IN_PROGRESS issues transition, so
+        # this is idempotent across repeat merges and covers both the worktree
+        # run's finalizing merge and a later retry of a leftover branch.
+        resolved_issue_ids = _backfill_resolved_source_issues(
+            project_root, newly, branch_issue_map
+        )
+        if resolved_issue_ids:
+            lines.append("")
+            for issue_id in resolved_issue_ids:
+                lines.append(f"Resolved source issue #{issue_id}")
         render_text("\n".join(lines), title="Merge Complete")
         return 0
     elif report.rollback_failed:
