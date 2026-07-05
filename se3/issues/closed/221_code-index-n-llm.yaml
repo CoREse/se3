@@ -1,7 +1,7 @@
 id: '221'
 description: code-index加上并发功能（同时调用n个llm任务），并且commit步骤在更新code index的时候，在webui里也要显示进度（正在进行哪些文件/项目的更新等）。
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-06-26T11:05:32.572527'
-updated_at: '2026-07-06T01:38:03.953547'
+updated_at: '2026-07-06T04:29:24.361072'
