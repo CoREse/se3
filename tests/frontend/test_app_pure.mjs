@@ -3860,6 +3860,14 @@ await progressionRefreshMod.registerProgressionRefreshTests({ app, check, checkA
 const issue217AnchorMod = await import("./issue217_scroll_anchor.test.mjs");
 issue217AnchorMod.registerIssue217ScrollAnchorTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the discovery→analyze boundary scroll-anchor tests (issue #260 / G5):
+// the silent rebuild reads the persistent flowConversationFollowingBottom intent
+// so a bottom-follower drifted off the bottom by a stalled boundary increment
+// still sticks to the new bottom (no up-jump), while a genuinely scrolled-up
+// reader keeps their element-anchored viewport offset.
+const discoveryAnalyzeAnchorMod = await import("./discovery_analyze_scroll_anchor.test.mjs");
+await discoveryAnalyzeAnchorMod.registerDiscoveryAnalyzeScrollAnchorTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
@@ -5788,14 +5796,17 @@ await checkAsync("flow silent: preserves scroll position when not near the botto
   });
   await app.loadFlowConversation("F1");
 
-  // Simulate the reader scrolled UP, far from the bottom.
+  // Simulate the reader scrolled UP, far from the bottom. In production the
+  // scroll handler drops the follow-bottom intent the silent rebuild consults;
+  // set it here to model that deliberate scroll-up (#260).
   c.scrollHeight = 1000; c.clientHeight = 100; c.scrollTop = 0;
+  app.state.flowConversationFollowingBottom = false;
   setFetch({
     records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
     progress: "p1", delivery: "full",
   });
   await app.loadFlowConversation("F1", { silent: true });
-  // isNearBottom was false → must NOT yank to the bottom.
+  // The reader deliberately scrolled up → must NOT yank to the bottom.
   assert.equal(c.scrollTop, 0,
     "silent refresh must not scroll a scrolled-up reader to the bottom");
   assert.equal(app.state.flowConversationRecords.length, 2);

@@ -53,6 +53,21 @@ const state = {
   // Monotonic view-local epoch used to invalidate an in-flight REST snapshot
   // when a WS `mode: full` push replaces the authoritative bundle.
   flowConversationEpoch: 0,
+  // Persistent "the reader is following the bottom" intent for the open flow —
+  // the reliable source the silent progression rebuild uses to decide stickiness
+  // instead of the point-in-time frozen-DOM isNearBottom (issue #260). At the
+  // discovery→analyze boundary the WS increment stalls: content lands without an
+  // auto-scroll (or a large chunk arrives between the measure and the scroll), so
+  // the frozen DOM reads scrollHeight-scrollTop-clientHeight>80 and the momentary
+  // isNearBottom MISJUDGES a bottom-follower as scrolled-up — the rebuild then
+  // takes the anchor branch and pins the old tail, jumping the view up. This flag
+  // is driven by real intent signals only — a user scroll of #flow-conversation
+  // (set to isNearBottom at that moment) and every programmatic scroll-to-bottom
+  // (set true) — and is NOT clobbered by the untrustworthy frozen measurement, so
+  // a follower who merely drifted from a stalled append still counts as following
+  // and the rebuild sticks to the bottom. Reset true on open (a fresh flow scrolls
+  // to bottom). true = following the bottom; false = deliberately scrolled up.
+  flowConversationFollowingBottom: true,
   // Progression baseline for the cause-immune fallback refresh (see
   // maybeRefreshConversationOnProgression). Holds the last observed
   // { flowId, currentStep, currentStepIndex, status } so each new
@@ -1665,6 +1680,10 @@ function openFlowView(flowId) {
   // A different flow is opening: drop any progress token held for the prior
   // flow so its delta cursor can never be echoed against this flow's bundle.
   state.flowConversationProgress = null;
+  // A freshly-opened flow forces a scroll to the bottom, so it starts as a
+  // bottom-follower; a stale "scrolled up" intent from the prior flow must not
+  // make this flow's first silent rebuild anchor an old tail (issue #260).
+  state.flowConversationFollowingBottom = true;
   // Reset the progression baseline so this flow's first detail snapshot only
   // establishes a baseline (the full first-open load already shows everything);
   // a prior flow's current_step/status must never trigger a refresh here.
@@ -2049,9 +2068,20 @@ async function loadFlowConversation(flowId, opts) {
       requestEpoch = state.flowConversationEpoch;
     }
     // Measure stickiness BEFORE the render mutates scrollHeight. A first-open
-    // always scrolls to bottom; a reconnect OR a silent progression refresh only
-    // follows if already near it, preserving the reader's scroll position.
-    const stick = (incremental || silent) ? isNearBottom(container) : true;
+    // always scrolls to bottom; a reconnect follows only if already near it.
+    //
+    // A SILENT progression rebuild instead reads the persistent
+    // flowConversationFollowingBottom intent (issue #260): the frozen-DOM
+    // isNearBottom is unreliable at the discovery→analyze boundary — a stalled
+    // increment leaves a bottom-follower drifted off the bottom, so the momentary
+    // measurement misjudges them as scrolled-up and the anchor branch pins the old
+    // tail, jumping the view up. The intent flag, driven only by real scroll /
+    // scroll-to-bottom signals, still reports "following", so the rebuild sticks.
+    // It is OR-combined with the frozen measurement so a reader who genuinely sits
+    // near the bottom (flag not yet set true this lifecycle) still follows.
+    const stick = silent
+      ? (state.flowConversationFollowingBottom || isNearBottom(container))
+      : incremental ? isNearBottom(container) : true;
     // A silent refresh does a from-scratch `append=false` rebuild that clears
     // `container.innerHTML` and re-lays-out the same records — possibly at
     // DIFFERENT heights (markdown reflow, a step header appearing, a partial
@@ -2126,6 +2156,9 @@ async function loadFlowConversation(flowId, opts) {
 function scrollFlowConversationToBottom() {
   const c = $("flow-conversation");
   c.scrollTop = c.scrollHeight;
+  // Landing at the bottom (re)establishes the follow-the-bottom intent, so a
+  // subsequent silent rebuild sticks rather than anchoring the old tail (#260).
+  state.flowConversationFollowingBottom = true;
 }
 
 // --- Element-anchored scroll preservation for the silent full rebuild --------
@@ -7376,7 +7409,18 @@ function ensureStickyHeaderMounted(scroller, content) {
   if (!floatEl) {
     floatEl = buildStickyHeaderEl(scroller);
     scroller.__convStickyFloat = floatEl;
-    const onScroll = () => updateStickyHeader(scroller);
+    const onScroll = () => {
+      updateStickyHeader(scroller);
+      // A real user scroll of the running-flow conversation is the authoritative
+      // signal for the follow-the-bottom intent the silent rebuild consults
+      // (#260): scrolling up drops it, scrolling back to the bottom re-arms it.
+      // Programmatic appends grow scrollHeight without firing a scroll event, so
+      // this only ever captures deliberate reader motion. Gated to
+      // #flow-conversation — the history view has no silent progression rebuild.
+      if (scroller.id === "flow-conversation") {
+        state.flowConversationFollowingBottom = isNearBottom(scroller);
+      }
+    };
     scroller.addEventListener("scroll", onScroll);
     scroller.__convStickyOnScroll = onScroll;
     // A window resize / orientation change reflows the conversation and shifts
