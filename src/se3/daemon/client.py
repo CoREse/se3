@@ -625,6 +625,19 @@ class DaemonClient:
             )
             return True
         changed = signature != self._last_history_signature
+        # HOP-3 DEBUG (daemon change-detection → push decision): the push loop
+        # calls read_active_flows + _push_history ONLY when this returns True.
+        # If the discovery→analyze boundary appends to disk but this stays False
+        # for a whole tick, the delta is not read/sent that tick — the first
+        # candidate #260 drop hop. Logged with the flow set so a live run shows
+        # whether the boundary is seen as a change.
+        if changed:
+            logger.debug(
+                "hist-diag _history_changed=True flows=%s (push will read+send)",
+                sorted(signature),
+            )
+        else:
+            logger.debug("hist-diag _history_changed=False (debounced, no push)")
         self._last_history_signature = signature
         return changed
 
@@ -1334,6 +1347,15 @@ class DaemonClient:
         for read in reads:
             if not read.records:
                 continue
+            # HOP-3 DEBUG (daemon→server send): the actual MSG_HISTORY_DATA frame
+            # leaving the daemon. If this line appears for the analyze records but
+            # the UI never renders them, the drop is downstream (server
+            # append/broadcast or frontend); if it never appears, the drop is
+            # upstream (change-detection or read).
+            logger.debug(
+                "hist-diag _push_history SEND flow=%s mode=%s records=%d cursor=%s",
+                read.flow_id, read.mode, len(read.records), read.cursor,
+            )
             try:
                 await self._send(
                     ws,

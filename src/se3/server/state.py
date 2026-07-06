@@ -20,11 +20,14 @@ import hashlib
 import hmac
 import json
 import secrets
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from se3.daemon import protocol
+
+logger = logging.getLogger(__name__)
 
 
 def _is_worktree_session_path(project_root: object) -> bool:
@@ -724,11 +727,26 @@ class ServerState:
                 # cursor and send only a new tail; caching that tail as a full
                 # snapshot would permanently omit all older records.
                 self._history_requires_full.add(flow_id)
+                # HOP-4 DEBUG (server bundle): a first-sighting append is
+                # discarded and the flow is FLAGGED requires_full. Every later
+                # append is then dropped (below) until a full frame lands — the
+                # persistent-freeze mode. Logged so a live run reveals the flow
+                # entering this stuck state at the discovery→analyze boundary.
+                logger.debug(
+                    "hist-diag append_history DISCARD flow=%s reason=first-sighting-append "
+                    "(now flagged requires_full)",
+                    flow_id,
+                )
                 return False
             if (
                 mode == protocol.HISTORY_MODE_APPEND
                 and flow_id in self._history_requires_full
             ):
+                logger.debug(
+                    "hist-diag append_history DISCARD flow=%s reason=requires_full-set "
+                    "records=%d (stuck until a full frame)",
+                    flow_id, len(new_records),
+                )
                 return False
             if mode == protocol.HISTORY_MODE_APPEND:
                 # An ordinary append keeps the bundle ``generation`` stable so a
@@ -745,6 +763,11 @@ class ServerState:
                     # pulls the new machine's complete history.
                     del self._history_data[flow_id]
                     self._history_requires_full.add(flow_id)
+                    logger.debug(
+                        "hist-diag append_history DISCARD flow=%s reason=machine-change "
+                        "(bundle dropped, flagged requires_full)",
+                        flow_id,
+                    )
                     return False
                 # Back-fill a stable generation for an old-format bundle that the
                 # ``full`` branch never created (or that lost the field), so the
@@ -758,6 +781,11 @@ class ServerState:
                 if machine_id:
                     existing["machine_id"] = machine_id
                 existing["updated_at"] = time.time()
+                logger.debug(
+                    "hist-diag append_history APPLIED-append flow=%s records=%d "
+                    "total=%d",
+                    flow_id, len(new_records), len(existing["records"]),
+                )
                 return True
             else:
                 # Any branch that replaces the cached bundle wholesale (a true
@@ -779,6 +807,11 @@ class ServerState:
                     "generation": self._next_generation(),
                     "updated_at": time.time(),
                 }
+                logger.debug(
+                    "hist-diag append_history APPLIED-full flow=%s records=%d "
+                    "(bundle replaced, requires_full cleared)",
+                    flow_id, len(new_records),
+                )
                 return True
 
     def _next_generation(self) -> int:

@@ -1111,6 +1111,19 @@ async def _handle_message(
             # broadcasts; only a resolved ``mode: full`` pull reply is
             # suppressed.
             suppress_broadcast = resolved_pull and mode == protocol.HISTORY_MODE_FULL
+            # HOP-4 DEBUG (server → UI fanout decision): whether this frame was
+            # applied to the bundle and whether it will be broadcast to /ws/ui.
+            # ``applied=False`` on a boundary append means state.append_history
+            # discarded it (first-sighting or _history_requires_full) — the
+            # persistent-freeze mode where every increment is dropped until a
+            # full frame (exit/re-enter) arrives. ``suppress_broadcast=True``
+            # only ever legitimately fires for a resolved mode:full pull reply.
+            logger.debug(
+                "hist-diag ws HISTORY_DATA flow=%s mode=%s records=%d "
+                "applied=%s resolved_pull=%s suppress_broadcast=%s",
+                flow_id, mode, len(records), applied, resolved_pull,
+                suppress_broadcast,
+            )
             if not suppress_broadcast:
                 await _push_history_data(
                     hub, state, machine_id, flow_id, mode, records

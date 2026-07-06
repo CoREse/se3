@@ -3946,9 +3946,33 @@ function applyHistoryIndex(sessions) {
 // Push handler: incremental (or full) records for one flow. The same flow may
 // be open in both the history view and the running-flow view; each keeps its
 // own record array so they update independently without double-appending.
+// HOP-5 DEBUG (frontend applyHistoryData): opt-in console tracing of the last
+// hop — whether a broadcast history_data frame reaches the open flow view and
+// grows flowConversationAppendSeq (the counter the progression-grace fallback
+// watches). Off by default so the normal console stays clean; enable in a live
+// browser session with `localStorage.SE3_WS_DEBUG = "1"` (or set
+// `window.SE3_WS_DEBUG = true`) to confirm whether the discovery→analyze
+// increments arrive at the last hop or die upstream.
+function wsHistDebug() {
+  try {
+    if (typeof window !== "undefined" && window.SE3_WS_DEBUG) return true;
+    if (typeof localStorage !== "undefined" && localStorage.getItem("SE3_WS_DEBUG")) {
+      return true;
+    }
+  } catch (_) { /* localStorage may throw in restricted contexts */ }
+  return false;
+}
+
 function applyHistoryData(msg) {
   const records = Array.isArray(msg.records) ? msg.records : [];
   const append = msg.mode === "append";
+  if (wsHistDebug()) {
+    // eslint-disable-next-line no-console
+    console.debug(
+      "hist-diag applyHistoryData flow=%s mode=%s records=%d selectedFlow=%s appendSeq=%d",
+      msg.flow_id, msg.mode, records.length, state.selectedFlowId,
+      state.flowConversationAppendSeq);
+  }
 
   // -- history view consumer --
   if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
@@ -3992,12 +4016,26 @@ function applyHistoryData(msg) {
       // non-empty `fresh` and keeps streaming). The history consumer above has
       // already run for this frame, so returning here short-circuits only this
       // running-flow consumer.
-      if (!fresh.length) return;            // all duplicates — skip entirely
+      if (!fresh.length) {
+        if (wsHistDebug()) {
+          // eslint-disable-next-line no-console
+          console.debug(
+            "hist-diag applyHistoryData ALL-DUPLICATES flow=%s (appendSeq unchanged=%d)",
+            msg.flow_id, state.flowConversationAppendSeq);
+        }
+        return;                             // all duplicates — skip entirely
+      }
       merged = state.flowConversationRecords.concat(fresh);
       // A real WS increment landed for the open flow — mark the push path alive
       // so a pending progression grace timer skips its fallback rebuild. Only
       // this genuine-append path counts (the all-duplicates case returned above).
       state.flowConversationAppendSeq += 1;
+      if (wsHistDebug()) {
+        // eslint-disable-next-line no-console
+        console.debug(
+          "hist-diag applyHistoryData APPEND-APPLIED flow=%s fresh=%d appendSeq=%d",
+          msg.flow_id, fresh.length, state.flowConversationAppendSeq);
+      }
     } else {
       state.flowConversationEpoch += 1;
       merged = records;

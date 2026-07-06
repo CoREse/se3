@@ -591,16 +591,42 @@ class DaemonHistoryReader:
         # correctness does not hinge on catching a same-size in-place swap.
         data = read_engine_header(engine_json, active=True)
         if not isinstance(data, dict):
+            # HOP-1 DEBUG: the active engine.json parsed to None (missing /
+            # oversized-degraded-miss / caught mid-write). The flow is dropped
+            # from the active set for this tick, so no incremental read/push
+            # happens for it — a candidate #260 drop point in the dense
+            # discovery→analyze rewrite window.
+            logger.debug(
+                "hist-diag _is_still_active: flow=%s DROPPED (engine.json "
+                "unreadable/degraded) root=%s",
+                meta.flow_id, meta.project_root,
+            )
             return False
         # Confirm the engine.json still describes *this* flow.  Without this
         # check, if flow F1 completed and a different flow F2 is now the
         # active engine.json flow (status RUNNING), _is_still_active(F1_meta)
         # would read F2's RUNNING status and incorrectly return True — keeping
         # the stale F1 meta in the active set and missing F2 entirely.
+        #
+        # This read uses the stat-keyed live-engine cache: on a same-(mtime,size)
+        # middle rewrite it can return a STALE flow_id/status (see
+        # disk_json_cache), so this branch is a diagnosis blind spot — logged so a
+        # live run reveals whether a still-active flow is transiently excluded.
         if str(data.get("flow_id") or "") != meta.flow_id:
+            logger.debug(
+                "hist-diag _is_still_active: flow=%s DROPPED (engine.json "
+                "flow_id=%s mismatch — possibly a stale cached parse)",
+                meta.flow_id, data.get("flow_id"),
+            )
             return False
         status = str(data.get("status") or "")
-        return _is_active_status(status)
+        active = _is_active_status(status)
+        if not active:
+            logger.debug(
+                "hist-diag _is_still_active: flow=%s DROPPED (status=%s terminal)",
+                meta.flow_id, status,
+            )
+        return active
 
     def _index_root(
         self, root: Path, metas: List[SessionMeta], seen: Dict[str, int]
@@ -1349,6 +1375,18 @@ class DaemonHistoryReader:
                 and prev[1] >= 0                   # offset is valid
                 and not rewritten                  # rewrite check passed
             )
+            # HOP-2 DEBUG: the per-file incremental-read decision. A freshly
+            # created boundary file (02_analyze) has prev=None → full read from
+            # cursor 0; a stale/desynced cursor (cursor_lines != prev consumed)
+            # forces a full re-read. Logged so a live run shows exactly which
+            # branch each step file takes across the discovery→analyze boundary.
+            logger.debug(
+                "hist-diag read_flow file=%s cursor_lines=%s prev_consumed=%s "
+                "cur_size=%s rewritten=%s can_incremental=%s",
+                jsonl.name, cursor_lines,
+                prev[0] if prev is not None else None,
+                cur_size, rewritten, can_incremental,
+            )
 
             if can_incremental and cur_size == prev[1]:
                 # No new bytes — file is unchanged since last read.
@@ -1582,6 +1620,14 @@ class DaemonHistoryReader:
                 )
                 new_cursor[jsonl.name] = consumed
 
+        # HOP-2 DEBUG: the delta this read produced. ``records==0`` on an active
+        # flow means the push loop ships nothing this tick even though the
+        # signature fired — a candidate #260 drop point; a non-empty ``append``
+        # is the increment that must reach the live view.
+        logger.debug(
+            "hist-diag read_flow RESULT flow=%s mode=%s records=%d cursor=%s",
+            flow_id, mode, len(records), new_cursor,
+        )
         return FlowRead(flow_id=flow_id, mode=mode, records=records, cursor=new_cursor)
 
     def read_active_flows(
@@ -1651,6 +1697,17 @@ class DaemonHistoryReader:
             )
             if read.records:
                 reads.append(read)
+        # HOP-2 DEBUG: the active set this poll produced. If a flow that is
+        # appending on disk is absent from ``active_ids`` (dropped by
+        # _is_still_active) it produces no delta at all — the persistent-freeze
+        # failure mode. Logged with the caller's tracked-cursor flows so a live
+        # run reveals a flow silently leaving the active set.
+        logger.debug(
+            "hist-diag read_active_flows active_ids=%s tracked_cursors=%s "
+            "reads_with_records=%s",
+            sorted(active_ids), sorted(cursors),
+            [(r.flow_id, r.mode, len(r.records)) for r in reads],
+        )
         return reads
 
     def active_flow_signature(self) -> Dict[str, Any]:
@@ -1705,6 +1762,19 @@ class DaemonHistoryReader:
                     mtime, size = _safe_stat(jsonl)
                     parts.append((jsonl.name, mtime, size))
             signature[flow_id] = tuple(parts)
+            # HOP-1 DEBUG: the change-detection fingerprint the push loop diffs
+            # (via client._history_changed) to decide whether to read+push a
+            # delta. The __engine__ part is a RAW _safe_stat (immune to the
+            # disk_json_cache staleness above), while __status__/flow_id come
+            # from the cached parse. Logged with the jsonl-part count so a live
+            # run can see, tick by tick, whether the boundary actually shifts the
+            # signature (a new 02_analyze jsonl adds a part) or debounces.
+            logger.debug(
+                "hist-diag active_flow_signature: flow=%s status=%s "
+                "engine=%s jsonl_parts=%d",
+                flow_id, status.strip().lower(),
+                (parts[0][1], parts[0][2]), len(parts) - 2,
+            )
         return signature
 
     def live_flow_ids(self) -> Set[str]:

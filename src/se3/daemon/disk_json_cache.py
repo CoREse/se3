@@ -375,7 +375,25 @@ def read_json_cached(
             # evicts the one file polled every tick.
             if key in _CACHE:
                 _CACHE.move_to_end(key)
+        # HOP-1 (change-detection) DEBUG observability: the live engine.json's
+        # cached parse was REUSED on a (mtime,size)+head/tail-window hit. When a
+        # >128KiB engine.json is rewritten only in its MIDDLE within one mtime
+        # tick at an identical size (the #260 discovery→analyze dense-rewrite
+        # window), this returns the just-superseded parse — the confirmed latent
+        # staleness the diagnosis (tests/DISCOVERY_ANALYZE_BOUNDARY_VERIFICATION.md)
+        # pins as the primary daemon-side hazard. Logged so a live run shows how
+        # often the active engine.json is served from cache vs re-parsed.
+        logger.debug(
+            "hist-diag disk_json_cache: active engine.json REUSE cached parse "
+            "path=%s mtime_ns=%s size=%s (middle-window change would be masked)",
+            path, mtime, size,
+        )
         return cached[3]
+    logger.debug(
+        "hist-diag disk_json_cache: active engine.json RE-PARSE path=%s "
+        "mtime_ns=%s size=%s stat_hit=%s",
+        path, mtime, size, stat_hit,
+    )
     parsed = _parse_json_file(path)
     with _CACHE_LOCK:
         _store(key, (mtime, size, digest, parsed))
