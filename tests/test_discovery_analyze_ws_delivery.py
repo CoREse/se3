@@ -33,11 +33,14 @@ Findings this harness locks (see ``tests/DISCOVERY_ANALYZE_BOUNDARY_VERIFICATION
   the signature and the delta is read + broadcast. So read_flow / read_active_flows
   / append_history / the /ws/ui fanout are all proven correct in-process (the
   ``test_boundary_*`` and ``test_normal_step_boundary_*`` cases pass).
-* The confirmed daemon-side latent hazard is the ``disk_json_cache`` stale parse
+* The confirmed daemon-side latent hazard was the ``disk_json_cache`` stale parse
   for the LIVE ``engine.json``: a same-``(mtime, size)`` rewrite that changes only
-  the true middle of a >128 KiB engine.json returns the just-superseded parse
-  (``test_active_engine_json_middle_rewrite_returns_stale_parse`` — ``xfail``
-  until G2 hardens it). This is the design's primary fix target.
+  the true middle of a >128 KiB engine.json returned the just-superseded parse.
+  G1 shipped that as a strict ``xfail`` repro; G2 hardened the cache to hash the
+  WHOLE active engine.json (bounded by the size guard) so the middle rewrite is
+  caught, and ``test_active_engine_json_middle_rewrite_returns_fresh_parse`` now
+  passes. This was the design's primary fix target — see
+  ``tests/DISCOVERY_ANALYZE_BOUNDARY_VERIFICATION.md``.
 """
 
 from __future__ import annotations
