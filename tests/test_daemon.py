@@ -28,6 +28,8 @@ from se3.daemon.daemon import (
     PROJECT_ROOTS_FILENAME,
     _append_project_root,
     _read_project_roots,
+    _read_project_roots_raw,
+    _sanitize_project_roots,
 )
 from se3.daemon import spawner as spawner_mod
 from se3.daemon.supervisor import _cmdline_is_se3_run
@@ -1509,6 +1511,71 @@ class TestProjectRootsRegistryHelpers:
     def test_config_project_roots_file_under_pid_dir(self, tmp_path):
         config = DaemonConfig(pid_dir=tmp_path)
         assert config.project_roots_file == tmp_path / PROJECT_ROOTS_FILENAME
+
+
+class TestProjectRootsSelfHeal:
+    """Non-existent roots are filtered on read, healed by _sanitize, and never
+    (re-)appended — so a deleted pytest tempdir disappears from the registry."""
+
+    def _write_registry(self, path, roots):
+        path.write_text(
+            json.dumps({"project_roots": [str(r) for r in roots]}),
+            encoding="utf-8",
+        )
+
+    def test_read_filters_nonexistent_root(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        live = tmp_path / "live"
+        live.mkdir()
+        dead = tmp_path / "gone"  # never created
+        self._write_registry(path, [live, dead])
+        # Read side hides the deleted root from consumers...
+        assert _read_project_roots(path) == [str(live)]
+        # ...but the raw view still shows both (so _sanitize can detect a change).
+        assert _read_project_roots_raw(path) == [str(live), str(dead)]
+
+    def test_sanitize_erases_nonexistent_root_from_disk(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        live = tmp_path / "live"
+        live.mkdir()
+        dead = tmp_path / "gone"
+        self._write_registry(path, [live, dead])
+        _sanitize_project_roots(path)
+        # The deleted root is now gone from the raw on-disk document, not just
+        # hidden on read — the self-heal survives the next restart.
+        assert _read_project_roots_raw(path) == [str(live)]
+
+    def test_sanitize_no_change_when_all_roots_exist(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        a = tmp_path / "a"
+        a.mkdir()
+        b = tmp_path / "b"
+        b.mkdir()
+        self._write_registry(path, [a, b])
+        before = path.stat().st_mtime
+        time.sleep(0.01)
+        _sanitize_project_roots(path)
+        # No stale entries -> file left untouched (no needless rewrite).
+        assert path.stat().st_mtime == before
+
+    def test_sanitize_missing_file_is_safe(self, tmp_path):
+        # A missing registry must not raise or create the file.
+        path = tmp_path / "project_roots.json"
+        _sanitize_project_roots(path)
+        assert not path.exists()
+
+    def test_sanitize_corrupt_file_is_safe(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        path.write_text("{ not valid json", encoding="utf-8")
+        _sanitize_project_roots(path)  # must not raise / block startup
+
+    def test_append_skips_nonexistent_root(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        dead = tmp_path / "gone"  # never created
+        _append_project_root(path, str(dead))
+        # A since-deleted directory is never persisted in the first place.
+        assert not path.exists()
+        assert _read_project_roots_raw(path) == []
 
 
 class TestRegistryWriteThrough:
