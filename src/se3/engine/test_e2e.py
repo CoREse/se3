@@ -276,5 +276,237 @@ class TestErrorRecovery:
             assert loaded.state.get_current_step().step_type != StepType.ANALYZE
 
 
+class TestWorktreeMergeSteps:
+    """End-to-end coverage for the merge-side steps of a worktree flow.
+
+    A ``--worktree`` flow's release point is the merge, so its sequence ends
+    with ``merge_integrate`` + ``version_reconcile`` (executed in the main
+    checkout under the merge lock via the step-level cwd override). These tests
+    stub the ``integrate()`` / ``reconcile()`` libraries and drive the state
+    machine to prove the wiring: sequence composition, end-to-end execution to a
+    reconciled version, resume between the two steps, and the per-step
+    confirmation gate landing on the version decision only.
+    """
+
+    @staticmethod
+    def _register_mock_handlers(sm, *, keep_merge_real=True):
+        """Register pass-through handlers for every non-merge step type."""
+        from se3.engine.steps import (
+            merge_integrate_handler,
+            version_reconcile_handler,
+        )
+
+        def mock_handler(step, flow):
+            step.status = StepStatus.COMPLETED
+            step.outputs.setdefault("mock", True)
+            return StepStatus.COMPLETED
+
+        for step_type in StepType:
+            sm.register_handler(step_type, mock_handler)
+        if keep_merge_real:
+            sm.register_handler(StepType.MERGE_INTEGRATE, merge_integrate_handler)
+            sm.register_handler(StepType.VERSION_RECONCILE, version_reconcile_handler)
+
+    @staticmethod
+    def _fake_integrate_result(branch):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            success=True,
+            pending_human=False,
+            merged_branches=[branch],
+            newly_merged_branches=[branch],
+            already_ancestor_branches=[],
+            failure_reason=None,
+            failure_detail=None,
+        )
+
+    @staticmethod
+    def _fake_reconcile_result():
+        from se3.engine.merge.reconcile import ReconcileResult
+
+        return ReconcileResult(
+            success=True,
+            base_version="11.12.0",
+            final_version="11.13.0",
+            bump_type="minor",
+            channel="deterministic",
+            consumed_flow_ids=["flow-x"],
+            reconcile_commit="abc123def456",
+        )
+
+    def _make_worktree_flow(self, project_root):
+        (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        sm = StateMachine(project_root)
+        self._register_mock_handlers(sm)
+        flow = sm.create_flow(
+            task_description="Add a worktree feature",
+            task_type="small",  # avoids the always-on plan-confirm
+            is_worktree_mode=True,
+        )
+        flow.worktree_branch = "worktree/add-feature"
+        flow.worktree_original_branch = "main"
+        return sm, flow
+
+    def _run_to_completion(self, sm, flow, *, max_steps=30):
+        steps = 0
+        while (
+            flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED)
+            and steps < max_steps
+        ):
+            step = flow.state.get_current_step()
+            if not step:
+                break
+            sm.run_step(flow, step)
+            if step.status == StepStatus.FAILED:
+                break
+            sm.transition_to_next(flow)
+            steps += 1
+        return steps
+
+    def test_worktree_sequence_appends_merge_steps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow = self._make_worktree_flow(Path(tmpdir))
+            seq = flow.state.selected_steps
+            assert StepType.MERGE_INTEGRATE in seq
+            assert StepType.VERSION_RECONCILE in seq
+            # integrate strictly precedes reconcile, both at the tail
+            assert seq.index(StepType.MERGE_INTEGRATE) < seq.index(
+                StepType.VERSION_RECONCILE
+            )
+            assert seq[-1] == StepType.VERSION_RECONCILE
+            # a non-worktree flow never gets them
+            sm2 = StateMachine(Path(tmpdir))
+            plain = sm2.create_flow("x", task_type="small", is_worktree_mode=False)
+            assert StepType.MERGE_INTEGRATE not in plain.state.selected_steps
+
+    def test_worktree_flow_runs_to_reconcile_on_master(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow = self._make_worktree_flow(Path(tmpdir))
+            with patch(
+                "se3.engine.merge.integrate",
+                return_value=self._fake_integrate_result("worktree/add-feature"),
+            ) as mock_integrate, patch(
+                "se3.engine.merge.reconcile",
+                return_value=self._fake_reconcile_result(),
+            ) as mock_reconcile:
+                self._run_to_completion(sm, flow)
+
+            assert flow.status == FlowStatus.COMPLETED
+            # integrate ran against the main checkout for our branch
+            mock_integrate.assert_called_once()
+            _args, kwargs = mock_integrate.call_args
+            assert kwargs.get("delete_merged") is False
+            assert kwargs.get("acquire_lock") is False
+            # reconcile ran and produced the final version, recorded on the step
+            mock_reconcile.assert_called_once()
+            reconcile_step = next(
+                s for s in flow.state.steps.values()
+                if s.step_type == StepType.VERSION_RECONCILE
+            )
+            assert reconcile_step.status == StepStatus.COMPLETED
+            assert reconcile_step.outputs["final_version"] == "11.13.0"
+            assert reconcile_step.outputs["base_version"] == "11.12.0"
+
+    def test_integrate_failure_does_not_reach_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm, flow = self._make_worktree_flow(Path(tmpdir))
+            from types import SimpleNamespace
+
+            failed = SimpleNamespace(
+                success=False,
+                pending_human=False,
+                merged_branches=[],
+                failure_reason="CONFLICT",
+                failure_detail="unresolved",
+            )
+            with patch(
+                "se3.engine.merge.integrate", return_value=failed
+            ), patch("se3.engine.merge.reconcile") as mock_reconcile:
+                self._run_to_completion(sm, flow)
+
+            # merge_integrate FAILED, so version_reconcile never ran.
+            integrate_step = next(
+                s for s in flow.state.steps.values()
+                if s.step_type == StepType.MERGE_INTEGRATE
+            )
+            assert integrate_step.status == StepStatus.FAILED
+            mock_reconcile.assert_not_called()
+            assert flow.status != FlowStatus.COMPLETED
+
+    def test_resume_between_merge_steps_only_reruns_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            sm, flow = self._make_worktree_flow(project_root)
+
+            # Phase 1: run until merge_integrate has completed and the flow has
+            # transitioned to version_reconcile (PENDING) — then "crash".
+            with patch(
+                "se3.engine.merge.integrate",
+                return_value=self._fake_integrate_result("worktree/add-feature"),
+            ) as mock_integrate:
+                steps = 0
+                while steps < 30:
+                    step = flow.state.get_current_step()
+                    if not step:
+                        break
+                    sm.run_step(flow, step)
+                    sm.transition_to_next(flow)
+                    steps += 1
+                    cur = flow.state.get_current_step()
+                    if cur and cur.step_type == StepType.VERSION_RECONCILE:
+                        break
+            assert mock_integrate.call_count == 1
+
+            # Phase 2: fresh process — new StateMachine + persistence — resumes.
+            sm2 = StateMachine(project_root)
+            self._register_mock_handlers(sm2)
+            loaded, is_resumed = sm2.load_or_create_flow()
+            assert is_resumed
+            loaded.worktree_branch = "worktree/add-feature"
+
+            with patch(
+                "se3.engine.merge.integrate"
+            ) as mock_integrate2, patch(
+                "se3.engine.merge.reconcile",
+                return_value=self._fake_reconcile_result(),
+            ) as mock_reconcile:
+                self._run_to_completion(sm2, loaded)
+
+            assert loaded.status == FlowStatus.COMPLETED
+            # The merge was NOT redone on resume — only the version decision reran.
+            mock_integrate2.assert_not_called()
+            mock_reconcile.assert_called_once()
+
+    def test_per_step_confirm_gates_only_version_decision(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+            # Gate ONLY the version decision behind a human confirmation.
+            (project_root / "se3.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "confirmation": {
+                            "steps": {"version_reconcile": {"reviewer": "human"}}
+                        }
+                    }
+                )
+            )
+            sm = StateMachine(project_root)
+            self._register_mock_handlers(sm)
+            flow = sm.create_flow(
+                task_description="x", task_type="small", is_worktree_mode=True
+            )
+            seq = flow.state.selected_steps
+            ri = seq.index(StepType.VERSION_RECONCILE)
+            mi = seq.index(StepType.MERGE_INTEGRATE)
+            # A CONFIRM is inserted immediately AFTER version_reconcile...
+            assert seq[ri + 1] == StepType.CONFIRM
+            # ...but NOT after merge_integrate (the expensive merge is not re-gated).
+            assert seq[mi + 1] == StepType.VERSION_RECONCILE
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

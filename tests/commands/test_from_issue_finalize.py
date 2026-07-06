@@ -365,25 +365,23 @@ class TestFromIssueEarlyDispatchFailureReverts:
 # ==========================================================================
 # End-to-end integration (G4)
 #
-# The unit/integration tests above (and G3's) stop at the run_merge boundary —
-# they mock run_merge to a bare return code, so the "merge succeeded → source
-# issue resolved" step (which lives INSIDE run_merge) never actually fires. G4
-# strings the WHOLE chain together with the REAL run_merge (only its git
-# machinery — MergeOrchestrator / branch-exists — is mocked, exactly as the
-# merge-backfill tests do), so the resolve is driven by production code end to
-# end:
+# The merge is no longer a trailing wrapper step: a worktree flow now merges
+# itself back in-flow (its final merge_integrate + version_reconcile steps run
+# in the main checkout under the merge lock), so "flow COMPLETED" already means
+# "landed on master". The wrapper's remaining job is best-effort housekeeping +
+# resolving the source issue through the same idempotent backfill choke point:
 #
 #     worktree from-issue first run PAUSES (issue held in-progress)
 #         → a FRESH process resumes it (_resume_worktree_run, decoupled from the
 #           original wrapper — the source_issue_id comes only from the persisted
 #           worktree engine.json)
-#         → flow reaches COMPLETED
-#         → the REAL trailing merge (_finalize_worktree_merge → run_merge) lands
-#         → run_merge's backfill resolves the source issue.
+#         → flow reaches COMPLETED (its in-flow merge steps already landed it)
+#         → _finalize_worktree_cleanup archives the worktree + resolves the issue.
 #
-# This is the single test that proves the three groups compose: the persisted
-# terminal status decouples finalization from the wrapper process (G3), and the
-# resolve choke point in run_merge (G2) actually closes the issue out.
+# This proves the persisted terminal status decouples finalization from the
+# wrapper process and the backfill choke point closes the issue out. A merge
+# that cannot land now fails the FLOW (not the wrapper), which reopens the issue
+# — covered by test_resume_to_failed_reopens_issue below.
 # ==========================================================================
 def _init_git_repo(path: Path) -> None:
     """Initialize a git repo with one commit — the real repo run_merge needs
@@ -479,11 +477,11 @@ def _failure_report(branch):
 
 class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
     """The headline end-to-end chain: pause → (new process) resume → COMPLETED
-    → real merge-back → source issue resolved. Nothing here mocks run_merge or
-    the finalize helpers — only the flow body (run_flow) and the low-level git
-    merge machinery are stubbed."""
+    (in-flow merge already landed) → source issue resolved by the wrapper's
+    post-merge cleanup. Only the flow body (run_flow) is stubbed; the finalize
+    + backfill path is real production code."""
 
-    def test_pause_then_fresh_resume_merge_success_resolves_issue(
+    def test_pause_then_fresh_resume_completed_resolves_issue(
         self, tmp_path, monkeypatch
     ):
         _init_git_repo(tmp_path)
@@ -503,10 +501,10 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
         )
 
-        # --- Resume in a FRESH process: run_flow (the flow body) is stubbed to
-        # drive the worktree flow to COMPLETED, exactly as a real resumed flow
-        # would persist it. Everything downstream (_finalize_worktree_merge →
-        # run_merge → backfill) is the real production code path.
+        # --- Resume in a FRESH process: run_flow (the flow body, including its
+        # in-flow merge steps) is stubbed to drive the worktree flow to COMPLETED,
+        # exactly as a real resumed flow would persist it. The downstream
+        # _finalize_worktree_cleanup → backfill is the real production path.
         def fake_run_flow(*_a, **kwargs):
             _write_wt_engine(
                 Path(kwargs["project_root"]),
@@ -516,8 +514,6 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
             )
             return 0
 
-        captured: list[dict] = []
-        _patch_real_merge(monkeypatch, _success_report(branch), captured)
         monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
 
         # resume_run rediscovers the paused worktree run and re-dispatches it —
@@ -525,23 +521,20 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
 
         assert rc == 0
-        # The merge landed and run_merge's backfill resolved the source issue —
-        # the whole point of the chain. It surfaces the resolve in the output.
+        # The flow completed (its in-flow merge landed the branch) and the
+        # wrapper's cleanup backfill resolved the source issue — the whole point.
         assert (
             IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
         )
-        merge_body = "\n".join(
-            e["content"] for e in captured if e["title"] == "Merge Complete"
-        )
-        assert f"Resolved source issue #{issue_id}" in merge_body
 
-    def test_pause_then_resume_merge_failure_keeps_in_progress(
+    def test_resume_completed_resolves_even_when_branch_cleanup_skips(
         self, tmp_path, monkeypatch
     ):
-        # req 1 merge-failure half, exercised through the real resume→merge path:
-        # a COMPLETED flow whose trailing merge FAILS must leave the issue
-        # in-progress (so the retry-merge path can still resolve it) and tell the
-        # operator the branch is preserved and how to retry.
+        # The post-merge cleanup is best-effort: even when CleanupManager cannot
+        # delete the branch (here it never existed as a real git branch, so the
+        # ancestor check refuses), the source-issue resolve is independent and
+        # still fires, and the resume returns success (the merge already landed
+        # in-flow — a cleanup hiccup is never reported as a merge failure).
         _init_git_repo(tmp_path)
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-2"
@@ -559,28 +552,14 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
             )
             return 0
 
-        errors: list[str] = []
-
-        def capture_error(msg, *_a, **_kw):
-            errors.append(str(msg))
-
-        captured: list[dict] = []
-        _patch_real_merge(monkeypatch, _failure_report(branch), captured)
         monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
-        monkeypatch.setattr("se3.commands.run.display_error", capture_error)
 
         rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
 
-        assert rc != 0
-        # Merge failed → issue stays in-progress (retry-merge can resolve later).
+        assert rc == 0
         assert (
-            IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
+            IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
         )
-        msg = "\n".join(errors)
-        assert "in-progress" in msg
-        assert "preserved" in msg
-        assert f"se3 merge {branch}" in msg
-        assert f"#{issue_id}" in msg
 
     def test_resume_to_failed_reopens_issue(self, tmp_path, monkeypatch):
         # req 5 on the resume path: a resumed worktree flow that ends FAILED

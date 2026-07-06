@@ -63,6 +63,13 @@ class StepType(Enum):
     VERSION_ANALYZE = "version_analyze"  # Analyze changes to determine version bump type
     COMMIT = "commit"  # Commit changes (program execution)
     SUMMARIZE = "summarize"  # Generate summary and handoff
+    # Merge-side steps, appended ONLY to a worktree flow's sequence (never in the
+    # default pool): the release point for an isolated --worktree run is the
+    # merge, so the flow's "done" means "actually landed on master". Both execute
+    # in the MAIN checkout under the merge lock (see Step.cwd + state_machine's
+    # step-level cwd override), not in the worktree the flow body ran in.
+    MERGE_INTEGRATE = "merge_integrate"  # Merge the flow branch into master (integrate() lib)
+    VERSION_RECONCILE = "version_reconcile"  # Derive+apply the final version at merge (reconcile() lib)
 
 
 class StepStatus(Enum):
@@ -100,6 +107,15 @@ class Step:
     model: Optional[str] = None  # Model to use for this step
     fallback_model: Optional[str] = None  # Fallback if primary fails
 
+    # Step-level working-directory override (absolute path). When set, the state
+    # machine executes this step against ``cwd`` instead of the flow's
+    # ``project_root`` — the merge-side steps (MERGE_INTEGRATE / VERSION_RECONCILE)
+    # of a worktree flow must run in the MAIN checkout, inside the merge lock, even
+    # though the flow body ran in the isolated worktree. ``None`` means "use the
+    # flow project_root" (every ordinary step). A small scalar, so it rides in the
+    # engine.json header (to_header_dict) and round-trips through to_dict/from_dict.
+    cwd: Optional[str] = None
+
     # Inputs and outputs
     inputs: Dict[str, Any] = field(default_factory=dict)
     outputs: Dict[str, Any] = field(default_factory=dict)
@@ -134,6 +150,7 @@ class Step:
             "max_retries": self.max_retries,
             "model": self.model,
             "fallback_model": self.fallback_model,
+            "cwd": self.cwd,
             "inputs": self.inputs,
             "outputs": self.outputs,
             "artifacts": [str(p) for p in self.artifacts],
@@ -204,6 +221,7 @@ class Step:
             max_retries=data.get("max_retries", 3),
             model=data.get("model"),
             fallback_model=data.get("fallback_model"),
+            cwd=data.get("cwd"),
             inputs=data.get("inputs", {}),
             outputs=data.get("outputs", {}),
             artifacts=[Path(p) for p in data.get("artifacts", [])],
@@ -964,6 +982,46 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "read_only": True,
         "inputs": ["changes_made", "commit_hash"],
         "outputs": ["summary"],
+    },
+    StepType.MERGE_INTEGRATE: {
+        "name": "merge_integrate",
+        # The "integrate" half of the merge-library split: branch merge + LLM
+        # conflict resolution + runtime sync + issue renumber + post-condition
+        # checks, executed in the MAIN checkout under the merge lock. Its failure
+        # mode is "cannot be merged"; when it fails the flow stops before
+        # version_reconcile (no version is decided for work that did not land).
+        "description": (
+            "Integrate the flow branch into master via the integrate() library "
+            "entry: sequential git merge, LLM conflict resolution, runtime sync, "
+            "issue renumber, post-condition checks. Runs in the main checkout "
+            "inside the merge lock. Worktree flows only."
+        ),
+        "uses_llm": True,  # LLM conflict resolution may fire inside integrate()
+        "read_only": False,
+        "inputs": ["worktree_branch", "worktree_original_branch"],
+        "outputs": ["merge_result", "merged_branches", "pending_human"],
+    },
+    StepType.VERSION_RECONCILE: {
+        "name": "version_reconcile",
+        # The "reconcile" half: re-derive the FINAL version at merge time against
+        # master's CURRENT version (not the version the session guessed), file the
+        # merged-in changelog bullets under it, and commit — unconditionally (it
+        # runs on the already-ancestor / no-op-merge path too). Cheap; its failure
+        # mode is "version computed wrong", so a resume re-runs only the version
+        # decision, never the merge. Idempotent via consumed-intent marking.
+        "description": (
+            "Reconcile the final project version at merge time via the "
+            "reconcile() library entry: collect merged-in session intents, "
+            "re-base on master's current version, pick the deterministic SemVer "
+            "or custom-rules channel, enforce no-regression, write the version "
+            "file + merge the changelog, and commit. Unconditional and "
+            "idempotent. Runs in the main checkout inside the merge lock. "
+            "Worktree flows only."
+        ),
+        "uses_llm": True,  # only in the custom version-rules channel
+        "read_only": False,
+        "inputs": ["worktree_branch"],
+        "outputs": ["reconcile_result", "final_version", "base_version", "channel"],
     },
 }
 

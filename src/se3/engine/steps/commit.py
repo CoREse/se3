@@ -1,10 +1,14 @@
 """Commit step handler.
 
 Commits the changes using git.
-Integrates with VersionBumper for automatic version bumping.
-Consumes the authoritative ``suggested_version`` from the version_analyze
-step and writes it verbatim to the project version file. ``bump_type`` is
-read only for commit-message decoration and template summary display.
+Integrates with VersionBumper for automatic version bumping — but only for a
+synchronous (non-worktree) flow, whose commit is the release point. Such a
+commit consumes the authoritative ``suggested_version`` from the
+version_analyze step and writes it verbatim to the project version file. A
+worktree flow's commit is de-versioned (the merge is its release point): it
+writes no version file / VERSIONS.md / ``Version:`` line and carries only the
+``bump_type`` message decoration. ``bump_type`` is otherwise read only for
+commit-message decoration and template summary display.
 """
 
 from __future__ import annotations
@@ -325,10 +329,14 @@ def _detect_root_whitelist_exclusions(project_root: Path) -> list[str]:
 def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the commit step.
 
-    Commits changes using git commands. If version bumping is enabled,
-    writes the authoritative ``suggested_version`` produced by the
-    preceding version_analyze step to the project version file before
-    committing.
+    Commits changes using git commands. If version bumping is enabled AND this
+    flow is a synchronous (non-worktree) run — whose commit is the release
+    point — it writes the authoritative ``suggested_version`` produced by the
+    preceding version_analyze step to the project version file, updates
+    VERSIONS.md, and stamps a ``Version:`` line, before committing. A worktree
+    flow's commit is de-versioned: it writes no version file, no VERSIONS.md
+    entry, and no ``Version:`` line (the version decision is deferred to the
+    merge-side reconcile), carrying only the bump-intent message decoration.
 
     Args:
         step: The current step being executed
@@ -358,6 +366,20 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Load version bumping configuration
     version_config = _load_version_config(project_root)
 
+    # De-versioning split (accident-driven, 2026-07-06): a worktree session's
+    # commit is NOT its release point — the merge is. So it must not write the
+    # version file, must not touch VERSIONS.md, and must not stamp a
+    # `Version: X.Y.Z` message line (the final version is unknowable here and
+    # would collide with a concurrent worktree flow's identical write). It
+    # carries only the bump *intent* (the `(minor bump)` message decoration and
+    # the branch-committed VersionIntent from version_analyze); the merge-side
+    # version_reconcile step writes the authoritative version. A non-worktree
+    # (synchronous) flow's commit IS the release point, so it keeps writing the
+    # version verbatim — behaviour unchanged. By skipping the whole bump block,
+    # `new_version` stays None, which in turn suppresses the docs update and the
+    # `Version:` message line downstream with no further branching.
+    is_worktree = getattr(flow, "is_worktree_mode", False)
+
     # Initialize version bumping state
     version_bumper: VersionBumper | None = None
     version_file: Path | None = None
@@ -366,8 +388,9 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     version_bumped = False
 
     try:
-        # Attempt version bumping if enabled
-        if version_config.enabled:
+        # Attempt version bumping if enabled (and this commit is a release
+        # point — worktree flows defer versioning to the merge).
+        if version_config.enabled and not is_worktree:
             version_bumper = VersionBumper(version_config)
             version_file = version_bumper.detect_version_file(project_root)
 
