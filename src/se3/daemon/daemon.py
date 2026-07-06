@@ -942,13 +942,19 @@ def _atomic_write_json(path: Path, payload: Dict[str, object]) -> None:
     tmp.replace(path)
 
 
-def _read_project_roots(path: Path) -> List[str]:
-    """Return the persisted project roots from the registry file at *path*.
+def _read_project_roots_raw(path: Path) -> List[str]:
+    """Return the persisted project roots verbatim, without existence filtering.
 
     The registry is a ``{"project_roots": [...]}`` JSON document written by
     :func:`_append_project_root`. A missing or corrupt file is treated as an
     empty registry (returns ``[]``) so a first-run or partially-written file
     never aborts the daemon's snapshot / history index.
+
+    This raw view (as opposed to the existence-filtered :func:`_read_project_roots`)
+    is the on-disk truth :func:`_sanitize_project_roots` compares against: if the
+    read-side existence filter were applied before that length comparison, stale
+    (deleted) entries would already be gone from the comparison basis and the
+    self-healing rewrite would never fire, leaving the file dirty forever.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -960,6 +966,18 @@ def _read_project_roots(path: Path) -> List[str]:
     if not isinstance(roots, list):
         return []
     return [str(r) for r in roots if isinstance(r, str) and r]
+
+
+def _read_project_roots(path: Path) -> List[str]:
+    """Return the *live* persisted project roots from the registry at *path*.
+
+    Reads the raw registry and drops every root whose directory no longer exists
+    on disk, so a consumer (snapshot / history index / WebUI project list) is
+    never shown a project root that has since been deleted — e.g. a pytest
+    tempdir registered by a live test run and then torn down. A missing or
+    corrupt file is treated as an empty registry (returns ``[]``).
+    """
+    return [r for r in _read_project_roots_raw(path) if os.path.exists(r)]
 
 
 def _append_project_root(path: Path, root: object) -> None:
@@ -987,7 +1005,12 @@ def _append_project_root(path: Path, root: object) -> None:
         return
     if not resolved:
         return
-    existing = _read_project_roots(path)
+    # Skip a root that no longer exists on disk: registering a since-deleted
+    # directory (e.g. a torn-down pytest tempdir) would only re-pollute the
+    # persistent list that the read-side / sanitize self-heal exists to keep clean.
+    if not os.path.exists(resolved):
+        return
+    existing = _read_project_roots_raw(path)
     if resolved in existing:
         return
     existing.append(resolved)
@@ -995,38 +1018,51 @@ def _append_project_root(path: Path, root: object) -> None:
 
 
 def _sanitize_project_roots(path: Path) -> None:
-    """One-time cleanup of leaked worktree-copy entries from the registry file.
+    """One-time startup cleanup of stale entries from the registry file.
 
-    The worktree→main normalization now applied at every registration entry
-    point (see :meth:`DaemonAggregator.add_project_root` and
-    :func:`_append_project_root`) prevents *new* pollution, but a registry that
-    was written before the normalization existed may already hold persisted
-    ``<main>/se3/worktrees/<name>`` entries — and because the file survives
-    restarts, those stale entries would keep surfacing the worktree in the
-    WebUI project list / New Task dropdown indefinitely. This scans the
-    registry once at daemon startup, drops every entry that
-    :func:`~se3.daemon.supervisor.is_worktree_copy_root` identifies as a
-    worktree copy, and atomically rewrites the file **only** when something was
-    actually removed (a clean registry is left untouched).
+    Two classes of stale entry are dropped:
+
+    * **Worktree copies.** The worktree→main normalization now applied at every
+      registration entry point (see :meth:`DaemonAggregator.add_project_root`
+      and :func:`_append_project_root`) prevents *new* pollution, but a registry
+      written before the normalization existed may already hold persisted
+      ``<main>/se3/worktrees/<name>`` entries.
+    * **Deleted roots.** A project root that no longer exists on disk — most
+      commonly a pytest tempdir that a live test run registered and then tore
+      down — would otherwise keep surfacing a dead project in the WebUI list.
+
+    Because the file survives restarts, either kind of stale entry would keep
+    resurfacing indefinitely. This scans the registry once at daemon startup,
+    drops every worktree-copy (per
+    :func:`~se3.daemon.supervisor.is_worktree_copy_root`) and every
+    no-longer-existent root, and atomically rewrites the file **only** when
+    something was actually removed (a clean registry is left untouched).
+
+    The comparison is made against the *raw* registry
+    (:func:`_read_project_roots_raw`) rather than the existence-filtered read so
+    the self-heal actually detects — and erases from disk — the deleted entries
+    the read-side filter would otherwise silently hide.
 
     Fully fault-tolerant: a missing / corrupt file reads as an empty registry
     and a write failure is logged, never propagated — sanitation must never
     block daemon startup.
     """
     try:
-        existing = _read_project_roots(path)
+        existing = _read_project_roots_raw(path)
     except Exception:  # pragma: no cover - defensive
         return
     if not existing:
         return
-    cleaned = [r for r in existing if not is_worktree_copy_root(r)]
+    cleaned = [
+        r for r in existing if not is_worktree_copy_root(r) and os.path.exists(r)
+    ]
     if len(cleaned) == len(existing):
-        # No worktree pollution — leave the file untouched (no needless write).
+        # No stale entries — leave the file untouched (no needless write).
         return
     try:
         _atomic_write_json(path, {"project_roots": sorted(set(cleaned))})
         logger.info(
-            "Sanitized project-roots registry: removed %d worktree entr%s",
+            "Sanitized project-roots registry: removed %d stale entr%s",
             len(existing) - len(cleaned),
             "y" if len(existing) - len(cleaned) == 1 else "ies",
         )
