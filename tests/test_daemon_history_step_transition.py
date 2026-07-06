@@ -15,11 +15,16 @@ by the daemon swallowing the transition/retry delta — the daemon reports it
 correctly, so the defect lives in the frontend incremental-consume path (owned by
 group G1).
 
-Conclusion recorded by this suite (G2 task 2): no defect was found in
-``client.py``'s cursor retention or in ``history.py``'s incremental read for the
-transition / retry-resend scenarios, so **no production code is changed** — these
-are guard tests that would fail if a future change regressed the daemon push
-side.
+The original conclusion of this suite was that no defect lived in ``client.py``'s
+cursor retention or ``history.py``'s incremental read — the push side reports the
+transition correctly. The #260 follow-up (session ``20260705-122709_377bfbb7``)
+then located the real daemon-side hazard one layer down: ``disk_json_cache``
+served a STALE parse for the live engine.json under a same-``(mtime, size)``
+middle rewrite in the dense discovery→analyze window, which could transiently
+drop a still-active flow out of ``read_active_flows``. The final section below
+locks the two G2 fixes for that: the live-engine cache now hashes the WHOLE
+content (so a middle rewrite re-parses), and ``_is_still_active`` re-confirms an
+ambiguous drop with a forced fresh read before excluding a flow.
 """
 
 from __future__ import annotations
@@ -27,9 +32,11 @@ from __future__ import annotations
 import asyncio
 import json
 
+import se3.daemon.disk_json_cache as disk_cache
+import se3.daemon.history as history_mod
 from se3.daemon import protocol
 from se3.daemon.client import DaemonClient
-from se3.daemon.history import DaemonHistoryReader
+from se3.daemon.history import DaemonHistoryReader, SessionMeta
 from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
@@ -852,3 +859,167 @@ def test_push_history_resend_is_append_not_full_reread(tmp_path):
     assert len(delta["records"]) == 1
     assert delta["records"][0]["message"]["content"] == "attempt 2"
     assert delta["cursor"]["07_update_spec_ef56.jsonl"] == 2
+
+
+# ==========================================================================
+# Task 2 — active-liveness stability across the PAUSED→RUNNING flip and the
+# true-value fallback that rescues a flow from a transient cache-based drop.
+# ==========================================================================
+
+
+def _write_engine_status(root, flow_id, status):
+    """Write a realistic active engine.json with a steps table + a status."""
+    state_dir = root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "status": status,
+                "task_description": "td",
+                "state": {"steps": {}, "current_step_index": 0},
+                "is_worktree_mode": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_is_still_active_stable_across_paused_running_flip(tmp_path):
+    """A discovery flow that pauses for its confirm gate and resumes must stay in
+    the active set the whole time — the PAUSED→RUNNING flip never drops it.
+
+    Both PAUSED and RUNNING are non-terminal, so ``_is_still_active`` must return
+    True across the flip; a spurious drop here is exactly the #260 freeze (the
+    flow leaves the active set, so no incremental read/push happens for it).
+    """
+    disk_cache.clear_cache()
+    _write_engine_status(tmp_path, "live", "RUNNING")
+    _write_jsonl(_hist(tmp_path, "live") / "01_discovery_ab12.jsonl",
+                 [_msg("user", "explore")])
+    reader = _make_reader(tmp_path)
+
+    def _meta():
+        reader.invalidate_index_cache()
+        return next(m for m in reader.build_index() if m.flow_id == "live")
+
+    assert reader._is_still_active(_meta()) is True  # RUNNING
+    _write_engine_status(tmp_path, "live", "PAUSED")
+    assert reader._is_still_active(_meta()) is True  # PAUSED — still active
+    _write_engine_status(tmp_path, "live", "RUNNING")
+    assert reader._is_still_active(_meta()) is True  # resumed
+
+
+def test_header_keeps_flow_active_return_values():
+    """The three-way liveness classifier distinguishes keep / terminal / ambiguous.
+
+    ``True`` (live-and-mine), ``False`` (present-but-terminal — a clean drop that
+    needs no re-confirm) and ``None`` (unreadable / flow_id mismatch — an
+    *ambiguous* drop the caller must re-confirm with a forced fresh read).
+    """
+    meta = SessionMeta(flow_id="live", project_root="/p", active=True, source="active")
+    keep = DaemonHistoryReader._header_keeps_flow_active
+    assert keep(meta, {"flow_id": "live", "status": "RUNNING"}) is True
+    assert keep(meta, {"flow_id": "live", "status": "PAUSED"}) is True
+    assert keep(meta, {"flow_id": "live", "status": "COMPLETED"}) is False
+    assert keep(meta, {"flow_id": "live", "status": "FAILED"}) is False
+    # Ambiguous: unreadable, or a different flow_id (possible stale/collided read).
+    assert keep(meta, None) is None
+    assert keep(meta, {"flow_id": "other", "status": "RUNNING"}) is None
+
+
+def test_is_still_active_rescues_flow_on_transient_cache_drop(monkeypatch):
+    """A cache-based read that would DROP a still-live flow is re-confirmed fresh.
+
+    Simulates the exact hazard the true-value fallback guards: the cached read
+    returns a mismatched flow_id (as a same-``(mtime, size)`` collision could),
+    which alone would exclude the flow from the active set and freeze its live WS
+    stream. The forced fresh read returns disk truth, so the flow is RESCUED.
+    """
+    meta = SessionMeta(flow_id="live", project_root="/p", active=True, source="active")
+    calls = {"cached": 0, "fresh": 0}
+
+    def fake_read(path, *, active=False, force_fresh=False, parse=None):
+        if force_fresh:
+            calls["fresh"] += 1
+            return {"flow_id": "live", "status": "RUNNING"}   # disk truth
+        calls["cached"] += 1
+        return {"flow_id": "other", "status": "RUNNING"}      # stale/collided
+
+    monkeypatch.setattr(history_mod, "read_engine_header", fake_read)
+    assert DaemonHistoryReader._is_still_active(meta) is True
+    assert calls["cached"] == 1 and calls["fresh"] == 1, (
+        "the drop path must pay exactly one forced-fresh re-confirm"
+    )
+
+
+def test_is_still_active_genuine_terminal_drop_pays_no_extra_read(monkeypatch):
+    """A cleanly terminal flow drops WITHOUT the forced fresh read.
+
+    Distinguishing a definite terminal ``False`` from an ambiguous ``None`` is
+    what keeps the extra fresh read off the healthy terminal transition: a flow
+    whose live engine.json says COMPLETED is dropped on the cached read alone.
+    """
+    meta = SessionMeta(flow_id="live", project_root="/p", active=True, source="active")
+    calls = {"cached": 0, "fresh": 0}
+
+    def fake_read(path, *, active=False, force_fresh=False, parse=None):
+        if force_fresh:
+            calls["fresh"] += 1
+        else:
+            calls["cached"] += 1
+        return {"flow_id": "live", "status": "COMPLETED"}
+
+    monkeypatch.setattr(history_mod, "read_engine_header", fake_read)
+    assert DaemonHistoryReader._is_still_active(meta) is False
+    assert calls["cached"] == 1 and calls["fresh"] == 0, (
+        "a clean terminal drop must not trigger the forced-fresh fallback"
+    )
+
+
+def test_read_active_flows_advances_cursor_on_steps_first_write_and_new_jsonl(
+    tmp_path,
+):
+    """The boundary read: steps-table first-write + a freshly-created analyze
+    jsonl yields a non-empty ``append`` delta AND advances the per-file cursor.
+
+    Guards Task 2's second acceptance criterion end-to-end on the real reader: a
+    same-``(mtime, size)`` engine rewrite in the dense boundary window must not
+    stop ``read_active_flows`` producing the analyze increment.
+    """
+    disk_cache.clear_cache()
+    _write_engine_status(tmp_path, "live", "PAUSED")  # discovery confirm gate
+    hist = _hist(tmp_path, "live")
+    discovery = hist / "01_discovery_ab12.jsonl"
+    _write_jsonl(discovery, [_msg("user", "explore"),
+                             _msg("assistant", '{"mode":"question"}')])
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    assert reads[0].mode == HISTORY_MODE_FULL
+    cursors = {r.flow_id: r.cursor for r in reads}
+
+    # THE BOUNDARY: steps table first-write + PAUSED→RUNNING, then the analyze
+    # jsonl is created and starts appending.
+    steps = {f"{i:02d}_{n}": {"status": "pending", "step_type": n}
+             for i, n in enumerate(["analyze", "plan", "commit"], start=2)}
+    state_dir = tmp_path / "se3" / "state"
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "live", "status": "RUNNING",
+                    "state": {"steps": steps, "current_step_index": 1},
+                    "is_worktree_mode": False}),
+        encoding="utf-8",
+    )
+    analyze = hist / "02_analyze_cd34.jsonl"
+    _write_jsonl(analyze, [_msg("assistant", "analyzing", step_type="analyze")])
+
+    reads = reader.read_active_flows(cursors)
+    assert reads and reads[0].flow_id == "live"
+    contents = [r.get("message", {}).get("content") for r in reads[0].records]
+    assert "analyzing" in contents, "the analyze increment must be delivered"
+    assert reads[0].cursor["02_analyze_cd34.jsonl"] == 1, "cursor must advance"
+
+    # Idle poll afterwards: nothing new.
+    cursors = {r.flow_id: r.cursor for r in reads}
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []

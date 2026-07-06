@@ -24,16 +24,20 @@ whole file and held a raw copy in memory every tick):
   when their content does, so a matching key is authoritative: the file is
   neither re-read nor re-parsed and is parsed exactly once. The live
   ``engine.json`` uses the SAME function with ``verify_content=True``: because a
-  completed→new-flow swap can keep the byte size identical and land in the same
-  mtime tick (coarse-mtime filesystems, or two fast writes on ext4), a pure stat
-  key would surface the just-superseded flow. So on each poll a bounded head+tail
-  *window* — never the whole file — is re-read and hashed; the cached parse is
-  reused only while the ``(mtime, size)`` key AND that window hash both still
-  match, and the expensive ``json.loads`` (the #209/#243 freeze) runs whenever
-  either moves. The stat key still catches a mid-file ``state`` change the window
-  can't see; the window hash is the extra guard for a same-stat content swap.
-  This keeps the per-poll cost a small bounded read + hash instead of the
-  full-file read+parse it used to be.
+  completed→new-flow swap (or an in-place step-status flip) can keep the byte
+  size identical and land in the same mtime tick (coarse-mtime filesystems, or
+  two fast writes on ext4), a pure stat key would surface the just-superseded
+  parse. So on each poll the file's WHOLE content — bounded by the size guard the
+  caller has already enforced, never an unbounded read — is re-read and hashed;
+  the cached parse is reused only while the ``(mtime, size)`` key AND that content
+  hash both still match, and the expensive ``json.loads`` (the #209/#243 freeze)
+  runs whenever either moves. Hashing the whole content (not just a bounded
+  head+tail window) is what catches a rewrite confined to the file's MIDDLE — a
+  deep-in-the-``state.steps``-table step-status flip in the dense
+  discovery→analyze rewrite window (#260) that leaves the head/tail bytes
+  identical — which a windowed hash silently masked, returning a stale parse. The
+  per-poll cost stays a bounded read + one C-speed digest instead of the
+  full-file ``json.loads`` it used to be.
 * A size guard (:data:`MAX_PARSE_BYTES`): a file above the threshold is never
   fully parsed and its content/result is never cached (so a giant legacy file
   cannot inflate daemon memory). The hot path instead uses
@@ -78,16 +82,17 @@ MAX_PARSE_BYTES = 5 * 1024 * 1024
 #: ceiling; callers and tests use whichever reads best in context.
 SIZE_GUARD_BYTES = MAX_PARSE_BYTES
 
-#: (path) -> (mtime, size, window-digest or None, parsed dict or None).
+#: (path) -> (mtime, size, content-digest or None, parsed dict or None).
 #: Only entries for at-or-under-guard files are ever stored. For an immutable
 #: snapshot (digest ``None``) a ``(mtime, size)`` hit is trusted — the file is
 #: neither re-read nor re-parsed. For the live engine.json (``verify_content``)
-#: the digest is a hash of a bounded head+tail window that is re-read every poll;
-#: the cached parse is reused only when the ``(mtime, size)`` key STILL matches
-#: AND that window-hash matches. The stat key catches every ordinary rewrite
-#: (including a mid-file ``state`` change the window can't see); the window hash
-#: is the extra guard that catches a same-size / coarse-mtime content swap the
-#: stat key cannot see. Neither check alone is sufficient, so both must hold.
+#: the digest is a hash of the file's WHOLE content, re-read every poll; the
+#: cached parse is reused only when the ``(mtime, size)`` key STILL matches AND
+#: that content-hash matches. The stat key catches every ordinary rewrite; the
+#: content hash is the extra guard that catches a same-``(mtime, size)`` swap the
+#: stat key cannot see — including one confined to the file's MIDDLE, which the
+#: earlier bounded head+tail window silently masked (#260). Neither check alone is
+#: sufficient, so both must hold.
 #:
 #: An ``OrderedDict`` keyed most-recently-used-last so the store can be bounded:
 #: without a cap a long-lived daemon would pin one fully-parsed dict per path it
@@ -121,11 +126,6 @@ _WARNED_LOCK = threading.Lock()
 #: ``worktree_*`` fields). 128 KiB each side comfortably covers both bands.
 _DEGRADED_WINDOW = 128 * 1024
 
-#: Bounded head/tail window hashed to detect a live-engine.json content swap on a
-#: ``(mtime, size)`` collision (:func:`read_json_cached`, ``verify_content``).
-#: Covers the head identity/status cluster and the tail worktree cluster — the
-#: fields that decide active-flow staleness — without re-reading the whole file.
-_VERIFY_WINDOW = 64 * 1024
 
 #: Top-level string keys the daemon hot path needs from any engine snapshot.
 _STR_HEADER_KEYS = (
@@ -207,29 +207,33 @@ def _safe_stat(path: Path) -> Optional[Tuple[int, int]]:
     # float64 only resolves an epoch-scale mtime to ~100 ns). Even the ns integer
     # is not sufficient on its own for the live engine.json: coarse-mtime
     # filesystems (and fast successive writes) can give two same-size rewrites an
-    # identical ``st_mtime_ns``. That swap is caught by the bounded-window content
-    # check in :func:`read_json_cached` (verify_content), not by this key.
+    # identical ``st_mtime_ns``. That swap is caught by the whole-content hash in
+    # :func:`read_json_cached` (verify_content), not by this key.
     return (st.st_mtime_ns, st.st_size)
 
 
-def _read_bounded_window(path: Path, size: int) -> Optional[bytes]:
-    """Read a bounded head+tail slice of *path* for cheap change-detection.
+def _read_active_content(path: Path) -> Optional[bytes]:
+    """Read the WHOLE content of *path* for the active-engine.json freshness hash.
 
-    Backs the active-engine.json verification: hashing this slice (rather than the
-    whole file) detects a flow identity/status swap — those keys live at the head
-    of an ``indent=2`` engine.json, the worktree keys at the tail — without the
-    full-file read the #243 fix-iteration-3 finding removed. A file no larger than
-    one window on each side is read whole (so the hash then covers everything).
-    Returns ``None`` on an I/O error, which the caller surfaces as "unreadable".
+    Backs the ``verify_content`` change-detection: the cached parse for the live
+    engine.json is reused only while a hash of this content is unchanged. Hashing
+    the ENTIRE file — not merely a bounded head+tail window — is what catches a
+    rewrite confined to the file's MIDDLE (a deep-in-the-``state.steps``-table
+    step-status flip in the dense discovery→analyze rewrite window, #260) that
+    keeps ``(mtime, size)`` and both former 64 KiB windows byte-identical; the old
+    windowed hash silently masked exactly that and returned a stale parse.
+
+    The read is bounded: :func:`read_json_cached` only reaches the verify path for
+    a file at or under :data:`MAX_PARSE_BYTES` (an oversized legacy engine.json
+    degrades to the always-fresh head+tail scan instead), so this reads at most
+    that many bytes and hashes them through a fast C digest — never the whole-file
+    ``json.loads`` (which still runs only when the digest moves), so it does not
+    reintroduce the #209/#243 per-tick parse sink. Returns ``None`` on an I/O
+    error, which the caller surfaces as "unreadable".
     """
     try:
         with open(path, "rb") as fh:
-            if size <= _VERIFY_WINDOW * 2:
-                return fh.read()
-            head = fh.read(_VERIFY_WINDOW)
-            fh.seek(size - _VERIFY_WINDOW)
-            tail = fh.read(_VERIFY_WINDOW)
-            return head + tail
+            return fh.read()
     except OSError:
         return None
 
@@ -278,6 +282,7 @@ def read_json_cached(
     path: Path,
     parse: Optional[Callable[[Path], Optional[dict]]] = None,
     verify_content: bool = False,
+    force_fresh: bool = False,
 ) -> Optional[dict]:
     """Parse *path* at most once per content change; skip oversized files.
 
@@ -295,17 +300,25 @@ def read_json_cached(
       so a matching key is authoritative — the file is neither re-read nor
       re-parsed and is parsed exactly once.
     * **The live engine.json** (``verify_content`` True): a completed→new-flow
-      swap can preserve the file size and share an ``st_mtime_ns`` (coarse-mtime
-      filesystem, or two fast writes), so a pure stat hit could return the
-      just-superseded flow. On each poll a bounded head+tail *window* (never the
-      whole file) is re-read and hashed; the cached parse is reused only while
-      BOTH the ``(mtime, size)`` key and that window-hash are unchanged. The stat
-      key alone reparses every ordinary rewrite — including one that touches only
-      the middle ``state`` block while the head/tail windows stay identical (so
-      the daemon never serves a stale ``state``); the window hash is the extra
-      guard that additionally catches a same-size / same-mtime swap. Per-poll
-      cost is a small bounded read + hash, not the full-file read + parse it used
-      to be, while any real flow change is caught.
+      swap — or an in-place step-status flip — can preserve the file size and
+      share an ``st_mtime_ns`` (coarse-mtime filesystem, or two fast writes), so a
+      pure stat hit could return the just-superseded parse. On each poll the WHOLE
+      content (bounded by the size guard) is re-read and hashed; the cached parse
+      is reused only while BOTH the ``(mtime, size)`` key and that content-hash are
+      unchanged. Hashing the whole content — not merely a head+tail window —
+      additionally catches a rewrite confined to the file's MIDDLE (a
+      deep-in-the-``state.steps``-table status flip in the dense discovery→analyze
+      rewrite window, #260) that keeps head/tail bytes identical; the earlier
+      windowed hash masked exactly that and returned a stale ``state``. Per-poll
+      cost is a bounded read + one C-speed hash, not the full-file read + parse it
+      used to be, while any real flow change is caught.
+
+    *force_fresh* (only meaningful with ``verify_content``) bypasses the cached
+    parse and forces one fresh read + parse this call, then refreshes the cache.
+    It is the *true-value* fallback :func:`~se3.daemon.history` uses on the rare
+    active-flow *drop* decision: rather than exclude a still-active flow on a
+    cache result that could be a same-``(mtime, size)`` collision, it re-confirms
+    against disk before acting.
 
     *parse* overrides the parse seam so a caller can keep its own parse-counting
     hook (honored only on the non-``verify_content`` path; the content path reads
@@ -343,56 +356,51 @@ def read_json_cached(
             _store(key, (mtime, size, None, parsed))
         return parsed
 
-    # Active engine.json. The window hash is a SAME-STAT safeguard layered on
+    # Active engine.json. The content hash is a SAME-STAT safeguard layered on
     # top of the (mtime, size) key, never a replacement for it. Two distinct
     # change classes must both force a reparse:
     #
     #  * A normal in-place rewrite advances st_mtime_ns (and usually st_size),
-    #    so ``stat_hit`` is False → reparse. Crucially this covers an
-    #    under-guard legacy engine.json whose only change is in the middle
-    #    ``state`` block (e.g. current_step_index / a step status flip) while the
-    #    head+tail windows stay byte-identical: the digest alone would miss it,
-    #    but the advanced mtime does not, so the stale ``state`` is never served.
-    #  * A completed→new-flow swap on a coarse-mtime filesystem (tmpfs /
-    #    overlayfs, and observably even ext4 for two writes in one jiffy) can
-    #    keep the byte size identical AND share an st_mtime_ns, so ``stat_hit``
-    #    is True yet the content differs. The bounded head+tail window hash
-    #    catches exactly that: the flow identity/status keys live at the head of
-    #    an indent=2 engine.json and the worktree keys at the tail, so a swap
-    #    changes the window even when the stat key cannot see it.
+    #    so ``stat_hit`` is False → reparse.
+    #  * A completed→new-flow swap — or a same-size in-place step-status flip —
+    #    on a coarse-mtime filesystem (tmpfs / overlayfs, and observably even ext4
+    #    for two writes in one jiffy) can keep the byte size identical AND share an
+    #    st_mtime_ns, so ``stat_hit`` is True yet the content differs. Hashing the
+    #    WHOLE content catches exactly that, wherever the change lands — head, tail
+    #    OR the true middle of the ``state.steps`` table. The earlier head+tail
+    #    window missed a middle-only rewrite (both windows byte-identical) and
+    #    served a stale parse into the dense discovery→analyze rewrite window
+    #    (#260); the whole-content hash closes that blind spot.
     #
     # The cached parse is therefore reused only when BOTH the stat key matches
-    # AND the window hash matches; any change to either pays for one full read +
-    # parse, so the expensive decode still runs at most once per real change
-    # while never masking a mid-file mutation the head+tail window can't see.
-    window = _read_bounded_window(path, size)
-    if window is None:
+    # AND the content hash matches (and *force_fresh* is not requested); any change
+    # to either pays for one full read + parse, so the expensive decode still runs
+    # at most once per real change while never masking a mid-file mutation.
+    content = _read_active_content(path)
+    if content is None:
         return None
-    digest = hashlib.blake2b(window, digest_size=16).digest()
-    if stat_hit and cached[2] is not None and cached[2] == digest:
+    digest = hashlib.blake2b(content, digest_size=16).digest()
+    if not force_fresh and stat_hit and cached[2] is not None and cached[2] == digest:
         with _CACHE_LOCK:
             # Refresh LRU recency for the live engine.json so the cap never
             # evicts the one file polled every tick.
             if key in _CACHE:
                 _CACHE.move_to_end(key)
         # HOP-1 (change-detection) DEBUG observability: the live engine.json's
-        # cached parse was REUSED on a (mtime,size)+head/tail-window hit. When a
-        # >128KiB engine.json is rewritten only in its MIDDLE within one mtime
-        # tick at an identical size (the #260 discovery→analyze dense-rewrite
-        # window), this returns the just-superseded parse — the confirmed latent
-        # staleness the diagnosis (tests/DISCOVERY_ANALYZE_BOUNDARY_VERIFICATION.md)
-        # pins as the primary daemon-side hazard. Logged so a live run shows how
-        # often the active engine.json is served from cache vs re-parsed.
+        # cached parse was REUSED on a (mtime,size)+whole-content hit — i.e. the
+        # file is byte-identical to the last parse, so the reuse is correct.
+        # Logged so a live run shows how often the active engine.json is served
+        # from cache vs re-parsed across the discovery→analyze boundary.
         logger.debug(
             "hist-diag disk_json_cache: active engine.json REUSE cached parse "
-            "path=%s mtime_ns=%s size=%s (middle-window change would be masked)",
+            "path=%s mtime_ns=%s size=%s (whole-content match)",
             path, mtime, size,
         )
         return cached[3]
     logger.debug(
         "hist-diag disk_json_cache: active engine.json RE-PARSE path=%s "
-        "mtime_ns=%s size=%s stat_hit=%s",
-        path, mtime, size, stat_hit,
+        "mtime_ns=%s size=%s stat_hit=%s force_fresh=%s",
+        path, mtime, size, stat_hit, force_fresh,
     )
     parsed = _parse_json_file(path)
     with _CACHE_LOCK:
@@ -404,6 +412,7 @@ def read_engine_header(
     path: Path,
     parse: Optional[Callable[[Path], Optional[dict]]] = None,
     active: bool = False,
+    force_fresh: bool = False,
 ) -> Optional[dict]:
     """Return the small top-level header of an engine.json / snapshot file.
 
@@ -426,11 +435,15 @@ def read_engine_header(
     *active* ``True`` reads the at/under-guard file with
     ``verify_content=True`` — for the one live ``engine.json`` whose in-place,
     possibly same-size / same-mtime rewrites must not be masked by a stat-only
-    cache hit (see :func:`read_json_cached`). It is NOT a full re-read: only a
-    bounded head+tail window is re-hashed each poll, and the parse is reused while
-    that window is unchanged, so the decode still runs at most once per real
-    change. An oversized active file degrades via the always-fresh head+tail
+    cache hit (see :func:`read_json_cached`). It re-hashes the file's whole
+    content each poll and reuses the parse while that content is unchanged, so the
+    decode still runs at most once per real change while a middle-only rewrite is
+    never masked. An oversized active file degrades via the always-fresh head+tail
     scan, so it is never stale either way.
+
+    *force_fresh* (only with ``active``) bypasses the cached parse for this call —
+    the true-value re-confirmation the active-flow *drop* decision uses so a
+    still-active flow is never excluded on a stale/collided cache result.
     """
     stat = _safe_stat(path)
     if stat is None:
@@ -441,7 +454,9 @@ def read_engine_header(
     _mtime, size = stat
     if size > MAX_PARSE_BYTES:
         return _degraded_header(path, size)
-    return read_json_cached(path, parse=parse, verify_content=active)
+    return read_json_cached(
+        path, parse=parse, verify_content=active, force_fresh=force_fresh
+    )
 
 
 def _join_head_tail(head_text: str, tail_text: str, separate: bool) -> str:

@@ -47,8 +47,6 @@ import json
 import os
 from pathlib import Path
 
-import pytest
-
 from se3.daemon import disk_json_cache, protocol
 from se3.daemon.history import DaemonHistoryReader
 from se3.server.state import ServerState
@@ -427,8 +425,9 @@ def test_normal_step_boundary_not_regressed(tmp_path):
 
 # --------------------------------------------------------------------------
 # The confirmed daemon-side latent hazard: disk_json_cache stale parse for the
-# LIVE engine.json under a same-(mtime,size) MIDDLE rewrite. This is the design's
-# primary #260 fix target; it is xfail until G2 hardens the cache.
+# LIVE engine.json under a same-(mtime,size) MIDDLE rewrite — the design's primary
+# #260 fix target. G1 reproduced it as an ``xfail``; G2 hardened the cache to hash
+# the WHOLE content, so this now PASSES as a permanent regression guard.
 # --------------------------------------------------------------------------
 
 
@@ -464,23 +463,17 @@ def _build_large_engine(marker: int) -> str:
     return json.dumps(obj, indent=2)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="#260 primary daemon-side hazard: disk_json_cache serves a STALE "
-    "parse for the live engine.json when a >128KiB file is rewritten only in "
-    "its middle within one mtime tick at an identical size (the dense "
-    "discovery→analyze rewrite window). G2 must harden the active-engine.json "
-    "freshness check (bounded middle re-hash / controlled re-parse).",
-)
-def test_active_engine_json_middle_rewrite_returns_stale_parse(tmp_path):
-    """Deterministic reproduction of the confirmed staleness.
+def test_active_engine_json_middle_rewrite_returns_fresh_parse(tmp_path):
+    """The #260 primary fix, locked: a same-``(st_mtime_ns, st_size)`` rewrite that
+    differs ONLY in the file's middle must return the FRESH parse.
 
-    Two writes with an identical ``(st_mtime_ns, st_size)`` that differ ONLY in
-    the file's middle. The head+tail verify window is byte-identical, so
-    ``read_engine_header(active=True)`` reuses the first parse and returns the
+    Before G2 the head+tail verify window was byte-identical, so
+    ``read_engine_header(active=True)`` reused the first parse and served the
     SUPERSEDED middle — a daemon reading the live engine.json in the dense
-    discovery→analyze rewrite window can act on stale flow state. When G2
-    hardens the freshness check this reads the fresh middle and the test XPASSes.
+    discovery→analyze rewrite window acted on stale flow state (the confirmed
+    freeze root cause). G2 now hashes the whole content, so the middle change is
+    caught and the fresh parse is returned. (G1 shipped this as a strict-``xfail``
+    reproduction; it is now a permanent regression guard.)
     """
     ej = tmp_path / "engine.json"
     first = _build_large_engine(0)
@@ -504,9 +497,8 @@ def test_active_engine_json_middle_rewrite_returns_stale_parse(tmp_path):
     mid1 = d1["state"]["steps"]["1500_step"]["blob"][:7]
     mid2 = d2["state"]["steps"]["1500_step"]["blob"][:7]
     assert mid1 == "MID0000"
-    # The daemon SHOULD observe the fresh middle (MID0001). Until G2 hardens the
-    # active-engine.json freshness check it observes the stale MID0000 — this
-    # assertion is the initial #260 FAIL (xfail).
+    # The daemon observes the fresh middle (MID0001): G2's whole-content freshness
+    # hash catches the middle rewrite the old head+tail window masked.
     assert mid2 == "MID0001", (
         f"disk_json_cache served a STALE parse for the live engine.json: read "
         f"{mid2!r}, expected the freshly-written MID0001"
@@ -545,3 +537,60 @@ def test_active_flow_signature_masks_engine_middle_rewrite(tmp_path):
         "expected the same-(mtime,size) middle rewrite to leave the raw-stat "
         "signature unchanged (the debounce that masks the staleness)"
     )
+
+
+def _build_large_worktree_engine(marker: int, branch: str) -> str:
+    """Like :func:`_build_large_engine` but a ``--worktree``-mode engine.json: the
+    worktree tail keys (``worktree_branch`` / ``worktree_path``) trail the giant
+    steps table, exactly where the removed 64 KiB tail window used to sit.
+    """
+    steps = {}
+    for i in range(3000):
+        blob = "x" * 40
+        if i == 1500:
+            blob = "MID%04d" % marker + "x" * 33
+        steps["%04d_step" % i] = {"status": "pending", "blob": blob}
+    obj = {
+        "flow_id": "F1",
+        "status": "RUNNING",
+        "task_description": "td",
+        "state": {"steps": steps, "current_step_index": 0},
+        "is_worktree_mode": True,
+        "worktree_branch": branch,
+        "worktree_path": "/tmp/wt/" + branch,
+    }
+    return json.dumps(obj, indent=2)
+
+
+def test_worktree_engine_middle_rewrite_fresh_and_tail_keys_preserved(tmp_path):
+    """--worktree non-regression: the whole-content freshness hash (which replaced
+    the head+tail window) must both catch a middle rewrite AND still surface the
+    worktree tail keys on the live read.
+
+    The removed tail window is exactly where ``worktree_branch`` / ``worktree_path``
+    live, so a naive fix could regress worktree visibility. Because the fix
+    re-parses the WHOLE file on a real change, every top-level key — worktree tail
+    keys included — is returned, and the middle marker is fresh.
+    """
+    ej = tmp_path / "engine.json"
+    first = _build_large_worktree_engine(0, "feat-a")
+    ej.write_text(first, encoding="utf-8")
+    assert ej.stat().st_size > 128 * 1024
+    disk_json_cache.clear_cache()
+
+    d1 = disk_json_cache.read_engine_header(ej, active=True)
+    assert d1["is_worktree_mode"] is True
+    assert d1["worktree_branch"] == "feat-a"
+    st = os.stat(ej)
+
+    second = _build_large_worktree_engine(1, "feat-a")
+    assert len(first) == len(second)
+    ej.write_text(second, encoding="utf-8")
+    os.utime(ej, ns=(st.st_atime_ns, st.st_mtime_ns))  # same (mtime, size)
+
+    d2 = disk_json_cache.read_engine_header(ej, active=True)
+    # Fresh middle AND the worktree tail keys still present (no regression).
+    assert d2["state"]["steps"]["1500_step"]["blob"][:7] == "MID0001"
+    assert d2["is_worktree_mode"] is True
+    assert d2["worktree_branch"] == "feat-a"
+    assert d2["worktree_path"] == "/tmp/wt/feat-a"

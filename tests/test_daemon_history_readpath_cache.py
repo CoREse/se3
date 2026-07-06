@@ -27,6 +27,7 @@ oversized file was never fully parsed.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -213,3 +214,170 @@ def test_degraded_extraction_failure_is_skipped_and_warned(
     with caplog.at_level("WARNING", logger="se3.daemon.history"):
         enumerate_historical_project_roots([root])
     assert "unreadable archive file" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# #260 (G2 task 1) — the live engine.json freshness check must catch a rewrite
+# confined to the file's MIDDLE, even when (mtime, size) and the former head+tail
+# windows stay byte-identical. Before the fix the head+tail window hash masked
+# such a rewrite and ``read_engine_header(active=True)`` served a STALE parse into
+# the dense discovery→analyze rewrite window; hashing the whole content closes it.
+# --------------------------------------------------------------------------
+
+
+def _build_large_engine(marker: int) -> str:
+    """A >128 KiB indent=2 engine.json whose ONLY variable byte-run is a marker
+    buried in the TRUE MIDDLE of the steps table — beyond the former 64 KiB head
+    window AND before the former 64 KiB tail window.
+
+    The head keys (``flow_id`` / ``status``) and the tail keys
+    (``current_step_index`` / worktree fields) are held byte-for-byte constant, so
+    only a deep-in-the-table step marker changes: a same-size rewrite the old
+    head+tail window could not see.
+    """
+    steps: dict = {}
+    for i in range(3000):
+        blob = "x" * 40
+        if i == 1500:  # middle of the file — outside both former 64 KiB windows
+            blob = "MID%04d" % marker + "x" * 33
+        steps["%04d_step" % i] = {"status": "pending", "blob": blob}
+    obj = {
+        "flow_id": "F1",
+        "status": "RUNNING",
+        "task_description": "td",
+        "state": {"steps": steps, "current_step_index": 0},
+        "is_worktree_mode": False,
+    }
+    return json.dumps(obj, indent=2)
+
+
+def test_active_engine_middle_rewrite_same_stat_returns_fresh_parse(tmp_path):
+    """Same ``(mtime, size)`` + middle-only rewrite → the FRESH parse, not stale.
+
+    Two writes sharing an identical ``(st_mtime_ns, st_size)`` that differ ONLY in
+    the file's middle. The whole-content hash must catch the change so
+    ``read_engine_header(active=True)`` returns the freshly-written middle — the
+    #260 primary daemon-side fix (this was the boundary e2e's ``xfail`` repro).
+    """
+    ej = tmp_path / "engine.json"
+    first = _build_large_engine(0)
+    ej.write_text(first, encoding="utf-8")
+    assert ej.stat().st_size > 128 * 1024, "engine.json must exceed the former window"
+    disk_cache.clear_cache()
+
+    d1 = disk_cache.read_engine_header(ej, active=True)
+    st = os.stat(ej)
+
+    second = _build_large_engine(1)
+    assert len(first) == len(second), "the rewrite must preserve the byte size"
+    ej.write_text(second, encoding="utf-8")
+    # Force the two writes to share an mtime tick (coarse-mtime filesystems and
+    # two fast writes on ext4 do this naturally; made deterministic here).
+    os.utime(ej, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.stat(ej).st_mtime_ns == st.st_mtime_ns
+    assert os.stat(ej).st_size == st.st_size
+
+    d2 = disk_cache.read_engine_header(ej, active=True)
+    assert d1["state"]["steps"]["1500_step"]["blob"][:7] == "MID0000"
+    assert d2["state"]["steps"]["1500_step"]["blob"][:7] == "MID0001", (
+        "read_engine_header(active=True) served a STALE parse for the live "
+        "engine.json; the whole-content freshness hash must catch a middle rewrite"
+    )
+
+
+def test_active_engine_unchanged_parsed_once_across_ticks(tmp_path, monkeypatch):
+    """A byte-identical active engine.json is full-parsed at most once per change.
+
+    Ten push-loop-equivalent reads of an UNCHANGED >128 KiB active engine.json
+    must full-parse it exactly once — the whole-content hash matches every tick,
+    so the cost stays a bounded read + C-speed digest, never a re-``json.loads``.
+    This is the bound that keeps the fix from re-introducing the #209 parse sink.
+    """
+    ej = tmp_path / "engine.json"
+    ej.write_text(_build_large_engine(0), encoding="utf-8")
+    disk_cache.clear_cache()
+    counter = _count_full_parses(monkeypatch)
+
+    for _ in range(10):
+        header = disk_cache.read_engine_header(ej, active=True)
+        assert header["flow_id"] == "F1"
+
+    assert counter["n"] == 1, (
+        f"unchanged active engine.json was fully parsed {counter['n']} times "
+        "across 10 ticks; the content-hash cache must collapse to a single parse"
+    )
+
+
+def test_active_engine_small_file_middle_rewrite_returns_fresh_parse(tmp_path):
+    """The small-file path stays correct: a same-``(mtime, size)`` middle rewrite
+    of an UNDER-128 KiB active engine.json is still caught (unchanged behaviour).
+
+    The former window already read a small file whole; this locks that the
+    whole-content hash preserves that correctness for the degenerate small case.
+    """
+    ej = tmp_path / "engine.json"
+    obj0 = {"flow_id": "F1", "status": "RUNNING", "state": {"n": 111}}
+    obj1 = {"flow_id": "F1", "status": "RUNNING", "state": {"n": 222}}
+    a = json.dumps(obj0)
+    b = json.dumps(obj1)
+    assert len(a) == len(b)
+    ej.write_text(a, encoding="utf-8")
+    disk_cache.clear_cache()
+
+    d1 = disk_cache.read_engine_header(ej, active=True)
+    st = os.stat(ej)
+    ej.write_text(b, encoding="utf-8")
+    os.utime(ej, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    d2 = disk_cache.read_engine_header(ej, active=True)
+    assert d1["state"]["n"] == 111
+    assert d2["state"]["n"] == 222
+
+
+def test_oversized_active_engine_degrades_unchanged(tmp_path, monkeypatch):
+    """An oversized (> guard) active engine.json still degrades — never parsed.
+
+    The size guard runs BEFORE the verify path, so an oversized active file takes
+    the always-fresh degraded head+tail scan regardless of ``active=True``; the
+    whole-content freshness change must not alter that (the #209 guard).
+    """
+    ej = tmp_path / "engine.json"
+    with open(ej, "w", encoding="utf-8") as fh:
+        fh.write("{\n")
+        fh.write('  "flow_id": "F1",\n')
+        fh.write('  "status": "RUNNING",\n')
+        fh.write('  "state": "')
+        fh.write("x" * _OVERSIZE_STATE_BYTES)
+        fh.write('",\n')
+        fh.write('  "is_worktree_mode": false\n')
+        fh.write("}\n")
+    assert ej.stat().st_size > disk_cache.MAX_PARSE_BYTES
+    disk_cache.clear_cache()
+    counter = _count_full_parses(monkeypatch)
+
+    header = disk_cache.read_engine_header(ej, active=True)
+    assert counter["n"] == 0, "an oversized active file must never be fully parsed"
+    assert header is not None and header.get("flow_id") == "F1"
+
+
+def test_force_fresh_bypasses_stale_same_stat_cache(tmp_path):
+    """``force_fresh=True`` re-parses even on a ``(mtime, size)`` + content hit.
+
+    The true-value fallback the active-flow *drop* decision uses: given a cached
+    parse, a forced fresh read must re-read + re-parse and return disk truth. Here
+    a same-``(mtime, size)`` middle rewrite is deliberately hidden from the normal
+    hash by pre-seeding the cache, then ``force_fresh`` must still surface it.
+    """
+    ej = tmp_path / "engine.json"
+    first = _build_large_engine(0)
+    ej.write_text(first, encoding="utf-8")
+    disk_cache.clear_cache()
+    disk_cache.read_engine_header(ej, active=True)  # seed the cache with MID0000
+    st = os.stat(ej)
+
+    second = _build_large_engine(1)
+    ej.write_text(second, encoding="utf-8")
+    os.utime(ej, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    fresh = disk_cache.read_engine_header(ej, active=True, force_fresh=True)
+    assert fresh["state"]["steps"]["1500_step"]["blob"][:7] == "MID0001"

@@ -122,14 +122,15 @@ def _count_file_parses(monkeypatch) -> dict:
     return counter
 
 
-def test_active_unchanged_not_fully_reread(tmp_path, monkeypatch):
-    """An unchanged active engine.json (verify_content=True) is not re-read in
-    full nor re-parsed on a stat hit — only a bounded window is re-hashed.
+def test_active_unchanged_not_reparsed(tmp_path, monkeypatch):
+    """An unchanged active engine.json (verify_content=True) is not re-PARSED on a
+    stat + whole-content hit.
 
-    Pre-fix, active reads re-read the whole file every poll to hash it; that
-    redundant full read+parse is what issue #243 fix iteration 3 removed. The
-    swap-safety it protected is preserved by the bounded-window hash (see
-    ``test_active_same_size_same_mtime_swap_detected``).
+    The #260 fix re-reads the whole content each poll to hash it (that read is the
+    bounded cost that catches a middle rewrite the old head+tail window masked),
+    but the expensive ``json.loads`` (``_parse_json_file``) must still run at most
+    once per real change — an unchanged file hashes equal every poll, so no
+    re-parse. This is the bound that keeps the fix off the #209 parse sink.
     """
     path = tmp_path / "engine.json"
     path.write_text(_engine_json("flow-a", is_worktree_mode=False), encoding="utf-8")
@@ -143,75 +144,77 @@ def test_active_unchanged_not_fully_reread(tmp_path, monkeypatch):
         again = read_json_cached(path, verify_content=True)
         assert again == first
     assert file_parses["n"] == 0, (
-        "unchanged active file must not be re-read in full / re-parsed per poll"
+        "unchanged active file must not be re-parsed per poll"
     )
 
 
-def test_active_large_underguard_file_reads_only_a_window(tmp_path, monkeypatch):
-    """A ~1 MiB (≤ guard) active engine.json is not re-read whole on a poll.
+def test_active_large_underguard_parsed_once_but_middle_rewrite_caught(
+    tmp_path, monkeypatch
+):
+    """A ~1 MiB (≤ guard) active engine.json: parsed once while unchanged, yet a
+    same-``(mtime, size)`` MIDDLE rewrite is still caught.
 
-    The bounded head+tail window caps the per-poll read far below the file size,
-    which is the concrete cost the finding targets for a legacy under-guard file.
+    This is the #260 fix's core trade: the per-poll cost is a whole-content read +
+    C-speed hash (never the whole-file ``json.loads``, which runs at most once per
+    real change), and in exchange a rewrite buried deep in the ``state`` block —
+    which the old head+tail window silently masked, serving a stale parse — is now
+    detected because the hash covers the whole file.
     """
-    from se3.daemon import disk_json_cache as _djc
+    import os
 
-    # ~1 MiB of padding inside ``state`` keeps flow_id at the head, is_worktree at
-    # the tail — well under the 5 MiB guard but far larger than the window.
+    # ~1 MiB of padding inside ``state`` — well under the 5 MiB guard but far
+    # larger than the removed 64 KiB verify window, so the change lands squarely in
+    # the middle the old window could not see.
+    def _doc(flow_id: str) -> str:
+        pad = "x" * (1024 * 1024)
+        return json.dumps(
+            {
+                "flow_id": "stable-id",
+                "status": "running",
+                "state": {"head_pad": pad, "marker": flow_id, "tail_pad": pad},
+                "is_worktree_mode": False,
+            },
+            indent=2,
+        )
+
     path = tmp_path / "engine.json"
-    path.write_text(
-        _engine_json("flow-a", is_worktree_mode=True, state_padding=1024 * 1024),
-        encoding="utf-8",
+    v1 = _doc("M1")
+    v2 = _doc("M2")
+    assert len(v1.encode()) == len(v2.encode())
+    assert len(v1.encode()) < SIZE_GUARD_BYTES
+    assert len(v1.encode()) > 128 * 1024
+
+    path.write_text(v1, encoding="utf-8")
+    first = read_json_cached(path, verify_content=True)
+    assert first["state"]["marker"] == "M1"
+
+    # Unchanged polls: no re-parse (the whole-content hash matches every time).
+    file_parses = _count_file_parses(monkeypatch)
+    for _ in range(5):
+        read_json_cached(path, verify_content=True)
+    assert file_parses["n"] == 0, "unchanged large active file must not be re-parsed"
+
+    # Same-(mtime, size) middle rewrite: the whole-content hash catches it.
+    st = path.stat()
+    path.write_text(v2, encoding="utf-8")
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert path.stat().st_size == st.st_size
+    assert path.stat().st_mtime_ns == st.st_mtime_ns
+
+    got = read_json_cached(path, verify_content=True)
+    assert got["state"]["marker"] == "M2", (
+        "a middle rewrite at the same (mtime, size) must be caught by the "
+        "whole-content hash, not masked as the old head+tail window did (#260)"
     )
-    assert path.stat().st_size < SIZE_GUARD_BYTES
-    assert path.stat().st_size > _djc._VERIFY_WINDOW * 2
-
-    read_json_cached(path, verify_content=True)  # prime
-
-    import builtins
-
-    real_open = builtins.open
-    bytes_read = {"n": 0}
-
-    class _CountingFH:
-        def __init__(self, fh):
-            self._fh = fh
-
-        def read(self, n=-1):
-            data = self._fh.read(n)
-            bytes_read["n"] += len(data)
-            return data
-
-        def __getattr__(self, name):
-            return getattr(self._fh, name)
-
-        def __enter__(self):
-            self._fh.__enter__()
-            return self
-
-        def __exit__(self, *a):
-            return self._fh.__exit__(*a)
-
-    def counting_open(file, *a, **k):
-        fh = real_open(file, *a, **k)
-        if str(file) == str(path) and "b" in (a[0] if a else k.get("mode", "")):
-            return _CountingFH(fh)
-        return fh
-
-    monkeypatch.setattr(builtins, "open", counting_open)
-
-    again = read_json_cached(path, verify_content=True)
-    assert again["flow_id"] == "flow-a"
-    assert bytes_read["n"] <= _djc._VERIFY_WINDOW * 2, (
-        f"poll read {bytes_read['n']} bytes; must stay within the bounded window"
-    )
+    assert file_parses["n"] == 1, "exactly one re-parse for the one real change"
 
 
 def test_active_same_size_same_mtime_swap_detected(tmp_path, monkeypatch):
     """A completed→new-flow swap that keeps size AND mtime is still caught.
 
-    This is the correctness property the whole-file hash used to give and the
-    bounded-window hash preserves: without it the daemon would report the stale,
-    just-superseded flow (test_read_active_flows_drops_stale_flow_after_flow_change).
+    The correctness property the whole-content hash guarantees: without it the
+    daemon would report the stale, just-superseded flow
+    (test_read_active_flows_drops_stale_flow_after_flow_change).
     """
     import os
 
@@ -237,14 +240,14 @@ def test_active_same_size_same_mtime_swap_detected(tmp_path, monkeypatch):
 
 def test_active_underguard_midfile_change_is_reparsed(tmp_path, monkeypatch):
     """An active under-guard file changed ONLY in its middle ``state`` block is
-    reparsed, even when the head+tail windows stay byte-identical.
+    reparsed — via either the advanced ``(mtime, size)`` key OR the whole-content
+    hash.
 
-    The window hash is a same-stat SAFEGUARD, not a replacement for the
-    ``(mtime, size)`` key. A normal rewrite of a legacy engine.json that flips,
-    say, ``current_step_index`` deep inside ``state`` leaves the head/tail
-    windows unchanged, so the digest alone would keep serving the stale parse —
-    the WebUI progress/current-step staleness the finding targets. The advanced
-    mtime must force the reparse.
+    Two independent guards force the reparse: a normal rewrite advances mtime (the
+    stat key), and even at an identical ``(mtime, size)`` the whole-content hash
+    covers the middle. Here the mtime is advanced deterministically so the stat key
+    is the trigger; the same-``(mtime, size)`` middle case is locked separately by
+    ``test_active_large_underguard_parsed_once_but_middle_rewrite_caught``.
     """
     import os
 
@@ -252,9 +255,9 @@ def test_active_underguard_midfile_change_is_reparsed(tmp_path, monkeypatch):
     tail_pad = "B" * 100_000
 
     def _doc(step_index: int) -> str:
-        # head_pad/tail_pad each exceed the 64 KiB verify window, so the head and
-        # tail windows land entirely inside them and are byte-identical across
-        # versions; only the middle current_step_index differs.
+        # head_pad/tail_pad bracket a middle current_step_index that is what
+        # differs across versions; the whole-content hash covers it regardless of
+        # where in the file it lands.
         return json.dumps(
             {
                 "flow_id": "flow-mid",
@@ -273,15 +276,14 @@ def test_active_underguard_midfile_change_is_reparsed(tmp_path, monkeypatch):
     v1 = _doc(3)
     v2 = _doc(4)
     assert len(v1.encode()) == len(v2.encode())  # single-digit swap keeps size
-    assert len(v1.encode()) > 128 * 1024  # > 2×window ⇒ head/tail read separately
+    assert len(v1.encode()) > 128 * 1024
 
     path.write_text(v1, encoding="utf-8")
     first = read_json_cached(path, verify_content=True)
     assert first["state"]["current_step_index"] == 3
 
-    # Rewrite only the middle value; head+tail windows stay byte-identical. A
-    # normal rewrite advances mtime — force it deterministically so the stat key
-    # (not the unchanged window hash) is what triggers the reparse.
+    # Rewrite only the middle value; a normal rewrite advances mtime — force it
+    # deterministically so the stat key triggers the reparse here.
     path.write_text(v2, encoding="utf-8")
     st = path.stat()
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))

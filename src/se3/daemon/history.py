@@ -585,48 +585,68 @@ class DaemonHistoryReader:
         if meta.source != "active":
             return False
         engine_json = Path(meta.project_root) / "se3" / "state" / "engine.json"
-        # active=True read: a matching (path, mtime, size) is trusted (no
-        # re-read), and a real step/status rewrite moves the key and re-parses.
-        # The explicit flow_id guard below is what rejects a superseded flow, so
-        # correctness does not hinge on catching a same-size in-place swap.
+        # active=True read: the live-engine cache now hashes the WHOLE content, so
+        # a same-(mtime,size) middle rewrite (the #260 dense discovery→analyze
+        # window) forces a re-parse rather than serving a stale flow_id/status —
+        # the disk_json_cache blind spot the diagnosis pinned is closed at source.
+        # The true-value fallback below is defence-in-depth on TOP of that: only
+        # ever reached on the drop path, so it re-confirms against disk (bypassing
+        # the cache) before a still-active flow is excluded, and never adds a parse
+        # on the healthy keep path.
         data = read_engine_header(engine_json, active=True)
-        if not isinstance(data, dict):
-            # HOP-1 DEBUG: the active engine.json parsed to None (missing /
-            # oversized-degraded-miss / caught mid-write). The flow is dropped
-            # from the active set for this tick, so no incremental read/push
-            # happens for it — a candidate #260 drop point in the dense
-            # discovery→analyze rewrite window.
+        active = DaemonHistoryReader._header_keeps_flow_active(meta, data)
+        if active is not None:
+            return active
+        # Cache-based read said DROP (unreadable / flow_id mismatch / terminal).
+        # Because dropping an active flow silently freezes its live WebUI stream
+        # for the rest of the step (the #260 symptom), re-confirm with a forced
+        # fresh read before acting — a same-(mtime,size) collision or a write
+        # racing our read must not transiently exclude a flow that is in fact live.
+        fresh = read_engine_header(engine_json, active=True, force_fresh=True)
+        confirmed = DaemonHistoryReader._header_keeps_flow_active(meta, fresh)
+        if confirmed is None:
+            # Forced fresh read still says DROP — the drop is genuine.
             logger.debug(
-                "hist-diag _is_still_active: flow=%s DROPPED (engine.json "
-                "unreadable/degraded) root=%s",
+                "hist-diag _is_still_active: flow=%s DROP confirmed by forced "
+                "fresh read (root=%s)",
                 meta.flow_id, meta.project_root,
             )
             return False
+        if confirmed and confirmed is not active:
+            logger.debug(
+                "hist-diag _is_still_active: flow=%s RESCUED — cached read would "
+                "have dropped it, forced fresh read confirms it is still active",
+                meta.flow_id,
+            )
+        return confirmed
+
+    @staticmethod
+    def _header_keeps_flow_active(
+        meta: SessionMeta, data: Any
+    ) -> Optional[bool]:
+        """Decide active-liveness from an engine.json header read.
+
+        Returns ``True`` when *data* confirms *meta*'s flow is still the live,
+        non-terminal engine.json flow, ``False`` when it is present-but-terminal,
+        and ``None`` for an *inconclusive* drop (unreadable / degraded-miss /
+        flow_id mismatch) that the caller should re-confirm with a forced fresh
+        read before trusting. Distinguishing a definite-terminal ``False`` from an
+        inconclusive ``None`` is what lets the caller pay the extra fresh read only
+        on the ambiguous drop, never on a clean terminal transition.
+        """
+        if not isinstance(data, dict):
+            # Missing / oversized-degraded-miss / caught mid-write: inconclusive.
+            return None
         # Confirm the engine.json still describes *this* flow.  Without this
-        # check, if flow F1 completed and a different flow F2 is now the
-        # active engine.json flow (status RUNNING), _is_still_active(F1_meta)
-        # would read F2's RUNNING status and incorrectly return True — keeping
-        # the stale F1 meta in the active set and missing F2 entirely.
-        #
-        # This read uses the stat-keyed live-engine cache: on a same-(mtime,size)
-        # middle rewrite it can return a STALE flow_id/status (see
-        # disk_json_cache), so this branch is a diagnosis blind spot — logged so a
-        # live run reveals whether a still-active flow is transiently excluded.
+        # check, if flow F1 completed and a different flow F2 is now the active
+        # engine.json flow (status RUNNING), this would read F2's RUNNING status
+        # and incorrectly keep the stale F1 meta active while missing F2. A
+        # mismatch is inconclusive (a same-(mtime,size) collision could show a
+        # stale id), so the caller re-confirms fresh.
         if str(data.get("flow_id") or "") != meta.flow_id:
-            logger.debug(
-                "hist-diag _is_still_active: flow=%s DROPPED (engine.json "
-                "flow_id=%s mismatch — possibly a stale cached parse)",
-                meta.flow_id, data.get("flow_id"),
-            )
-            return False
+            return None
         status = str(data.get("status") or "")
-        active = _is_active_status(status)
-        if not active:
-            logger.debug(
-                "hist-diag _is_still_active: flow=%s DROPPED (status=%s terminal)",
-                meta.flow_id, status,
-            )
-        return active
+        return _is_active_status(status)
 
     def _index_root(
         self, root: Path, metas: List[SessionMeta], seen: Dict[str, int]
