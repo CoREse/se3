@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -783,6 +784,38 @@ def test_clear_recovery_pull_re_arms_after_failed_send():
         # The recovery send failed (daemon vanished) — release the marker so a
         # later append can re-arm a fresh recovery instead of wedging.
         await state.clear_recovery_pull("f1")
+        return await state.take_recovery_pull("f1")
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_recovery_marker_expires_when_reply_never_arrives():
+    """A lost recovery reply must not wedge the flow forever.
+
+    If the recovery ``MSG_HISTORY_REQUEST`` was sent but the daemon never
+    answered (it swallowed a read error and returned silently, or disconnected
+    right after the request left the server), the in-flight marker would — with
+    a bare flag — stay set forever, so every later append stays discarded and no
+    second recovery pull can ever fire. The marker is timestamped, so once it is
+    older than the TTL a later discarded append re-arms a fresh pull and the
+    bundle can still self-heal.
+    """
+
+    async def scenario():
+        state = ServerState()
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 1}], machine_id="m1"
+        )
+        assert await state.take_recovery_pull("f1") is True
+        # A second consult while the pull is fresh is still deduped (no storm).
+        assert await state.take_recovery_pull("f1") is False
+        # Simulate the reply never arriving: backdate the dispatch past the TTL.
+        # The marker is aged on the monotonic clock, so backdate on that same
+        # clock (a wall-clock epoch value would never line up with monotonic).
+        state._history_recovery_inflight["f1"] = (
+            time.monotonic() - ServerState._HISTORY_RECOVERY_TTL - 1.0
+        )
+        # The stale marker is now treated as lost, so a fresh pull re-arms.
         return await state.take_recovery_pull("f1")
 
     assert asyncio.run(scenario()) is True

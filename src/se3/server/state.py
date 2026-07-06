@@ -313,6 +313,15 @@ def _owned(record: "MachineRecord", owner: Optional[str]) -> bool:
 class ServerState:
     """Thread-safe (asyncio-safe) in-memory store of all machine state."""
 
+    #: Seconds after which an unanswered self-heal recovery pull (see
+    #: :attr:`_history_recovery_inflight`) is treated as lost so a later
+    #: discarded append can re-arm a fresh pull. Sized well above the
+    #: round-trip of a healthy full pull (sub-second) yet small enough that a
+    #: silently-dropped reply self-corrects within one grace-window cadence, so
+    #: at worst one redundant pull fires per interval and the flow is never
+    #: permanently wedged.
+    _HISTORY_RECOVERY_TTL: float = 30.0
+
     def __init__(self) -> None:
         self._machines: Dict[str, MachineRecord] = {}
         # History relay caches. The server is a pure in-memory relay for
@@ -326,15 +335,22 @@ class ServerState:
         #: Flows whose cache was invalidated by a cross-machine append. Further
         #: appends stay ignored until an authoritative full bundle arrives.
         self._history_requires_full: set[str] = set()
-        #: Flows for which a self-heal ``MSG_HISTORY_REQUEST`` (full pull) has
-        #: been dispatched to the owning daemon and is not yet answered. Without
-        #: this, a flow that landed in ``_history_requires_full`` stayed frozen
-        #: until the user exited and re-entered the chat (the only path that
-        #: previously re-pulled a ``full`` frame). The receive loop consults
-        #: :meth:`take_recovery_pull` after every discarded append so it fires at
-        #: most one recovery pull per stuck flow; the marker clears when the
-        #: authoritative full frame lands (see :meth:`append_history`).
-        self._history_recovery_inflight: set[str] = set()
+        #: flow_id -> monotonic dispatch time of a self-heal
+        #: ``MSG_HISTORY_REQUEST`` (full pull) sent to the owning daemon and not
+        #: yet answered. Without this, a flow that landed in
+        #: ``_history_requires_full`` stayed frozen until the user exited and
+        #: re-entered the chat (the only path that previously re-pulled a ``full``
+        #: frame). The receive loop consults :meth:`take_recovery_pull` after
+        #: every discarded append so it fires at most one recovery pull per stuck
+        #: flow; the marker clears when the authoritative full frame lands (see
+        #: :meth:`append_history`). It is a *timestamp*, not a bare flag, so a
+        #: pull whose reply never arrives (the daemon swallowed a read error and
+        #: returned silently, or disconnected right after the request left the
+        #: server) cannot wedge the flow forever: after
+        #: :data:`_HISTORY_RECOVERY_TTL` seconds :meth:`take_recovery_pull`
+        #: treats the marker as stale and re-arms a fresh pull, so the bundle
+        #: still self-heals without the user exiting and re-entering the chat.
+        self._history_recovery_inflight: Dict[str, float] = {}
         #: Monotonic counter handing out a fresh ``generation`` to every newly
         #: created / replaced history bundle, so a progress token is bound to
         #: exactly one bundle lifecycle (see ``encode_progress``).
@@ -776,7 +792,7 @@ class ServerState:
                     # longer helps — the flow now needs a full pull from the NEW
                     # daemon. Drop the marker so ``take_recovery_pull`` can fire a
                     # fresh recovery for this machine instead of being wedged.
-                    self._history_recovery_inflight.discard(flow_id)
+                    self._history_recovery_inflight.pop(flow_id, None)
                     logger.debug(
                         "hist-diag append_history DISCARD flow=%s reason=machine-change "
                         "(bundle dropped, flagged requires_full)",
@@ -816,7 +832,7 @@ class ServerState:
                 # recovery pull for this flow has been satisfied (this frame is
                 # its reply, or a concurrent full pull beat it). Clear the marker
                 # so a later re-desync can dispatch a fresh recovery.
-                self._history_recovery_inflight.discard(flow_id)
+                self._history_recovery_inflight.pop(flow_id, None)
                 self._history_data[flow_id] = {
                     "flow_id": flow_id,
                     "machine_id": machine_id,
@@ -855,13 +871,31 @@ class ServerState:
         broadcast normally. Every later discarded append for the same still-stuck
         flow returns ``False`` so a per-cycle append storm cannot fan out one
         request per frame.
+
+        The in-flight marker records the dispatch *time*, not a bare flag: if a
+        pull's reply never arrives (the daemon swallowed a read error and
+        returned without sending HISTORY_DATA, its reply send failed, or it
+        disconnected right after the request left the server) a bare flag would
+        wedge the flow forever — every later append still discarded, every
+        ``take_recovery_pull`` returning ``False``, the bundle frozen until some
+        client happens to trigger a REST cache-miss full pull. So a marker older
+        than :attr:`_HISTORY_RECOVERY_TTL` is treated as lost and this call
+        re-arms a fresh pull, letting the bundle self-heal without the user
+        exiting and re-entering the chat.
         """
         async with self._lock:
             if flow_id not in self._history_requires_full:
                 return False
-            if flow_id in self._history_recovery_inflight:
+            dispatched_at = self._history_recovery_inflight.get(flow_id)
+            # Age the marker on the monotonic clock so the TTL measures real
+            # elapsed time: a backward wall-clock step (NTP correction) must not
+            # keep a lost pull's marker "fresh" and freeze the flow past the TTL.
+            if (
+                dispatched_at is not None
+                and (time.monotonic() - dispatched_at) < self._HISTORY_RECOVERY_TTL
+            ):
                 return False
-            self._history_recovery_inflight.add(flow_id)
+            self._history_recovery_inflight[flow_id] = time.monotonic()
             return True
 
     async def clear_recovery_pull(self, flow_id: str) -> None:
@@ -873,7 +907,7 @@ class ServerState:
         request that never left the server.
         """
         async with self._lock:
-            self._history_recovery_inflight.discard(flow_id)
+            self._history_recovery_inflight.pop(flow_id, None)
 
     def _next_generation(self) -> int:
         """Hand out a fresh bundle generation. Caller must hold ``self._lock``."""

@@ -708,6 +708,16 @@ function isActiveFlow(flow) {
   return ["running", "paused", "init", "recovering"].includes(s);
 }
 
+// A flow is "terminal" once it has completed or failed: it will never produce
+// another step or another mid-step record, so any fallback loop watching it for
+// new content can stop. Deliberately narrower than `!isActiveFlow` — a blank /
+// "unknown" status is treated as transient (still loading), NOT terminal, so a
+// momentarily-unknown snapshot cannot prematurely kill a live fallback loop.
+function isTerminalFlow(flow) {
+  const s = String((flow && flow.status) || "").toLowerCase();
+  return s === "completed" || s === "failed";
+}
+
 // A flow is "resumable" when the daemon can pick it back up via
 // `se3 run --resume --flow-id <id>`.  The authoritative signal is the daemon's
 // `resumable` flag, computed from the flow's semantic state and surfaced even
@@ -2286,8 +2296,12 @@ function cancelProgressionGrace() {
 // cadence, so a WS that never recovers still keeps pulling freshly-written
 // mid-step content into the open view — the reader never has to exit and
 // re-enter. It STOPS (does not re-arm) the instant a genuine WS increment lands
-// (appendSeq moves past the frozen snapshot ⇒ the healthy push path recovered)
-// or the open flow changes. The frozen snapshot is the sole "WS recovered" gate:
+// (appendSeq moves past the frozen snapshot ⇒ the healthy push path recovered),
+// the open flow changes, OR the flow reaches a terminal status (completed /
+// failed) — a terminal flow yields no further content, and its final append can
+// land before the arming snapshot so the counter never moves past it, which
+// would otherwise wedge the loop into full-rebuilding the DOM every window
+// forever. The frozen snapshot is the sole "WS recovered" gate:
 // a silent rebuild deliberately does NOT bump flowConversationAppendSeq (only a
 // real /ws/ui landing does), so comparing against the frozen value — rather than
 // re-reading it each cycle — is what makes "keep retrying until the WS itself
@@ -2309,9 +2323,19 @@ function armProgressionGrace(flowId, seqAtSchedule) {
     if (state.selectedFlowId !== flowId) return;
     if (state.flowConversationAppendSeq > seqAtSchedule) return;
     // WS stayed silent through this window: pull the latest disk state so
-    // mid-step content the broken WS never pushed still appears, then re-arm and
-    // keep pulling on the same cadence until a genuine WS increment resumes.
+    // mid-step content the broken WS never pushed still appears.
     loadFlowConversation(flowId, { silent: true });
+    // Terminal-status stop condition. A completed / failed flow can produce no
+    // further mid-step content, so this one catch-up pull (which surfaces any
+    // final record a broken WS never delivered) is the LAST work needed — do NOT
+    // re-arm. Without this guard a terminal flow whose final WS append landed
+    // before the arming snapshot would leave the append counter permanently at
+    // the frozen value (no future append can ever bump it), so the "WS recovered"
+    // gate could never fire and the loop would silently full-rebuild the DOM
+    // every window forever while the view stays open. Only a still-live flow
+    // re-arms, to keep pulling until a genuine WS increment resumes.
+    const found = findFlow(flowId);
+    if (found && isTerminalFlow(found.flow)) return;
     armProgressionGrace(flowId, seqAtSchedule);
   }, state.progressionGraceMs);
 }

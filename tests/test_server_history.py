@@ -1219,8 +1219,21 @@ def test_history_detail_pull_ignores_racing_append_waits_for_full(client_and_app
         worker = threading.Thread(target=do_get)
         worker.start()
         try:
-            req = _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
-            assert req.payload["flow_id"] == "f1"
+            # Two server→daemon pulls are now in flight for f1: the self-heal
+            # recovery pull the discarded first-sighting append fires (ws.py
+            # asks the owning daemon for one cursorless full so the frozen flow
+            # unsticks without an exit/re-enter), and the REST cache-miss pull
+            # the worker's GET dispatches. Drain BOTH so the worker is
+            # guaranteed to have registered its waiter (a cache miss it can only
+            # resolve via a daemon reply) before the racing append lands —
+            # otherwise, if we send the full while the worker is still catching
+            # up, it reads the already-warmed cache and returns cached:True
+            # without ever parking, which is correct behaviour but no longer
+            # exercises the premature-resolution race this test guards.
+            req1 = _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
+            req2 = _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
+            assert req1.payload["flow_id"] == "f1"
+            assert req2.payload["flow_id"] == "f1"
             # A racing periodic append arrives first — still discarded because
             # the flow is requires-full. The waiter must NOT resolve on it.
             daemon.send_text(

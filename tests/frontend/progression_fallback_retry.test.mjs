@@ -209,4 +209,39 @@ export async function registerProgressionFallbackRetryTests(ctx) {
       globalThis.fetch = saved;
     }
   });
+
+  // -- (E) a terminal (completed) flow stops the loop after one catch-up pull --
+  // Regression for the self-check finding: a flow that completes while its chat
+  // is open, whose FINAL WS append raced in before the arming snapshot, leaves
+  // the append counter frozen — no future append can ever bump it. Without a
+  // terminal stop condition the loop full-rebuilds the DOM every window forever.
+  await checkAsync("periodic fallback: a terminal (completed) flow stops the retry loop", async () => {
+    resetProgressionState("F1");
+    const saved = globalThis.fetch;
+    const savedMachines = app.state.machines;
+    const calls = installCountingFetch({
+      records: [asstRecord("final", 1, "s9", "commit")], progress: "p", delivery: "full",
+    });
+    // The flow is discoverable (via findFlow → state.machines) as terminal.
+    app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
+    try {
+      // The final advance arms the loop; its last WS append landed before the
+      // snapshot, so flowConversationAppendSeq stays frozen at 0 and the
+      // "WS recovered" gate can never fire.
+      app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
+      app.maybeRefreshConversationOnProgression(snap("F1", "commit", 5, "completed"));
+      await waitWindows(6);
+      // Exactly one catch-up pull fires (surfacing any final record a broken WS
+      // never delivered), then the loop terminates — a terminal flow yields no
+      // more content, so it must NOT rebuild the DOM every window forever.
+      assert.equal(calls.length, 1,
+        "a terminal flow does exactly one catch-up pull then stops, got " + calls.length);
+      assert.equal(app.state.progressionGraceTimer, null,
+        "the loop is not re-armed for a terminal flow");
+    } finally {
+      app.cancelProgressionGrace();
+      app.state.machines = savedMachines;
+      globalThis.fetch = saved;
+    }
+  });
 }

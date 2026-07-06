@@ -87,6 +87,15 @@
 
 
 
+
+## 11.12.1 - 2026-07-06
+
+- Fix live chat view no longer receiving new messages after a running flow crosses the discovery→analyze boundary by correcting the daemon disk-cache stale-parse blind spot during dense engine.json rewrites
+- Fix daemon active-flow detection and read_flow cursor advancement across the first steps-list write, PAUSED→RUNNING flip, and new per-step jsonl creation
+- Harden the server history relay so a dropped first/full bundle self-heals and subsequent appends still broadcast over /ws/ui instead of being permanently swallowed
+- Change the WebUI silent-rebuild fallback from a one-shot 5s rebuild to a periodic retry that keeps pulling mid-step content until WS increments resume, so users no longer must exit and re-enter the chat view
+- Fix the scroll jump on fallback rebuild: stay pinned to the bottom when the user is near it, and keep viewport-anchored content stable otherwise
+- Add discovery→analyze boundary end-to-end delivery tests plus fallback-retry and scroll-anchor coverage, and document manual browser verification steps
 ## 11.12.0 - 2026-07-06
 
 - Add `code_index.max_concurrency` config to generate file/dir summaries concurrently across multiple LLM tasks, with output identical to the serial path
