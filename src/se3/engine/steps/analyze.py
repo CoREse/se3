@@ -52,7 +52,11 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 Before reading source, consult the code-index map (injected below) to locate the
 relevant modules / symbols; pull deeper detail on demand via
-``se3 code-index show <path>`` rather than reading whole files blindly.
+``se3 code-index show <path>`` rather than reading whole files blindly. To find
+items by keyword or regex, use ``se3 code-index search <pattern>`` instead of
+``grep 'pattern' se3/code-index.md`` — each hit carries the item's full locating
+path (a symbol renders as ``relpath::local_id``, which a raw grep line cannot
+show); its syntax matches grep (regex ``pattern`` by default, ``-i``/``-F``/``-m``).
 
 Respond in JSON format:
 {{
