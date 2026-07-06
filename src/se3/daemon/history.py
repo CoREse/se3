@@ -337,12 +337,6 @@ class SessionMeta:
     # True for an active ("active" source) flow; history-only / archived flows
     # are never waiting.
     waiting_for_lock: bool = False
-    # Running sub-state mirrored from the active engine.json's top-level
-    # ``merging`` flag: True while a completed *worktree* flow is merging its
-    # branch back to main (the queue-and-wait for the main lock included). Only
-    # ever True for an active ("active" source) flow; history-only / archived /
-    # resumable snapshots are never mid-merge.
-    merging: bool = False
     # Authoritative "can this flow be resumed" signal, mirroring the daemon
     # aggregator's ``FlowSnapshot.resumable``. True for a non-completed active
     # flow and for every per-flow resumable snapshot (source ``"resumable"``)
@@ -366,7 +360,6 @@ class SessionMeta:
             "source": self.source,
             "step_count": self.step_count,
             "waiting_for_lock": self.waiting_for_lock,
-            "merging": self.merging,
             "resumable": self.resumable,
         }
 
@@ -803,28 +796,17 @@ class DaemonHistoryReader:
             active=active,
             source=source,
             step_count=_count_jsonl(root / "se3" / "history" / flow_id),
-            # "waiting for lock" is meaningful in two live cases: a still-running
-            # flow queued behind the merge lock, and a COMPLETED --worktree flow
-            # whose trailing merge is queued (status=='completed' so ``active`` is
-            # False, yet ``merging`` is True and its on_lock_wait callback set
-            # waiting_for_lock). Gate it like ``merging`` — read only from the live
-            # engine.json (source=='active') and require the flow be either active
-            # or mid-merge — so history mirrors the machine flow-list's
-            # '合并中·等待主分支锁' suffix while still keeping a stale True out of
-            # archived/terminal snapshots.
+            # "waiting for lock" is a live sub-state of a still-running flow that
+            # is queued behind the merge lock (including a --worktree flow that is
+            # running its own merge_integrate / version_reconcile steps under the
+            # lock). Read only from the live engine.json (source=='active') and
+            # require the flow be active, so a stale True never shows on an
+            # archived/terminal snapshot.
             waiting_for_lock=bool(
                 source == "active"
-                and (active or data.get("merging", False))
+                and active
                 and data.get("waiting_for_lock", False)
             ),
-            # ``merging`` is a live worktree-merge sub-state. Unlike
-            # ``waiting_for_lock`` it layers on a *completed* worktree flow (the
-            # body finished; the trailing merge runs), so it CANNOT be gated on
-            # the ``active`` boolean (which excludes COMPLETED). It is instead
-            # gated on ``source == "active"`` — read only from the live
-            # engine.json, so an archived / resumable snapshot carrying a stale
-            # flag never shows as mid-merge in history.
-            merging=bool(source == "active" and data.get("merging", False)),
             resumable=bool(resumable),
         )
 

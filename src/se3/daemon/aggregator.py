@@ -128,15 +128,6 @@ class FlowSnapshot:
     # and True for a queued synchronous run); surfaced so the web console shows
     # the flow as RUNNING·waiting-for-lock rather than a silent "已发布" stall.
     waiting_for_lock: bool = False
-    # Running sub-state: True while a *worktree* flow whose body has completed is
-    # merging its branch back to main (including the queue-and-wait for the
-    # main-worktree lock). Read from the worktree engine.json's top-level
-    # ``merging`` flag (emit-when-True). Orthogonal to ``waiting_for_lock``: both
-    # True means "merging, currently blocked acquiring the main lock". Surfaced so
-    # the web console renders a completed worktree flow as 合并中 rather than a
-    # silent 已完成 while the trailing merge runs. Only ever True on an active
-    # engine.json; a resumable-snapshot flow is never mid-merge.
-    merging: bool = False
     # Authoritative "can this flow be resumed" signal computed by the daemon
     # from the flow's semantic status (see :func:`_is_resumable_status`): True
     # for any flow that has NOT completed normally and still has recoverable
@@ -164,7 +155,6 @@ class FlowSnapshot:
             "issue_count": self.issue_count,
             "summary": self.summary,
             "waiting_for_lock": self.waiting_for_lock,
-            "merging": self.merging,
             "resumable": self.resumable,
         }
 
@@ -866,9 +856,6 @@ class DaemonAggregator:
             # Surface the lock-wait sub-state; absent/false for every flow not
             # currently queued behind the main-worktree mutex.
             waiting_for_lock=bool(data.get("waiting_for_lock", False)),
-            # Surface the worktree-merge sub-state; absent/false for every flow
-            # not currently merging its branch back to main.
-            merging=bool(data.get("merging", False)),
             # A still-active flow that has not completed normally is resumable
             # (covers the interrupted-but-still-current-engine.json case, where
             # status may be running/paused/failed). A COMPLETED active flow that
@@ -999,9 +986,6 @@ class DaemonAggregator:
             issue_count=0,
             summary=None,
             waiting_for_lock=False,
-            # A superseded per-flow resumable snapshot is never mid-merge (merging
-            # is a live-engine.json sub-state on a just-completed worktree flow).
-            merging=False,
             resumable=_resumable_with_live_gate(status, root, live_roots),
         )
 

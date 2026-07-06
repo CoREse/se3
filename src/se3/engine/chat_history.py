@@ -423,55 +423,6 @@ def record_waiting_for_lock(
         logger.warning("Failed to record waiting_for_lock for %s: %s", step_id, exc)
 
 
-def record_merging(
-    project_root: Path,
-    flow_id: str,
-    step_id: str,
-    step_type: str,
-    message: str = "",
-    timestamp: Optional[float] = None,
-) -> None:
-    """Record a streaming ``merging`` lifecycle anchor into the step's jsonl.
-
-    Written by ``run.py`` when a --worktree flow body has finished (its
-    engine.json is COMPLETED) and the finalizer is about to merge that branch
-    back into its original branch. Emitting this line the moment the merge
-    begins lets the daemon's incremental history reader push a visible "合并中"
-    record to the web console, so a completed worktree flow shows as
-    merging-in-progress rather than silently sitting on the "已完成" state while
-    the (possibly lock-contended) merge runs. It is the merge-time sibling of
-    :func:`record_waiting_for_lock`; when the merge itself blocks queueing for
-    the main-worktree lock, a separate ``waiting_for_lock`` anchor layers on top.
-
-    Like :func:`record_waiting_for_lock` the line is intentionally NOT a
-    :class:`ChatMessage` (it carries no ``role``); it rides the existing
-    ``history_data`` push channel without protocol changes and
-    :func:`get_step_history` skips it so CLI history rendering and retry-context
-    construction never ingest it. Same best-effort write semantics — ``mkdir`` +
-    a single whole-line ``write`` wrapped in an ``OSError`` guard so a write
-    failure never breaks the running flow.
-    """
-    record = {
-        "type": "merging",
-        "step_id": step_id,
-        "step_type": step_type,
-        "status": "merging",
-        "message": message or "正在将 worktree 分支合并回主分支（可能在等待主分支锁释放）…",
-        "timestamp": (
-            datetime.fromtimestamp(timestamp).isoformat()
-            if timestamp is not None
-            else datetime.now().isoformat()
-        ),
-    }
-    path = _history_file(project_root, flow_id, step_id)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except OSError as exc:
-        logger.warning("Failed to record merging for %s: %s", step_id, exc)
-
-
 def record_lock_acquired(
     project_root: Path,
     flow_id: str,
@@ -1062,7 +1013,6 @@ def get_step_history(
                 "step_failed",
                 "step_output",
                 "waiting_for_lock",
-                "merging",
             ) and "role" not in data:
                 continue
             # Stream-progress records (written by record_stream_progress) carry

@@ -4,7 +4,9 @@ Why this module exists
 ----------------------
 The isolation-worktree cleanup path (branch deletion + worktree removal +
 COMPLETED-state promotion) is wired ONLY into the normal end-of-flow
-``_finalize_worktree_merge`` collect-and-merge step. Two real flows escape it:
+``_finalize_worktree_cleanup`` housekeeping (which runs after a worktree flow's
+own merge_integrate / version_reconcile steps land the branch on master). Two
+real flows escape it:
 
 * a flow that was ``pause``d and later ``resume``d completes WITHOUT
   re-triggering the finalize/merge step, so its worktree is never cleaned;

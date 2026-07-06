@@ -267,14 +267,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-weight: 600;
 }
 
-/* Worktree-merge sub-state badge on the flow-list card: overrides the terminal
-   已完成 badge with 合并中, in the same cyan accent as the chat status row. */
-.badge-merging {
-  background: rgba(59,182,196,.18);
-  color: var(--cyan);
-  font-weight: 600;
-}
-
 /* Resume button — inline inside flow cards, history items, and the sidebar. */
 .btn-resume {
   background: var(--accent);
@@ -2174,14 +2166,6 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 .conv-record.step-status-waiting_for_lock {
   border-left-color: var(--yellow);
   background: rgba(214, 162, 58, 0.10);
-  color: var(--fg);
-}
-/* Worktree-merge sub-state: the flow body has completed and is being merged
-   back into its origin branch. Distinct cyan accent so 合并中 reads apart from
-   the (yellow) waiting-for-lock and the terminal (green) completed states. */
-.conv-record.step-status-merging {
-  border-left-color: var(--cyan);
-  background: rgba(59, 182, 196, 0.10);
   color: var(--fg);
 }
 .conv-record.step-status-completed {
