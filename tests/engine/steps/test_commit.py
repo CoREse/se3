@@ -29,6 +29,11 @@ def _make_flow(**kwargs) -> FlowInstance:
         "task_description": "Fix authentication bug",
         "task_type": "bugfix",
         "change_path": Path("/tmp/project/se3.yaml"),
+        # Mirror the real FlowInstance default: without this a MagicMock(spec=…)
+        # returns a truthy MagicMock for is_worktree_mode, which would trip the
+        # commit step's worktree de-versioning branch and skip the version bump
+        # these tests assert. Individual worktree tests override to True.
+        "is_worktree_mode": False,
     }
     defaults.update(kwargs)
     flow = MagicMock(spec=FlowInstance)

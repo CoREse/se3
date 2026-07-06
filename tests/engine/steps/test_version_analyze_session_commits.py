@@ -38,6 +38,10 @@ def _make_flow(**kwargs) -> FlowInstance:
         "task_description": "Fix something small",
         "task_type": "bugfix",
         "change_path": Path("/tmp/project/se3.yaml"),
+        # Mirror the real FlowInstance default so a MagicMock(spec=…) flow does
+        # not read is_worktree_mode as a truthy MagicMock and divert the handler
+        # into the worktree intent-only branch. See test_version_analyze.py.
+        "is_worktree_mode": False,
     }
     defaults.update(kwargs)
     flow = MagicMock(spec=FlowInstance)
