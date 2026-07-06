@@ -8,7 +8,60 @@ exception for testing tightly-coupled engine internals), so they are OUTSIDE
 tests need — see ``_no_real_code_index_refresh`` below.
 """
 
+from pathlib import Path
+
 import pytest
+
+
+# Roots a co-located engine test must never write chat history into. The engine
+# test module lives at ``src/se3/engine/`` so the repo root is four parents up;
+# ``Path.cwd()`` is the fallback ``project_root`` for a flow with no
+# ``change_path`` (as in ``test_steps.py``'s test-step cases), so include it too.
+def _real_history_roots() -> set:
+    roots = set()
+    try:
+        roots.add(Path(__file__).resolve().parents[3])
+    except (OSError, IndexError):
+        pass
+    try:
+        roots.add(Path.cwd().resolve())
+    except OSError:
+        pass
+    return roots
+
+
+@pytest.fixture(autouse=True)
+def _no_chat_history_leak_to_real_repo(monkeypatch):
+    """Neutralise chat-history writes aimed at the live repo for every engine test.
+
+    Twin of the fixture in ``tests/conftest.py`` (kept in sync). ``pytest`` only
+    applies a ``conftest.py`` to its own subtree, and the engine's co-located
+    tests live OUTSIDE ``tests/``, so without this guard ``test_steps.py``'s
+    ``test_test_success`` / ``test_test_failure`` — which run ``run_test_step``
+    against a flow with no ``change_path``, so ``project_root`` falls back to
+    ``Path.cwd()`` (the live repo) — leak a fake test-history jsonl pair into the
+    committed ``se3/history/`` on every suite run.
+
+    ``chat_history._append_message`` is the single disk-write point behind
+    ``record_prompt`` / ``record_response``; wrapping it to no-op only when the
+    resolved ``project_root`` is a real repo root drops those leaks while letting
+    any tmp-scoped write through unchanged.
+    """
+    from se3.engine import chat_history
+
+    real_roots = _real_history_roots()
+    original = chat_history._append_message
+
+    def _guarded(project_root, flow_id, step_id, msg):
+        try:
+            target = Path(project_root).resolve()
+        except (TypeError, ValueError, OSError):
+            target = None
+        if target is not None and target in real_roots:
+            return
+        return original(project_root, flow_id, step_id, msg)
+
+    monkeypatch.setattr(chat_history, "_append_message", _guarded)
 
 
 @pytest.fixture(autouse=True)
