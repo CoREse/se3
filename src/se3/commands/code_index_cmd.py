@@ -211,10 +211,12 @@ def search_cmd(
     matches = 0
     for line in code_index_render.iter_search_lines(index):
         if matcher(line):
-            typer.echo(line)
-            matches += 1
+            # Check the cap before echoing so `-m 0` (or any non-positive N)
+            # prints nothing and falls through to exit 1, matching `grep -m 0`.
             if max_count is not None and matches >= max_count:
                 break
+            typer.echo(line)
+            matches += 1
 
     if matches == 0:
         # grep's exit-code-1 "no matches" contract, so an agent can compose this

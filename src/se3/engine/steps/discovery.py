@@ -1,7 +1,3 @@
-Both conflict blocks in `discovery.py` are the same code-index search guidance line. Both wordings satisfy the test assertions (each contains `se3 code-index search`, `grep`, and the `-i`/`-F`/`-m` flags). I'll resolve both to the more explicit G2 wording consistently.
-
-Here is the fully resolved file:
-
 """Discovery step handler.
 
 Implements a multi-turn discovery workflow that:
@@ -1347,3 +1343,5 @@ def _display_discovery_message(
     console.print(Group(*renderables))
     console.print("")
     display.render_block_footer("blue")
+
+

@@ -119,6 +119,14 @@ def test_max_count_truncates(built_project: Path):
     assert len(_match_lines(result.output)) == 2
 
 
+def test_max_count_zero_prints_nothing_exits_one(built_project: Path):
+    # `-m 0` matches grep: print no lines and exit 1, even when the pattern
+    # would otherwise match, so exit-status composition stays grep-compatible.
+    result = runner.invoke(app, ["code-index", "search", "-m", "0", "mod.py"])
+    assert result.exit_code == 1
+    assert not _match_lines(result.output)
+
+
 def test_no_match_exits_one_with_message(built_project: Path):
     result = runner.invoke(app, ["code-index", "search", "zzz-no-such-item"])
     assert result.exit_code == 1
