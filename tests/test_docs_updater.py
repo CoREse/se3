@@ -83,11 +83,11 @@ class TestVersionsWithoutTitle:
 
 
 # ---------------------------------------------------------------------------
-# (i) duplicate version is not re-inserted
+# (i) an existing version's block is merged into, not duplicated
 # ---------------------------------------------------------------------------
 
-class TestDuplicateVersionDedup:
-    def test_existing_version_not_duplicated(self, tmp_path):
+class TestDuplicateVersionMerge:
+    def test_existing_version_header_not_duplicated(self, tmp_path):
         versions = tmp_path / "VERSIONS.md"
         original = (
             "# Version History\n\n"
@@ -97,12 +97,30 @@ class TestDuplicateVersionDedup:
         versions.write_text(original, encoding="utf-8")
 
         updater = DocumentationUpdater(tmp_path)
-        updater.update_versions_md("1.2.3", ["should not appear"])
+        # A distinct changelog entry landing on an already-present version
+        # must be merged in, not silently swallowed (the 11.12.0 collision).
+        updater.update_versions_md("1.2.3", ["now merged in"])
 
         content = versions.read_text(encoding="utf-8")
-        assert content == original
-        assert "should not appear" not in content
         assert content.count("## 1.2.3") == 1
+        assert "- already here" in content
+        assert "- now merged in" in content
+
+    def test_verbatim_rewrite_is_noop(self, tmp_path):
+        versions = tmp_path / "VERSIONS.md"
+        original = (
+            "# Version History\n\n"
+            "## 1.2.3 - 2026-01-01\n\n"
+            "- already here\n"
+        )
+        versions.write_text(original, encoding="utf-8")
+
+        updater = DocumentationUpdater(tmp_path)
+        # Re-writing the same bullet adds nothing (idempotent merge).
+        updater.update_versions_md("1.2.3", ["already here"])
+
+        content = versions.read_text(encoding="utf-8")
+        assert content.count("- already here") == 1
 
 
 # ---------------------------------------------------------------------------

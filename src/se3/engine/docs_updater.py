@@ -404,44 +404,138 @@ class DocumentationUpdater:
         return '\n'.join(formatted)
 
     def _insert_version_entry(self, content: str, new_entry: str, version: str) -> str:
-        """Insert new version entry into existing VERSIONS.md content.
+        """Insert (or merge) a version entry into existing VERSIONS.md content.
+
+        When ``version`` already has an entry, the new changelog bullets are
+        *merged* into that block rather than discarded. The previous
+        "version exists -> return unchanged" branch silently swallowed a
+        distinct feature's changelog whenever two concurrent flows landed on
+        the same version number (the 11.12.0 collision), so a byte-identical
+        re-write must never lose entries.
 
         Args:
             content: Existing VERSIONS.md content
-            new_entry: New entry to insert
-            version: Version string (for deduplication)
+            new_entry: New rendered entry (``## ver - date`` + changes)
+            version: Version string (for locating an existing block)
 
         Returns:
             Updated content
         """
-        # Check if version already exists
-        version_pattern = rf'^##\s+{re.escape(version)}\s+-'
-        if re.search(version_pattern, content, re.MULTILINE):
-            # Version already exists, don't duplicate
-            return content
-
-        # Find the position after the header (if any)
+        # Normalising here (not only on the create path) is what drains the
+        # historical head-blank accumulation on the first write and keeps
+        # every subsequent insertion from re-growing it.
+        content = self._normalize_head_blanks(content)
         lines = content.split('\n')
 
-        # Skip title/header lines
-        insert_index = 0
+        # Merge path: an entry for this exact version already exists.
+        version_pattern = rf'^##\s+{re.escape(version)}\s+-'
+        for i, line in enumerate(lines):
+            if re.match(version_pattern, line):
+                return self._merge_change_lines(lines, i, new_entry)
+
+        entry = new_entry.rstrip('\n')
+
+        # New version: insert directly above the newest existing version
+        # block. Head normalization guarantees exactly one blank line
+        # between the title and that block, and entries abut each other with
+        # no separating blank (the established VERSIONS.md style), so no
+        # extra blank line is inserted here — that unconditional insert was
+        # the source of the head-blank accumulation.
+        for i, line in enumerate(lines):
+            if line.startswith('## ') and not line.startswith('## Changelog'):
+                lines.insert(i, entry)
+                return '\n'.join(lines)
+
+        # No existing version block: anchor to the title with a single blank
+        # separator, or (title-less file) before the first prose line.
         for i, line in enumerate(lines):
             if line.startswith('# ') or line.startswith('## Changelog'):
-                insert_index = i + 1
-                # Skip blank lines after header
-                while insert_index < len(lines) and not lines[insert_index].strip():
-                    insert_index += 1
-                break
-            elif line.strip() and not line.startswith('#'):
-                # Found non-header content, insert before it
-                insert_index = i
+                lines[i + 1:i + 1] = ['', entry]
+                return '\n'.join(lines)
+            if line.strip() and not line.startswith('#'):
+                lines[i:i] = [entry, '']
+                return '\n'.join(lines)
+
+        # Empty / whitespace-only file: the entry is the whole content.
+        if not content.strip():
+            return entry
+        return '\n'.join(lines + [entry])
+
+    def _merge_change_lines(self, lines: List[str], header_index: int, new_entry: str) -> str:
+        """Merge the new entry's changelog bullets into an existing block.
+
+        Appends only bullets not already present (so a verbatim re-write is a
+        no-op and repeated merges are idempotent), placing them after the
+        last existing bullet of the block and before the next version header.
+
+        Args:
+            lines: VERSIONS.md split into lines
+            header_index: Index of the existing ``## version`` header line
+            new_entry: New rendered entry whose bullets are to be merged
+
+        Returns:
+            Updated content
+        """
+        # Extent of the existing version block (up to the next ## header).
+        block_end = len(lines)
+        for j in range(header_index + 1, len(lines)):
+            if lines[j].startswith('## '):
+                block_end = j
                 break
 
-        # Insert new entry
-        lines.insert(insert_index, '')
-        lines.insert(insert_index + 1, new_entry.rstrip())
+        # Changelog bullets carried by the rendered entry: everything after
+        # its own header line, blanks dropped.
+        change_lines = [ln for ln in new_entry.split('\n')[1:] if ln.strip()]
+        existing = {ln.strip() for ln in lines[header_index:block_end] if ln.strip()}
+        to_add = [ln for ln in change_lines if ln.strip() not in existing]
+        if not to_add:
+            return '\n'.join(lines)
 
+        # Append after the last non-blank line of the block.
+        insert_at = block_end
+        while insert_at > header_index + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines[insert_at:insert_at] = to_add
         return '\n'.join(lines)
+
+    def _normalize_head_blanks(self, content: str) -> str:
+        """Collapse the blank-line run just after the title to a single blank.
+
+        Idempotent: a head already at one blank is returned unchanged, so
+        repeated writes stay stable. Only the title heading (``# ...`` /
+        ``## Changelog``) anchors cleanup; a file whose first heading is a
+        version entry, or one with no heading, is left untouched.
+
+        Args:
+            content: VERSIONS.md content
+
+        Returns:
+            Content with a single blank line after the title
+        """
+        lines = content.split('\n')
+
+        title_idx = None
+        for i, line in enumerate(lines):
+            if line.startswith('# ') or line.startswith('## Changelog'):
+                title_idx = i
+                break
+            if line.strip():
+                # First non-blank line is not a title (e.g. a version entry
+                # or prose) — no title to anchor cleanup to.
+                return content
+        if title_idx is None:
+            return content
+
+        end = title_idx + 1
+        while end < len(lines) and not lines[end].strip():
+            end += 1
+
+        if end >= len(lines):
+            # Title followed only by blank lines: drop the trailing blanks.
+            new_lines = lines[:title_idx + 1]
+        else:
+            new_lines = lines[:title_idx + 1] + [''] + lines[end:]
+        return '\n'.join(new_lines)
 
     def _create_new_versions_md(self, first_entry: str) -> str:
         """Create new VERSIONS.md content.
