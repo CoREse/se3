@@ -903,8 +903,20 @@ def run_merge(
     project_root: Optional[Path] = None,
     on_lock_wait: Optional[Callable[[], None]] = None,
     on_lock_acquired: Optional[Callable[[], None]] = None,
+    suppress_human_call: bool = False,
 ) -> int:
-    """Run the merge command.
+    """Run the merge command: integrate the branches, then reconcile the version.
+
+    This is the back-to-back ``integrate() -> reconcile()`` sequence that the
+    ``se3 merge`` CLI drives (change B/C). ``integrate`` owns the merge
+    invariants (lock, runtime sync, issue renumber, post-conditions);
+    ``reconcile`` is the merge-side version release point — it runs
+    UNCONDITIONALLY on a clean integrate, in-lock on the main checkout, and
+    derives the final version from the merged-in session intents against
+    master's *current* on-disk version rather than any version a session
+    guessed. A plain branch merge that carries no session intents reconciles
+    to a clean no-op, so behaviour is unchanged until de-versioned commits
+    start emitting intents.
 
     Args:
         branches: List of branch names to merge (in order).
@@ -914,6 +926,13 @@ def run_merge(
             the merge sequence. When False (default), collisions are bypassed
             via sidecar files and the sequence continues.
         project_root: Project root directory. Auto-detected if None.
+        suppress_human_call: When True, run the integrate half in library mode
+            — the orchestrator records escalations on the returned result
+            instead of writing ``se3/calls/`` files or printing terminal
+            instructions. The ``se3 merge`` CLI passes True (no confirmation
+            gate, failure is expressed via the exit code and the operator
+            reruns the whole command). Defaults to False so the worktree
+            merge-back keeps its existing call-file behaviour.
         on_lock_wait: Optional callback fired once, BEFORE blocking, when the
             main-worktree merge lock is already held by a live holder and this
             merge must queue for it. Lets a caller (the worktree merge-back)
@@ -1027,6 +1046,12 @@ def run_merge(
     # `MergeLockBusy` / `MergeLockStale` rendering below is kept only as a
     # defensive fallback (blocking acquisition does not raise them).
     from ..engine.merge.orchestrator import MergeOrchestrator
+    from ..engine.merge.reconcile import (
+        ReconcileError,
+        ReconcileResult,
+        VersionRegressionError,
+        reconcile,
+    )
     from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
     from .run import _resolve_main_lock_root
 
@@ -1057,6 +1082,14 @@ def run_merge(
     # (live stash kept / index left with unmerged paths). When True the merge
     # must NOT report a clean success even if the orchestrator's report does.
     stash_pop_incomplete = False
+    # Populated inside the lock by the reconcile half below. ``reconcile_result``
+    # carries the final version landed at merge; ``reconcile_error`` holds a
+    # version-decision fault (regression / collision / write failure) that the
+    # post-lock rendering surfaces as a non-zero exit. Kept as locals so the
+    # reconcile runs in-lock but is rendered after the lock releases, alongside
+    # the integrate report.
+    reconcile_result: Optional[ReconcileResult] = None
+    reconcile_error: Optional[str] = None
     try:
         # Blocking acquisition (queue-and-wait) is unchanged when no callbacks
         # are supplied; ``_acquire_merge_lock_with_callbacks`` only adds a
@@ -1092,6 +1125,13 @@ def run_merge(
                 # ``MergeLockBusy`` (the legacy contract here was that
                 # lock acquisition lived only in this wrapper).
                 acquire_lock=False,
+                # Change C: the CLI drives no confirmation gate and expresses
+                # failure via the exit code (rerun the whole command). In that
+                # mode the integrate half must not self-write se3/calls files
+                # or print terminal instructions — an escalation surfaces on the
+                # returned report instead. The worktree merge-back leaves this
+                # False to keep its existing call-file behaviour.
+                suppress_human_call=suppress_human_call,
             )
             try:
                 report = orchestrator.execute(branches)
@@ -1106,6 +1146,27 @@ def run_merge(
                     stash_pop_incomplete = _fast_stash_pop(
                         project_root, stash_label, stash_audit_messages,
                     )
+
+            # Reconcile the version at merge — the second half of the
+            # integrate -> reconcile sequence, run in-lock on the main checkout
+            # so a concurrent merge cannot bump between the two. It is
+            # UNCONDITIONAL by design (it decides from the outstanding session
+            # intents, not from a merge-shape heuristic), and idempotent —
+            # consumed intents are marked, so rerunning the whole command after
+            # a failure re-collects only outstanding intents and never
+            # double-bumps. Skipped only when the integrate itself did not land
+            # cleanly (a failed merge or an unfinalised stash-pop): there is no
+            # settled tree to reconcile a version against.
+            if report.success and not stash_pop_incomplete:
+                try:
+                    reconcile_result = reconcile(project_root, commit=True)
+                except (ReconcileError, VersionRegressionError) as exc:
+                    # A version-decision fault (regression, collision, or a
+                    # write/commit failure). The branches are already
+                    # integrated; only the version decision is unsettled, so we
+                    # surface a non-zero exit and let the operator rerun.
+                    reconcile_error = str(exc)
+                    logger.error("version reconcile failed: %s", exc)
         finally:
             # Mirror the previous ``with MergeLock(...)`` __exit__ — release the
             # lock on every exit path, including an orchestrator exception.
@@ -1181,7 +1242,42 @@ def run_merge(
         )
         return 1
 
+    if report.success and reconcile_error is not None:
+        # Branches integrated cleanly, but the merge-side version decision
+        # failed (a regression, a collision with an already-released version,
+        # or a write/commit fault). Reporting success here would land the
+        # merges with a wrong or missing version — the exact class of accident
+        # the reconcile redesign exists to prevent — so surface a non-zero exit.
+        # Recovery is a whole-command rerun: integrate is now a no-op (the
+        # branches are already ancestors) and reconcile re-collects only the
+        # still-outstanding intents (idempotent, never double-bumps), so the
+        # rerun re-attempts just the version decision.
+        lines = [
+            "Branches integrated, but version reconcile FAILED — the final "
+            "version was NOT landed.",
+            "",
+            f"Reason: {reconcile_error}",
+            "",
+            "The branch merges are committed; only the version decision is "
+            "unsettled. Fix the cause, then rerun `se3 merge` to re-attempt "
+            "the reconcile.",
+        ]
+        if report.log_file:
+            lines.append(f"Log file: {report.log_file}")
+        render_text("\n".join(lines), title="Merge: Version Reconcile Failed")
+        return 1
+
     if report.success:
+        # The reconcile half is the authoritative version landed at merge:
+        # fold its result onto the report so the "Version:" line below reflects
+        # the version actually written on disk (change B/C — the merge side,
+        # not any session's guess, owns the number). A no-op reconcile (no
+        # session intents) leaves ``final_version`` empty and the line is
+        # simply omitted, matching pre-reconcile behaviour.
+        if reconcile_result is not None and reconcile_result.final_version:
+            report.final_version = reconcile_result.final_version
+            if not (report.effective_pre_merge_version or report.pre_merge_version):
+                report.effective_pre_merge_version = reconcile_result.base_version
         # Defect I3: split rendering by newly-merged vs already-ancestor.
         # Operators care about the difference: a branch in "already" was
         # already reachable from HEAD (no-op for this run), while a branch

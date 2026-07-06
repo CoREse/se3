@@ -825,6 +825,23 @@ class MergeOrchestrator:
         # passes correctly.
         self._aggregation_fixup_depth: int = 0
 
+    @property
+    def recorded_escalations(self) -> list[dict]:
+        """Escalations recorded in library mode instead of written to disk.
+
+        Change C retires the orchestrator's self-written flow management: in
+        library mode (``suppress_human_call=True``) the human-call writer is a
+        :class:`_RecordingNullHumanCallWriter` that *records* each escalation
+        (conflict / guardrail) rather than writing an ``se3/calls/`` file or
+        printing terminal instructions. The caller owns flow-control and reads
+        the escalation off the returned :class:`MergeResult` (the CLI turns it
+        into an exit code; a flow step drives PAUSED/confirm/resume). In the
+        legacy non-suppressed mode the writer writes files as before, so this
+        returns an empty list — nothing was *recorded* because everything was
+        *written*.
+        """
+        return list(getattr(self._human_writer, "recorded_calls", []))
+
     def _log(
         self,
         message: str,
@@ -6253,4 +6270,15 @@ def integrate(
         acquire_lock=acquire_lock,
         suppress_human_call=True,
     )
-    return orchestrator.execute(branches)
+    report = orchestrator.execute(branches)
+    # Expose the recorded escalations on the result so both entry points (the
+    # ``se3 merge`` CLI, a flow step) can consume what would have been written
+    # to ``se3/calls/`` without any file having been created — the caller owns
+    # flow-control. Best-effort: a MergeReport is a plain dataclass so the
+    # dynamic attribute is always settable; only skip on the theoretical case
+    # of a slotted/immutable report substituted by a test double.
+    try:
+        report.recorded_escalations = orchestrator.recorded_escalations
+    except (AttributeError, TypeError):
+        pass
+    return report

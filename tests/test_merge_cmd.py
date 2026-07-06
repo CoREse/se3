@@ -364,11 +364,13 @@ class TestMergeCliFromSubdirectory:
         def mock_run_merge(
             branches, strategy="default", delete_merged=False,
             strict_runtime_sync=False, project_root=None,
+            suppress_human_call=False,
         ):
             captured["strategy"] = strategy
             captured["delete_merged"] = delete_merged
             captured["strict_runtime_sync"] = strict_runtime_sync
             captured["project_root"] = str(project_root) if project_root else None
+            captured["suppress_human_call"] = suppress_human_call
             return 0
 
         monkeypatch.setattr("se3.commands.merge_cmd.run_merge", mock_run_merge)
@@ -570,6 +572,7 @@ class TestMergeDeleteMergedTristate:
         def mock_run_merge(
             branches, strategy="default", delete_merged=False,
             strict_runtime_sync=False, project_root=None,
+            suppress_human_call=False,
         ):
             captured["delete_merged"] = delete_merged
             return 0

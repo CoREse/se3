@@ -159,6 +159,7 @@ def test_cli_no_delete_merged_flag_overrides_default(
     def stub_run_merge(
         branches, strategy="fast", delete_merged=True,
         strict_runtime_sync=False, project_root=None,
+        suppress_human_call=False,
     ):
         captured["delete_merged"] = delete_merged
         captured["strategy"] = strategy
@@ -195,6 +196,7 @@ def test_cli_default_delete_merged_is_on(
     def stub_run_merge(
         branches, strategy="fast", delete_merged=True,
         strict_runtime_sync=False, project_root=None,
+        suppress_human_call=False,
     ):
         captured["delete_merged"] = delete_merged
         return 0

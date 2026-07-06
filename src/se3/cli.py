@@ -902,9 +902,17 @@ def merge_cmd(
 ):
     """Merge one or more branches sequentially into the current branch.
 
-    Each branch is merged in order using git merge. Conflicts are handled
-    per the chosen strategy. After all merges complete, SemVer bumps are
-    aggregated and applied to pyproject.toml.
+    A thin adapter over the merge library: it runs ``integrate()`` (branch
+    merges + conflict resolution + runtime sync + issue renumber + post-condition
+    checks) back-to-back with ``reconcile()`` (the merge-side version release
+    point — the final version is derived from the merged-in session intents
+    against master's current version, never a version a session guessed).
+
+    The CLI has no confirmation gate: failure is expressed via a non-zero exit
+    code and the operator reruns the whole command (integrate is then a no-op —
+    the branches are already ancestors — and reconcile idempotently re-attempts
+    only the still-outstanding version decision). No ``se3/calls/`` files are
+    written on this path; an escalation surfaces in the rendered output.
 
     Default strategy and delete-merged behaviour can be configured in
     se3.yaml under the ``merge:`` section.
@@ -963,6 +971,10 @@ def merge_cmd(
         strategy=effective_strategy,
         delete_merged=effective_delete,
         strict_runtime_sync=merge_cfg.strict_runtime_sync,
+        # CLI wrapper semantics (change C): no confirmation gate, no self-written
+        # human-call files — the orchestrator records escalations on the result
+        # and the non-zero exit code drives recovery (rerun the whole command).
+        suppress_human_call=True,
     )
     raise typer.Exit(exit_code)
 

@@ -195,6 +195,7 @@ def test_cli_merge_defaults_to_fast(tmp_path: Path, monkeypatch) -> None:
     def stub_run_merge(
         branches, strategy="fast", delete_merged=True,
         strict_runtime_sync=False, project_root=None,
+        suppress_human_call=False,
     ):
         captured["strategy"] = strategy
         captured["delete_merged"] = delete_merged
