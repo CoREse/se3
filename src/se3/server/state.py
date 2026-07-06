@@ -326,6 +326,15 @@ class ServerState:
         #: Flows whose cache was invalidated by a cross-machine append. Further
         #: appends stay ignored until an authoritative full bundle arrives.
         self._history_requires_full: set[str] = set()
+        #: Flows for which a self-heal ``MSG_HISTORY_REQUEST`` (full pull) has
+        #: been dispatched to the owning daemon and is not yet answered. Without
+        #: this, a flow that landed in ``_history_requires_full`` stayed frozen
+        #: until the user exited and re-entered the chat (the only path that
+        #: previously re-pulled a ``full`` frame). The receive loop consults
+        #: :meth:`take_recovery_pull` after every discarded append so it fires at
+        #: most one recovery pull per stuck flow; the marker clears when the
+        #: authoritative full frame lands (see :meth:`append_history`).
+        self._history_recovery_inflight: set[str] = set()
         #: Monotonic counter handing out a fresh ``generation`` to every newly
         #: created / replaced history bundle, so a progress token is bound to
         #: exactly one bundle lifecycle (see ``encode_progress``).
@@ -763,6 +772,11 @@ class ServerState:
                     # pulls the new machine's complete history.
                     del self._history_data[flow_id]
                     self._history_requires_full.add(flow_id)
+                    # The just-superseded machine's recovery pull (if any) no
+                    # longer helps — the flow now needs a full pull from the NEW
+                    # daemon. Drop the marker so ``take_recovery_pull`` can fire a
+                    # fresh recovery for this machine instead of being wedged.
+                    self._history_recovery_inflight.discard(flow_id)
                     logger.debug(
                         "hist-diag append_history DISCARD flow=%s reason=machine-change "
                         "(bundle dropped, flagged requires_full)",
@@ -798,6 +812,11 @@ class ServerState:
                 # echo a valid token and get an empty delta forever until the
                 # daemon restarts and pushes a real full snapshot.
                 self._history_requires_full.discard(flow_id)
+                # The bundle is now authoritative again: any in-flight self-heal
+                # recovery pull for this flow has been satisfied (this frame is
+                # its reply, or a concurrent full pull beat it). Clear the marker
+                # so a later re-desync can dispatch a fresh recovery.
+                self._history_recovery_inflight.discard(flow_id)
                 self._history_data[flow_id] = {
                     "flow_id": flow_id,
                     "machine_id": machine_id,
@@ -813,6 +832,48 @@ class ServerState:
                     flow_id, len(new_records),
                 )
                 return True
+
+    async def take_recovery_pull(self, flow_id: str) -> bool:
+        """Return ``True`` when a self-heal full pull should be sent for *flow_id*.
+
+        A flow lands in ``_history_requires_full`` when a live ``append`` frame
+        arrives with no authoritative bundle to extend — a first sighting (e.g.
+        the daemon retained its cursor across a server restart and sent only a
+        tail), or a cross-machine/version desync. Historically the flow then
+        stayed frozen: the live push loop only ever sends ``append`` frames, and
+        every one of them was discarded (below) until a ``full`` frame arrived,
+        which only happened when the user exited and re-entered the chat and its
+        REST cache-miss pull fetched one. That is the "must re-enter" symptom.
+
+        To self-heal, the receive loop calls this after every discarded append.
+        The FIRST call for a stuck flow (flagged ``requires_full`` with no
+        recovery already in flight) returns ``True`` and marks a recovery in
+        flight, so the caller sends exactly one ``MSG_HISTORY_REQUEST`` (a
+        cursorless — hence ``full`` — pull) to the owning daemon. Its ``full``
+        reply repopulates the bundle and clears both flags via
+        :meth:`append_history`, after which subsequent appends apply and
+        broadcast normally. Every later discarded append for the same still-stuck
+        flow returns ``False`` so a per-cycle append storm cannot fan out one
+        request per frame.
+        """
+        async with self._lock:
+            if flow_id not in self._history_requires_full:
+                return False
+            if flow_id in self._history_recovery_inflight:
+                return False
+            self._history_recovery_inflight.add(flow_id)
+            return True
+
+    async def clear_recovery_pull(self, flow_id: str) -> None:
+        """Drop the in-flight recovery marker for *flow_id*.
+
+        Called when the recovery ``MSG_HISTORY_REQUEST`` send failed (the daemon
+        disconnected between the append and the recovery dispatch), so a later
+        append can re-arm a fresh recovery rather than being wedged behind a
+        request that never left the server.
+        """
+        async with self._lock:
+            self._history_recovery_inflight.discard(flow_id)
 
     def _next_generation(self) -> int:
         """Hand out a fresh bundle generation. Caller must hold ``self._lock``."""

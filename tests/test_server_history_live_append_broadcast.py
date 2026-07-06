@@ -32,7 +32,12 @@ import pytest
 from se3.daemon import protocol
 from se3.daemon.history import DaemonHistoryReader
 from se3.server.state import ServerState
-from se3.server.ws import HistoryRequestRegistry, UiHub, _handle_message
+from se3.server.ws import (
+    ConnectionManager,
+    HistoryRequestRegistry,
+    UiHub,
+    _handle_message,
+)
 
 
 class _UiWS:
@@ -704,3 +709,328 @@ def test_e2e_frames_match_committed_golden_fixture(tmp_path):
         "daemon→server e2e frames drifted from the committed golden fixture; "
         "regenerate with SE3_REGEN_GOLDEN=1 and re-run the frontend node-stub test"
     )
+
+
+# ==========================================================================
+# G3 — server relay robustness: the ``requires_full`` stuck-state self-heal.
+#
+# When a live ``mode: append`` frame lands with no authoritative bundle to
+# extend (a first sighting after a server restart, or a cross-machine/version
+# desync), ``append_history`` discards it and flags the flow ``requires_full``.
+# Historically the flow then FROZE: the daemon push loop only ever sends
+# ``append`` frames, so every later increment was dropped until a ``full`` frame
+# arrived — which only happened when the user exited and re-entered the chat and
+# its REST cache-miss pull fetched one. That is the "must re-enter" persistence
+# the user reports at the discovery→analyze boundary.
+#
+# The fix: the receive loop asks the owning daemon (over the exact socket the
+# frame arrived on) for one cursorless — hence ``full`` — pull the FIRST time a
+# flow is stuck. Its reply repopulates the bundle and clears the flag, so
+# subsequent appends flow again with no manual re-enter. These tests prove the
+# marker fires once per stuck flow, clears on the healing full frame, and — end
+# to end over the REAL daemon reader — recovers a first-sighting freeze while a
+# healthy boundary never triggers a recovery at all (no regression).
+# --------------------------------------------------------------------------
+
+
+def test_take_recovery_pull_fires_once_per_stuck_flow():
+    async def scenario():
+        state = ServerState()
+        # A first-sighting append flags the flow requires_full (discarded).
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 1}], machine_id="m1"
+        )
+        assert applied is False
+        first = await state.take_recovery_pull("f1")
+        second = await state.take_recovery_pull("f1")
+        # A flow that never went stuck never arms a recovery.
+        untouched = await state.take_recovery_pull("other")
+        return first, second, untouched
+
+    first, second, untouched = asyncio.run(scenario())
+    assert first is True       # first stuck-flow consult arms exactly one pull
+    assert second is False     # deduped while the pull is in flight (no storm)
+    assert untouched is False  # a healthy flow never arms a recovery
+
+
+def test_recovery_marker_cleared_when_full_frame_heals_bundle():
+    async def scenario():
+        state = ServerState()
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 1}], machine_id="m1"
+        )
+        assert await state.take_recovery_pull("f1") is True
+        # The recovery's full reply repopulates the bundle and clears both the
+        # requires_full flag and the in-flight recovery marker.
+        healed = await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [{"line": 1}], machine_id="m1"
+        )
+        assert healed is True
+        return state._history_requires_full, state._history_recovery_inflight
+
+    requires_full, recovery_inflight = asyncio.run(scenario())
+    assert "f1" not in requires_full
+    assert "f1" not in recovery_inflight
+
+
+def test_clear_recovery_pull_re_arms_after_failed_send():
+    async def scenario():
+        state = ServerState()
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 1}], machine_id="m1"
+        )
+        assert await state.take_recovery_pull("f1") is True
+        # The recovery send failed (daemon vanished) — release the marker so a
+        # later append can re-arm a fresh recovery instead of wedging.
+        await state.clear_recovery_pull("f1")
+        return await state.take_recovery_pull("f1")
+
+    assert asyncio.run(scenario()) is True
+
+
+class _RecordingDaemonWS:
+    """Fake daemon socket capturing the ``MSG_HISTORY_REQUEST`` frames sent it.
+
+    The server's self-heal dispatches a ``MSG_HISTORY_REQUEST`` down the daemon
+    socket; this stand-in records each so a test can assert on how many recovery
+    pulls fired and then feed back the daemon's ``full`` reply.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list = []
+
+    async def send_text(self, data: str) -> None:
+        msg = protocol.decode(data)
+        if msg.type == protocol.MSG_HISTORY_REQUEST:
+            self.requests.append(msg.payload)
+
+
+def test_first_sighting_append_dispatches_one_recovery_pull_then_heals():
+    """A first-sighting append self-heals: one recovery pull, then appends flow.
+
+    Without the fix the flow stays frozen (every append discarded) until a full
+    frame arrives via a manual re-enter. Here the server asks the daemon for one
+    full pull; its reply repopulates the bundle and the next live append applies
+    and broadcasts — no re-enter.
+    """
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        manager = ConnectionManager()
+        daemon = _RecordingDaemonWS()
+        await manager.connect("m1", daemon)
+
+        def append(line):
+            return _history_msg(
+                "f1",
+                protocol.HISTORY_MODE_APPEND,
+                [{"step": "s1", "line": line}],
+                cursor={"s1": line},
+            )
+
+        # Server restarted mid-flow: a live append lands with no cached bundle.
+        await _handle_message(
+            append(5), state, "m1", hub, registry, manager=manager, connection=daemon
+        )
+        # Exactly one self-heal MSG_HISTORY_REQUEST was dispatched.
+        assert len(daemon.requests) == 1
+        # A second discarded append while the pull is in flight does NOT fan out
+        # another request (no per-cycle storm).
+        await _handle_message(
+            append(6), state, "m1", hub, registry, manager=manager, connection=daemon
+        )
+        assert len(daemon.requests) == 1
+
+        # The daemon answers with the authoritative full snapshot.
+        await _handle_message(
+            _history_msg(
+                "f1",
+                protocol.HISTORY_MODE_FULL,
+                [{"step": "s1", "line": 5}, {"step": "s1", "line": 6}],
+                cursor={"s1": 6},
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+            manager=manager,
+            connection=daemon,
+        )
+        # A subsequent live append now APPLIES (bundle healed) and broadcasts.
+        await _handle_message(
+            append(7), state, "m1", hub, registry, manager=manager, connection=daemon
+        )
+        bundle = await state.get_history("f1")
+        return ui, bundle
+
+    ui, bundle = asyncio.run(scenario())
+    frames = ui.history_frames("f1")
+    modes = [f["mode"] for f in frames]
+    # The recovery full reply reached the live view, and the post-heal append
+    # streamed after it (the last frame the live view saw).
+    assert protocol.HISTORY_MODE_FULL in modes
+    assert modes[-1] == protocol.HISTORY_MODE_APPEND
+    assert frames[-1]["records"] == [{"step": "s1", "line": 7}]
+    # The healed bundle carries the recovered snapshot plus the live append —
+    # exactly what a fresh REST full pull would serve, no re-enter needed.
+    assert [r["line"] for r in bundle["records"]] == [5, 6, 7]
+
+
+def test_recovery_pull_skipped_when_no_daemon_connection():
+    """With no connection manager the handler degrades — no crash, no recovery.
+
+    Unit tests drive ``_handle_message`` without a manager; the discarded append
+    must simply not attempt a recovery (and the flow stays flagged so a later
+    manager-backed call can heal it).
+    """
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        await _handle_message(
+            _history_msg(
+                "f1", protocol.HISTORY_MODE_APPEND, [{"step": "s1", "line": 1}]
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        # The flow is flagged, but no recovery could be dispatched (no manager);
+        # the marker was not consumed, so a manager-backed retry can still arm.
+        return "f1" in state._history_requires_full, "f1" in state._history_recovery_inflight
+
+    flagged, in_flight = asyncio.run(scenario())
+    assert flagged is True
+    assert in_flight is False
+
+
+async def _drive_server_restart_midflow(root, flow_id, mutations, restart_before):
+    """Drive the real daemon reader with a server restart mid-flow.
+
+    Phase 1 runs the daemon while the server is DOWN, advancing the daemon's
+    read cursor across ``mutations[:restart_before]`` but relaying nothing. Phase
+    2 brings the server back with an EMPTY cache: the daemon kept its cursor, so
+    its next relayed frame is an ``append`` with no bundle to anchor — the
+    first-sighting stuck-state. Each self-heal ``MSG_HISTORY_REQUEST`` the server
+    dispatches is answered by reading the flow's authoritative full snapshot
+    (cursorless), exactly as the owning daemon would.
+
+    Returns ``{"frames", "snapshot", "recovery_pulls"}``.
+    """
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(root)])
+    manager = ConnectionManager()
+    daemon = _RecordingDaemonWS()
+    await manager.connect("m1", daemon)
+
+    cursors: dict = {}
+    # Phase 1 — server DOWN: advance the daemon cursor, relay nothing.
+    for mutate in mutations[:restart_before]:
+        mutate()
+        reads = reader.read_active_flows(cursors)
+        cursors = {r.flow_id: r.cursor for r in reads}
+
+    # Phase 2 — server restarts with an empty cache.
+    state = ServerState()
+    await state.register_machine("m1", "host", "1.0", owner_id="owner-A")
+    hub = UiHub()
+    ui = _UiWS()
+    await hub.register(ui, "owner-A")
+    registry = HistoryRequestRegistry()
+    recovery_pulls = 0
+
+    async def feed(read):
+        await _handle_message(
+            protocol.make_history_data(
+                read.flow_id, read.mode, read.records, cursor=read.cursor
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+            manager=manager,
+            connection=daemon,
+        )
+
+    for mutate in mutations[restart_before:]:
+        mutate()
+        reads = reader.read_active_flows(cursors)
+        cursors = {r.flow_id: r.cursor for r in reads}
+        for r in reads:
+            if r.records:
+                await feed(r)
+        # The owning daemon answers each dispatched self-heal pull by reading the
+        # authoritative full snapshot. Draining here (no disk write in between)
+        # keeps the push cursor aligned with the recovered end, so the following
+        # appends continue cleanly with no overlap.
+        while daemon.requests:
+            daemon.requests.pop(0)
+            recovery_pulls += 1
+            full = reader.read_flow(flow_id, project_root=str(root), cursor=None)
+            await feed(full)
+
+    snap = await state.get_history_snapshot(flow_id, expected_machine_id="m1")
+    frames = [
+        {"mode": f["mode"], "records": f["records"]}
+        for f in ui.history_frames(flow_id)
+    ]
+    return {
+        "frames": frames,
+        "snapshot": snap["records"],
+        "recovery_pulls": recovery_pulls,
+    }
+
+
+def test_restart_at_discovery_analyze_boundary_self_heals_no_reenter(tmp_path):
+    """A server restart across the discovery→analyze boundary recovers itself.
+
+    The first post-restart frame is an ``append`` (first sighting) — the exact
+    freeze the user reports. Assert: exactly one recovery pull fires, a full
+    frame reaches the live view, and the recovered snapshot plus the following
+    live appends converge on the authoritative full history (no loss, no dup, no
+    manual re-enter).
+    """
+    scenario = asyncio.run(
+        _drive_server_restart_midflow(
+            tmp_path,
+            "live",
+            _transition_mutations(tmp_path, "live"),
+            restart_before=6,  # restart right before the discovery→analyze m6
+        )
+    )
+    # Exactly one self-heal pull recovered the first-sighting freeze.
+    assert scenario["recovery_pulls"] == 1
+    frames = scenario["frames"]
+    full_idxs = [
+        i for i, f in enumerate(frames) if f["mode"] == protocol.HISTORY_MODE_FULL
+    ]
+    assert full_idxs, "the recovery full frame must reach the live view"
+    # From the recovery full onward, the streamed records equal the authoritative
+    # snapshot — the freeze healed and analyze continued live without a re-enter.
+    converged = _flat_records(frames[full_idxs[-1]:])
+    assert converged == scenario["snapshot"]
+    # The post-transition analyze content arrived live after the recovery.
+    bodies = [r["message"].get("content") for r in _flat_records(frames[full_idxs[-1]:])]
+    assert "Analysis complete." in bodies
+
+
+def test_healthy_boundary_never_triggers_recovery_pull(tmp_path):
+    """No regression: a healthy boundary (bundle established first) self-heals 0×.
+
+    With no restart the first frame is a ``full`` snapshot, so the flow never
+    lands in requires_full and no recovery pull is ever dispatched — the healthy
+    path stays exactly as before, and the stream still equals the full snapshot.
+    """
+    scenario = asyncio.run(
+        _drive_server_restart_midflow(
+            tmp_path,
+            "live",
+            _transition_mutations(tmp_path, "live"),
+            restart_before=0,  # no server downtime → first frame is mode: full
+        )
+    )
+    assert scenario["recovery_pulls"] == 0
+    frames = scenario["frames"]
+    assert frames[0]["mode"] == protocol.HISTORY_MODE_FULL
+    assert all(f["mode"] == protocol.HISTORY_MODE_APPEND for f in frames[1:])
+    # The full incremental stream equals the authoritative snapshot (no loss/dup).
+    assert _flat_records(frames) == scenario["snapshot"]

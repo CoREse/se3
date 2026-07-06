@@ -969,6 +969,8 @@ async def _serve_loop(
                 index_registry,
                 interjection_tracker,
                 issue_registry,
+                manager=manager,
+                connection=websocket,
             )
 
     async def heartbeat() -> None:
@@ -1013,8 +1015,18 @@ async def _handle_message(
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
+    *,
+    manager: Optional["ConnectionManager"] = None,
+    connection: Any = None,
 ) -> None:
-    """Apply one inbound daemon message to the server state."""
+    """Apply one inbound daemon message to the server state.
+
+    *manager* and *connection* are the live daemon socket this frame arrived on;
+    they let the ``MSG_HISTORY_DATA`` branch dispatch a self-heal full pull back
+    to the same daemon when an ``append`` is discarded because the flow needs a
+    full bundle. Both default to ``None`` (the recovery is simply skipped) so
+    unit tests can drive this handler without a connection manager.
+    """
     if message.type == protocol.MSG_STATUS_UPDATE:
         snapshot = message.payload.get("snapshot") or {}
         if isinstance(snapshot, dict):
@@ -1124,6 +1136,49 @@ async def _handle_message(
                 flow_id, mode, len(records), applied, resolved_pull,
                 suppress_broadcast,
             )
+            # Self-heal the requires_full stuck-state. A live ``append`` that
+            # ``append_history`` discarded (first-sighting after a server
+            # restart, a cross-machine desync, or a flow already flagged
+            # requires_full) leaves the flow frozen: the push loop only ever
+            # sends appends, so without intervention EVERY later increment is
+            # dropped until a ``full`` frame lands — which historically required
+            # the user to exit and re-enter the chat. Instead, ask the owning
+            # daemon (over the exact socket this frame arrived on) for one
+            # cursorless — hence ``full`` — pull. Its reply repopulates the
+            # bundle and clears the flag, so subsequent appends flow again with
+            # no manual re-enter. ``take_recovery_pull`` fires at most one pull
+            # per stuck flow, so a per-cycle append storm cannot fan out.
+            if (
+                not applied
+                and mode == protocol.HISTORY_MODE_APPEND
+                and manager is not None
+                and await state.take_recovery_pull(flow_id)
+            ):
+                # Resolve the authoritative root exactly as the REST cache-miss
+                # pull does: a worktree-mode flow splits its history across the
+                # main repo root (discovery) and the worktree root (later steps),
+                # so a cursorless pull with the wrong root would return only the
+                # discovery slice — the freeze the worktree fix already closed.
+                flow_project_root = await state.get_history_flow_project_root(
+                    flow_id
+                )
+                sent = await request_history(
+                    manager,
+                    state,
+                    flow_id,
+                    machine_id=machine_id,
+                    connection=connection,
+                    project_root=flow_project_root or "",
+                )
+                logger.debug(
+                    "hist-diag ws HISTORY_DATA recovery-pull flow=%s sent=%s "
+                    "(self-heal requires_full)",
+                    flow_id, sent,
+                )
+                if not sent:
+                    # The daemon vanished between the append and this dispatch;
+                    # release the marker so a later append can re-arm recovery.
+                    await state.clear_recovery_pull(flow_id)
             if not suppress_broadcast:
                 await _push_history_data(
                     hub, state, machine_id, flow_id, mode, records
