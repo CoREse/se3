@@ -1,3 +1,15 @@
+The project charter (project-level conventions) and the code-index (a zoomable
+structural orientation map) are injected below — plan against the task, the
+charter, and the code-index. Before reading source, consult the code-index map
+to locate the relevant modules / symbols; open a collapsed directory one more
+level with `se3 code-index index <path>` and pull a file's function/method
+detail on demand with `se3 code-index show <path>`. To search the map by
+keyword/regex, use `se3 code-index search <pattern>` instead of `grep
+se3/code-index.md` — it returns one line per matching item (directory / file /
+symbol) with the symbol's owning-file path (`relpath::local_id`) a raw grep line
+lacks; syntax matches grep (regex pattern by default, `-i` / `-F` / `-m`).
+
+```python
 """Plan step handler.
 
 Unified planning step that replaces the separate propose, design, and plan_tasks steps.
@@ -505,3 +517,4 @@ def _display_plan(plan: dict, task_groups: list, depth: str) -> None:
         console.print(tree_panel)
         summary_panel = formatter.format_summary(task_groups)
         console.print(summary_panel)
+```

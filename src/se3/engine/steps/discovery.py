@@ -1,3 +1,7 @@
+Both conflict blocks in `discovery.py` are the same code-index search guidance line. Both wordings satisfy the test assertions (each contains `se3 code-index search`, `grep`, and the `-i`/`-F`/`-m` flags). I'll resolve both to the more explicit G2 wording consistently.
+
+Here is the fully resolved file:
+
 """Discovery step handler.
 
 Implements a multi-turn discovery workflow that:
@@ -94,7 +98,7 @@ You MUST NOT:
 
 Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
 - Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `se3 code-index index <path>` and pull a file's function/method detail on demand with `se3 code-index show <path>`.
-- To search the map by keyword/regex, use `se3 code-index search <pattern>` instead of `grep se3/code-index.md` — it returns one line per matching item (directory / file / symbol) with the symbol's owning-file path (`relpath::local_id`) that a raw grep line lacks; syntax matches grep (regex pattern by default, `-i` / `-F` / `-m`).
+- To find code-index items by keyword or regex, use `se3 code-index search <pattern>` instead of `grep 'pattern' se3/code-index.md` — each hit carries the item's full locating path (a symbol renders as `relpath::local_id`, which a raw grep line cannot show). Its syntax matches grep: regex `pattern` by default, `-i` for case-insensitive, `-F` for literal substrings, `-m N` to cap matches.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
@@ -210,7 +214,7 @@ You MUST NOT:
 
 Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
 - Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `se3 code-index index <path>` and pull a file's function/method detail on demand with `se3 code-index show <path>`.
-- To search the map by keyword/regex, use `se3 code-index search <pattern>` instead of `grep se3/code-index.md` — it returns one line per matching item (directory / file / symbol) with the symbol's owning-file path (`relpath::local_id`) that a raw grep line lacks; syntax matches grep (regex pattern by default, `-i` / `-F` / `-m`).
+- To find code-index items by keyword or regex, use `se3 code-index search <pattern>` instead of `grep 'pattern' se3/code-index.md` — each hit carries the item's full locating path (a symbol renders as `relpath::local_id`, which a raw grep line cannot show). Its syntax matches grep: regex `pattern` by default, `-i` for case-insensitive, `-F` for literal substrings, `-m N` to cap matches.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
@@ -1343,5 +1347,3 @@ def _display_discovery_message(
     console.print(Group(*renderables))
     console.print("")
     display.render_block_footer("blue")
-
-
