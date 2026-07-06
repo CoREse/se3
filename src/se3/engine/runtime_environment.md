@@ -34,12 +34,13 @@ Overview & navigation (preferred first):
 - `se3 code-index` — show the adaptive root map: a zoomable directory tree expanded to a byte budget (top level always shown; code directories drilled a few levels deep)
 - `se3 code-index index <path>` — show exactly ONE literal level at `<path>`: a directory's immediate children (subdirs + files), or a file's functions/methods. Use this to open a directory shown collapsed in the root map.
 - `se3 code-index show <path>` — print one file's full function/method-level detail
+- `se3 code-index search <pattern>` — grep the map's item lines by keyword/regex. Use this INSTEAD OF `grep 'pattern' se3/code-index.md`: it matches one rendered line per item (directory / file / **symbol**), and a matched symbol line carries its owning file's full path (`relpath::local_id`) — the context a raw grep of the md cannot give — with no fingerprint comments in the output. Grep-aligned syntax: *pattern* is a regex by default (case-sensitive); `-i` case-insensitive, `-F` literal substring, `-m N` cap at N matches. Exit 0 on a match, 1 on none (like grep).
 
 These display commands read the committed `se3/code-index.md`; if the map has not been built yet they report that and exit, so run `se3 code-index rebuild` once to generate it (flow steps then keep it fresh incrementally).
 
 The code-index root map is also injected into this step automatically; use `se3 code-index index <path>` to open a collapsed directory one more level, and `se3 code-index show <path>` to pull a file's per-symbol detail on demand.
 
-**Recommended workflow:** 先看注入的 code-index 地图定位相关目录/文件，用 `se3 code-index index <path>` 把折叠的目录再展开一层，再用 `se3 code-index show <path>` 拉取该文件的函数级细节，避免盲目通读整份源码。
+**Recommended workflow:** 先看注入的 code-index 地图定位相关目录/文件，用 `se3 code-index index <path>` 把折叠的目录再展开一层，再用 `se3 code-index show <path>` 拉取该文件的函数级细节，避免盲目通读整份源码。若要按关键词/正则搜索某个 item（目录/文件/符号），用 `se3 code-index search <pattern>` 而非直接 `grep se3/code-index.md`——纯 grep 的单行拿不到 symbol 所属文件路径，`search` 输出自带完整定位路径（语法与 grep 一致：正则 pattern、`-i`/`-F`/`-m`）。
 
 ### Do NOT call proactively
 

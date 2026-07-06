@@ -6,6 +6,7 @@ LLM through a small command family:
     se3 code-index                  # adaptive root view (budgeted zoomable tree)
     se3 code-index index [<path>]   # literal drill-in — exactly one level
     se3 code-index show <path>      # one file's full function/method detail
+    se3 code-index search <pattern> # grep the map's item lines (regex; -i/-F/-m)
     se3 code-index rebuild [--force]# (re)build the map (incremental, or full)
     se3 code-index inspect          # summary stats of the on-disk map
 
@@ -32,8 +33,9 @@ content fingerprint changed (``--force`` re-summarises everything), and writes
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 
@@ -155,6 +157,95 @@ def show_cmd(
 
     output = code_index_render.render_path(index, path)
     typer.echo(output, nl=False)
+
+
+@app.command(name="search")
+def search_cmd(
+    pattern: str = typer.Argument(
+        ...,
+        help=(
+            "Pattern to match against each item's rendered line. A Python regex "
+            "by default (feels like `grep -E`), case-sensitive; use -F for a "
+            "literal substring."
+        ),
+    ),
+    ignore_case: bool = typer.Option(
+        False, "-i", "--ignore-case", help="Case-insensitive matching (like grep -i)."
+    ),
+    fixed_strings: bool = typer.Option(
+        False,
+        "-F",
+        "--fixed-strings",
+        help="Match *pattern* as a literal substring, not a regex (like grep -F).",
+    ),
+    max_count: Optional[int] = typer.Option(
+        None,
+        "-m",
+        "--max-count",
+        help="Stop after N matches (like grep -m). Default: no limit.",
+    ),
+):
+    """Grep the code-index item lines — a drop-in for `grep se3/code-index.md`.
+
+    Reads the authoritative ``se3/code-index.md`` (render-only; never rebuilds)
+    and matches *pattern* against the rendered single line of every item —
+    directory, file, and each in-file symbol. Unlike a raw grep of the md, a
+    matched symbol line carries its owning file's full path
+    (``relpath::local_id``), and no fingerprint comments leak into the output.
+
+    Grep-aligned semantics: *pattern* is a regex by default (case-sensitive);
+    ``-i`` matches case-insensitively, ``-F`` treats it as a literal substring,
+    and ``-m N`` caps the output at N matches. Exit code follows grep: 0 when at
+    least one line matches, 1 when none do (2 on an invalid regex).
+    """
+    from ..engine import code_index_render
+
+    project_root = get_project_root()
+    index = code_index_render.load_for_display(project_root)
+    if index is None:
+        typer.echo(_NOT_BUILT_HINT, err=True)
+        raise typer.Exit(code=1)
+
+    matcher = _build_matcher(pattern, ignore_case=ignore_case, fixed_strings=fixed_strings)
+
+    matches = 0
+    for line in code_index_render.iter_search_lines(index):
+        if matcher(line):
+            typer.echo(line)
+            matches += 1
+            if max_count is not None and matches >= max_count:
+                break
+
+    if matches == 0:
+        # grep's exit-code-1 "no matches" contract, so an agent can compose this
+        # by exit status exactly as it would with grep.
+        typer.echo(f"No code-index item matched: {pattern}", err=True)
+        raise typer.Exit(code=1)
+
+
+def _build_matcher(
+    pattern: str, *, ignore_case: bool, fixed_strings: bool
+) -> "Callable[[str], bool]":
+    """Compile *pattern* into a per-line predicate honouring -i / -F.
+
+    ``-F`` matches a literal substring (case-folded when ``-i``); otherwise the
+    pattern is a Python regex, searched anywhere in the line. An invalid regex
+    exits 2 (a usage error), mirroring grep's distinction between "no match" (1)
+    and "bad pattern" (2).
+    """
+    if fixed_strings:
+        needle = pattern.lower() if ignore_case else pattern
+        if ignore_case:
+            return lambda line: needle in line.lower()
+        return lambda line: needle in line
+
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        rx = re.compile(pattern, flags)
+    except re.error as exc:
+        typer.echo(f"Invalid regular expression: {exc}", err=True)
+        raise typer.Exit(code=2)
+    return lambda line: rx.search(line) is not None
 
 
 @app.command(name="rebuild")

@@ -264,6 +264,50 @@ def _render_one_level(index: CodeIndex, dirkey: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def iter_search_lines(index: CodeIndex) -> List[str]:
+    """Render every item in the map as one grep-able line.
+
+    Produces one line per item — directory, file, and each in-file symbol — in
+    the same bullet style as the ``index`` / ``show`` views:
+
+    - directory  ``- `dirkey` — summary``
+    - file       ``- `relpath` (kind) — summary``
+    - symbol     ``- `relpath::local_id` (kind) — summary``
+
+    A symbol's line carries its owning file's full path (``relpath::local_id``),
+    which is exactly the context a raw ``grep se3/code-index.md`` cannot give: a
+    bare symbol bullet in the md is indented under a file heading many lines
+    away. Lines are built from the structured index, never passed through from
+    the md text, so they never carry the ``<!--#...-->`` fingerprint comments.
+    """
+    all_dirs = code_index._all_dir_keys(index.files)
+    lines: List[str] = []
+
+    for dirkey in sorted(all_dirs):
+        summary = index.dir_summaries.get(dirkey, "")
+        line = f"- `{dirkey}`"
+        if summary:
+            line += f" — {summary}"
+        lines.append(line)
+
+    for rel in sorted(index.files):
+        fe = index.files[rel]
+        line = f"- `{rel}`"
+        if fe.kind:
+            line += f" ({fe.kind})"
+        if fe.summary:
+            line += f" — {fe.summary}"
+        lines.append(line)
+        for sym in fe.symbols:
+            marker = f" {DEGRADED_MARKER}" if sym.degraded else ""
+            sym_line = f"- `{fe.symbol_id(sym)}` ({sym.kind}){marker}"
+            if sym.summary:
+                sym_line += f" — {sym.summary}"
+            lines.append(sym_line)
+
+    return lines
+
+
 def render_path(index: CodeIndex, path: str) -> str:
     """Render the literal drill-in view for *path* — exactly one level.
 
