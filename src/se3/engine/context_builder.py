@@ -456,6 +456,13 @@ def get_code_index_injection(project_root: Path) -> str:
         "function/method-level detail is pulled with `se3 code-index show <path>` "
         "(both run via Bash) — instead of reading whole source files blindly, the "
         "map points you at the few symbols worth reading.\n\n"
+        "To find items by keyword or regex, use `se3 code-index search <pattern>` "
+        "**instead of** `grep 'pattern' se3/code-index.md`: each hit carries the "
+        "item's full locating path (a symbol renders as `relpath::local_id`, so "
+        "you see the file it lives in — which a raw grep line cannot give you). "
+        "Its syntax matches grep — `pattern` is a regex by default; `-i` for "
+        "case-insensitive, `-F` for literal substrings, `-m N` to cap the number "
+        "of matches.\n\n"
     )
 
     index = load_for_display(Path(project_root))

@@ -88,6 +88,14 @@
 
 
 
+
+## 11.13.0 - 2026-07-06
+
+- Add `se3 code-index search <pattern>` subcommand to grep the committed code-index by rendered item line (directories, files, and in-file symbols)
+- Support grep-consistent flags: `-i`/`--ignore-case`, `-F`/`--fixed-strings`, and `-m`/`--max-count N` (regex by default, case-sensitive)
+- Emit each match on one line with the item's full locating path (symbol matches include their owning file path), kind, and one-line description, excluding fingerprint comments
+- Return grep-consistent exit codes: 0 on match, 1 with an explicit no-match message when nothing matches, and prompt to run `se3 code-index rebuild` when the map is not built
+- Update runtime environment and discovery/plan/analyze step prompts to recommend `se3 code-index search` over raw grep of `se3/code-index.md` for keyword/regex lookups
 ## 11.12.1 - 2026-07-06
 
 - Fix live chat view no longer receiving new messages after a running flow crosses the discovery→analyze boundary by correcting the daemon disk-cache stale-parse blind spot during dense engine.json rewrites
