@@ -15,6 +15,7 @@ from .confirm import confirm_handler
 from .discovery import discovery_handler
 from .implement import implement_handler
 from .invariant_check import invariant_check_handler
+from .merge_integrate import merge_integrate_handler
 from .plan import plan_handler
 from .plan_tasks import plan_tasks_handler
 from .project_summary import project_summary_handler
@@ -22,6 +23,7 @@ from .self_check import self_check_handler
 from .summarize import summarize_handler
 from .test import test_handler
 from .version_analyze import version_analyze_handler
+from .version_reconcile import version_reconcile_handler
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,8 @@ STEP_HANDLERS = {
     StepType.VERSION_ANALYZE: version_analyze_handler,
     StepType.COMMIT: commit_handler,
     StepType.SUMMARIZE: summarize_handler,
+    StepType.MERGE_INTEGRATE: merge_integrate_handler,
+    StepType.VERSION_RECONCILE: version_reconcile_handler,
 }
 
 __all__ = [
@@ -103,5 +107,7 @@ __all__ = [
     "version_analyze_handler",
     "commit_handler",
     "summarize_handler",
+    "merge_integrate_handler",
+    "version_reconcile_handler",
     "STEP_HANDLERS",
 ]

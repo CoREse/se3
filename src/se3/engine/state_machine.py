@@ -10,6 +10,7 @@ import json
 import logging
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -368,6 +369,13 @@ class StateMachine:
         # Append optional steps from se3.yaml (e.g. summarize)
         selected_steps = self._apply_step_config(selected_steps)
 
+        # For a worktree flow, the release point is the merge — extend the
+        # sequence with the two merge-side steps (integrate then reconcile). This
+        # happens BEFORE confirmation insertion so a configured per-step gate
+        # (e.g. ``version_reconcile: {reviewer: human}``) still wraps them.
+        if is_worktree_mode:
+            selected_steps = self._append_worktree_merge_steps(selected_steps)
+
         # Insert confirmation steps based on config
         selected_steps = self._insert_confirmation_steps(selected_steps)
 
@@ -385,6 +393,15 @@ class StateMachine:
         flow.state.context["task_description"] = task_description
         flow.state.context["task_type"] = task_type
         flow.state.context["project_root"] = str(self.project_root)
+        # Stash the main checkout the merge-side steps must run in, resolved once
+        # at flow creation from the (possibly worktree) project_root. Read back by
+        # ``_merge_step_cwd`` when a merge step is instantiated — kept stable here
+        # so the value cannot drift with the transient project_root rebinding the
+        # merge steps perform while executing.
+        if is_worktree_mode:
+            flow.state.context["merge_checkout_root"] = str(
+                self._resolve_main_checkout_root()
+            )
 
         # Create first step
         first_step_type = selected_steps[0] if selected_steps else StepType.ANALYZE
@@ -409,6 +426,54 @@ class StateMachine:
         logger.info(f"Created flow {flow.flow_id} for task: {task_description[:50]}...")
 
         return flow
+
+    def _resolve_main_checkout_root(self) -> Path:
+        """Resolve the main checkout for merge-side steps from ``self.project_root``.
+
+        A worktree flow's ``self.project_root`` is the linked worktree; the merge
+        must land on the main checkout. ``_resolve_main_repo_root`` walks back from
+        a linked worktree to its main repo (and is a no-op when already on it).
+        Any resolution fault degrades to ``self.project_root`` rather than raising.
+        """
+        try:
+            from ..config import _resolve_main_repo_root
+
+            return Path(_resolve_main_repo_root(self.project_root))
+        except Exception:  # noqa: BLE001 - never let root resolution abort creation
+            logger.debug("Failed to resolve main checkout root", exc_info=True)
+            return self.project_root
+
+    def _append_worktree_merge_steps(
+        self, steps: list[StepType]
+    ) -> list[StepType]:
+        """Append the two merge-side steps to a worktree flow's sequence.
+
+        Idempotent: a step type already present (e.g. a resumed / re-derived
+        sequence) is not duplicated. Order is integrate → reconcile, both after
+        every ordinary step (commit / summarize), so the flow's "done" means the
+        work has actually landed on master.
+        """
+        result = list(steps)
+        for step_type in (StepType.MERGE_INTEGRATE, StepType.VERSION_RECONCILE):
+            if step_type not in result:
+                result.append(step_type)
+        return result
+
+    def _merge_step_cwd(
+        self, flow: FlowInstance, step_type: StepType
+    ) -> Optional[str]:
+        """Return the cwd override for a merge-side step, else ``None``.
+
+        Merge steps run in the main checkout; every other step returns ``None``
+        (uses the flow project_root). Prefers the value stashed at flow creation
+        so it never drifts with the merge step's transient project_root rebind.
+        """
+        if step_type not in (StepType.MERGE_INTEGRATE, StepType.VERSION_RECONCILE):
+            return None
+        stashed = flow.state.context.get("merge_checkout_root") if flow.state else None
+        if stashed:
+            return str(stashed)
+        return str(self._resolve_main_checkout_root())
 
     def _apply_step_config(self, steps: list[StepType]) -> list[StepType]:
         """Append optional steps from se3.yaml steps.append configuration.
@@ -490,6 +555,12 @@ class StateMachine:
         steps may legitimately write specs. Any config-loading fault degrades
         safely to *disabled* (the PreToolUse hook remains the primary guard).
         """
+        # The merge-side steps run in the MAIN checkout and legitimately land
+        # whatever the merged branch changed — including a spec file edited on
+        # that branch. The spec-diff guard (scoped to the flow's own edits) would
+        # misfire on merged-in spec content, so it never applies to them.
+        if step.step_type in (StepType.MERGE_INTEGRATE, StepType.VERSION_RECONCILE):
+            return False
         try:
             from .context_builder import SPEC_WRITE_ALLOWED_STEPS
 
@@ -507,6 +578,61 @@ class StateMachine:
                 exc_info=True,
             )
             return False
+
+    @contextmanager
+    def _step_cwd_override(self, flow: FlowInstance, step: Step):
+        """Run *step* against its ``cwd`` override, inside the merge lock.
+
+        A step whose :attr:`Step.cwd` is set (the merge-side steps of a worktree
+        flow) must execute in the MAIN checkout, not the isolated worktree the
+        flow body ran in, and must be serialised against every other run/merge
+        by the main-worktree mutex. This manager, for the duration of the step:
+
+          * acquires the blocking main-worktree merge lock at the override root
+            (queue-and-wait — the same mutex sync runs and ``se3 merge`` take);
+          * rebinds ``self.project_root`` and the flow's ``context['project_root']``
+            to the override so the step's context / issue-discovery / spec paths
+            all resolve to the main checkout consistently.
+
+        ``self.persistence`` is deliberately NOT rebound: the flow's engine.json
+        stays in its own home (the worktree) so ``--resume`` keeps finding it —
+        only the *handler's* view of the project moves to the main checkout. On
+        exit everything is restored and the lock released, even on error.
+
+        A step with no override yields unchanged (the overwhelmingly common
+        path), holding no lock and touching nothing.
+        """
+        if not step.cwd:
+            yield
+            return
+
+        override_root = Path(step.cwd)
+        saved_root = self.project_root
+        saved_ctx_root = (
+            flow.state.context.get("project_root") if flow.state else None
+        )
+        # The merge lock file lives at ``<main checkout>/se3/state/merge.lock``;
+        # the override root IS the main checkout, so it is the lock root.
+        from ..commands.merge.merge_lock import MergeLock
+
+        lock = MergeLock(override_root, blocking=True)
+        lock.acquire(blocking=True)
+        try:
+            self.project_root = override_root
+            if flow.state is not None:
+                flow.state.context["project_root"] = str(override_root)
+            yield
+        finally:
+            self.project_root = saved_root
+            if flow.state is not None:
+                if saved_ctx_root is None:
+                    flow.state.context.pop("project_root", None)
+                else:
+                    flow.state.context["project_root"] = saved_ctx_root
+            try:
+                lock.release()
+            except Exception:  # noqa: BLE001 - release must never mask step result
+                logger.debug("merge lock release failed", exc_info=True)
 
     def run_step(
         self,
@@ -610,8 +736,11 @@ class StateMachine:
         # the contextvar on exit (including the exception path).
         step_usage = None
         try:
-            # Execute handler under the step usage scope.
-            with accumulate_step_usage() as step_usage:
+            # Execute handler under the step usage scope. A step carrying a
+            # ``cwd`` override (the merge-side steps) runs inside the main-worktree
+            # merge lock with self.project_root rebound to the main checkout; an
+            # ordinary step yields through _step_cwd_override unchanged.
+            with self._step_cwd_override(flow, step), accumulate_step_usage() as step_usage:
                 result = handler(step, flow)
 
             # Handler can return status or we infer from step object
@@ -1015,6 +1144,7 @@ class StateMachine:
             step_type=next_step_type,
             status=StepStatus.PENDING,
             inputs=self._build_step_inputs(flow, next_step_type),
+            cwd=self._merge_step_cwd(flow, next_step_type),
         )
 
         flow.state.add_step(next_step)

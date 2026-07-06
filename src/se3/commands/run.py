@@ -3607,7 +3607,14 @@ def _finalize_worktree_merge(
     worktree_original_branch: Optional[str],
     worktree_path: Path,
 ) -> int:
-    """Merge a completed ``--worktree`` run's branch back into the main repo.
+    """RETIRED trailing-merge path — no longer wired into any run/resume flow.
+
+    Superseded by the in-flow merge steps (``merge_integrate`` +
+    ``version_reconcile``) that a worktree flow now runs itself, plus the
+    lightweight :func:`_finalize_worktree_cleanup` housekeeping. Kept only so the
+    ``merging``-status helpers it drove (:func:`_mark_worktree_merging` et al.)
+    retain their documented shape for reference; the ``flow.merging`` bypass
+    status is no longer set at runtime. Do not call this from new code.
 
     Reuses the heavy ``se3 merge`` orchestrator (``run_merge``): version bump,
     postconditions, typed FailureReason, context-aware LLM conflict resolution,
@@ -3707,6 +3714,72 @@ def _finalize_worktree_merge(
         )
         display_error("\n".join(lines))
     return rc
+
+
+def _finalize_worktree_cleanup(
+    project_root: Path,
+    worktree_branch: str,
+    worktree_original_branch: Optional[str],
+    worktree_path: Path,
+) -> int:
+    """Clean up after a worktree flow that merged itself back in-flow.
+
+    Successor to the retired ``_finalize_worktree_merge`` trailing-merge path.
+    The merge is no longer a wrapper concern: a worktree flow's own step
+    sequence now ends with ``merge_integrate`` + ``version_reconcile`` (executed
+    in the main checkout under the merge lock), so by the time the flow reaches
+    COMPLETED the branch has *already* landed on master and the final version has
+    been reconciled. "Flow completed" therefore means "actually merged".
+
+    All that remains is housekeeping — archive the worktree + delete the
+    (now-ancestor) isolation branch + promote the terminal flow state — plus
+    resolving the source issue of a ``--from-issue`` run. Both are best-effort:
+    the merge already succeeded, so a cleanup hiccup must never be reported as a
+    merge failure (the standalone worktree GC reclaims anything left behind).
+    Returns 0.
+    """
+    from ..engine.merge.cleanup import CleanupManager
+    from .merge.merge_lock import MergeLock
+    from .merge_cmd import (
+        _backfill_resolved_source_issues,
+        _map_branches_to_source_issues,
+    )
+
+    target = worktree_original_branch or "the original branch"
+    get_console().print(
+        Rule(f"[bold]worktree merge[/bold] [dim]→ {target}[/dim]", style="cyan")
+    )
+
+    # Capture branch→issue BEFORE cleanup archives/removes the worktree (whose
+    # engine.json holds source_issue_id).
+    branch_issue_map = _map_branches_to_source_issues(project_root, [worktree_branch])
+
+    # Housekeeping mutates the main checkout (worktree remove + branch delete +
+    # state promotion), so it runs under the same main-worktree mutex the merge
+    # steps used — serialised against concurrent runs/merges.
+    lock = MergeLock(_resolve_main_lock_root(project_root), blocking=True)
+    lock.acquire(blocking=True)
+    try:
+        try:
+            CleanupManager(project_root).delete_merged_branches([worktree_branch])
+        except Exception:  # noqa: BLE001 - cleanup is best-effort; GC is the net
+            logger.debug("worktree cleanup failed post in-flow merge", exc_info=True)
+    finally:
+        try:
+            lock.release()
+        except Exception:  # noqa: BLE001
+            logger.debug("main lock release failed after worktree cleanup", exc_info=True)
+
+    # The branch's commits are ancestors of master (merged in-flow), so its
+    # source issue is resolved through the same idempotent choke point the CLI
+    # merge uses.
+    resolved = _backfill_resolved_source_issues(
+        project_root, [worktree_branch], branch_issue_map
+    )
+    display_success(f"Merged '{worktree_branch}' back into '{target}'.")
+    for issue_id in resolved:
+        get_console().print(f"[dim]Resolved source issue #{issue_id}[/dim]")
+    return 0
 
 
 def run_worktree_mode(
@@ -3848,17 +3921,13 @@ def run_worktree_mode(
             )
             return exit_code
 
-        # Success: merge the isolation branch back into the original branch. The
-        # source-issue resolve is owned by run_merge (fires only on merge_rc==0);
-        # this trailing call handles the merge-failure case — the issue stays
-        # in-progress so a later retry-merge can resolve it.
-        merge_rc = _finalize_worktree_merge(
+        # Success means the flow already merged itself back in-flow (its final
+        # steps, merge_integrate + version_reconcile, run in the main checkout
+        # under the merge lock). All that is left is housekeeping + resolving the
+        # source issue of a --from-issue run.
+        return _finalize_worktree_cleanup(
             project_root, worktree_branch, original_branch, worktree_path
         )
-        _finalize_worktree_source_issue(
-            project_root, worktree_path, FlowStatus.COMPLETED.value, merge_rc
-        )
-        return merge_rc
     finally:
         _clear_run_pidfile(wt_persistence)
 
@@ -4126,15 +4195,11 @@ def _resume_worktree_run(
             )
             return 1
 
-        merge_rc = _finalize_worktree_merge(
+        # In-flow merge already landed the branch on master (see
+        # run_worktree_mode); only housekeeping + source-issue resolve remain.
+        return _finalize_worktree_cleanup(
             project_root, worktree_branch, worktree_original_branch, worktree_path
         )
-        # Resolve on successful merge is owned by run_merge; this handles the
-        # merge-failure case (issue stays in-progress for a retry-merge).
-        _finalize_worktree_source_issue(
-            project_root, worktree_path, FlowStatus.COMPLETED.value, merge_rc
-        )
-        return merge_rc
     finally:
         _clear_run_pidfile(wt_persistence)
 

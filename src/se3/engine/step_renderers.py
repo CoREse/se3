@@ -46,6 +46,8 @@ STEP_DISPLAY_TITLES: Dict[StepType, str] = {
     StepType.VERSION_ANALYZE: "Version Analysis",
     StepType.COMMIT: "Commit",
     StepType.SUMMARIZE: "Work Summary",
+    StepType.MERGE_INTEGRATE: "Merge Integrate",
+    StepType.VERSION_RECONCILE: "Version Reconcile",
 }
 
 
@@ -225,6 +227,61 @@ def _render_version_analyze(step: Step) -> None:
         lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
 
     render_full("\n".join(lines), title="Version Analysis")
+
+
+@register_renderer(StepType.MERGE_INTEGRATE)
+def _render_merge_integrate(step: Step) -> None:
+    """Render the merge_integrate step: which branch landed on master."""
+    outputs = step.outputs or {}
+    result = outputs.get("merge_result") or {}
+    merged = outputs.get("merged_branches") or result.get("merged_branches") or []
+
+    lines: list[str] = []
+    if merged:
+        joined = ", ".join(str(b) for b in merged)
+        lines.append(f"Merged [bold cyan]{joined}[/bold cyan] into master")
+    else:
+        lines.append("No branches merged")
+
+    if result.get("pending_human"):
+        lines.append("")
+        lines.append("[yellow]Merge escalated to a human (unresolved conflict).[/yellow]")
+
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Merge Integrate")
+
+
+@register_renderer(StepType.VERSION_RECONCILE)
+def _render_version_reconcile(step: Step) -> None:
+    """Render the version_reconcile step: the final version derived at merge."""
+    outputs = step.outputs or {}
+    result = outputs.get("reconcile_result") or {}
+    base = outputs.get("base_version") or result.get("base_version") or "N/A"
+    final = outputs.get("final_version") or result.get("final_version")
+    channel = outputs.get("channel") or result.get("channel") or "N/A"
+
+    lines: list[str] = []
+    if result.get("already_reconciled") and not final:
+        # Nothing outstanding to reconcile — a clean no-op, not a fault.
+        lines.append(f"[bold]{base}[/bold] [dim](already reconciled — no bump)[/dim]")
+    else:
+        lines.append(
+            f"[bold]{base}[/bold] → [bold cyan]{final or 'N/A'}[/bold cyan]"
+        )
+    lines.append(f"[dim]channel: {channel}[/dim]")
+
+    commit = result.get("reconcile_commit")
+    if commit:
+        lines.append(f"[dim]reconcile commit: {str(commit)[:12]}[/dim]")
+
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Version Reconcile")
 
 
 @register_renderer(StepType.SUMMARIZE)
