@@ -472,6 +472,187 @@ class TestCommitDeVersioning:
         assert "Version: 1.4.0" in message
 
 
+class TestCommitVersionRaceGuard:
+    """commit step (change D): a synchronous commit re-checks the disk version
+    against the pre-session baseline in-lock; on drift (a concurrent direct-run
+    flow bumped first) it re-runs version_analyze against the drifted baseline so
+    the two flows do not collide on the same number (the 10.7.1 double-bump)."""
+
+    def _fake_git(self, captured):
+        def fake_git(cmd, *args, **kwargs):
+            sub = cmd[1] if isinstance(cmd, (list, tuple)) and len(cmd) > 1 else ""
+            if sub == "status":
+                return MagicMock(returncode=0, stdout="M file.py", stderr="")
+            if sub == "commit":
+                captured["message"] = cmd[3] if len(cmd) > 3 else ""
+                return MagicMock(returncode=0, stdout="[main abc123] msg", stderr="")
+            if sub == "rev-parse":
+                return MagicMock(returncode=0, stdout="abc123def456", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return fake_git
+
+    def _make_flow_with_version_analyze(self, tmpdir, *, va_current, baseline):
+        """Build a non-worktree flow carrying a completed version_analyze step."""
+        flow = FlowInstance(task_description="Add feature")
+        flow.task_type = "feature"
+        flow.is_worktree_mode = False
+        flow.change_path = Path(tmpdir) / "dummy"
+
+        va = Step(step_type=StepType.VERSION_ANALYZE)
+        va.status = StepStatus.COMPLETED
+        va.outputs["current_version"] = va_current
+        va.outputs["suggested_version"] = "10.7.1"
+        va.inputs["pre_session_version"] = baseline
+        flow.state.add_step(va)
+        return flow
+
+    def _make_commit_step(self, *, suggested, baseline):
+        step = Step(step_type=StepType.COMMIT)
+        step.inputs["suggested_version"] = suggested
+        step.inputs["pre_session_version"] = baseline
+        step.inputs["bump_type"] = "patch"
+        return step
+
+    @patch("se3.engine.steps.commit._update_docs")
+    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("se3.engine.steps.commit.VersionBumper")
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("subprocess.run")
+    def test_drift_triggers_reanalyze_and_avoids_collision(
+        self, mock_run, mock_cfg, MockBumper, mock_reanalyze, mock_hash, mock_docs
+    ):
+        """Disk drifted 10.7.0 -> 10.7.1 (a concurrent flow bumped first). The
+        stale suggested_version 10.7.1 must NOT be written; version_analyze is
+        re-run against the drifted baseline and its 10.7.2 is written instead."""
+        from .version_bumper import VersionConfig
+
+        mock_cfg.return_value = VersionConfig(enabled=True)
+
+        mock_bumper = MagicMock()
+        MockBumper.return_value = mock_bumper
+        mock_bumper.detect_version_file.return_value = Path("/tmp/project/pyproject.toml")
+        # In-lock disk read reveals the concurrent bump: 10.7.1, not the
+        # pre-session baseline 10.7.0.
+        mock_bumper.read_version.return_value = "10.7.1"
+        mock_bumper.set_version.side_effect = lambda version, path: version
+
+        def fake_reanalyze(va_step, flow):
+            # Re-analysis against the drifted baseline yields the next patch.
+            va_step.outputs["suggested_version"] = "10.7.2"
+            va_step.outputs["bump_type"] = "patch"
+            va_step.outputs["commit_message"] = "recomputed"
+            va_step.outputs["versions_changes"] = ["recomputed entry"]
+            va_step.outputs["reasoning"] = "drift recompute"
+            return StepStatus.COMPLETED
+
+        mock_reanalyze.side_effect = fake_reanalyze
+
+        captured: dict[str, str] = {}
+        mock_run.side_effect = self._fake_git(captured)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow = self._make_flow_with_version_analyze(
+                tmpdir, va_current="10.7.0", baseline="10.7.0"
+            )
+            step = self._make_commit_step(suggested="10.7.1", baseline="10.7.0")
+
+            result = commit_handler(step, flow)
+
+            assert result == StepStatus.COMPLETED
+            # Drift detected -> version_analyze re-run against the drifted baseline.
+            assert mock_reanalyze.called
+            new_baseline = mock_reanalyze.call_args.args[0].inputs["pre_session_version"]
+            assert new_baseline == "10.7.1"
+            # The recomputed, non-colliding version was written — never the stale
+            # 10.7.1 that would double-bump.
+            written = [c.kwargs.get("version") for c in mock_bumper.set_version.call_args_list]
+            assert written == ["10.7.2"]
+            assert step.outputs["version"] == "10.7.2"
+
+    @patch("se3.engine.steps.commit._update_docs")
+    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("se3.engine.steps.commit.VersionBumper")
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("subprocess.run")
+    def test_no_drift_writes_target_unchanged(
+        self, mock_run, mock_cfg, MockBumper, mock_reanalyze, mock_hash, mock_docs
+    ):
+        """When the disk version still equals the pre-session baseline there was
+        no concurrent bump: version_analyze is NOT re-run and the resolved target
+        is written verbatim — behaviour unchanged."""
+        from .version_bumper import VersionConfig
+
+        mock_cfg.return_value = VersionConfig(enabled=True)
+
+        mock_bumper = MagicMock()
+        MockBumper.return_value = mock_bumper
+        mock_bumper.detect_version_file.return_value = Path("/tmp/project/pyproject.toml")
+        # Disk still at the baseline — no drift.
+        mock_bumper.read_version.return_value = "10.7.0"
+        mock_bumper.set_version.side_effect = lambda version, path: version
+
+        captured: dict[str, str] = {}
+        mock_run.side_effect = self._fake_git(captured)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow = self._make_flow_with_version_analyze(
+                tmpdir, va_current="10.7.0", baseline="10.7.0"
+            )
+            step = self._make_commit_step(suggested="10.7.1", baseline="10.7.0")
+
+            result = commit_handler(step, flow)
+
+            assert result == StepStatus.COMPLETED
+            mock_reanalyze.assert_not_called()
+            written = [c.kwargs.get("version") for c in mock_bumper.set_version.call_args_list]
+            assert written == ["10.7.1"]
+            assert step.outputs["version"] == "10.7.1"
+
+    @patch("se3.engine.steps.commit._update_docs")
+    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("se3.engine.steps.commit.VersionBumper")
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("subprocess.run")
+    def test_drift_reanalyze_failure_halts_commit(
+        self, mock_run, mock_cfg, MockBumper, mock_reanalyze, mock_hash, mock_docs
+    ):
+        """If the drift re-analysis fails to produce a version, the commit must
+        halt (FAIL) rather than silently write the stale, colliding target."""
+        from .version_bumper import VersionConfig
+
+        mock_cfg.return_value = VersionConfig(enabled=True)
+
+        mock_bumper = MagicMock()
+        MockBumper.return_value = mock_bumper
+        mock_bumper.detect_version_file.return_value = Path("/tmp/project/pyproject.toml")
+        mock_bumper.read_version.return_value = "10.7.1"
+        mock_bumper.set_version.side_effect = lambda version, path: version
+
+        def fake_reanalyze(va_step, flow):
+            # Re-analysis failed to yield a version.
+            return StepStatus.FAILED
+
+        mock_reanalyze.side_effect = fake_reanalyze
+
+        captured: dict[str, str] = {}
+        mock_run.side_effect = self._fake_git(captured)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow = self._make_flow_with_version_analyze(
+                tmpdir, va_current="10.7.0", baseline="10.7.0"
+            )
+            step = self._make_commit_step(suggested="10.7.1", baseline="10.7.0")
+
+            result = commit_handler(step, flow)
+
+            assert result == StepStatus.FAILED
+            # The colliding target was never written.
+            mock_bumper.set_version.assert_not_called()
+
+
 class TestStepHandlers:
     """Tests for the STEP_HANDLERS registry."""
 

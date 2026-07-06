@@ -333,10 +333,15 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     flow is a synchronous (non-worktree) run — whose commit is the release
     point — it writes the authoritative ``suggested_version`` produced by the
     preceding version_analyze step to the project version file, updates
-    VERSIONS.md, and stamps a ``Version:`` line, before committing. A worktree
-    flow's commit is de-versioned: it writes no version file, no VERSIONS.md
-    entry, and no ``Version:`` line (the version decision is deferred to the
-    merge-side reconcile), carrying only the bump-intent message decoration.
+    VERSIONS.md, and stamps a ``Version:`` line, before committing. Just before
+    writing, and while holding the merge lock, it re-checks the disk version
+    against the pre-session baseline (:func:`_guard_version_race`); if a
+    concurrent direct-run flow bumped it first, version_analyze is re-run
+    against the drifted baseline so the two flows do not land on the same
+    number. A worktree flow's commit is de-versioned: it writes no version
+    file, no VERSIONS.md entry, and no ``Version:`` line (the version decision
+    is deferred to the merge-side reconcile), carrying only the bump-intent
+    message decoration.
 
     Args:
         step: The current step being executed
@@ -423,6 +428,22 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         )
                     # Retry — let any exception propagate normally
                     original_version = version_bumper.read_version(version_file)
+
+                # Concurrency race guard (change D, accident-driven 2026-07-06):
+                # this synchronous commit is the release point and the merge
+                # lock is already held for the whole run, but ``target_version``
+                # (version_analyze's suggested_version) was computed earlier,
+                # against the then-current disk version. ``original_version`` is
+                # the version re-read just now, in-lock. If a concurrent
+                # direct-run flow grabbed the lock first and bumped between our
+                # version_analyze and here, disk has drifted ahead of the
+                # pre-session baseline — writing our stale target would land the
+                # same number twice (the 10.7.1 double-bump). On drift, recompute
+                # the target against the drifted disk baseline so we advance past
+                # it instead of colliding.
+                target_version = _guard_version_race(
+                    step, flow, original_version, target_version
+                )
 
                 # Write the authoritative target version directly
                 new_version = version_bumper.set_version(
@@ -701,6 +722,178 @@ def _resolve_target_version(step: Step, flow: FlowInstance) -> str:
         )
 
     return suggested.strip()
+
+
+def _normalize_version(value: str | None) -> str:
+    """Normalize a version string for equality comparison.
+
+    Strips surrounding whitespace and a leading ``v``/``V`` prefix so a raw
+    disk read (``10.7.0``) and a baseline that happens to carry a ``v`` prefix
+    compare equal. Non-strings collapse to ``""`` (never equal to a real
+    version), so a missing baseline can never masquerade as a match.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lstrip("vV")
+
+
+def _resolve_analyze_baseline(step: Step, flow: FlowInstance) -> str | None:
+    """Resolve the disk version version_analyze computed ``suggested_version`` against.
+
+    This is the pre-session baseline the race guard compares the in-lock disk
+    read against. It mirrors exactly what version_analyze used as its base:
+
+    * ``pre_session_version`` (forwarded from the implement step) when present;
+    * otherwise the disk version version_analyze read at analyze time, which it
+      recorded on its ``current_version`` output (its own fallback baseline).
+
+    Returns ``None`` when neither is available, in which case the guard has no
+    reference and leaves the target untouched.
+    """
+    baseline = step.inputs.get("pre_session_version")
+    if isinstance(baseline, str) and baseline.strip():
+        return baseline.strip()
+
+    for step_id in reversed(flow.state.step_history):
+        s = flow.state.steps.get(step_id)
+        if s and s.step_type == StepType.VERSION_ANALYZE:
+            current = s.outputs.get("current_version")
+            if isinstance(current, str) and current.strip():
+                return current.strip()
+            break
+    return None
+
+
+def _guard_version_race(
+    step: Step,
+    flow: FlowInstance,
+    disk_version: str | None,
+    target_version: str,
+) -> str:
+    """Return the version to write, recomputed if the disk baseline drifted.
+
+    Compares the in-lock disk version against the pre-session baseline
+    version_analyze used. When they agree there was no concurrent bump — the
+    behaviour is unchanged and ``target_version`` is returned verbatim. When
+    they differ, a concurrent direct-run flow bumped the version file after our
+    version_analyze ran, so ``target_version`` is stale and would collide;
+    version_analyze is re-run against the drifted disk version and its fresh
+    ``suggested_version`` is returned instead.
+
+    Args:
+        step: The commit step (its ``inputs`` carry the forwarded baseline and
+            version_analyze artifacts, refreshed here on drift).
+        flow: The flow instance — locates the version_analyze step to re-run.
+        disk_version: The version read from the version file just now, in-lock.
+        target_version: The version_analyze ``suggested_version`` resolved
+            earlier (the stale candidate on drift).
+
+    Returns:
+        The version string to write: ``target_version`` when the baseline held,
+        or the recomputed version when it drifted.
+    """
+    baseline = _resolve_analyze_baseline(step, flow)
+    if baseline is None:
+        # No baseline to compare against — cannot tell drift from a normal
+        # first bump, so leave the resolved target untouched.
+        return target_version
+
+    if _normalize_version(disk_version) == _normalize_version(baseline):
+        return target_version
+
+    logger.warning(
+        "Version race guard: disk version %r drifted from the pre-session "
+        "baseline %r (a concurrent flow bumped first); re-running "
+        "version_analyze against the drifted baseline so the stale target %r "
+        "does not collide.",
+        disk_version,
+        baseline,
+        target_version,
+    )
+    new_target = _reanalyze_version_with_baseline(step, flow, disk_version)
+    logger.info(
+        "Version race guard: recomputed target version %r -> %r (new baseline "
+        "%r)",
+        target_version,
+        new_target,
+        disk_version,
+    )
+    if _normalize_version(new_target) == _normalize_version(disk_version):
+        # The re-analysis produced a number equal to the drifted disk version,
+        # which would still collide. This is an upstream (version_analyze)
+        # correctness issue, not a race we can fix by retrying here; surface it
+        # loudly rather than silently writing a colliding version.
+        logger.warning(
+            "Version race guard: re-analysis returned %r, equal to the drifted "
+            "disk version %r — writing it would still collide.",
+            new_target,
+            disk_version,
+        )
+    return new_target
+
+
+def _reanalyze_version_with_baseline(
+    step: Step, flow: FlowInstance, new_baseline: str | None
+) -> str:
+    """Re-run version_analyze against a drifted disk baseline, return its version.
+
+    Locates the flow's version_analyze step, overrides its
+    ``pre_session_version`` input with the drifted disk version, and re-invokes
+    ``version_analyze_handler`` so the new number is derived against the version
+    a concurrent flow just wrote (honouring any ``se3/version-rules.md``, which a
+    mechanical SemVer bump could not). The refreshed artifacts (bump_type,
+    commit_message, versions_changes, reasoning) are forwarded back onto the
+    commit step's inputs so the commit message and VERSIONS.md entry match the
+    recomputed version.
+
+    Raises:
+        RuntimeError: When no version_analyze step can be located, or the re-run
+            fails / yields no ``suggested_version``. Halting the commit is the
+            safe outcome — writing the stale, colliding version is exactly the
+            accident this guard exists to prevent.
+    """
+    from .version_analyze import version_analyze_handler
+
+    va_step: Step | None = None
+    for step_id in reversed(flow.state.step_history):
+        s = flow.state.steps.get(step_id)
+        if s and s.step_type == StepType.VERSION_ANALYZE:
+            va_step = s
+            break
+
+    if va_step is None:
+        raise RuntimeError(
+            "Version race guard: disk version drifted from the pre-session "
+            "baseline but no version_analyze step was found to re-run; refusing "
+            "to write a possibly-colliding version."
+        )
+
+    # Override the baseline so the re-analysis computes against the drifted disk
+    # version, and drop the stale suggested_version so a fresh one is produced.
+    va_step.inputs["pre_session_version"] = new_baseline
+    va_step.outputs.pop("suggested_version", None)
+
+    status = version_analyze_handler(va_step, flow)
+    new_suggested = va_step.outputs.get("suggested_version")
+    if status != StepStatus.COMPLETED or not (
+        isinstance(new_suggested, str) and new_suggested.strip()
+    ):
+        raise RuntimeError(
+            "Version race guard: re-running version_analyze against the drifted "
+            f"baseline {new_baseline!r} did not yield a suggested_version "
+            f"(status={status}); refusing to write a possibly-colliding version. "
+            "Rerun the version_analyze step or supply a version via human "
+            "intervention."
+        )
+
+    new_suggested = new_suggested.strip()
+    # Forward the refreshed artifacts so the commit message / changelog match
+    # the recomputed version rather than the superseded one.
+    step.inputs["suggested_version"] = new_suggested
+    for key in ("bump_type", "commit_message", "versions_changes", "reasoning"):
+        if key in va_step.outputs:
+            step.inputs[key] = va_step.outputs[key]
+    return new_suggested
 
 
 def _stage_file(project_root: Path, file_path: Path) -> None:
