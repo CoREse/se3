@@ -3853,6 +3853,14 @@ issue209ReplayMod.registerIssue209RealFrameReplayTests({ app, check, findOne, fi
 const progressionRefreshMod = await import("./progression_refresh.test.mjs");
 await progressionRefreshMod.registerProgressionRefreshTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the PERIODIC progression-fallback retry tests (G4 / issue #260): the
+// grace timer now re-arms itself after each silent rebuild and keeps pulling on
+// the progressionGraceMs cadence until a genuine WS increment lands, so a WS that
+// stays dead across a whole step (the discovery→analyze break) still surfaces
+// mid-step content without the reader exiting and re-entering the session.
+const progressionFallbackRetryMod = await import("./progression_fallback_retry.test.mjs");
+await progressionFallbackRetryMod.registerProgressionFallbackRetryTests({ app, check, checkAsync, findOne, findAll });
+
 // Register the element-anchored scroll-preservation tests (issue #217 / #209
 // jump fix): the silent rebuild anchors on the bubble the reader is looking at
 // (by recordKey) and restores its viewport offset, so a content-height change
