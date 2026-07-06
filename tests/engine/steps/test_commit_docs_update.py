@@ -40,6 +40,11 @@ def _make_flow(tmp_path: Path, **kwargs) -> FlowInstance:
         # project_root == flow.change_path.parent == tmp_path
         "change_path": tmp_path / "se3.yaml",
         "baseline_commit": None,
+        # Mirror the real FlowInstance default: a MagicMock(spec=…) otherwise
+        # reads is_worktree_mode as a truthy MagicMock and diverts the commit
+        # into the worktree de-versioning branch, which skips the version bump
+        # and the docs update these tests assert.
+        "is_worktree_mode": False,
     }
     defaults.update(kwargs)
 

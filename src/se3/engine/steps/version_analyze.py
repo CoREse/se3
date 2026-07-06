@@ -160,8 +160,21 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     Uses LLM to decide the new version number based on the actual changes,
     project-specific version rules (optional), and Semantic Versioning 2.0.0
-    as the default. The LLM-returned ``suggested_version`` is authoritative
-    and the commit step writes it verbatim into the project version file.
+    as the default.
+
+    The step's product depends on the flow's isolation mode:
+
+    * **Non-worktree (synchronous) flow** — the commit that follows is the
+      release point (baseline == current version), so the LLM-returned
+      ``suggested_version`` is authoritative and the commit step writes it
+      verbatim into the project version file. Output shape is unchanged.
+    * **Worktree flow** (``flow.is_worktree_mode``) — the release point is the
+      later merge, not this session's commit, so this step emits a branch-
+      committed :class:`~se3.engine.version_intent.VersionIntent` (change
+      summary + changelog bullets + auxiliary bump hint + provisional version)
+      instead of an authoritative ``suggested_version``. The merge-side
+      ``version_reconcile`` step derives the final version once, against
+      master's then-current version. See :func:`_emit_version_intent`.
 
     Args:
         step: The current step being executed
@@ -275,7 +288,6 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["bump_type"] = result["bump_type"]
     step.outputs["reasoning"] = result["reasoning"]
     step.outputs["confidence"] = result["confidence"]
-    step.outputs["suggested_version"] = result["suggested_version"]
     step.outputs["current_version"] = current_version
     step.outputs["commit_message"] = (
         result.get("commit_message")
@@ -292,6 +304,40 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         versions_changes = [step.outputs["commit_message"]]
     step.outputs["versions_changes"] = versions_changes
 
+    # De-versioning split (accident-driven, 2026-07-06): a worktree session's
+    # release point is the merge, not this commit, so it must NOT emit an
+    # authoritative suggested_version — two concurrent worktree flows diverging
+    # from one baseline would each compute (and one silently drop) the same
+    # number. Instead we persist a *VersionIntent* on the flow branch; the
+    # merge-side version_reconcile step derives the final number once, against
+    # master's then-current version. A non-worktree (synchronous) flow's commit
+    # IS its release point (baseline == current version), so it keeps writing
+    # the authoritative suggested_version verbatim — behaviour unchanged.
+    if getattr(flow, "is_worktree_mode", False):
+        _emit_version_intent(
+            step,
+            flow,
+            project_root=project_root,
+            result=result,
+            pre_session_version=pre_session_version,
+            versions_changes=versions_changes,
+            changes_text=changes_text,
+            spec_changes_text=spec_changes_text,
+            verification_text=verification_text,
+        )
+        logger.info(
+            "Version analysis (worktree, intent-only): bump_type=%s, "
+            "provisional_suggested_version=%s (pre_session_baseline=%s), "
+            "confidence=%s — final version deferred to merge-side reconcile",
+            result["bump_type"],
+            result["suggested_version"],
+            pre_session_version,
+            result["confidence"],
+        )
+        return StepStatus.COMPLETED
+
+    step.outputs["suggested_version"] = result["suggested_version"]
+
     logger.info(
         "Version analysis complete: suggested_version=%s (current=%s), "
         "bump_type=%s, confidence=%s",
@@ -302,6 +348,96 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     return StepStatus.COMPLETED
+
+
+def _emit_version_intent(
+    step: Step,
+    flow: FlowInstance,
+    *,
+    project_root: Path,
+    result: dict[str, Any],
+    pre_session_version: Any,
+    versions_changes: list[str],
+    changes_text: str,
+    spec_changes_text: str,
+    verification_text: str,
+) -> None:
+    """Persist a worktree session's version bump as a branch-committed intent.
+
+    Builds a :class:`VersionIntent` from the analysis and writes it to the
+    flow-branch-tracked ``se3/version-intents/`` directory so the merge-side
+    ``version_reconcile`` step can read it after the merge and derive the final
+    version. ``suggested_version`` is carried only as
+    ``provisional_suggested_version`` (a non-authoritative reference) and is
+    deliberately NOT placed in ``step.outputs['suggested_version']`` — that key
+    is the commit step's authoritative version, which a worktree flow must not
+    supply.
+
+    ``change_summary`` is the intent's substance for the custom-rules (LLM)
+    reconcile channel, which cannot rely on ``bump_type`` (that field is
+    auxiliary and MAY be lossy under non-SemVer rules). It is the inductive
+    digest of the same changes / spec / verification material this step already
+    formatted for its prompt, so no usable intent is lost when ``bump_type`` is.
+
+    A write failure is surfaced as a warning but does not fail the step: the
+    reconcile step treats a missing intent as "no bump contributed", which is a
+    safe (if lossy) degradation rather than a hard flow abort.
+    """
+    from ..version_intent import VersionIntent, write_intent
+
+    change_summary = _build_change_summary(
+        changes_text, spec_changes_text, verification_text
+    )
+    baseline = pre_session_version if isinstance(pre_session_version, str) else None
+
+    intent = VersionIntent(
+        flow_id=flow.flow_id,
+        change_summary=change_summary,
+        versions_changes=list(versions_changes),
+        bump_type=result.get("bump_type"),
+        pre_session_baseline=baseline,
+        provisional_suggested_version=result.get("suggested_version"),
+    )
+
+    # Expose the intent (never the authoritative suggested_version) so the web
+    # console / template summary and any resume can see what this session
+    # contributed without treating it as a version to write.
+    step.outputs["version_intent"] = intent.to_dict()
+    step.outputs["provisional_suggested_version"] = result.get("suggested_version")
+
+    try:
+        path = write_intent(project_root, intent)
+        step.outputs["version_intent_path"] = str(path)
+    except OSError as exc:
+        logger.warning(
+            "Could not persist version intent for flow %s (%s); merge-side "
+            "reconcile will treat this session as contributing no bump",
+            flow.flow_id,
+            exc,
+        )
+
+
+def _build_change_summary(
+    changes_text: str, spec_changes_text: str, verification_text: str
+) -> str:
+    """Compose the free-form intent digest from the formatted prompt sections.
+
+    Reuses the already-formatted Changes / Spec Changes / Verification blocks
+    (the same material the LLM saw) rather than re-deriving them, so the intent
+    the merge side reads is faithful to what drove this session's bump decision.
+    Empty / placeholder sections are dropped to keep the digest compact.
+    """
+    sections: list[str] = []
+    for heading, body in (
+        ("Changes Made", changes_text),
+        ("Spec Changes", spec_changes_text),
+        ("Verification", verification_text),
+    ):
+        text = (body or "").strip()
+        if not text:
+            continue
+        sections.append(f"## {heading}\n\n{text}")
+    return "\n\n".join(sections)
 
 
 def _read_version_rules_file(project_root: Path) -> Optional[str]:

@@ -246,6 +246,232 @@ class TestCommitStep:
         assert result == StepStatus.COMPLETED
 
 
+class TestVersionAnalyzeDeVersioning:
+    """version_analyze: worktree flows emit a VersionIntent, not an authoritative
+    suggested_version; synchronous flows keep their current behaviour."""
+
+    _LLM_JSON = json.dumps({
+        "suggested_version": "1.4.0",
+        "bump_type": "minor",
+        "reasoning": "Added a new capability",
+        "confidence": "high",
+        "commit_message": "Add new capability",
+        "versions_changes": [
+            "Add new capability X",
+            "Wire capability X into the CLI",
+        ],
+    })
+
+    def _run(self, tmpdir, *, worktree: bool):
+        from .steps.version_analyze import version_analyze_handler
+
+        with patch("se3.engine.steps.version_analyze.LLMCaller") as MockCaller:
+            mock_caller = MagicMock()
+            mock_caller.call.return_value = self._LLM_JSON
+            MockCaller.return_value = mock_caller
+
+            flow = FlowInstance(task_description="Add capability X")
+            flow.task_type = "feature"
+            flow.is_worktree_mode = worktree
+            flow.change_path = Path(tmpdir) / "dummy"
+            step = Step(step_type=StepType.VERSION_ANALYZE)
+            step.inputs["task_description"] = "Add capability X"
+            step.inputs["pre_session_version"] = "1.3.2"
+            step.inputs["files_changed"] = ["src/cap.py"]
+
+            result = version_analyze_handler(step, flow)
+        return flow, step, result
+
+    def test_worktree_flow_emits_intent_and_no_authoritative_version(self):
+        """A worktree flow writes a VersionIntent file and does NOT expose an
+        authoritative suggested_version the commit step could consume."""
+        from .version_intent import read_intent
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow, step, result = self._run(tmpdir, worktree=True)
+
+            assert result == StepStatus.COMPLETED
+            # No authoritative version — the merge side decides it.
+            assert "suggested_version" not in step.outputs
+            # Provisional reference is retained, but only as provisional.
+            assert step.outputs["provisional_suggested_version"] == "1.4.0"
+            # Intent metadata surfaced in outputs.
+            assert step.outputs["version_intent"]["flow_id"] == flow.flow_id
+            # Bump hint + changelog bullets still forwarded for display / docs.
+            assert step.outputs["bump_type"] == "minor"
+            assert step.outputs["versions_changes"] == [
+                "Add new capability X",
+                "Wire capability X into the CLI",
+            ]
+
+            # Intent persisted on the (to-be-committed) flow branch path.
+            intent = read_intent(Path(tmpdir), flow.flow_id)
+            assert intent is not None
+            assert intent.provisional_suggested_version == "1.4.0"
+            assert intent.bump_type == "minor"
+            assert intent.pre_session_baseline == "1.3.2"
+            assert intent.versions_changes == [
+                "Add new capability X",
+                "Wire capability X into the CLI",
+            ]
+            # change_summary is the intent's substance and must be non-empty
+            # even though bump_type happens to be usable here.
+            assert intent.change_summary.strip()
+            assert "src/cap.py" in intent.change_summary
+
+    def test_worktree_intent_body_complete_without_usable_bump_type(self):
+        """Under custom rules bump_type may be absent/lossy; the intent body
+        (change_summary + versions_changes) must still be complete."""
+        from .steps.version_analyze import version_analyze_handler
+        from .version_intent import read_intent
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("se3.engine.steps.version_analyze.LLMCaller") as MockCaller:
+                mock_caller = MagicMock()
+                # No bump_type in the response -> _validate_result defaults it,
+                # but the intent's substance must not depend on it.
+                mock_caller.call.return_value = json.dumps({
+                    "suggested_version": "2024.07.06",
+                    "reasoning": "date-based scheme",
+                    "confidence": "medium",
+                    "commit_message": "Ship July build",
+                    "versions_changes": ["Ship the July build"],
+                })
+                MockCaller.return_value = mock_caller
+
+                flow = FlowInstance(task_description="Ship build")
+                flow.task_type = "feature"
+                flow.is_worktree_mode = True
+                flow.change_path = Path(tmpdir) / "dummy"
+                step = Step(step_type=StepType.VERSION_ANALYZE)
+                step.inputs["pre_session_version"] = "2024.07.01"
+                step.inputs["files_changed"] = ["build.py"]
+
+                result = version_analyze_handler(step, flow)
+
+            assert result == StepStatus.COMPLETED
+            intent = read_intent(Path(tmpdir), flow.flow_id)
+            assert intent is not None
+            # Substance is complete regardless of bump_type.
+            assert intent.versions_changes == ["Ship the July build"]
+            assert intent.change_summary.strip()
+            assert intent.provisional_suggested_version == "2024.07.06"
+
+    def test_synchronous_flow_keeps_authoritative_version(self):
+        """A non-worktree flow still exposes the authoritative suggested_version
+        and writes NO intent file (behaviour unchanged)."""
+        from .version_intent import read_intent
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow, step, result = self._run(tmpdir, worktree=False)
+
+            assert result == StepStatus.COMPLETED
+            assert step.outputs["suggested_version"] == "1.4.0"
+            assert "version_intent" not in step.outputs
+            assert "provisional_suggested_version" not in step.outputs
+            assert step.outputs["bump_type"] == "minor"
+            # No intent persisted for a synchronous flow.
+            assert read_intent(Path(tmpdir), flow.flow_id) is None
+
+
+class TestCommitDeVersioning:
+    """commit step: worktree flows write no version file / VERSIONS.md /
+    ``Version:`` line, only the bump-intent message decoration."""
+
+    def _fake_git(self, captured):
+        def fake_git(cmd, *args, **kwargs):
+            sub = cmd[1] if isinstance(cmd, (list, tuple)) and len(cmd) > 1 else ""
+            if sub == "status":
+                return MagicMock(returncode=0, stdout="M file.py", stderr="")
+            if sub == "commit":
+                # cmd = ["git", "commit", "-m", <message>]
+                captured["message"] = cmd[3] if len(cmd) > 3 else ""
+                return MagicMock(returncode=0, stdout="[main abc123] msg", stderr="")
+            if sub == "rev-parse":
+                return MagicMock(returncode=0, stdout="abc123def456", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return fake_git
+
+    @patch("se3.engine.steps.commit.VersionBumper")
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("subprocess.run")
+    def test_worktree_commit_skips_version_and_docs(
+        self, mock_run, mock_version_config, MockBumper
+    ):
+        """With version bumping ENABLED but the flow in worktree mode, the commit
+        must not read/write the version file and must not stamp a Version line."""
+        from .version_bumper import VersionConfig
+
+        mock_version_config.return_value = VersionConfig(enabled=True)
+        mock_bumper = MagicMock()
+        MockBumper.return_value = mock_bumper
+
+        captured: dict[str, str] = {}
+        mock_run.side_effect = self._fake_git(captured)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow = FlowInstance(task_description="Add worktree feature")
+            flow.task_type = "feature"
+            flow.is_worktree_mode = True
+            flow.change_path = Path(tmpdir) / "dummy"
+            step = Step(step_type=StepType.COMMIT)
+            # These would be forwarded from version_analyze; a worktree flow
+            # never carries an authoritative suggested_version, but even if a
+            # stray one were present the commit must ignore it.
+            step.inputs["bump_type"] = "minor"
+            step.inputs["commit_message"] = "Add worktree feature"
+
+            result = commit_handler(step, flow)
+
+            assert result == StepStatus.COMPLETED
+            # The version file was never touched.
+            mock_bumper.set_version.assert_not_called()
+            mock_bumper.detect_version_file.assert_not_called()
+            # No authoritative version recorded on the step.
+            assert "version" not in step.outputs
+            assert step.outputs.get("version_bumped") is not True
+            # Message carries the bump-intent decoration but NO Version: line.
+            assert "(minor bump)" in captured["message"]
+            assert "Version:" not in captured["message"]
+
+    def test_worktree_commit_message_has_no_version_line(self):
+        """_generate_commit_message: a worktree commit (new_version=None) yields
+        the bump decoration but never a ``Version:`` line."""
+        from .steps.commit import _generate_commit_message
+        from .version_bumper import VersionConfig
+
+        flow = FlowInstance(task_description="Add capability")
+        flow.task_type = "feature"
+        flow.is_worktree_mode = True
+        step = Step(step_type=StepType.COMMIT)
+        step.inputs["commit_message"] = "Add capability"
+        step.inputs["bump_type"] = "minor"
+
+        # new_version=None mirrors the worktree path where no version was written.
+        message = _generate_commit_message(
+            flow, step, new_version=None, version_config=VersionConfig(enabled=True)
+        )
+        assert "(minor bump)" in message
+        assert "Version:" not in message
+
+    def test_synchronous_commit_message_keeps_version_line(self):
+        """Contrast: a synchronous commit with a written version keeps the
+        ``Version:`` line — behaviour unchanged."""
+        from .steps.commit import _generate_commit_message
+        from .version_bumper import VersionConfig
+
+        flow = FlowInstance(task_description="Add capability")
+        flow.task_type = "feature"
+        step = Step(step_type=StepType.COMMIT)
+        step.inputs["commit_message"] = "Add capability"
+        step.inputs["bump_type"] = "minor"
+
+        message = _generate_commit_message(
+            flow, step, new_version="1.4.0", version_config=VersionConfig(enabled=True)
+        )
+        assert "Version: 1.4.0" in message
+
+
 class TestStepHandlers:
     """Tests for the STEP_HANDLERS registry."""
 
