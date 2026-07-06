@@ -315,11 +315,7 @@ ENGINE_JSON_SCHEMA: Dict[str, Any] = {
         # Present (and True) only while a synchronous run is queued acquiring the
         # main-worktree mutex before its first non-discovery step; absent otherwise
         # (FlowInstance.to_dict only emits it when True).
-        "waiting_for_lock": {"type": "boolean"},
-        # Present (and True) only while a COMPLETED --worktree flow body is being
-        # merged back into its original branch; absent otherwise
-        # (FlowInstance.to_dict only emits it when True).
-        "merging": {"type": "boolean"}
+        "waiting_for_lock": {"type": "boolean"}
     }
 }
 

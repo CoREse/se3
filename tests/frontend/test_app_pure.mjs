@@ -3790,13 +3790,6 @@ stepLaneMod.registerStepLaneContinuityTests({ app, check, findOne, findAll });
 const waitingForLockMod = await import("./waiting_for_lock.test.mjs");
 waitingForLockMod.registerWaitingForLockTests({ app, check, findOne, findAll });
 
-// Register the G4 worktree-merge sub-state tests (isMerging / flowStatusLabel /
-// the merging chat anchor). merging rides the flow snapshot's merging flag and
-// layers on the COMPLETED body, so a still-merging worktree flow must read as
-// 合并中 (·等待主分支锁 while queued for the lock) rather than 已完成.
-const mergingMod = await import("./merging.test.mjs");
-mergingMod.registerMergingTests({ app, check, findOne, findAll });
-
 // Register the G1 discovery→analyze step-transition tests. These pin the
 // long-standing freeze: after the operator confirms discovery the engine steps
 // into analyze, and the daemon-pushed `mode: append` increments (the discovery

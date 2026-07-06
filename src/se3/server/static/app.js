@@ -424,13 +424,6 @@ function flowsSignature(machine, selectedId, resumeRequests) {
       step_index: (f && f.current_step_index) || 0,
       total_steps: (f && f.total_steps) || 0,
       waiting_lock: isWaitingForLock(f),
-      merging: isMerging(f),
-      // A merging card's badge is flowStatusLabel(flow), whose ·等待主分支锁
-      // suffix rides the RAW waiting_for_lock flag — not isWaitingForLock (which
-      // requires status===running and so is always false on the completed+merging
-      // body). Capture the raw flag too, else toggling it mid-merge leaves the
-      // signature unchanged and the badge freezes on 合并中 / 合并中·等待主分支锁.
-      raw_waiting_lock: !!(f && f.waiting_for_lock),
       pending: hasPendingCall(f),
       resumable: isFlowResumable(f),
       resuming: resuming(f && f.flow_id),
@@ -670,32 +663,12 @@ function isWaitingForLock(flow) {
   return String(flow.status || "").toLowerCase() === "running";
 }
 
-// Whether a worktree flow's body has finished and it is now merging back into
-// its original branch (possibly blocked queueing for the main-worktree lock).
-// Unlike waiting_for_lock — which layers on a RUNNING flow — merging layers on
-// the flow's COMPLETED body, so this deliberately does NOT require status
-// running; requiring it would filter the sub-state out entirely. The only
-// defence is dropping archived/history-only snapshots: a successful merge
-// archives the worktree engine.json and the flag disappears with it, but a
-// stale flag on such a snapshot must never keep reading as merging. Pure.
-function isMerging(flow) {
-  if (!flow || !flow.merging) return false;
-  const src = String(flow.source || "").toLowerCase();
-  if (src === "archived" || src === "history") return false;
-  return true;
-}
-
-// Human-facing status label that folds a running/terminal sub-state into the
-// displayed text. The merging sub-state overrides the underlying (completed)
-// status with 合并中 — and appends ·等待主分支锁 while the merge is queued for
-// the main-worktree lock (checked via the raw waiting_for_lock flag, since the
-// merging body's status is completed so isWaitingForLock would reject it).
-// Otherwise the waiting-for-lock running sub-state folds in as
-// "running · waiting for lock". Pure.
+// Human-facing status label that folds the running waiting-for-lock sub-state
+// into the displayed text as "running · waiting for lock". The worktree merge
+// is no longer a wrapper sub-state on a COMPLETED body: it now runs as the
+// flow's own merge_integrate / version_reconcile steps, which render through
+// the normal step lifecycle, so there is no merging override here. Pure.
 function flowStatusLabel(flow) {
-  if (isMerging(flow)) {
-    return flow && flow.waiting_for_lock ? "合并中·等待主分支锁" : "合并中";
-  }
   const base = (flow && flow.status) || "unknown";
   return isWaitingForLock(flow) ? `${base} · waiting for lock` : base;
 }
@@ -1609,15 +1582,11 @@ function renderFlowCard(flow) {
   const task = el("span", "flow-task",
     flow.task_description || flow.flow_id || "(untitled flow)");
   task.title = flow.task_description || "";
-  // The merging sub-state layers on the flow's COMPLETED body, so it overrides
-  // the terminal badge with 合并中 (·等待主分支锁) rather than reading as 已完成;
-  // for every other flow the badge stays the raw status. isWaitingForLock keeps
-  // its own separate ⏳ badge below (it layers on running, not completed).
-  const merging = isMerging(flow);
-  const sc = merging ? "merging" : statusClass(flow.status);
-  const badge = el(
-    "span", "badge badge-" + sc,
-    merging ? flowStatusLabel(flow) : (flow.status || "unknown"));
+  // The badge is the raw flow status; isWaitingForLock keeps its own separate ⏳
+  // badge below (it layers on running). The worktree merge no longer has a
+  // completed-body badge override — it renders as the flow's own merge steps.
+  const sc = statusClass(flow.status);
+  const badge = el("span", "badge badge-" + sc, flow.status || "unknown");
   head.append(task, badge);
 
   // Annotate which project this running flow belongs to so flows from
@@ -2515,14 +2484,10 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
     flow_id: f.flow_id ?? null,
     project_root: f.project_root ?? null,
     status: f.status ?? null,
+    // Overview Status is flowStatusLabel(flow), whose · waiting-for-lock suffix
+    // is fully determined by isWaitingForLock (status + the flag), both already
+    // captured here — so the Status re-renders when the lock is acquired.
     waiting_lock: isWaitingForLock(f),
-    merging: isMerging(f),
-    // Overview Status is flowStatusLabel(flow), whose ·等待主分支锁 suffix rides
-    // the RAW waiting_for_lock flag — not isWaitingForLock (which requires
-    // status===running and so is always false on the completed+merging body).
-    // Capture the raw flag too, else toggling it mid-merge (lock acquired) leaves
-    // the signature unchanged and the Status freezes on 合并中·等待主分支锁.
-    raw_waiting_lock: !!(f.waiting_for_lock),
     task_type: f.task_type ?? null,
     current_step_index: f.current_step_index ?? null,
     total_steps: f.total_steps ?? null,
@@ -4352,17 +4317,13 @@ function renderHistoryList() {
     const task = el("span", "history-task",
       s.task_description || s.flow_id || "(untitled session)");
     task.title = s.task_description || s.flow_id || "";
-    // A merging worktree session enters the history list from its active
-    // engine.json (source "active", so isMerging does not drop it). Its body
-    // is COMPLETED, so the raw status reads 已完成; fold in the merging
-    // sub-state here — exactly as the machine flow-list card does — so this
-    // list surface also shows 合并中 (·等待主分支锁) during the merge window.
-    const merging = isMerging(s);
-    const sc = merging ? "merging" : statusClass(s.status);
+    // Badge is the raw session status. A worktree session's merge back now runs
+    // as its own merge_integrate / version_reconcile steps (rendered in the
+    // transcript), so there is no completed-body "合并中" fold on this surface.
+    const sc = statusClass(s.status);
     head.append(
       task,
-      el("span", "badge badge-" + sc,
-        merging ? flowStatusLabel(s) : (s.status || "unknown")));
+      el("span", "badge badge-" + sc, s.status || "unknown"));
     if (s.active) head.appendChild(el("span", "badge badge-live", "● live"));
     const resumeBtn = makeResumeButton(s);
     if (resumeBtn) head.appendChild(resumeBtn);
@@ -5621,18 +5582,13 @@ function normalizeRecord(rec) {
   // superseded in place by the later `step_started` running anchor and the
   // terminal report once the lock is acquired and the step proceeds.
   //
-  // `merging` (persisted by chat_history.record_merging) is the isomorphic
-  // anchor for the worktree-merge sub-state: once a worktree flow's body has
-  // completed, its final step gets a `merging` anchor while the flow is merged
-  // back into its original branch (possibly blocked queueing for the
-  // main-worktree lock, which additionally rides the waiting_for_lock anchor).
-  // It shares that last step's `stepId`, so a later, more-current anchor for
-  // the same region supersedes it in place.
+  // The worktree merge no longer has its own bypass anchor: it runs as the
+  // flow's merge_integrate / version_reconcile steps, which emit the ordinary
+  // step_started / step_status / step_completed lifecycle anchors handled here.
   if (
     eventType === "step_started"
     || eventType === "step_status"
     || eventType === "waiting_for_lock"
-    || eventType === "merging"
   ) {
     return {
       role: "step-event",
@@ -5647,9 +5603,7 @@ function normalizeRecord(rec) {
             ? "running"
             : eventType === "waiting_for_lock"
               ? "waiting_for_lock"
-              : eventType === "merging"
-                ? "merging"
-                : "paused"),
+              : "paused"),
       ).toLowerCase(),
       stepReport: null,
       raw: { raw_json: [msg], raw_ndjson: null },
@@ -6385,6 +6339,10 @@ const STEP_HEADER_TITLES = {
   spec_gate: "SPEC GATE",
   version_analyze: "VERSION ANALYZE",
   commit: "COMMIT",
+  // The worktree merge is now the flow's own steps (they replaced the retired
+  // "合并中" bypass indicator), so they get first-class step headings.
+  merge_integrate: "MERGE",
+  version_reconcile: "VERSION RECONCILE",
   summarize: "SUMMARY",
 };
 
@@ -6423,7 +6381,6 @@ const STEP_STATUS_DISPLAY = {
   failed: { icon: "✗", text: "失败" },
   partial: { icon: "◑", text: "部分完成" },
   waiting_for_lock: { icon: "⏳", text: "等待锁" },
-  merging: { icon: "🔀", text: "合并中" },
 };
 
 // Pure: resolve a step's status display ({icon, text}); unknown statuses fall
@@ -6643,16 +6600,15 @@ function addConversationRecords(container, st, records, startIndex) {
       bubble.__convTurnKey = progressTurnKey(norm);
     }
     // Tag the step lifecycle status anchors (step_started / step_status /
-    // waiting_for_lock / merging) so a later, more-current anchor for the SAME
-    // step region supersedes the earlier one — the region then shows only its
-    // current state (等待锁 → 进行中 → 已暂停, or 合并中 on the final step) rather
-    // than stacking redundant status rows.
+    // waiting_for_lock) so a later, more-current anchor for the SAME step
+    // region supersedes the earlier one — the region then shows only its
+    // current state (等待锁 → 进行中 → 已暂停) rather than stacking redundant
+    // status rows.
     bubble.__convStatusRow = !!(
       norm
       && (norm.kind === "step_started"
         || norm.kind === "step_status"
-        || norm.kind === "waiting_for_lock"
-        || norm.kind === "merging"));
+        || norm.kind === "waiting_for_lock"));
     // Tag the terminal report rows (step_completed / step_failed). Once a step
     // region has a terminal report, ITS non-terminal status anchors (进行中 /
     // 已暂停 / 重试中) are stale — the report card itself conveys the final
@@ -9581,7 +9537,6 @@ function renderConversationRecord(norm) {
     norm.kind === "step_started"
     || norm.kind === "step_status"
     || norm.kind === "waiting_for_lock"
-    || norm.kind === "merging"
   ) {
     return renderStepStartedRecord(norm);
   }
@@ -9826,9 +9781,7 @@ function renderStepStartedRecord(norm) {
     ? "step_status"
     : norm.kind === "waiting_for_lock"
       ? "waiting_for_lock"
-      : norm.kind === "merging"
-        ? "merging"
-        : "step_started";
+      : "step_started";
   const row = el(
     "div",
     "history-record conv-record role-step-event kind-" + kind + " "
@@ -10089,6 +10042,9 @@ const STEP_REPORT_TITLES = {
   spec_gate: "Spec Gate",
   version_analyze: "Version Analysis",
   commit: "Commit",
+  // The two worktree-merge steps that replaced the retired "合并中" bypass.
+  merge_integrate: "Merge",
+  version_reconcile: "Version Reconcile",
   summarize: "Work Summary",
 };
 
@@ -12511,9 +12467,6 @@ if (typeof module !== "undefined" && module.exports) {
     // in tests/frontend/waiting_for_lock.test.mjs.
     isWaitingForLock,
     flowStatusLabel,
-    // Worktree-merge sub-state (G4) — exposed for the DOM-free tests in
-    // tests/frontend/merging.test.mjs.
-    isMerging,
     // Local interjection lifecycle helpers (G4) — exposed for the DOM-free
     // tests in tests/frontend/test_app_pure.mjs.
     bindLocalInterjectionToCallId,

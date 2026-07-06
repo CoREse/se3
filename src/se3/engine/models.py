@@ -655,20 +655,6 @@ class FlowInstance:
     # written to engine.json when actually True.
     waiting_for_lock: bool = False
 
-    # Merge-in-progress sub-state: True while a --worktree flow body — already
-    # COMPLETED — is being merged back into its original branch by run_merge.
-    # Unlike waiting_for_lock (which layers on a RUNNING sync run), merging
-    # layers on a COMPLETED worktree flow, and is orthogonal to (and stackable
-    # with) waiting_for_lock: merging && waiting_for_lock means the merge itself
-    # is blocked queueing for the main-worktree lock. Kept as its own top-level
-    # emit-when-True boolean rather than a FlowStatus value so it never pollutes
-    # terminal-state / resume / progress semantics that key off status. Written
-    # only to the worktree's own engine.json, where a successful merge archives
-    # it away with the worktree (self-clearing); the daemon aggregator surfaces
-    # it onto the owning root's flow list via the same attribution path as
-    # waiting_for_lock.
-    merging: bool = False
-
     def to_dict(self) -> Dict[str, Any]:
         """Serialize flow instance to dictionary."""
         data: Dict[str, Any] = {
@@ -695,10 +681,6 @@ class FlowInstance:
         # round-tripping a True value for a synchronous run that is queued.
         if self.waiting_for_lock:
             data["waiting_for_lock"] = True
-        # Same emit-when-True discipline: an ordinary worktree body's engine.json
-        # stays free of the key, and old readers ignore the absent key.
-        if self.merging:
-            data["merging"] = True
         return data
 
     def to_header_dict(self) -> Dict[str, Any]:
@@ -749,8 +731,6 @@ class FlowInstance:
             # Backward compatible: old engine.json files predate this field, so
             # a missing key reads as False (not waiting).
             waiting_for_lock=data.get("waiting_for_lock", False),
-            # Backward compatible: absent key reads as False (not merging).
-            merging=data.get("merging", False),
         )
 
     def get_progress(self) -> tuple[int, int]:

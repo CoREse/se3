@@ -304,8 +304,8 @@ class TestResumeRun:
         assert kwargs["acquire_main_lock"] is False
         assert kwargs["flow_id"] == "wt-1"
         assert Path(kwargs["project_root"]).name == "worktree-x-1"
-        # success → trailing merge back (now also threads the worktree path so
-        # the finalizer can flag that flow's engine.json as merging)
+        # success → worktree cleanup (threads the worktree path so the finalizer
+        # can archive that flow's worktree after its in-flow merge landed)
         mock_merge.assert_called_once_with(
             tmp_path,
             "worktree/x-1",
@@ -376,8 +376,8 @@ class TestResumeRun:
         assert kwargs["acquire_main_lock"] is False
         assert kwargs["flow_id"] == "wt-1"
         assert Path(kwargs["project_root"]) == wt_root
-        # Merge driven from the resolved MAIN repo, not the worktree; the
-        # worktree path is still threaded through for the merging-status flag.
+        # Cleanup driven from the resolved MAIN repo, not the worktree; the
+        # worktree path is still threaded through so the finalizer can archive it.
         mock_merge.assert_called_once_with(
             Path("/main"), "worktree/x-1", "main", wt_root
         )
