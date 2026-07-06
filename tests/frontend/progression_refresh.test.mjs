@@ -115,6 +115,10 @@ export async function registerProgressionRefreshTests(ctx) {
     app.state.flowProgressionMarker = null;
     app.state.flowConversationAppendSeq = 0;
     app.state.progressionGraceMs = TEST_GRACE_MS;
+    // A fresh open is a bottom-follower (openFlowView forces a scroll to bottom);
+    // individual cases that simulate the reader scrolling up flip this to false,
+    // mirroring the scroll handler that maintains it in production (#260).
+    app.state.flowConversationFollowingBottom = true;
     const c = document.getElementById("flow-conversation");
     c.innerHTML = "";
     c.__convState = null;
@@ -376,6 +380,9 @@ export async function registerProgressionRefreshTests(ctx) {
       });
       await app.loadFlowConversation("F1");
       cA.scrollHeight = 1000; cA.clientHeight = 100; cA.scrollTop = 600;  // 300 from bottom
+      // The reader deliberately scrolled up: in production the scroll handler
+      // drops the follow-bottom intent, which the silent rebuild consults (#260).
+      app.state.flowConversationFollowingBottom = false;
       installCountingFetch({
         records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
         progress: "t1", delivery: "full",
