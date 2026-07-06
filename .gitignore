@@ -51,6 +51,11 @@ materials
 !/se3/scripts/
 !/se3/prompts/
 !/se3/version-rules.md
+# Version-reconcile intent metadata: written by a worktree session's commit
+# step and committed on the flow branch so the merge-side reconcile step can
+# read every merged-in branch's intent from master. Must be tracked, unlike
+# the rest of se3/state runtime content that /se3/* ignores.
+!/se3/version-intents/
 tmp*.prompt
 
 # SE3 session file
