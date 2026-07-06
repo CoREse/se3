@@ -1,9 +1,14 @@
 """Tests for scripts/cleanup_history_leak.py (one-time history-leak cleanup).
 
 Locks in the classification logic so the destructive script can never grow to
-delete a real flow: only empty dirs, content-verified single-``.jsonl`` leak
-dirs, and explicit test-fixture names are removed; flow-id / recovered_ /
-old uuid-style multi-step dirs are preserved.
+delete a real flow: only empty dirs, single-``.jsonl`` (empty-step_id) leak dirs
+regardless of file content, and explicit test-fixture names are removed; flow-id
+/ recovered_ / old uuid-style multi-step dirs are preserved.
+
+A real flow always names its step files ``<step_id>.jsonl`` with a non-empty
+``step_id``, so a directory whose sole file is a bare ``.jsonl`` is unambiguously
+the leak no matter what that file contains -- an empty / truncated /
+signature-less leak file must still be removed, never kept.
 """
 
 from __future__ import annotations
@@ -45,19 +50,26 @@ def _build_history(tmp_path: Path) -> Path:
     _mk(hist, "test-flow-neg", {".jsonl": _LEAK_LINE})
     (hist / "se3" / "history").mkdir(parents=True)  # nested test-residue dir
     (hist / "prompt_history").write_text("stray", encoding="utf-8")
+    # prompt_history* DIRECTORY residue: multi-file so criteria (a)/(b) never
+    # catch it -- only the name-based residue rule (c) removes it.
+    _mk(hist, "prompt_history_old", {"a.txt": "x", "b.txt": "y"})
+    # A lone bare ``.jsonl`` is the empty-step_id leak REGARDLESS of content: a
+    # non-signature body is still a leak (the name, not the content, is the
+    # signature) and must be removed, not preserved.
+    _mk(hist, "20260706-013806_33334444", {".jsonl": '{"role": "user"}\n'})
+    # ...and even an empty / truncated leak file (no readable body at all).
+    _mk(hist, "20260706-013807_55556666", {".jsonl": ""})
     # --- real flows (must be preserved) ---
     _mk(hist, "20260706-013805_11112222", {"01_analyze_ab.jsonl": "real"})
     _mk(hist, "recovered_20260706_120000", {"engine.json": "{}"})
     _mk(hist, "173a47a7-c95", {"387e4498.jsonl": "real", "3be5f132.jsonl": "real"})
-    # single-.jsonl file but NOT the test signature -> must be preserved
-    _mk(hist, "20260706-013806_33334444", {".jsonl": '{"role": "user"}\n'})
     return hist
 
 
 def test_dry_run_removes_nothing(tmp_path, capsys):
     hist = _build_history(tmp_path)
     before = sorted(p.name for p in hist.iterdir())
-    rc = cleanup_mod.cleanup(hist, dry_run=True, include_uuid_dirs=False)
+    rc = cleanup_mod.cleanup(hist, dry_run=True)
     assert rc == 0
     assert sorted(p.name for p in hist.iterdir()) == before  # nothing deleted
     out = capsys.readouterr().out
@@ -66,12 +78,11 @@ def test_dry_run_removes_nothing(tmp_path, capsys):
 
 def test_deletes_only_leaks(tmp_path):
     hist = _build_history(tmp_path)
-    cleanup_mod.cleanup(hist, dry_run=False, include_uuid_dirs=False)
+    cleanup_mod.cleanup(hist, dry_run=False)
     remaining = sorted(p.name for p in hist.iterdir())
     assert remaining == [
         "173a47a7-c95",
         "20260706-013805_11112222",
-        "20260706-013806_33334444",
         "recovered_20260706_120000",
     ]
 
@@ -79,25 +90,47 @@ def test_deletes_only_leaks(tmp_path):
 def test_flow_id_and_recovered_protected(tmp_path):
     hist = _build_history(tmp_path)
     # A flow-id dir with real content and a recovered_ snapshot are never touched.
-    assert cleanup_mod.classify_dir(hist / "20260706-013805_11112222", False) is None
-    assert cleanup_mod.classify_dir(hist / "recovered_20260706_120000", False) is None
-    # uuid-style dir preserved by default (real history); only the explicit
-    # --include-uuid-dirs opt-in makes it a name-based deletion candidate.
-    assert cleanup_mod.classify_dir(hist / "173a47a7-c95", False) is None
-    assert cleanup_mod.classify_dir(hist / "173a47a7-c95", True) == "uuid_name"
+    assert cleanup_mod.classify_dir(hist / "20260706-013805_11112222") is None
+    assert cleanup_mod.classify_dir(hist / "recovered_20260706_120000") is None
+    # A multi-step uuid-style dir holds REAL historical flow content and must
+    # never be name-deleted -- there is no opt-in that can destroy it. (An empty
+    # or single-``.jsonl`` uuid dir is still a content leak caught by (a)/(b);
+    # this one has two real step files, so it is always preserved.)
+    assert cleanup_mod.classify_dir(hist / "173a47a7-c95") is None
 
 
-def test_multifile_dir_not_misdeleted(tmp_path):
+def test_bare_jsonl_leak_removed_regardless_of_content(tmp_path):
     hist = _build_history(tmp_path)
-    # non-signature single-.jsonl is preserved (not a verified leak).
-    assert cleanup_mod.classify_dir(hist / "20260706-013806_33334444", False) is None
+    # A lone bare ``.jsonl`` is the empty-step_id leak by its NAME, so a
+    # non-signature body and an empty/truncated body are both removed. (A real
+    # flow can never produce a bare ``.jsonl`` -- its step_id is always non-empty
+    # -- so this can never delete real history.)
+    assert cleanup_mod.classify_dir(hist / "20260706-013806_33334444") == "only_jsonl"
+    assert cleanup_mod.classify_dir(hist / "20260706-013807_55556666") == "only_jsonl"
+
+
+def test_multistep_flow_with_real_step_file_preserved(tmp_path):
+    hist = _build_history(tmp_path)
+    # A dir holding a real ``<step_id>.jsonl`` (non-empty step_id) is a real flow
+    # and is never a single-bare-.jsonl leak.
+    assert cleanup_mod.classify_dir(hist / "20260706-013805_11112222") is None
+
+
+def test_prompt_history_dir_is_residue(tmp_path):
+    hist = _build_history(tmp_path)
+    # A multi-file prompt_history* dir escapes the content-leak criteria and is
+    # removed purely on its name (residue), not preserved as an unknown dir.
+    assert cleanup_mod.classify_dir(hist / "prompt_history_old") == "residue_name"
 
 
 def test_report_counts(tmp_path, capsys):
     hist = _build_history(tmp_path)
-    cleanup_mod.cleanup(hist, dry_run=True, include_uuid_dirs=False)
+    cleanup_mod.cleanup(hist, dry_run=True)
     out = capsys.readouterr().out
     assert "Empty leak dirs:            1" in out
-    assert "Single-'.jsonl' leak dirs:  2" in out  # cafef00d + test-flow-neg
-    assert "Residue-name dirs:          2" in out  # test-flow-123 + se3
+    # cafef00d + test-flow-neg + 33334444 + 55556666 (bare .jsonl caught before
+    # the name-based rules, regardless of content).
+    assert "Single-'.jsonl' leak dirs:  4" in out
+    # test-flow-123 + se3 + prompt_history_old
+    assert "Residue-name dirs:          3" in out
     assert "Residue root files:         1" in out  # prompt_history

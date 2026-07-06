@@ -31,7 +31,7 @@ def _real_history_roots() -> set:
 
 
 @pytest.fixture(autouse=True)
-def _no_chat_history_leak_to_real_repo(monkeypatch):
+def _no_chat_history_leak_to_real_repo(tmp_path, monkeypatch):
     """Neutralise chat-history writes aimed at the live repo for every engine test.
 
     Twin of the fixture in ``tests/conftest.py`` (kept in sync). ``pytest`` only
@@ -42,26 +42,40 @@ def _no_chat_history_leak_to_real_repo(monkeypatch):
     ``Path.cwd()`` (the live repo) — leak a fake test-history jsonl pair into the
     committed ``se3/history/`` on every suite run.
 
-    ``chat_history._append_message`` is the single disk-write point behind
-    ``record_prompt`` / ``record_response``; wrapping it to no-op only when the
-    resolved ``project_root`` is a real repo root drops those leaks while letting
-    any tmp-scoped write through unchanged.
+    Every ``record_*`` writer resolves its target path through the module-global
+    ``chat_history._history_dir`` (via ``_history_file``): ``record_prompt`` /
+    ``record_response`` (through ``_append_message``) as well as the sibling
+    writers ``record_step_event`` / ``record_stream_progress`` /
+    ``record_user_interjection`` and every other ``record_*``. Rerouting that one
+    resolution point into a per-test tmp dir when the resolved ``project_root``
+    is a real repo root drops the leak from ALL writers at once while letting any
+    tmp-scoped write through unchanged. ``se3.engine.state_machine`` binds
+    ``_history_dir`` at import time, so its reference is repatched directly too.
     """
     from se3.engine import chat_history
 
     real_roots = _real_history_roots()
-    original = chat_history._append_message
+    redirect_root = tmp_path / "_chat_history_redirect"
+    original = chat_history._history_dir
 
-    def _guarded(project_root, flow_id, step_id, msg):
+    def _redirected(project_root, flow_id):
         try:
             target = Path(project_root).resolve()
         except (TypeError, ValueError, OSError):
             target = None
         if target is not None and target in real_roots:
-            return
-        return original(project_root, flow_id, step_id, msg)
+            return original(redirect_root, flow_id)
+        return original(project_root, flow_id)
 
-    monkeypatch.setattr(chat_history, "_append_message", _guarded)
+    monkeypatch.setattr(chat_history, "_history_dir", _redirected)
+    try:
+        from se3.engine import state_machine
+
+        monkeypatch.setattr(
+            state_machine, "_history_dir", _redirected, raising=False
+        )
+    except Exception:  # pragma: no cover - defensive
+        pass
 
 
 @pytest.fixture(autouse=True)

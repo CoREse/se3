@@ -1,0 +1,56 @@
+id: '266'
+description: "## 背景（事故驱动）\n\n2026-07-06 两个并发 session（`20260706-013803_96453dd6` 直跑、`20260706-013828_8a10f200`\
+  \ worktree）从同一基线 11.11.2 出发，version_analyze 各自算出 11.12.0。前者 04:28 先落盘正常；后者 04:39\
+  \ verbatim 写入已是 11.12.0 的文件成为 no-op，VERSIONS.md 按版本号去重把它的 changelog 条目静默吞掉。结果：两个\
+  \ minor feature 共用 11.12.0（应为 11.13.0），其中一个 feature 无任何 changelog 记录。10.7.1 也有同样的撞号前科（f3b51426\
+  \ / f9054a6f）。\n\n根因链（均有日志/代码证据）：\n1. 设计上版本聚合应由 merge 侧完成（version_aggregator.py：推断各分支\
+  \ bump 类型、取 max、施加到 master 当前版本、amend 进 merge commit），session 内 commit 按 pre-session\
+  \ 基线写版本是设计内行为。\n2. 但实际执行中 impl leaf merge 与 release commit 都直接落在 master 上（reflog\
+  \ 证实），merge orchestrator 收尾时分支恒为 already-ancestor、无 merge commit，_find_base_ref_for_already_merged\
+  \ 返回 (None, None) → \"Skipping version aggregation: no branches contributed bumps\"\
+  。版本聚合路径从未真正生效（至少 07-04 起的 merge 日志均如此）。\n3. 单 flow 时基线==当前版本，commit 的 verbatim 写入掩盖了聚合失效；并发时立即丢\
+  \ bump。\n4. 撞号时文本层零冲突（两边内容相同、clean merge/no-op merge），任何基于\"检测到 version 文件冲突\"的方案在最需要时不会触发。\n\
+  \n## 设计原则\n\n**版本号只写在敲定它的地方。**\n- 非 worktree flow：commit 时基线==master 当前版本，commit\
+  \ 即 release 点 → 行为不变（当场写版本文件、VERSIONS.md、message 带 `Version: X`）。\n- worktree session：release\
+  \ 点在 merge → session 内只产出**意图**，最终版本由 merge 侧无条件判定。\n\n推论：未 merge 回 master 的 worktree\
+  \ 工作没有版本号（分支被弃/merge 失败/被 GC 不会留下从未发布的幽灵版本号）。\n\n## 改动 A：session commit 去版本化（仅 worktree\
+  \ flow）\n\n- version_analyze 照跑，但产出物变为**意图元数据**，以结构化形式随 flow/分支传递：\n  - **变更摘要**（version_analyze\
+  \ 消费的 changes_made / updated_specs / verification 的归纳）——意图主体；\n  - `versions_changes`（changelog\
+  \ 条目内容，不带版本号头）；\n  - `bump_type`——仅作为默认 SemVer 通道的输入和 commit message 展示；注意自定义 version-rules\
+  \ 下 bump_type 是辅助字段，可能无意义或有损（日期版本、构建号等非 SemVer 方案），不得作为意图的唯一载体；\n  - pre-session\
+  \ 基线记录（供审计/漂移诊断）。\n  - `suggested_version` 降级为 provisional 参考，不落任何盘。\n- commit message\
+  \ 的 `(minor bump)` 仅作兜底展示，merge 侧不靠正则解析 message。\n- commit step 不写版本文件、不写 VERSIONS.md，message\
+  \ 只带 bump 意图、**不写 `Version: X.Y.Z`**（落笔时刻最终版本不可知）。\n- 版本文本冲突在构造上消失：分支不碰 version\
+  \ 字段，git 无从冲突。\n\n## 改动 B：merge 正式 step 化（两个 step）\n\nworktree flow 的 selected_steps\
+  \ 在 commit 之后追加两个 step（非 worktree flow 不含）；flow 的\"完成\"从此意味着\"真的落到 master 了\"：\n\
+  \n1. **`merge_integrate`**：分支并入（含 LLM 冲突解决）、runtime sync、issue renumber、postcondition\
+  \ 校验。输出结构化 MergeResult。\n2. **`version_reconcile`**：**无条件运行**（含 already-ancestor/no-op\
+  \ merge 路径，无触发谓词）。本质是把 version_analyze 的版本推导在 merge 时刻、以 master 当前版本为基线重新执行一次，而非消费\
+  \ session 时刻算好的版本号：\n   - 无 `se3/version-rules.md`（默认 SemVer）：确定性通道——取并入 session\
+  \ 意图中 bump_type 的最大值机械施加，不动用 LLM；\n   - 有 `se3/version-rules.md`：LLM 通道——输入 = master\
+  \ 当前版本 + 意图中的变更摘要/versions_changes + 规则文件，输出最终版本；\n   - 校验按规则语义\"不回退\"：SemVer 下\
+  \ final ≥ 当前版本、声明了 bump 则严格大于；自定义规则下由规则定义序关系，至少保证不等于且不回退到历史已用版本（防 LLM 幻觉写倒退/撞已有号）；\n\
+  \   - 落盘：写版本文件 + 把 changelog 条目归并到最终版本名下 + 生成 reconcile commit（message 可回指被取代的 provisional\
+  \ 信息）。\n3. 拆两个 step 的理由（恢复边界与确认边界同缝）：integrate 贵、失败模式是\"合不进去\"；reconcile 便宜、失败模式是\"\
+  版本算错\"。reconcile 挂掉/被打回时 resume 只重跑版本判定，不重做合并；确认门可按 per-step 配置只 gate 版本决定（如 `version_reconcile:\
+  \ { reviewer: human }`）。\n4. 执行上下文：两个 step 在**主 checkout**、merge lock 内执行（引擎需支持\
+  \ step 级 cwd 覆盖）。\n5. webui 现有的\"正在 merge\"旁路状态显示退役，由 step 渲染取代。\n\n## 改动 C：库/入口架构与幂等\n\
+  \n- orchestrator 降为库：从\"自带全套流程管理的顶层入口\"收缩为可调用的 `integrate()` / `reconcile()` 两个函数；step\
+  \ handler 与 `se3 merge` CLI 均为薄适配层，核心操作两入口等价。\n- 全部不变量长在库里（merge lock、不回退校验、意图收集/消费、changelog\
+  \ 归并）；流程管理（何时跑、失败怎么办、进度给谁看、怎么等人）交给调用方——flow 内用 step 机制（PAUSED/confirm/resume/webui\
+  \ 渲染），CLI 用终端方式（退出码/重跑）。orchestrator 现有的自写 human call、旁路状态显示等流程管理代码退役，失败改为抛类型化异常/返回\
+  \ MergeResult 由调用方决定。\n- 包装语义有意不同：flow 内有确认门/断点续跑；CLI 背靠背一口气、失败重跑整条命令、无确认门（手动/修复工具定位）。\n\
+  - **reconcile 幂等标记**：意图记录被消费后打标（或判定该 session 的 reconcile commit 已存在），任一入口断点重入不会多\
+  \ bump。\n\n## 改动 D：非 worktree 并发竞态守卫（独立小项）\n\n直跑 flow 的 commit step 写版本前，在锁内校验「磁盘当前版本\
+  \ == pre-session 基线」；漂移（并发 flow 抢先 bump）则带新基线重跑 version_analyze。堵住 10.7.1 型撞号。\n\
+  \n## 迁移与遗留（已决策）\n\n- **不回补** 11.13.0：接受 e88f923c 与 64493e95 两个 feature\
+  \ 共享 11.12.0，不翻历史旧账，只修机制。\n- 修复 VERSIONS.md：头部已累积约 89 行空行（每次插条目遗留），reconcile/docs_updater\
+  \ 落盘时清理并保证后续插入不再产生。"
+status: open
+tags: []
+source: human
+created_at: '2026-07-06T14:46:33.740117'
+updated_at: '2026-07-06T14:46:33.740117'
+title: 版本判定移到 merge 侧：session 去版本化 + merge 正式 step 化（integrate/reconcile）
+priority: high
+type: feature

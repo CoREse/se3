@@ -39,6 +39,35 @@ except Exception:  # pragma: no cover - psutil absent
 
 ExitCallback = Callable[["FlowRecord"], None]
 
+# A process carrying this env var (value "1") opts itself out of a daemon's
+# external ``se3 run`` discovery. The test suite sets it on every subprocess it
+# spawns (see ``tests/conftest.py``) so that a real daemon running on the same
+# dev machine never picks up a test's throwaway ``se3 run`` stub — which lives
+# in a pytest tempdir — and persists that cwd into ``~/.se3/project_roots.json``.
+# The existence-based registry self-heal cannot undo that leak while pytest
+# still retains the tempdir, so the process must be invisible to the scan in the
+# first place. Purely opt-in: a genuine ``se3 run`` never sets it.
+EXTERNAL_SCAN_IGNORE_ENV = "SE3_EXTERNAL_SCAN_IGNORE"
+
+
+def _proc_opted_out_of_scan(proc) -> bool:
+    """Return whether *proc* carries the external-scan opt-out marker env var.
+
+    Best-effort and deliberately broad in its exception handling: ``environ()``
+    may be denied (a foreign-user process), unavailable (a fake psutil in tests),
+    or raise for a vanished/zombie process. Any failure to read the environment
+    is treated as "not opted out" so a real ``se3 run`` is never hidden from
+    discovery just because its environment could not be read.
+    """
+    try:
+        env = proc.environ()
+    except Exception:
+        return False
+    try:
+        return env.get(EXTERNAL_SCAN_IGNORE_ENV) == "1"
+    except Exception:  # pragma: no cover - defensive (non-dict environ)
+        return False
+
 
 @dataclass
 class FlowRecord:
@@ -173,10 +202,15 @@ def _read_flow_id(project_root: str) -> Optional[str]:
 class DaemonSupervisor:
     """Discovers and tracks local ``se3 run`` processes."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, include_scan_ignored: bool = False) -> None:
         self._flows: Dict[int, FlowRecord] = {}
         self._lock = threading.RLock()
         self._exit_callbacks: List[ExitCallback] = []
+        # When True, external discovery does NOT skip processes carrying the
+        # ``SE3_EXTERNAL_SCAN_IGNORE`` opt-out marker. Only the tests that must
+        # exercise ``_scan_external`` against their own (marked) stub process set
+        # this; a real daemon leaves it False so marked stubs stay invisible.
+        self._include_scan_ignored = include_scan_ignored
 
     # -- registration ------------------------------------------------------
 
@@ -283,6 +317,15 @@ class DaemonSupervisor:
                     if pid is None or pid == current:
                         continue
                     if not _cmdline_is_se3_run(cmdline):
+                        continue
+                    # A process that opted out of external discovery (the test
+                    # suite marks every subprocess it spawns) must never be
+                    # registered as a project root; otherwise a live daemon on a
+                    # dev machine re-pollutes ~/.se3/project_roots.json with a
+                    # throwaway pytest-tempdir cwd on every test run.
+                    if not self._include_scan_ignored and _proc_opted_out_of_scan(
+                        proc
+                    ):
                         continue
                     with self._lock:
                         if pid in self._flows:

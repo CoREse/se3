@@ -89,6 +89,15 @@
 
 
 
+
+## 11.13.1 - 2026-07-06
+
+- Isolate test suite from real project state: chat_history writes and the SE3 daemon home are redirected to temp dirs so running tests no longer leak fake data into se3/history/ or ~/.se3/project_roots.json
+- Stop 'Test execution (fix iteration 0)' noise entries from appearing in `se3 history list`
+- Self-heal the daemon project registry by dropping project roots whose directory no longer exists, so deleted temporary projects vanish from the daemon/WebUI project list automatically
+- Skip registering a project root that no longer exists on disk to prevent re-polluting the persisted registry
+- Add scripts/cleanup_history_leak.py to purge leaked se3/history/ residue while protecting real uuid-prefixed flow directories
+- Add scripts/cleanup_project_roots.py to remove stale pytest-tempdir entries from ~/.se3/project_roots.json
 ## 11.13.0 - 2026-07-06
 
 - Add `se3 code-index search <pattern>` subcommand to grep the committed code-index by rendered item line (directories, files, and in-file symbols)

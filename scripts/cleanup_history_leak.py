@@ -16,10 +16,13 @@ accumulated backlog once.
 
 Deletion criteria -- a directory is removed iff:
   (a) it is empty                -- a real flow always writes >=1 step file;
-  (b) its only content is a single file literally named ``.jsonl`` AND that
-      file carries the leak signature ({"step_type": "test", ...} /
-      "Test execution (fix iteration 0)");
-  (c) its name is a known test-fixture residue name (``se3``, ``test-flow*``).
+  (b) its only content is a single file literally named ``.jsonl``. A real flow
+      always names its step files ``<step_id>.jsonl`` with a NON-empty step_id,
+      so a bare ``.jsonl`` (empty step_id) is unambiguously the leak regardless
+      of what the file contains -- an empty / truncated / signature-less leak
+      file is still residue and must be removed;
+  (c) its name is a known test-fixture residue name (``se3``, ``test-flow*``,
+      ``prompt_history*``).
 
 Hard protection -- never touched:
   - valid flow-id dirs   ``^\d{8}-\d{6}_[0-9a-f]{8}$`` (current naming scheme);
@@ -27,13 +30,16 @@ Hard protection -- never touched:
   - old uuid-style flow dirs (e.g. ``173a47a7-c95``): although the task framed
     these as "uuid residue", inspection showed they hold REAL historical step
     prompts (real analyze/plan/discover conversations), so deleting them would
-    destroy genuine flow history. They are preserved by default. Only
-    ``--include-uuid-dirs`` opts them in, and even then a dir is removed solely
-    when it also matches a content leak signature (a) or (b) -- never a
-    multi-step dir.
+    destroy genuine flow history. They are ALWAYS preserved -- there is no
+    name-based deletion of uuid dirs at all. A uuid dir that happens to be empty
+    or a single-``.jsonl`` leak is still removed, but only because criteria
+    (a)/(b) above catch it as a content leak; a multi-step uuid dir holding real
+    history is never touched.
 
-Stray ``prompt_history*`` FILES left at the history root by tests are also
-removed (real flows never write files directly at the history root).
+Stray ``prompt_history*`` entries left at the history root by tests are also
+removed whether they are files or directories (real flows never write
+``prompt_history*`` at the history root -- files via the residue-file path,
+directories via criterion (c)).
 
 Usage:
     python scripts/cleanup_history_leak.py --dry-run
@@ -62,6 +68,19 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _is_leak_jsonl_file(path: Path) -> bool:
+    """A file literally named ``.jsonl`` is the empty-step_id leak, always.
+
+    A real flow writes ``<step_id>.jsonl`` with a non-empty ``step_id``; only the
+    isolation-gap test leak produced an empty ``step_id`` and therefore a file
+    named ``.jsonl``. The name alone is the signature -- content is NOT inspected,
+    so an empty / truncated / signature-less leak file is still recognised and
+    removed. (A non-empty ``step_id`` never collides with this name, so no real
+    history record can ever be mistaken for the leak.)
+    """
+    return path.is_file() and path.name == LEAK_JSONL_NAME
+
+
 def _is_protected_name(name: str) -> bool:
     """Names that always denote a real flow / recovery snapshot -> never delete."""
     return bool(FLOW_ID_RE.match(name)) or name.startswith("recovered_")
@@ -69,24 +88,14 @@ def _is_protected_name(name: str) -> bool:
 
 def _is_residue_name(name: str) -> bool:
     """Known test-fixture directory names (never used by a real flow)."""
-    return name == "se3" or name.startswith("test-flow")
+    return (
+        name == "se3"
+        or name.startswith("test-flow")
+        or name.startswith("prompt_history")
+    )
 
 
-def _is_test_leak_jsonl(path: Path) -> bool:
-    """A lone ``.jsonl`` file is only a leak if it carries the test signature.
-
-    Guards against ever removing a real (non-empty-step_id) history record; the
-    empty-step_id leak always records ``"step_type": "test"`` on its first line.
-    """
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            first = fh.readline()
-    except OSError:
-        return False
-    return '"step_type": "test"' in first or "Test execution (fix iteration" in first
-
-
-def classify_dir(entry: Path, include_uuid_dirs: bool) -> str | None:
+def classify_dir(entry: Path) -> str | None:
     """Return the leak category for a history subdir, or None to keep it."""
     name = entry.name
     try:
@@ -100,13 +109,11 @@ def classify_dir(entry: Path, include_uuid_dirs: bool) -> str | None:
     if not contents:
         return "empty"
 
-    # (b) single ".jsonl" (empty-step_id) leak file, content-verified.
-    if (
-        len(contents) == 1
-        and contents[0].is_file()
-        and contents[0].name == LEAK_JSONL_NAME
-        and _is_test_leak_jsonl(contents[0])
-    ):
+    # (b) single ".jsonl" (empty-step_id) leak file. The bare ``.jsonl`` name is
+    # itself the signature (a real flow always uses a non-empty step_id), so the
+    # file's content is irrelevant -- an empty / truncated / signature-less leak
+    # file is still removed.
+    if len(contents) == 1 and _is_leak_jsonl_file(contents[0]):
         return "only_jsonl"
 
     # Everything below is name-based; real flows and recovery snapshots are
@@ -118,16 +125,14 @@ def classify_dir(entry: Path, include_uuid_dirs: bool) -> str | None:
     if _is_residue_name(name):
         return "residue_name"
 
-    # Old uuid-style dirs hold real history, so name-based deletion is OFF by
-    # default. --include-uuid-dirs opts them in only if separately confirmed
-    # disposable; content-leak uuid dirs are already caught by (a)/(b) above.
-    if include_uuid_dirs and UUID_DIR_RE.match(name):
-        return "uuid_name"
-
+    # Old uuid-style dirs hold REAL historical flow content, so there is NO
+    # name-based deletion for them -- a multi-step uuid dir is never removed.
+    # A uuid dir that is itself a content leak (empty / single-``.jsonl``) was
+    # already caught by (a)/(b) above and never reaches this point.
     return None
 
 
-def cleanup(history_dir: Path, dry_run: bool, include_uuid_dirs: bool) -> int:
+def cleanup(history_dir: Path, dry_run: bool) -> int:
     if not history_dir.is_dir():
         print(f"History directory not found: {history_dir}")
         return 1
@@ -137,7 +142,6 @@ def cleanup(history_dir: Path, dry_run: bool, include_uuid_dirs: bool) -> int:
         "only_jsonl": 0,
         "residue_name": 0,
         "residue_file": 0,
-        "uuid_name": 0,
     }
     to_delete: list[tuple[Path, str]] = []
     kept_flow = 0
@@ -145,7 +149,7 @@ def cleanup(history_dir: Path, dry_run: bool, include_uuid_dirs: bool) -> int:
 
     for entry in sorted(history_dir.iterdir()):
         if entry.is_dir():
-            category = classify_dir(entry, include_uuid_dirs)
+            category = classify_dir(entry)
             if category in stats:
                 to_delete.append((entry, category))
             else:
@@ -176,16 +180,15 @@ def cleanup(history_dir: Path, dry_run: bool, include_uuid_dirs: bool) -> int:
     print(f"Empty leak dirs:            {stats['empty']}")
     print(f"Single-'.jsonl' leak dirs:  {stats['only_jsonl']}")
     print(f"Residue-name dirs:          {stats['residue_name']}")
-    print(f"Uuid-style dirs (opt-in):   {stats['uuid_name']}")
     print(f"Residue root files:         {stats['residue_file']}")
     print(f"Total {'to remove' if dry_run else 'removed'}: {total}")
     print(f"Preserved real flows (flow-id/recovered/other): {kept_flow}")
     print(f"Preserved old uuid-style flow dirs:             {kept_uuid}")
-    if kept_uuid and not include_uuid_dirs:
+    if kept_uuid:
         print(
             "  (uuid-style dirs contain real historical flow content and are "
-            "kept; pass --include-uuid-dirs only if separately confirmed "
-            "disposable -- even then only content-leak dirs are removed.)"
+            "always preserved; only empty / single-'.jsonl' content leaks are "
+            "ever removed.)"
         )
     return 0
 
@@ -203,15 +206,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="path to se3/history (default: <project_root>/se3/history)",
     )
-    parser.add_argument(
-        "--include-uuid-dirs",
-        action="store_true",
-        help="also consider old uuid-style dirs (preserved by default; see docstring)",
-    )
     args = parser.parse_args(argv)
 
     history_dir = args.history_dir or (_project_root() / "se3" / "history")
-    return cleanup(history_dir.resolve(), args.dry_run, args.include_uuid_dirs)
+    return cleanup(history_dir.resolve(), args.dry_run)
 
 
 if __name__ == "__main__":

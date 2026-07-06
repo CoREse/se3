@@ -1,0 +1,8 @@
+id: '265'
+description: commit message里不要把“discovery”当成session的类型，discovery不是类型，analyze分析后的那个类型才是类型。
+status: open
+tags: []
+source: human
+created_at: '2026-07-06T14:42:16.878377'
+updated_at: '2026-07-06T14:42:16.878377'
+type: bug

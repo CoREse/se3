@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -38,6 +39,19 @@ from se3.daemon.supervisor import _cmdline_is_se3_run
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+# A benign, always-existing, NON-tempdir cwd for the ``se3 run``-shaped stubs
+# these discovery tests spawn. The suite-wide ``SE3_EXTERNAL_SCAN_IGNORE`` marker
+# hides such a stub from a *new* daemon's external scan, but a **pre-fix** daemon
+# already running on this dev machine does not understand that marker, still
+# recognises ``[.../se3, run]`` as a genuine flow, and would persist the stub's
+# cwd into the real ``~/.se3/project_roots.json``. Running these stubs in a pytest
+# tempdir would therefore leak that tempdir into the registry. Anchoring their cwd
+# to the real repo root (a legitimate, already-known se3 project — never a pytest
+# tempdir) makes that unavoidable pre-fix-daemon registration harmless: nothing a
+# test does can add a ``/tmp/pytest-of-*`` root. The tests assert only pid
+# membership, never the registered cwd, so the change does not weaken them.
+_BENIGN_STUB_CWD = str(Path(__file__).resolve().parents[1])
 
 
 def _spawn_sleeper(seconds: float = 30.0) -> subprocess.Popen:
@@ -275,7 +289,11 @@ class TestScanExternalDiscovery:
     must not be registered, genuine console-script processes still must be."""
 
     def test_inline_code_se3_run_not_registered(self, tmp_path):
-        sup = DaemonSupervisor()
+        # Opt back into scan-ignored stubs (they inherit the suite-wide
+        # SE3_EXTERNAL_SCAN_IGNORE marker) so the "not registered" result is
+        # attributable solely to the cmdline-predicate rejection, not to the
+        # marker-skip branch that a default supervisor would also apply.
+        sup = DaemonSupervisor(include_scan_ignored=True)
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)", "se3", "run"],
             cwd=str(tmp_path),
@@ -296,14 +314,49 @@ class TestScanExternalDiscovery:
     def test_console_script_se3_run_registered(self, tmp_path):
         pytest.importorskip("psutil")
         fake_se3 = _write_fake_se3(tmp_path, "import time\ntime.sleep(30)\n")
-        sup = DaemonSupervisor()
-        proc = subprocess.Popen([str(fake_se3), "run"], cwd=str(tmp_path))
+        # The stub inherits the suite-wide SE3_EXTERNAL_SCAN_IGNORE marker so a
+        # *new* daemon never registers it; opt this in-process supervisor back in
+        # so the positive-registration path is still tested. cwd is the real repo
+        # root (see _BENIGN_STUB_CWD), NOT the pytest tempdir, so even a pre-fix
+        # daemon that ignores the marker cannot leak a tempdir into ~/.se3/.
+        sup = DaemonSupervisor(include_scan_ignored=True)
+        proc = subprocess.Popen([str(fake_se3), "run"], cwd=_BENIGN_STUB_CWD)
         try:
             # Wait until psutil reports the shebang-rewritten cmdline (se3 at
             # argv[1]) so the positive registration is exercised deterministically.
             _wait_until_psutil_observes(proc.pid)
             flows = sup.discover_flows(scan_external=True)
             assert any(f.pid == proc.pid for f in flows)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+    def test_scan_ignored_stub_not_registered_by_default_supervisor(self, tmp_path):
+        """A default supervisor must honour the SE3_EXTERNAL_SCAN_IGNORE marker.
+
+        This is the negative counterpart of the positive test above: it directly
+        exercises the ``_proc_opted_out_of_scan`` skip branch in
+        ``_scan_external``. The spawned stub inherits the suite-wide
+        ``SE3_EXTERNAL_SCAN_IGNORE=1`` marker (see tests/conftest.py); a default
+        ``DaemonSupervisor()`` — how a real dev-machine daemon runs — must NOT
+        register it, so a regression in the env-read guard (renamed key, broken
+        environ parsing) that silently reopens the ~/.se3 registry-pollution
+        vector fails this test instead of passing unnoticed.
+        """
+        pytest.importorskip("psutil")
+        fake_se3 = _write_fake_se3(tmp_path, "import time\ntime.sleep(30)\n")
+        sup = DaemonSupervisor()
+        # cwd is the real repo root, not the pytest tempdir (see _BENIGN_STUB_CWD):
+        # a pre-fix daemon that ignores the marker cannot leak a tempdir into
+        # ~/.se3/. This test asserts the marker-skip, so cwd is immaterial to it.
+        proc = subprocess.Popen([str(fake_se3), "run"], cwd=_BENIGN_STUB_CWD)
+        try:
+            # Synchronise on observability first: "not registered" must mean the
+            # marker was honoured, not that psutil merely never saw the pid.
+            _wait_until_psutil_observes(proc.pid)
+            flows = sup.discover_flows(scan_external=True)
+            assert all(f.pid != proc.pid for f in flows)
+            assert sup.get(proc.pid) is None
         finally:
             proc.terminate()
             proc.wait(timeout=10)
@@ -1576,6 +1629,18 @@ class TestProjectRootsSelfHeal:
         # A since-deleted directory is never persisted in the first place.
         assert not path.exists()
         assert _read_project_roots_raw(path) == []
+
+    def test_append_new_root_prunes_persisted_stale_root(self, tmp_path):
+        # A stale entry persisted while the daemon was up (e.g. a pytest tempdir
+        # torn down after registration) must be erased from disk when a *new*
+        # live root is appended, not carried forward until the next restart.
+        path = tmp_path / "project_roots.json"
+        dead = tmp_path / "gone"  # never created
+        self._write_registry(path, [dead])
+        live = tmp_path / "live"
+        live.mkdir()
+        _append_project_root(path, str(live))
+        assert _read_project_roots_raw(path) == [os.path.realpath(str(live))]
 
 
 class TestRegistryWriteThrough:

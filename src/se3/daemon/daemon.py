@@ -989,6 +989,14 @@ def _append_project_root(path: Path, root: object) -> None:
     a genuinely new root appears — an already-registered root is a no-op and
     leaves the file untouched.
 
+    When a rewrite does fire, stale entries whose directory no longer exists on
+    disk are pruned in the same write. Otherwise a registry holding a deleted
+    root (e.g. a torn-down pytest tempdir persisted while the daemon was up)
+    would carry that dead entry forward unchanged every time a *different* live
+    root is appended, keeping the file dirty until the next startup
+    :func:`_sanitize_project_roots` pass — the very resurfacing the existence
+    self-heal exists to prevent.
+
     A worktree isolation copy (``<main>/se3/worktrees/<name>``) is folded back
     to its owning ``<main>`` here as a defence-in-depth backstop: the primary
     normalization seam is :meth:`DaemonAggregator.add_project_root` (which feeds
@@ -1011,10 +1019,14 @@ def _append_project_root(path: Path, root: object) -> None:
     if not os.path.exists(resolved):
         return
     existing = _read_project_roots_raw(path)
-    if resolved in existing:
+    # Prune since-deleted roots from the persisted set so the rewrite triggered
+    # by this new root also erases stale entries, rather than carrying them
+    # forward untouched until the next startup sanitize pass.
+    live = [r for r in existing if os.path.exists(r)]
+    if resolved in live:
         return
-    existing.append(resolved)
-    _atomic_write_json(path, {"project_roots": sorted(set(existing))})
+    live.append(resolved)
+    _atomic_write_json(path, {"project_roots": sorted(set(live))})
 
 
 def _sanitize_project_roots(path: Path) -> None:
