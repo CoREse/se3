@@ -38,7 +38,7 @@ from .guardrails import (
     _read_file_from_ref,
     violation_set_hash,
 )
-from .human_call import HumanCallWriter
+from .human_call import HumanCallWriter, _generate_call_filename
 from .issue_renumber import (
     advance_next_id_to_max,
     append_description_note,
@@ -73,6 +73,13 @@ from .version_aggregator import (
 from ...commands.merge.result_model import MergeOutcome, MergeReport
 
 logger = logging.getLogger(__name__)
+
+# The structured return type of the library entry points (:func:`integrate`).
+# The design demotes this orchestrator from a top-level entry that manages its
+# own flow-control to a library that hands a structured result back to the
+# caller. ``MergeResult`` is the typed :class:`MergeReport`; the alias names the
+# library contract without forking a second nearly-identical dataclass.
+MergeResult = MergeReport
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -576,6 +583,75 @@ def _check_repo_state(project_root: Path) -> None:
 # typed values via the property.
 
 
+class _RecordingNullHumanCallWriter(HumanCallWriter):
+    """Human-call writer that records escalations instead of writing files.
+
+    The redesign retires the orchestrator's self-written human-call files: a
+    library caller (:func:`integrate`) wants an escalation surfaced on the
+    returned :class:`MergeResult` (``pending_human=True`` plus the recorded
+    payload) and decides the flow-control itself — a flow step drives
+    PAUSED/confirm/resume, the ``se3 merge`` CLI uses exit codes. So in library
+    mode nothing lands in ``se3/calls/``.
+
+    The write methods keep :class:`HumanCallWriter`'s return contract (a
+    ``Path`` under ``se3/calls/``) so the orchestrator's existing
+    ``if report.human_call_file:`` truthiness checks and exception plumbing are
+    unchanged — the path is simply never created on disk. ``print_instructions``
+    becomes a no-op (no terminal side effects in library mode).
+    """
+
+    def __init__(self, project_root: Path) -> None:
+        super().__init__(project_root)
+        # Recorded escalations, so the caller can render/inspect what would
+        # have been written without touching the filesystem.
+        self.recorded_calls: list[dict] = []
+
+    def write_call(
+        self,
+        context,
+        resolution,
+        decision,
+        *,
+        options=None,
+        instructions_override=None,
+        call_file_name=None,
+        strategy=None,
+    ) -> Path:
+        branch = getattr(context, "theirs_branch", "") or ""
+        name = call_file_name or _generate_call_filename("merge", branch)
+        call_file = self.project_root / "se3" / "calls" / name
+        self.recorded_calls.append(
+            {"type": "conflict", "branch": branch, "call_file": call_file}
+        )
+        return call_file
+
+    def write_guardrail_call(
+        self,
+        branch,
+        violations,
+        pre_merge_sha,
+        call_type="guardrail_violation",
+        iteration_count=None,
+    ) -> Path:
+        call_file = self.project_root / "se3" / "calls" / _generate_call_filename(
+            "merge", f"{branch}_guardrail",
+        )
+        self.recorded_calls.append(
+            {
+                "type": call_type,
+                "branch": branch,
+                "violations": violations,
+                "pre_merge_sha": pre_merge_sha,
+                "call_file": call_file,
+            }
+        )
+        return call_file
+
+    def print_instructions(self, call_file: Path) -> None:
+        # Library mode: no terminal output — the caller owns presentation.
+        return None
+
+
 class MergeOrchestrator:
     """Orchestrate sequential merging of branches.
 
@@ -629,6 +705,7 @@ class MergeOrchestrator:
         delete_merged: bool = True,
         strict_runtime_sync: bool = False,
         acquire_lock: bool = True,
+        suppress_human_call: bool = False,
     ) -> None:
         self.project_root = project_root
         # Validate via MergeStrategy.from_str so the removed
@@ -674,7 +751,16 @@ class MergeOrchestrator:
             llm_trace=self._llm_trace,
         )
         self._decider = StrategyDecider()
-        self._human_writer = HumanCallWriter(project_root)
+        # Library mode (``suppress_human_call``) swaps in a recording writer so
+        # escalations surface on the returned MergeResult rather than as files
+        # under se3/calls/. Default False keeps the legacy CLI/step behaviour —
+        # and every existing test — byte-for-byte unchanged.
+        self.suppress_human_call = suppress_human_call
+        self._human_writer = (
+            _RecordingNullHumanCallWriter(project_root)
+            if suppress_human_call
+            else HumanCallWriter(project_root)
+        )
         self._guardrails = MergeGuardrailsCheck(project_root)
         self._repairer = GuardrailRepairer(
             project_root,
@@ -6114,3 +6200,57 @@ class MergeOrchestrator:
                 f"Working tree may be in an inconsistent state. "
                 f"Manual intervention required."
             )
+
+
+def integrate(
+    project_root: Path,
+    branches: list[str],
+    *,
+    strategy: str = "fast",
+    delete_merged: bool = True,
+    strict_runtime_sync: bool = False,
+    acquire_lock: bool = True,
+) -> MergeResult:
+    """Library entry point: integrate *branches* into the current branch.
+
+    Wraps the sequential branch-merge machinery — git merge + LLM conflict
+    resolution + runtime sync + issue renumber + post-condition checks — and
+    returns a structured :class:`MergeResult`. This is the "integrate" half of
+    the merge-library split: it owns the *invariants* (merge lock, runtime sync,
+    renumber, post-conditions) while leaving *flow-control* to the caller.
+
+    Unlike the legacy top-level orchestrator entry it does NOT write human-call
+    files or print terminal instructions. An escalation is surfaced on the
+    returned report instead (``pending_human=True``; the recorded payloads live
+    on the orchestrator's ``_RecordingNullHumanCallWriter``), so the caller — a
+    flow step (PAUSED/confirm/resume) or the ``se3 merge`` CLI (exit codes) —
+    decides what happens next.
+
+    Failure is expressed in the returned :class:`MergeResult`
+    (``success=False`` + ``failure_reason``/``failure_detail``), or, for
+    programmer/state errors the orchestrator already raises (detached HEAD,
+    shallow repo, lock-busy), as the same typed exceptions — never as a
+    written call file.
+
+    Args:
+        project_root: The main-checkout project root (the merge target).
+        branches: Branches to merge, in order.
+        strategy: Conflict-resolution strategy tier (``"fast"`` default).
+        delete_merged: Delete each branch after a successful merge.
+        strict_runtime_sync: Fail (rather than bypass) on runtime-sync
+            collisions.
+        acquire_lock: Acquire the process-wide merge lock inside ``execute``.
+            Pass ``False`` when the caller already holds it.
+
+    Returns:
+        The :class:`MergeResult` from the underlying orchestration run.
+    """
+    orchestrator = MergeOrchestrator(
+        project_root,
+        strategy=strategy,
+        delete_merged=delete_merged,
+        strict_runtime_sync=strict_runtime_sync,
+        acquire_lock=acquire_lock,
+        suppress_human_call=True,
+    )
+    return orchestrator.execute(branches)

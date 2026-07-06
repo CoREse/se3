@@ -31,7 +31,15 @@ from .issue_renumber import (
     rewrite_references_in_added_lines,
     strip_renumber_traces,
 )
-from .orchestrator import MergeOrchestrator, MergeReport
+from .orchestrator import MergeOrchestrator, MergeReport, MergeResult, integrate
+from .reconcile import (
+    ReconcileError,
+    ReconcileResult,
+    VersionRegressionError,
+    historical_versions,
+    read_current_version,
+    reconcile,
+)
 from .runtime_sync import (
     DEST_HASH_UNAVAILABLE,
     BypassedCollision,
@@ -80,10 +88,12 @@ __all__ = [
     "format_renumber_trace",
     "GuardrailReport",
     "GuardrailViolation",
+    "historical_versions",
     "HumanCallWriter",
     "HunkResolution",
     "InferResult",
     "infer_branch_bump",
+    "integrate",
     "IssueMergeRecord",
     "merge_worktree_issues",
     "LLMResolution",
@@ -92,8 +102,14 @@ __all__ = [
     "MergeGuardrailsCheck",
     "MergeOrchestrator",
     "MergeReport",
+    "MergeResult",
     "MergeStrategy",
+    "read_current_version",
     "read_version_at_ref",
+    "reconcile",
+    "ReconcileError",
+    "ReconcileResult",
+    "VersionRegressionError",
     "rewrite_issue_references",
     "rewrite_issue_references_bulk",
     "rewrite_references_in_added_lines",
