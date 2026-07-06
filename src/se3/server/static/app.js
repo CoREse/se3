@@ -82,14 +82,19 @@ const state = {
   // absolute counter needs no per-lifecycle bookkeeping.
   flowConversationAppendSeq: 0,
   // Pending grace-timer state for the progression fallback. When the open flow
-  // is observed to advance, we no longer rebuild immediately (issue #209's root
-  // cause — a starved daemon _push_loop — is fixed by #243/#244, so the WS delta
-  // now arrives on its own); instead we start a grace window and only rebuild if
-  // the WS push failed to deliver an increment within it. These hold the pending
-  // setTimeout id, the flow it targets, and the flowConversationAppendSeq snapshot
-  // taken when the timer was scheduled (compared against the live counter when it
-  // fires). All three are cleared by cancelProgressionGrace() — on a fresh
-  // advance (rescheduled to the newest step), and on openFlowView / doCloseFlowView.
+  // is observed to advance, we no longer rebuild immediately; instead we start a
+  // grace window and only rebuild if the WS push failed to deliver an increment
+  // within it. Unlike the original one-shot safety net, the timer now RE-ARMS
+  // itself after each silent rebuild (see armProgressionGrace) and keeps pulling
+  // on the grace cadence until a genuine WS increment lands — so a WS that stays
+  // dead across a whole step (the #260 discovery→analyze break) still surfaces
+  // mid-step content without the reader exiting/re-entering. These hold the
+  // pending setTimeout id, the flow it targets, and the flowConversationAppendSeq
+  // snapshot frozen when the loop was first armed (compared against the live
+  // counter each time a window fires). All three are cleared by
+  // cancelProgressionGrace() — on a fresh advance (rescheduled to the newest
+  // step), and on openFlowView / doCloseFlowView, which is now the only way the
+  // periodic loop is stopped short of a WS recovery.
   progressionGraceTimer: null,
   progressionGraceFlowId: null,
   progressionGraceAppendSeqAtSchedule: 0,
@@ -2226,7 +2231,11 @@ function noteDetailFetchFailure(message) {
 
 // Cancel a pending progression grace timer and clear its bookkeeping. Idempotent
 // (a no-op when nothing is pending), so it is safe to call unconditionally from
-// a fresh-advance reschedule and from openFlowView / doCloseFlowView.
+// a fresh-advance reschedule and from openFlowView / doCloseFlowView. Because the
+// grace timer now RE-ARMS itself on every silent-fallback firing (see
+// armProgressionGrace), this is the sole way the periodic retry loop is stopped
+// on a flow switch / close — it must clear the pending timer so no further pull
+// can fire against a flow that is no longer open.
 function cancelProgressionGrace() {
   if (state.progressionGraceTimer != null) {
     clearTimeout(state.progressionGraceTimer);
@@ -2234,6 +2243,44 @@ function cancelProgressionGrace() {
   state.progressionGraceTimer = null;
   state.progressionGraceFlowId = null;
   state.progressionGraceAppendSeqAtSchedule = 0;
+}
+
+// Arm (or re-arm) the progression grace timer for `flowId`, gating on the WS
+// append counter frozen at `seqAtSchedule` (the value at the moment the advance
+// was first detected — NOT re-snapshotted per cycle). When the window elapses
+// with the WS still silent (append counter has not moved past the frozen
+// snapshot) it does one silent full rebuild AND re-arms itself on the same
+// cadence, so a WS that never recovers still keeps pulling freshly-written
+// mid-step content into the open view — the reader never has to exit and
+// re-enter. It STOPS (does not re-arm) the instant a genuine WS increment lands
+// (appendSeq moves past the frozen snapshot ⇒ the healthy push path recovered)
+// or the open flow changes. The frozen snapshot is the sole "WS recovered" gate:
+// a silent rebuild deliberately does NOT bump flowConversationAppendSeq (only a
+// real /ws/ui landing does), so comparing against the frozen value — rather than
+// re-reading it each cycle — is what makes "keep retrying until the WS itself
+// delivers something" terminate correctly.
+function armProgressionGrace(flowId, seqAtSchedule) {
+  state.progressionGraceFlowId = flowId;
+  state.progressionGraceAppendSeqAtSchedule = seqAtSchedule;
+  state.progressionGraceTimer = setTimeout(() => {
+    // The pending timer just fired: drop the reference so cancelProgressionGrace
+    // is a no-op and a future advance can re-arm cleanly.
+    state.progressionGraceTimer = null;
+    state.progressionGraceFlowId = null;
+    state.progressionGraceAppendSeqAtSchedule = 0;
+    // Stop the loop when the flow is no longer open, or when the WS push path
+    // delivered a genuine increment for it during the window (append counter
+    // moved past the frozen snapshot) — the live append is the update, so the
+    // healthy path stays zero-rebuild and the loop terminates the moment WS
+    // recovers.
+    if (state.selectedFlowId !== flowId) return;
+    if (state.flowConversationAppendSeq > seqAtSchedule) return;
+    // WS stayed silent through this window: pull the latest disk state so
+    // mid-step content the broken WS never pushed still appears, then re-arm and
+    // keep pulling on the same cadence until a genuine WS increment resumes.
+    loadFlowConversation(flowId, { silent: true });
+    armProgressionGrace(flowId, seqAtSchedule);
+  }, state.progressionGraceMs);
 }
 
 // Fallback-when-the-WS-goes-quiet: detect that the open flow advanced and, if
@@ -2271,18 +2318,22 @@ function cancelProgressionGrace() {
 // retry/resume status transition is the real signal that captures the same-step
 // retry case.
 // If the advanced flow is the one currently open (`state.selectedFlowId`
-// matches), we snapshot flowConversationAppendSeq and arm a grace timer instead
-// of rebuilding immediately. On a fresh advance any earlier pending timer is
-// cancelled and re-armed against the newest step, so a real multi-step burst
-// observes the latest step and a duplicate snapshot (marker already updated ⇒
-// not advanced) neither re-arms nor re-fires — at most one rebuild per advance.
-// When the timer elapses it rebuilds ONLY if the flow is still open and the WS
-// append counter has not moved past the snapshot (the push path stayed silent);
-// otherwise it skips, leaving the live WS append as the sole update — zero
-// rebuilds on the healthy path. The baseline marker is updated on every call
-// regardless, and a steady-state flow with no advance arms nothing. Only the
-// conversation region and its state are touched — the reply region (draft /
-// focus / textarea height) is never read or written here or in the callback.
+// matches), we snapshot flowConversationAppendSeq and arm a self-re-arming grace
+// timer (armProgressionGrace) instead of rebuilding immediately. On a fresh
+// advance any earlier pending loop is cancelled and re-armed against the newest
+// step, so a real multi-step burst observes the latest step and a duplicate
+// snapshot (marker already updated ⇒ not advanced) neither re-arms nor re-fires.
+// When a window elapses the timer rebuilds ONLY if the flow is still open and the
+// WS append counter has not moved past the snapshot (the push path stayed
+// silent), and then re-arms for the next window — so under a WS that never
+// recovers it keeps pulling freshly-written mid-step content on the grace cadence
+// (the reader need not exit/re-enter) and stops the instant a genuine WS
+// increment lands. On the healthy path the very first window sees the counter
+// already moved and never rebuilds — zero rebuilds. The baseline marker is
+// updated on every call regardless, and a steady-state flow with no advance arms
+// nothing. Only the conversation region and its state are touched — the reply
+// region (draft / focus / textarea height) is never read or written here or in
+// the callback.
 function maybeRefreshConversationOnProgression(flow) {
   if (!flow || typeof flow !== "object") return;
   const flowId = flow.flow_id;
@@ -2323,27 +2374,15 @@ function maybeRefreshConversationOnProgression(flow) {
   // at most once.
   state.flowProgressionMarker = { flowId, currentStep, currentStepIndex, status };
   if (advanced && state.selectedFlowId === flowId) {
-    // Re-arm from a clean slate: cancel any timer still pending from an earlier
-    // advance so a real burst of steps observes only the newest one and cannot
-    // stack multiple fallbacks.
+    // Re-arm from a clean slate: cancel any retry loop still pending from an
+    // earlier advance so a real burst of steps observes only the newest one and
+    // cannot stack multiple concurrent fallback loops.
     cancelProgressionGrace();
-    const seqAtSchedule = state.flowConversationAppendSeq;
-    state.progressionGraceFlowId = flowId;
-    state.progressionGraceAppendSeqAtSchedule = seqAtSchedule;
-    state.progressionGraceTimer = setTimeout(() => {
-      // The pending timer just fired: drop the reference so cancelProgressionGrace
-      // is a no-op and a future advance can re-arm cleanly.
-      state.progressionGraceTimer = null;
-      state.progressionGraceFlowId = null;
-      state.progressionGraceAppendSeqAtSchedule = 0;
-      // Skip the fallback when the flow is no longer open, or when the WS push
-      // path already delivered an increment for it during the grace window
-      // (append counter moved past the snapshot) — the live append is the update.
-      if (state.selectedFlowId !== flowId) return;
-      if (state.flowConversationAppendSeq > seqAtSchedule) return;
-      // WS stayed silent through the whole window: rebuild once as the safety net.
-      loadFlowConversation(flowId, { silent: true });
-    }, state.progressionGraceMs);
+    // Freeze the append counter at this advance and hand it to the self-re-arming
+    // grace timer, which keeps pulling on the grace cadence until a genuine WS
+    // increment lands past this snapshot (or the flow closes) — so a WS that
+    // never recovers still surfaces mid-step content without an exit/re-enter.
+    armProgressionGrace(flowId, state.flowConversationAppendSeq);
   }
 }
 

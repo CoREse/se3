@@ -70,7 +70,7 @@ def test_frontend_progression_refresh_node_suite_passes():
     for needle in (
         "progression: first snapshot only sets baseline, no timer",
         "progression: advance + WS increment within grace → zero silent rebuilds",
-        "progression: advance + no WS increment → exactly one silent rebuild after grace",
+        "progression: advance + no WS increment → periodic silent full rebuild that stays armed",
         "progression: a duplicate snapshot of the same advance re-fires nothing",
         "progression: only a retry/resume status flip arms a fallback (not a halt)",
         "progression: a halt-only status change (RUNNING→PAUSED) arms nothing",

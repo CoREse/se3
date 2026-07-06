@@ -177,8 +177,12 @@ export async function registerProgressionRefreshTests(ctx) {
     }
   });
 
-  // -- (3) FALLBACK path: no WS increment within the window → one rebuild -----
-  await checkAsync("progression: advance + no WS increment → exactly one silent rebuild after grace", async () => {
+  // -- (3) FALLBACK path: no WS increment within the window → periodic rebuild -
+  // Since #260 the fallback is a PERIODIC retry, not a one-shot: while the WS
+  // stays silent the grace timer re-arms itself after each silent full rebuild
+  // (full = no `after=` pull) and keeps going. This pins the first firing does a
+  // full pull AND leaves the loop armed to keep pulling.
+  await checkAsync("progression: advance + no WS increment → periodic silent full rebuild that stays armed", async () => {
     resetProgressionState("F1");
     const saved = globalThis.fetch;
     const calls = installCountingFetch({
@@ -188,13 +192,15 @@ export async function registerProgressionRefreshTests(ctx) {
       app.maybeRefreshConversationOnProgression(snap("F1", "discovery", 0, "running"));
       app.maybeRefreshConversationOnProgression(snap("F1", "analyze", 1, "running"));
       assert.equal(calls.length, 0, "no rebuild before the grace window elapses");
-      // No WS increment arrives; the window elapses → exactly one fallback rebuild.
+      // No WS increment arrives; the window elapses → the fallback fires and, as a
+      // silent rebuild does not bump the append counter, re-arms itself.
       await waitGrace();
-      assert.equal(calls.length, 1, "a silent WS path must trigger exactly one fallback rebuild");
+      assert.ok(calls.length >= 1, "a silent WS path must trigger at least one fallback rebuild");
       assert.ok(calls[0].includes("/api/history/"), calls[0]);
       assert.ok(!calls[0].includes("after="), "the fallback must be a full (no-after) pull");
-      // The timer reference is cleared after firing so a later advance re-arms cleanly.
-      assert.equal(app.state.progressionGraceTimer, null, "the fired timer reference is cleared");
+      // The loop stays armed to keep pulling while the WS remains silent.
+      assert.notEqual(app.state.progressionGraceTimer, null, "the periodic fallback stays armed after firing");
+      app.cancelProgressionGrace();
     } finally {
       globalThis.fetch = saved;
     }
@@ -216,7 +222,10 @@ export async function registerProgressionRefreshTests(ctx) {
       assert.equal(app.state.progressionGraceTimer, armed,
         "a duplicate snapshot must not re-arm (cancel+reschedule) the grace timer");
       await waitGrace();
-      assert.equal(calls.length, 1, "a duplicate snapshot of the same advance must not fire a second rebuild");
+      // The duplicate started no independent second loop; the sole loop the first
+      // advance armed is what pulls (periodic, so >= 1 while the WS stays silent).
+      assert.ok(calls.length >= 1, "the single armed loop pulls while the WS stays silent");
+      app.cancelProgressionGrace();
     } finally {
       globalThis.fetch = saved;
     }
@@ -244,7 +253,8 @@ export async function registerProgressionRefreshTests(ctx) {
       app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "running"));
       assert.notEqual(app.state.progressionGraceTimer, null, "a FAILED→RUNNING retry must arm a timer");
       await waitGrace();
-      assert.equal(calls.length, 1, "the retry, with no WS increment, fires exactly one fallback rebuild");
+      assert.ok(calls.length >= 1, "the retry, with no WS increment, fires the periodic fallback rebuild");
+      app.cancelProgressionGrace();
     } finally {
       globalThis.fetch = saved;
     }
@@ -264,7 +274,8 @@ export async function registerProgressionRefreshTests(ctx) {
       // Resuming (PAUSED → RUNNING) is forward motion.
       app.maybeRefreshConversationOnProgression(snap("F1", "update_spec", 5, "running"));
       await waitGrace();
-      assert.equal(calls.length, 1, "resuming from PAUSED→RUNNING fires exactly one fallback rebuild");
+      assert.ok(calls.length >= 1, "resuming from PAUSED→RUNNING fires the periodic fallback rebuild");
+      app.cancelProgressionGrace();
     } finally {
       globalThis.fetch = saved;
     }
@@ -465,9 +476,13 @@ export async function registerProgressionRefreshTests(ctx) {
       await p2;
       await flush();
       assert.equal(app.state.flowProgressionMarker.currentStep, "analyze");
-      // The advance armed the fallback; with no WS increment it fires once.
+      // The advance armed the fallback; with no WS increment its periodic loop
+      // fires. Stop the loop and snapshot its pull count so the stale-response
+      // check below can prove the stale response starts no NEW loop of its own.
       await waitGrace();
-      assert.equal(historyCalls.length, 1, "the real advance fires exactly one fallback rebuild");
+      assert.ok(historyCalls.length >= 1, "the real advance fires the periodic fallback rebuild");
+      app.cancelProgressionGrace();
+      const pullsBeforeStale = historyCalls.length;
       // Now the OLDER request (seq=1) resolves LATE with the stale snapshot. The
       // seq guard drops it before the detector, so the marker holds and nothing re-arms.
       flowResolvers[0]({
@@ -479,11 +494,12 @@ export async function registerProgressionRefreshTests(ctx) {
       await waitGrace();
       assert.equal(app.state.flowProgressionMarker.currentStep, "analyze",
         "a stale older response must not rewind the progression marker");
-      assert.equal(historyCalls.length, 1,
-        "a stale older response must not fire a second fallback rebuild");
+      assert.equal(historyCalls.length, pullsBeforeStale,
+        "a stale older response must not arm a new fallback loop");
       assert.equal(app.state.flowDetail && app.state.flowDetail.current_step, "analyze",
         "a stale older response must not overwrite the fresher flow detail");
     } finally {
+      app.cancelProgressionGrace();
       globalThis.fetch = saved;
     }
   });
