@@ -147,6 +147,11 @@ env/
 !/se3/issues/
 !/se3/scripts/
 !/se3/version-rules.md
+# Version-reconcile intent metadata: written by a worktree session's commit
+# step and committed on the flow branch so the merge-side reconcile step can
+# read every merged-in branch's intent from master. Must be tracked, unlike
+# the rest of se3/ runtime content that /se3/* ignores.
+!/se3/version-intents/
 
 # SE3: local-only config overrides (never committed). Redundant under the
 # root default-deny, but kept explicit so the intent survives manual edits

@@ -26,6 +26,7 @@ from ..project_context import ProjectContextCollector
 from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 from ...config import (
+    append_worktree_merge_steps,
     apply_step_config,
     insert_confirmation_steps,
 )
@@ -367,10 +368,21 @@ def _update_flow_steps(
     # Append optional steps from se3.yaml (e.g. summarize).
     # _update_flow_steps rebuilds from the default sequence every time, so
     # applying the config once here mirrors state_machine.create_flow's
-    # (default -> apply_step_config -> insert_confirmation_steps) order and
-    # keeps configured steps from being dropped by the rebuild. apply_step_config
-    # dedups by step value, so this never appends duplicates.
+    # (default -> apply_step_config -> [worktree merge steps] ->
+    # insert_confirmation_steps) order and keeps configured steps from being
+    # dropped by the rebuild. apply_step_config dedups by step value, so this
+    # never appends duplicates.
     selected_steps = apply_step_config(selected_steps, project_root)
+
+    # A worktree flow's release point is the merge: the two merge-side steps
+    # appended by StateMachine.create_flow must survive this analyze-time
+    # re-derivation, otherwise the rebuilt sequence ends at summarize and the
+    # branch never lands on master (_finalize_worktree_cleanup then misdiagnoses
+    # the flow as predating the in-flow merge steps and exits 1). ANALYZE is the
+    # first step of every task-type sequence and always triggers this rebuild,
+    # so re-appending here is what actually makes worktree merges run.
+    if getattr(flow, "is_worktree_mode", False):
+        selected_steps = append_worktree_merge_steps(selected_steps)
 
     # Insert confirmation steps based on config
     # This ensures CONFIRM steps are added after plan as configured

@@ -14,7 +14,9 @@ commit-message decoration and template summary display.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..models import FlowInstance, Step, StepStatus, StepType
@@ -335,10 +337,10 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     preceding version_analyze step to the project version file, updates
     VERSIONS.md, and stamps a ``Version:`` line, before committing. Just before
     writing, and while holding the merge lock, it re-checks the disk version
-    against the pre-session baseline (:func:`_guard_version_race`); if a
-    concurrent direct-run flow bumped it first, version_analyze is re-run
-    against the drifted baseline so the two flows do not land on the same
-    number. A worktree flow's commit is de-versioned: it writes no version
+    against the version version_analyze observed on disk (its ``current_version``,
+    NOT the pre-session baseline — :func:`_guard_version_race`); if a concurrent
+    direct-run flow bumped it first, version_analyze is re-run against the drifted
+    baseline so the two flows do not land on the same number. A worktree flow's commit is de-versioned: it writes no version
     file, no VERSIONS.md entry, and no ``Version:`` line (the version decision
     is deferred to the merge-side reconcile), carrying only the bump-intent
     message decoration.
@@ -442,7 +444,9 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 # the target against the drifted disk baseline so we advance past
                 # it instead of colliding.
                 target_version = _guard_version_race(
-                    step, flow, original_version, target_version
+                    step, flow, original_version, target_version,
+                    version_file=version_file,
+                    version_bumper=version_bumper,
                 )
 
                 # Write the authoritative target version directly
@@ -620,6 +624,14 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if new_version:
             step.outputs["version"] = new_version
             step.outputs["version_bumped"] = True
+            # Durable own-replay marker for the version race guard: record the
+            # version this flow just committed onto the flow's persisted state so
+            # a later re-entry of the commit step can tell its own already-landed
+            # bump apart from a concurrent flow's — the only signal that works in
+            # script mode (no reconstructable version-file blob) and under
+            # version.include_in_commit_message: false (no Version: trailer). See
+            # _guard_version_race.
+            _record_flow_committed_version(flow, new_version)
 
         logger.info(f"Changes committed: {commit_hash[:8]}")
 
@@ -738,30 +750,206 @@ def _normalize_version(value: str | None) -> str:
 
 
 def _resolve_analyze_baseline(step: Step, flow: FlowInstance) -> str | None:
-    """Resolve the disk version version_analyze computed ``suggested_version`` against.
+    """Resolve the disk version the race guard compares the in-lock read against.
 
-    This is the pre-session baseline the race guard compares the in-lock disk
-    read against. It mirrors exactly what version_analyze used as its base:
+    Per the drift model (改动 D): drift means *another concurrent flow bumped
+    the version file out from under us*. The authoritative reference for "what
+    the version file held when our decision was made" is the disk version
+    version_analyze actually observed — its ``current_version`` output. That
+    value already folds in THIS flow's own session/implement-phase commits
+    (version_analyze reads disk after them), so those advances are, by
+    construction, not drift.
 
-    * ``pre_session_version`` (forwarded from the implement step) when present;
-    * otherwise the disk version version_analyze read at analyze time, which it
-      recorded on its ``current_version`` output (its own fallback baseline).
+    ``pre_session_version`` is deliberately NOT the drift criterion: it predates
+    this flow's own session commits, so comparing against it would misread the
+    flow's own already-accounted bump as concurrent drift. It is kept only as an
+    audit/diagnostic fallback for the pathological case where version_analyze
+    recorded no ``current_version`` at all.
 
     Returns ``None`` when neither is available, in which case the guard has no
     reference and leaves the target untouched.
     """
-    baseline = step.inputs.get("pre_session_version")
-    if isinstance(baseline, str) and baseline.strip():
-        return baseline.strip()
-
     for step_id in reversed(flow.state.step_history):
         s = flow.state.steps.get(step_id)
         if s and s.step_type == StepType.VERSION_ANALYZE:
             current = s.outputs.get("current_version")
             if isinstance(current, str) and current.strip():
-                return current.strip()
+                stripped = current.strip()
+                # ``_get_current_version`` emits ``unknown`` / ``unknown (...)``
+                # sentinels on a transient version-file detection failure. A
+                # sentinel is NOT an observed disk version — it can never equal
+                # the real in-lock read, so using it as the drift reference would
+                # spuriously declare concurrent drift and burn a non-deterministic
+                # LLM re-analysis inside the global merge lock. Treat it exactly
+                # like a missing baseline and fall through to the fallback.
+                if not stripped.lower().startswith("unknown"):
+                    return stripped
             break
+
+    # Fallback only: version_analyze recorded no observed disk version. This is
+    # audit metadata, not a true drift baseline, but it is better than no
+    # reference at all.
+    baseline = step.inputs.get("pre_session_version")
+    if isinstance(baseline, str) and baseline.strip():
+        return baseline.strip()
     return None
+
+
+def _version_at_commit(
+    project_root: Path,
+    commit: str,
+    version_file: Path,
+    version_bumper: VersionBumper,
+) -> str | None:
+    """Parse the version recorded in *version_file* at *commit*, or ``None``.
+
+    Reads the file's blob at that commit (``git show <commit>:<relpath>``) and
+    parses it through the SAME handler the commit path uses, so every project
+    type / file shape is covered. Any fault (git error, unparseable blob) yields
+    ``None`` — the caller treats that as "cannot confirm", never as a match.
+    """
+    try:
+        rel = os.path.relpath(version_file, project_root)
+    except ValueError:
+        return None
+    try:
+        blob = subprocess.run(
+            ["git", "show", f"{commit}:{rel}"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if blob.returncode != 0:
+        return None
+    # Write the blob under the SAME filename so the handler's name/suffix-based
+    # can_handle() selects the right parser (pyproject.toml vs package.json vs …).
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / version_file.name
+        try:
+            tmp.write_text(blob.stdout, encoding="utf-8")
+            return version_bumper.read_version(tmp)
+        except Exception:  # noqa: BLE001 - an unparseable historical blob is not a match
+            return None
+
+
+def _record_flow_committed_version(flow: FlowInstance, version: str | None) -> None:
+    """Persist the version this flow just committed onto its durable state.
+
+    Read back by :func:`_guard_version_race` as a mode-independent own-replay
+    signal: it is the only way a re-entered commit step can recognise its own
+    already-landed bump in script mode (no reconstructable version-file blob)
+    or under ``version.include_in_commit_message: false`` (no ``Version:``
+    commit-message trailer). Written on the flow's ``state.context`` so the
+    state machine's post-step save carries it into a later resume/fix-loop
+    re-entry. Best-effort — a missing state must never fail an otherwise
+    successful commit.
+    """
+    if not version:
+        return
+    # Best-effort and fully defensive: a state whose ``context`` is missing or
+    # not a mutable mapping (e.g. a test double) must never turn an otherwise
+    # successful commit into a failure.
+    try:
+        context = getattr(getattr(flow, "state", None), "context", None)
+        if isinstance(context, dict):
+            context["flow_committed_version"] = version.strip()
+    except Exception:  # noqa: BLE001 - recording is a non-critical optimisation
+        logger.debug("Could not record flow-committed version", exc_info=True)
+
+
+def _flow_wrote_version(
+    project_root: Path,
+    flow_id: str | None,
+    version: str | None,
+    version_file: Path | None = None,
+    version_bumper: VersionBumper | None = None,
+) -> bool:
+    """True when this flow's OWN earlier commit already stamped *version*.
+
+    Distinguishes a replay/resume over the flow's own already-accounted session
+    commit from a genuine concurrent bump by another direct-run flow. Both leave
+    the disk version ahead of the pre-session baseline, but only our own commit
+    carries THIS flow's ``Flow: <flow_id>`` trailer (always stamped by
+    :func:`_generate_commit_message`).
+
+    Crucially the match must NOT depend on the optional ``Version: <version>``
+    commit-message line: that line is only emitted when
+    ``version.include_in_commit_message`` is true (default true, but frequently
+    disabled), and requiring it would misclassify a legitimate own-replay as
+    concurrent drift for those projects — double-bumping or failing a healthy
+    resume. So the primary signal is: a commit carrying our ``Flow:`` trailer
+    whose *version-file blob* parses to *version*. The ``Version:``-line grep is
+    retained only as a fallback for cases where the blob cannot be inspected
+    (script-mode version scheme, or no version file/bumper available).
+
+    Best-effort: any git error → ``False`` (treat as drift, the
+    safe-from-collision default).
+    """
+    if not flow_id or not version:
+        return False
+    version = version.strip()
+
+    # Collect THIS flow's own commits via the always-present Flow: trailer.
+    try:
+        own = subprocess.run(
+            [
+                "git", "log", "--fixed-strings",
+                f"--grep=Flow: {flow_id}",
+                "--pretty=%H", "-n", "20",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    commits = own.stdout.split() if own.returncode == 0 else []
+
+    # Primary: verify the version-file blob at one of our own commits equals the
+    # disk version — independent of the optional Version: commit-message line.
+    # Skipped in script mode, where read_version ignores the path and reads live
+    # disk state (a historical blob cannot be reconstructed that way).
+    if (
+        commits
+        and version_file is not None
+        and version_bumper is not None
+        and not getattr(version_bumper, "_use_script_mode", False)
+    ):
+        for commit in commits:
+            blob_version = _version_at_commit(
+                project_root, commit, version_file, version_bumper
+            )
+            if blob_version is not None and (
+                _normalize_version(blob_version) == _normalize_version(version)
+            ):
+                return True
+        # Blob inspection ran and confirmed none of our own commits stamped this
+        # version — do NOT fall through to the looser Version:-line grep, which
+        # could only agree or (given the blob already disagreed) mislead.
+        return False
+
+    # Fallback (no version file/bumper to inspect, or script mode): the legacy
+    # Flow+Version double-grep, effective only when the Version: line is present.
+    try:
+        legacy = subprocess.run(
+            [
+                "git", "log", "--all-match", "--fixed-strings",
+                f"--grep=Flow: {flow_id}",
+                f"--grep=Version: {version}",
+                "--pretty=%H", "-n", "1",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return legacy.returncode == 0 and bool(legacy.stdout.strip())
 
 
 def _guard_version_race(
@@ -769,16 +957,25 @@ def _guard_version_race(
     flow: FlowInstance,
     disk_version: str | None,
     target_version: str,
+    version_file: Path | None = None,
+    version_bumper: VersionBumper | None = None,
 ) -> str:
     """Return the version to write, recomputed if the disk baseline drifted.
 
-    Compares the in-lock disk version against the pre-session baseline
-    version_analyze used. When they agree there was no concurrent bump — the
-    behaviour is unchanged and ``target_version`` is returned verbatim. When
-    they differ, a concurrent direct-run flow bumped the version file after our
-    version_analyze ran, so ``target_version`` is stale and would collide;
-    version_analyze is re-run against the drifted disk version and its fresh
-    ``suggested_version`` is returned instead.
+    Compares the in-lock disk version against the version version_analyze
+    actually OBSERVED on disk (its ``current_version`` output — see
+    :func:`_resolve_analyze_baseline`), NOT the pre-session baseline. The
+    distinction is load-bearing: ``current_version`` already folds in this flow's
+    own session/implement commits, so those advances are by construction not
+    drift; comparing against ``pre_session_version`` instead would misread the
+    flow's own already-accounted bump as concurrent drift and trigger a spurious
+    recompute. When they agree there was no concurrent bump — the behaviour is
+    unchanged and ``target_version`` is returned verbatim. When they differ, a
+    concurrent direct-run flow bumped the version file after our version_analyze
+    ran (or a prior crashed attempt of THIS flow left an uncommitted write — see
+    the crash-resume recognition below), so ``target_version`` is stale and would
+    collide; version_analyze is re-run against the drifted disk version and its
+    fresh ``suggested_version`` is returned instead.
 
     Args:
         step: The commit step (its ``inputs`` carry the forwarded baseline and
@@ -801,6 +998,99 @@ def _guard_version_race(
     if _normalize_version(disk_version) == _normalize_version(baseline):
         return target_version
 
+    # The disk version is ahead of the pre-session baseline — but not every
+    # advance is a *concurrent* bump. A replay/resume of THIS flow's own commit
+    # step (e.g. after a fix-loop re-entry) sees disk already at the version this
+    # flow itself committed earlier; that is our own already-accounted write, not
+    # another flow's. Re-analysing against it would rebase the decision and
+    # double-bump (5.1.0 baseline, own 5.2.0 on disk, suggested 5.2.0 → a
+    # baseline-sensitive LLM returns 5.2.1/5.3.0).
+    #
+    # Primary, mode-independent signal: the version THIS flow already committed,
+    # recorded on the flow's durable state at its prior successful commit
+    # (``_record_flow_committed_version``). This is the ONLY reliable own-replay
+    # signal in script mode, where ``read_version`` ignores the path and reads
+    # live disk state (so no historical version-file blob can be reconstructed)
+    # and the optional ``Version:`` commit-message line may be absent under
+    # ``version.include_in_commit_message: false`` — leaving the git-durable
+    # blob/trailer probe below unable to recognise our own commit.
+    _guard_context = getattr(getattr(flow, "state", None), "context", None)
+    own_committed = (
+        _guard_context.get("flow_committed_version")
+        if isinstance(_guard_context, dict)
+        else None
+    )
+    if own_committed and (
+        _normalize_version(own_committed) == _normalize_version(disk_version)
+    ):
+        logger.info(
+            "Version race guard: disk version %r matches the version this flow "
+            "recorded committing earlier (durable flow state); treating as a "
+            "replay, not concurrent drift — keeping target %r.",
+            disk_version,
+            target_version,
+        )
+        return target_version
+
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+
+    # Crash-resume own-write recognition (change D, issue: set_version→commit
+    # crash window). If the process died AFTER set_version wrote the version file
+    # but BEFORE ``git commit``, a later resume re-enters here with disk already
+    # at our target while version_analyze's observed baseline is still the old
+    # version — the durable flow_committed_version marker (written only post-
+    # commit) and the committed-blob probe below both legitimately miss, because
+    # NO commit was ever made. The distinguishing fact: a *concurrent* flow's
+    # bump is always committed (HEAD's version-file blob == disk), whereas our
+    # crashed write is uncommitted (HEAD still holds the pre-crash version, only
+    # the working tree is ahead). So when HEAD's committed version differs from
+    # the drifted disk version, the drift is our OWN uncommitted residue — keep
+    # the target and re-write it verbatim (the pre-change self-healing behaviour)
+    # rather than misclassifying it as concurrent drift and over-advancing.
+    # File mode only: script mode has no reconstructable version-file blob, and
+    # its live-disk read model makes this crash window far less reachable.
+    if (
+        version_file is not None
+        and version_bumper is not None
+        and not getattr(version_bumper, "_use_script_mode", False)
+    ):
+        head_version = _version_at_commit(
+            project_root, "HEAD", version_file, version_bumper
+        )
+        if head_version is not None and (
+            _normalize_version(head_version) != _normalize_version(disk_version)
+        ):
+            logger.info(
+                "Version race guard: disk version %r is uncommitted (HEAD still "
+                "at %r); the drift is this flow's own set_version write from a "
+                "prior attempt that crashed before commit — keeping target %r and "
+                "re-writing verbatim (self-heal).",
+                disk_version,
+                head_version,
+                target_version,
+            )
+            return target_version
+
+    # Secondary, git-durable signal for file-backed versioning: our own prior
+    # write is recognisable via the always-present Flow: trailer + version-file
+    # blob (NOT the optional Version: commit-message line). Survives a flow-state
+    # reset that would erase the durable record above; a no-op idempotent write.
+    if _flow_wrote_version(
+        project_root,
+        getattr(flow, "flow_id", None),
+        disk_version,
+        version_file=version_file,
+        version_bumper=version_bumper,
+    ):
+        logger.info(
+            "Version race guard: disk version %r was written by this flow's own "
+            "prior commit (Flow trailer + version-file blob match); treating as a "
+            "replay, not concurrent drift — keeping target %r.",
+            disk_version,
+            target_version,
+        )
+        return target_version
+
     logger.warning(
         "Version race guard: disk version %r drifted from the pre-session "
         "baseline %r (a concurrent flow bumped first); re-running "
@@ -820,14 +1110,56 @@ def _guard_version_race(
     )
     if _normalize_version(new_target) == _normalize_version(disk_version):
         # The re-analysis produced a number equal to the drifted disk version,
-        # which would still collide. This is an upstream (version_analyze)
-        # correctness issue, not a race we can fix by retrying here; surface it
-        # loudly rather than silently writing a colliding version.
-        logger.warning(
-            "Version race guard: re-analysis returned %r, equal to the drifted "
-            "disk version %r — writing it would still collide.",
-            new_target,
-            disk_version,
+        # which would still collide — writing it would file this flow's changelog
+        # under the number a concurrent flow just released (the 10.7.1-type
+        # shared-version accident this guard exists to block). This is an upstream
+        # (version_analyze) correctness issue, not a race we can fix by retrying
+        # here; HALT the commit rather than silently write the colliding version,
+        # matching the other refusal paths in _reanalyze_version_with_baseline.
+        raise RuntimeError(
+            "Version race guard: re-running version_analyze against the drifted "
+            f"baseline {disk_version!r} returned {new_target!r}, equal to the "
+            "version a concurrent flow just released; refusing to write a "
+            "colliding version. Rerun the version_analyze step or supply a "
+            "version via human intervention."
+        )
+
+    # Equality alone is not enough: a re-analysis LLM can also hallucinate a
+    # number LOWER than the drifted disk version (a regression) or one equal to
+    # an earlier historically-released version (a collision with a past release).
+    # Both are the same class of accident — a bad version silently committed on
+    # the exact code path whose purpose is collision prevention — so mirror
+    # validate_no_regression's contract on the merge-side reconcile path here
+    # (final >= drifted current, no reuse of an already-released number).
+    try:
+        from ..version_bumper import Version
+
+        disk_v = Version.parse(disk_version)
+        new_v = Version.parse(new_target)
+    except Exception:  # noqa: BLE001 - non-SemVer / unparseable: skip numeric check
+        disk_v = new_v = None
+    if disk_v is not None and new_v is not None and new_v < disk_v:
+        raise RuntimeError(
+            "Version race guard: re-running version_analyze against the drifted "
+            f"baseline {disk_version!r} returned {new_target!r}, which regresses "
+            "below the version a concurrent flow just released; refusing to write "
+            "a regressing version. Rerun the version_analyze step or supply a "
+            "version via human intervention."
+        )
+
+    try:
+        from ..merge.reconcile import historical_versions
+
+        history = historical_versions(project_root)
+    except Exception:  # noqa: BLE001 - unreadable changelog: skip the history guard
+        history = set()
+    if new_target.strip() in history:
+        raise RuntimeError(
+            "Version race guard: re-running version_analyze against the drifted "
+            f"baseline {disk_version!r} returned {new_target!r}, which reuses a "
+            "version already recorded in VERSIONS.md; refusing to write a "
+            "colliding version. Rerun the version_analyze step or supply a "
+            "version via human intervention."
         )
     return new_target
 

@@ -13,7 +13,11 @@ Two contracts are pinned here:
 
 1. **No bypass residue.** The ``merging`` flag, its ``record_merging`` anchor,
    the ``isMerging`` helper, the ``merging`` STEP_STATUS_DISPLAY / badge / chat
-   anchor, and the engine.json schema field are all gone.
+   anchor, and the engine.json schema field are all gone — nothing NEW writes a
+   ``merging`` sub-state. (The frontend still *reads* a legacy ``{"type":"merging"}``
+   row from pre-change archived flows tolerantly, folding it into a benign
+   step-event status row instead of a stray empty bubble — see
+   ``test_normalize_record_recognizes_legacy_merging_event``.)
 2. **Merge renders as steps.** ``merge_integrate`` / ``version_reconcile`` are
    real step types that a worktree flow appends to its sequence, and the frontend
    gives them first-class step titles so they render like every other step.
@@ -106,15 +110,35 @@ def test_step_status_display_has_no_merging_entry():
     )
 
 
-def test_normalize_record_drops_merging_event():
-    """``normalizeRecord`` must not recognize a ``merging`` event type — the
-    retired ``record_merging`` anchor no longer exists."""
+def test_normalize_record_recognizes_legacy_merging_event():
+    """No NEW ``merging`` anchor is ever written, but pre-change archived worktree
+    flows (real old flows in se3/history) still carry a bare ``{"type":"merging"}``
+    row. ``normalizeRecord`` (the daemon→webui raw-record path) must recognize it
+    as a lifecycle anchor — folded into the same step-event family as
+    ``waiting_for_lock`` — so it does NOT fall through to the generic role path and
+    render as a stray empty "(no readable content)" bubble (the CLI reader
+    chat_history.get_step_history already skips it symmetrically)."""
     body = _extract_js_function_body(_read(APP_JS), "normalizeRecord")
-    assert '=== "merging"' not in body, (
-        "normalizeRecord must not special-case a 'merging' event type"
+    assert '=== "merging"' in body, (
+        "normalizeRecord must recognize a legacy 'merging' event type so old "
+        "archived flows don't render a stray empty bubble"
     )
-    # The sibling waiting_for_lock anchor stays recognized.
+    # It must be handled in the SAME lifecycle-anchor branch as waiting_for_lock,
+    # i.e. it returns a role 'step-event' record, not a generic bubble.
     assert '=== "waiting_for_lock"' in body
+
+
+def test_normalize_record_maps_legacy_merging_to_step_event():
+    """The legacy ``merging`` record maps to a role ``step-event`` anchor (kind
+    ``merging``), so renderConversationRecord routes it to renderStepStartedRecord
+    (a benign status row) rather than the generic empty-bubble path."""
+    render_body = _extract_js_function_body(
+        _read(APP_JS), "renderConversationRecord"
+    )
+    assert 'norm.kind === "merging"' in render_body, (
+        "renderConversationRecord must route a legacy 'merging' anchor to the "
+        "status-row renderer, not the generic bubble path"
+    )
 
 
 def test_style_css_has_no_merging_rules():

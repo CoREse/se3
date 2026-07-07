@@ -587,9 +587,13 @@ class TestFinalizeWorktreeCleanup:
             wt, status="completed", source_issue_id=issue_id, branch="worktree/x"
         )
         # CleanupManager + the main lock touch real git/fs; stub them so the unit
-        # exercises only the resolve path.
+        # exercises only the resolve path. tmp_path is not a real git repo, so the
+        # finalize ancestry guard (branch landed on master?) is stubbed True — this
+        # unit assumes the in-flow merge already landed the branch (a not-landed
+        # branch is covered separately by the resume E2E tests).
         with patch("se3.engine.merge.cleanup.CleanupManager") as MockCleanup, \
-             patch("se3.commands.merge.merge_lock.MergeLock") as MockLock:
+             patch("se3.commands.merge.merge_lock.MergeLock") as MockLock, \
+             patch("se3.commands.run._worktree_branch_landed", return_value=True):
             MockLock.return_value.acquire.return_value = None
             MockLock.return_value.release.return_value = None
             rc = run._finalize_worktree_cleanup(

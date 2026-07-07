@@ -414,6 +414,55 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
             )
 
 
+def _append_human_call_lines(
+    lines: list[str], report, suppress_human_call: bool
+) -> None:
+    """Render the human-escalation recovery artifact for a failure branch.
+
+    In the normal (non-suppressed) mode the orchestrator wrote a real
+    ``se3/calls/`` file and ``report.human_call_file`` points at it, so the
+    operator can ``se3 merge respond`` against it — render that path.
+
+    In library / suppress mode (change C: the ``se3 merge`` CLI drives no
+    confirmation gate) NO call file is created — ``_RecordingNullHumanCallWriter``
+    returns a phantom ``se3/calls/`` path without touching disk. Printing that
+    path would tell the operator to respond to a file that does not exist. So
+    here we instead render the recorded escalation payload and direct the
+    operator to the actual recovery: rerun ``se3 merge`` (integrate is now a
+    no-op; the failing step re-attempts). ``recorded_escalations`` is read
+    defensively (a pre-typed-model report stub may lack it).
+    """
+    if not suppress_human_call:
+        if report.human_call_file:
+            lines.append(f"Call file: {report.human_call_file}")
+        return
+
+    escalations = getattr(report, "recorded_escalations", None) or []
+    # Only claim a human escalation when one actually happened. A failure that
+    # never escalated (postcondition/runtime-sync/branch-validation fault) has
+    # no call file and no recorded escalation; printing the escalation block for
+    # it would misrepresent what occurred, so we render nothing here and let the
+    # caller's failure-reason lines stand alone.
+    if not report.human_call_file and not escalations:
+        return
+    lines.append(
+        "Merge escalated to human review (no call file — `se3 merge` runs "
+        "without a confirmation gate)."
+    )
+    for esc in escalations:
+        etype = esc.get("type", "escalation")
+        branch = esc.get("branch", "")
+        lines.append(f"  - {etype}: {branch}" if branch else f"  - {etype}")
+        violations = esc.get("violations")
+        if violations:
+            for v in violations:
+                lines.append(f"      violation: {v}")
+    lines.append(
+        "Recovery: resolve the reported issue, then rerun `se3 merge` "
+        "(already-merged branches are skipped)."
+    )
+
+
 def _split_merged_buckets(
     report,
     project_root: Optional[Path] = None,
@@ -895,6 +944,48 @@ def _acquire_merge_lock_with_callbacks(
             logger.debug("on_lock_acquired callback failed", exc_info=True)
 
 
+def _run_deferred_branch_cleanup(project_root: Path, report, branches: list[str]) -> None:
+    """Delete the merged source branches AFTER the reconcile half has settled.
+
+    Change B/C recovery contract: the ``se3 merge`` CLI drives
+    ``integrate() -> reconcile()`` back-to-back, so branch deletion must NOT
+    happen inside ``integrate()`` (as it does for a flow step, whose resume
+    boundary re-runs only reconcile). Deferring it to here — the last thing a
+    fully clean CLI run does — keeps the documented whole-command rerun
+    recoverable: a reconcile fault leaves the source branch intact so
+    ``se3 merge <branch>`` can re-attempt the version decision instead of
+    failing branch validation against a branch that ``--delete-merged`` already
+    removed.
+
+    Mirrors the orchestrator's own cleanup error handling: on a partial failure
+    the in-progress report is surfaced (so the operator sees which branches were
+    deleted before the raise) and a synthetic entry records the aborting
+    exception, rather than raising out of the CLI's success path.
+    """
+    from ..engine.merge.cleanup import CleanupManager, CleanupReport
+
+    cleanup = CleanupManager(project_root)
+    try:
+        report.cleanup_report = cleanup.delete_merged_branches(report.merged_branches)
+        report.cleanup_skipped = False
+    except Exception as exc:  # noqa: BLE001 - cleanup must not break the success path
+        logger.warning("Deferred branch cleanup failed: %s", exc, exc_info=True)
+        partial = getattr(cleanup, "_current_report", None)
+        if partial is not None:
+            report.cleanup_report = partial
+            partial.skipped_unknown_state.append((
+                "<cleanup-aborted>",
+                f"Cleanup raised {type(exc).__name__}: {exc}",
+            ))
+        else:
+            report.cleanup_report = CleanupReport(
+                skipped_not_merged=[(
+                    "<cleanup-aborted>",
+                    f"Cleanup raised {type(exc).__name__}: {exc}",
+                )],
+            )
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "fast",
@@ -1045,12 +1136,16 @@ def run_merge(
     # holder releases it rather than failing fast — the legacy non-blocking
     # `MergeLockBusy` / `MergeLockStale` rendering below is kept only as a
     # defensive fallback (blocking acquisition does not raise them).
-    from ..engine.merge.orchestrator import MergeOrchestrator
+    from ..engine.merge import integrate
     from ..engine.merge.reconcile import (
         ReconcileError,
         ReconcileResult,
         VersionRegressionError,
         reconcile,
+    )
+    from ..engine.version_intent import (
+        IntentReadError,
+        intent_flow_ids_introduced,
     )
     from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
     from .run import _resolve_main_lock_root
@@ -1113,28 +1208,90 @@ def run_merge(
                     project_root, stash_audit_messages,
                 )
 
-            orchestrator = MergeOrchestrator(
-                project_root=project_root,
-                strategy=strategy,
-                delete_merged=delete_merged,
-                strict_runtime_sync=strict_runtime_sync,
+            # Scope the reconcile half to exactly the intents the branches THIS
+            # invocation is merging INTRODUCE. Read from each branch's committed
+            # tree BEFORE integrate (so ``HEAD`` is still master's pre-merge tip
+            # and the branches still exist), and subtract the intents already on
+            # that tip: an intent present at both the branch and pre-merge master
+            # was merely INHERITED (a concurrent worktree flow that finished
+            # merge_integrate but has not yet run its own version_reconcile step —
+            # Flow A paused at its confirmation gate — leaves its intent
+            # outstanding on master, and a branch cut from that master carries a
+            # copy). Consuming Flow A's inherited intent here would commit its
+            # version decision outside its step lifecycle, bypass its
+            # confirmation/resume boundary, and collapse two independent releases
+            # into one max bump — the exact accident the self-check flags. The
+            # branch's OWN intent is never already on master (unique flow_id, its
+            # reconcile has not run), so it survives the subtraction.
+            #
+            # Scoping by the BRANCH tree (not a pre/post-merge diff of master)
+            # also preserves the documented whole-command rerun recovery: after a
+            # reconcile fault the branch's own intent is still on master AND still
+            # on the branch, so a rerun re-derives it (reconcile is idempotent via
+            # the git-durable reconcile-commit trailer) instead of no-op'ing — a
+            # pre/post diff would see the intent as "already present" on the rerun
+            # and skip it.
+            #
+            # A git INFRASTRUCTURE fault while reading the scope must NOT degrade
+            # to an empty contribution: an empty scope makes reconcile a clean
+            # no-op AND lets ``--delete-merged`` remove the branch, publishing the
+            # merge with no version bump / changelog for a branch that actually
+            # carried an intent. So an unreadable scope is treated exactly like a
+            # reconcile fault — the branches integrate, but the command reports a
+            # non-zero exit and preserves the source branch so the whole-command
+            # rerun re-derives the version once git recovers.
+            merged_intent_flow_ids: set[str] = set()
+            intent_scope_unreadable = False
+            try:
+                for _branch in branches:
+                    merged_intent_flow_ids.update(
+                        intent_flow_ids_introduced(project_root, _branch, "HEAD")
+                    )
+            except IntentReadError as exc:
+                intent_scope_unreadable = True
+                reconcile_error = (
+                    "could not determine the version-intent scope for the "
+                    f"merged branch(es): {exc}"
+                )
+                logger.error("version-intent scope determination failed: %s", exc)
+
+            try:
+                # Thin adapter: drive the SAME integrate() library entry the
+                # merge_integrate step uses so the two entry points stay
+                # equivalent — any invariant, return-shape, or recovery change
+                # to integrate() applies to `se3 merge` too (a test patching
+                # se3.engine.merge.integrate now affects both paths).
+                #
                 # The CLI wrapper already holds the merge lock via the
-                # surrounding acquire above, so the orchestrator must
-                # NOT re-acquire — fcntl.flock on a second fd of the
-                # same file from the same process would surface as
-                # ``MergeLockBusy`` (the legacy contract here was that
-                # lock acquisition lived only in this wrapper).
-                acquire_lock=False,
+                # surrounding acquire above, so integrate must NOT re-acquire it
+                # (acquire_lock=False) — fcntl.flock on a second fd of the same
+                # file from the same process would surface as ``MergeLockBusy``.
+                #
                 # Change C: the CLI drives no confirmation gate and expresses
                 # failure via the exit code (rerun the whole command). In that
-                # mode the integrate half must not self-write se3/calls files
-                # or print terminal instructions — an escalation surfaces on the
-                # returned report instead. The worktree merge-back leaves this
-                # False to keep its existing call-file behaviour.
-                suppress_human_call=suppress_human_call,
-            )
-            try:
-                report = orchestrator.execute(branches)
+                # mode the integrate half must not self-write se3/calls files or
+                # print terminal instructions — an escalation surfaces on the
+                # returned report instead. The worktree merge-back leaves
+                # ``suppress_human_call`` False to keep its call-file behaviour.
+                #
+                # Branch deletion is deferred: integrate runs with
+                # ``delete_merged=False`` even when the operator requested it, so
+                # the source branches survive until AFTER the reconcile half
+                # settles below. This preserves the whole-command rerun recovery
+                # contract — a reconcile fault must not have already deleted the
+                # branch out from under the documented ``se3 merge <branch>``
+                # retry (which would then fail branch validation / capture an
+                # empty intent scope). The actual cleanup runs post-reconcile via
+                # ``_run_deferred_branch_cleanup``.
+                report = integrate(
+                    project_root,
+                    branches,
+                    strategy=strategy,
+                    delete_merged=False,
+                    strict_runtime_sync=strict_runtime_sync,
+                    acquire_lock=False,
+                    suppress_human_call=suppress_human_call,
+                )
             finally:
                 # Always attempt to pop the stash, even on orchestrator
                 # exception, so a fast run never leaves a dangling stash
@@ -1157,16 +1314,63 @@ def run_merge(
             # double-bumps. Skipped only when the integrate itself did not land
             # cleanly (a failed merge or an unfinalised stash-pop): there is no
             # settled tree to reconcile a version against.
-            if report.success and not stash_pop_incomplete:
+            if report.success and not stash_pop_incomplete and not intent_scope_unreadable:
+                # Restrict the reconcile to the intents INTRODUCED by THESE
+                # branches (captured above from their committed trees, minus what
+                # they inherited from master). An empty scope is meaningful and
+                # preserved: a pure-legacy branch carrying no intent reconciles to
+                # a clean no-op instead of sweeping up an unrelated in-flight
+                # flow's outstanding intent. When the scope could NOT be read
+                # (``intent_scope_unreadable``) this block is skipped entirely and
+                # ``reconcile_error`` is already set, so the merge is NOT published
+                # as clean and the branch is preserved for a rerun.
                 try:
-                    reconcile_result = reconcile(project_root, commit=True)
-                except (ReconcileError, VersionRegressionError) as exc:
-                    # A version-decision fault (regression, collision, or a
-                    # write/commit failure). The branches are already
-                    # integrated; only the version decision is unsettled, so we
-                    # surface a non-zero exit and let the operator rerun.
+                    reconcile_result = reconcile(
+                        project_root,
+                        flow_ids=sorted(merged_intent_flow_ids),
+                        commit=True,
+                    )
+                except (
+                    ReconcileError,
+                    VersionRegressionError,
+                    IntentReadError,
+                ) as exc:
+                    # A version-decision fault (regression, collision, a
+                    # write/commit failure) or an idempotency-probe fault that
+                    # persisted across a retry (git contention on this host is a
+                    # known condition). The branches are already integrated; only
+                    # the version decision is unsettled, so we surface a non-zero
+                    # exit and let the operator rerun rather than fail open into a
+                    # possible double-bump.
                     reconcile_error = str(exc)
                     logger.error("version reconcile failed: %s", exc)
+
+            # Deferred --delete-merged cleanup, still inside the merge lock.
+            # Runs only on a fully clean outcome: the integrate landed
+            # (``report.success``), the reconcile half actually RAN
+            # (``not stash_pop_incomplete``), and it did not fault
+            # (``reconcile_error is None``). A version-decision fault therefore
+            # preserves the source branches so the documented whole-command
+            # rerun can re-attempt the version decision against them — matching
+            # integrate()'s own "skip cleanup unless success" rule while moving
+            # the delete point past reconcile.
+            #
+            # The stash-pop-incomplete path must ALSO preserve the branch even
+            # though its fault concerns the operator's unrelated WIP, not the
+            # merged branch: that path SKIPS reconcile entirely (guard at 1295),
+            # so no version-reconcile commit was created and the command returns
+            # non-zero (below) advertising a whole-command rerun. Deleting the
+            # branch here would make that rerun fail branch validation, stranding
+            # the merged intent on master with no reconcile bump/changelog. The
+            # branch survives so the operator can resolve the stash-pop, rerun
+            # the command, and let reconcile settle the version against it.
+            if (
+                delete_merged
+                and report.success
+                and not stash_pop_incomplete
+                and reconcile_error is None
+            ):
+                _run_deferred_branch_cleanup(project_root, report, branches)
         finally:
             # Mirror the previous ``with MergeLock(...)`` __exit__ — release the
             # lock on every exit path, including an orchestrator exception.
@@ -1376,8 +1580,7 @@ def run_merge(
         ]
         if report.merged_branches:
             lines.append(f"Branches already merged: {', '.join(report.merged_branches)}")
-        if report.human_call_file:
-            lines.append(f"Call file: {report.human_call_file}")
+        _append_human_call_lines(lines, report, suppress_human_call)
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
         # Defense-in-depth: runtime_sync_collisions / idempotent / discarded
@@ -1413,8 +1616,7 @@ def run_merge(
             for b in report.unattempted_branches:
                 lines.append(f"  - {b}")
             lines.append("")
-        if report.human_call_file:
-            lines.append(f"Call file: {report.human_call_file}")
+        _append_human_call_lines(lines, report, suppress_human_call)
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
         _append_runtime_sync_lines(lines, report)

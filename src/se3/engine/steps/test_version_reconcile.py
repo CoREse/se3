@@ -91,14 +91,52 @@ def test_deterministic_max_bump_applied(tmp_path):
     assert read_current_version(root) == "1.3.0"
 
 
-def test_deterministic_no_bump_hint_defaults_patch(tmp_path):
+def test_deterministic_no_bump_no_substance_leaves_version_unchanged(tmp_path):
+    # A merge whose every intent declared no bump AND carried no changelog substance
+    # (truly non-versionable work) must NOT fabricate a phantom patch release — the
+    # no-regress rule permits final == current when no bump was declared and there is
+    # nothing to file. The version stays put and no VERSIONS.md release block is written.
     root = _make_project(tmp_path, "2.0.0")
-    _put_intent(root, "flowX", bump_type=None, versions_changes=["misc"])
+    _put_intent(root, "flowX", bump_type=None, versions_changes=[])
 
     result = reconcile(root)
 
+    assert result.success
+    assert result.final_version == "2.0.0"
+    assert result.bump_type is None
+    assert read_current_version(root) == "2.0.0"
+    versions = (root / "VERSIONS.md").read_text(encoding="utf-8")
+    assert "## 2.0.1" not in versions
+    # The intent is still consumed and a durable reconcile commit is created so a
+    # resume never recomputes the no-bump decision.
+    assert result.consumed_flow_ids == ["flowX"]
+    assert result.reconcile_commit is not None
+
+
+def test_deterministic_changelog_substance_without_bump_hint_forces_patch(tmp_path):
+    # Regression guard: an intent with changelog substance but no bump hint (an LLM
+    # inconsistency version_analyze can emit) must NOT be consumed while filing nothing
+    # — that silently drops the changelog note (and a later resume skips it because the
+    # reconcile commit now exists). A changelog bullet IS a versionable change, so
+    # reconcile applies a PATCH and files the bullet under the new released version.
+    root = _make_project(tmp_path, "2.0.0")
+    _put_intent(
+        root, "flowX", bump_type=None,
+        versions_changes=["Document new CLI behavior"],
+    )
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.channel == "deterministic"
     assert result.final_version == "2.0.1"
     assert result.bump_type == "patch"
+    assert read_current_version(root) == "2.0.1"
+    versions = (root / "VERSIONS.md").read_text(encoding="utf-8")
+    assert "## 2.0.1" in versions
+    assert "Document new CLI behavior" in versions
+    assert result.consumed_flow_ids == ["flowX"]
+    assert result.reconcile_commit is not None
 
 
 def test_compute_deterministic_pure():
@@ -122,6 +160,141 @@ def test_changelog_entries_merged_under_final(tmp_path):
     # Both features' changelog bullets survive under the one final version.
     assert "feat a" in versions
     assert "fix b" in versions
+
+
+def test_operator_edit_survives_residue_reset_timeout(tmp_path, monkeypatch):
+    # Issue 3: the detach + crash-residue reset happen inside the try/finally that
+    # owns the operator-edit reattach. A git stall during the residue-reset window
+    # (after README was already detached to HEAD) must still reach the reattach —
+    # otherwise the operator's uncommitted README edit is silently lost.
+    import sys
+
+    # The name ``se3.engine.merge.reconcile`` is shadowed by the re-exported
+    # reconcile() function on the package, so fetch the real submodule from
+    # sys.modules (imported at module top) to monkeypatch its _run_git global.
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+    from se3.engine.version_intent import (
+        VERSION_INTENT_DIR_RELPATH,
+        mark_consumed,
+    )
+
+    root = _make_project(tmp_path, "1.0.0")
+    # A tracked README (reconcile-owned path with a HEAD blob to detach against).
+    (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-q", "-m", "add readme")
+
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+    # Residue from a crashed prior reconcile: consumed flag committed but NO
+    # reconcile commit — this triggers the version-intents residue-reset path.
+    mark_consumed(root, "flowA")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "intent + consumed residue")
+
+    # Operator's uncommitted edit on a reconcile-owned path.
+    (root / "README.md").write_text("# Demo\noperator WIP\n", encoding="utf-8")
+
+    real_run_git = rec_mod._run_git
+    stalled = {"fired": False}
+
+    def flaky(project_root, *args, **kwargs):
+        # Stall the FIRST residue-reset checkout of the version-intents dir (which
+        # runs after README has been detached to HEAD), modelling a single transient
+        # git stall under contention; later calls (including the except-path
+        # rollback) proceed so reconcile surfaces a clean ReconcileError.
+        if (
+            not stalled["fired"]
+            and "checkout" in args
+            and VERSION_INTENT_DIR_RELPATH in args
+        ):
+            stalled["fired"] = True
+            raise subprocess.TimeoutExpired(cmd="git checkout", timeout=15)
+        return real_run_git(project_root, *args, **kwargs)
+
+    monkeypatch.setattr(rec_mod, "_run_git", flaky)
+
+    with pytest.raises(ReconcileError):
+        reconcile(root)
+
+    # The reattach finally replayed the operator's edit despite the timeout.
+    assert "operator WIP" in (root / "README.md").read_text(encoding="utf-8")
+
+
+def test_reattach_git_timeout_surfaces_as_reconcile_error(tmp_path, monkeypatch):
+    """Issue 2: a git stall INSIDE the finally-block reattach (``git merge-file``
+    under lock contention) must surface as a typed ReconcileError, not a raw
+    TimeoutExpired escaping reconcile() untyped — that would break run_merge's
+    typed-failure recovery contract and mask any in-flight error."""
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_project(tmp_path, "1.0.0")
+    (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-q", "-m", "add readme")
+
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "intent")
+
+    # Operator's uncommitted edit on a reconcile-owned path -> a reattach snapshot
+    # whose replay routes through the 3-way merge (``git merge-file``).
+    (root / "README.md").write_text("# Demo\noperator WIP\n", encoding="utf-8")
+
+    real_run_git = rec_mod._run_git
+
+    def flaky(project_root, *args, **kwargs):
+        if "merge-file" in args:
+            raise subprocess.TimeoutExpired(cmd="git merge-file", timeout=15)
+        return real_run_git(project_root, *args, **kwargs)
+
+    monkeypatch.setattr(rec_mod, "_run_git", flaky)
+
+    # Typed failure, not a raw TimeoutExpired.
+    with pytest.raises(ReconcileError):
+        reconcile(root)
+
+
+def test_prepass_git_timeout_surfaces_as_reconcile_error(tmp_path, monkeypatch):
+    """Issue 2: a git stall in the read-only replayability PRE-PASS (which runs
+    BEFORE the try/finally) must also be mapped to a typed ReconcileError rather
+    than escaping reconcile() untyped."""
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_project(tmp_path, "1.0.0")
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "intent")
+
+    def boom(project_root, rel):
+        raise subprocess.TimeoutExpired(cmd="git status", timeout=15)
+
+    monkeypatch.setattr(rec_mod, "_assert_staged_state_replayable", boom)
+
+    with pytest.raises(ReconcileError):
+        reconcile(root)
+
+
+def test_empty_changelog_still_recorded_in_versions_md(tmp_path):
+    # A reconcile whose intents carry NO changelog bullets must still record the
+    # released number in VERSIONS.md (issue 9): historical_versions() is parsed
+    # from VERSIONS.md headers and is the anti-collision guard's source of truth.
+    # A version that reaches the version file but never lands a header could be
+    # re-approved for reuse later.
+    root = _make_project(tmp_path, "1.0.0")
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=[])
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.final_version == "1.1.0"
+    versions = (root / "VERSIONS.md").read_text(encoding="utf-8")
+    assert "## 1.1.0" in versions
+    # The released number is now in the historical set the guard consults.
+    assert "1.1.0" in historical_versions(root)
 
 
 # --- custom-rules LLM channel ------------------------------------------------
@@ -208,6 +381,27 @@ def test_validate_custom_rules_rejects_unchanged():
         validate_no_regression(
             "2026.07.05", "2026.07.05",
             declared_bump=False, custom_rules=True, historical=set(),
+        )
+
+
+def test_validate_custom_rules_accepts_build_metadata_only_advance():
+    # SemVer precedence ignores build metadata, so 1.0.0+b1 == 1.0.0+b2 by
+    # Version.__eq__; under the custom-rules channel a build-number scheme's
+    # advance is string-unequal and not historical, so it must be accepted rather
+    # than rejected as "does not advance" (issue 5). Must not raise.
+    validate_no_regression(
+        "1.0.0+b1", "1.0.0+b2",
+        declared_bump=True, custom_rules=True, historical={"1.0.0+b1"},
+    )
+
+
+def test_validate_default_channel_still_rejects_build_metadata_only():
+    # The default SemVer channel has no ordering for a build-metadata-only change
+    # (they compare equal), so it must remain a non-advance rejection.
+    with pytest.raises(VersionRegressionError):
+        validate_no_regression(
+            "1.0.0+b1", "1.0.0+b2",
+            declared_bump=True, custom_rules=False, historical=set(),
         )
 
 

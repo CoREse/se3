@@ -43,20 +43,37 @@ def _resolve_merge_root(step: Step, flow: FlowInstance) -> Path:
     """Resolve the main-checkout root this merge step operates on.
 
     Prefers the step's ``cwd`` override (the main checkout, set when the merge
-    steps are appended to a worktree flow). Falls back to resolving the main
-    repo root from the flow's recorded ``project_root`` when no override is
-    present (defensive — a worktree flow always sets ``cwd``).
+    steps are appended to a worktree flow). When no override is present (only a
+    hand-built / corrupted persisted step — a normal worktree flow always sets
+    ``cwd``), the main checkout is resolved STRICTLY, mirroring the state
+    machine's fail-loud :class:`MergeCheckoutResolutionError` policy: a genuine
+    probe fault is raised, NOT silently degraded to the flow's base path. A
+    silent fallback to the isolation worktree would run integrate()/reconcile()
+    in the wrong checkout — landing the branch and writing the version outside
+    master — the precise silent-wrong-checkout the design forbids.
+
+    Raises:
+        MergeCheckoutResolutionError: when there is no ``cwd`` override and the
+            main-repo probe genuinely faults (git missing, non-zero exit,
+            unparseable output). A ``None`` probe result is the legitimate
+            "base IS the main checkout" case and returns ``base``.
     """
     if step.cwd:
         return Path(step.cwd)
+    from ...config import MainRepoProbeError, probe_main_repo_root
+    from ..state_machine import MergeCheckoutResolutionError
+
     root = flow.state.context.get("project_root") if flow.state else None
     base = Path(root) if root else Path.cwd()
     try:
-        from ...config import _resolve_main_repo_root
-
-        return Path(_resolve_main_repo_root(base))
-    except Exception:  # noqa: BLE001 - never let root resolution abort the step
-        return base
+        main = probe_main_repo_root(base)
+    except MainRepoProbeError as exc:
+        raise MergeCheckoutResolutionError(
+            f"merge_integrate step has no cwd override and the main checkout "
+            f"could not be resolved from {base}; refusing to merge in the "
+            f"isolation worktree: {exc}"
+        ) from exc
+    return main if main is not None else base
 
 
 def merge_integrate_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -73,8 +90,15 @@ def merge_integrate_handler(step: Step, flow: FlowInstance) -> StepStatus:
       retry / abort decision.
     """
     from ..merge import integrate
+    from ..state_machine import MergeCheckoutResolutionError
 
-    project_root = _resolve_merge_root(step, flow)
+    try:
+        project_root = _resolve_merge_root(step, flow)
+    except MergeCheckoutResolutionError as exc:
+        step.status = StepStatus.FAILED
+        step.error_message = str(exc)
+        logger.error(step.error_message)
+        return StepStatus.FAILED
 
     branch = flow.worktree_branch or step.inputs.get("worktree_branch")
     if not branch:

@@ -843,6 +843,15 @@ class TestFailureReasonRendering:
         monkeypatch.setattr(
             "se3.commands.merge_cmd._branch_exists", lambda _root, _branch: True,
         )
+        # The branch args here are fakes (existence is stubbed above and the
+        # orchestrator is mocked, so no real ref is ever created). Stub the
+        # intent-scope scan too — otherwise it git-reads a nonexistent ref, which
+        # now (correctly) raises IntentReadError and blocks the merge. In
+        # production the branch is validated to exist before this scan runs.
+        monkeypatch.setattr(
+            "se3.engine.version_intent.intent_flow_ids_introduced",
+            lambda *_a, **_k: set(),
+        )
         return captured
 
     def test_merge_conflict_rendering(self, tmp_path: Path, monkeypatch) -> None:
@@ -1440,3 +1449,63 @@ class TestFailureReasonRendering:
         body = captured[0]["content"]
         assert "Committed issue renumbers" in body
         assert "#005 -> #011 (open)" in body
+
+
+class TestAppendHumanCallLines:
+    """Fix (iteration 4): in suppress mode the CLI must NOT print a phantom
+    ``se3/calls/`` file (never created by _RecordingNullHumanCallWriter); it
+    renders the recorded escalation payload and the rerun-`se3 merge` recovery
+    instead. In non-suppress mode the real call-file path is still printed.
+    """
+
+    class _Report:
+        def __init__(self, human_call_file=None, recorded_escalations=None):
+            self.human_call_file = human_call_file
+            self.recorded_escalations = recorded_escalations or []
+
+    def test_non_suppress_prints_real_call_file(self):
+        from se3.commands.merge_cmd import _append_human_call_lines
+
+        lines: list[str] = []
+        report = self._Report(human_call_file="se3/calls/merge_x.json")
+        _append_human_call_lines(lines, report, suppress_human_call=False)
+        assert lines == ["Call file: se3/calls/merge_x.json"]
+
+    def test_suppress_renders_escalations_not_phantom_path(self):
+        from se3.commands.merge_cmd import _append_human_call_lines
+
+        lines: list[str] = []
+        report = self._Report(
+            human_call_file="se3/calls/merge_never_written.json",
+            recorded_escalations=[
+                {"type": "conflict", "branch": "feature/x"},
+                {
+                    "type": "guardrail_violation",
+                    "branch": "feature/y",
+                    "violations": ["touched se3/specs"],
+                },
+            ],
+        )
+        _append_human_call_lines(lines, report, suppress_human_call=True)
+
+        rendered = "\n".join(lines)
+        # The phantom call file must NOT appear as a recovery artifact.
+        assert "merge_never_written.json" not in rendered
+        assert "Call file:" not in rendered
+        # The escalation payload and the rerun recovery ARE surfaced.
+        assert "conflict: feature/x" in rendered
+        assert "guardrail_violation: feature/y" in rendered
+        assert "touched se3/specs" in rendered
+        assert "rerun `se3 merge`" in rendered
+
+    def test_suppress_no_escalation_renders_nothing(self):
+        # A non-escalation failure (postcondition / runtime-sync / branch
+        # validation) has no call file and no recorded escalation; the CLI must
+        # not claim a human escalation happened when none did.
+        from se3.commands.merge_cmd import _append_human_call_lines
+
+        lines: list[str] = []
+        report = self._Report()
+        _append_human_call_lines(lines, report, suppress_human_call=True)
+
+        assert lines == []

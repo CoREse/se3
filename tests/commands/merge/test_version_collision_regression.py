@@ -28,14 +28,23 @@ reproduce:
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from se3.commands.merge_cmd import run_merge
 from se3.engine.merge.reconcile import read_current_version, reconcile
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.commit import _guard_version_race
-from se3.engine.version_intent import VersionIntent, is_consumed, write_intent
+from se3.engine.steps.commit import _guard_version_race, commit_handler
+from se3.engine.version_intent import (
+    VersionIntent,
+    is_consumed,
+    mark_consumed,
+    reconcile_commit_exists,
+    write_intent,
+)
 
 
 PYPROJECT_TEMPLATE = """\
@@ -402,6 +411,138 @@ class TestReconcileResumeIdempotent:
         assert _pyproject_version(root) == "11.12.0"
 
 
+class TestReconcileCommitFailureRecovery:
+    """Task 2b': a reconcile whose `git commit` fails must stay recoverable.
+
+    The failure class the redesign exists to prevent: the version file +
+    changelog + consumed-flag are written, then the commit dies (index.lock
+    contention, a failing hook). If the on-disk consumed flag were trusted as
+    proof of completion, the resumed reconcile would no-op and the bump would
+    linger as uncommitted dirt — a feature with no committed version/changelog.
+    """
+
+    def test_failed_commit_rolls_back_and_resume_lands_version(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A failed commit leaves NO half-applied bump; the resume lands it.
+
+        The first reconcile fails at the commit step. It must roll back its
+        uncommitted version/changelog/consumed writes so the tree is clean and
+        the intent is un-consumed. The resumed reconcile then recomputes from the
+        committed base and lands the version — committed, not as dirt.
+        """
+        root = _make_project(tmp_path, "11.11.2")
+        _make_feature_with_intent(
+            root, "feature", "flowC", bump_type="minor", change="feat C"
+        )
+        _git(root, "merge", "--ff-only", "feature")  # intent on master, unconsumed
+
+        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        real_commit = reconcile_mod._commit_reconcile
+        calls = {"n": 0}
+
+        def flaky_commit(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise reconcile_mod.ReconcileError("simulated index.lock contention")
+            return real_commit(*args, **kwargs)
+
+        monkeypatch.setattr(reconcile_mod, "_commit_reconcile", flaky_commit)
+
+        # First attempt: commit fails.
+        with pytest.raises(reconcile_mod.ReconcileError):
+            reconcile(root)
+
+        # Rollback: no half-applied bump on disk, intent NOT consumed, tree clean.
+        assert read_current_version(root) == "11.11.2"
+        assert not is_consumed(root, "flowC")
+        assert _git(root, "status", "--porcelain").stdout.strip() == ""
+
+        # Resume: the second attempt commits and lands the version.
+        result = reconcile(root)
+        assert result.success
+        assert not result.already_reconciled
+        assert read_current_version(root) == "11.12.0"
+        assert "feat C" in _versions_text(root)
+        assert is_consumed(root, "flowC")
+        assert reconcile_commit_exists(root, "flowC")
+        # Committed — nothing left dangling in the working tree.
+        assert _git(root, "status", "--porcelain").stdout.strip() == ""
+
+    def test_resume_recovers_consumed_but_uncommitted_intent(
+        self, tmp_path: Path
+    ) -> None:
+        """A crash after the writes but before the commit is recovered on resume.
+
+        Simulates the hard-crash window (no graceful rollback ran): the version
+        file, changelog, and consumed flag are on disk but there is NO reconcile
+        commit. A resumed reconcile must NOT treat that uncommitted consumed flag
+        as proof of completion — it restores to HEAD, recomputes, and commits.
+        """
+        from se3.engine.merge.reconcile import (
+            _merge_changelog,
+            _write_final_version,
+        )
+
+        root = _make_project(tmp_path, "11.11.2")
+        _make_feature_with_intent(
+            root, "feature", "flowD", bump_type="minor", change="feat D"
+        )
+        _git(root, "merge", "--ff-only", "feature")  # intent on master, unconsumed
+
+        # Simulate the crash residue: writes applied + flag set, but no commit.
+        _write_final_version(root, "11.12.0")
+        _merge_changelog(root, "11.12.0", ["feat D"])
+        mark_consumed(root, "flowD")
+        assert read_current_version(root) == "11.12.0"  # dirty, uncommitted
+        assert not reconcile_commit_exists(root, "flowD")
+
+        # Resume must recover rather than no-op on the uncommitted consumed flag.
+        result = reconcile(root)
+
+        assert result.success
+        assert not result.already_reconciled
+        assert result.final_version == "11.12.0"
+        assert read_current_version(root) == "11.12.0"
+        assert "feat D" in _versions_text(root)
+        assert is_consumed(root, "flowD")
+        assert reconcile_commit_exists(root, "flowD")
+        assert _git(root, "status", "--porcelain").stdout.strip() == ""
+
+    def test_resume_recovers_dirty_version_file_without_consumed_flag(
+        self, tmp_path: Path
+    ) -> None:
+        """A crash after the version write but BEFORE any consumed flag recovers.
+
+        The narrowest hard-crash window: ``_write_final_version`` landed a dirty
+        11.12.0 on disk but the process died before the first ``mark_consumed``,
+        so there is NO flag to signal residue. A resume must still read its base
+        from master's COMMITTED 11.11.2 (not the dirty 11.12.0) and reconcile to
+        11.12.0 — NOT double-bump to 11.13.0 and strand 11.12.0 as a ghost.
+        """
+        from se3.engine.merge.reconcile import _write_final_version
+
+        root = _make_project(tmp_path, "11.11.2")
+        _make_feature_with_intent(
+            root, "feature", "flowE", bump_type="minor", change="feat E"
+        )
+        _git(root, "merge", "--ff-only", "feature")  # intent on master, unconsumed
+
+        # Crash residue: version file dirty, NO changelog write, NO consumed flag.
+        _write_final_version(root, "11.12.0")
+        assert read_current_version(root) == "11.12.0"  # dirty, uncommitted
+        assert not is_consumed(root, "flowE")
+
+        result = reconcile(root)
+
+        assert result.success
+        # Base was read from committed 11.11.2, so a single minor bump → 11.12.0.
+        assert result.final_version == "11.12.0"
+        assert read_current_version(root) == "11.12.0"
+        assert reconcile_commit_exists(root, "flowE")
+        assert _git(root, "status", "--porcelain").stdout.strip() == ""
+
+
 class TestNonWorktreeDriftGuard:
     """Task 2c: the direct-run commit drift guard (change D) prevents 10.7.1."""
 
@@ -489,3 +630,292 @@ class TestNonWorktreeDriftGuard:
 
         assert not mock_reanalyze.called
         assert result == "10.7.1"
+
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    def test_drift_reanalysis_returning_disk_version_halts(
+        self, mock_reanalyze, tmp_path: Path
+    ) -> None:
+        """Re-analysis that STILL returns the drifted disk version must HALT.
+
+        The refuse-on-collision branch: disk drifted 10.7.0 -> 10.7.1 (a concurrent
+        flow released 10.7.1), and re-running version_analyze against the drifted
+        baseline nonetheless returns 10.7.1 again. Writing it would file THIS flow's
+        changelog under the exact number the concurrent flow just released — the
+        10.7.1-type shared-version accident this guard exists to block. The guard
+        must raise rather than return the colliding number.
+        """
+        def fake_reanalyze(va_step, flow):
+            # Re-analysis returns the SAME drifted disk version → still a collision.
+            va_step.outputs["suggested_version"] = "10.7.1"
+            va_step.outputs["bump_type"] = "patch"
+            va_step.outputs["versions_changes"] = ["recomputed entry"]
+            return StepStatus.COMPLETED
+
+        mock_reanalyze.side_effect = fake_reanalyze
+
+        flow = self._make_flow_with_version_analyze(
+            tmp_path, va_current="10.7.0", baseline="10.7.0", suggested="10.7.1"
+        )
+        step = self._commit_step(suggested="10.7.1", baseline="10.7.0")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            _guard_version_race(
+                step, flow, disk_version="10.7.1", target_version="10.7.1"
+            )
+
+        assert mock_reanalyze.called
+        # The refusal names the colliding version and refuses to write it.
+        msg = str(excinfo.value)
+        assert "10.7.1" in msg
+        assert "colliding" in msg.lower()
+
+
+class TestFlowWroteVersionBlobDetection:
+    """Issue 4: own-replay detection must NOT depend on the optional Version: line.
+
+    With ``version.include_in_commit_message: false`` the flow's own commit never
+    carries a ``Version: <v>`` line, so the old grep-for-Version probe would
+    misclassify a healthy resume/replay as concurrent drift (double-bump or a
+    spurious collision failure). The probe must instead confirm the version-file
+    blob recorded at the flow's own ``Flow:``-trailer commit.
+    """
+
+    @staticmethod
+    def _git(root: Path, *args: str):
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def test_own_replay_detected_without_version_commit_line(
+        self, tmp_path: Path
+    ) -> None:
+        from se3.engine.steps.commit import _flow_wrote_version
+        from se3.engine.version_bumper import VersionBumper, VersionConfig
+
+        root = tmp_path
+        (root / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\nversion = "5.2.0"\n', encoding="utf-8"
+        )
+        self._git(root, "init", "-q")
+        self._git(root, "config", "user.email", "t@example.com")
+        self._git(root, "config", "user.name", "Test")
+        self._git(root, "add", "-A")
+        # This flow's commit carries its Flow: trailer but NO "Version:" line, as
+        # under include_in_commit_message=false.
+        self._git(
+            root, "commit", "-q", "-m", "impl: feature\n\nFlow: flow-xyz"
+        )
+
+        bumper = VersionBumper(VersionConfig())
+        vf = bumper.detect_version_file(root)
+        assert vf is not None
+
+        # disk 5.2.0 == the blob this flow's own commit recorded -> own replay,
+        # detected purely from the Flow: trailer + version-file blob.
+        assert _flow_wrote_version(root, "flow-xyz", "5.2.0", vf, bumper) is True
+        # a version this flow never wrote is not a match
+        assert _flow_wrote_version(root, "flow-xyz", "9.9.9", vf, bumper) is False
+        # another flow's id must not match our commit
+        assert _flow_wrote_version(root, "other-flow", "5.2.0", vf, bumper) is False
+
+
+class TestNonWorktreeCommitHandlerDriftGuard:
+    """Change D through the REAL ``commit_handler`` wiring (not just the helper).
+
+    The ``TestNonWorktreeDriftGuard`` cases above hand-feed ``disk_version`` to
+    ``_guard_version_race`` directly, so a break in ``commit_handler``'s in-lock
+    disk re-read (``VersionBumper.read_version``) or its call into the guard —
+    the plumbing that actually connects the two — would slip through unnoticed.
+    This exercises the full path against a real git repo: a real version file is
+    re-read at commit time, drift is detected, and the recomputed version is what
+    lands on disk. The baseline the guard compares against is version_analyze's
+    OBSERVED ``current_version`` (10.7.0), NOT the audit-only pre_session_version.
+    """
+
+    def _make_direct_flow(self, root: Path, *, va_current: str, suggested: str):
+        flow = FlowInstance(
+            flow_id="direct-flow",
+            task_description="Fix a bug",
+            task_type="fix",
+            change_path=root / "se3.yaml",
+        )
+        flow.is_worktree_mode = False
+
+        va = Step(step_type=StepType.VERSION_ANALYZE, status=StepStatus.COMPLETED)
+        va.outputs["current_version"] = va_current
+        va.outputs["suggested_version"] = suggested
+        va.outputs["bump_type"] = "patch"
+        flow.state.add_step(va)
+
+        commit = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
+        commit.inputs["suggested_version"] = suggested
+        commit.inputs["bump_type"] = "patch"
+        flow.state.add_step(commit)
+        return flow, commit
+
+    @patch("se3.engine.context_builder.ensure_code_index_fresh")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    def test_commit_handler_recomputes_on_concurrent_disk_drift(
+        self, mock_reanalyze, _mock_index, tmp_path: Path
+    ) -> None:
+        """A concurrent direct run published 10.7.1 first; the commit recomputes.
+
+        version_analyze observed disk 10.7.0 and suggested the next patch 10.7.1.
+        Before this flow's commit, a concurrent direct run bumped pyproject.toml
+        to 10.7.1 and committed. commit_handler must re-read the drifted disk
+        version in-lock, hand it to the guard, and — because 10.7.1 != the
+        observed 10.7.0 — recompute past it (to 10.7.2) and land THAT, never a
+        second 10.7.1.
+        """
+        root = _make_project(tmp_path, "10.7.0")
+        flow, commit_step = self._make_direct_flow(
+            root, va_current="10.7.0", suggested="10.7.1"
+        )
+
+        # Concurrent flow grabbed the lock first and released 10.7.1.
+        (root / "pyproject.toml").write_text(
+            PYPROJECT_TEMPLATE.format(version="10.7.1"), encoding="utf-8"
+        )
+        _git(root, "commit", "-aqm", "concurrent flow: bump to 10.7.1")
+
+        # This flow has its own real code change to commit.
+        (root / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+        def fake_reanalyze(va_step, fl):
+            # The guard must re-point version_analyze at the DRIFTED disk version.
+            assert va_step.inputs["pre_session_version"] == "10.7.1"
+            va_step.outputs["suggested_version"] = "10.7.2"
+            va_step.outputs["bump_type"] = "patch"
+            va_step.outputs["versions_changes"] = ["recomputed entry"]
+            return StepStatus.COMPLETED
+
+        mock_reanalyze.side_effect = fake_reanalyze
+
+        result = commit_handler(commit_step, flow)
+
+        assert result == StepStatus.COMPLETED, commit_step.error_message
+        assert mock_reanalyze.called
+        # The recomputed, non-colliding version is what landed on disk — the
+        # in-lock re-read (10.7.1) drove the recompute, not the stale suggestion.
+        assert read_current_version(root) == "10.7.2"
+
+    @patch("se3.engine.context_builder.ensure_code_index_fresh")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    def test_commit_handler_no_drift_writes_resolved_target(
+        self, mock_reanalyze, _mock_index, tmp_path: Path
+    ) -> None:
+        """No concurrent bump: the resolved target is written, no re-analysis.
+
+        Disk still matches version_analyze's observed current_version, so the
+        guard is a pass-through — commit_handler writes the suggested 10.7.1 and
+        never re-runs version_analyze.
+        """
+        root = _make_project(tmp_path, "10.7.0")
+        flow, commit_step = self._make_direct_flow(
+            root, va_current="10.7.0", suggested="10.7.1"
+        )
+
+        (root / "feature.py").write_text("y = 2\n", encoding="utf-8")
+
+        result = commit_handler(commit_step, flow)
+
+        assert result == StepStatus.COMPLETED, commit_step.error_message
+        assert not mock_reanalyze.called
+        assert read_current_version(root) == "10.7.1"
+
+    @patch("se3.engine.context_builder.ensure_code_index_fresh")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    def test_commit_handler_own_session_advance_is_not_drift(
+        self, mock_reanalyze, _mock_index, tmp_path: Path
+    ) -> None:
+        """The guard's operand is version_analyze's OBSERVED current_version, NOT
+        the pre_session_version — proven through the REAL commit_handler wiring.
+
+        This flow's own session commits advanced pyproject.toml to 10.7.5 and
+        committed them (with NO Flow: trailer for this flow, so the git-durable
+        own-replay probe cannot help). version_analyze then observed 10.7.5 and
+        suggested 10.8.0, while the pre-session baseline lags at 10.7.0. Disk ==
+        observed current_version, so this is NOT drift: no re-analysis, 10.8.0
+        lands verbatim.
+
+        Discriminates the operand: current_version (10.7.5) != pre_session
+        (10.7.0), and every own-replay escape hatch is genuine/unstubbed. A wrong
+        implementation comparing disk against pre_session_version (10.7.0) would
+        see a spurious 10.7.5 != 10.7.0 drift and re-run version_analyze.
+        """
+        root = _make_project(tmp_path, "10.7.0")
+
+        # This flow's own session commits advanced the version file and committed
+        # them — a NON-Flow-trailer commit, so _flow_wrote_version cannot claim it.
+        (root / "pyproject.toml").write_text(
+            PYPROJECT_TEMPLATE.format(version="10.7.5"), encoding="utf-8"
+        )
+        _git(root, "commit", "-aqm", "impl: own session work advanced version")
+
+        flow, commit_step = self._make_direct_flow(
+            root, va_current="10.7.5", suggested="10.8.0"
+        )
+        # The audit-only pre-session baseline lags the observed current_version.
+        commit_step.inputs["pre_session_version"] = "10.7.0"
+
+        (root / "feature.py").write_text("z = 3\n", encoding="utf-8")
+
+        result = commit_handler(commit_step, flow)
+
+        assert result == StepStatus.COMPLETED, commit_step.error_message
+        # Disk == observed current_version -> pass-through, no recompute.
+        assert not mock_reanalyze.called
+        assert read_current_version(root) == "10.8.0"
+
+    @patch("se3.engine.context_builder.ensure_code_index_fresh")
+    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    def test_commit_handler_halts_when_reanalysis_still_collides(
+        self, mock_reanalyze, _mock_index, tmp_path: Path
+    ) -> None:
+        """commit_handler HALTS (never writes) when the recompute still collides.
+
+        A concurrent direct run published 10.7.1. This flow's version_analyze had
+        observed 10.7.0 and suggested 10.7.1; in-lock the guard re-runs
+        version_analyze against the drifted 10.7.1 baseline but it STILL returns
+        10.7.1. commit_handler must FAIL rather than commit this flow's changelog
+        under the concurrent flow's released number — the exact 10.7.1 shared-
+        version accident. The version file is left at the concurrent flow's 10.7.1
+        with NO changelog entry appended for this flow.
+        """
+        root = _make_project(tmp_path, "10.7.0")
+        flow, commit_step = self._make_direct_flow(
+            root, va_current="10.7.0", suggested="10.7.1"
+        )
+
+        # Concurrent flow grabbed the lock first and released 10.7.1.
+        (root / "pyproject.toml").write_text(
+            PYPROJECT_TEMPLATE.format(version="10.7.1"), encoding="utf-8"
+        )
+        _git(root, "commit", "-aqm", "concurrent flow: bump to 10.7.1")
+        head_before = _git(root, "rev-parse", "HEAD").stdout.strip()
+
+        # This flow has its own real code change to commit.
+        (root / "feature.py").write_text("x = 1\n", encoding="utf-8")
+
+        def fake_reanalyze(va_step, fl):
+            # Recompute against the drifted baseline STILL yields the collision.
+            assert va_step.inputs["pre_session_version"] == "10.7.1"
+            va_step.outputs["suggested_version"] = "10.7.1"
+            va_step.outputs["bump_type"] = "patch"
+            va_step.outputs["versions_changes"] = ["recomputed entry"]
+            return StepStatus.COMPLETED
+
+        mock_reanalyze.side_effect = fake_reanalyze
+
+        result = commit_handler(commit_step, flow)
+
+        assert result == StepStatus.FAILED
+        assert mock_reanalyze.called
+        # The colliding version was never re-written by this flow and no commit
+        # landed — the version file still reads the concurrent flow's 10.7.1.
+        assert read_current_version(root) == "10.7.1"
+        assert _git(root, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert "colliding" in (commit_step.error_message or "").lower()

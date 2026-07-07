@@ -17,6 +17,7 @@ from .version_intent import (
     RECONCILE_TRAILER,
     VERSION_INTENT_DIR_RELPATH,
     VersionIntent,
+    VersionIntentIgnoredError,
     collect_intents,
     intent_path,
     is_consumed,
@@ -181,6 +182,57 @@ def git_repo(tmp_path: Path) -> Path:
     _git(tmp_path, "add", "README.md")
     _git(tmp_path, "commit", "-m", "seed")
     return tmp_path
+
+
+class TestWriteIntentGitignoreGuard:
+    """write_intent must fail loudly when its path is gitignored.
+
+    On an existing project whose committed .gitignore predates the
+    ``!/se3/version-intents/`` whitelist, the intent JSON would be silently
+    skipped by the commit step's ``git add -A`` and the flow would only fail
+    much later at version_reconcile with a misleading "restore the intent file".
+    Surfacing the real cause at write time is the fix.
+    """
+
+    def test_ignored_path_raises_with_actionable_message(self, git_repo: Path):
+        # An old .gitignore that ignores the whole se3 state tree with NO
+        # version-intents whitelist — the exact pre-migration shape.
+        (git_repo / ".gitignore").write_text("/se3/\n", encoding="utf-8")
+        _git(git_repo, "add", ".gitignore")
+        _git(git_repo, "commit", "-m", "ignore se3 state")
+
+        with pytest.raises(VersionIntentIgnoredError) as exc_info:
+            write_intent(git_repo, _make_intent("20260707-ign_0001"))
+
+        msg = str(exc_info.value)
+        assert VERSION_INTENT_DIR_RELPATH in msg
+        assert ".gitignore" in msg
+        # The intent file must NOT have been written (it could never be staged).
+        assert not intent_path(git_repo, "20260707-ign_0001").exists()
+
+    def test_ignored_error_is_oserror_subclass(self):
+        # version_analyze's intent-emit path catches OSError to FAIL the step;
+        # the ignored-path error must ride that same channel.
+        assert issubclass(VersionIntentIgnoredError, OSError)
+
+    def test_whitelisted_path_writes_normally(self, git_repo: Path):
+        # The current template shape: ``/se3/*`` ignores se3 CONTENTS one level
+        # down (not the directory itself, so the whitelist below can re-include —
+        # git cannot re-include under a fully-excluded parent dir), and
+        # ``!/se3/version-intents/`` tracks the intents.
+        (git_repo / ".gitignore").write_text(
+            f"/se3/*\n!/{VERSION_INTENT_DIR_RELPATH}/\n", encoding="utf-8"
+        )
+        _git(git_repo, "add", ".gitignore")
+        _git(git_repo, "commit", "-m", "whitelist intents")
+
+        path = write_intent(git_repo, _make_intent("20260707-ok_0002"))
+        assert path.is_file()
+
+    def test_non_repo_does_not_block_write(self, tmp_path: Path):
+        # No git repo -> check-ignore probe faults -> best-effort, write proceeds.
+        path = write_intent(tmp_path, _make_intent("20260707-nr_0003"))
+        assert path.is_file()
 
 
 class TestReconcileCommitDetection:

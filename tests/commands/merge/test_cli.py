@@ -425,6 +425,12 @@ class TestCliRendersBucketSplit:
             "se3.commands.merge_cmd._branch_exists",
             lambda _root, _branch: True,
         )
+        # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
+        # does not git-read a nonexistent ref (which now raises IntentReadError).
+        monkeypatch.setattr(
+            "se3.engine.version_intent.intent_flow_ids_introduced",
+            lambda *_a, **_k: set(),
+        )
 
         _init_repo(tmp_path)
         from se3.commands.merge_cmd import run_merge
@@ -475,6 +481,12 @@ class TestCliRendersBucketSplit:
         monkeypatch.setattr(
             "se3.commands.merge_cmd._branch_exists",
             lambda _root, _branch: True,
+        )
+        # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
+        # does not git-read a nonexistent ref (which now raises IntentReadError).
+        monkeypatch.setattr(
+            "se3.engine.version_intent.intent_flow_ids_introduced",
+            lambda *_a, **_k: set(),
         )
 
         _init_repo(tmp_path)
@@ -528,6 +540,12 @@ class TestCliRendersBucketSplit:
         monkeypatch.setattr(
             "se3.commands.merge_cmd._branch_exists",
             lambda _root, _branch: True,
+        )
+        # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
+        # does not git-read a nonexistent ref (which now raises IntentReadError).
+        monkeypatch.setattr(
+            "se3.engine.version_intent.intent_flow_ids_introduced",
+            lambda *_a, **_k: set(),
         )
 
         _init_repo(tmp_path)

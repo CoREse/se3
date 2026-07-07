@@ -34,7 +34,12 @@ def _init_repo(path: Path) -> None:
     (path / "README.md").write_text("# Test\n")
     # Ignore se3/ runtime directory so that merge lock files and logs
     # do not cause "untracked working tree files would be overwritten".
-    (path / ".gitignore").write_text("/se3/*\n!/se3/specs/\n!/se3/issues/\n")
+    # version-intents is whitelisted (matching the real init/migrate template)
+    # so worktree sessions' intents actually travel with the branch — write_intent
+    # now refuses to write to a gitignored path.
+    (path / ".gitignore").write_text(
+        "/se3/*\n!/se3/specs/\n!/se3/issues/\n!/se3/version-intents/\n"
+    )
     subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "initial"],
@@ -137,6 +142,97 @@ class TestMergeOrchestrator:
         assert report.failed_branch is None
         assert report.log_file is not None
         assert report.log_file.exists()
+
+    def test_intent_probe_ignores_consumed_historical_intents(
+        self, tmp_path: Path
+    ) -> None:
+        """The legacy-aggregation suppression probe counts only unconsumed intents.
+
+        Every reconcile commits the consumed intent JSON into master and never
+        deletes it. Probing with include_consumed=True would see that permanent
+        residue and suppress legacy per-branch aggregation for ALL later merges,
+        so a pure legacy branch (direct version-file bump, no intent) would land
+        verbatim with no bump. Only an as-yet-unconsumed intent — this merge's own
+        contribution — should stand the legacy path down.
+        """
+        from se3.engine.version_intent import VersionIntent, mark_consumed, write_intent
+
+        _init_repo(tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
+
+        # No intents at all → legacy aggregation stays enabled.
+        assert orch._merged_tree_has_version_intents() is False
+
+        # A historical, already-consumed intent (reconcile residue) must NOT
+        # suppress aggregation for an unrelated later legacy merge.
+        write_intent(
+            tmp_path,
+            VersionIntent(
+                flow_id="flowHistoric",
+                change_summary="old",
+                versions_changes=["old feat"],
+                bump_type="minor",
+            ),
+        )
+        mark_consumed(tmp_path, "flowHistoric")
+        assert orch._merged_tree_has_version_intents() is False
+
+        # A fresh, unconsumed intent (this merge's own contribution) DOES.
+        write_intent(
+            tmp_path,
+            VersionIntent(
+                flow_id="flowFresh",
+                change_summary="new",
+                versions_changes=["new feat"],
+                bump_type="minor",
+            ),
+        )
+        assert orch._merged_tree_has_version_intents() is True
+
+    def test_intent_probe_ignores_pre_existing_unrelated_intents(
+        self, tmp_path: Path
+    ) -> None:
+        """An unconsumed intent already on master before THIS merge is ignored.
+
+        Flow A finished merge_integrate and left its unconsumed intent on master
+        while still awaiting version_reconcile. A separate legacy `se3 merge`
+        that introduces NO intent must still run legacy aggregation — Flow A's
+        leftover intent (present at the pre-merge tree) is not this merge's
+        contribution, so it must not stand aggregation down.
+        """
+        from se3.engine.version_intent import VersionIntent, write_intent
+
+        _init_repo(tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
+
+        # Flow A's unconsumed intent, committed to master before this merge.
+        write_intent(
+            tmp_path,
+            VersionIntent(
+                flow_id="flowA_pending",
+                change_summary="pending",
+                versions_changes=["pending feat"],
+                bump_type="minor",
+            ),
+        )
+        # se3/ is gitignored in this fixture; force-add so the intent lands in
+        # the committed tree that intent_flow_ids_at_ref reads.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "-f", "se3/version-intents"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "flow A intent (awaiting reconcile)"],
+            check=True, capture_output=True,
+        )
+        # Simulate execute() having snapshotted the pre-merge tree's intents.
+        from se3.engine.version_intent import intent_flow_ids_at_ref
+
+        orch._pre_merge_intent_ids = intent_flow_ids_at_ref(tmp_path, "HEAD")
+        assert orch._pre_merge_intent_ids == {"flowA_pending"}
+
+        # The legacy branch introduces no new intent → aggregation stays enabled.
+        assert orch._merged_tree_has_version_intents() is False
 
     def test_merge_multiple_clean_branches(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)

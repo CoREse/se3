@@ -90,6 +90,17 @@
 
 
 
+
+## 11.14.0 - 2026-07-07
+
+- Add version-intent metadata so worktree sessions carry bump intent instead of writing versions at commit time, eliminating version-file merge conflicts
+- Introduce merge_integrate and version_reconcile steps so a worktree flow's completion means changes actually landed on master, with the final version decided unconditionally at merge time
+- Add an integrate()/reconcile() merge library with a deterministic SemVer channel and a version-rules LLM channel, plus no-backtrack validation and crash-safe idempotency keyed on the reconcile commit
+- Guard non-worktree flows against concurrent version collisions by re-checking on-disk version under the merge lock and re-running analysis on drift
+- Merge changelog entries under the final version name so concurrent minor features no longer silently drop each other's VERSIONS.md entries
+- Clean up accumulated blank lines at the top of VERSIONS.md and prevent future blank-line growth on insert
+- Slim the se3 merge CLI to a thin adapter over the merge library and retire the webui 'merging' bypass status in favor of step rendering
+- Add end-to-end regression tests for concurrent worktree collisions, non-worktree drift, no-op merge reconcile, and idempotent re-entry
 ## 11.13.1 - 2026-07-06
 
 - Isolate test suite from real project state: chat_history writes and the SE3 daemon home are redirected to temp dirs so running tests no longer leak fake data into se3/history/ or ~/.se3/project_roots.json

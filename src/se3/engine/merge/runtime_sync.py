@@ -314,6 +314,58 @@ def _file_hash(path: Path, source_se3: Path | None = None) -> str:
     return h.hexdigest()
 
 
+def _read_regular_file_bytes(path: Path) -> bytes:
+    """Read a destination file's bytes with the same O_NOFOLLOW/regular-file
+    guards as :func:`_file_hash`.
+
+    Used by the append-only history supersede check, which needs the actual
+    destination bytes (not just a hash) to test the prefix relationship.
+    Raises ``OSError`` on symlinks, non-regular entries, or any read cap.
+    """
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            if stat.S_ISDIR(st.st_mode):
+                raise IsADirectoryError(21, "Is a directory", str(path))
+            raise OSError(errno.EINVAL, "Not a regular file", str(path))
+        chunks = list(_bounded_read_chunks(fd, str(path)))
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _is_history_supersede(rel_str: str, dest_file: Path, src_content: bytes) -> bool:
+    """Return True when *dest_file* should be overwritten by *src_content*
+    because it is a strict byte-prefix of it (append-only history extension).
+
+    ``history/<flow>/<step>.jsonl`` files are append-only transcripts. When a
+    worktree flow merges in-flow, ``integrate()`` runtime-syncs the merge step's
+    own history mid-step, landing a prefix (only ``step_started``); the terminal
+    ``step_completed`` record is appended in the worktree afterwards. The
+    compensating final sync then sees a size mismatch and, absent this check,
+    would stash the fuller transcript in an invisible ``.from-<branch>`` sidecar
+    that history readers (which glob ``*.jsonl``) never see — leaving the
+    main-root transcript permanently stuck at the mid-step anchor.
+
+    Restricting the overwrite to the strict-prefix relationship keeps it safe:
+    the destination is guaranteed to be an ancestor of the source (no divergent
+    edits are discarded). Any read error / non-regular dest / equal-or-shorter
+    source returns False, falling back to the sidecar collision path.
+    """
+    norm = rel_str.replace(os.sep, "/")
+    if not (norm.startswith("history/") and norm.endswith(".jsonl")):
+        return False
+    try:
+        dest_bytes = _read_regular_file_bytes(dest_file)
+    except OSError:
+        return False
+    return (
+        len(dest_bytes) < len(src_content)
+        and src_content.startswith(dest_bytes)
+    )
+
+
 # Tier A: directories to recursively scan (relative to se3/)
 TIER_A_DIRS = [
     "history",
@@ -2005,6 +2057,13 @@ def sync_branch_runtime(
     tier_a_files: list[tuple[Path, str, Path]] = []
     bypass_files: list[tuple[Path, str, Path, str]] = []
     idempotent_skips: list[tuple[Path, Path]] = []
+    # Append-only history files where the destination is a strict byte-prefix
+    # of the source: the source is authoritatively fuller and must overwrite
+    # the dest rather than land in an invisible sidecar (see
+    # _is_history_supersede). Kept separate from tier_a_files so the copy
+    # phase's TOCTOU re-check knows to re-verify the prefix relation instead
+    # of treating the surviving dest as a fresh collision.
+    supersede_rel: set[str] = set()
     seen_rel_paths: set[str] = set()
 
     def _process_single_src_file(src_file: Path) -> None:
@@ -2036,6 +2095,13 @@ def sync_branch_runtime(
             except RuntimeSyncCollision:
                 if strict:
                     raise
+                # Append-only history extension: overwrite the mid-step prefix
+                # with the worktree's fuller transcript instead of sidecar-ing
+                # it out of history readers' sight.
+                if _is_history_supersede(rel_str, dest_file, content):
+                    supersede_rel.add(rel_str)
+                    tier_a_files.append((src_file, rel_str, dest_file))
+                    return
                 if dest_file.is_dir() or not dest_file.is_file():
                     # Directory or non-regular entry (FIFO, socket, device)
                     # at destination cannot be bypassed as a sidecar file;
@@ -2157,6 +2223,23 @@ def sync_branch_runtime(
             # validation and copy (e.g. concurrent process). If it now
             # exists, re-run collision logic rather than silently overwriting.
             if dest_file.exists():
+                # Append-only history supersede: the dest is (still) meant to be
+                # a strict prefix of the fuller source. Re-verify the prefix
+                # relation under TOCTOU rather than routing to the sidecar path
+                # a plain collision check would take. If the dest is no longer a
+                # prefix (diverged concurrently) fall through to the normal
+                # collision handling so nothing is silently discarded.
+                if rel_str in supersede_rel:
+                    if _is_history_supersede(rel_str, dest_file, content):
+                        try:
+                            _atomic_write_bytes(dest_file, content)
+                        except OSError:
+                            report.skipped_files.append(rel_str)
+                            continue
+                        copied_so_far.append(dest_file)
+                        report.copied.append(rel_str)
+                        continue
+                    # No longer a prefix — fall through to normal collision path.
                 try:
                     # Hash the already-read content rather than re-reading
                     # src_file. This both saves one pass over the file and

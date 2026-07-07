@@ -1,0 +1,165 @@
+id: '270'
+title: 项目改名 se3 → tianluo(田螺):命令 luo、目录/配置 tianluo、12.0.0 落地
+status: open
+priority: high
+type: feature
+tags:
+- rename
+- branding
+- breaking-change
+- source:human
+source: human
+created_at: '2026-07-07T17:04:06.743164'
+updated_at: '2026-07-07T17:04:06.743164'
+description: |
+  ## 决策来源
+
+  2026-07-07 与用户(CRE)一次完整讨论的定案。起点是"se3 这个名字是否太大、
+  太容易同名"。讨论记录与推理过程存档在:
+  - `prompts/2026-07-07_rename-tianluo-session.jsonl`(原始会话)
+  - `prompts/2026-07-07_rename-tianluo-session.md`(可读对话)
+  - `prompts/2026-07-07_rename-tianluo-session.thinking.md`(思考中译压缩版)
+  - `prompts/2026-07-07_rename-tianluo-session.thinking.verbatim.md`(思考英文逐字版)
+
+  本 issue 是决策记录 + 执行清单。**执行方式已决策:人工 Claude 会话落地,
+  不交给 se3 自己跑**(理由见文末"为什么人工执行")。
+
+  ## 为什么必须改名(动机)
+
+  - "SE(3)" 是数学中的特殊欧氏群(3D 刚体变换),在机器人学 / 3D 视觉 /
+    几何深度学习里是标准记号(SE(3)-Transformer、se3-diffusion、se3cnn……)。
+    语义territory 已被一整个成熟学科占据,靠内容抢不回来。
+  - 实测占用:PyPI `se3` 已被 2015 年的 SE(3) 李群库占用;GitHub 名字含 se3
+    的仓库约 5685 个,头部全是机器人学。**因此 README 里的 `pip install se3`
+    从未成立——这次不是"迁移包名",而是首次真正以自有包名发布。**
+  - "se3" 作为品类宣言(类似 Web3 / 工业4.0)无法被拥有、零意象、要求读者
+    预先接受历史分期。方法论名与工具名应分离。
+
+  ## 最终命名决策(全景)
+
+  | 工件 | 名字 | 服务对象 |
+  |------|------|----------|
+  | 项目 / 仓库 / PyPI 包 | **tianluo** | 搜索引擎、README 读者 |
+  | 运行时目录 | **tianluo/** | 代码阅读者、陌生仓库浏览者 |
+  | 配置文件 | **tianluo.yaml**(本地覆盖 tianluo.local.yaml) | 同上 |
+  | 主命令 | **luo** | 用户的手指 |
+  | 全名命令 | **tianluo** | 文档、演示、可搜索性 |
+  | 方法论/宣言名 | **SE 3.0 / Software Engineering 3.0** | 文档叙事(概念,不怕重名,保留) |
+  | 兼容层 | `se3` 命令 + `se3/`/`se3.yaml` 回落 | 过渡期,退役见时间表 |
+
+  一句话原则:**写下来的地方用 tianluo,喊它干活时叫 luo**(文件上写全名,
+  嘴上喊小名)。
+
+  ### 关键命名理由(避免后人重复纠结)
+
+  - **名字 tianluo**:田螺姑娘典故——主人下地干活,素女从螺中出来把家务
+    做完,主人回来只见完成的成果。这正是 README 第 9 行 "You prompt once,
+    walk away, and come back to a finished deliverable" 的人格化。产品定位是
+    "高自主性的伙伴(Jarvis 型),不是需要亲自操作的工具",tianluo 传递
+    "信任 / 放心"的情感,胜过备选 regent(摄政者,冷、制度化)。tianluo 全网
+    近乎唯一 token(GitHub 仅约 20 个不相关仓库),PyPI 空闲。
+  - **命令 luo(而非 tl)**:曾在 tl(双手交替、打字快)与 luo(实体之名、
+    有故事)间反复摇摆,最终裁决 luo。决定性论据:命令手感的价值 ∝ 日敲击
+    次数,而本产品架构上就是**低频命令**("prompt once, walk away";若一天
+    敲几十遍是产品失败)。故 tl 的唯一优势被产品自身论点判低权重;luo 的
+    优势(文档/口头/转述/被写下)恰是早期开源项目的高频面。且不对称可恢复:
+    嫌 luo 慢者可 `alias tl=luo` 自救,tl 缺的故事无人能补。agent 时代命令
+    多为名字(claude/gemini/codex)而非缩写——`luo run "..."` = "螺,去把这个
+    干了"。FAQ 里可写一句 `alias tl=luo` 接住手感党。不发 tl,不发第二个短命令
+    (双短命令并存会分裂文档/教程/社区语言)。
+  - **目录/配置用全名 tianluo/ 而非 luo/**:(1) `tl/`/`luo/` 作目录名在别人
+    项目里有真实歧义(tl/ 常指 translations);(2) 目录里是要进 git、上 code
+    review 的文档(code-index.md/charter.md/issues/),可读性 > 省键;
+    (3) 运行时目录是"产品在陌生人仓库里的广告位",tianluo/ 一搜即达,luo/
+    搜出一万个姓罗的,线索死。
+  - **项目不叫 luo**:Luo 是高频中文姓氏 + 肯尼亚 Dholuo 民族语言,GitHub 上
+    成千上万,会重新掉进搜索阴影;且单字"螺"斩断"田螺"典故的检索钥匙,
+    品牌故事被斩首。luo 只配当命令,不配当项目名(如 rg 之于 ripgrep)。
+
+  ## 版本策略:大版本 bump,不归零
+
+  - **tianluo 12.0.0 落地改名**,携带 se3 的完整世系(当前在 11.x)。
+  - 不归零重来:归零会(1) 低报 11 个大版本的成熟度;(2) 语义不诚实
+    (代码/git/changelog 连续而版本倒退,version_analyze 机制会混乱);
+    (3) 违背先例(改名保版本线是惯例:LibreOffice 接 OpenOffice 3.3、
+    PyTorch Lightning 改名不动版本;归零的是"重写"不是"改名")。
+  - 退役时间表挂在版本上:
+    - **12.0.0** — 改名落地;se3 命令 + se3//se3.yaml 回落保留但打弃用警告;
+      VERSIONS.md 用一条大记录写清完整对照表。
+    - **12.x** — 过渡期;rename 迁移器(`luo migrate`)帮存量项目一键搬家。
+    - **13.0.0** — 移除全部 se3 兼容层。
+
+  ## 执行清单(不得遗漏)
+
+  ### A. 代码 / 包
+  - [ ] `src/se3/` → `src/tianluo/`(git mv,保留历史)
+  - [ ] pyproject.toml:包名 se3 → tianluo;version → 12.0.0;
+    console scripts 装三个入口 → `luo`(主)、`tianluo`(全名)、`se3`(兼容别名);
+    `se3-server` → `tianluo-server`(保留 `se3-server` 兼容别名);
+    `[server]` / `[browser]` extras 名不变。
+  - [ ] 全库 import / 模块引用 `se3.` → `tianluo.`(确定性批量替换,人工 review 边界)
+  - [ ] `python -m se3.cli` 等入口引用同步(注意 installed-se3-shadows-worktree 陷阱,
+    用 PYTHONPATH=src 验证)
+
+  ### B. 运行时目录 / 配置(带回落)
+  - [ ] 引擎路径解析:优先 `tianluo/`,找不到回落 `se3/` 并打提示;
+    `tianluo.yaml`/`tianluo.local.yaml` 优先,回落 `se3.yaml`/`se3.local.yaml`
+  - [ ] `se3 init` 生成 `tianluo/` + `tianluo.yaml`;.gitignore 白名单路径同步
+    (code-index.md/charter.md/issues/prompts/version-rules.md)
+  - [ ] 沙箱子进程约定通道(charter 注入)中的目录名同步
+
+  ### C. 命令 / CLI
+  - [ ] 主命令改 `luo`;`tianluo` 全名入口;`se3` 兼容别名,首次调用 stderr 打
+    一行迁移提示(指向 12.x→13.0 退役)
+  - [ ] 帮助文本、`se3 xxx` 子命令示例、错误信息里的命令名统一
+  - [ ] tl 冲突备注:Teal(Lua 方言)编译器命令占用 `tl`,故不发 tl;FAQ 写 `alias tl=luo`
+
+  ### D. 迁移器
+  - [ ] 新增 rename 迁移器(挂在现有 `se3 migrate` 注册表,类似 spec-to-new-system):
+    `git mv` 目录、改 se3.yaml→tianluo.yaml、更新 .gitignore,产出一条可 review、
+    可 `git revert` 的 commit
+
+  ### E. 文档 / 品牌
+  - [ ] README.md / README.zh.md:标题、徽章、`pip install`、命令示例、目录树、
+    命令参考表全部改名;方法论叙事保留 "SE 3.0";顶部加 origin story 一句
+    (英文示例:"tianluo — named after the Snail Girl of Chinese folklore, who
+    finishes your work while you're away")
+  - [ ] **顺手修复**:README 徽章写 11.13.1、正文写 10.8.1 本就不同步——改名时
+    统一到 12.0.0(版本归 pyproject.toml 管,勿手改错源)
+  - [ ] docs/ 下所有 se3 引用;VERSIONS.md 加改名大记录 + 对照表
+  - [ ] charter.md / code-index.md 里的项目身份、路径引用
+
+  ### F. 仓库 / 发布
+  - [ ] GitHub 仓库直接改名(**不新建仓库**):自带永久重定向(网页/git/API),
+    star/issue/PR 原地保留。**唯一失效条件:此后永不在旧账号下再建同名 se3 仓库**
+  - [ ] 本地 remote 顺手更新:`git remote set-url origin <新URL>`
+  - [ ] PyPI 以 tianluo 首发 12.0.0(包名新,版本属于产品)
+
+  ### G. 首秀(可选的浪漫)
+  - [ ] 改名由人工落地后,把"自举浪漫"留给改名后第一个 `luo run`:跑一个
+    小而安全的任务(如统一 README 版本号),宣传语:"田螺姑娘醒来后干的
+    第一件事,是把家收拾整齐。"
+
+  ## 为什么人工执行(而非 se3 自跑)
+
+  1. **自指手术**:改名对象正是引擎运行时在用的东西(se3/state/engine.json、
+     se3.yaml、运行中进程加载的 src/se3)。即便 worktree 隔离,合并落地时旧代码
+     与新布局脱节,可能凭空重建 se3/。自举项目做"自我更名"是自指性最强、最易
+     产生诡异状态的一类任务。
+  2. **防线全会误报**:全库改名 = 每文件海量删除行 → guardrails 的 deleted-line
+     检测尖叫;code-index 指纹全体失效 → 全量重建;merge 面对万行 diff(已有
+     两次大 diff 合并把文件搅成叙事文本的前科)。大量升级为人工确认,
+     fire-and-forget 收益归零。
+  3. **主体工作不该 LLM 干**:git mv + 确定性批量替换 + 人工 review 边界,又快
+     又零幻觉;让 LLM 在 plan→implement→test 循环里干 sed 的活,是用最贵的工具
+     干最便宜的事。
+
+  ## 验收标准
+
+  - [ ] `pip install tianluo` 后 `luo --help` / `tianluo --help` / `se3 --help`
+    三入口均可用,se3 打弃用提示
+  - [ ] `luo init` 在干净项目生成 tianluo/ + tianluo.yaml
+  - [ ] 存量 se3/ 项目经 rename 迁移器一步搬家,且旧布局仍能回落运行
+  - [ ] 全测试通过(注意:改名会触碰大量测试里的 se3 引用与路径)
+  - [ ] pyproject.toml 版本 = 12.0.0,VERSIONS.md 有改名记录
+  - [ ] README 三处版本号统一,origin story 就位

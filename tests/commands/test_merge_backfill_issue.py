@@ -143,6 +143,13 @@ def _patch_merge(monkeypatch, report, captured):
         "se3.commands.merge_cmd._branch_exists",
         lambda _root, _branch: True,
     )
+    # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
+    # does not git-read a nonexistent ref (which now raises IntentReadError and
+    # would flip run_merge to a non-zero exit before the backfill under test).
+    monkeypatch.setattr(
+        "se3.engine.version_intent.intent_flow_ids_introduced",
+        lambda *_a, **_k: set(),
+    )
 
 
 # --------------------------------------------------------------------------

@@ -438,7 +438,14 @@ def _write_charter_once(project_root: Path, charter_body: str) -> Path:
 # .gitignore rewrite (idempotent)
 # ---------------------------------------------------------------------------
 
-_GITIGNORE_WHITELISTS = ["!/se3/code-index.md", "!/se3/charter.md"]
+_GITIGNORE_WHITELISTS = [
+    "!/se3/code-index.md",
+    "!/se3/charter.md",
+    # Version-reconcile intent metadata: committed on the flow branch so the
+    # merge-side reconcile step can read every merged-in branch's intent from
+    # master. Must be tracked, unlike the rest of se3/ runtime content.
+    "!/se3/version-intents/",
+]
 _GITIGNORE_REMOVE = "!/se3/specs/"
 
 _GITIGNORE_ROOT_DENY_HEADER = [

@@ -2509,7 +2509,7 @@ def _run_flow_impl(
             # producing duplicate report cards.
             from ..engine.chat_history import has_step_terminal_event
             if not has_step_terminal_event(
-                flow.project_root, flow.flow_id, current_step.step_id
+                project_root, flow.flow_id, current_step.step_id
             ):
                 emitter.emit(new_event(
                     EventType.STEP_COMPLETED,
@@ -2552,7 +2552,7 @@ def _run_flow_impl(
             if step_usage:
                 from ..engine.chat_history import has_step_output_event
                 if not has_step_output_event(
-                    flow.project_root, flow.flow_id, current_step.step_id
+                    project_root, flow.flow_id, current_step.step_id
                 ):
                     emitter.emit(new_event(
                         EventType.STEP_OUTPUT,
@@ -3317,6 +3317,8 @@ def _finalize_worktree_source_issue(
     worktree_path: Path,
     status: Optional[str],
     merge_rc: Optional[int],
+    worktree_branch: Optional[str] = None,
+    target_branch: Optional[str] = None,
 ) -> None:
     """Best-effort finalize the source issue of a ``--worktree`` from-issue run.
 
@@ -3324,7 +3326,14 @@ def _finalize_worktree_source_issue(
     worktree engine.json), never the wrapper's exit code — a json-mode pause
     also returns 0, so the exit code cannot distinguish pause from completion.
 
-    - ``status == FAILED`` → move the issue back to OPEN (mirrors sync failure).
+    - ``status == FAILED`` → move the issue back to OPEN (mirrors sync failure)
+      UNLESS the isolation branch already landed on master. With the merge split
+      into ``merge_integrate`` + ``version_reconcile``, a flow can merge the
+      branch (integrate succeeds, work is on master) and then FAIL in the cheap
+      ``version_reconcile`` step. Reopening the issue then would spawn duplicate
+      work for code that already landed; the version miscompute is a merge-side
+      retry (``se3 merge`` / resume re-runs reconcile), not unmerged work. So
+      when the branch is an ancestor of master, leave the issue IN_PROGRESS.
     - ``status == COMPLETED`` → the resolve is owned by ``run_merge`` (it only
       resolves on a successful merge-back, ``merge_rc == 0``); when the merge
       failed (``merge_rc != 0``) the issue is deliberately left IN_PROGRESS so
@@ -3337,6 +3346,13 @@ def _finalize_worktree_source_issue(
     bookkeeping must never alter the worktree run's exit code.
     """
     if status != FlowStatus.FAILED.value:
+        return
+    # A FAILED flow whose branch already landed on master is not unmerged work —
+    # the failure is downstream of merge_integrate (a version_reconcile miscompute
+    # that a merge-side retry fixes). Reopening would duplicate landed code.
+    if worktree_branch and _worktree_branch_landed(
+        main_root, worktree_branch, target_branch
+    ):
         return
     source_issue_id = _read_worktree_source_issue_id(worktree_path)
     if not source_issue_id:
@@ -3352,6 +3368,42 @@ def _finalize_worktree_source_issue(
     except Exception:
         # Best-effort only — never let issue bookkeeping affect the return code.
         pass
+
+
+def _worktree_branch_landed(
+    project_root: Path,
+    worktree_branch: str,
+    target_branch: Optional[str],
+) -> bool:
+    """True iff *worktree_branch* has landed on *target_branch* (is its ancestor).
+
+    Equivalent to ``git merge-base --is-ancestor worktree_branch target_branch``.
+    Fail-closed: any git error (missing ref, indeterminate ancestry) returns
+    False, so an unverifiable state is treated as "not merged" rather than
+    reported as a successful merge. Refs are shared across all linked worktrees,
+    so this resolves identically whether *project_root* is the main checkout or a
+    worktree. Falls back to HEAD when no target branch was recorded.
+    """
+    from ..engine.worktree import _run_git
+
+    target = target_branch or "HEAD"
+    try:
+        result = _run_git(
+            project_root,
+            "merge-base",
+            "--is-ancestor",
+            worktree_branch,
+            target,
+            check=False,
+            timeout=15,
+        )
+    except Exception:  # noqa: BLE001 - any git failure => "not landed" (fail closed)
+        logger.debug(
+            "ancestry check failed for %s -> %s", worktree_branch, target,
+            exc_info=True,
+        )
+        return False
+    return result.returncode == 0
 
 
 def _finalize_worktree_cleanup(
@@ -3384,6 +3436,31 @@ def _finalize_worktree_cleanup(
     )
 
     target = worktree_original_branch or "the original branch"
+
+    # Guard: "COMPLETED" only means "landed" because a worktree flow's step
+    # sequence now ends with merge_integrate + version_reconcile. But a flow
+    # PERSISTED BEFORE those steps existed carries a selected_steps without them,
+    # and resume never re-derives the sequence — so such a flow can reach
+    # COMPLETED having never merged. Verify the branch actually became an
+    # ancestor of the target before resolving the source issue / reporting a
+    # merge; otherwise we would silently close a --from-issue source issue and
+    # print "Merged" for work still stranded in the worktree.
+    if not _worktree_branch_landed(
+        project_root, worktree_branch, worktree_original_branch
+    ):
+        display_error(
+            "\n".join(
+                [
+                    f"Worktree flow COMPLETED but branch '{worktree_branch}' has "
+                    f"not landed on '{target}' — no merge is present.",
+                    "This flow predates the in-flow merge steps; its work is "
+                    f"preserved in the worktree '{worktree_path}'.",
+                    f"Merge it manually with: se3 merge {worktree_branch}",
+                ]
+            )
+        )
+        return 1
+
     get_console().print(
         Rule(f"[bold]worktree merge[/bold] [dim]→ {target}[/dim]", style="cyan")
     )
@@ -3398,6 +3475,24 @@ def _finalize_worktree_cleanup(
     lock = MergeLock(_resolve_main_lock_root(project_root), blocking=True)
     lock.acquire(blocking=True)
     try:
+        # Final runtime sync BEFORE cleanup archives/removes the worktree.
+        # merge_integrate's integrate() synced the worktree's runtime state as it
+        # stood mid-step — version_reconcile had not yet run and the confirm-gate
+        # records were not yet written. Those later records (version_reconcile
+        # history, confirm answers, merge_integrate's own completion) live only in
+        # the worktree, so without a second sync here the main-checkout history
+        # would stop at the mid-flight merge_integrate anchor and lose the tail of
+        # the flow once the worktree is gone. Best-effort: a sync hiccup must never
+        # turn a successful merge into a cleanup failure.
+        try:
+            from ..engine.merge.runtime_sync import sync_branch_runtime
+
+            sync_branch_runtime(project_root, worktree_branch)
+        except Exception:  # noqa: BLE001 - history sync is best-effort
+            logger.debug(
+                "final worktree runtime sync failed post in-flow merge",
+                exc_info=True,
+            )
         try:
             CleanupManager(project_root).delete_merged_branches([worktree_branch])
         except Exception:  # noqa: BLE001 - cleanup is best-effort; GC is the net
@@ -3523,6 +3618,8 @@ def run_worktree_mode(
                 worktree_path,
                 _worktree_flow_status(worktree_path),
                 merge_rc=None,
+                worktree_branch=worktree_branch,
+                target_branch=original_branch,
             )
             render_full(
                 "\n".join(
@@ -3794,6 +3891,8 @@ def _resume_worktree_run(
                 worktree_path,
                 _worktree_flow_status(worktree_path),
                 merge_rc=None,
+                worktree_branch=worktree_branch,
+                target_branch=worktree_original_branch,
             )
             render_full(
                 "\n".join(

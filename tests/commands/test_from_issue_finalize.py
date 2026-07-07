@@ -406,6 +406,21 @@ def _init_git_repo(path: Path) -> None:
     )
 
 
+def _create_ancestor_branch(root: Path, branch: str) -> None:
+    """Create *branch* at HEAD so it is an ancestor of the default branch.
+
+    Models the real post-in-flow-merge state: merge_integrate lands the branch on
+    master with ``delete_merged=False``, so at finalize time the branch ref still
+    exists and IS an ancestor of master — the precondition
+    ``_finalize_worktree_cleanup`` now verifies before resolving the source issue
+    and reporting a merge (a flow that reached COMPLETED without landing must not
+    be reported as merged)."""
+    subprocess.run(
+        ["git", "-C", str(root), "branch", branch],
+        check=True, capture_output=True,
+    )
+
+
 def _write_wt_engine(
     wt_path: Path, *, status, source_issue_id, branch, flow_id="wt-1", original="master"
 ):
@@ -488,6 +503,9 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         # A from-issue run advances the issue OPEN→IN_PROGRESS before dispatch.
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-1"
+        # The in-flow merge landed the branch on master (delete_merged=False), so
+        # its ref exists and is an ancestor — the state finalize now verifies.
+        _create_ancestor_branch(tmp_path, branch)
         wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-1"
 
         # --- First run PAUSED: only the persisted worktree engine.json survives
@@ -530,15 +548,60 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
     def test_resume_completed_resolves_even_when_branch_cleanup_skips(
         self, tmp_path, monkeypatch
     ):
-        # The post-merge cleanup is best-effort: even when CleanupManager cannot
-        # delete the branch (here it never existed as a real git branch, so the
-        # ancestor check refuses), the source-issue resolve is independent and
-        # still fires, and the resume returns success (the merge already landed
-        # in-flow — a cleanup hiccup is never reported as a merge failure).
+        # The post-merge cleanup is best-effort: even when CleanupManager fails to
+        # delete the (genuinely landed) branch, the source-issue resolve is
+        # independent and still fires, and the resume returns success (the merge
+        # already landed in-flow — a cleanup hiccup is never reported as a merge
+        # failure). The branch DID land (it is a real ancestor of master, so the
+        # finalize ancestry guard passes); only the deletion step is made to fail.
         _init_git_repo(tmp_path)
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-2"
+        _create_ancestor_branch(tmp_path, branch)
         wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-2"
+        _write_wt_engine(
+            wt_path, status="paused", source_issue_id=issue_id, branch=branch
+        )
+
+        def fake_run_flow(*_a, **kwargs):
+            _write_wt_engine(
+                Path(kwargs["project_root"]),
+                status="completed",
+                source_issue_id=issue_id,
+                branch=branch,
+            )
+            return 0
+
+        def boom_cleanup(self, branches):
+            raise RuntimeError("simulated branch-deletion failure")
+
+        monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
+        monkeypatch.setattr(
+            "se3.engine.merge.cleanup.CleanupManager.delete_merged_branches",
+            boom_cleanup,
+        )
+
+        rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
+
+        assert rc == 0
+        assert (
+            IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
+        )
+
+    def test_resume_completed_but_branch_not_landed_does_not_resolve(
+        self, tmp_path, monkeypatch
+    ):
+        # Issue #1 regression: a worktree flow PERSISTED BEFORE the in-flow merge
+        # steps existed carries a step sequence without them, so a resume after
+        # the upgrade can reach COMPLETED having never merged. "COMPLETED" must
+        # NOT be trusted as "landed": the branch is not an ancestor of master, so
+        # finalize must NOT resolve the source issue nor report a merge, and must
+        # signal failure so the operator knows the work is stranded.
+        _init_git_repo(tmp_path)
+        issue_id = _make_in_progress_issue(tmp_path)
+        branch = "worktree/never-landed-9"
+        # Deliberately DO NOT create the branch as an ancestor — it never merged.
+        wt_path = tmp_path / "se3" / "worktrees" / "worktree-never-9"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -556,9 +619,11 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
 
         rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
 
-        assert rc == 0
+        # Signalled as not-done, and the source issue is left IN_PROGRESS (never
+        # silently resolved for work still stranded in the worktree).
+        assert rc != 0
         assert (
-            IssueManager(tmp_path).load(issue_id).status == IssueStatus.RESOLVED
+            IssueManager(tmp_path).load(issue_id).status == IssueStatus.IN_PROGRESS
         )
 
     def test_resume_to_failed_reopens_issue(self, tmp_path, monkeypatch):

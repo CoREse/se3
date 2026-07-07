@@ -122,6 +122,12 @@ class DocumentationUpdater:
 
 """
 
+    # Body written for a version block that carries no changelog bullets. The
+    # released number must still land a VERSIONS.md header (historical_versions()
+    # anti-collision source of truth), but this placeholder is mutually exclusive
+    # with real bullets — merge logic drops it the moment a real bullet arrives.
+    NO_CHANGES_PLACEHOLDER = "- No changes recorded"
+
     def __init__(self, project_root: Path, config: Optional[Dict[str, Any]] = None):
         """Initialize the documentation updater.
 
@@ -392,7 +398,7 @@ class DocumentationUpdater:
             Formatted markdown string
         """
         if not changes:
-            return "- No changes recorded"
+            return self.NO_CHANGES_PLACEHOLDER
 
         formatted = []
         for change in changes:
@@ -428,10 +434,10 @@ class DocumentationUpdater:
         lines = content.split('\n')
 
         # Merge path: an entry for this exact version already exists.
-        version_pattern = rf'^##\s+{re.escape(version)}\s+-'
+        version_pattern = self._version_header_pattern(version)
         for i, line in enumerate(lines):
-            if re.match(version_pattern, line):
-                return self._merge_change_lines(lines, i, new_entry)
+            if version_pattern.match(line):
+                return self._merge_change_lines(lines, i, new_entry, version)
 
         entry = new_entry.rstrip('\n')
 
@@ -461,7 +467,151 @@ class DocumentationUpdater:
             return entry
         return '\n'.join(lines + [entry])
 
-    def _merge_change_lines(self, lines: List[str], header_index: int, new_entry: str) -> str:
+    def _versions_entry_header_line(self) -> str:
+        """The version-bearing header line of the effective ``versions_entry`` template.
+
+        This is the line that carries ``{{version}}`` — the entry's header,
+        whether or not it is a markdown heading. A non-heading template such as
+        ``ENTRY {{version}} | {{changes}}`` has no ``#`` line, yet its
+        version-bearing line is still the block header the existing-version
+        detector and block-boundary marker must key off; keying only off ``#``
+        headings made those helpers blind to it, so a second update inserted a
+        duplicate block instead of merging bullets into the existing entry.
+
+        Falls back to the first heading line when no line carries ``{{version}}``
+        (defensive — an entry template should always contain it). Any heading
+        level counts (``#`` … ``######``): a project may use a Keep-a-Changelog
+        ``## [{{version}}] - {{date}}`` or a level-1 ``# {{version}}`` header.
+        Returns ``""`` when no template / no usable line.
+        """
+        template = self.templates.get("versions_entry")
+        if template is None:
+            return ""
+        lines = template.content.splitlines()
+        for line in lines:
+            if "{{version}}" in line:
+                return line.strip()
+        for line in lines:
+            if line.strip().startswith("#"):
+                return line.strip()
+        return ""
+
+    def _version_header_pattern(self, version: str) -> "re.Pattern[str]":
+        """Regex matching an existing VERSIONS.md block header for *version*.
+
+        Must recognise whatever header shape the project's ``versions_entry``
+        template renders — the default ``## <version> - <date>``, a suffixless
+        ``## {{version}}``, a level-1 ``# {{version}}``, AND a bracketed
+        Keep-a-Changelog ``## [{{version}}] - {{date}}`` where a literal ``]``
+        abuts the version with no separating whitespace. The old pattern only
+        tolerated a *whitespace-separated* suffix, so ``## [1.2.3] - …`` was never
+        recognised and a second update for the same version inserted a duplicate
+        block instead of merging bullets into the existing one.
+
+        Derived from the effective template: the literal anchor BEFORE
+        ``{{version}}`` and the literal text immediately AFTER it (up to the next
+        ``{{placeholder}}``) are both honoured, so an abutting ``]`` is matched
+        while a variable date/build suffix stays flexible. Degrades to a
+        permissive default (optional suffix) on any template-resolution fault.
+        """
+        header_line = self._versions_entry_header_line()
+        if "{{version}}" in header_line:
+            prefix = header_line.split("{{version}}", 1)[0].rstrip()
+            after = header_line.split("{{version}}", 1)[1]
+            # Literal text right after the version, up to the next placeholder
+            # (e.g. ``]`` for ``[{{version}}]``, `` - `` for `` - {{date}}``).
+            after_literal = after.split("{{", 1)[0].rstrip()
+            try:
+                if after_literal:
+                    # Accept EITHER the template's literal tail (``]`` abutting
+                    # the version, `` -`` before a date) OR a bare
+                    # whitespace/EOL boundary. A same-version header written
+                    # under a different / suffixless template shape (or
+                    # hand-edited to plain ``## 1.2.3``) must still be recognised
+                    # and merged into, not duplicated. The alternation is also
+                    # the whole anti-prefix guard: ``11.13`` cannot match
+                    # ``## [11.13.1]`` (next char ``]`` is the literal tail only
+                    # for the full version) nor ``## 11.13.1`` (next char ``.``
+                    # is neither the tail nor whitespace/EOL).
+                    follow = (
+                        r'(?:' + re.escape(after_literal) + r'|\s|$).*$'
+                    )
+                else:
+                    # Version at end / before an immediate placeholder: require a
+                    # whitespace boundary or EOL so ``11.13`` does not prefix-match
+                    # header ``## 11.13.1``.
+                    follow = r'(?:\s+.*)?\s*$'
+                return re.compile(
+                    r'^' + re.escape(prefix) + r'\s*' + re.escape(version) + follow
+                )
+            except re.error:
+                pass
+        return re.compile(rf'^#{{1,6}}\s+{re.escape(version)}(?:\s+-.*)?\s*$')
+
+    def _version_header_marker(self) -> str:
+        """The literal ``#``-prefix that begins a version block header line.
+
+        Derived from the effective ``versions_entry`` template (default ``## ``)
+        so block-boundary detection recognises whatever heading level the
+        project renders — a custom ``### {{version}}`` block ends at the next
+        ``### `` header, a level-1 ``# {{version}}`` block at the next ``# ``.
+        Using the wrong level makes the block scan run past the next version
+        header and merge bullets into an older block. For a non-heading template
+        the literal text before ``{{version}}`` (e.g. ``ENTRY `` for
+        ``ENTRY {{version}} | …``) begins every entry line and serves the same
+        boundary role. Defaults to ``## `` on any template-resolution fault.
+        """
+        header_line = self._versions_entry_header_line()
+        if header_line.startswith("#"):
+            hashes = header_line[: len(header_line) - len(header_line.lstrip("#"))]
+            if hashes:
+                return hashes + " "
+        if "{{version}}" in header_line:
+            prefix = header_line.split("{{version}}", 1)[0]
+            if prefix.strip():
+                return prefix
+        return "## "
+
+    def _inline_changes_from_header(self, header_line: str, version: str) -> Optional[str]:
+        """Extract the changelog text rendered ON the header line, if any.
+
+        Some entry templates place ``{{changes}}`` on the same line as
+        ``{{version}}`` (e.g. ``ENTRY {{version}} | {{changes}}``) rather than
+        on following lines. For those the bullets live inside the header line,
+        so the line-based merge — which only scans lines *after* the header —
+        would miss them and silently drop a second update's changes. This
+        recovers that inline text so it participates in dedupe/merge.
+
+        Returns the rendered ``{{changes}}`` substring, or ``None`` when the
+        template keeps changes on separate lines (the default markdown shape)
+        or the header line does not match the template.
+        """
+        tmpl = self._versions_entry_header_line()
+        if "{{version}}" not in tmpl or "{{changes}}" not in tmpl:
+            return None
+        # Reconstruct the rendered header from its template: literals match
+        # verbatim, the known version is pinned, any other placeholder (e.g.
+        # ``{{date}}``) is a wildcard, and ``{{changes}}`` captures the rest of
+        # the inline text.
+        parts = re.split(r"(\{\{[a-zA-Z_]+\}\})", tmpl)
+        regex = "^"
+        for part in parts:
+            if part == "{{version}}":
+                regex += re.escape(version)
+            elif part == "{{changes}}":
+                regex += r"(?P<changes>.*)"
+            elif re.fullmatch(r"\{\{[a-zA-Z_]+\}\}", part):
+                regex += r".*?"
+            else:
+                regex += re.escape(part)
+        regex += "$"
+        try:
+            match = re.match(regex, header_line)
+        except re.error:
+            return None
+        return match.group("changes") if match else None
+
+    def _merge_change_lines(self, lines: List[str], header_index: int, new_entry: str, version: str) -> str:
         """Merge the new entry's changelog bullets into an existing block.
 
         Appends only bullets not already present (so a verbatim re-write is a
@@ -472,30 +622,83 @@ class DocumentationUpdater:
             lines: VERSIONS.md split into lines
             header_index: Index of the existing ``## version`` header line
             new_entry: New rendered entry whose bullets are to be merged
+            version: Version string (used to recover bullets rendered inline
+                on the header line of a single-line entry template)
 
         Returns:
             Updated content
         """
-        # Extent of the existing version block (up to the next ## header).
+        # Extent of the existing version block (up to the next version header).
+        # Terminate on the effective header level (``## `` by default, ``### ``
+        # for a custom template) so the same header-pattern family that located
+        # this block also bounds it — otherwise a custom-level next header is
+        # not recognised and bullets leak into the older block below it.
+        marker = self._version_header_marker()
         block_end = len(lines)
         for j in range(header_index + 1, len(lines)):
-            if lines[j].startswith('## '):
+            if lines[j].startswith(marker):
                 block_end = j
                 break
 
-        # Changelog bullets carried by the rendered entry: everything after
-        # its own header line, blanks dropped.
-        change_lines = [ln for ln in new_entry.split('\n')[1:] if ln.strip()]
-        existing = {ln.strip() for ln in lines[header_index:block_end] if ln.strip()}
-        to_add = [ln for ln in change_lines if ln.strip() not in existing]
-        if not to_add:
-            return '\n'.join(lines)
+        placeholder = self.NO_CHANGES_PLACEHOLDER
 
-        # Append after the last non-blank line of the block.
-        insert_at = block_end
-        while insert_at > header_index + 1 and not lines[insert_at - 1].strip():
-            insert_at -= 1
-        lines[insert_at:insert_at] = to_add
+        # Changelog bullets carried by the rendered entry: everything after its
+        # own header line, blanks dropped, plus any bullets rendered inline ON
+        # the header line for a single-line template (``ENTRY {{version}} |
+        # {{changes}}``) — those would otherwise be missed and the update lost.
+        # Its placeholder (if the new entry carried no real changes) is NOT a
+        # mergeable bullet — a placeholder must never be appended beside real
+        # bullets — so exclude it from what we add.
+        new_entry_lines = new_entry.split('\n')
+        new_inline = self._inline_changes_from_header(new_entry_lines[0], version)
+        change_lines = [
+            ln for ln in (new_inline.split('\n') if new_inline else [])
+            if ln.strip()
+        ]
+        change_lines += [ln for ln in new_entry_lines[1:] if ln.strip()]
+        new_real = [ln for ln in change_lines if ln.strip() != placeholder]
+
+        # The existing block body (between this header and the next), blank
+        # framing preserved. Split its content into the real bullets (drives the
+        # dedupe set) vs. the stale placeholder (dropped once real bullets exist).
+        # Bullets living inline on the existing header line join the dedupe set
+        # too, so a re-write of the same version stays a no-op.
+        block = lines[header_index + 1:block_end]
+        existing_real = {
+            ln.strip() for ln in block if ln.strip() and ln.strip() != placeholder
+        }
+        existing_inline = self._inline_changes_from_header(lines[header_index], version)
+        if existing_inline:
+            existing_real.update(
+                ln.strip() for ln in existing_inline.split('\n')
+                if ln.strip() and ln.strip() != placeholder
+            )
+        to_add = [ln for ln in new_real if ln.strip() not in existing_real]
+
+        has_real = bool(existing_real) or bool(to_add)
+        placeholder_present = any(ln.strip() == placeholder for ln in block)
+
+        if has_real:
+            # Real bullets win: drop any contradictory placeholder, then append
+            # the new bullets before the block's trailing blank run. Nothing to do
+            # when there are no additions and no placeholder to strip.
+            if not to_add and not placeholder_present:
+                return '\n'.join(lines)
+            new_block = [ln for ln in block if ln.strip() != placeholder]
+            insert_at = len(new_block)
+            while insert_at > 0 and not new_block[insert_at - 1].strip():
+                insert_at -= 1
+            new_block[insert_at:insert_at] = to_add
+        else:
+            # No real bullets anywhere: keep exactly one placeholder as the body.
+            if placeholder_present:
+                return '\n'.join(lines)
+            insert_at = len(block)
+            while insert_at > 0 and not block[insert_at - 1].strip():
+                insert_at -= 1
+            new_block = block[:insert_at] + [placeholder] + block[insert_at:]
+
+        lines[header_index + 1:block_end] = new_block
         return '\n'.join(lines)
 
     def _normalize_head_blanks(self, content: str) -> str:

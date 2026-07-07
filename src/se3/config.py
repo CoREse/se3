@@ -53,15 +53,52 @@ def _resolve_main_repo_root(project_root: Path) -> Optional[Path]:
     return _resolve_main_repo_root_cached(resolved)
 
 
+class MainRepoProbeError(RuntimeError):
+    """The worktree/main-repo git probe could not positively resolve an answer.
+
+    Raised by :func:`probe_main_repo_root` when git is missing, the probe
+    subprocess fails/times out, its output cannot be parsed, or a worktree is
+    detected but its main working tree cannot be derived. Distinct from the
+    *legitimate* "not a worktree" outcome (probe succeeds, common-dir ==
+    git-dir), which is reported as ``None`` rather than an error. Callers that
+    must not conflate "definitely the main checkout" with "probe failed" (e.g.
+    a worktree flow choosing where merge-side steps run) use the raising probe
+    directly; the swallow-to-``None`` behaviour is preserved for everyone else
+    via :func:`_resolve_main_repo_root`.
+    """
+
+
 @functools.lru_cache(maxsize=64)
 def _resolve_main_repo_root_cached(project_root: Path) -> Optional[Path]:
-    """Actual git-probe implementation — cached on the resolved absolute path."""
+    """Actual git-probe implementation — cached on the resolved absolute path.
+
+    Backward-compatible wrapper: swallows a :class:`MainRepoProbeError` (genuine
+    probe failure) to ``None`` so historical callers keep their lenient
+    "treat-as-non-worktree" fallback. Callers that need to tell a real failure
+    apart from a genuine non-worktree call :func:`probe_main_repo_root` directly.
+    """
+    try:
+        return probe_main_repo_root(project_root)
+    except MainRepoProbeError:
+        return None
+
+
+def probe_main_repo_root(project_root: Path) -> Optional[Path]:
+    """Git-probe ``project_root``; return the main working-tree root or ``None``.
+
+    Returns ``None`` only for the *legitimate* case where ``project_root`` is
+    not a linked worktree (probe succeeded and common-dir == git-dir), i.e.
+    ``project_root`` itself is the main checkout. Raises
+    :class:`MainRepoProbeError` on every genuine failure (git missing, non-zero
+    exit, unparseable output, or a worktree whose main working tree cannot be
+    derived) so callers can refuse to silently fall back to a linked worktree.
+    """
     # Enforce the documented contract: the public wrapper always passes a
     # resolved absolute path, but this module-level symbol is importable by
     # third-party callers who may bypass the wrapper.  An assertion here
     # documents and defends the contract rather than silently misbehaving.
     assert project_root.is_absolute(), (
-        f"_resolve_main_repo_root_cached expects an absolute path, got {project_root!r}"
+        f"probe_main_repo_root expects an absolute path, got {project_root!r}"
     )
     # Sanitize the environment so that inherited GIT_DIR / GIT_WORK_TREE /
     # GIT_COMMON_DIR do not override the -C flag and cause the probe to
@@ -78,26 +115,38 @@ def _resolve_main_repo_root_cached(project_root: Path) -> Optional[Path]:
             check=False,
             env=_clean_env,
         )
-        if result.returncode != 0:
-            return None
-        lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
-        # Safety: a worktree path with an embedded newline would produce more
-        # than two lines here; we conservatively return None rather than risk
-        # misparsing. This is a safe fallback (treats as non-worktree).
-        if len(lines) != 2:
-            return None
-        common_dir, git_dir = lines
-        # Normalize relative paths (git may emit relative to project_root)
-        common_dir = str(Path(project_root) / common_dir) if not Path(common_dir).is_absolute() else common_dir
-        git_dir = str(Path(project_root) / git_dir) if not Path(git_dir).is_absolute() else git_dir
-        if Path(common_dir).resolve() == Path(git_dir).resolve():
-            return None
-        # Derive main repo working tree root from common-dir parent
-        candidate = Path(common_dir).parent
-        # Safety: confirm with git --show-toplevel from the candidate.
-        # If this fails the candidate is not a valid working tree (e.g.
-        # bare-repo-backed worktree or corrupt layout), so return None
-        # rather than probing the wrong directory.
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise MainRepoProbeError(
+            f"git worktree probe failed for {project_root}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        raise MainRepoProbeError(
+            f"git rev-parse --git-common-dir exited {result.returncode} "
+            f"for {project_root}: {result.stderr.strip()}"
+        )
+    lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+    # A worktree path with an embedded newline would produce more than two
+    # lines here; we cannot safely parse it, and must NOT silently treat it as
+    # non-worktree (that is what let a linked-worktree probe fault degrade to
+    # running merge steps in the worktree). Surface it as a probe failure.
+    if len(lines) != 2:
+        raise MainRepoProbeError(
+            f"git rev-parse produced {len(lines)} line(s) for {project_root}; "
+            "cannot resolve worktree topology"
+        )
+    common_dir, git_dir = lines
+    # Normalize relative paths (git may emit relative to project_root)
+    common_dir = str(Path(project_root) / common_dir) if not Path(common_dir).is_absolute() else common_dir
+    git_dir = str(Path(project_root) / git_dir) if not Path(git_dir).is_absolute() else git_dir
+    if Path(common_dir).resolve() == Path(git_dir).resolve():
+        # Legitimate non-worktree: project_root itself IS the main checkout.
+        return None
+    # Derive main repo working tree root from common-dir parent
+    candidate = Path(common_dir).parent
+    # Confirm with git --show-toplevel from the candidate. If this fails the
+    # candidate is not a valid working tree (bare-repo-backed worktree or
+    # corrupt layout) — a genuine failure, not a non-worktree, so raise.
+    try:
         toplevel_result = subprocess.run(
             ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
             capture_output=True,
@@ -106,13 +155,18 @@ def _resolve_main_repo_root_cached(project_root: Path) -> Optional[Path]:
             check=False,
             env=_clean_env,
         )
-        if toplevel_result.returncode == 0:
-            toplevel = toplevel_result.stdout.strip()
-            if toplevel:
-                return Path(toplevel).resolve()
-        return None
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise MainRepoProbeError(
+            f"git --show-toplevel failed for main-repo candidate {candidate}: {exc}"
+        ) from exc
+    if toplevel_result.returncode == 0:
+        toplevel = toplevel_result.stdout.strip()
+        if toplevel:
+            return Path(toplevel).resolve()
+    raise MainRepoProbeError(
+        f"could not derive main working tree from common-dir {common_dir} "
+        f"(candidate {candidate}) for worktree {project_root}"
+    )
 
 
 # Expose cache_clear on the public wrapper name so tests and callers
@@ -2891,6 +2945,46 @@ def apply_step_config(steps: list, project_root: Optional[Path] = None) -> list:
         except ValueError:
             pass  # Ignore invalid step names
 
+    return result
+
+
+def append_worktree_merge_steps(steps: list) -> list:
+    """Insert the two merge-side steps (integrate → reconcile) right after ``commit``.
+
+    The release point of a worktree flow is the merge, and it must be the
+    *immediate* post-commit boundary: once the de-versioned branch commit
+    exists, the very next thing is landing it on master. No ordinary /
+    post-commit step (e.g. a configured ``summarize``) may run in the worktree
+    between the branch commit and the merge — otherwise flow steps execute in
+    the worktree after the de-versioned commit but before the merge-side
+    release point.
+
+    Shared by ``StateMachine.create_flow`` and ``analyze._update_flow_steps``
+    so the analyze-time sequence re-derivation cannot silently drop the merge
+    steps.
+
+    Idempotent: a step type already present is not duplicated. If ``commit`` is
+    absent (unusual sequence), the pair is appended at the tail as a fallback.
+    """
+    from .engine.models import StepType
+
+    merge_steps = [
+        st
+        for st in (StepType.MERGE_INTEGRATE, StepType.VERSION_RECONCILE)
+        if st not in steps
+    ]
+    if not merge_steps:
+        return list(steps)
+
+    result = list(steps)
+    try:
+        insert_at = result.index(StepType.COMMIT) + 1
+    except ValueError:
+        # No commit step in this sequence — fall back to appending at the tail
+        # so the merge steps still run last rather than being dropped.
+        result.extend(merge_steps)
+        return result
+    result[insert_at:insert_at] = merge_steps
     return result
 
 

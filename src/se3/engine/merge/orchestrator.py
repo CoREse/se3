@@ -824,6 +824,17 @@ class MergeOrchestrator:
         # ``max_fixup_depth=`` so depth=2 ([bump → fix-up → merge])
         # passes correctly.
         self._aggregation_fixup_depth: int = 0
+        # Pre-merge intent snapshot, populated by ``execute()``. The set holds
+        # the flow_ids of unconsumed intents already on master before this
+        # merge; ``_snapshot_ok`` records whether that snapshot actually
+        # completed. Default True so a direct unit-test call of
+        # ``_merged_tree_has_version_intents`` (which never runs ``execute()``)
+        # exercises the introduced-intent logic on the assumption of a good
+        # snapshot. ``execute()`` resets ``_snapshot_ok`` to False before
+        # capturing and re-arms it only on success, so a read fault (empty
+        # pre_merge_sha / probe error) correctly degrades to the legacy path.
+        self._pre_merge_intent_ids: set[str] = set()
+        self._pre_merge_snapshot_ok: bool = True
 
     @property
     def recorded_escalations(self) -> list[dict]:
@@ -1263,6 +1274,64 @@ class MergeOrchestrator:
             )
             _record_failure(f"infer error: {exc}")
 
+    def _merged_tree_has_version_intents(self) -> bool:
+        """True when this merge carries an as-yet-unreconciled VersionIntent.
+
+        De-versioning split (2026-07-06): a merged-in worktree branch emits a
+        :class:`VersionIntent` and the merge-side ``reconcile()`` step/entry —
+        which now runs unconditionally after ``integrate()`` in both entry
+        points — owns the version decision from it. Running the legacy per-branch
+        aggregation too would DOUBLE-BUMP an intent-carrying branch whose tip
+        also advanced the version file: ``infer_branch_bump`` applies the file
+        delta, then ``reconcile()`` applies the intent on top. So the legacy path
+        must stand down whenever THIS merge brings in unconsumed intents.
+
+        ``include_consumed=False`` is load-bearing: every reconcile commits the
+        consumed intent JSON into master and never deletes it, so probing with
+        ``include_consumed=True`` would see that permanent residue and suppress
+        aggregation for ALL later merges — including a pure legacy branch that
+        advances the version file directly and carries no intent, which would
+        then land verbatim with no bump. The just-merged branch's own intent is
+        still unconsumed at this point (reconcile runs after execute/integrate),
+        so it is counted here while long-consumed historical intents are not;
+        pure legacy (no-intent) branches keep aggregating exactly as before.
+
+        Filtering against ``_pre_merge_intent_ids`` is the second load-bearing
+        guard: an unconsumed intent left on master by a *different* flow (Flow A
+        finished ``merge_integrate`` but has not yet run ``version_reconcile``)
+        is NOT contributed by the branches this merge is bringing in. Counting it
+        would wrongly stand aggregation down for a concurrent pure-legacy
+        ``se3 merge``, so the legacy branch would land with no bump. Only intents
+        absent from master's pre-merge tree (i.e. introduced by these branches)
+        are counted. Any read fault degrades to ``False`` (fall back to the
+        legacy path) rather than aborting the merge.
+
+        A failure to snapshot the pre-merge intent set (``_pre_merge_snapshot_ok``
+        is False — e.g. ``git rev-parse HEAD`` stalled so ``pre_merge_sha`` was
+        empty, or ``intent_flow_ids_at_ref`` raised) is itself a read fault: an
+        empty ``_pre_merge_intent_ids`` in that case does NOT mean "no
+        pre-existing intents", so treating it as such would wrongly count an
+        unrelated concurrent flow's leftover intent as introduced by these
+        branches and stand aggregation down for a pure-legacy branch. Degrade to
+        ``False`` (legacy aggregation keeps bumping exactly as before).
+        """
+        if not getattr(self, "_pre_merge_snapshot_ok", False):
+            return False
+        try:
+            from ..version_intent import collect_intents
+
+            pre_existing = getattr(self, "_pre_merge_intent_ids", None) or set()
+            introduced = [
+                intent
+                for intent in collect_intents(
+                    self.project_root, include_consumed=False
+                )
+                if intent.flow_id not in pre_existing
+            ]
+            return bool(introduced)
+        except Exception:  # noqa: BLE001 - intent probing must never abort the merge
+            return False
+
     def execute(self, branches: list[str]) -> MergeReport:
         """Execute sequential merge of all branches.
 
@@ -1510,6 +1579,31 @@ class MergeOrchestrator:
         except subprocess.TimeoutExpired:
             self._log("git rev-parse HEAD timed out — cannot capture pre-merge SHA")
             pre_merge_sha = ""
+
+        # Snapshot which version-intents already exist on master BEFORE this
+        # merge. Only intents INTRODUCED by the branches being merged should
+        # suppress legacy version aggregation; a leftover unconsumed intent from
+        # an unrelated flow (still awaiting its own version_reconcile) must NOT
+        # stand aggregation down for a pure legacy branch that carries no intent.
+        # ``_pre_merge_snapshot_ok`` distinguishes a genuinely empty pre-merge
+        # intent set (snapshot succeeded, nothing outstanding) from a read fault
+        # (empty ``pre_merge_sha`` or an intent-probe error). Only the former may
+        # let _merged_tree_has_version_intents count introduced intents; a fault
+        # must degrade to the legacy path, so the flag stays False unless the
+        # snapshot actually completed.
+        self._pre_merge_intent_ids: set[str] = set()
+        self._pre_merge_snapshot_ok: bool = False
+        if pre_merge_sha:
+            try:
+                from ..version_intent import intent_flow_ids_at_ref
+
+                self._pre_merge_intent_ids = intent_flow_ids_at_ref(
+                    self.project_root, pre_merge_sha
+                )
+                self._pre_merge_snapshot_ok = True
+            except Exception:  # noqa: BLE001 - intent probing must never abort the merge
+                self._pre_merge_intent_ids = set()
+                self._pre_merge_snapshot_ok = False
         # B5 fix: wrap read_version_at_ref so a TimeoutExpired (transient
         # git stall) is logged distinctly from a missing version file.
         # Without this, the inner subprocess.TimeoutExpired propagates
@@ -2339,9 +2433,16 @@ class MergeOrchestrator:
         # branch_bumps is only populated for branches whose git merge
         # succeeded, so it serves as the gate: if empty, there is nothing
         # to aggregate.
+        #
+        # De-versioning split: when merged-in branches carry a VersionIntent the
+        # merge-side reconcile owns the version decision, so the legacy path is
+        # suppressed to avoid double-bumping (see
+        # ``_merged_tree_has_version_intents``).
+        has_version_intents = self._merged_tree_has_version_intents()
         if (
             branch_bumps
             and effective_pre_merge_version
+            and not has_version_intents
         ):
             report.effective_pre_merge_version = effective_pre_merge_version
             self._log("Aggregating SemVer bumps from merged branches")
@@ -2717,7 +2818,16 @@ class MergeOrchestrator:
                 self._log(f"Version aggregation raised: {exc}")
         else:
             report.version_aggregation_skipped = True
-            if report.failed_branch is not None:
+            if has_version_intents:
+                # The merge-side reconcile step/entry owns the version decision
+                # for intent-carrying branches; the legacy aggregation stands
+                # down so the two deciders never both fire (double-bump guard).
+                self._log(
+                    "Skipping legacy version aggregation: merged branches carry "
+                    "VersionIntents; the merge-side reconcile owns the version "
+                    "decision"
+                )
+            elif report.failed_branch is not None:
                 self._log(
                     f"Skipping version aggregation: branch '{report.failed_branch}' "
                     f"failed ({report.failure_reason}); aggregation requires a "
@@ -6227,6 +6337,7 @@ def integrate(
     delete_merged: bool = True,
     strict_runtime_sync: bool = False,
     acquire_lock: bool = True,
+    suppress_human_call: bool = True,
 ) -> MergeResult:
     """Library entry point: integrate *branches* into the current branch.
 
@@ -6258,17 +6369,22 @@ def integrate(
             collisions.
         acquire_lock: Acquire the process-wide merge lock inside ``execute``.
             Pass ``False`` when the caller already holds it.
+        suppress_human_call: Run in library mode (default) — record escalations
+            on the result instead of writing ``se3/calls/`` files or printing
+            terminal instructions. Passed through so the CLI adapter can keep
+            the worktree merge-back's legacy call-file behaviour by supplying
+            ``False``.
 
     Returns:
         The :class:`MergeResult` from the underlying orchestration run.
     """
     orchestrator = MergeOrchestrator(
-        project_root,
+        project_root=project_root,
         strategy=strategy,
         delete_merged=delete_merged,
         strict_runtime_sync=strict_runtime_sync,
         acquire_lock=acquire_lock,
-        suppress_human_call=True,
+        suppress_human_call=suppress_human_call,
     )
     report = orchestrator.execute(branches)
     # Expose the recorded escalations on the result so both entry points (the

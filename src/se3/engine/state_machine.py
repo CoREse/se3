@@ -61,6 +61,19 @@ class TransitionError(StateMachineError):
     pass
 
 
+class MergeCheckoutResolutionError(StateMachineError):
+    """The main checkout for a worktree flow's merge-side steps is unresolvable.
+
+    Raised when a worktree flow cannot positively resolve the main checkout the
+    merge-side steps (``merge_integrate`` / ``version_reconcile``) must run in.
+    Failing loudly is mandatory: silently falling back to the isolation worktree
+    would run the merge / version reconcile in the wrong checkout, landing the
+    branch and writing the version/changelog outside master.
+    """
+
+    pass
+
+
 def _reset_retry_counter_for_new_call(step: "Step") -> None:
     """Clear ``step.inputs['retry_count']`` at a transition point where the
     next LLM call is a fresh one (new discovery round, new fix iteration,
@@ -398,10 +411,29 @@ class StateMachine:
         # ``_merge_step_cwd`` when a merge step is instantiated — kept stable here
         # so the value cannot drift with the transient project_root rebinding the
         # merge steps perform while executing.
+        #
+        # Only ever stash a POSITIVELY-resolved main checkout: a probe fault here
+        # must NOT be papered over by stashing the (worktree) project_root, since
+        # that stale value would later send the merge-side steps into the
+        # isolation worktree. Flow creation itself stays tolerant of a transient
+        # probe failure (git momentarily unavailable, worktree not fully wired
+        # yet) — we simply leave the stash empty and let ``_merge_step_cwd``
+        # strictly re-resolve at execution time, failing loudly there if the
+        # main checkout still cannot be resolved (fail-before-executing, never
+        # run-in-the-wrong-checkout).
         if is_worktree_mode:
-            flow.state.context["merge_checkout_root"] = str(
-                self._resolve_main_checkout_root()
-            )
+            try:
+                flow.state.context["merge_checkout_root"] = str(
+                    self._resolve_main_checkout_root()
+                )
+            except MergeCheckoutResolutionError:
+                logger.debug(
+                    "Deferring merge_checkout_root resolution for worktree flow "
+                    "at %s; main checkout unresolvable at creation, will re-resolve "
+                    "strictly before any merge-side step runs.",
+                    self.project_root,
+                    exc_info=True,
+                )
 
         # Create first step
         first_step_type = selected_steps[0] if selected_steps else StepType.ANALYZE
@@ -431,33 +463,51 @@ class StateMachine:
         """Resolve the main checkout for merge-side steps from ``self.project_root``.
 
         A worktree flow's ``self.project_root`` is the linked worktree; the merge
-        must land on the main checkout. ``_resolve_main_repo_root`` walks back from
-        a linked worktree to its main repo (and is a no-op when already on it).
-        Any resolution fault degrades to ``self.project_root`` rather than raising.
-        """
-        try:
-            from ..config import _resolve_main_repo_root
+        must land on the main checkout. :func:`config.probe_main_repo_root` walks
+        back from a linked worktree to its main repo, returns ``None`` only for
+        the legitimate case that ``self.project_root`` is itself the main checkout
+        (not a worktree), and raises on any genuine probe fault.
 
-            return Path(_resolve_main_repo_root(self.project_root))
-        except Exception:  # noqa: BLE001 - never let root resolution abort creation
-            logger.debug("Failed to resolve main checkout root", exc_info=True)
-            return self.project_root
+        This resolution is strict — used only for worktree merge-side steps, it
+        must NOT degrade to ``self.project_root`` on failure. A silent fallback
+        to the linked worktree would run the merge / version reconcile in the
+        isolation worktree, landing the branch and writing the version/changelog
+        outside master. A genuine probe fault is therefore re-raised as
+        :class:`MergeCheckoutResolutionError` so the flow fails before any
+        merge-side step executes in the wrong checkout.
+        """
+        from ..config import MainRepoProbeError, probe_main_repo_root
+
+        resolved = Path(self.project_root).resolve()
+        try:
+            main = probe_main_repo_root(resolved)
+        except MainRepoProbeError as exc:
+            raise MergeCheckoutResolutionError(
+                f"Cannot resolve the main checkout for worktree flow at "
+                f"{self.project_root}; refusing to run merge-side steps in the "
+                f"isolation worktree: {exc}"
+            ) from exc
+        # ``None`` means project_root is not a worktree — it IS the main checkout.
+        return main if main is not None else resolved
 
     def _append_worktree_merge_steps(
         self, steps: list[StepType]
     ) -> list[StepType]:
-        """Append the two merge-side steps to a worktree flow's sequence.
+        """Insert the two merge-side steps (integrate → reconcile) after ``commit``.
+
+        The release point of a worktree flow is the merge, and it must be the
+        immediate post-commit boundary — no ordinary/post-commit step (e.g. a
+        configured ``summarize``) may run in the worktree between the branch
+        commit and the merge. Delegates to the shared
+        :func:`config.append_worktree_merge_steps` so this and
+        ``analyze._update_flow_steps`` derive the same sequence.
 
         Idempotent: a step type already present (e.g. a resumed / re-derived
-        sequence) is not duplicated. Order is integrate → reconcile, both after
-        every ordinary step (commit / summarize), so the flow's "done" means the
-        work has actually landed on master.
+        sequence) is not duplicated.
         """
-        result = list(steps)
-        for step_type in (StepType.MERGE_INTEGRATE, StepType.VERSION_RECONCILE):
-            if step_type not in result:
-                result.append(step_type)
-        return result
+        from ..config import append_worktree_merge_steps
+
+        return append_worktree_merge_steps(steps)
 
     def _merge_step_cwd(
         self, flow: FlowInstance, step_type: StepType
@@ -579,6 +629,112 @@ class StateMachine:
             )
             return False
 
+    def _acquire_merge_step_lock(
+        self, lock, flow: FlowInstance, step: Step, history_root: Path
+    ) -> None:
+        """Acquire the main-worktree merge lock, surfacing a wait state on contention.
+
+        Mirrors run.py's ``_ensure_main_lock_for_step`` for the merge-side steps
+        (merge_integrate / version_reconcile) of a worktree flow: a non-blocking
+        probe first, and only if the lock is genuinely held by another run/merge
+        does it mark the flow ``waiting_for_lock=True`` (persisted so the daemon /
+        web UI show a queued-and-waiting flow rather than a generic running step),
+        emit a streaming ``waiting_for_lock`` history anchor, then block until the
+        holder releases. On acquisition the flag is cleared and, when a wait
+        anchor was written, a matching ``record_lock_acquired`` clears the live
+        transcript's "等待锁" row. All bookkeeping is best-effort — a persistence
+        or history-write hiccup never blocks the actual lock acquisition.
+        """
+        from ..commands.merge.merge_lock import MergeLockBusy, MergeLockStale
+
+        acquired = False
+        try:
+            lock.acquire(blocking=False)
+            acquired = True
+        except MergeLockStale:
+            try:
+                lock.acquire(blocking=False, break_stale=True)
+                acquired = True
+            except (MergeLockBusy, MergeLockStale):
+                acquired = False
+        except MergeLockBusy:
+            acquired = False
+
+        wrote_waiting = False
+        if not acquired:
+            flow.waiting_for_lock = True
+            try:
+                self.persistence.save_flow(flow)
+            except Exception:  # noqa: BLE001 - bookkeeping must not block the lock
+                logger.debug(
+                    "failed to persist waiting_for_lock=True for %s",
+                    flow.flow_id, exc_info=True,
+                )
+            try:
+                from .chat_history import record_waiting_for_lock
+
+                record_waiting_for_lock(
+                    project_root=history_root,
+                    flow_id=flow.flow_id,
+                    step_id=step.step_id,
+                    step_type=step.step_type.value,
+                )
+                wrote_waiting = True
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "failed to record waiting_for_lock for %s",
+                    step.step_id, exc_info=True,
+                )
+            try:
+                lock.acquire(blocking=True)
+            except BaseException:
+                # Any escape from the blocking acquire — a Ctrl+C queued behind
+                # another merge (KeyboardInterrupt), or an OSError/stale-lock error
+                # surfacing mid-wait — exits with waiting_for_lock=True already
+                # persisted while no lock was actually acquired. Clear + persist the
+                # flag before propagating (exception-symmetric, not just the
+                # interrupt case), else engine.json records status=running +
+                # waiting_for_lock=True for a dead process and the daemon/web console
+                # keeps rendering a stale "等待主分支锁" badge until a later resume
+                # re-enters the acquire path. Mirrors run.py's
+                # _ensure_main_lock_for_step interrupt handling for the
+                # synchronous-run lock wait.
+                flow.waiting_for_lock = False
+                try:
+                    self.persistence.save_flow(flow)
+                except Exception:  # noqa: BLE001 - best-effort on the failure path
+                    logger.debug(
+                        "failed to persist waiting_for_lock=False on lock-wait failure for %s",
+                        flow.flow_id, exc_info=True,
+                    )
+                raise
+
+        if flow.waiting_for_lock:
+            flow.waiting_for_lock = False
+            try:
+                self.persistence.save_flow(flow)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "failed to persist waiting_for_lock=False for %s",
+                    flow.flow_id, exc_info=True,
+                )
+
+        if wrote_waiting:
+            try:
+                from .chat_history import record_lock_acquired
+
+                record_lock_acquired(
+                    project_root=history_root,
+                    flow_id=flow.flow_id,
+                    step_id=step.step_id,
+                    step_type=step.step_type.value,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "failed to record lock-acquired for %s",
+                    step.step_id, exc_info=True,
+                )
+
     @contextmanager
     def _step_cwd_override(self, flow: FlowInstance, step: Step):
         """Run *step* against its ``cwd`` override, inside the merge lock.
@@ -599,24 +755,53 @@ class StateMachine:
         only the *handler's* view of the project moves to the main checkout. On
         exit everything is restored and the lock released, even on error.
 
-        A step with no override yields unchanged (the overwhelmingly common
-        path), holding no lock and touching nothing.
+        A non-merge step with no override yields unchanged (the overwhelmingly
+        common path), holding no lock and touching nothing. A merge-side step
+        (MERGE_INTEGRATE / VERSION_RECONCILE) whose persisted header LOST its
+        ``cwd`` (a corrupted / hand-edited engine.json, or a reconstructed resume
+        flow) still mutates master — the handler's strict ``_resolve_merge_root``
+        fallback resolves the main checkout and proceeds — so it must NOT run
+        unserialised. Keying the lock on the presence of ``step.cwd`` would let
+        such a step land branches / write versions on master concurrently with a
+        ``se3 merge``. So for a merge-side step we resolve the main checkout the
+        same strict way and acquire the lock at that root regardless.
         """
-        if not step.cwd:
+        _merge_side = step.step_type in (
+            StepType.MERGE_INTEGRATE,
+            StepType.VERSION_RECONCILE,
+        )
+        if not step.cwd and not _merge_side:
             yield
             return
 
-        override_root = Path(step.cwd)
+        # A merge-side step missing its cwd override still must hold the lock:
+        # resolve the main checkout strictly (fail-loud on a genuine probe fault,
+        # never degrading to the isolation worktree).
+        override_root = Path(step.cwd) if step.cwd else self._resolve_main_checkout_root()
         saved_root = self.project_root
-        saved_ctx_root = (
-            flow.state.context.get("project_root") if flow.state else None
-        )
         # The merge lock file lives at ``<main checkout>/se3/state/merge.lock``;
         # the override root IS the main checkout, so it is the lock root.
-        from ..commands.merge.merge_lock import MergeLock
+        from ..commands.merge.merge_lock import MergeLock, is_lock_held_in_process
 
-        lock = MergeLock(override_root, blocking=True)
-        lock.acquire(blocking=True)
+        # Same-process re-entry guard (mirrors the orchestrator's defence at
+        # orchestrator._execute): if this process already holds the main-worktree
+        # merge lock — e.g. a caller ran the whole worktree flow through run_flow
+        # with acquire_main_lock=True, so _ensure_main_lock_for_step holds the
+        # lock for the run's duration — a blocking flock against the same lock
+        # file on a fresh fd would deadlock forever with no timeout. Detect the
+        # already-held lock via the in-process registry and skip re-acquisition,
+        # running the merge step under the externally-held lock.
+        already_held = is_lock_held_in_process(override_root)
+        lock = None if already_held else MergeLock(override_root, blocking=True)
+        if lock is not None:
+            # Surface the same running "等待锁" state a synchronous run shows while
+            # it queues for the main-worktree mutex (run.py's
+            # _ensure_main_lock_for_step): a second worktree flow reaching
+            # merge_integrate concurrently must appear as running-and-waiting, not
+            # a generic silent running step. The history anchor lands in the
+            # flow's own home (``saved_root`` — self.project_root is not yet
+            # rebound to the override here).
+            self._acquire_merge_step_lock(lock, flow, step, saved_root)
         try:
             self.project_root = override_root
             if flow.state is not None:
@@ -625,14 +810,21 @@ class StateMachine:
         finally:
             self.project_root = saved_root
             if flow.state is not None:
-                if saved_ctx_root is None:
-                    flow.state.context.pop("project_root", None)
-                else:
-                    flow.state.context["project_root"] = saved_ctx_root
-            try:
-                lock.release()
-            except Exception:  # noqa: BLE001 - release must never mask step result
-                logger.debug("merge lock release failed", exc_info=True)
+                # Restore to the flow's OWN home (``saved_root``), never to the
+                # value read from persisted context. The rebind above is
+                # transient and may have been persisted mid-step; if the process
+                # died and this is a crash-resume re-run, the persisted context
+                # already holds the override (main) root — restoring that would
+                # leak the main checkout into every subsequent step permanently.
+                # ``saved_root`` is self.project_root at entry (the worktree home,
+                # reconstructed fresh each process from the actual checkout), so
+                # it is the crash-independent correct value.
+                flow.state.context["project_root"] = str(saved_root)
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:  # noqa: BLE001 - release must never mask step result
+                    logger.debug("merge lock release failed", exc_info=True)
 
     def run_step(
         self,

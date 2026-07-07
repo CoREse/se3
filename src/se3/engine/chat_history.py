@@ -1013,6 +1013,13 @@ def get_step_history(
                 "step_failed",
                 "step_output",
                 "waiting_for_lock",
+                # Legacy anchor: pre-change worktree flows recorded a bare
+                # ``{"type": "merging"}`` bypass-status row (the webui merge
+                # side-state, now retired in favour of the merge_integrate /
+                # version_reconcile steps). It carries no ``role`` and is not a
+                # ChatMessage, so keep silently skipping it here rather than
+                # letting it fall through to a malformed-history warning.
+                "merging",
             ) and "role" not in data:
                 continue
             # Stream-progress records (written by record_stream_progress) carry

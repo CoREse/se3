@@ -242,6 +242,120 @@ class TestPromptIncludesSessionCommitsAndPreSession:
         )
 
 
+class TestWorktreeIntentPersistenceIsMandatory:
+    """A worktree flow must FAIL if its version intent cannot be persisted.
+
+    The merge-side ``version_reconcile`` derives the final version SOLELY from
+    the committed intent. If ``write_intent`` fails and the step still reported
+    COMPLETED, the branch would land with no intent, reconcile would treat the
+    session as contributing no bump, and the feature would merge with no version
+    bump or changelog — silently. So a persist failure must surface as a FAILED
+    (resumable) step, not a best-effort warning.
+    """
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_write_intent_oserror_fails_the_step(
+        self, mock_caller_cls, mock_ver, mock_inject
+    ):
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = _llm_response_json(
+            bump_type="minor", suggested_version="5.2.0"
+        )
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(is_worktree_mode=True)
+        step = _make_step(
+            {"task_description": "Add a feature", "pre_session_version": "5.1.0"}
+        )
+
+        # write_intent is imported inside _emit_version_intent as
+        # ``from ..version_intent import ... write_intent``; patch it at the
+        # source module so the local import binds to the failing stub.
+        with patch(
+            "se3.engine.version_intent.write_intent",
+            side_effect=OSError("read-only filesystem"),
+        ):
+            result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        assert step.error_message
+        assert "version-intents" in step.error_message
+        # No authoritative version leaks into outputs on the worktree path.
+        assert "suggested_version" not in step.outputs
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_successful_persist_still_completes(
+        self, mock_caller_cls, mock_ver, mock_inject, tmp_path
+    ):
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = _llm_response_json(
+            bump_type="minor", suggested_version="5.2.0"
+        )
+        mock_caller_cls.return_value = mock_caller
+
+        # project_root is derived from flow.change_path.parent; point it at the
+        # tmp dir so the intent lands somewhere writable and inspectable.
+        flow = _make_flow(
+            is_worktree_mode=True,
+            flow_id="flow-persist-ok",
+            change_path=tmp_path / "se3.yaml",
+        )
+        step = _make_step(
+            {"task_description": "Add a feature", "pre_session_version": "5.1.0"}
+        )
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        # The intent file was actually written under the project root.
+        assert (tmp_path / "se3" / "version-intents" / "flow-persist-ok.json").exists()
+        assert step.outputs["version_intent"]["bump_type"] == "minor"
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._version_bumping_enabled", return_value=False)
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_version_disabled_worktree_emits_no_intent(
+        self, mock_caller_cls, mock_ver, mock_enabled, mock_inject, tmp_path
+    ):
+        """version.enabled=false in worktree mode must NOT emit an intent (nor
+        write one to disk): emitting one would make the merge-side reconcile bump
+        a version the project deliberately does not manage. The step still
+        COMPLETEs — the merge lands with no automatic bump, exactly as a
+        non-worktree disabled flow does."""
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = _llm_response_json(
+            bump_type="minor", suggested_version="5.2.0"
+        )
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(
+            is_worktree_mode=True,
+            flow_id="flow-disabled",
+            change_path=tmp_path / "se3.yaml",
+        )
+        step = _make_step(
+            {"task_description": "Add a feature", "pre_session_version": "5.1.0"}
+        )
+
+        # write_intent must never be reached when bumping is disabled.
+        with patch(
+            "se3.engine.version_intent.write_intent",
+            side_effect=AssertionError("write_intent must not run when disabled"),
+        ):
+            result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert "version_intent" not in step.outputs
+        assert "suggested_version" not in step.outputs
+        # Nothing was written to the intents directory.
+        assert not (tmp_path / "se3" / "version-intents").exists()
+
+
 class TestEndToEndDoubleBumpReplay:
     """End-to-end regression for the 20260512-225655 double-bump scenario.
 
@@ -407,9 +521,18 @@ class TestEndToEndDoubleBumpReplay:
         mock_bumper.read_version.return_value = "5.2.0"  # disk already at 5.2.0
         mock_bumper.set_version.return_value = "5.2.0"
 
+        # The session's own "bump version to 5.2.0" commit put 5.2.0 on disk, so
+        # in a real run its Flow+Version trailer makes ``_flow_wrote_version``
+        # report True — the disk version is THIS flow's own work, not a concurrent
+        # bump. The guard then keeps the resolved target as-is (no re-analysis).
+        # We stub it True here because subprocess is mocked away (no real git
+        # history to grep); without this the guard would treat the flow's own
+        # in-session bump as indistinguishable-from-concurrent drift and, on a
+        # re-analysis that returns the same 5.2.0, halt to avoid a collision.
         with patch("se3.engine.steps.commit._has_changes", return_value=True), \
              patch("se3.engine.steps.commit._load_version_config") as mock_load_cfg, \
              patch("se3.engine.steps.commit._get_commit_hash", return_value="ffffffff"), \
+             patch("se3.engine.steps.commit._flow_wrote_version", return_value=True), \
              patch("se3.engine.steps.commit.subprocess") as mock_subproc, \
              patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             cfg = MagicMock()
@@ -432,3 +555,82 @@ class TestEndToEndDoubleBumpReplay:
         write_calls = [c.kwargs.get("version") for c in mock_bumper.set_version.call_args_list]
         assert "5.2.1" not in write_calls
         assert commit_step.outputs.get("version") == "5.2.0"
+
+
+class TestGuardVersionRaceOwnReplay:
+    """Fix (iteration 4): the non-worktree race guard must not treat the flow's
+    OWN already-committed version as concurrent drift.
+
+    The pre-fix guard declared drift on any disk version above the pre-session
+    baseline and re-ran version_analyze against it. On a replay/resume over the
+    flow's own prior commit (disk already at the version this flow wrote), a
+    baseline-sensitive LLM would then bump AGAIN (5.2.0 → 5.2.1/5.3.0). The fix
+    detects the flow's own prior write via the git-durable Flow+Version trailer
+    and keeps the already-resolved target instead of re-analysing.
+    """
+
+    def _guard_flow(self, tmp_path):
+        flow = _make_flow(change_path=tmp_path / "se3.yaml", flow_id="flow-own")
+        flow.state = State()
+        return flow
+
+    def test_own_prior_write_is_not_treated_as_drift(self, tmp_path):
+        from se3.engine.steps import commit as commit_mod
+
+        flow = self._guard_flow(tmp_path)
+        step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
+        step.inputs = {"pre_session_version": "5.1.0"}
+
+        with patch.object(commit_mod, "_flow_wrote_version", return_value=True) as m_own, \
+             patch.object(commit_mod, "_reanalyze_version_with_baseline") as m_re:
+            result = commit_mod._guard_version_race(
+                step, flow, disk_version="5.2.0", target_version="5.2.0"
+            )
+
+        # Own replay → keep the resolved target, do NOT re-analyse (no 2nd bump).
+        assert result == "5.2.0"
+        m_own.assert_called_once()
+        m_re.assert_not_called()
+
+    def test_true_concurrent_drift_still_reanalyses(self, tmp_path):
+        from se3.engine.steps import commit as commit_mod
+
+        flow = self._guard_flow(tmp_path)
+        step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
+        step.inputs = {"pre_session_version": "5.1.0"}
+
+        # Not our own write (another flow bumped first) → recompute past it.
+        with patch.object(commit_mod, "_flow_wrote_version", return_value=False), \
+             patch.object(
+                 commit_mod, "_reanalyze_version_with_baseline", return_value="5.3.0"
+             ) as m_re:
+            result = commit_mod._guard_version_race(
+                step, flow, disk_version="5.2.0", target_version="5.2.0"
+            )
+
+        assert result == "5.3.0"
+        m_re.assert_called_once()
+
+    def test_reanalysis_returning_disk_version_halts(self, tmp_path):
+        """Re-analysis that still returns the drifted disk version must halt.
+
+        Fix (iteration 7): a concurrent flow bumped disk to 5.2.0; this flow's
+        re-analysis erroneously returns 5.2.0 again (equal to the new baseline).
+        Writing it would file this flow's changelog under the number the
+        concurrent flow just released — the 10.7.1-type shared-version accident
+        the guard exists to block. The guard must raise, not log-and-write.
+        """
+        from se3.engine.steps import commit as commit_mod
+
+        flow = self._guard_flow(tmp_path)
+        step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
+        step.inputs = {"pre_session_version": "5.1.0"}
+
+        with patch.object(commit_mod, "_flow_wrote_version", return_value=False), \
+             patch.object(
+                 commit_mod, "_reanalyze_version_with_baseline", return_value="5.2.0"
+             ):
+            with pytest.raises(RuntimeError, match="colliding version"):
+                commit_mod._guard_version_race(
+                    step, flow, disk_version="5.2.0", target_version="5.2.0"
+                )

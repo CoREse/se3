@@ -122,6 +122,75 @@ class TestDuplicateVersionMerge:
         content = versions.read_text(encoding="utf-8")
         assert content.count("- already here") == 1
 
+    def test_suffixless_custom_template_header_is_merged(self, tmp_path):
+        # A custom ``## {{version}}`` template renders headers with NO
+        # ``- <date>`` suffix. A second update for the same version must merge
+        # into that existing block, not insert a duplicate header (the old
+        # ``## <version> -`` detector required the suffix and missed these).
+        versions = tmp_path / "VERSIONS.md"
+        versions.write_text(
+            "# Version History\n\n"
+            "## 2026.07.06\n\n"
+            "- already here\n",
+            encoding="utf-8",
+        )
+
+        updater = DocumentationUpdater(
+            tmp_path,
+            config={"versions_entry_template": "## {{version}}\n\n{{changes}}\n"},
+        )
+        updater.update_versions_md("2026.07.06", ["now merged in"])
+
+        content = versions.read_text(encoding="utf-8")
+        assert content.count("## 2026.07.06") == 1
+        assert "- already here" in content
+        assert "- now merged in" in content
+
+    def test_suffixless_header_merged_under_default_template(self, tmp_path):
+        # The inverse of the custom-template case: a bare ``## 1.2.3`` header
+        # (hand-edited, or written earlier under a suffixless template) must be
+        # recognised and merged into even when the EFFECTIVE template is the
+        # default ``## {{version}} - {{date}}``. The old detector required the
+        # `` - <date>`` tail immediately after the version and inserted a second
+        # ``## 1.2.3`` block, re-creating the fragmented-changelog shape the
+        # merge fix targets.
+        versions = tmp_path / "VERSIONS.md"
+        versions.write_text(
+            "# Version History\n\n"
+            "## 1.2.3\n\n"
+            "- already here\n",
+            encoding="utf-8",
+        )
+
+        updater = DocumentationUpdater(tmp_path)  # default template
+        updater.update_versions_md("1.2.3", ["now merged in"])
+
+        content = versions.read_text(encoding="utf-8")
+        assert content.count("## 1.2.3") == 1
+        assert "- already here" in content
+        assert "- now merged in" in content
+
+    def test_prefix_version_not_matched_as_duplicate(self, tmp_path):
+        # Anti-prefix guard: updating ``11.13`` must NOT be mis-merged into an
+        # existing ``## 11.13.1`` block (the next char ``.`` is neither the
+        # template tail nor a whitespace/EOL boundary), so a genuinely new
+        # ``## 11.13`` header is created instead of corrupting the 11.13.1 block.
+        versions = tmp_path / "VERSIONS.md"
+        versions.write_text(
+            "# Version History\n\n"
+            "## 11.13.1 - 2026-01-01\n\n"
+            "- one-three-one\n",
+            encoding="utf-8",
+        )
+
+        updater = DocumentationUpdater(tmp_path)  # default template
+        updater.update_versions_md("11.13", ["distinct entry"])
+
+        content = versions.read_text(encoding="utf-8")
+        assert content.count("## 11.13.1") == 1
+        assert "- one-three-one" in content
+        assert "- distinct entry" in content
+
 
 # ---------------------------------------------------------------------------
 # (j) README.md with leading YAML front-matter
@@ -200,6 +269,33 @@ class TestConfigCustomEntryTemplate:
         updater.update_versions_md("4.5.6", ["custom rendered"])
         content = (tmp_path / "VERSIONS.md").read_text(encoding="utf-8")
         assert "ENTRY 4.5.6 | - custom rendered" in content
+
+    def test_non_heading_template_merges_same_version(self, tmp_path):
+        # A non-markdown-heading entry template still carries the version on its
+        # first line; a second update for that version must merge into the
+        # existing entry, not insert a duplicate block (the head/heading-only
+        # detector used to miss it and duplicate).
+        config = {"versions_entry_template": "ENTRY {{version}} | {{changes}}\n"}
+        updater = DocumentationUpdater(tmp_path, config=config)
+
+        updater.update_versions_md("4.5.6", ["first"])
+        updater.update_versions_md("4.5.6", ["second"])
+
+        content = (tmp_path / "VERSIONS.md").read_text(encoding="utf-8")
+        assert content.count("ENTRY 4.5.6") == 1
+        assert "- first" in content
+        assert "- second" in content
+
+        # A byte-identical re-write stays idempotent.
+        updater.update_versions_md("4.5.6", ["second"])
+        content = (tmp_path / "VERSIONS.md").read_text(encoding="utf-8")
+        assert content.count("- second") == 1
+
+        # A different version remains a distinct entry.
+        updater.update_versions_md("4.5.7", ["new feature"])
+        content = (tmp_path / "VERSIONS.md").read_text(encoding="utf-8")
+        assert content.count("ENTRY 4.5.6") == 1
+        assert content.count("ENTRY 4.5.7") == 1
 
 
 # ---------------------------------------------------------------------------

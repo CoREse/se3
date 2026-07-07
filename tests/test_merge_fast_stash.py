@@ -122,3 +122,49 @@ def test_fast_strategy_run_merge_stashes_dirty_tree(
     assert "scratch.txt" in post_status
     # feat.txt should now be committed (no entry in porcelain).
     assert (tmp_path / "feat.txt").exists()
+
+
+def test_incomplete_stash_pop_preserves_branch_under_delete_merged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the post-merge stash-pop does NOT finalize, ``run_merge``
+    skips ``reconcile()`` and returns non-zero, advertising a
+    whole-command rerun. The deferred ``--delete-merged`` cleanup MUST
+    therefore preserve the source branch: no version-reconcile commit was
+    created, so deleting the branch would make the rerun fail branch
+    validation and strand the merged intent on master with no reconcile
+    bump/changelog.
+    """
+    import se3.commands.merge_cmd as merge_cmd
+
+    default = _init_repo(tmp_path)
+    _make_feature_branch(tmp_path, "feature", "feat.txt")
+    _git(tmp_path, "checkout", default)
+
+    # Dirty target tree so the fast strategy takes the stash path.
+    (tmp_path / "README.md").write_text("dirty WIP content\n")
+    (tmp_path / "scratch.txt").write_text("untracked WIP\n")
+
+    # Force the stash-pop to report "incomplete" — the failure mode this
+    # regression guards. The branch merge still lands; only WIP restoration
+    # is unfinalised.
+    monkeypatch.setattr(
+        merge_cmd, "_fast_stash_pop", lambda *a, **k: True,
+    )
+
+    exit_code = run_merge(
+        branches=["feature"],
+        strategy="fast",
+        delete_merged=True,
+        project_root=tmp_path,
+    )
+    # Stash-pop-incomplete is a recoverable failure.
+    assert exit_code != 0
+
+    # The branch survives so the documented `se3 merge feature` rerun can
+    # re-attempt the version decision against it.
+    branches = _git(tmp_path, "branch", "--list", "feature").stdout
+    assert "feature" in branches, (
+        "source branch was deleted despite reconcile being skipped — "
+        "the advertised rerun path would fail branch validation"
+    )

@@ -4,6 +4,7 @@ Tests complete flow execution for real tasks.
 """
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -281,11 +282,14 @@ class TestWorktreeMergeSteps:
 
     A ``--worktree`` flow's release point is the merge, so its sequence ends
     with ``merge_integrate`` + ``version_reconcile`` (executed in the main
-    checkout under the merge lock via the step-level cwd override). These tests
+    checkout under the merge lock via the step-level cwd override). Most tests
     stub the ``integrate()`` / ``reconcile()`` libraries and drive the state
     machine to prove the wiring: sequence composition, end-to-end execution to a
     reconciled version, resume between the two steps, and the per-step
-    confirmation gate landing on the version decision only.
+    confirmation gate landing on the version decision only. One test
+    (``test_worktree_merge_steps_land_real_version_on_master``) drives the same
+    step path against the REAL libraries in a temp git repo, so a genuine
+    handler↔library integration break is caught here, not only in the CLI tests.
     """
 
     @staticmethod
@@ -337,6 +341,15 @@ class TestWorktreeMergeSteps:
 
     def _make_worktree_flow(self, project_root):
         (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        # The merge-side steps resolve their cwd via ``probe_main_repo_root``,
+        # which is deliberately strict: a non-git project_root is a genuine fault
+        # (a silent fallback to a linked worktree would land the merge outside the
+        # main checkout). Even for the mocked-library wiring tests the fixture must
+        # therefore be a real git repo so the probe resolves — here project_root is
+        # the main checkout itself, so the probe returns it as the merge cwd.
+        self._git(project_root, "init", "-q")
+        self._git(project_root, "config", "user.email", "t@example.com")
+        self._git(project_root, "config", "user.name", "Test")
         sm = StateMachine(project_root)
         self._register_mock_handlers(sm)
         flow = sm.create_flow(
@@ -370,15 +383,59 @@ class TestWorktreeMergeSteps:
             seq = flow.state.selected_steps
             assert StepType.MERGE_INTEGRATE in seq
             assert StepType.VERSION_RECONCILE in seq
-            # integrate strictly precedes reconcile, both at the tail
-            assert seq.index(StepType.MERGE_INTEGRATE) < seq.index(
-                StepType.VERSION_RECONCILE
-            )
-            assert seq[-1] == StepType.VERSION_RECONCILE
+            # The merge is the immediate post-commit boundary: integrate then
+            # reconcile land directly after commit, BEFORE any ordinary post-commit
+            # step (e.g. a configured summarize) — no flow step may run in the
+            # worktree between the de-versioned commit and the branch landing on
+            # master.
+            commit_i = seq.index(StepType.COMMIT)
+            assert seq[commit_i + 1] == StepType.MERGE_INTEGRATE
+            assert seq[commit_i + 2] == StepType.VERSION_RECONCILE
+            if StepType.SUMMARIZE in seq:
+                assert seq.index(StepType.SUMMARIZE) > seq.index(
+                    StepType.VERSION_RECONCILE
+                )
             # a non-worktree flow never gets them
             sm2 = StateMachine(Path(tmpdir))
             plain = sm2.create_flow("x", task_type="small", is_worktree_mode=False)
             assert StepType.MERGE_INTEGRATE not in plain.state.selected_steps
+
+    def test_analyze_rederive_preserves_worktree_merge_steps(self):
+        """The analyze step's sequence rebuild must NOT drop the merge steps.
+
+        ANALYZE is the first step of every task-type sequence and always rebuilds
+        ``selected_steps`` from scratch (:func:`analyze._update_flow_steps`). The
+        two merge-side steps create_flow appended for a worktree flow must survive
+        that rebuild in the post-commit position — a rebuild that discarded them
+        (the regression) would leave every ``se3 run --worktree`` completing at
+        summarize without ever merging or reconciling. The worktree e2e tests mock
+        the ANALYZE handler, so this drives the real re-derivation directly.
+        """
+        from se3.engine.steps.analyze import _update_flow_steps
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sm, flow = self._make_worktree_flow(root)
+            # change_path.parent is the project root _update_flow_steps loads
+            # config from; point it at the isolated tmpdir (no se3.yaml → defaults).
+            flow.change_path = root / "change"
+            assert StepType.MERGE_INTEGRATE in flow.state.selected_steps
+
+            _update_flow_steps(flow, "small")
+
+            seq = flow.state.selected_steps
+            assert StepType.MERGE_INTEGRATE in seq
+            assert StepType.VERSION_RECONCILE in seq
+            commit_i = seq.index(StepType.COMMIT)
+            assert seq[commit_i + 1] == StepType.MERGE_INTEGRATE
+            assert seq[commit_i + 2] == StepType.VERSION_RECONCILE
+
+            # a non-worktree flow's analyze rebuild still omits them
+            plain = sm.create_flow("x", task_type="small", is_worktree_mode=False)
+            plain.change_path = root / "change"
+            _update_flow_steps(plain, "small")
+            assert StepType.MERGE_INTEGRATE not in plain.state.selected_steps
+            assert StepType.VERSION_RECONCILE not in plain.state.selected_steps
 
     def test_worktree_flow_runs_to_reconcile_on_master(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -400,6 +457,129 @@ class TestWorktreeMergeSteps:
             assert kwargs.get("acquire_lock") is False
             # reconcile ran and produced the final version, recorded on the step
             mock_reconcile.assert_called_once()
+            reconcile_step = next(
+                s for s in flow.state.steps.values()
+                if s.step_type == StepType.VERSION_RECONCILE
+            )
+            assert reconcile_step.status == StepStatus.COMPLETED
+            assert reconcile_step.outputs["final_version"] == "11.13.0"
+            assert reconcile_step.outputs["base_version"] == "11.12.0"
+
+    @staticmethod
+    def _git(root, *args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def _make_real_git_project(self, root):
+        """A committed git project + a feature branch carrying a version intent.
+
+        Mirrors a de-versioned worktree session: a feature branch with a code
+        change plus a committed ``se3/version-intents/<flow>.json`` (changelog
+        bullet + minor bump hint, NO version number). Returns the default branch
+        name. HEAD is left on the default branch, so the merge steps merge the
+        feature branch into it.
+        """
+        from se3.engine.version_intent import VersionIntent, write_intent
+
+        (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (root / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\nversion = "11.12.0"\n', encoding="utf-8"
+        )
+        (root / "VERSIONS.md").write_text(
+            "# Demo Version History\n\n## 11.12.0 - 2026-07-06\n- baseline entry\n",
+            encoding="utf-8",
+        )
+        (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+        self._git(root, "init", "-q")
+        self._git(root, "config", "user.email", "t@example.com")
+        self._git(root, "config", "user.name", "Test")
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "baseline")
+        default = self._git(
+            root, "rev-parse", "--abbrev-ref", "HEAD"
+        ).stdout.strip()
+
+        self._git(root, "checkout", "-q", "-b", "worktree/add-feature")
+        (root / "feature.txt").write_text("work\n", encoding="utf-8")
+        write_intent(
+            root,
+            VersionIntent(
+                flow_id="flow-real",
+                change_summary="add feature",
+                versions_changes=["feat: a real landed feature"],
+                bump_type="minor",
+                pre_session_baseline="11.12.0",
+                provisional_suggested_version="11.13.0",
+            ),
+        )
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "work + intent")
+        self._git(root, "checkout", "-q", default)
+        return default
+
+    def test_worktree_merge_steps_land_real_version_on_master(self):
+        """Drive the state machine's merge steps against the REAL libraries.
+
+        The other tests in this class stub ``integrate()`` / ``reconcile()`` to
+        prove state-machine wiring; this one drives the same step path through a
+        real temp git repo with the real libraries, so a genuine handler↔library
+        integration break (signature drift, lock interplay, result-shape
+        mismatch) is caught by the engine e2e rather than only by the CLI-path
+        tests. It exercises cwd override + merge lock + real integrate + real
+        reconcile together, landing a real version on master via the steps.
+        """
+        from se3.engine.merge.reconcile import read_current_version
+        from se3.engine.version_intent import is_consumed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            default = self._make_real_git_project(root)
+
+            # Build a worktree flow whose merge steps carry cwd == the main
+            # checkout (== root here, since root is not itself a linked worktree).
+            sm = StateMachine(root)
+            self._register_mock_handlers(sm)  # real merge handlers; mock the rest
+            flow = sm.create_flow(
+                task_description="Add a worktree feature",
+                task_type="small",
+                is_worktree_mode=True,
+            )
+            # version_reconcile filters to THIS flow's own intent (the change-#3
+            # concurrency guard). In production the intent is written by this same
+            # flow during version_analyze/commit, so its id always matches. The
+            # fixture had to write the intent before the flow existed, so align the
+            # flow's id with the intent it owns — otherwise reconcile finds no
+            # matching intent and no-ops, leaving the version un-bumped.
+            flow.flow_id = "flow-real"
+            flow.worktree_branch = "worktree/add-feature"
+            flow.worktree_original_branch = default
+
+            self._run_to_completion(sm, flow)
+
+            assert flow.status == FlowStatus.COMPLETED
+            # Real integrate(): the branch actually landed on master.
+            ancestor = subprocess.run(
+                [
+                    "git", "-C", str(root), "merge-base", "--is-ancestor",
+                    "worktree/add-feature", default,
+                ],
+                capture_output=True,
+            )
+            assert ancestor.returncode == 0
+            # Real reconcile(): a real version was derived + written onto master.
+            assert read_current_version(root) == "11.13.0"
+            versions = (root / "VERSIONS.md").read_text(encoding="utf-8")
+            assert "feat: a real landed feature" in versions
+            assert "11.13.0" in versions
+            assert is_consumed(root, "flow-real")
+            # A reconcile commit carrying the session trailer landed on master.
+            log = self._git(root, "log", "--format=%B", "-n", "20").stdout
+            assert "Version-Reconcile-Session: flow-real" in log
+            # The step recorded the REAL ReconcileResult shape (not a canned one).
             reconcile_step = next(
                 s for s in flow.state.steps.values()
                 if s.step_type == StepType.VERSION_RECONCILE

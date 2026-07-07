@@ -5582,13 +5582,21 @@ function normalizeRecord(rec) {
   // superseded in place by the later `step_started` running anchor and the
   // terminal report once the lock is acquired and the step proceeds.
   //
-  // The worktree merge no longer has its own bypass anchor: it runs as the
-  // flow's merge_integrate / version_reconcile steps, which emit the ordinary
-  // step_started / step_status / step_completed lifecycle anchors handled here.
+  // The worktree merge no longer emits its own bypass anchor going forward: it
+  // runs as the flow's merge_integrate / version_reconcile steps, which emit the
+  // ordinary step_started / step_status / step_completed lifecycle anchors
+  // handled here. But pre-change archived worktree flows (real old flows exist in
+  // se3/history) still carry a bare legacy ``{"type":"merging"}`` row. The CLI
+  // reader (chat_history.get_step_history) skips it; this daemon→webui path must
+  // likewise recognise it, else it falls through to the generic role path and
+  // renders as a stray empty "(no readable content)" bubble. Fold it into the
+  // same affordance-free lifecycle-anchor family (a "正在 merge" status row) it
+  // was rendered as before the bypass retirement.
   if (
     eventType === "step_started"
     || eventType === "step_status"
     || eventType === "waiting_for_lock"
+    || eventType === "merging"
   ) {
     return {
       role: "step-event",
@@ -5603,7 +5611,9 @@ function normalizeRecord(rec) {
             ? "running"
             : eventType === "waiting_for_lock"
               ? "waiting_for_lock"
-              : "paused"),
+              : eventType === "merging"
+                ? "merging"
+                : "paused"),
       ).toLowerCase(),
       stepReport: null,
       raw: { raw_json: [msg], raw_ndjson: null },
@@ -9537,6 +9547,7 @@ function renderConversationRecord(norm) {
     norm.kind === "step_started"
     || norm.kind === "step_status"
     || norm.kind === "waiting_for_lock"
+    || norm.kind === "merging"
   ) {
     return renderStepStartedRecord(norm);
   }

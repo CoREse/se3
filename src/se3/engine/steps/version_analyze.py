@@ -314,17 +314,47 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # IS its release point (baseline == current version), so it keeps writing
     # the authoritative suggested_version verbatim — behaviour unchanged.
     if getattr(flow, "is_worktree_mode", False):
-        _emit_version_intent(
-            step,
-            flow,
-            project_root=project_root,
-            result=result,
-            pre_session_version=pre_session_version,
-            versions_changes=versions_changes,
-            changes_text=changes_text,
-            spec_changes_text=spec_changes_text,
-            verification_text=verification_text,
-        )
+        if not _version_bumping_enabled(project_root):
+            # version.enabled=false: preserve the "no automatic version bump"
+            # contract in worktree mode too. Emitting an intent would make the
+            # merge-side version_reconcile bump the detected version file (or
+            # fail with ReconcileError when no version file exists), so skip it —
+            # the merge lands with no version change, exactly as a non-worktree
+            # flow does (the commit step skips bumping when disabled).
+            step.outputs["current_version"] = current_version
+            logger.info(
+                "Version analysis (worktree): version bumping disabled; emitting "
+                "no version intent — merge lands with no automatic bump."
+            )
+            return StepStatus.COMPLETED
+        try:
+            _emit_version_intent(
+                step,
+                flow,
+                project_root=project_root,
+                result=result,
+                pre_session_version=pre_session_version,
+                versions_changes=versions_changes,
+                changes_text=changes_text,
+                spec_changes_text=spec_changes_text,
+                verification_text=verification_text,
+            )
+        except OSError as exc:
+            # The persisted intent is the merge side's sole input for deciding
+            # this feature's version; without it version_reconcile would treat
+            # the session as contributing no bump and merge it with no version
+            # or changelog. Fail loudly (and resumably) instead.
+            step.outputs["current_version"] = current_version
+            step.error_message = (
+                f"version_analyze: could not persist the version intent for "
+                f"worktree flow {flow.flow_id}: {exc}. The merge-side "
+                f"version_reconcile step depends on "
+                f"se3/version-intents/{flow.flow_id}.json to derive the final "
+                f"version; without it this feature would merge with no version "
+                f"bump or changelog entry. Fix the cause and resume."
+            )
+            logger.error(step.error_message)
+            return StepStatus.FAILED
         logger.info(
             "Version analysis (worktree, intent-only): bump_type=%s, "
             "provisional_suggested_version=%s (pre_session_baseline=%s), "
@@ -379,9 +409,11 @@ def _emit_version_intent(
     digest of the same changes / spec / verification material this step already
     formatted for its prompt, so no usable intent is lost when ``bump_type`` is.
 
-    A write failure is surfaced as a warning but does not fail the step: the
-    reconcile step treats a missing intent as "no bump contributed", which is a
-    safe (if lossy) degradation rather than a hard flow abort.
+    A write failure is NOT swallowed: it propagates as :class:`OSError` for the
+    caller to turn into a FAILED step. The merge-side ``version_reconcile``
+    derives the final version SOLELY from this persisted intent, so a missing
+    intent silently drops the whole bump + changelog — a visible, resumable
+    failure here is strictly safer than an invisibly version-less merge.
     """
     from ..version_intent import VersionIntent, write_intent
 
@@ -405,16 +437,11 @@ def _emit_version_intent(
     step.outputs["version_intent"] = intent.to_dict()
     step.outputs["provisional_suggested_version"] = result.get("suggested_version")
 
-    try:
-        path = write_intent(project_root, intent)
-        step.outputs["version_intent_path"] = str(path)
-    except OSError as exc:
-        logger.warning(
-            "Could not persist version intent for flow %s (%s); merge-side "
-            "reconcile will treat this session as contributing no bump",
-            flow.flow_id,
-            exc,
-        )
+    # Let OSError propagate: the intent is this worktree session's ONLY carrier
+    # of its version bump to the merge side, so a failed persist must fail the
+    # step (handled by the caller) rather than degrade to a warning.
+    path = write_intent(project_root, intent)
+    step.outputs["version_intent_path"] = str(path)
 
 
 def _build_change_summary(
@@ -497,6 +524,22 @@ def _read_version_rules_file(project_root: Path) -> Optional[str]:
         )
 
     return text
+
+
+def _version_bumping_enabled(project_root: Path) -> bool:
+    """Whether the project has version bumping enabled.
+
+    Mirrors the commit step's ``version_config.enabled`` gate so worktree mode
+    honours the same "no automatic version bump" contract. Any config-load fault
+    defaults to enabled (the safe default: better to compute a version than to
+    silently skip a bump on a healthy project).
+    """
+    try:
+        from ...config import load_version_config
+
+        return bool(load_version_config(project_root).enabled)
+    except Exception:  # noqa: BLE001 - config load must not abort the step
+        return True
 
 
 def _get_current_version(flow: FlowInstance) -> str:

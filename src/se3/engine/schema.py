@@ -62,6 +62,8 @@ class StepTypeValue(str, Enum):
     SPEC_GATE = "spec_gate"  # deprecated by the charter refactor
     VERSION_ANALYZE = "version_analyze"
     COMMIT = "commit"
+    MERGE_INTEGRATE = "merge_integrate"
+    VERSION_RECONCILE = "version_reconcile"
     SUMMARIZE = "summarize"
 
 
@@ -128,6 +130,11 @@ class StepSchema(TypedDict, total=False):
     max_retries: int
     model: Optional[str]
     fallback_model: Optional[str]
+    # Step-level working-directory override (absolute path). Present on the
+    # merge-side steps (merge_integrate / version_reconcile) of a worktree flow,
+    # which must run in the MAIN checkout rather than the isolated worktree; None
+    # / absent for every ordinary step. Mirrors models.Step.cwd.
+    cwd: Optional[str]
     cold_ref: ColdRefSchema  # New format: externalized inputs/outputs/artifacts
     inputs: Dict[str, Any]  # Legacy format only (inline)
     outputs: Dict[str, Any]  # Legacy format only (inline)
@@ -228,9 +235,6 @@ class FlowInstanceSchema(TypedDict, total=False):
     # Present (and True) only while a synchronous run is queued acquiring the
     # main-worktree mutex before its first non-discovery step; absent otherwise.
     waiting_for_lock: bool
-    # Present (and True) only while a COMPLETED --worktree flow body is being
-    # merged back into its original branch; absent otherwise.
-    merging: bool
 
 
 ENGINE_JSON_SCHEMA: Dict[str, Any] = {
