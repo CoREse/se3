@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 
 export function registerIncrementalSelfHealTests(ctx) {
-  const { app, check } = ctx;
+  const { app, check, findAll } = ctx;
 
   const asst = (stepId, stepType, ordinal, content, ts) => ({
     step_id: stepId,
@@ -116,5 +116,37 @@ export function registerIncrementalSelfHealTests(ctx) {
     const last = app.normalizeRecord(recs[recs.length - 1]);
     assert.equal(last.done, 5);
     assert.equal(last.total, 5);
+  });
+
+  check("G2 self-heal: re-delivering the SAME full snapshot renders no duplicate bubbles (render idempotent)", () => {
+    const flowId = "g2-selfheal-repeat";
+    const c = freshFlow(flowId);
+    const snap = {
+      flow_id: flowId,
+      mode: "full",
+      records: [
+        asst("01_discovery_a", "discovery", 0, "d0", 1),
+        asst("01_discovery_a", "discovery", 1, "d1", 2),
+        asst("02_analyze_b", "analyze", 0, "a0", 3),
+      ],
+    };
+    app.applyHistoryData(snap);
+    const bubblesAfterFirst = findAll(c, "conv-bubble").length;
+    const lenAfterFirst = app.state.flowConversationRecords.length;
+    assert.equal(bubblesAfterFirst, 3, "three assistant bubbles rendered on the first full snapshot");
+
+    // The periodic 3s backstop re-pulls the identical full snapshot repeatedly.
+    // An idempotent reconcile must converge to the SAME view — no stacking.
+    app.applyHistoryData({ ...snap, records: snap.records.map((r) => ({ ...r })) });
+    app.applyHistoryData({ ...snap, records: snap.records.map((r) => ({ ...r })) });
+
+    assert.equal(app.state.flowConversationRecords.length, lenAfterFirst,
+      "record count is unchanged after repeated identical full snapshots");
+    assert.equal(findAll(c, "conv-bubble").length, bubblesAfterFirst,
+      "no duplicate bubbles accumulate when the same full snapshot re-arrives");
+    assert.deepEqual(bodies(app.state.flowConversationRecords), ["d0", "d1", "a0"],
+      "the view stays exactly the authoritative sequence");
+    const keys = app.state.flowConversationRecords.map(app.recordKey);
+    assert.equal(new Set(keys).size, keys.length, "still no duplicate keys after the repeats");
   });
 }

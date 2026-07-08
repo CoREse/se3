@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 
 export function registerMarkerDedupOrdinalTests(ctx) {
-  const { app, check } = ctx;
+  const { app, check, findOne, findAll } = ctx;
 
   // A commit-step index_progress marker (empty content, no status) at a given
   // physical line `ordinal`.
@@ -189,5 +189,57 @@ export function registerMarkerDedupOrdinalTests(ctx) {
     app.applyHistoryData({ flow_id: flowId, mode: "append", records: [discOut(0, 1), asst(1, "draft", 2)] });
     assert.equal(app.state.flowConversationRecords.length, lenBefore, "no duplicate appended");
     assert.equal(c.__convState.count, cursorBefore, "the no-op short-circuit left the render cursor in lock-step");
+  });
+
+  // A commit-step assistant bubble — the "commit result" content the operator
+  // must see once the code-index rebuild finishes.
+  const commitResult = (ordinal, content, ts) => ({
+    step_id: "09_commit_abcd1234",
+    step_type: "commit",
+    ordinal,
+    message: { role: "assistant", content, timestamp: ts },
+  });
+
+  check("G2 commit: the index_progress card updates in place across the whole rebuild, then the commit result content shows", () => {
+    const flowId = "g2-commit-index";
+    const c = freshFlow(flowId);
+
+    // The rebuild opens: line 0 marker (1/5). Exactly one live progress card.
+    app.applyHistoryData({ flow_id: flowId, mode: "full", records: [ipMarker(0, "a.py", 1, 5, 1)] });
+    assert.equal(findAll(c, "index-progress-marker").length, 1, "one progress card at the start of the refresh");
+    assert.equal(findOne(c, "index-progress-text").textContent, "更新 code-index：a.py (1/5)");
+
+    // Each subsequent marker line arrives via the low-latency WS append path
+    // (distinct ordinal → not deduped away), and the SINGLE card updates in
+    // place to the latest count for the whole duration of the refresh.
+    for (const [ord, path, done, ts] of [[1, "b.py", 2, 2], [2, "c.py", 3, 3], [3, "d.py", 4, 4]]) {
+      app.applyHistoryData({ flow_id: flowId, mode: "append", records: [ipMarker(ord, path, done, 5, ts)] });
+      assert.equal(findAll(c, "index-progress-marker").length, 1,
+        `still one card mid-refresh at ${done}/5 (in-place update, not a new bubble)`);
+      assert.equal(findOne(c, "index-progress-text").textContent, `更新 code-index：${path} (${done}/5)`,
+        "the card tracks the latest count in place");
+      assert.ok(findOne(c, "index-progress-marker").classList.contains("status-running"),
+        "still running while done<total");
+    }
+
+    // The final marker (5/5) completes the rebuild.
+    app.applyHistoryData({ flow_id: flowId, mode: "append", records: [ipMarker(4, "e.py", 5, 5, 5)] });
+    assert.equal(findAll(c, "index-progress-marker").length, 1, "one card at completion — never stacked");
+    assert.equal(findOne(c, "index-progress-text").textContent, "更新 code-index：e.py (5/5)");
+    assert.ok(findOne(c, "index-progress-marker").classList.contains("status-completed"),
+      "the card flips to completed at 5/5");
+    // No content bubbles were manufactured by the empty-content markers.
+    assert.equal(findAll(c, "conv-bubble").length, 0, "empty-content markers created no chat bubbles");
+
+    // Commit finishes and writes its result content — it MUST render after the
+    // progress card (the "提交后无内容" symptom is that this bubble never showed).
+    app.applyHistoryData({ flow_id: flowId, mode: "append", records: [
+      commitResult(5, "已提交：3 个文件，版本 12.0.1", 6),
+    ]});
+    const bubble = findOne(c, "conv-bubble");
+    assert.ok(bubble && bubble.textContent.includes("已提交：3 个文件，版本 12.0.1"),
+      "the commit result content is shown once the rebuild's markers are done");
+    assert.equal(findAll(c, "index-progress-marker").length, 1,
+      "the progress card survives alongside the commit result, still exactly one");
   });
 }

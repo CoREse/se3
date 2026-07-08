@@ -79,9 +79,12 @@ def test_frontend_g2_reconcile_node_suite_passes():
         "G2 reconcile: same ordinal arriving many times converges to one record",
         # the discovery-freeze scenario end to end
         "G2 applyHistoryData: a PAUSE→resume rewrite of a discovery line advances the view live",
+        # the commit index_progress card renders in place then shows the result
+        "G2 commit: the index_progress card updates in place across the whole rebuild, then the commit result content shows",
         # self-heal via the periodic full snapshot
         "G2 self-heal: a dropped append frame is recovered by the next full snapshot",
         "G2 self-heal: a full snapshot deletes a stale bubble no longer in the history",
+        "G2 self-heal: re-delivering the SAME full snapshot renders no duplicate bubbles (render idempotent)",
     ):
         assert needle in combined, (
             f"expected G2 check {needle!r} in node output:\n{combined}"
