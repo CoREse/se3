@@ -141,6 +141,33 @@ def test_invalid_regex_exits_two(built_project: Path):
     assert "Invalid regular expression" in result.output
 
 
+def test_line_number_flag_accepted_exit_zero(built_project: Path):
+    # `-n` is accepted for grep muscle-memory (previously "No such option: -n"),
+    # a pure no-op: a matching search still exits 0.
+    result = runner.invoke(app, ["code-index", "search", "-n", "Greet.r"])
+    assert result.exit_code == 0, result.output
+    assert _match_lines(result.output)
+
+
+def test_line_number_output_identical_to_without(built_project: Path):
+    # `-n` must not change a single output byte — a true grep drop-in that never
+    # prefixes a line number (code-index lines carry none).
+    without = runner.invoke(app, ["code-index", "search", "mod.py"])
+    with_n = runner.invoke(app, ["code-index", "search", "-n", "mod.py"])
+    assert with_n.exit_code == without.exit_code == 0
+    assert with_n.output == without.output
+
+
+def test_line_number_combines_with_other_flags(built_project: Path):
+    # `-n` alongside -i / -F / -m leaves each flag's semantics and exit code
+    # untouched: same output, line for line, as the same call without -n.
+    for extra in (["-i", "greeter"], ["-F", "a.*b"], ["-m", "2", "mod.py"]):
+        base = runner.invoke(app, ["code-index", "search", *extra])
+        with_n = runner.invoke(app, ["code-index", "search", "-n", *extra])
+        assert with_n.exit_code == base.exit_code, (extra, with_n.output)
+        assert with_n.output == base.output, extra
+
+
 def test_unbuilt_map_hints_rebuild(tmp_path: Path, monkeypatch):
     # No md on disk -> the not-built hint + exit 1, same as index/show/inspect.
     root = tmp_path / "empty"
