@@ -3838,6 +3838,20 @@ snapshotDiscoveryMod.registerSnapshotDiscoveryDedupTests({ app, check, findOne, 
 const issue209ReplayMod = await import("./issue209_real_frame_replay.test.mjs");
 issue209ReplayMod.registerIssue209RealFrameReplayTests({ app, check, findOne, findAll });
 
+// Register the ordinal-identity reconcile tests (G2): each record's stable
+// `stepId#ordinal` identity keeps empty-content marker records distinct, and the
+// idempotent reconcile updates a retry-rewritten line in place instead of
+// dropping or duplicating it — the discovery/commit "chat stops advancing" fix.
+const markerDedupMod = await import("./marker_dedup_ordinal.test.mjs");
+markerDedupMod.registerMarkerDedupOrdinalTests({ app, check, findOne, findAll });
+
+// Register the incremental-drop self-heal tests (G2): a dropped/mis-judged WS
+// append frame is recovered when the next periodic full snapshot re-delivers the
+// whole flow through the same idempotent reconcile — correctness no longer
+// depends on every increment arriving.
+const selfHealMod = await import("./incremental_selfheal.test.mjs");
+selfHealMod.registerIncrementalSelfHealTests({ app, check, findOne, findAll });
+
 // Register the cause-immune progression-refresh fallback tests (G2): a detected
 // advance of the open flow (current_step / current_step_index change, or a
 // status flip on an in-step retry) fires one silent full /api/history rebuild,

@@ -4046,15 +4046,18 @@ function applyHistoryData(msg) {
     // scrollHeight, so "near bottom" must be measured against the old layout.
     const stick = !append || isNearBottom(historyScrollContainer());
     if (append) {
-      const fresh = dedupeAppendRecords(state.historyRecords, records);
-      if (fresh.length) {
-        state.historyRecords = state.historyRecords.concat(fresh);
-        renderHistoryRecords(msg.flow_id, state.historyRecords, append);
+      const rec = reconcileAppendRecords(state.historyRecords, records);
+      if (rec.changed) {
+        state.historyRecords = rec.records;
+        // A mid-list in-place update (a retry rewrote an already-rendered line)
+        // cannot be repainted by the tail-only incremental render — force a full
+        // rebuild in that case; a pure tail append keeps the cheap append render.
+        renderHistoryRecords(msg.flow_id, state.historyRecords, append && !rec.updatedInPlace);
         refreshHistoryStickyHeader();
         updateHistoryUsageBadge(state.historyRecords);
         if (stick) scrollHistoryToBottom();
       }
-      // else: all duplicates — skip state update and render entirely
+      // else: nothing changed (all no-op re-deliveries) — skip render entirely
     } else {
       state.historyEpoch += 1;
       state.historyRecords = records;
@@ -4074,33 +4077,40 @@ function applyHistoryData(msg) {
   if (state.selectedFlowId === msg.flow_id) {
     const stick = !append || isNearBottom($("flow-conversation"));
     let merged;
+    // Whether a tail-only incremental render is still safe. Any in-place rewrite
+    // of an already-held line touches the middle of the array, so it forces a
+    // full rebuild; a pure tail append can use the cheap incremental path.
+    let appendSafe = true;
     if (append) {
-      const fresh = dedupeAppendRecords(state.flowConversationRecords, records);
-      // `fresh` is empty only when the batch is a genuine tail-overlap duplicate
-      // (the bounded-window dedupe no longer mistakes a far-back recordKey
-      // collision for a duplicate, so a real post-respond append always yields a
-      // non-empty `fresh` and keeps streaming). The history consumer above has
+      const rec = reconcileAppendRecords(state.flowConversationRecords, records);
+      // `changed` is false only when every incoming record is a byte-identical
+      // re-delivery of a line already held (the REST∩WS overlap) — no new tail
+      // record and no rewritten line. The idempotent reconcile makes this the
+      // ONLY drop case, so a real post-respond append or a retry rewrite always
+      // registers as changed and keeps streaming. The history consumer above has
       // already run for this frame, so returning here short-circuits only this
       // running-flow consumer.
-      if (!fresh.length) {
+      if (!rec.changed) {
         if (wsHistDebug()) {
           // eslint-disable-next-line no-console
           console.debug(
             "hist-diag applyHistoryData ALL-DUPLICATES flow=%s (appendSeq unchanged=%d)",
             msg.flow_id, state.flowConversationAppendSeq);
         }
-        return;                             // all duplicates — skip entirely
+        return;                             // all no-op re-deliveries — skip entirely
       }
-      merged = state.flowConversationRecords.concat(fresh);
+      merged = rec.records;
       // A real WS increment landed for the open flow — mark the push path alive
       // so a pending progression grace timer skips its fallback rebuild. Only
-      // this genuine-append path counts (the all-duplicates case returned above).
+      // this genuine-change path counts (the no-op case returned above).
       state.flowConversationAppendSeq += 1;
+      appendSafe = !rec.updatedInPlace;
       if (wsHistDebug()) {
         // eslint-disable-next-line no-console
         console.debug(
-          "hist-diag applyHistoryData APPEND-APPLIED flow=%s fresh=%d appendSeq=%d",
-          msg.flow_id, fresh.length, state.flowConversationAppendSeq);
+          "hist-diag applyHistoryData APPEND-APPLIED flow=%s fresh=%d inPlace=%s appendSeq=%d",
+          msg.flow_id, rec.fresh.length, rec.updatedInPlace,
+          state.flowConversationAppendSeq);
       }
     } else {
       state.flowConversationEpoch += 1;
@@ -4120,7 +4130,8 @@ function applyHistoryData(msg) {
     const echoRemoved = reconciled !== merged;
     state.flowConversationRecords = reconciled;
     renderConversation(
-      $("flow-conversation"), state.flowConversationRecords, append && !echoRemoved);
+      $("flow-conversation"), state.flowConversationRecords,
+      append && !echoRemoved && appendSafe);
     refreshFlowStickyHeader();
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) scrollFlowConversationToBottom();
@@ -5486,11 +5497,18 @@ function normalizeRecord(rec) {
     return {
       role: "log", content: rec == null ? "" : String(rec),
       timestamp: null, stepType: "", stepId: "", raw: null, attempt: null,
-      agentName: null, modelName: null,
+      agentName: null, modelName: null, ordinal: null,
     };
   }
   const msg = (rec.message && typeof rec.message === "object") ? rec.message : rec;
   const pick = (key) => (msg[key] != null ? msg[key] : rec[key]);
+  // `ordinal` is the record's 0-based physical line position in its step .jsonl
+  // file, injected at the envelope level by the daemon history reader
+  // (daemon/history.py). It is written at append time and preserved across a
+  // retry's in-place rewrite, so it is the record's STABLE identity — the basis
+  // for `recordKey`'s `stepId#ordinal` key and the idempotent reconcile. Surfaced
+  // here so every render/dedup path sees the same value the envelope carries.
+  const ordinal = recordOrdinal(rec);
 
   // step_type resolution intentionally diverges from `pick` (which is
   // message-first). The daemon injects an authoritative `step_type` at the
@@ -5554,7 +5572,7 @@ function normalizeRecord(rec) {
       stepReport: stepReport,
       raw: { raw_json: [msg], raw_ndjson: null },
       attempt: null,
-      agentName: null, modelName: null,
+      agentName: null, modelName: null, ordinal: ordinal,
     };
   }
 
@@ -5623,7 +5641,7 @@ function normalizeRecord(rec) {
       stepReport: null,
       raw: { raw_json: [msg], raw_ndjson: null },
       attempt: null,
-      agentName: null, modelName: null,
+      agentName: null, modelName: null, ordinal: ordinal,
     };
   }
 
@@ -5660,6 +5678,7 @@ function normalizeRecord(rec) {
       // (backward-compatible) — only displayed when present, no placeholder.
       agentName: typeof pick("agent_name") === "string" && pick("agent_name") ? pick("agent_name") : null,
       modelName: typeof pick("model_name") === "string" && pick("model_name") ? pick("model_name") : null,
+      ordinal: ordinal,
     };
   }
 
@@ -5701,6 +5720,7 @@ function normalizeRecord(rec) {
       // agent/model badge (each per-node summary runs its own throwaway caller).
       agentName: null,
       modelName: null,
+      ordinal: ordinal,
     };
   }
 
@@ -5794,44 +5814,74 @@ function normalizeRecord(rec) {
     toolUseId: toolUseId,
     isError: isError,
     toolDetail: toolDetail,
+    ordinal: ordinal,
   };
 }
 
-// Stable identity key for a raw record, used to dedup a REST snapshot against
-// `history_data` append deltas that arrived while the snapshot was in flight.
-function recordKey(rec) {
-  const n = normalizeRecord(rec);
+// The record's stable per-step line ordinal, read from the .jsonl envelope the
+// daemon history reader tags (daemon/history.py). Envelope-first (that is where
+// the reader injects it); a `message.ordinal` is only a defensive fallback for
+// an already-unwrapped shape. Returns null for any record without a finite
+// numeric ordinal — optimistic local echoes and pre-ordinal daemons — so the
+// caller falls back to the legacy content key.
+function recordOrdinal(rec) {
+  if (!rec || typeof rec !== "object") return null;
+  let o = rec.ordinal;
+  if (o == null && rec.message && typeof rec.message === "object") {
+    o = rec.message.ordinal;
+  }
+  return typeof o === "number" && Number.isFinite(o) ? o : null;
+}
+
+// The legacy coarse identity: stepId + role/kind/status/second-timestamp/attempt
+// + content length + content[:96]. Used both as the fallback key for records
+// with no ordinal AND, in the idempotent reconcile, as a cheap content signature
+// to tell an unchanged re-delivery of a stable line apart from a retry rewrite
+// of the same line (see `sameStableRecordContent`).
+//
+// `status` disambiguates two status anchors of the SAME step region — e.g. a
+// `paused` step_status followed by a resumed `running` step_started — that share
+// stepId / role (step-event) / attempt (null) / empty content and, on a
+// same-second daemon resume, the same second timestamp. `kind` does the same for
+// the terminal `step_completed` / `step_failed` reports vs the non-terminal
+// `step_output` usage record, which all normalize to role `step-event` with no
+// top-level `status` and empty content. Generic chat records carry neither field
+// → a constant "undefined", so their identity is unchanged and backward-compat.
+function legacyKeyFromNorm(n) {
   const content = typeof n.content === "string" ? n.content : "";
-  // Include the lifecycle `status` so two status anchors of the SAME step
-  // region — e.g. a `paused` step_status followed by a resumed `running`
-  // step_started — never collide on recordKey. They share stepId / role
-  // (step-event) / attempt (null) / content ("") and, when the resume happens
-  // within the same wall-clock second as the pause (the daemon-resume answer
-  // path), the same second-granularity timestamp too; without `status` in the
-  // key the post-answer `running` anchor hashes identically to the frozen
-  // `paused` anchor and dedupeAppendRecords drops it, so the live append never
-  // supersedes the 已暂停 row and the view stays frozen until a full re-entry.
-  // Generic chat records (user / assistant / system) carry no `status`, so this
-  // adds a constant "undefined" to their key and never changes their identity.
-  //
-  // Include the event `kind` for the same reason in the OTHER step-event family:
-  // the terminal `step_completed` / `step_failed` reports and the non-terminal
-  // `step_output` usage record all normalize to role `step-event` with NO
-  // top-level lifecycle `status` and empty content. A step emits a step_output
-  // on each PAUSED / REVISION / RETRYING round and a terminal report when it
-  // finishes; a status-only key hashes the same-step/same-second step_output and
-  // step_completed identically, so dedupeAppendRecords would drop the terminal
-  // report — the discovery region would never show completion and its status
-  // anchors would never be superseded (a transition/retry-time freeze of that
-  // region). Keying on `kind` keeps each event-type distinct while a TRUE
-  // duplicate (the literal same record re-delivered) shares its kind and still
-  // collapses. Generic chat records carry no `kind` → a constant "undefined",
-  // so their identity (shared with mergeSnapshotWithLiveAppends / usage dedup)
-  // is unchanged and backward-compatible.
   return [
     n.stepId, n.role, String(n.kind), String(n.status), String(n.timestamp),
     String(n.attempt), content.length, content.slice(0, 96),
   ].join("");
+}
+
+// Stable identity key for a raw record. When the daemon-injected `ordinal` is
+// present it is the record's TRUE stable identity — `stepId#ordinal` — written
+// at append time and preserved across a retry's in-place rewrite, so the same
+// logical .jsonl line always hashes identically regardless of its content or
+// timestamp. This is what lets the idempotent reconcile update line N in place
+// (a retry rewrote it) instead of dropping or duplicating it, and what keeps
+// content-empty marker records (discovery/commit/index_progress) distinct by
+// their line position rather than colliding on their shared empty content.
+//
+// Records without an ordinal (optimistic local echoes, pre-ordinal daemons)
+// fall back to the legacy coarse content key so their behaviour is unchanged.
+// The `#` separator and short length make an ordinal key un-collidable with any
+// legacy key.
+function recordKey(rec) {
+  const n = normalizeRecord(rec);
+  const ord = recordOrdinal(rec);
+  if (ord != null && n.stepId) return n.stepId + "#" + ord;
+  return legacyKeyFromNorm(n);
+}
+
+// True when two records sharing a stable `stepId#ordinal` identity carry the
+// SAME rendered content — i.e. this is a plain re-delivery (REST∩WS overlap),
+// not a retry that rewrote line N with new output. Compared via the legacy
+// coarse signature (role/kind/status/ts/len/content[:96]), which captures a
+// content or status change while treating a byte-identical re-delivery as equal.
+function sameStableRecordContent(a, b) {
+  return legacyKeyFromNorm(normalizeRecord(a)) === legacyKeyFromNorm(normalizeRecord(b));
 }
 
 // Merge a freshly-fetched snapshot with append records that arrived during the
@@ -5879,6 +5929,93 @@ function dedupeAppendRecords(existing, incoming) {
   const seen = new Set();
   for (let i = start; i < existing.length; i++) seen.add(recordKey(existing[i]));
   return incoming.filter((r) => !seen.has(recordKey(r)));
+}
+
+// Idempotent reconcile of an append batch into the records a view already holds.
+// This is the正确性 core of the right-side "chat that stops advancing" fix: an
+// increment can now arrive any number of times and always converges to the same
+// result, because a record's identity is its stable `stepId#ordinal` (not a
+// content+timestamp key that a marker record or a retry rewrite would break).
+//
+// Three outcomes per incoming record, keyed by `recordKey`:
+//   * stable identity already held → the SAME logical .jsonl line. A retry can
+//     rewrite line N with new content, so update it IN PLACE (converge to the
+//     newest); a byte-identical re-delivery is a no-op. Never a second bubble —
+//     this is what unfreezes the discovery region whose step_output line is
+//     rewritten each PAUSE→resume round, and keeps the commit `index_progress`
+//     card updating in place through the whole rebuild.
+//   * new identity → appended at the tail.
+//   * legacy (no-ordinal) record → the pre-ordinal bounded-tail dedup is kept
+//     verbatim: a key matching only a FAR-BACK record is a coincidental
+//     collision that must still append (the "stall after respond" fix), a key
+//     matching within the recent tail is a true duplicate and is dropped. Legacy
+//     records (optimistic local echoes) never take the in-place path.
+//
+// Returns { records, fresh, rebased, updatedInPlace, changed }:
+//   * records        — the reconciled array to adopt (same ref when unchanged).
+//   * fresh          — the genuinely-new records, in incoming order (the caller
+//                      may re-order these for a timestamp-correct delta render).
+//   * rebased        — `existing` with in-place updates applied but WITHOUT the
+//                      fresh tail (so a caller can merge `fresh` by timestamp).
+//   * updatedInPlace — an already-held bubble's content changed, so a tail-only
+//                      incremental render is unsafe and the caller must rebuild.
+//   * changed        — records !== existing (an in-place update and/or an append).
+function reconcileAppendRecords(existing, incoming) {
+  const base = Array.isArray(existing) ? existing : [];
+  const inc = Array.isArray(incoming) ? incoming : [];
+  if (!inc.length) {
+    return { records: base, fresh: [], rebased: base, updatedInPlace: false, changed: false };
+  }
+  const idxByKey = new Map();
+  // Last occurrence wins, so an in-place update targets the most recent copy of
+  // a key (matches the daemon's own last-write-wins for a rewritten line).
+  for (let i = 0; i < base.length; i++) idxByKey.set(recordKey(base[i]), i);
+
+  // Legacy bounded-tail window: only a duplicate within this recent slice is a
+  // true re-delivery; a match further back is a coincidental coarse-key
+  // collision and must still append (preserves the pre-ordinal behaviour).
+  const windowLen = Math.max(inc.length, DEDUPE_TAIL_BASELINE) + inc.length;
+  const tailStart = base.length > windowLen ? base.length - windowLen : 0;
+
+  let out = null;                       // lazily cloned base on first in-place edit
+  let updatedInPlace = false;
+  const fresh = [];
+  const freshIdxByKey = new Map();
+  for (const rec of inc) {
+    const k = recordKey(rec);
+    const stable = recordOrdinal(rec) != null;
+    if (idxByKey.has(k)) {
+      const at = idxByKey.get(k);
+      if (stable) {
+        // Same logical line — converge to newest content; skip a no-op re-deliver.
+        if (!sameStableRecordContent(base[at], rec)) {
+          if (!out) out = base.slice();
+          out[at] = rec;
+          updatedInPlace = true;
+        }
+        continue;
+      }
+      if (at >= tailStart) continue;    // legacy true tail duplicate — drop
+      // legacy far-back collision — fall through to append
+    }
+    if (freshIdxByKey.has(k)) {
+      // The same key appears twice within this one batch: converge a stable
+      // identity to its newest copy, drop a legacy duplicate.
+      if (stable) fresh[freshIdxByKey.get(k)] = rec;
+      continue;
+    }
+    freshIdxByKey.set(k, fresh.length);
+    fresh.push(rec);
+  }
+  const rebased = out || base;
+  const records = fresh.length ? rebased.concat(fresh) : rebased;
+  return {
+    records,
+    fresh,
+    rebased,
+    updatedInPlace,
+    changed: updatedInPlace || fresh.length > 0,
+  };
 }
 
 // Defensive guard against a merged history snapshot that carries the SAME
@@ -6025,11 +6162,30 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
   const progress = (response && typeof response.progress === "string")
     ? response.progress : null;
   if (response && response.delivery === "delta") {
-    const fresh = dedupeAppendRecords(base, records);
-    if (!fresh.length) {
-      // Every delta record is already held (e.g. the WS append for the same
-      // batch beat the snapshot in). Nothing to render.
+    // Idempotent reconcile: `fresh` are the genuinely-new lines to place by
+    // timestamp; an existing `stepId#ordinal` that a retry rewrote is updated in
+    // place inside `rebased`. `dedupeAppendRecords` (still used for legacy
+    // no-ordinal records inside the reconcile) alone would DROP such a rewrite,
+    // stalling the delta path until a full re-pull; the reconcile applies it.
+    const rec = reconcileAppendRecords(base, records);
+    if (!rec.changed) {
+      // Every delta record is a byte-identical re-delivery of a line already
+      // held (e.g. the WS append for the same batch beat the snapshot in).
+      // Nothing to render.
       return { records: base, progress, render: "noop" };
+    }
+    const fresh = rec.fresh;
+    if (rec.updatedInPlace) {
+      // A held line's content changed under an unchanged ordinal — the tail-only
+      // delta render cannot repaint a mid-list bubble, so fold any fresh records
+      // into the rebased array by timestamp and force a full rebuild.
+      return {
+        records: fresh.length
+          ? stableMergeByTimestamp(rec.rebased, fresh, requestBaseline)
+          : rec.rebased,
+        progress,
+        render: "full",
+      };
     }
     // The delta carries the outage-window gap records. While this fetch was in
     // flight a live WS `history_data` append (which does NOT bump the fetch
@@ -12415,6 +12571,8 @@ if (typeof module !== "undefined" && module.exports) {
     tsValue,
     stepKey,
     recordKey,
+    recordOrdinal,
+    reconcileAppendRecords,
     mergeSnapshotWithLiveAppends,
     dedupeAppendRecords,
     dedupeSnapshotDiscovery,
