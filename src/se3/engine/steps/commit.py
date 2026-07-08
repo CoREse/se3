@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ..context import effective_task_type
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..version_bumper import VersionBumper, VersionConfig
 
@@ -1397,7 +1398,13 @@ def _generate_commit_message(
     Returns:
         Commit message string
     """
-    task_type = flow.task_type or "feature"
+    # Use the real analyzed type for the subject prefix — never a run mode like
+    # 'discovery'. flow.task_type can legitimately be 'discovery' (to keep a
+    # --discover run's step sequence), but the commit message must read the type
+    # analyze actually inferred (feature/bugfix/…) via effective_task_type.
+    task_type = effective_task_type(
+        getattr(getattr(flow, "state", None), "context", None), flow.task_type
+    )
     task_description = step.inputs.get("task_description", flow.task_description) or ""
 
     # Get inputs from previous steps
@@ -1530,7 +1537,11 @@ def _generate_template_summary(flow: FlowInstance, step: Step) -> None:
     test_results = _collect_test_results_from_flow(flow)
 
     task_description = flow.task_description or ""
-    task_type = flow.task_type or "task"
+    # The summary's Type field must show the real analyzed type, never a run mode
+    # like 'discovery' — consistent with the commit-message / version boundaries.
+    task_type = effective_task_type(
+        getattr(getattr(flow, "state", None), "context", None), flow.task_type
+    )
 
     # Build summary document
     lines = [f"## Work Summary\n"]

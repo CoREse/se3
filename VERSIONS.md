@@ -1,5 +1,12 @@
 # SE3 Framework Version History
 
+## 11.15.1 - 2026-07-08
+
+- Stop labeling the session type as 'discovery' in commit-message prefixes; use the type analyze actually inferred (feature/bugfix/...)
+- Show the real analyzed task type in the work-summary Type field instead of a run mode like 'discovery'
+- Feed the real analyzed type into the version-analyze prompt and fallback commit message so version output never reflects 'discovery'
+- Persist the analyze-inferred task type separately (analyzed_type) without altering resolved_type/flow.task_type, keeping step sequencing and resume intact for --discover runs
+- Add a single effective_task_type resolution source so commit, summary, and version boundaries agree on the displayed type
 ## 11.15.0 - 2026-07-08
 
 - Accept a new `-n`/`--line-number` flag on `se3 code-index search` for grep muscle-memory compatibility

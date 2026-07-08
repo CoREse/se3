@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import List
 
+from ..context import RUN_MODE_TYPES
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, get_default_step_sequence
 from ..project_context import ProjectContextCollector
@@ -187,6 +188,15 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Explicit --type flag overrides LLM analysis
         resolved_task_type = _handle_type_conflict(flow, resolved_task_type)
 
+        # Persist the real analyzed task type (sanitized to never be a run mode
+        # like 'discovery') SEPARATELY from resolved_task_type / flow.task_type.
+        # The latter deliberately stay as-is (possibly 'discovery') so the step
+        # sequence & resume are untouched; commit-message / version consumers
+        # read this field via effective_task_type so a --discover run is
+        # prefixed with the type analyze actually inferred, not 'discovery'.
+        analyzed_type = _sanitize_analyzed_type(result)
+        flow.state.context["analyzed_type"] = analyzed_type
+
         # Update state with resolved task type
         flow.state.update_task_type(resolved_task_type)
         flow.task_type = resolved_task_type
@@ -199,6 +209,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # steps instead receive the charter + code-index injection. These keys are
         # kept (empty) so any defensive ``.get()`` consumers degrade cleanly.
         step.outputs["task_type"] = resolved_task_type
+        step.outputs["analyzed_type"] = analyzed_type
         step.outputs["scope"] = result.get("scope", "")
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["reasoning"] = result.get("reasoning", "")
@@ -256,6 +267,22 @@ def _extract_task_type(analyze_output: dict, flow: FlowInstance) -> str:
         logger.warning(f"Invalid task_type '{task_type}' from analyze, defaulting to 'feature'")
         task_type = "feature"
 
+    return task_type
+
+
+def _sanitize_analyzed_type(analyze_output: dict) -> str:
+    """Return the LLM's real task type, never a run mode (e.g. 'discovery').
+
+    This is the value persisted as ``analyzed_type`` and consumed via
+    ``effective_task_type`` by the commit-message / version steps, so it must be
+    clean at the source: a ``--discover`` run whose LLM echoes 'discovery' (or
+    returns anything invalid) degrades to 'feature' here, keeping the downstream
+    helper's fallback logic trivial.
+    """
+    valid_types = ("feature", "bugfix", "review", "small", "directive")
+    task_type = analyze_output.get("task_type", "feature")
+    if task_type in RUN_MODE_TYPES or task_type not in valid_types:
+        return "feature"
     return task_type
 
 

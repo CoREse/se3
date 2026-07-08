@@ -126,6 +126,71 @@ class TestCommitMessageInOutput:
         assert step.outputs["commit_message"] == "Fix login timeout bug"
 
 
+class TestDiscoveryRunUsesRealType:
+    """A --discover run must inject the real analyzed type (not the run mode) as
+    the prompt's Task Type and drive _fallback_commit_message with it."""
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_discovery_flow_injects_real_task_type(self, mock_caller_cls, mock_ver, mock_inject):
+        llm_response = json.dumps({
+            "bump_type": "minor",
+            "reasoning": "New feature",
+            "confidence": "high",
+            "suggested_version": "1.3.0",
+            "commit_message": "Add thing",
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(task_type="discovery")
+        # analyze persisted the real inferred type on the flow's context.
+        flow.state = MagicMock()
+        flow.state.context = {"analyzed_type": "feature"}
+        step = _make_step({"task_description": "Build a thing"})
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        # Inspect the prompt the LLM saw: the Task Type line must be the real
+        # analyzed type, never the 'discovery' run mode.
+        prompt = mock_caller.call.call_args.kwargs["prompt"]
+        assert "**Task Type:** feature" in prompt
+        assert "**Task Type:** discovery" not in prompt
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_discovery_flow_fallback_commit_message_uses_real_type(
+        self, mock_caller_cls, mock_ver, mock_inject
+    ):
+        """When the LLM omits commit_message, the fallback is derived with the
+        real analyzed type — it must not fail nor leak 'discovery'."""
+        llm_response = json.dumps({
+            "bump_type": "minor",
+            "reasoning": "New feature",
+            "confidence": "high",
+            "suggested_version": "1.3.0",
+            # no commit_message
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(task_type="discovery", task_description="Add discovery-driven feature")
+        flow.state = MagicMock()
+        flow.state.context = {"analyzed_type": "feature"}
+        step = _make_step({"task_description": "Add discovery-driven feature"})
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        # Fallback uses the task description (type-agnostic body) and stores it.
+        assert step.outputs["commit_message"] == "Add discovery-driven feature"
+
+
 class TestVersionChangesOutput:
     """version_analyze stores changelog bullets (versions_changes) in outputs."""
 

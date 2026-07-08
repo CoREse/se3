@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
+from ..context import effective_task_type
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..prompt_markers import inject_boundary
@@ -184,7 +185,12 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         StepStatus.COMPLETED on success, StepStatus.FAILED when the LLM call
         fails or the response does not include a valid ``suggested_version``.
     """
-    task_type = flow.task_type or "feature"
+    # Use the real analyzed type (never a run mode like 'discovery') so the
+    # prompt's Task Type and the _fallback_commit_message both reflect what
+    # analyze inferred, not the --discover run mode carried on flow.task_type.
+    task_type = effective_task_type(
+        getattr(getattr(flow, "state", None), "context", None), flow.task_type
+    )
     task_description = step.inputs.get("task_description", flow.task_description) or ""
 
     # Get changes - implement step uses different output names

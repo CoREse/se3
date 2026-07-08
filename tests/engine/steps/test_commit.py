@@ -844,6 +844,31 @@ class TestCommitMessageBumpTypeDecoration:
         subject = msg.split("\n", 1)[0]
         assert "bump)" not in subject
 
+    def test_discovery_flow_prefix_uses_analyzed_type(self):
+        """flow.task_type='discovery' (run mode) → prefix is the real analyzed
+        type from context, never 'discovery:'."""
+        flow = _make_flow(task_type="discovery")
+        # The mock's state.context defaults to a MagicMock; give it the real
+        # dict analyze would have persisted.
+        flow.state.context = {"analyzed_type": "bugfix"}
+        step = _make_step(inputs={"commit_message": "Fix the thing"})
+
+        msg = _generate_commit_message(flow, step)
+        subject = msg.split("\n", 1)[0]
+        assert subject.startswith("bugfix:")
+        assert "discovery:" not in msg
+
+    def test_discovery_flow_no_analyzed_type_degrades_to_feature(self):
+        """flow.task_type='discovery' with no analyzed_type → 'feature:' prefix."""
+        flow = _make_flow(task_type="discovery")
+        flow.state.context = {}
+        step = _make_step(inputs={"commit_message": "Do the thing"})
+
+        msg = _generate_commit_message(flow, step)
+        subject = msg.split("\n", 1)[0]
+        assert subject.startswith("feature:")
+        assert "discovery:" not in msg
+
 
 def _init_git_repo(tmp_path: Path) -> Path:
     """Initialise a minimal git repo with one commit; return its root."""

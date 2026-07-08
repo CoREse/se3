@@ -471,6 +471,43 @@ class TestCommitDeVersioning:
         )
         assert "Version: 1.4.0" in message
 
+    def test_discovery_flow_commit_prefix_uses_real_analyzed_type(self):
+        """A --discover run carries flow.task_type='discovery' for its step
+        sequence, but the commit subject must be prefixed with the real analyzed
+        type (via effective_task_type), never 'discovery:'."""
+        from .steps.commit import _generate_commit_message
+        from .version_bumper import VersionConfig
+
+        flow = FlowInstance(task_description="Build a thing")
+        flow.task_type = "discovery"
+        # analyze persisted the real inferred type here.
+        flow.state.context["analyzed_type"] = "feature"
+        step = Step(step_type=StepType.COMMIT)
+        step.inputs["commit_message"] = "Build a thing"
+
+        message = _generate_commit_message(
+            flow, step, new_version="1.4.0", version_config=VersionConfig(enabled=True)
+        )
+        assert message.startswith("feature:")
+        assert "discovery:" not in message
+
+    def test_discovery_flow_without_analyzed_type_falls_back_to_feature(self):
+        """Old state: flow.task_type='discovery' with no analyzed_type still
+        never yields a 'discovery:' prefix — it degrades to 'feature:'."""
+        from .steps.commit import _generate_commit_message
+        from .version_bumper import VersionConfig
+
+        flow = FlowInstance(task_description="Build a thing")
+        flow.task_type = "discovery"
+        step = Step(step_type=StepType.COMMIT)
+        step.inputs["commit_message"] = "Build a thing"
+
+        message = _generate_commit_message(
+            flow, step, new_version="1.4.0", version_config=VersionConfig(enabled=True)
+        )
+        assert message.startswith("feature:")
+        assert "discovery:" not in message
+
 
 class TestCommitVersionRaceGuard:
     """commit step (change D): a synchronous commit re-checks the disk version

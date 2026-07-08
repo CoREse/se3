@@ -12,6 +12,57 @@ if TYPE_CHECKING:
     from .models import State
 
 
+# Run modes are invocation modes (triggered by flags like --discover), NOT task
+# types. They legitimately drive the flow's step sequence / resume via
+# flow.task_type / resolved_type, but they must never surface as the *type* in a
+# commit-message prefix or version display — the real type is whatever analyze
+# inferred (feature/bugfix/…). Extend this set when a new run mode is added.
+RUN_MODE_TYPES: set[str] = {"discovery"}
+
+
+def effective_task_type(
+    context: dict, fallback_flow_type: Optional[str] = None
+) -> str:
+    """Resolve the real task type for commit-message / version consumers.
+
+    Single source of truth for "what type is this work" at the display/commit
+    boundary. Never returns a run mode (see :data:`RUN_MODE_TYPES`): a
+    ``--discover`` run whose flow.task_type stays ``'discovery'`` (to keep its
+    step sequence) still yields the type analyze actually inferred.
+
+    Resolution order:
+
+    1. A real explicit ``--type`` (``context['explicit_type']`` that is not a
+       run mode) — the user's stated intent wins.
+    2. The analyzed type analyze persisted (``context['analyzed_type']``) — the
+       real type behind a run mode; already sanitized to a non-run-mode value.
+    3. ``fallback_flow_type`` sanitized: when it is empty or a run mode, degrade
+       to ``'feature'`` (an old state predating ``analyzed_type`` that only has
+       ``flow.task_type == 'discovery'`` still resolves to a usable type).
+
+    Pure, side-effect-free.
+    """
+    if not isinstance(context, dict):
+        context = {}
+
+    explicit = context.get("explicit_type")
+    if isinstance(explicit, str) and explicit and explicit not in RUN_MODE_TYPES:
+        return explicit
+
+    analyzed = context.get("analyzed_type")
+    if isinstance(analyzed, str) and analyzed and analyzed not in RUN_MODE_TYPES:
+        return analyzed
+
+    if (
+        isinstance(fallback_flow_type, str)
+        and fallback_flow_type
+        and fallback_flow_type not in RUN_MODE_TYPES
+    ):
+        return fallback_flow_type
+
+    return "feature"
+
+
 class Context:
     """Read-only context for workflow step execution.
 
@@ -53,17 +104,30 @@ class Context:
         # Check for resolved type from analyze step
         resolved = self._state.context.get("resolved_type")
         if resolved:
+            # A run mode (e.g. discovery) is not a task type: fall back to the
+            # real analyzed type so callers never see 'discovery' as the type.
+            if resolved in RUN_MODE_TYPES:
+                return effective_task_type(self._state.context, resolved)
             return resolved
 
-        # Check for explicit type from --type flag
+        # Check for explicit type from --type flag — but a run mode (e.g. a
+        # --discover run's explicit_type='discovery') is never a task type, so
+        # skip it here and let it resolve below.
         explicit = self._state.context.get("explicit_type")
-        if explicit:
+        if explicit and explicit not in RUN_MODE_TYPES:
             return explicit
 
         # Check for explicit_type in flow's task_type attribute (backward compat)
         flow_type = getattr(self._state, "task_type", None)
-        if flow_type:
+        if flow_type and flow_type not in RUN_MODE_TYPES:
             return flow_type
+
+        # A run mode is in play (e.g. discovery pre-analyze) but no real type is
+        # resolved yet: surface the analyzed type if analyze already persisted
+        # it, otherwise stay pending — a run mode must never be the task type.
+        analyzed = self._state.context.get("analyzed_type")
+        if analyzed and analyzed not in RUN_MODE_TYPES:
+            return analyzed
 
         # Default to pending
         return self.PENDING_TYPE
@@ -80,6 +144,10 @@ class Context:
         """
         resolved = self._state.context.get("resolved_type")
         if resolved:
+            # A run mode (e.g. discovery) is not a displayable task type: show
+            # the real analyzed type instead of 'discovery'.
+            if resolved in RUN_MODE_TYPES:
+                return effective_task_type(self._state.context, resolved)
             return resolved
         return None
 

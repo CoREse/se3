@@ -25,7 +25,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.context import Context
+from se3.engine.context import Context, RUN_MODE_TYPES, effective_task_type
 
 
 class TestStateInitialization:
@@ -468,6 +468,189 @@ class TestFlowInstanceTypeHandling:
 
         assert restored.task_type == "feature"
         assert restored.state.context["resolved_type"] == "bugfix"
+
+
+class TestEffectiveTaskType:
+    """effective_task_type: the single source of truth for the real task type.
+
+    Guarantees no consumer (commit message / version) ever sees a run mode
+    (e.g. 'discovery') as the type.
+    """
+
+    def test_never_returns_a_run_mode(self):
+        """Every branch must resolve to a non-run-mode value."""
+        cases = [
+            ({"explicit_type": "discovery"}, "discovery"),
+            ({"analyzed_type": "discovery"}, "discovery"),
+            ({}, "discovery"),
+            ({}, None),
+        ]
+        for context, fallback in cases:
+            result = effective_task_type(context, fallback)
+            assert result not in RUN_MODE_TYPES
+
+    def test_real_explicit_type_wins(self):
+        """A real --type overrides analyzed_type and the flow fallback."""
+        context = {"explicit_type": "bugfix", "analyzed_type": "feature"}
+        assert effective_task_type(context, "discovery") == "bugfix"
+
+    def test_discovery_explicit_falls_through_to_analyzed(self):
+        """explicit_type='discovery' is a run mode → use analyzed_type."""
+        context = {"explicit_type": "discovery", "analyzed_type": "feature"}
+        assert effective_task_type(context, "discovery") == "feature"
+
+    def test_analyzed_type_used_when_no_real_explicit(self):
+        """analyzed_type is the real type behind a discovery run."""
+        context = {"analyzed_type": "bugfix"}
+        assert effective_task_type(context, "discovery") == "bugfix"
+
+    def test_missing_analyzed_type_discovery_fallback_is_feature(self):
+        """Old state: no analyzed_type + flow.task_type='discovery' → 'feature'."""
+        assert effective_task_type({}, "discovery") == "feature"
+
+    def test_regular_feature_flow_unaffected(self):
+        """A normal flow with no run mode resolves to its flow type."""
+        assert effective_task_type({}, "feature") == "feature"
+        assert effective_task_type({}, "bugfix") == "bugfix"
+
+    def test_non_dict_context_is_tolerated(self):
+        """A missing/non-dict context degrades to the sanitized fallback."""
+        assert effective_task_type(None, "bugfix") == "bugfix"
+        assert effective_task_type(None, "discovery") == "feature"
+        assert effective_task_type(None, None) == "feature"
+
+
+class TestContextDiscoverySanitization:
+    """Context.task_type / display_type must not surface 'discovery'."""
+
+    def test_task_type_falls_back_to_analyzed_when_discovery(self):
+        """resolved_type='discovery' + analyzed_type='feature' → task_type='feature'."""
+        state = State()
+        state.context["analyzed_type"] = "feature"
+        state.update_task_type("discovery")  # resolved_type = discovery
+
+        context = Context("Test task", state)
+
+        assert context.task_type == "feature"
+        assert context.task_type not in RUN_MODE_TYPES
+
+    def test_display_type_never_returns_discovery(self):
+        """display_type shows the analyzed type, not the run mode."""
+        state = State()
+        state.context["analyzed_type"] = "bugfix"
+        state.update_task_type("discovery")
+
+        context = Context("Test task", state)
+
+        assert context.display_type == "bugfix"
+        assert context.display_type not in RUN_MODE_TYPES
+
+    def test_discovery_without_analyzed_type_degrades_to_feature(self):
+        """Old state: resolved_type='discovery', no analyzed_type → 'feature'."""
+        state = State()
+        state.update_task_type("discovery")
+
+        context = Context("Test task", state)
+
+        assert context.task_type == "feature"
+        assert context.display_type == "feature"
+
+    def test_regular_resolved_type_unchanged(self):
+        """A non-run-mode resolved type is returned verbatim (behavior unchanged)."""
+        state = State()
+        state.update_task_type("bugfix")
+
+        context = Context("Test task", state)
+
+        assert context.task_type == "bugfix"
+        assert context.display_type == "bugfix"
+
+    def test_is_type_pending_semantics_preserved(self):
+        """Sanitization does not change is_type_pending (still keyed on resolved_type)."""
+        state = State()
+        # No resolved_type yet → pending, regardless of analyzed_type presence.
+        state.context["analyzed_type"] = "feature"
+        context = Context("Test task", state)
+        assert context.is_type_pending() is True
+
+        state.update_task_type("discovery")
+        assert context.is_type_pending() is False
+
+
+class TestAnalyzePersistsAnalyzedType:
+    """analyze persists the real analyzed type without touching the sequence type."""
+
+    def _run_analyze(self, project_root, explicit_type, llm_task_type):
+        """Drive analyze_handler with a stubbed LLM and collector."""
+        from se3.engine.steps import analyze as analyze_mod
+        from se3.engine.models import Step, StepType
+
+        flow = FlowInstance(
+            task_description="Add a new capability",
+            task_type=explicit_type or "pending",
+            change_name="test-change",
+            change_path=project_root / "se3.yaml",
+        )
+        if explicit_type:
+            flow.state.context["explicit_type"] = explicit_type
+
+        step = Step(step_type=StepType.ANALYZE, step_id="analyze-001")
+        step.inputs["task_description"] = "Add a new capability"
+
+        llm_result = {
+            "task_type": llm_task_type,
+            "scope": "engine",
+            "complexity": "medium",
+            "reasoning": "because",
+        }
+
+        with patch.object(analyze_mod, "_collect_project_summary", return_value="ctx"), \
+            patch.object(analyze_mod, "get_charter_injection", return_value="", create=True), \
+            patch.object(analyze_mod, "LLMCaller") as MockCaller, \
+            patch.object(analyze_mod, "parse_json_response", return_value=llm_result):
+            # context_builder helpers are imported lazily inside the handler;
+            # patch them on that module.
+            import se3.engine.context_builder as cb
+            with patch.object(cb, "get_issue_discovery_injection", return_value=""), \
+                patch.object(cb, "get_charter_injection", return_value=""), \
+                patch.object(cb, "get_code_index_injection", return_value=""), \
+                patch.object(cb, "ensure_code_index_fresh", return_value=None), \
+                patch.object(cb, "get_runtime_environment_injection", return_value=""):
+                MockCaller.return_value.call.return_value = "{}"
+                status = analyze_mod.analyze_handler(step, flow)
+
+        return flow, step, status
+
+    def test_discovery_flow_persists_real_analyzed_type(self):
+        """A --discover run keeps flow.task_type='discovery' but records the real type."""
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td)
+            flow, step, status = self._run_analyze(
+                project_root, explicit_type="discovery", llm_task_type="feature"
+            )
+
+            assert status == StepStatus.COMPLETED
+            # Real analyzed type persisted, never 'discovery'.
+            assert flow.state.context["analyzed_type"] == "feature"
+            assert step.outputs["analyzed_type"] == "feature"
+            assert flow.state.context["analyzed_type"] not in RUN_MODE_TYPES
+            # Sequence type stays 'discovery' so the step sequence / resume hold.
+            assert flow.task_type == "discovery"
+            assert flow.state.context["resolved_type"] == "discovery"
+
+    def test_regular_feature_flow_analyzed_type_matches(self):
+        """A normal flow records analyzed_type equal to its real type."""
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td)
+            flow, step, status = self._run_analyze(
+                project_root, explicit_type=None, llm_task_type="bugfix"
+            )
+
+            assert status == StepStatus.COMPLETED
+            assert flow.state.context["analyzed_type"] == "bugfix"
+            assert step.outputs["analyzed_type"] == "bugfix"
+            assert flow.task_type == "bugfix"
+            assert flow.state.context["resolved_type"] == "bugfix"
 
 
 class TestAnalyzeStepTypeExtraction:
