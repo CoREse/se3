@@ -47,7 +47,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from .disk_json_cache import read_engine_header, read_json_cached
+from .disk_json_cache import (
+    cached_content_digest,
+    read_engine_header,
+    read_json_cached,
+)
 from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 from .supervisor import resolve_worktree_main_root
 
@@ -1751,8 +1755,19 @@ class DaemonHistoryReader:
             status = str(data.get("status") or "")
             if not _is_active_status(status):
                 continue
+            # The raw ``(mtime, size)`` alone debounces a same-``(mtime, size)``
+            # in-place engine.json rewrite — the PAUSE→resume / same-length
+            # status-flip churn on coarse-mtime filesystems — so the push loop
+            # would stall that frame until an unrelated jsonl append nudges the
+            # token. Fold in the whole-content digest the ``read_engine_header``
+            # call just above already computed and cached (zero extra read/hash):
+            # a mid-file rewrite that keeps ``(mtime, size)`` identical still
+            # moves the digest, so the signature shifts and the delta is read on
+            # the next tick. ``None`` (never-active read / oversized degrade)
+            # leaves the token as before, matching the previous behaviour.
+            engine_digest = cached_content_digest(engine_json)
             parts: List[Any] = [
-                ("__engine__", *_safe_stat(engine_json)),
+                ("__engine__", *_safe_stat(engine_json), engine_digest),
                 ("__status__", status.strip().lower()),
             ]
             hist_dir = root / "se3" / "history" / flow_id
@@ -1766,11 +1781,12 @@ class DaemonHistoryReader:
             signature[flow_id] = tuple(parts)
             # HOP-1 DEBUG: the change-detection fingerprint the push loop diffs
             # (via client._history_changed) to decide whether to read+push a
-            # delta. The __engine__ part is a RAW _safe_stat (immune to the
-            # disk_json_cache staleness above), while __status__/flow_id come
-            # from the cached parse. Logged with the jsonl-part count so a live
-            # run can see, tick by tick, whether the boundary actually shifts the
-            # signature (a new 02_analyze jsonl adds a part) or debounces.
+            # delta. The __engine__ part carries the raw ``(mtime, size)`` PLUS
+            # the whole-content digest, so a same-(mtime,size) in-place rewrite
+            # still shifts it; __status__/flow_id come from the cached parse.
+            # Logged with the jsonl-part count so a live run can see, tick by
+            # tick, whether the boundary actually shifts the signature (a new
+            # 02_analyze jsonl adds a part) or debounces.
             logger.debug(
                 "hist-diag active_flow_signature: flow=%s status=%s "
                 "engine=%s jsonl_parts=%d",
