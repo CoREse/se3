@@ -1,96 +1,12 @@
 # SE3 Framework Version History
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+## 11.15.0 - 2026-07-08
+
+- Accept a new `-n`/`--line-number` flag on `se3 code-index search` for grep muscle-memory compatibility
+- Treat `-n` as a pure no-op: output stays byte-for-byte identical whether or not it is passed, with no line-number prefix emitted
+- Preserve existing `-i`/`-F`/`-m` semantics and grep-aligned exit codes (0 match, 1 no match, 2 invalid regex) when `-n` is combined with them
+- Document in the option help text and command docstring that `-n` is accepted but ignored for code-index
+- Add tests covering `-n` acceptance, line-by-line output parity, and combined use with `-i`/`-F`/`-m`
 ## 11.14.0 - 2026-07-07
 
 - Add version-intent metadata so worktree sessions carry bump intent instead of writing versions at commit time, eliminating version-file merge conflicts

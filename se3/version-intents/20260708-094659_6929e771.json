@@ -11,6 +11,6 @@
   "bump_type": "minor",
   "pre_session_baseline": "11.14.0",
   "provisional_suggested_version": "11.15.0",
-  "consumed": false,
+  "consumed": true,
   "consumed_by": null
 }
