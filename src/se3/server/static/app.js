@@ -141,6 +141,23 @@ const state = {
   // seq 1). The seq guard only orders fetches WITHIN one lifecycle; the
   // generation guard scopes freshness ACROSS lifecycles.
   flowDetailViewGen: 0,
+  // G3 periodic full-snapshot self-heal bookkeeping. `periodicSnapshotActive` is
+  // true while the running-flow view's 3s detailPollTimer is running its
+  // conversation self-heal (openFlowView → doCloseFlowView). It is the "the
+  // periodic full snapshot now owns correctness" signal that DEMOTES the
+  // progression-grace fallback: while it is true a detected advance still updates
+  // the marker (activity/stall detection) but does NOT arm the grace loop, so the
+  // two paths never issue duplicate full pulls — the 3s poll heals first
+  // (3s < the 5s grace window) and is the single self-heal path. The DOM-free
+  // progression tests never open a view, so this stays false there and the grace
+  // loop still runs, keeping those suites' isolated coverage intact.
+  periodicSnapshotActive: false,
+  // Flow id whose final post-terminal self-heal pull has already run. A
+  // completed/failed flow produces no further content, so re-pulling its now
+  // static conversation every 3s forever is wasted work — after one catch-up pull
+  // the periodic conversation self-heal stops for that flow (the sidebar poll
+  // keeps running). Keyed by flow id so re-opening a flow resets it.
+  periodicSnapshotTerminalDone: null,
   flowInterventions: [],  // intervention entries derived from pending_calls
   flowReplyTargetId: null,// id of the intervention the reply box targets
   flowInterjectRequested: false, // user clicked Interject — synth chip on
@@ -1737,12 +1754,22 @@ function openFlowView(flowId) {
   updateFlowUsageBadge([]);
   resetReplyBox();
 
+  // A fresh open resets the per-flow terminal catch-up latch so a re-opened flow
+  // pulls again; the periodic self-heal becomes the conversation's correctness
+  // source while this view is open (see maybeRefreshConversationOnProgression).
+  state.periodicSnapshotTerminalDone = null;
+  state.periodicSnapshotActive = true;
+
   refreshFlowDetail();
   // Fetch the flow's conversation snapshot; WS history_data deltas append live.
   loadFlowConversation(flowId);
-  // Poll the REST endpoint while the view is open (WS updates also refresh).
+  // Poll the REST endpoint while the view is open. pollFlowView refreshes the
+  // left-side detail AND re-pulls the whole conversation on the same 3s cadence:
+  // the periodic full snapshot is the right side's correctness source, so a WS
+  // increment the push path dropped self-heals at the next tick (WS deltas stay
+  // as a pure low-latency optimization).
   if (detailPollTimer) clearInterval(detailPollTimer);
-  detailPollTimer = setInterval(refreshFlowDetail, 3000);
+  detailPollTimer = setInterval(pollFlowView, 3000);
 }
 
 // Cleanup-only close: clears state and hides the view, but never touches
@@ -1788,6 +1815,11 @@ function doCloseFlowView() {
   // Reset the mobile sidebar drawer so the next opened flow starts collapsed.
   closeFlowSidebar();
   $("flow-view").classList.add("hidden");
+  // The periodic self-heal stops with the view: clear the "poll owns correctness"
+  // flag so a later detached progression observation (or a DOM-free test) is free
+  // to arm the grace fallback again, and drop the terminal catch-up latch.
+  state.periodicSnapshotActive = false;
+  state.periodicSnapshotTerminalDone = null;
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
     detailPollTimer = null;
@@ -2105,6 +2137,17 @@ async function loadFlowConversation(flowId, opts) {
     // render can no longer be trusted — force a full rebuild in that case.
     const reconciled = reconcileLocalEchoes(result.records);
     const echoRemoved = reconciled !== result.records;
+    // G3: a silent periodic self-heal that changed nothing must not repaint. On
+    // the healthy path the 3s full snapshot equals what WS already delivered, so
+    // the reconciled records match those held — skip the from-scratch rebuild AND
+    // the scroll adjustment entirely, keeping the poll cheap and jank-free; only a
+    // real divergence (a dropped/rewritten increment) falls through to rebuild and
+    // self-heal. Compared BEFORE state.flowConversationRecords is reassigned, so it
+    // still holds the pre-merge array. Only the silent path opts in — a first-open
+    // / reconnect must always render its authoritative result.
+    if (silent && sameRenderedConversation(reconciled, state.flowConversationRecords)) {
+      return;
+    }
     state.flowConversationRecords = reconciled;
     // Delta delivery → incremental append render (preserves DOM/fold state);
     // full fallback, or any echo removal, → authoritative full rebuild.
@@ -2409,12 +2452,66 @@ function maybeRefreshConversationOnProgression(flow) {
     // earlier advance so a real burst of steps observes only the newest one and
     // cannot stack multiple concurrent fallback loops.
     cancelProgressionGrace();
+    // G3 convergence: while the view's 3s periodic full-snapshot self-heal is
+    // running it is the primary self-heal path (it re-pulls the whole
+    // conversation every 3s and idempotently reconciles, healing any dropped
+    // increment before the 5s grace window would even elapse). Arming the grace
+    // loop too would issue a duplicate full pull on nearly the same cadence, so
+    // demote the fallback to marker-only here — the advance is still recorded
+    // above for activity/stall detection, but self-heal is deferred to the poll.
+    // Only when the poll is NOT active (a view without it, or the DOM-free
+    // progression tests) does the grace loop remain the self-heal path.
+    if (state.periodicSnapshotActive) return;
     // Freeze the append counter at this advance and hand it to the self-re-arming
     // grace timer, which keeps pulling on the grace cadence until a genuine WS
     // increment lands past this snapshot (or the flow closes) — so a WS that
     // never recovers still surfaces mid-step content without an exit/re-enter.
     armProgressionGrace(flowId, state.flowConversationAppendSeq);
   }
+}
+
+// The running-flow view's 3s detailPollTimer callback (G3). It refreshes the
+// left-side detail (sidebar / interventions) AND runs the right-side periodic
+// full-snapshot self-heal on the SAME cadence — reusing the left side's already
+// proven 3s rhythm and its epoch/seq race guards rather than adding a second
+// timer with duplicated lifecycle management. refreshFlowDetail is fire-and-
+// forget async; selfHealFlowConversation likewise. Kept as its own function (not
+// an inline arrow) so it is exportable for the DOM-stub tests.
+function pollFlowView() {
+  refreshFlowDetail();
+  selfHealFlowConversation();
+}
+
+// Periodic full-snapshot self-heal for the open running-flow conversation. Every
+// tick re-pulls the whole history via loadFlowConversation's silent full path and
+// lets the idempotent reconcile (G2) converge, so any WS increment the push path
+// dropped, or any front-end/daemon/server misjudgement that stalled the delta
+// chain, is corrected at the next 3s tick — correctness no longer depends on the
+// increment link never misfiring. loadFlowConversation's silent path skips the
+// DOM rebuild when the snapshot matches what is already held (see
+// sameRenderedConversation), so the healthy path (WS already delivered
+// everything) stays a cheap no-op repaint-wise; only a real divergence repaints.
+//
+// A terminal (completed/failed) flow yields no further content, so once its final
+// catch-up snapshot has been pulled the self-heal stops for that flow — the
+// detail poll keeps running, but re-pulling a static conversation forever is
+// wasted work. A still-loading (unknown/blank status) or running flow always
+// pulls; findFlow returning null (not yet in state.machines) is treated as
+// non-terminal so a freshly-opened flow keeps healing.
+function selfHealFlowConversation() {
+  const flowId = state.selectedFlowId;
+  if (!flowId) return;
+  const found = findFlow(flowId);
+  if (found && isTerminalFlow(found.flow)) {
+    // One post-terminal catch-up pull, then latch off for this flow.
+    if (state.periodicSnapshotTerminalDone === flowId) return;
+    state.periodicSnapshotTerminalDone = flowId;
+  } else {
+    // Non-terminal again (or re-opened): clear the latch so a later terminal
+    // transition still gets its one final pull.
+    state.periodicSnapshotTerminalDone = null;
+  }
+  loadFlowConversation(flowId, { silent: true });
 }
 
 async function refreshFlowDetail() {
@@ -5882,6 +5979,27 @@ function recordKey(rec) {
 // content or status change while treating a byte-identical re-delivery as equal.
 function sameStableRecordContent(a, b) {
   return legacyKeyFromNorm(normalizeRecord(a)) === legacyKeyFromNorm(normalizeRecord(b));
+}
+
+// True when two record arrays would render identically — same length and, at
+// every position, the same VISIBLE signature (legacyKeyFromNorm captures role /
+// kind / status / timestamp / length / content[:96], so a content or status
+// change registers as different even when the stable stepId#ordinal identity is
+// unchanged by a retry rewrite). Used by the G3 periodic silent self-heal to
+// skip a from-scratch DOM rebuild when the authoritative snapshot matches what is
+// already held, so the 3s poll is a cheap no-op on the healthy path and repaints
+// only a genuine divergence. Deliberately position-wise (not set-based): a
+// reordering IS a visible change and must repaint.
+function sameRenderedConversation(a, b) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (legacyKeyFromNorm(normalizeRecord(a[i])) !==
+        legacyKeyFromNorm(normalizeRecord(b[i]))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Merge a freshly-fetched snapshot with append records that arrived during the
@@ -12614,6 +12732,12 @@ if (typeof module !== "undefined" && module.exports) {
     maybeRefreshConversationOnProgression,
     cancelProgressionGrace,
     refreshFlowDetail,
+    // G3 periodic full-snapshot self-heal — exposed for the DOM-stub tests in
+    // tests/frontend/test_app_pure.mjs (the 3s poll callback, its conversation
+    // self-heal, and the visible-equality no-op guard).
+    pollFlowView,
+    selfHealFlowConversation,
+    sameRenderedConversation,
     openHistorySession,
     closeHistory,
     applyHistoryData,

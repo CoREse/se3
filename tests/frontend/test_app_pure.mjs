@@ -5907,6 +5907,208 @@ await checkAsync("flow silent: never touches reply-region state", async () => {
   assert.deepEqual(app.state.flowReplyPromptExpanded, { "chip-7": true });
 });
 
+// -- G3 periodic full-snapshot self-heal (3s poll) ---------------------------
+//
+// The running-flow view now re-pulls the whole conversation on the SAME 3s
+// detailPollTimer cadence the left-side status area uses, and idempotently
+// reconciles it, so any dropped/misjudged WS increment self-heals at the next
+// tick — WS deltas are demoted to a pure low-latency optimization. These tests
+// pin: (1) the poll callback issues a full (no-`after`) history pull and the
+// self-heal renders the pulled records; (2) a silent snapshot that changed
+// nothing skips the DOM rebuild entirely (cheap healthy path); (3) while the
+// poll is active a detected advance updates the marker but does NOT arm the
+// grace fallback (no duplicate full pull); (4) a terminal flow gets exactly one
+// post-terminal catch-up pull, then the self-heal stops for it.
+
+const flushTicks = async (n = 4) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+};
+// A fetch that routes /api/flows → detail payload, /api/history → snapshot
+// payload, recording every URL so the two poll legs can be told apart.
+function installRouterFetch(historyPayload, flowPayload) {
+  const calls = [];
+  globalThis.fetch = (url) => {
+    const u = String(url);
+    calls.push(u);
+    const payload = u.includes("/api/history/") ? historyPayload : flowPayload;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+  };
+  return calls;
+}
+
+await checkAsync("G3 poll: pollFlowView issues a full history self-heal pull and renders it", async () => {
+  const saved = globalThis.fetch;
+  const savedMachines = app.state.machines;
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  app.state.flowProgressionMarker = null;
+  app.state.periodicSnapshotActive = true;
+  app.state.periodicSnapshotTerminalDone = null;
+  app.state.machines = [];   // findFlow → null → treated as non-terminal (still pulls)
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  try {
+    const calls = installRouterFetch(
+      { records: [asstRecord("A", 1, "s1", "discovery")], progress: "p1", delivery: "full" },
+      { flow: { flow_id: "F1", current_step: "discovery", current_step_index: 0, status: "running" }, machine_id: "m1" },
+    );
+    app.pollFlowView();
+    await flushTicks();
+    // Both legs of the poll fired: a detail pull AND a full conversation pull.
+    assert.ok(calls.some((u) => u.includes("/api/flows/")), "poll refreshes the left-side detail");
+    const hist = calls.find((u) => u.includes("/api/history/"));
+    assert.ok(hist, "poll issues a conversation self-heal pull");
+    assert.ok(!hist.includes("after="), "the self-heal is a full (no-after) pull: " + hist);
+    // The pulled snapshot is reconciled into the open conversation.
+    assert.equal(app.state.flowConversationRecords.length, 1, "self-heal populated the records");
+    assert.equal(bubbleNodes(c).length, 1, "self-heal rendered the pulled record");
+  } finally {
+    app.state.periodicSnapshotActive = false;
+    app.state.machines = savedMachines;
+    globalThis.fetch = saved;
+  }
+});
+
+await checkAsync("G3 poll: an unchanged snapshot self-heal skips the DOM rebuild", async () => {
+  const saved = globalThis.fetch;
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationProgress = null;
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  try {
+    // Establish the held conversation.
+    setFetch({
+      records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+      progress: "p0", delivery: "full",
+    });
+    await app.loadFlowConversation("F1");
+    const recsBefore = app.state.flowConversationRecords;
+    const stBefore = c.__convState;
+    const bubblesBefore = bubbleNodes(c).slice();
+    // A silent self-heal whose snapshot is byte-identical to what is held must
+    // NOT rebuild: same records ref, same __convState, same DOM nodes.
+    setFetch({
+      records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
+      progress: "p1", delivery: "full",
+    });
+    await app.loadFlowConversation("F1", { silent: true });
+    assert.equal(app.state.flowConversationRecords, recsBefore,
+      "unchanged self-heal keeps the same records array (no adopt)");
+    assert.equal(c.__convState, stBefore, "unchanged self-heal does not rebuild __convState");
+    assert.deepEqual(bubbleNodes(c), bubblesBefore, "unchanged self-heal leaves the DOM untouched");
+    // A snapshot that DOES change still rebuilds (self-heals the divergence).
+    setFetch({
+      records: [
+        asstRecord("A", 1, "s1", "discovery"),
+        asstRecord("B", 2, "s1", "discovery"),
+        asstRecord("C", 3, "s2", "analyze"),
+      ],
+      progress: "p2", delivery: "full",
+    });
+    await app.loadFlowConversation("F1", { silent: true });
+    assert.equal(app.state.flowConversationRecords.length, 3,
+      "a divergent snapshot is adopted and rendered (self-heal)");
+    assert.equal(bubbleNodes(c).length, 3);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+check("G3 sameRenderedConversation: identity, length, content, and order sensitivity", () => {
+  const A = asstRecord("A", 1, "s1", "discovery");
+  const B = asstRecord("B", 2, "s1", "discovery");
+  const Bx = asstRecord("B-edited", 2, "s1", "discovery");
+  assert.equal(app.sameRenderedConversation([A, B], [A, B]), true, "equal content → same");
+  assert.equal(app.sameRenderedConversation([A, B], [A]), false, "different length → different");
+  assert.equal(app.sameRenderedConversation([A, B], [A, Bx]), false, "content edit → different");
+  assert.equal(app.sameRenderedConversation([A, B], [B, A]), false, "reorder → different");
+  const same = [A, B];
+  assert.equal(app.sameRenderedConversation(same, same), true, "same reference → same");
+});
+
+await checkAsync("G3 convergence: an active periodic poll demotes the progression grace fallback", async () => {
+  const saved = globalThis.fetch;
+  app.cancelProgressionGrace();
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [];
+  app.state.flowConversationAppendSeq = 0;
+  app.state.progressionGraceMs = 5;
+  // Baseline at discovery so the analyze snapshot below reads as an advance.
+  app.state.flowProgressionMarker = {
+    flowId: "F1", currentStep: "discovery", currentStepIndex: 0, status: "running",
+  };
+  setFetch({ records: [], progress: "p", delivery: "full" });
+  try {
+    // Poll active → the advance updates the marker (activity detection) but must
+    // NOT arm the grace loop: the 3s poll is the single self-heal path, so a
+    // second full pull on the ~5s grace cadence would be a duplicate.
+    app.state.periodicSnapshotActive = true;
+    app.maybeRefreshConversationOnProgression({
+      flow_id: "F1", current_step: "analyze", current_step_index: 1, status: "running",
+    });
+    assert.equal(app.state.progressionGraceTimer, null,
+      "an active periodic poll must NOT arm the grace fallback");
+    assert.equal(app.state.flowProgressionMarker.currentStep, "analyze",
+      "the advance is still recorded for activity/stall detection");
+
+    // Poll inactive (a view without it / the DOM-free tests) → the grace loop
+    // remains the self-heal path and DOES arm, proving the gate is the switch.
+    app.state.periodicSnapshotActive = false;
+    app.state.flowProgressionMarker = {
+      flowId: "F1", currentStep: "analyze", currentStepIndex: 1, status: "running",
+    };
+    app.maybeRefreshConversationOnProgression({
+      flow_id: "F1", current_step: "commit", current_step_index: 2, status: "running",
+    });
+    assert.notEqual(app.state.progressionGraceTimer, null,
+      "with no periodic poll the grace fallback still arms");
+  } finally {
+    app.cancelProgressionGrace();
+    app.state.periodicSnapshotActive = false;
+    globalThis.fetch = saved;
+  }
+});
+
+await checkAsync("G3 poll: a terminal flow gets exactly one post-terminal self-heal pull, then stops", async () => {
+  const saved = globalThis.fetch;
+  const savedMachines = app.state.machines;
+  app.state.selectedFlowId = "F1";
+  app.state.flowConversationRecords = [asstRecord("final", 1, "s9", "commit")];
+  app.state.flowConversationProgress = null;
+  app.state.periodicSnapshotTerminalDone = null;
+  app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  try {
+    const calls = [];
+    globalThis.fetch = (url) => {
+      calls.push(String(url));
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({
+          records: [asstRecord("final", 1, "s9", "commit")], progress: "p", delivery: "full",
+        }),
+      });
+    };
+    // First tick: one catch-up pull for the just-completed flow, then latch.
+    app.selfHealFlowConversation();
+    await flushTicks();
+    assert.equal(calls.length, 1, "a terminal flow does one catch-up self-heal pull");
+    assert.equal(app.state.periodicSnapshotTerminalDone, "F1", "the terminal latch is set");
+    // Subsequent ticks must NOT re-pull a static terminal conversation.
+    app.selfHealFlowConversation();
+    app.selfHealFlowConversation();
+    await flushTicks();
+    assert.equal(calls.length, 1, "a latched terminal flow issues no further self-heal pulls");
+  } finally {
+    app.state.periodicSnapshotTerminalDone = null;
+    app.state.machines = savedMachines;
+    globalThis.fetch = saved;
+  }
+});
+
 // -- history detail view -----------------------------------------------------
 
 await checkAsync("history: reconnect delta appends without clearing detail DOM", async () => {
