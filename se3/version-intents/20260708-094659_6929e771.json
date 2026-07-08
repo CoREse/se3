@@ -1,0 +1,16 @@
+{
+  "flow_id": "20260708-094659_6929e771",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] se3/code-index.md\n- [modified] src/se3/commands/code_index_cmd.py\n- [modified] tests/commands/test_code_index_search.py\n\n### Implementation Groups:\n- 新增 -n/--line-number no-op 选项并补测试: 在 search_cmd 中新增被静默接受的 `-n`/`--line-number` 布尔 flag(纯 no-op),更新其 help 文本与命令 docstring,并在 test_code_index_search.py 中新增覆盖接受性、逐行一致性与组合行为的测试。\n\n## Spec Changes\n\nNo spec changes recorded.\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Accept a new `-n`/`--line-number` flag on `se3 code-index search` for grep muscle-memory compatibility",
+    "Treat `-n` as a pure no-op: output stays byte-for-byte identical whether or not it is passed, with no line-number prefix emitted",
+    "Preserve existing `-i`/`-F`/`-m` semantics and grep-aligned exit codes (0 match, 1 no match, 2 invalid regex) when `-n` is combined with them",
+    "Document in the option help text and command docstring that `-n` is accepted but ignored for code-index",
+    "Add tests covering `-n` acceptance, line-by-line output parity, and combined use with `-i`/`-F`/`-m`"
+  ],
+  "bump_type": "minor",
+  "pre_session_baseline": "11.14.0",
+  "provisional_suggested_version": "11.15.0",
+  "consumed": false,
+  "consumed_by": null
+}

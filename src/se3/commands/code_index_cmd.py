@@ -184,6 +184,16 @@ def search_cmd(
         "--max-count",
         help="Stop after N matches (like grep -m). Default: no limit.",
     ),
+    line_number: bool = typer.Option(
+        False,
+        "-n",
+        "--line-number",
+        help=(
+            "Accepted for grep muscle-memory only; a no-op with no effect on "
+            "code-index (ignored — code-index item lines carry no source line "
+            "number, so nothing is prefixed)."
+        ),
+    ),
 ):
     """Grep the code-index item lines — a drop-in for `grep se3/code-index.md`.
 
@@ -197,6 +207,11 @@ def search_cmd(
     ``-i`` matches case-insensitively, ``-F`` treats it as a literal substring,
     and ``-m N`` caps the output at N matches. Exit code follows grep: 0 when at
     least one line matches, 1 when none do (2 on an invalid regex).
+
+    ``-n``/``--line-number`` is accepted for grep muscle-memory but is a pure
+    no-op with no effect on code-index: item lines have no source line number,
+    so it is ignored and no line-number prefix is ever emitted (output stays
+    byte-for-byte identical to omitting it).
     """
     from ..engine import code_index_render
 
