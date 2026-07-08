@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
+import se3.daemon.disk_json_cache as disk_cache
 from se3.daemon import history as history_mod
 from se3.daemon.history import (
     DaemonHistoryReader,
@@ -634,6 +636,144 @@ def test_active_flow_signature_stable_when_nothing_changes(tmp_path):
     )
     reader = _make_reader(tmp_path)
     assert reader.active_flow_signature() == reader.active_flow_signature()
+
+
+# --------------------------------------------------------------------------
+# G5: engine.json same-(mtime,size) fingerprint blind-spot hardening
+#
+# Each round of a discovery PAUSE→resume rewrites engine.json in place. On a
+# coarse-mtime filesystem (tmpfs / overlayfs, and observably ext4 for two
+# writes in one jiffy) that rewrite can land in the SAME ``st_mtime_ns`` and
+# keep the SAME byte size, so a stat-only cache/fingerprint sees "no change".
+# These tests pin the mtime (``os.utime``) and craft equal-size payloads to
+# reproduce exactly that collision, and assert the whole-content hash still
+# forces a re-parse (no stale flow_id/status → no wrong DROP) and still moves
+# the change-detection signature (no residual frame-delay).
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_disk_json_cache():
+    """Clear the module-level parse cache around each test in this module.
+
+    The G5 same-``(mtime, size)`` tests deliberately re-use one path across
+    in-place rewrites, so the cache is the unit under test — a leaked entry from
+    a prior test keyed on the same tmp path would poison the first read.
+    """
+    disk_cache.clear_cache()
+    yield
+    disk_cache.clear_cache()
+
+
+def _write_engine_pinned(root, payload, mtime_ns):
+    """Write ``engine.json`` with *payload* and pin its mtime to *mtime_ns*.
+
+    Pinning the mtime (and matching payload size across calls) is how the test
+    forces the same-``(mtime, size)`` collision a real coarse-mtime in-place
+    rewrite produces.
+    """
+    state_dir = root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    engine = state_dir / "engine.json"
+    engine.write_text(json.dumps(payload), encoding="utf-8")
+    os.utime(engine, ns=(mtime_ns, mtime_ns))
+    return engine
+
+
+def test_active_engine_same_stat_inplace_rewrite_forces_reparse(tmp_path):
+    """A same-``(mtime, size)`` in-place engine.json rewrite must not serve the
+    stale parse: the whole-content hash forces a fresh decode so a completed→
+    running flip (the DROP hazard) surfaces the *current* status."""
+    engine = tmp_path / "se3" / "state" / "engine.json"
+    mtime_ns = 1_700_000_000_000_000_000
+
+    # ``RUNNING`` + 2-char nonce and ``completed`` + empty nonce serialise to the
+    # SAME byte length, so the two rewrites are indistinguishable by ``stat``.
+    terminal = {"flow_id": "live", "status": "completed", "nonce": ""}
+    active = {"flow_id": "live", "status": "RUNNING", "nonce": "aa"}
+    assert len(json.dumps(terminal)) == len(json.dumps(active))
+
+    # Prime the cache with the terminal parse.
+    _write_engine_pinned(tmp_path, terminal, mtime_ns)
+    first = history_mod.read_engine_header(engine, active=True)
+    assert first["status"] == "completed"
+
+    # In-place rewrite to the active flow, SAME (mtime, size). A stat-only cache
+    # would return the just-cached ``completed`` parse (→ wrong DROP).
+    _write_engine_pinned(tmp_path, active, mtime_ns)
+    st = engine.stat()
+    assert (st.st_mtime_ns, st.st_size) == (mtime_ns, len(json.dumps(active)))
+
+    second = history_mod.read_engine_header(engine, active=True)
+    assert second["status"] == "RUNNING"
+
+
+def test_is_still_active_not_dropped_across_same_stat_pause_resume(tmp_path):
+    """Across repeated PAUSE→resume rewrites that all share one ``(mtime, size)``
+    and a pinned mtime, the active flow is never mis-DROPped and read_flow keeps
+    advancing."""
+    mtime_ns = 1_700_000_000_000_000_000
+    hist = tmp_path / "se3" / "history" / "live"
+    s1 = hist / "01_discovery.jsonl"
+    _write_jsonl(s1, [_msg("user", "q1", step_type="discovery")])
+
+    # Equal-length RUNNING / PAUSED payloads (nonce padding keeps the byte size
+    # identical so every rewrite collides on (mtime, size)).
+    running = {"flow_id": "live", "status": "RUNNING", "nonce": "x"}
+    paused = {"flow_id": "live", "status": "PAUSED", "nonce": "xx"}
+    assert len(json.dumps(running)) == len(json.dumps(paused))
+
+    _write_engine_pinned(tmp_path, running, mtime_ns)
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    assert [r.flow_id for r in reads] == ["live"]
+    cursors = {r.flow_id: r.cursor for r in reads}
+
+    delivered = [r["message"]["content"] for r in reads[0].records]
+    for i in range(4):
+        # PAUSE (same mtime tick, same size as RUNNING) — must stay active.
+        _write_engine_pinned(tmp_path, paused, mtime_ns)
+        reader.invalidate_index_cache()
+        index = reader.build_index()
+        assert index[0].active is True
+        assert reader._is_still_active(index[0]) is True
+
+        # Resume: flip back to RUNNING (still same (mtime, size)) and append a
+        # new discovery record; the read must pick it up incrementally.
+        _write_engine_pinned(tmp_path, running, mtime_ns)
+        _append_jsonl(s1, [_msg("assistant", f"a{i}", step_type="discovery")])
+        reader.invalidate_index_cache()
+        reads = reader.read_active_flows(cursors)
+        assert [r.flow_id for r in reads] == ["live"]
+        cursors = {r.flow_id: r.cursor for r in reads}
+        delivered += [r["message"]["content"] for r in reads[0].records]
+
+    # Every appended record was streamed exactly once — the flow never froze.
+    assert delivered == ["q1", "a0", "a1", "a2", "a3"]
+
+
+def test_active_flow_signature_moves_on_same_stat_engine_rewrite(tmp_path):
+    """A same-``(mtime, size)`` in-place engine.json rewrite still shifts the
+    change-detection signature (residual frame-delay hardening): the folded
+    whole-content digest moves even though the stat token does not."""
+    mtime_ns = 1_700_000_000_000_000_000
+    a = {"flow_id": "live", "status": "RUNNING", "nonce": "A"}
+    b = {"flow_id": "live", "status": "RUNNING", "nonce": "B"}
+    assert len(json.dumps(a)) == len(json.dumps(b))
+
+    engine = _write_engine_pinned(tmp_path, a, mtime_ns)
+    reader = _make_reader(tmp_path)
+    sig1 = reader.active_flow_signature()
+    assert set(sig1) == {"live"}
+
+    # In-place middle rewrite: identical (mtime, size), different content.
+    _write_engine_pinned(tmp_path, b, mtime_ns)
+    st = engine.stat()
+    assert (st.st_mtime_ns, st.st_size) == (mtime_ns, len(json.dumps(a)))
+
+    sig2 = reader.active_flow_signature()
+    assert sig2 != sig1
 
 
 # --------------------------------------------------------------------------

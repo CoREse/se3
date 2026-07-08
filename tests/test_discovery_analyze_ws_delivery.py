@@ -508,14 +508,15 @@ def test_active_engine_json_middle_rewrite_returns_fresh_parse(tmp_path):
     )
 
 
-def test_active_flow_signature_masks_engine_middle_rewrite(tmp_path):
-    """Documents WHY the staleness is masked in the common case (and where it is
-    NOT): ``active_flow_signature`` keys engine.json on a RAW ``_safe_stat``, so a
-    same-``(mtime, size)`` middle rewrite leaves the signature UNCHANGED — the
-    push loop debounces that tick. When such an engine-only tick is the only
-    change (no jsonl append), the delta read is skipped; the confirmed staleness
-    then decides what the daemon believes about the flow. This is the concrete
-    interaction G2 must close, captured here as a regression anchor.
+def test_active_flow_signature_moves_on_engine_middle_rewrite(tmp_path):
+    """G5: a same-``(mtime, size)`` engine.json middle rewrite now SHIFTS the
+    signature. ``active_flow_signature`` folds in the whole-content digest that
+    the ``active`` read already computed, so an engine-only PAUSE→resume tick
+    (no jsonl append) no longer debounces — the push loop reads the delta on the
+    next tick instead of stalling until an unrelated append nudges the raw-stat
+    token. Correctness itself is the frontend full snapshot; this closes the
+    residual frame-delay the old raw-stat-only signature left behind (this test
+    previously anchored that blind spot as intentional).
     """
     root = tmp_path
     flow_id = "F1"
@@ -532,13 +533,14 @@ def test_active_flow_signature_masks_engine_middle_rewrite(tmp_path):
     st = os.stat(ej)
     ej.write_text(_build_large_engine(1), encoding="utf-8")  # same size, middle-only
     os.utime(ej, ns=(st.st_atime_ns, st.st_mtime_ns))        # same mtime tick
-    sig2 = reader.active_flow_signature()
 
-    # The raw-stat engine part is identical, and no jsonl changed → the signature
-    # is unchanged, so client._history_changed would DEBOUNCE this tick.
-    assert sig1 == sig2, (
-        "expected the same-(mtime,size) middle rewrite to leave the raw-stat "
-        "signature unchanged (the debounce that masks the staleness)"
+    # The raw ``(mtime, size)`` is unchanged, but the folded whole-content digest
+    # moved → the signature shifts, so client._history_changed reads this tick
+    # rather than masking it.
+    sig2 = reader.active_flow_signature()
+    assert sig2 != sig1, (
+        "expected the folded whole-content digest to shift the signature on a "
+        "same-(mtime,size) middle rewrite (residual frame-delay closed)"
     )
 
 

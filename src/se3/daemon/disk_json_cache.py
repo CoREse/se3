@@ -180,6 +180,32 @@ def _drop_entry(key: str) -> None:
         _CACHE.pop(key, None)
 
 
+def cached_content_digest(path: Path) -> Optional[bytes]:
+    """Return the whole-content digest of *path*'s last ``active`` read.
+
+    The live ``engine.json`` read (``read_engine_header(active=True)``) hashes
+    the file's WHOLE content each poll and caches that digest alongside the
+    parse (see :func:`read_json_cached`). This exposes exactly that digest so
+    the change-detection signature can fold it in *without paying a second read
+    or hash*: a same-``(mtime, size)`` in-place rewrite — the PAUSE→resume
+    engine.json churn that a stat-only fingerprint debounces — still shifts the
+    signature because its content digest moved, so the push loop reads the delta
+    on the next tick instead of stalling until an unrelated jsonl append happens
+    to nudge the stat token. Correctness itself is the frontend's periodic full
+    snapshot; this only trims the residual frame-delay that stat-only
+    debouncing would otherwise leave on a pure in-place engine.json rewrite.
+
+    Returns ``None`` when the path was never read via the ``active`` path, when
+    it degraded (oversized, never hashed), or when its last read failed — the
+    caller then falls back to the ``(mtime, size)`` token alone.
+    """
+    with _CACHE_LOCK:
+        cached = _CACHE.get(str(path))
+    if cached is None:
+        return None
+    return cached[2]
+
+
 def _warn_once_degraded(path: Path) -> None:
     """Warn (once per path) that degraded header extraction failed for *path*.
 
