@@ -1727,6 +1727,38 @@ check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live 
   const snap = [r1];
   assert.equal(app.mergeSnapshotWithLiveAppends(snap, []), snap);
 });
+check("mergeSnapshotWithLiveAppends does NOT roll an authoritative snapshot line back to an older live copy", () => {
+  // Reverse race: baseline had line 1 = A, a WS append advanced the held view to
+  // 1 = B, then the cache advanced to 1 = C (newest). The dropped WS frame means
+  // the live-held copy is still the older B, but the full snapshot correctly
+  // carries C. The merge must keep the authoritative C, NOT regress to B.
+  const ord = (ordinal, content, ts) => ({
+    step_id: "s1", step_type: "discovery", ordinal,
+    message: { role: "assistant", content, timestamp: ts },
+  });
+  const merged = app.mergeSnapshotWithLiveAppends(
+    [ord(0, "d0", 1), ord(1, "C", 4)],   // snapshot: newest content, later ts
+    [ord(1, "B", 2)],                    // live-held: older content, earlier ts
+  );
+  const bodies = merged.map(app.normalizeRecord).map((n) => n.content);
+  assert.deepEqual(bodies, ["d0", "C"],
+    "the authoritative snapshot line wins over the stale live-held copy");
+});
+check("mergeSnapshotWithLiveAppends keeps the snapshot line on an equal-timestamp tie", () => {
+  // Ties resolve to the snapshot (the correctness source); a truly-missed
+  // forward rewrite self-heals at the next full pull rather than risking a
+  // backward regression on an ambiguous same-timestamp collision.
+  const ord = (ordinal, content, ts) => ({
+    step_id: "s1", step_type: "discovery", ordinal,
+    message: { role: "assistant", content, timestamp: ts },
+  });
+  const merged = app.mergeSnapshotWithLiveAppends(
+    [ord(0, "snap", 5)],
+    [ord(0, "live", 5)],
+  );
+  const bodies = merged.map(app.normalizeRecord).map((n) => n.content);
+  assert.deepEqual(bodies, ["snap"], "equal timestamp keeps the snapshot copy");
+});
 
 // -- dedupeAppendRecords: filter duplicate records from WS append batches -----
 //
@@ -2000,6 +2032,81 @@ check("mergeHistoryResponse full fallback drops an echo already authoritative in
       && app.comparableUserText(app.normalizeRecord(r).content) === "yes");
   assert.equal(yes.length, 1, "reply shown exactly once after reconcile");
   assert.ok(!reconciled.some((r) => r.__localEcho), "echo reconciled away");
+});
+
+check("mergeHistoryResponse full fallback keeps a live in-place rewrite over a stale snapshot line", () => {
+  // A REST full pull raced a WS in-place rewrite of the SAME stepId#ordinal.
+  // The request baseline held line 1's pre-rewrite content; during the fetch a
+  // WS append advanced it to the new content (the held `base` array). The REST
+  // snapshot resolves STALE, still carrying the pre-rewrite content. The merge
+  // must NOT regress the view backward to the snapshot's old content — the live
+  // rewrite already advanced it, so its content is the newer authority for that
+  // line. dedupeAppendRecords omits it (its key already exists in the baseline);
+  // stableInPlaceRewrites surfaces it and the idempotent snapshot merge applies
+  // it in place.
+  const ord = (stepId, ordinal, content, ts) => ({
+    step_id: stepId, step_type: "discovery", ordinal,
+    message: { role: "assistant", content, timestamp: ts },
+  });
+  const baseline = [ord("s1", 0, "d0", 1), ord("s1", 1, "old", 2)];
+  const base = [ord("s1", 0, "d0", 1), ord("s1", 1, "new", 3)];
+  const resp = {
+    delivery: "full",
+    records: [ord("s1", 0, "d0", 1), ord("s1", 1, "old", 2)],
+    progress: "gen2",
+  };
+  const out = app.mergeHistoryResponse(resp, base, baseline);
+  assert.equal(out.render, "full");
+  const bodies = out.records.map(app.normalizeRecord).map((n) => n.content);
+  assert.deepEqual(bodies, ["d0", "new"],
+    "the live in-place rewrite wins over the stale snapshot line");
+  const keys = out.records.map(app.recordKey);
+  assert.equal(new Set(keys).size, keys.length, "no duplicate line after the merge");
+});
+
+check("mergeHistoryResponse full fallback keeps an authoritative snapshot line over an OLDER live-held copy", () => {
+  // The inverse of the test above: the WS in-place rewrite the held view carries
+  // is now STALE — the server cache advanced past it and the full snapshot is the
+  // newer authority. The request baseline held line 1 = A; during the fetch a WS
+  // append advanced the held `base` to 1 = B; but the cache reached 1 = C and the
+  // dropped WS frame means the view never saw C. The REST full snapshot correctly
+  // resolves to C. stableInPlaceRewrites still surfaces B (it changed vs baseline
+  // A), but the timestamp-gated merge must NOT let the older B overwrite C —
+  // otherwise the right side regresses backward until a later poll repairs it.
+  const ord = (stepId, ordinal, content, ts) => ({
+    step_id: stepId, step_type: "discovery", ordinal,
+    message: { role: "assistant", content, timestamp: ts },
+  });
+  const baseline = [ord("s1", 0, "d0", 1), ord("s1", 1, "A", 2)];
+  const base = [ord("s1", 0, "d0", 1), ord("s1", 1, "B", 3)];
+  const resp = {
+    delivery: "full",
+    records: [ord("s1", 0, "d0", 1), ord("s1", 1, "C", 5)],
+    progress: "gen3",
+  };
+  const out = app.mergeHistoryResponse(resp, base, baseline);
+  assert.equal(out.render, "full");
+  const bodies = out.records.map(app.normalizeRecord).map((n) => n.content);
+  assert.deepEqual(bodies, ["d0", "C"],
+    "the authoritative full snapshot wins over the older live-held rewrite");
+  const keys = out.records.map(app.recordKey);
+  assert.equal(new Set(keys).size, keys.length, "no duplicate line after the merge");
+});
+
+check("mergeSnapshotWithLiveAppends updates a snapshot line in place when a live rewrite shares its ordinal", () => {
+  // The stable-identity idempotent merge: a live record whose stepId#ordinal
+  // matches a snapshot line but whose content advanced updates that line in
+  // place rather than being dropped as a key collision.
+  const ord = (ordinal, content, ts) => ({
+    step_id: "s1", step_type: "discovery", ordinal,
+    message: { role: "assistant", content, timestamp: ts },
+  });
+  const merged = app.mergeSnapshotWithLiveAppends(
+    [ord(0, "d0", 1), ord(1, "stale", 2)],
+    [ord(1, "fresh", 3)],
+  );
+  const bodies = merged.map(app.normalizeRecord).map((n) => n.content);
+  assert.deepEqual(bodies, ["d0", "fresh"]);
 });
 
 check("mergeHistoryResponse unrecognised delivery defaults to full", () => {
@@ -5917,8 +6024,10 @@ await checkAsync("flow silent: never touches reply-region state", async () => {
 // self-heal renders the pulled records; (2) a silent snapshot that changed
 // nothing skips the DOM rebuild entirely (cheap healthy path); (3) while the
 // poll is active a detected advance updates the marker but does NOT arm the
-// grace fallback (no duplicate full pull); (4) a terminal flow gets exactly one
-// post-terminal catch-up pull, then the self-heal stops for it.
+// grace fallback (no duplicate full pull); (4) a terminal flow keeps pulling
+// until its conversation content stabilizes, then the self-heal stops for it —
+// and a commit/index result that lands on a pull AFTER the status flipped
+// terminal is still captured rather than frozen out.
 
 const flushTicks = async (n = 4) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
@@ -5944,8 +6053,7 @@ await checkAsync("G3 poll: pollFlowView issues a full history self-heal pull and
   app.state.flowConversationProgress = null;
   app.state.flowProgressionMarker = null;
   app.state.periodicSnapshotActive = true;
-  app.state.periodicSnapshotTerminalDone = null;
-  app.state.machines = [];   // findFlow → null → treated as non-terminal (still pulls)
+  app.state.machines = [];   // findFlow → null (flow not yet in state.machines)
   const c = document.getElementById("flow-conversation");
   c.innerHTML = ""; c.__convState = null;
   try {
@@ -6071,13 +6179,12 @@ await checkAsync("G3 convergence: an active periodic poll demotes the progressio
   }
 });
 
-await checkAsync("G3 poll: a terminal flow gets exactly one post-terminal self-heal pull, then stops", async () => {
+await checkAsync("G3 poll: a terminal flow keeps self-healing every tick (never latched off by status)", async () => {
   const saved = globalThis.fetch;
   const savedMachines = app.state.machines;
   app.state.selectedFlowId = "F1";
   app.state.flowConversationRecords = [asstRecord("final", 1, "s9", "commit")];
   app.state.flowConversationProgress = null;
-  app.state.periodicSnapshotTerminalDone = null;
   app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
   const c = document.getElementById("flow-conversation");
   c.innerHTML = ""; c.__convState = null;
@@ -6092,18 +6199,68 @@ await checkAsync("G3 poll: a terminal flow gets exactly one post-terminal self-h
         }),
       });
     };
-    // First tick: one catch-up pull for the just-completed flow, then latch.
-    app.selfHealFlowConversation();
-    await flushTicks();
-    assert.equal(calls.length, 1, "a terminal flow does one catch-up self-heal pull");
-    assert.equal(app.state.periodicSnapshotTerminalDone, "F1", "the terminal latch is set");
-    // Subsequent ticks must NOT re-pull a static terminal conversation.
-    app.selfHealFlowConversation();
-    app.selfHealFlowConversation();
-    await flushTicks();
-    assert.equal(calls.length, 1, "a latched terminal flow issues no further self-heal pulls");
+    // Terminal STATUS never stops the self-heal — it mirrors the left-side detail
+    // poll, running a full pull on every tick while the view is open. Re-pulling
+    // a static conversation is a cheap silent no-op (no DOM repaint), but the pull
+    // itself must keep firing so a late-arriving commit/index result is never
+    // frozen out. Each tick therefore issues exactly one history pull.
+    for (let i = 0; i < 4; i++) {
+      app.selfHealFlowConversation();
+      await flushTicks();
+    }
+    assert.equal(calls.length, 4,
+      "a terminal flow issues a self-heal pull on every tick, not just once: " + calls.length);
+    assert.ok(calls.every((u) => u.includes("/api/history/") && !u.includes("after=")),
+      "every self-heal pull is a full (no-after) history pull");
   } finally {
-    app.state.periodicSnapshotTerminalDone = null;
+    app.state.machines = savedMachines;
+    globalThis.fetch = saved;
+  }
+});
+
+await checkAsync("G3 poll: a commit result landing AFTER the terminal status flip is still self-healed in", async () => {
+  const saved = globalThis.fetch;
+  const savedMachines = app.state.machines;
+  app.state.selectedFlowId = "F1";
+  // Status has already flipped completed, but the history cache still holds only
+  // the pre-commit snapshot (the daemon/server marked the flow done before the
+  // commit/index result was written) AND the WS append carrying it was dropped.
+  // This is the exact race the old one-post-terminal-pull latch could not survive.
+  app.state.flowConversationRecords = [asstRecord("running-tail", 1, "s9", "commit")];
+  app.state.flowConversationProgress = null;
+  app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
+  const c = document.getElementById("flow-conversation");
+  c.innerHTML = ""; c.__convState = null;
+  try {
+    const calls = [];
+    // The first several post-terminal pulls return the stale pre-commit snapshot;
+    // the history cache only catches up on the fourth pull, now carrying the
+    // commit result. Because the self-heal never latches off on terminal status,
+    // that later pull still fires and the result is rendered.
+    let served = 0;
+    globalThis.fetch = (url) => {
+      calls.push(String(url));
+      served += 1;
+      const records = served >= 4
+        ? [asstRecord("running-tail", 1, "s9", "commit"),
+           asstRecord("Committed abc123: fix", 2, "s9", "commit")]
+        : [asstRecord("running-tail", 1, "s9", "commit")];
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({ records, progress: "p" + served, delivery: "full" }),
+      });
+    };
+    for (let i = 0; i < 6; i++) {
+      app.selfHealFlowConversation();
+      await flushTicks();
+    }
+    assert.equal(app.state.flowConversationRecords.length, 2,
+      "the late-arriving commit result was pulled into the conversation");
+    assert.ok(
+      app.state.flowConversationRecords.some((r) =>
+        String(r.content || (r.message && r.message.content) || "").includes("Committed")),
+      "the commit result record is present after self-heal");
+  } finally {
     app.state.machines = savedMachines;
     globalThis.fetch = saved;
   }

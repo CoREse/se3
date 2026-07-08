@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+## 11.15.3 - 2026-07-08
+
+- Fix right-side chat freezing during multi-round discovery where the left status pointer advanced but the chat stopped following
+- Fix the commit step's code-index index_progress card so it updates in place throughout the refresh and shows commit results afterward
+- Make chat/history rendering self-heal by periodically re-pulling the running flow's full history on the existing 3s cadence, so any dropped or misjudged WS increment recovers on the next snapshot
+- Render history idempotently using each record's write-time ordinal identity, so a record converges to one result no matter how many times it arrives
+- Stop empty-content, status-less marker records (discovery/commit) from being wrongly deduped and dropped as duplicates
+- Remove the server full/incremental latch trap so append-only frames no longer permanently lock out subsequent updates
+- Harden daemon active/rewrite detection so each PAUSE→resume rewrite of engine.json with the same mtime/size is no longer dropped as unchanged
 ## 11.15.2 - 2026-07-08
 
 - Fix a stray empty '(untitled flow)' card appearing in the WebUI running-flows list after a flow was ended and archived via end-session

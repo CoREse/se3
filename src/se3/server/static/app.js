@@ -152,12 +152,6 @@ const state = {
   // progression tests never open a view, so this stays false there and the grace
   // loop still runs, keeping those suites' isolated coverage intact.
   periodicSnapshotActive: false,
-  // Flow id whose final post-terminal self-heal pull has already run. A
-  // completed/failed flow produces no further content, so re-pulling its now
-  // static conversation every 3s forever is wasted work — after one catch-up pull
-  // the periodic conversation self-heal stops for that flow (the sidebar poll
-  // keeps running). Keyed by flow id so re-opening a flow resets it.
-  periodicSnapshotTerminalDone: null,
   flowInterventions: [],  // intervention entries derived from pending_calls
   flowReplyTargetId: null,// id of the intervention the reply box targets
   flowInterjectRequested: false, // user clicked Interject — synth chip on
@@ -1754,10 +1748,9 @@ function openFlowView(flowId) {
   updateFlowUsageBadge([]);
   resetReplyBox();
 
-  // A fresh open resets the per-flow terminal catch-up latch so a re-opened flow
-  // pulls again; the periodic self-heal becomes the conversation's correctness
-  // source while this view is open (see maybeRefreshConversationOnProgression).
-  state.periodicSnapshotTerminalDone = null;
+  // The periodic self-heal becomes the conversation's correctness source while
+  // this view is open (see maybeRefreshConversationOnProgression); it runs every
+  // tick until the view closes, regardless of terminal status.
   state.periodicSnapshotActive = true;
 
   refreshFlowDetail();
@@ -1817,9 +1810,8 @@ function doCloseFlowView() {
   $("flow-view").classList.add("hidden");
   // The periodic self-heal stops with the view: clear the "poll owns correctness"
   // flag so a later detached progression observation (or a DOM-free test) is free
-  // to arm the grace fallback again, and drop the terminal catch-up latch.
+  // to arm the grace fallback again.
   state.periodicSnapshotActive = false;
-  state.periodicSnapshotTerminalDone = null;
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
     detailPollTimer = null;
@@ -2492,25 +2484,28 @@ function pollFlowView() {
 // sameRenderedConversation), so the healthy path (WS already delivered
 // everything) stays a cheap no-op repaint-wise; only a real divergence repaints.
 //
-// A terminal (completed/failed) flow yields no further content, so once its final
-// catch-up snapshot has been pulled the self-heal stops for that flow — the
-// detail poll keeps running, but re-pulling a static conversation forever is
-// wasted work. A still-loading (unknown/blank status) or running flow always
-// pulls; findFlow returning null (not yet in state.machines) is treated as
-// non-terminal so a freshly-opened flow keeps healing.
+// Terminal STATUS is deliberately NOT a stop condition. An earlier version
+// latched the self-heal off after one post-terminal catch-up pull, but the
+// daemon/server can flip a flow to completed/failed BEFORE the history cache
+// holds the final commit / code-index result — so that single catch-up pull can
+// capture a stale snapshot, and if the WS append carrying the commit result was
+// also dropped, the right side would freeze without ever showing the commit
+// result. No purely front-end signal can reliably tell "content is temporarily
+// static because the cache is still catching up" from "content is final", so we
+// do not try to guess: matching the left-side detail poll (refreshFlowDetail,
+// which likewise runs every tick for the whole open view regardless of status),
+// the self-heal keeps pulling on every tick while the view is open. The pull
+// stops only when the view closes (endFlowDetailPolling clears the timer).
+// loadFlowConversation's silent path is a cheap no-op — it skips the DOM rebuild
+// whenever the pulled snapshot matches what is already held (see
+// sameRenderedConversation) — so re-pulling a genuinely static terminal
+// conversation costs one fetch per tick and never repaints, while a late commit
+// result (cache catches up after the status flip) is picked up at the next tick
+// and rendered. Correctness is thus the periodic full snapshot, never a timing
+// guess about when the history became final.
 function selfHealFlowConversation() {
   const flowId = state.selectedFlowId;
   if (!flowId) return;
-  const found = findFlow(flowId);
-  if (found && isTerminalFlow(found.flow)) {
-    // One post-terminal catch-up pull, then latch off for this flow.
-    if (state.periodicSnapshotTerminalDone === flowId) return;
-    state.periodicSnapshotTerminalDone = flowId;
-  } else {
-    // Non-terminal again (or re-opened): clear the latch so a later terminal
-    // transition still gets its one final pull.
-    state.periodicSnapshotTerminalDone = null;
-  }
   loadFlowConversation(flowId, { silent: true });
 }
 
@@ -6002,15 +5997,83 @@ function sameRenderedConversation(a, b) {
   return true;
 }
 
-// Merge a freshly-fetched snapshot with append records that arrived during the
-// fetch. The server's snapshot may have been built before a live-appended
-// record was cached, so any live append not already present in the snapshot is
-// preserved by appending it; appends already in the snapshot are dropped.
+// Merge a freshly-fetched snapshot with the records that arrived OR changed live
+// during the fetch. The snapshot is the authoritative generation and MUST remain
+// the correctness source (the whole point of the periodic full re-pull): but the
+// server may have built it before a live record reached the cache, so a live
+// record can legitimately carry content NEWER than the snapshot's copy of the
+// same line. This folds the live records in through the idempotent ordinal
+// reconcile (reconcileAppendRecords) so a genuinely-new line appends and a
+// byte-identical re-delivery is a no-op — but a live record sharing a snapshot
+// line's stable `stepId#ordinal` may overwrite it ONLY when it is provably newer
+// (strictly later timestamp) than the snapshot's copy.
+//
+// The strict-newer guard is the correctness pivot. Without it the merge would
+// blindly replace the snapshot line with the live copy, which regresses the view
+// in the inverse race: baseline holds line 1=A, a WS append advances the held
+// view to 1=B, then the server cache advances to 1=C and the REST full snapshot
+// correctly carries C — but the WS frame carrying C was dropped. The live-held
+// copy is still the older B; letting B overwrite the authoritative C would roll
+// the conversation BACKWARD until a later poll happened to repair it. Comparing
+// timestamps keeps the intended FORWARD in-place update (a live retry that raced
+// ahead of a stale snapshot: B newer than A wins) while refusing the BACKWARD one
+// (B older than C is dropped, snapshot stays authoritative). Ties resolve to the
+// snapshot — it is the correctness source, and any truly-missed forward rewrite
+// self-heals at the next full pull.
 function mergeSnapshotWithLiveAppends(snapshot, liveAppends) {
   if (!liveAppends.length) return snapshot;
-  const seen = new Set(snapshot.map(recordKey));
-  const extra = liveAppends.filter((r) => !seen.has(recordKey(r)));
-  return extra.length ? snapshot.concat(extra) : snapshot;
+  const snap = Array.isArray(snapshot) ? snapshot : [];
+  // Stable key -> the snapshot line's sortable timestamp, so a live rewrite of an
+  // already-present ordinal can be gated on being strictly newer.
+  const snapTsByKey = new Map();
+  for (const r of snap) {
+    if (recordOrdinal(r) == null) continue;
+    const n = normalizeRecord(r);
+    if (!n.stepId) continue;
+    snapTsByKey.set(n.stepId + "#" + recordOrdinal(r), recordSortTs(r));
+  }
+  const applicable = liveAppends.filter((r) => {
+    // Legacy / local-echo records (no ordinal) never collide with a snapshot's
+    // stable identity — they take the ordinary append-if-absent path untouched.
+    if (recordOrdinal(r) == null) return true;
+    const n = normalizeRecord(r);
+    if (!n.stepId) return true;
+    const k = n.stepId + "#" + recordOrdinal(r);
+    if (!snapTsByKey.has(k)) return true;          // a new line the snapshot lacks
+    return recordSortTs(r) > snapTsByKey.get(k);   // only a strictly-newer rewrite wins
+  });
+  if (!applicable.length) return snapshot;
+  return reconcileAppendRecords(snapshot, applicable).records;
+}
+
+// Base records that changed IN PLACE during the fetch: a stable `stepId#ordinal`
+// already present in the request baseline whose rendered content advanced (a
+// retry rewrote that .jsonl line). `dedupeAppendRecords` only surfaces records
+// with a NEW key, so it omits an in-place rewrite entirely — and a stale full
+// snapshot that still carries the pre-rewrite content would then REGRESS the
+// view backward once the merge preserves nothing for that line. Surfacing the
+// rewritten records here lets the idempotent snapshot merge update the matching
+// snapshot line to the live content instead of dropping it. Only ordinal-keyed
+// records qualify: a legacy (no-ordinal) record encodes its content in its
+// recordKey, so a legacy content change already reads as a NEW key that
+// `dedupeAppendRecords` picks up on the ordinary append path.
+function stableInPlaceRewrites(baseline, base) {
+  if (!base.length || !baseline.length) return [];
+  const sigByKey = new Map();
+  for (const r of baseline) {
+    const n = normalizeRecord(r);
+    if (recordOrdinal(r) == null || !n.stepId) continue;
+    sigByKey.set(n.stepId + "#" + recordOrdinal(r), legacyKeyFromNorm(n));
+  }
+  if (!sigByKey.size) return [];
+  const out = [];
+  for (const r of base) {
+    const n = normalizeRecord(r);
+    if (recordOrdinal(r) == null || !n.stepId) continue;
+    const k = n.stepId + "#" + recordOrdinal(r);
+    if (sigByKey.has(k) && sigByKey.get(k) !== legacyKeyFromNorm(n)) out.push(r);
+  }
+  return out;
 }
 
 // Filter incoming append records against an existing array, returning only
@@ -6351,6 +6414,17 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
   // Discard every baseline record, preserving only records that appeared while
   // this request was in flight and are not already in the new snapshot.
   const liveAppends = dedupeAppendRecords(baseline, base);
+  // ...plus records the WS path rewrote IN PLACE during the fetch (a retry
+  // advancing an already-held `stepId#ordinal`). `dedupeAppendRecords` filters
+  // these out — their key already exists in the baseline — so without them a
+  // stale full snapshot that still holds the pre-rewrite content would regress
+  // the view backward. The idempotent snapshot merge below updates the matching
+  // snapshot line to this live content in place ONLY when the live copy is
+  // strictly newer than the snapshot's (so the reverse race — a dropped WS frame
+  // whose newer content the snapshot already carries — keeps the authoritative
+  // snapshot line); they never double-count with `liveAppends` (disjoint:
+  // in-baseline vs new key).
+  const liveRewrites = stableInPlaceRewrites(baseline, base);
   // Pending optimistic local echoes (`__localEcho`) are client-only UI state,
   // NOT part of any server cache generation, so they must survive a full
   // (generation-replacing) fallback. They were spliced into the array before
@@ -6365,9 +6439,10 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
   const pendingEchoes = base.filter(
     (r) => r && r.__localEcho && liveAppends.indexOf(r) === -1,
   );
-  const preserved = pendingEchoes.length
-    ? liveAppends.concat(pendingEchoes)
-    : liveAppends;
+  // In-place rewrites go FIRST: the reconcile applies them as mid-list updates
+  // (no tail effect), so the appended tail order stays [liveAppends, echoes] —
+  // matching the prior behaviour.
+  const preserved = liveRewrites.concat(liveAppends, pendingEchoes);
   return {
     // Collapse any duplicate discovery record the merged worktree+main snapshot
     // may carry (defensive backstop — the daemon already de-dups at the file
