@@ -1,7 +1,7 @@
 id: '271'
 description: webui点“结束并归档”后，会留下一个空的session在列表里。
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-07-08T10:16:21.100714'
-updated_at: '2026-07-08T10:16:21.100714'
+updated_at: '2026-07-08T12:53:09.176739'

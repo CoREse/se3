@@ -219,8 +219,17 @@ def test_snapshot_folds_legacy_top_level_flow_id(tmp_path: Path) -> None:
     assert legacy.context.get("flow_id") == "flow-current"
 
 
-def test_snapshot_no_engine_json_passthrough(tmp_path: Path) -> None:
-    """When engine.json is missing, pending calls pass through unfiltered."""
+def test_snapshot_no_engine_json_yields_no_flow(tmp_path: Path) -> None:
+    """A root with no active engine.json produces no flow snapshot at all.
+
+    A root that has been archived (engine.json gone) has no current flow, so
+    ``_snapshot_for_root`` returns None rather than fabricating a flowless
+    snapshot — such a snapshot rendered as an empty ``(untitled flow)`` card in
+    the running-flows list. The root's lingering call files are still surfaced
+    machine-wide by ``get_snapshot`` via ``_enumerate_calls`` (verified in
+    ``test_get_snapshot_archived_root_no_flowless_flow``), independent of this
+    method's return.
+    """
     _write(
         tmp_path / "se3" / "calls" / "alpha.json",
         {"prompt": "p", "context": {"flow_id": "flow-x"}},
@@ -233,9 +242,7 @@ def test_snapshot_no_engine_json_passthrough(tmp_path: Path) -> None:
     aggregator.add_project_root(tmp_path)
 
     snapshot = aggregator._snapshot_for_root(tmp_path)
-    assert snapshot is not None
-    assert snapshot.flow_id is None
-    assert {c.call_id for c in snapshot.pending_calls} == {"alpha", "beta"}
+    assert snapshot is None
 
 
 def test_snapshot_completed_flow_reports_total_and_full_progress(tmp_path: Path) -> None:
@@ -747,6 +754,31 @@ def _write_issue(
         encoding="utf-8",
     )
     return target
+
+
+def test_get_snapshot_archived_root_no_flowless_flow(tmp_path: Path) -> None:
+    """An archived root (issues on disk, no engine.json) yields no empty flow.
+
+    Regression for the empty ``(untitled flow)`` card: after ``end-session``
+    archives engine.json, the root still has issue YAML under se3/issues/.
+    ``get_snapshot`` must NOT surface a flowless (no flow_id) entry in
+    ``.flows`` for such a root, while its issues still reach
+    ``MachineStatus.issues`` via the independent ``_collect_issues`` pass.
+    """
+    from se3.daemon.aggregator import DaemonAggregator
+
+    _write_issue(tmp_path, "042", subdir="open", title="Lingering issue")
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(tmp_path)
+
+    status = aggregator.get_snapshot()
+
+    # No flow entry may lack a flow_id (the empty-card symptom).
+    assert all(f.flow_id for f in status.flows)
+    # In practice, an archived-only root contributes zero flows.
+    assert not any(f.project_root == str(tmp_path) for f in status.flows)
+    # Machine-level issue aggregation is unaffected by the root-cause fix.
+    assert any(i.id == "042" for i in status.issues)
 
 
 def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:

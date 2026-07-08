@@ -6484,6 +6484,42 @@ check("renderFlows does not rebuild DOM when data is unchanged", () => {
   assert.notEqual(thirdChildren[0], firstChildren[0]);
 });
 
+check("renderFlows skips flows without a flow_id (empty-card defense)", () => {
+  app.state.machines = [
+    {
+      machine_id: "m1",
+      hostname: "host-a",
+      online: true,
+      // First entry mimics the archived-root flowless snapshot regression:
+      // no flow_id/status. It must not become a card, and must not count
+      // toward the non-empty state.
+      flows: [
+        { project_root: "/p/archived", issue_count: 3 },
+        {
+          flow_id: "f1",
+          status: "running",
+          task_description: "real flow",
+          project_root: "/p/live",
+        },
+      ],
+    },
+  ];
+  app.state.selectedMachineId = "m1";
+  app.resetRenderSignatures();
+
+  app.renderFlows();
+  const panel = document.getElementById("flow-list");
+  // Only the flow_id-bearing flow renders a card.
+  assert.equal(panel.children.length, 1);
+
+  // When every flow lacks a flow_id, the empty state shows.
+  app.state.machines[0].flows = [{ project_root: "/p/archived", issue_count: 3 }];
+  app.resetRenderSignatures();
+  app.renderFlows();
+  assert.equal(panel.children.length, 1);
+  assert.equal(panel.children[0].className, "empty");
+});
+
 // -- flowSidebarSignature: diff-aware sidebar render guard (G3) --------------
 const baseSidebarFlow = () => ({
   task_description: "Do a thing",

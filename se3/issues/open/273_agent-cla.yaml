@@ -1,0 +1,7 @@
+id: '273'
+description: 在没有配置的情况下，默认会按照支持的agent（现在是claude和codex）依次往下找能用的agent，而不是只看claude，没有claude就不工作。
+status: open
+tags: []
+source: human
+created_at: '2026-07-08T12:49:39.927371'
+updated_at: '2026-07-08T12:49:39.927371'

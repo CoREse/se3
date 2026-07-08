@@ -1,5 +1,12 @@
 # SE3 Framework Version History
 
+## 11.15.2 - 2026-07-08
+
+- Fix a stray empty '(untitled flow)' card appearing in the WebUI running-flows list after a flow was ended and archived via end-session
+- Stop the daemon aggregator from fabricating a flow-less snapshot for roots whose engine.json is already archived, so archived projects no longer contribute phantom flow entries
+- Preserve machine-level issue and pending-call reporting for archived roots — issues and calls are still aggregated independently and remain visible in the UI
+- Filter out any flow lacking a flow_id in the frontend renderFlows as defense-in-depth, ensuring flow-less entries never render as cards or block the empty state
+- Add aggregator contract tests asserting an archived root with residual issues yields no flow_id-less flows while its issues still appear in MachineStatus.issues
 ## 11.15.1 - 2026-07-08
 
 - Stop labeling the session type as 'discovery' in commit-message prefixes; use the type analyze actually inferred (feature/bugfix/...)

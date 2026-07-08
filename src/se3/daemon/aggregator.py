@@ -786,8 +786,14 @@ class DaemonAggregator:
     ) -> Optional[FlowSnapshot]:
         """Build a :class:`FlowSnapshot` for one project root.
 
-        Returns ``None`` only when the root has neither an ``engine.json`` nor
-        any other readable SE3 artifact (nothing to report).
+        Returns ``None`` when the root has no active ``engine.json`` — such a
+        root has no current flow to report, so it contributes no entry to
+        ``MachineStatus.flows``. Its machine-level issues and pending calls are
+        still surfaced: ``get_snapshot`` aggregates those independently via
+        ``_collect_issues``/``_enumerate_calls`` regardless of this method's
+        return, so nothing is lost by declining to fabricate a flow snapshot
+        here. (Fabricating a flowless snapshot for an archived root is what
+        produced the empty ``(untitled flow)`` card in the running-flows list.)
 
         *live_roots* (when supplied) is the normalized set of roots with a live
         ``se3 run`` process; it gates the ``resumable`` flag of a ``RUNNING``
@@ -808,23 +814,20 @@ class DaemonAggregator:
         # indefinitely, so the bounded head+tail window is re-verified each poll.
         data = read_engine_header(engine_json, active=True)
 
+        if data is None:
+            # No active engine.json → no current flow_id, so there is no flow to
+            # report for this root. A flowless snapshot carrying only
+            # issue/log/call counts (the pre-independent-aggregation legacy) has
+            # no flow_id, task or status, and rendered as an empty
+            # ``(untitled flow)`` card that lingered on every snapshot round for
+            # any archived root that still had issue YAML on disk. Machine-level
+            # issues and pending calls for this root are collected separately in
+            # ``get_snapshot``, so returning None here loses nothing.
+            return None
+
         pending_calls = self._enumerate_calls(root)
         log_count = _count_dir(root / "se3" / "logs")
         issue_count = _count_issues(root / "se3" / "issues")
-
-        if data is None:
-            # No engine.json: no current flow_id to filter by, but historical
-            # call files may still be lingering. Pass ``None`` to keep the
-            # retro-compatible behavior (no filtering when flow_id unknown).
-            flow_scoped_calls = self._filter_calls_for_flow(pending_calls, None)
-            if not flow_scoped_calls and log_count == 0 and issue_count == 0:
-                return None
-            return FlowSnapshot(
-                project_root=str(root),
-                pending_calls=flow_scoped_calls,
-                log_count=log_count,
-                issue_count=issue_count,
-            )
 
         state = data.get("state") or {}
         selected = state.get("selected_steps") or []

@@ -1564,7 +1564,12 @@ function renderFlows() {
   }
 
   heading.textContent = `Flows — ${machine.hostname || machine.machine_id}`;
-  const flows = machine.flows || [];
+  // Defense-in-depth against the empty ``(untitled flow)`` card: skip any flow
+  // lacking a flow_id so it neither renders a card nor blocks the empty state.
+  // The root cause is fixed in DaemonAggregator._snapshot_for_root (an archived
+  // root no longer fabricates a flowless snapshot), but a flowless entry from a
+  // stale/legacy source must still never reach renderFlowCard.
+  const flows = (machine.flows || []).filter((f) => f && f.flow_id);
   if (!flows.length) {
     panel.appendChild(el("p", "empty", "No flows on this machine."));
     return;
