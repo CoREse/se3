@@ -373,12 +373,21 @@ class FlowRead:
         mode: :data:`~se3.daemon.protocol.HISTORY_MODE_FULL` for the initial
             batch (the requester had no cursor) or
             :data:`~se3.daemon.protocol.HISTORY_MODE_APPEND` for a delta.
-        records: A list of ``{"step_id": str, "step_type": str, "message":
-            dict}`` records, one per conversation line, ordered by step file
-            then line. ``step_type`` is the authoritative type parsed from the
-            jsonl file-name stem (see :func:`parse_step_type_from_step_id`); it
-            is injected at the envelope level so the frontend never has to guess
-            it, while ``message`` keeps its original bytes untouched.
+        records: A list of ``{"step_id": str, "step_type": str, "ordinal": int,
+            "message": dict}`` records, one per conversation line, ordered by
+            step file then line. ``step_type`` is the authoritative type parsed
+            from the jsonl file-name stem (see
+            :func:`parse_step_type_from_step_id`); it is injected at the envelope
+            level so the frontend never has to guess it, while ``message`` keeps
+            its original bytes untouched. ``ordinal`` is the record's 0-based
+            physical line position within its step file — a stable identity fixed
+            at write time (the jsonl is append-only), IDENTICAL across a ``full``
+            snapshot and any later ``append`` delta for the same logical line, and
+            preserved across a retry's in-place rewrite (the line at ordinal N now
+            carries the rewritten content). Paired with ``step_id`` it forms the
+            ``step_id#ordinal`` key the frontend uses to reconcile records
+            idempotently — so a marker record with empty ``content`` is no longer
+            mistaken for a duplicate of another marker.
         cursor: The updated per-step line cursor to send back on the next
             request to continue incrementally.
     """
@@ -1439,10 +1448,20 @@ class DaemonHistoryReader:
                         continue
                     if not isinstance(message, dict):
                         continue
+                    # ``ordinal`` is the record's 0-based physical line position
+                    # in its step file. ``consumed`` counts every physical line
+                    # (blank lines included, so it stays a true line number), and
+                    # was just incremented for THIS line, so ``consumed - 1`` is
+                    # the 0-based index. It is the stable identity a full read of
+                    # the same file reproduces exactly (see the full-read ``_emit``
+                    # ordinal below), so an append delta and a later full snapshot
+                    # tag the same logical line with the same ordinal — the
+                    # invariant the frontend's idempotent reconcile relies on.
                     records.append(
                         {
                             "step_id": step_id,
                             "step_type": step_type,
+                            "ordinal": consumed - 1,
                             "message": message,
                         }
                     )
@@ -1550,8 +1569,16 @@ class DaemonHistoryReader:
                 if rewritten or start > total_physical_lines:
                     start = 0
 
-                def _emit(line_text: str) -> bool:
-                    """Append a parsed record for *line_text*; return truncation."""
+                def _emit(line_text: str, ordinal: int) -> bool:
+                    """Append a parsed record for *line_text*; return truncation.
+
+                    *ordinal* is the record's 0-based physical line position in
+                    its step file. A full read reproduces the SAME ordinal an
+                    append delta assigned the same logical line (both derive it
+                    from the physical line index), so the frontend can dedupe /
+                    update in place by ``step_id#ordinal`` regardless of which
+                    read path delivered the record.
+                    """
                     stripped = line_text.strip()
                     if not stripped:
                         return False
@@ -1565,6 +1592,7 @@ class DaemonHistoryReader:
                         {
                             "step_id": step_id,
                             "step_type": step_type,
+                            "ordinal": ordinal,
                             "message": message,
                         }
                     )
@@ -1577,7 +1605,7 @@ class DaemonHistoryReader:
                     offset += len(line_text.encode("utf-8")) + 1
                     if idx < start:
                         continue
-                    if _emit(line_text):
+                    if _emit(line_text, idx):
                         truncated = True
                         break
 
@@ -1598,7 +1626,7 @@ class DaemonHistoryReader:
                         consumed = tail_idx + 1
                         # No trailing newline for the tail line.
                         offset += len(tail.encode("utf-8"))
-                        if tail_idx >= start and _emit(tail):
+                        if tail_idx >= start and _emit(tail, tail_idx):
                             truncated = True
                     # else: leave consumed/offset at the last complete line so
                     # the partial tail is re-read next round.
