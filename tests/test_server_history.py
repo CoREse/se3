@@ -215,6 +215,152 @@ def test_append_history_returns_whether_cache_was_populated():
     asyncio.run(scenario())
 
 
+def test_first_sighting_append_heals_via_full_snapshot():
+    """first-sighting discard → full frame clears requires_full → append flows.
+
+    The server-restart latch: the daemon retains its cursor and pushes only a
+    tail, which is discarded and flags the flow requires-full. A later
+    authoritative full frame — the reply to a self-heal recovery pull or the
+    front-end periodic full backstop — must clear the flag so the periodic
+    appends resume extending the bundle instead of being silently dropped
+    forever. No 'exit and re-enter the chat' is required.
+    """
+    state = ServerState()
+
+    async def scenario():
+        # First-sighting append → discarded, flow flagged requires-full.
+        assert (
+            await state.append_history(
+                "f1", protocol.HISTORY_MODE_APPEND, [{"line": 9}], machine_id="m1"
+            )
+            is False
+        )
+        assert "f1" in state._history_requires_full
+        # An authoritative full frame lands and clears the latch.
+        assert (
+            await state.append_history(
+                "f1",
+                protocol.HISTORY_MODE_FULL,
+                [{"line": 1}, {"line": 2}],
+                machine_id="m1",
+            )
+            is True
+        )
+        assert "f1" not in state._history_requires_full
+        # Subsequent appends now extend the bundle rather than being discarded.
+        assert (
+            await state.append_history(
+                "f1", protocol.HISTORY_MODE_APPEND, [{"line": 3}], machine_id="m1"
+            )
+            is True
+        )
+        snap = await state.get_history_snapshot("f1")
+        assert [r["line"] for r in snap["records"]] == [1, 2, 3]
+
+    asyncio.run(scenario())
+
+
+def test_full_snapshot_serve_clears_requires_full_latch():
+    """A served full snapshot de-latches requires-full and re-arms recovery.
+
+    G4: serving a client the COMPLETE bundle is itself an authoritative event
+    — the client now holds the full history — so any lingering requires-full
+    flag (which would keep discarding later appends) MUST clear and the
+    self-heal recovery marker MUST re-arm on the read. This pins that invariant
+    guard directly by forcing the pathological (bundle present ∧ flagged
+    requires-full ∧ recovery in flight) coexistence the guard defends against,
+    then asserting one full read heals it and a following append flows.
+    """
+    state = ServerState()
+
+    async def scenario():
+        # Establish an authoritative bundle the full read can serve.
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [{"line": 1}], machine_id="m1"
+        )
+        # Force the coexistence the front-end full backstop must be able to heal
+        # (in normal operation a present bundle already implies a clear flag).
+        state._history_requires_full.add("f1")
+        state._history_recovery_inflight["f1"] = time.monotonic()
+
+        snap = await state.get_history_snapshot("f1")
+        assert snap["delivery"] == "full"
+        assert "f1" not in state._history_requires_full
+        assert "f1" not in state._history_recovery_inflight
+
+        # De-latched: a following append extends the bundle instead of dropping.
+        assert (
+            await state.append_history(
+                "f1", protocol.HISTORY_MODE_APPEND, [{"line": 2}], machine_id="m1"
+            )
+            is True
+        )
+        snap2 = await state.get_history_snapshot("f1")
+        assert [r["line"] for r in snap2["records"]] == [1, 2]
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_full_preserves_ordinal_envelope():
+    """The full snapshot relays each record envelope — including ordinal — verbatim.
+
+    G4/G1: the daemon reader stamps a stable per-step ``ordinal`` on every
+    record envelope so the front-end can key records by ``stepId#ordinal`` for
+    idempotent reconciliation. The server is a pure in-memory relay and must
+    not strip or rewrite that field — marker records (empty content, no status)
+    are distinguished solely by their ordinal, so losing it would collapse them
+    into one and reintroduce the mis-dedup bug.
+    """
+    state = ServerState()
+
+    async def scenario():
+        records = [
+            {
+                "step_id": "01_discovery",
+                "step_type": "discovery",
+                "ordinal": 0,
+                "message": {"type": "marker"},
+            },
+            {
+                "step_id": "01_discovery",
+                "step_type": "discovery",
+                "ordinal": 1,
+                "message": {"type": "marker"},
+            },
+        ]
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, records, machine_id="m1"
+        )
+        snap = await state.get_history_snapshot("f1")
+        assert snap["delivery"] == "full"
+        assert [r["ordinal"] for r in snap["records"]] == [0, 1]
+        assert [r["step_id"] for r in snap["records"]] == [
+            "01_discovery",
+            "01_discovery",
+        ]
+        # A delta read after an appended higher ordinal must relay it untouched.
+        await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_APPEND,
+            [
+                {
+                    "step_id": "02_analyze",
+                    "step_type": "analyze",
+                    "ordinal": 0,
+                    "message": {"type": "marker"},
+                }
+            ],
+            machine_id="m1",
+        )
+        delta = await state.get_history_snapshot("f1", after=snap["progress"])
+        assert delta["delivery"] == "delta"
+        assert [(r["step_id"], r["ordinal"]) for r in delta["records"]] == [
+            ("02_analyze", 0)
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_history_data_full_replaces():
     state = ServerState()
 
