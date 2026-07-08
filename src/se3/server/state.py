@@ -1036,6 +1036,23 @@ class ServerState:
                 # the client rebuilds a record set identical to the on-disk jsonl.
                 out_records = list(records)
                 delivery = "full"
+                # De-latch on a served full snapshot. A cached bundle only ever
+                # comes into existence through an authoritative full/replace
+                # frame, so returning its COMPLETE record set means this client
+                # now holds authoritative history for the flow. Any lingering
+                # ``requires_full`` flag (which would keep silently discarding
+                # every later append) MUST clear here, and the self-heal recovery
+                # marker MUST re-arm, so the front-end's periodic full pull is
+                # itself a latch-clearing event rather than depending on the
+                # daemon happening to push a fresh ``full`` frame. This is the
+                # third, independent de-latch path (alongside the append_history
+                # full branch and the ws.py recovery pull): together they ensure
+                # no flow can stay frozen behind a stale flag until the user
+                # exits and re-enters the chat. It is a no-op on the common path
+                # (a present bundle already implies the flag is clear), but keeps
+                # the "full served ⇒ not latched" invariant true unconditionally.
+                self._history_requires_full.discard(flow_id)
+                self._history_recovery_inflight.pop(flow_id, None)
 
             return {
                 "flow_id": cached["flow_id"],
