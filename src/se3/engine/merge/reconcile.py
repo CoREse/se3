@@ -1528,6 +1528,44 @@ def _restore_reconcile_paths(project_root: Path) -> None:
             pass
 
 
+def _delete_version_tags_pointing_at(project_root: Path, commit: str) -> None:
+    """Delete version tags that point at an undone reconcile commit."""
+    refs = _run_git(
+        project_root,
+        "for-each-ref",
+        "refs/tags",
+        "--format=%(refname:short)%09%(objectname)%09%(*objectname)",
+        check=False,
+        timeout=15,
+    )
+    if refs.returncode != 0:
+        raise ReconcileError(
+            f"failed to inspect tags before revision recompute: "
+            f"{refs.stderr.strip()}"
+        )
+    tags_to_delete: list[str] = []
+    for line in refs.stdout.splitlines():
+        parts = line.split("\t")
+        if not parts:
+            continue
+        name = parts[0].strip()
+        if not name.startswith("v"):
+            continue
+        object_name = parts[1].strip() if len(parts) > 1 else ""
+        peeled_name = parts[2].strip() if len(parts) > 2 else ""
+        if commit in {object_name, peeled_name}:
+            tags_to_delete.append(name)
+    for tag in tags_to_delete:
+        delete = _run_git(
+            project_root, "tag", "-d", tag, check=False, timeout=15
+        )
+        if delete.returncode != 0:
+            raise ReconcileError(
+                f"failed to delete stale version tag {tag} before revision "
+                f"recompute: {delete.stderr.strip()}"
+            )
+
+
 def undo_last_reconcile(project_root: Path, flow_id: str) -> bool:
     """Un-commit *flow_id*'s reconcile commit while it is still ``HEAD``.
 
@@ -1588,6 +1626,12 @@ def undo_last_reconcile(project_root: Path, flow_id: str) -> bool:
     )
     if parent.returncode != 0:
         return False
+    head = _run_git(
+        project_root, "rev-parse", "HEAD", check=False, timeout=15
+    )
+    if head.returncode != 0 or not head.stdout.strip():
+        return False
+    head_commit = head.stdout.strip()
     # Detach the operator's uncommitted edits on the reconcile-owned content paths
     # (version file / README / VERSIONS.md), snapshotted against the current
     # reconcile commit as their base, BEFORE unwinding it. Without this the scoped
@@ -1625,6 +1669,7 @@ def undo_last_reconcile(project_root: Path, flow_id: str) -> bool:
                 f"failed to undo prior reconcile commit: {reset.stderr.strip()}"
             )
         _restore_reconcile_paths(project_root)
+        _delete_version_tags_pointing_at(project_root, head_commit)
     finally:
         # Replay the operator's detached edits onto the rolled-back (parent) content
         # via 3-way merge: on success the edit survives alongside the revert; on a
