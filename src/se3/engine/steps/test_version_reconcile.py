@@ -14,6 +14,7 @@ import pytest
 
 from se3.engine.merge.reconcile import (
     ReconcileError,
+    ReconcileResult,
     VersionRegressionError,
     compute_deterministic,
     historical_versions,
@@ -21,6 +22,9 @@ from se3.engine.merge.reconcile import (
     reconcile,
     validate_no_regression,
 )
+from se3.engine.git_tags import VersionTagError
+from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from se3.engine.steps.version_reconcile import version_reconcile_handler
 from se3.engine.version_bumper import BumpType
 from se3.engine.version_intent import (
     VersionIntent,
@@ -74,6 +78,12 @@ def _put_intent(root: Path, flow_id: str, **kwargs) -> None:
     write_intent(root, VersionIntent(flow_id=flow_id, **kwargs))
 
 
+def _tag_body(root: Path, tag_name: str) -> str:
+    content = _git(root, "cat-file", "-p", tag_name).stdout
+    _, _, body = content.partition("\n\n")
+    return body
+
+
 # --- deterministic channel ---------------------------------------------------
 
 def test_deterministic_max_bump_applied(tmp_path):
@@ -88,7 +98,19 @@ def test_deterministic_max_bump_applied(tmp_path):
     # max(patch, minor) = minor applied to 1.2.3 -> 1.3.0
     assert result.final_version == "1.3.0"
     assert result.bump_type == "minor"
+    assert result.is_tag is True
+    assert result.tag_name == "v1.3.0"
+    assert result.tag_created is True
     assert read_current_version(root) == "1.3.0"
+    assert _git(root, "cat-file", "-t", "v1.3.0").stdout.strip() == "tag"
+    assert (
+        _git(root, "rev-list", "-n", "1", "v1.3.0").stdout.strip()
+        == result.reconcile_commit
+    )
+    assert (
+        _tag_body(root, "v1.3.0")
+        == "chore: reconcile version to 1.3.0 at merge\n"
+    )
 
 
 def test_deterministic_no_bump_no_substance_leaves_version_unchanged(tmp_path):
@@ -131,6 +153,9 @@ def test_deterministic_changelog_substance_without_bump_hint_forces_patch(tmp_pa
     assert result.channel == "deterministic"
     assert result.final_version == "2.0.1"
     assert result.bump_type == "patch"
+    assert result.is_tag is False
+    assert result.tag_name is None
+    assert result.tag_created is False
     assert read_current_version(root) == "2.0.1"
     versions = (root / "VERSIONS.md").read_text(encoding="utf-8")
     assert "## 2.0.1" in versions
@@ -146,6 +171,35 @@ def test_compute_deterministic_pure():
     )
     assert final == "2.0.0"
     assert bump is BumpType.MAJOR
+
+
+def test_deterministic_major_creates_tag(tmp_path):
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="major", versions_changes=["break api"])
+
+    result = reconcile(root)
+
+    assert result.final_version == "2.0.0"
+    assert result.is_tag is True
+    assert result.tag_name == "v2.0.0"
+    assert result.tag_created is True
+    assert (
+        _git(root, "rev-list", "-n", "1", "v2.0.0").stdout.strip()
+        == result.reconcile_commit
+    )
+
+
+def test_deterministic_patch_does_not_create_tag(tmp_path):
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="patch", versions_changes=["fix"])
+
+    result = reconcile(root)
+
+    assert result.final_version == "1.2.4"
+    assert result.is_tag is False
+    assert result.tag_name is None
+    assert result.tag_created is False
+    assert _git(root, "tag", "--list", "v1.2.4").stdout.strip() == ""
 
 
 def test_changelog_entries_merged_under_final(tmp_path):
@@ -311,16 +365,62 @@ def test_custom_rules_channel_uses_llm_output(tmp_path):
 
     def fake_llm(prompt: str) -> str:
         captured["prompt"] = prompt
-        return '{"final_version": "2026.07.06", "reasoning": "date rule"}'
+        return (
+            '{"final_version": "2026.07.06", "is_tag": true, '
+            '"reasoning": "date rule"}'
+        )
 
     result = reconcile(root, llm_call=fake_llm)
 
     assert result.success
     assert result.channel == "custom-rules"
     assert result.final_version == "2026.07.06"
+    assert result.is_tag is True
+    assert result.tag_name == "v2026.07.06"
+    assert result.tag_created is True
     # The change substance (not the bump_type) is what anchors the prompt.
     assert "feat" in captured["prompt"]
     assert "Use date-style versions." in captured["prompt"]
+
+
+def test_custom_rules_is_tag_false_does_not_create_tag(tmp_path):
+    root = _make_project(tmp_path, "1.2.3")
+    (root / "se3").mkdir(exist_ok=True)
+    (root / "se3" / "version-rules.md").write_text(
+        "Use date-style versions.", encoding="utf-8"
+    )
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+
+    result = reconcile(
+        root,
+        llm_call=lambda _p: (
+            '{"final_version": "2026.07.07", "is_tag": false, '
+            '"reasoning": "date rule"}'
+        ),
+    )
+
+    assert result.success
+    assert result.channel == "custom-rules"
+    assert result.is_tag is False
+    assert result.tag_name is None
+    assert result.tag_created is False
+    assert _git(root, "tag", "--list", "v2026.07.07").stdout.strip() == ""
+
+
+def test_tag_failure_raises_reconcile_error(tmp_path, monkeypatch):
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+
+    def fail_tag(project_root, version, commit):
+        raise VersionTagError(f"v{version}", "tag failed")
+
+    monkeypatch.setattr(rec_mod, "create_annotated_version_tag", fail_tag)
+
+    with pytest.raises(ReconcileError, match="failed to create version tag v1.3.0"):
+        reconcile(root)
 
 
 def test_custom_rules_empty_response_raises(tmp_path):
@@ -456,7 +556,46 @@ def test_reconcile_noop_when_no_intents(tmp_path):
     assert result.already_reconciled
     assert result.channel == "noop"
     assert result.base_version == "3.1.4"
+    assert result.is_tag is False
+    assert result.tag_name is None
+    assert result.tag_created is False
     assert read_current_version(root) == "3.1.4"
+
+
+def test_version_reconcile_handler_outputs_tag_fields(tmp_path, monkeypatch):
+    import se3.engine.merge as merge_pkg
+
+    result = ReconcileResult(
+        success=True,
+        base_version="1.2.3",
+        final_version="1.3.0",
+        bump_type="minor",
+        channel="deterministic",
+        consumed_flow_ids=["flowA"],
+        reconcile_commit="abc123",
+        is_tag=True,
+        tag_name="v1.3.0",
+        tag_created=True,
+    )
+
+    monkeypatch.setattr(merge_pkg, "reconcile", lambda *args, **kwargs: result)
+
+    step = Step(step_type=StepType.VERSION_RECONCILE, cwd=str(tmp_path))
+    flow = FlowInstance(
+        flow_id="flowA", task_description="feature", task_type="feature"
+    )
+    flow.state.selected_steps = [StepType.VERSION_ANALYZE, StepType.COMMIT]
+
+    status = version_reconcile_handler(step, flow)
+
+    assert status is StepStatus.COMPLETED
+    assert step.outputs["is_tag"] is True
+    assert step.outputs["tag_name"] == "v1.3.0"
+    assert step.outputs["tag_created"] is True
+    nested = step.outputs["reconcile_result"]
+    assert nested["is_tag"] is True
+    assert nested["tag_name"] == "v1.3.0"
+    assert nested["tag_created"] is True
 
 
 def test_reconcile_runs_on_already_ancestor_shape(tmp_path):

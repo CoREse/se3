@@ -1466,6 +1466,14 @@ def run_merge(
             "unsettled. Fix the cause, then rerun `se3 merge` to re-attempt "
             "the reconcile.",
         ]
+        if "failed to create version tag" in reconcile_error:
+            lines.extend([
+                "",
+                "A version reconcile commit may already exist while the git tag "
+                "is missing. The source branch is preserved for recovery; inspect "
+                "HEAD and create or repair the missing annotated tag before "
+                "considering the release complete.",
+            ])
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
         render_text("\n".join(lines), title="Merge: Version Reconcile Failed")

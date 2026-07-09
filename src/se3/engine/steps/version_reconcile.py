@@ -129,10 +129,16 @@ def version_reconcile_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "channel": "noop",
             "consumed_flow_ids": [],
             "reconcile_commit": None,
+            "is_tag": False,
+            "tag_name": None,
+            "tag_created": False,
             "already_reconciled": True,
         }
         step.outputs["final_version"] = None
         step.outputs["channel"] = "noop"
+        step.outputs["is_tag"] = False
+        step.outputs["tag_name"] = None
+        step.outputs["tag_created"] = False
         step.status = StepStatus.COMPLETED
         return StepStatus.COMPLETED
 
@@ -255,11 +261,17 @@ def version_reconcile_handler(step: Step, flow: FlowInstance) -> StepStatus:
         "channel": result.channel,
         "consumed_flow_ids": list(result.consumed_flow_ids),
         "reconcile_commit": result.reconcile_commit,
+        "is_tag": result.is_tag,
+        "tag_name": result.tag_name,
+        "tag_created": result.tag_created,
         "already_reconciled": result.already_reconciled,
     }
     step.outputs["final_version"] = result.final_version
     step.outputs["base_version"] = result.base_version
     step.outputs["channel"] = result.channel
+    step.outputs["is_tag"] = result.is_tag
+    step.outputs["tag_name"] = result.tag_name
+    step.outputs["tag_created"] = result.tag_created
 
     step.status = StepStatus.COMPLETED
     return StepStatus.COMPLETED

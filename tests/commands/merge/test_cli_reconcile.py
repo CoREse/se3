@@ -109,6 +109,15 @@ def _pyproject_version(root: Path) -> str:
     return read_current_version(root)
 
 
+def _tag_subject(root: Path, tag_name: str) -> str:
+    return _git(
+        root,
+        "for-each-ref",
+        f"refs/tags/{tag_name}",
+        "--format=%(contents:subject)",
+    ).stdout.strip()
+
+
 class TestIntegrateThenReconcile:
     """The CLI runs integrate and reconcile back-to-back and lands the version."""
 
@@ -140,7 +149,9 @@ class TestIntegrateThenReconcile:
 
         This is the exact accident the redesign prevents: two minor features
         must aggregate to a single reconciled version whose changelog carries
-        both entries, not silently share a number and drop one.
+        both entries, not silently share a number and drop one. The same
+        aggregate release owns exactly one annotated tag, whose message comes
+        from the final reconcile commit rather than from either session.
         """
         root = _make_project(tmp_path, "1.2.3")
         _make_feature_with_intent(
@@ -165,6 +176,23 @@ class TestIntegrateThenReconcile:
         assert "feat Y" in versions
         assert is_consumed(root, "flowX")
         assert is_consumed(root, "flowY")
+        assert _git(root, "tag", "--list", "v*").stdout.splitlines() == ["v1.3.0"]
+
+        reconcile_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+        tag_commit = _git(root, "rev-parse", "v1.3.0^{}").stdout.strip()
+        assert tag_commit == reconcile_commit
+        assert _git(root, "cat-file", "-t", "v1.3.0").stdout.strip() == "tag"
+
+        reconcile_subject = _git(
+            root, "log", "-1", "--format=%s", reconcile_commit
+        ).stdout.strip()
+        assert _tag_subject(root, "v1.3.0") == reconcile_subject
+        assert _tag_subject(root, "v1.3.0") not in {
+            "fix X",
+            "feat Y",
+            "work + intent on feat-x",
+            "work + intent on feat-y",
+        }
 
     def test_no_intents_is_noop_success(self, tmp_path: Path) -> None:
         """A plain branch merge with no session intents reconciles to a no-op."""
@@ -555,6 +583,51 @@ class TestReconcileFailureExitCode:
         assert _pyproject_version(root) == "2.1.0"
         assert is_consumed(root, "flowA")
         assert _git(root, "branch", "--list", "feature").stdout.strip() == ""
+
+    def test_tag_failure_preserves_branch_and_reports_committed_reconcile(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A tag failure is loud and leaves the source branch for recovery.
+
+        The reconcile commit is created before the annotated tag. If tag
+        creation fails, the CLI must not delete the source branch under
+        ``--delete-merged`` and the rendered error must make the already-created
+        reconcile commit / missing-tag state diagnosable.
+        """
+        import sys
+
+        from se3.engine.git_tags import VersionTagError
+        from se3.engine.version_intent import reconcile_commit_exists
+
+        root = _make_project(tmp_path, "2.0.0")
+        _make_feature_with_intent(
+            root, "feature", "flowA", bump_type="minor", change="feat A"
+        )
+
+        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+
+        def _tag_boom(*_args, **_kwargs):
+            raise VersionTagError("v2.1.0", "simulated tag helper failure")
+
+        monkeypatch.setattr(
+            reconcile_mod,
+            "create_annotated_version_tag",
+            _tag_boom,
+        )
+
+        exit_code = run_merge(
+            ["feature"], strategy="fast", delete_merged=True, project_root=root
+        )
+
+        rendered = capsys.readouterr().out
+        assert exit_code == 1
+        assert _git(root, "branch", "--list", "feature").stdout.strip() != ""
+        assert reconcile_commit_exists(root, "flowA")
+        assert _pyproject_version(root) == "2.1.0"
+        assert _git(root, "tag", "--list", "v2.1.0").stdout.strip() == ""
+        assert "failed to create version tag v2.1.0" in rendered
+        assert "version reconcile commit may already exist" in rendered
+        assert "source branch is preserved" in rendered
 
 
 class TestNoConfirmationGate:
