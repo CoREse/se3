@@ -34,6 +34,7 @@ def _make_intent(flow_id: str, **overrides) -> VersionIntent:
         change_summary=f"summary for {flow_id}",
         versions_changes=[f"Add thing in {flow_id}", "Fix another thing"],
         bump_type="minor",
+        is_tag=True,
         pre_session_baseline="1.2.3",
         provisional_suggested_version="1.3.0",
     )
@@ -92,6 +93,15 @@ class TestSerialization:
             {"flow_id": "f1", "versions_changes": ["keep", "", 42, None, "  also  "]}
         )
         assert intent.versions_changes == ["keep", "also"]
+
+    def test_is_tag_round_trip(self):
+        intent = _make_intent("20260709-tag_0001", is_tag=False)
+        restored = VersionIntent.from_dict(intent.to_dict())
+        assert restored.is_tag is False
+
+    def test_from_dict_missing_is_tag_defaults_none(self):
+        intent = VersionIntent.from_dict({"flow_id": "f1"})
+        assert intent.is_tag is None
 
     def test_read_missing_returns_none(self, tmp_path: Path):
         assert read_intent(tmp_path, "nope") is None

@@ -335,6 +335,153 @@ class TestVersionChangesOutput:
         assert step.outputs["versions_changes"] == ["Fix it"]
 
 
+class TestTagDecisionOutput:
+    """version_analyze exposes the tag decision metadata."""
+
+    @pytest.mark.parametrize(
+        ("bump_type", "expected"),
+        [
+            ("major", True),
+            ("minor", True),
+            ("patch", False),
+        ],
+    )
+    def test_default_semver_derives_is_tag_from_bump_type(self, bump_type, expected):
+        result = _validate_result(
+            {
+                "suggested_version": "2.0.0",
+                "bump_type": bump_type,
+                "reasoning": "Default SemVer decision",
+                "confidence": "high",
+            }
+        )
+        assert result["is_tag"] is expected
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_default_semver_outputs_is_tag_for_minor(
+        self, mock_caller_cls, mock_ver, mock_inject
+    ):
+        llm_response = json.dumps({
+            "bump_type": "minor",
+            "reasoning": "New feature",
+            "confidence": "high",
+            "suggested_version": "1.3.0",
+            "commit_message": "Add feature",
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow()
+        step = _make_step({"task_description": "Add feature"})
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["is_tag"] is True
+
+    @pytest.mark.parametrize("is_tag", [True, False])
+    def test_custom_rules_preserve_boolean_is_tag(self, is_tag):
+        result = _validate_result(
+            {
+                "suggested_version": "2026.07.09",
+                "bump_type": "patch",
+                "reasoning": "Custom rule decision",
+                "confidence": "high",
+                "is_tag": is_tag,
+            },
+            has_custom_rules=True,
+        )
+        assert result["is_tag"] is is_tag
+
+    @pytest.mark.parametrize("raw_is_tag", ["true", 1, None, {"value": True}])
+    def test_custom_rules_non_boolean_is_tag_normalizes_false(self, raw_is_tag):
+        result = _validate_result(
+            {
+                "suggested_version": "2026.07.09",
+                "bump_type": "minor",
+                "reasoning": "Custom rule decision",
+                "confidence": "high",
+                "is_tag": raw_is_tag,
+            },
+            has_custom_rules=True,
+        )
+        assert result["is_tag"] is False
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_custom_rules_prompt_and_output_include_is_tag(
+        self, mock_caller_cls, mock_ver, mock_inject, tmp_path
+    ):
+        rules_dir = tmp_path / "se3"
+        rules_dir.mkdir()
+        (rules_dir / "version-rules.md").write_text(
+            "Create tags for calendar releases only.", encoding="utf-8"
+        )
+
+        llm_response = json.dumps({
+            "bump_type": "patch",
+            "suggested_version": "2026.07.09",
+            "reasoning": "Calendar release",
+            "confidence": "high",
+            "commit_message": "Ship calendar release",
+            "is_tag": True,
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(change_path=tmp_path / "se3.yaml")
+        step = _make_step({"task_description": "Ship calendar release"})
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["is_tag"] is True
+        called_prompt = mock_caller.call.call_args.kwargs["prompt"]
+        assert "**is_tag**" in called_prompt
+        assert '"is_tag": true' in called_prompt
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_worktree_intent_includes_is_tag(
+        self, mock_caller_cls, mock_ver, mock_inject, tmp_path
+    ):
+        from se3.engine.version_intent import read_intent
+
+        llm_response = json.dumps({
+            "bump_type": "minor",
+            "reasoning": "New feature",
+            "confidence": "high",
+            "suggested_version": "1.3.0",
+            "commit_message": "Add feature",
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(
+            change_path=tmp_path / "se3.yaml",
+            flow_id="flow-tag-intent",
+            is_worktree_mode=True,
+        )
+        step = _make_step(
+            {"task_description": "Add feature", "pre_session_version": "1.2.3"}
+        )
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["version_intent"]["is_tag"] is True
+        intent = read_intent(tmp_path, "flow-tag-intent")
+        assert intent is not None
+        assert intent.is_tag is True
+
+
 class TestVersionChangesForwarding:
     """versions_changes is forwarded from version_analyze.outputs to commit.inputs."""
 
@@ -379,6 +526,14 @@ class TestVersionChangesForwarding:
             "commit_message": "Add features",
         })
         assert inputs["versions_changes"] == []
+
+    def test_is_tag_forwarded_to_commit_inputs(self):
+        inputs = self._build_commit_inputs({
+            "suggested_version": "1.3.0",
+            "commit_message": "Add features",
+            "is_tag": True,
+        })
+        assert inputs["is_tag"] is True
 
 
 class TestLLMFailureFailsStep:
@@ -479,6 +634,8 @@ class TestVersionRulesFileInjection:
         called_prompt = mock_caller.call.call_args.kwargs["prompt"]
         assert "No project-specific rules file found" in called_prompt
         assert "Project-Specific Version Rules" in called_prompt
+        assert '"is_tag": true' not in called_prompt
+        assert "**is_tag**" not in called_prompt
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
     @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
@@ -512,6 +669,8 @@ class TestVersionRulesFileInjection:
         called_prompt = mock_caller.call.call_args.kwargs["prompt"]
         assert rules_marker in called_prompt
         assert "No project-specific rules file found" not in called_prompt
+        assert "**is_tag**" in called_prompt
+        assert '"is_tag": true' in called_prompt
 
 
 class TestReadVersionRulesFile:

@@ -107,6 +107,8 @@ class VersionIntent:
             by the default deterministic channel and for commit-message
             display only. MAY be ``None`` or lossy under custom version-rules;
             never the sole carrier of intent.
+        is_tag: Optional tag policy decision from version_analyze. ``None``
+            means the intent was written before tag metadata existed.
         pre_session_baseline: The master version the session diverged from,
             recorded for audit / drift diagnosis (NOT used to compute the
             final version — reconcile re-bases on master's *current* version).
@@ -123,6 +125,7 @@ class VersionIntent:
     change_summary: str = ""
     versions_changes: list[str] = field(default_factory=list)
     bump_type: Optional[str] = None
+    is_tag: Optional[bool] = None
     pre_session_baseline: Optional[str] = None
     provisional_suggested_version: Optional[str] = None
     consumed: bool = False
@@ -160,6 +163,9 @@ class VersionIntent:
             change_summary=str(data.get("change_summary") or ""),
             versions_changes=versions_changes,
             bump_type=_normalize_optional_str(data.get("bump_type")),
+            is_tag=(
+                data.get("is_tag") if isinstance(data.get("is_tag"), bool) else None
+            ),
             pre_session_baseline=_normalize_optional_str(data.get("pre_session_baseline")),
             provisional_suggested_version=_normalize_optional_str(
                 data.get("provisional_suggested_version")

@@ -117,6 +117,8 @@ Analyze the changes above and produce:
    - Provide between 3 and 8 entries; if the change is genuinely tiny, fewer is
      acceptable, but prefer enumerating distinct user-visible effects.
 
+{tag_decision_instruction}
+
 Respond in valid JSON format:
 
 ```json
@@ -129,7 +131,7 @@ Respond in valid JSON format:
   "versions_changes": [
     "Imperative changelog bullet describing one user-facing change",
     "Another distinct user-facing change in this version"
-  ]
+  ]{is_tag_json_field}
 }}
 ```
 
@@ -153,6 +155,17 @@ VERSION_ANALYZE_PROMPT = inject_boundary(
 _NO_CUSTOM_RULES_PLACEHOLDER = (
     "_No project-specific rules file found at `se3/version-rules.md`. "
     "Use the default Semantic Versioning 2.0.0 rules above._"
+)
+
+_DEFAULT_TAG_DECISION_INSTRUCTION = (
+    "Tag policy: SE3 derives git tag creation from the default SemVer "
+    "`bump_type`: major and minor create tags; patch and none do not."
+)
+
+_CUSTOM_TAG_DECISION_INSTRUCTION = (
+    '7. **is_tag**: A boolean tag decision. Set `true` when this release '
+    'should create an annotated git tag; set `false` when it should not. '
+    'This field is required when project-specific version rules are present.'
 )
 
 
@@ -222,6 +235,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Read optional project-specific version rules
     rules_text = _read_version_rules_file(project_root)
     custom_rules_block = rules_text if rules_text else _NO_CUSTOM_RULES_PLACEHOLDER
+    has_custom_rules = bool(rules_text)
 
     # Pre-session version + session-introduced commits (G3 forwards these
     # into step.inputs from the implement step). pre_session_version falls
@@ -254,6 +268,12 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         pre_session_version=pre_session_version,
         session_commits=session_commits_text,
         custom_rules=custom_rules_block,
+        tag_decision_instruction=(
+            _CUSTOM_TAG_DECISION_INSTRUCTION
+            if has_custom_rules
+            else _DEFAULT_TAG_DECISION_INSTRUCTION
+        ),
+        is_tag_json_field=',\n  "is_tag": true' if has_custom_rules else "",
     )
 
     # Append issue discovery injection if applicable
@@ -279,7 +299,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             prompt=prompt,
             json_mode="two_phase",
         )
-        result = _parse_response(response)
+        result = _parse_response(response, has_custom_rules=has_custom_rules)
     except Exception as e:
         logger.exception("Version analysis failed")
         step.error_message = (
@@ -295,6 +315,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["reasoning"] = result["reasoning"]
     step.outputs["confidence"] = result["confidence"]
     step.outputs["current_version"] = current_version
+    step.outputs["is_tag"] = result["is_tag"]
     step.outputs["commit_message"] = (
         result.get("commit_message")
         or _fallback_commit_message(task_type, task_description)
@@ -364,11 +385,12 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.info(
             "Version analysis (worktree, intent-only): bump_type=%s, "
             "provisional_suggested_version=%s (pre_session_baseline=%s), "
-            "confidence=%s — final version deferred to merge-side reconcile",
+            "confidence=%s, is_tag=%s — final version deferred to merge-side reconcile",
             result["bump_type"],
             result["suggested_version"],
             pre_session_version,
             result["confidence"],
+            result["is_tag"],
         )
         return StepStatus.COMPLETED
 
@@ -433,6 +455,7 @@ def _emit_version_intent(
         change_summary=change_summary,
         versions_changes=list(versions_changes),
         bump_type=result.get("bump_type"),
+        is_tag=result.get("is_tag"),
         pre_session_baseline=baseline,
         provisional_suggested_version=result.get("suggested_version"),
     )
@@ -785,7 +808,7 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _parse_response(response: str) -> dict[str, Any]:
+def _parse_response(response: str, *, has_custom_rules: bool = False) -> dict[str, Any]:
     """Parse the LLM response to extract version analysis.
     
     Parses and validates the LLM response.
@@ -812,10 +835,12 @@ def _parse_response(response: str) -> dict[str, Any]:
             f"suggested_version. Preview: {preview}..."
         )
 
-    return _validate_result(result)
+    return _validate_result(result, has_custom_rules=has_custom_rules)
 
 
-def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
+def _validate_result(
+    result: dict[str, Any], *, has_custom_rules: bool = False
+) -> dict[str, Any]:
     """Validate and normalize the parsed result.
 
     ``suggested_version`` is the authoritative output field and is required.
@@ -839,6 +864,14 @@ def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
     bump_type = str(result.get("bump_type", "patch")).lower()
     if bump_type not in ("major", "minor", "patch", "none"):
         bump_type = "patch"
+
+    if has_custom_rules:
+        raw_is_tag = result.get("is_tag")
+        is_tag = raw_is_tag if isinstance(raw_is_tag, bool) else False
+    else:
+        from ..git_tags import should_tag_semver_bump
+
+        is_tag = should_tag_semver_bump(bump_type)
 
     confidence = str(result.get("confidence", "medium")).lower()
     if confidence not in ("high", "medium", "low"):
@@ -864,6 +897,7 @@ def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
         "suggested_version": suggested_version,
         "commit_message": result.get("commit_message", ""),
         "versions_changes": versions_changes,
+        "is_tag": is_tag,
     }
 
 

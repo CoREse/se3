@@ -2418,6 +2418,7 @@ class StateMachine:
                     inputs["reasoning"] = step.outputs.get("reasoning")
                     inputs["confidence"] = step.outputs.get("confidence")
                     inputs["suggested_version"] = step.outputs.get("suggested_version")
+                    inputs["is_tag"] = step.outputs.get("is_tag")
                     inputs["commit_message"] = step.outputs.get("commit_message")
                     # Forward changelog bullets so the commit step's
                     # DocumentationUpdater wiring can write VERSIONS.md. Absent on
