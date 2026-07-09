@@ -49,6 +49,12 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..docs_updater import DocumentationUpdater
+from ..git_tags import (
+    VersionTagError,
+    create_annotated_version_tag,
+    should_tag_semver_bump,
+    tag_name_for_version,
+)
 from ..version_bumper import BumpType, Version
 from ..version_intent import (
     RECONCILE_TRAILER,
@@ -111,6 +117,9 @@ class ReconcileResult:
     consumed_flow_ids: list[str] = field(default_factory=list)
     reconcile_commit: Optional[str] = None
     changelog_entries: list[str] = field(default_factory=list)
+    is_tag: bool = False
+    tag_name: Optional[str] = None
+    tag_created: bool = False
     already_reconciled: bool = False
     # True ONLY when version bumping is disabled for the project. A disabled
     # project legitimately produces no intent and no reconcile commit, so the
@@ -389,7 +398,9 @@ Rules for your answer:
 - Derive the final version from the current version + the changes + the rules.
 - It MUST NOT regress and MUST NOT reuse a version the project already released.
 - Respond with a JSON object: {{"final_version": "<the version string>",
-  "reasoning": "<one line>"}}
+  "is_tag": true|false, "reasoning": "<one line>"}}
+- Set "is_tag" to true only when the custom rules say this final release should
+  create a git tag.
 """
 
 
@@ -420,7 +431,7 @@ def compute_via_rules(
     rules_text: str,
     llm_call: Callable[[str], str],
     revision_feedback: Optional[str] = None,
-) -> str:
+) -> tuple[str, bool]:
     """Custom-rules LLM channel: derive the final version via the model.
 
     Args:
@@ -431,8 +442,8 @@ def compute_via_rules(
             recomputed version (custom-rules channel only — a deterministic
             SemVer result cannot be steered).
 
-    Returns the final version string as produced by the LLM (validation /
-    no-regression enforcement happens in :func:`reconcile`).
+    Returns the final version string and tag decision as produced by the LLM
+    (validation / no-regression enforcement happens in :func:`reconcile`).
 
     Raises:
         ReconcileError: on an empty response or a response with no usable
@@ -478,7 +489,8 @@ def compute_via_rules(
         raise ReconcileError(
             "version-rules LLM response has an empty 'final_version'"
         )
-    return final.strip()
+    raw_is_tag = parsed.get("is_tag")
+    return final.strip(), raw_is_tag if isinstance(raw_is_tag, bool) else False
 
 
 def _default_llm_call(project_root: Path) -> Callable[[str], str]:
@@ -1877,6 +1889,9 @@ def reconcile(
     reconcile_commit: Optional[str] = None
     consumed_flow_ids: list[str] = []
     reattach_failed: list[str] = []
+    is_tag = False
+    tag_name: Optional[str] = None
+    tag_created = False
     # Whether reconcile has begun WRITING its own output (version file / changelog
     # / consumed flags). The failure rollback below (_restore_reconcile_paths, a
     # blind ``checkout HEAD --`` over ALL reconcile-owned paths) is only safe once
@@ -1978,10 +1993,11 @@ def reconcile(
             bump_label: Optional[str] = (
                 chosen_bump.value if chosen_bump is not None else None
             )
+            is_tag = should_tag_semver_bump(bump_label)
         else:
             channel = "custom-rules"
             call = llm_call or _default_llm_call(project_root)
-            final_version = compute_via_rules(
+            final_version, is_tag = compute_via_rules(
                 project_root,
                 current_version,
                 outstanding,
@@ -2019,6 +2035,10 @@ def reconcile(
         # then tripping validate_no_regression's "does not advance current" on a
         # numerically-equal pair.
         publish_release = channel == "custom-rules" or chosen_bump is not None
+        if not publish_release:
+            is_tag = False
+        if is_tag:
+            tag_name = tag_name_for_version(final_version)
 
         # Validate only when actually publishing a new number. The no-regress /
         # no-collision contract is about a NEW released version; the no-bump no-op
@@ -2068,6 +2088,14 @@ def reconcile(
                 project_root, message, version_file=version_file,
                 allow_empty=True,
             )
+            if publish_release and is_tag and reconcile_commit:
+                try:
+                    tag_name = create_annotated_version_tag(
+                        project_root, final_version, reconcile_commit
+                    )
+                except VersionTagError as exc:
+                    raise ReconcileError(str(exc)) from exc
+                tag_created = True
     except (
         ReconcileError,
         subprocess.SubprocessError,
@@ -2167,4 +2195,7 @@ def reconcile(
         consumed_flow_ids=consumed_flow_ids,
         reconcile_commit=reconcile_commit,
         changelog_entries=changelog_entries,
+        is_tag=is_tag,
+        tag_name=tag_name,
+        tag_created=tag_created,
     )
