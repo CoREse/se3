@@ -20,6 +20,11 @@ import tempfile
 from pathlib import Path
 
 from ..context import effective_task_type
+from ..git_tags import (
+    VersionTagError,
+    create_annotated_version_tag,
+    tag_name_for_version,
+)
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..version_bumper import VersionBumper, VersionConfig
 
@@ -617,6 +622,35 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Clear version backup on successful commit (make bump permanent)
         if version_bumper:
             version_bumper.clear_backup()
+
+        should_create_tag = bool(new_version and step.inputs.get("is_tag") is True)
+        if should_create_tag and new_version:
+            tag_name = tag_name_for_version(new_version)
+            try:
+                created_tag = create_annotated_version_tag(
+                    project_root,
+                    new_version,
+                    commit_hash,
+                )
+            except VersionTagError as exc:
+                logger.error("Failed to create version tag %s: %s", tag_name, exc)
+                step.error_message = str(exc)
+                step.outputs["commit_hash"] = commit_hash
+                step.outputs["committed"] = False
+                step.outputs["commit_created"] = True
+                step.outputs["commit_message"] = commit_message
+                step.outputs["version"] = new_version
+                step.outputs["version_bumped"] = True
+                step.outputs["tag_name"] = exc.tag_name
+                step.outputs["tag_created"] = False
+                step.outputs["tag_error"] = str(exc)
+                return StepStatus.FAILED
+            step.outputs["tag_name"] = created_tag
+            step.outputs["tag_created"] = True
+        else:
+            step.outputs["tag_created"] = False
+            if new_version:
+                step.outputs["tag_name"] = tag_name_for_version(new_version)
 
         # Store outputs
         step.outputs["commit_hash"] = commit_hash

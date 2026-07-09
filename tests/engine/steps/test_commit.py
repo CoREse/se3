@@ -20,6 +20,7 @@ from se3.engine.steps.commit import (
     _strip_runtime_leaks,
     _index_has_staged_changes,
 )
+from se3.engine.git_tags import VersionTagError
 from se3.engine.version_bumper import BumpType, VersionBumper, VersionConfig
 
 
@@ -892,6 +893,174 @@ def _head_tree_files(repo: Path) -> str:
         ["git", "-C", str(repo), "show", "--name-only", "--pretty=format:", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def _tag_body(repo: Path, tag_name: str) -> str:
+    content = _git(repo, "cat-file", "-p", tag_name).stdout
+    _, _, body = content.partition("\n\n")
+    return body
+
+
+def _write_pyproject(repo: Path, version: str = "1.0.0") -> None:
+    (repo / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "tag-test"\n'
+        f'version = "{version}"\n',
+        encoding="utf-8",
+    )
+
+
+class TestCommitVersionTagIntegration:
+    """Direct commit path version tag behaviour."""
+
+    def _run_version_commit(
+        self,
+        repo: Path,
+        *,
+        suggested_version: str,
+        bump_type: str,
+        is_tag: bool,
+        is_worktree: bool = False,
+    ) -> tuple[StepStatus, Step]:
+        flow = _make_flow_with_state(
+            change_path=repo / "se3.yaml",
+            selected_steps=[StepType.VERSION_ANALYZE, StepType.COMMIT, StepType.SUMMARIZE],
+        )
+        flow.baseline_commit = None
+        flow.is_worktree_mode = is_worktree
+        step = _make_step(
+            {
+                "suggested_version": suggested_version,
+                "current_version": "1.0.0",
+                "bump_type": bump_type,
+                "is_tag": is_tag,
+                "commit_message": "release change",
+            }
+        )
+        with patch(
+            "se3.engine.steps.commit._load_version_config",
+            return_value=VersionConfig(
+                enabled=True,
+                file_path="pyproject.toml",
+                include_in_commit_message=True,
+            ),
+        ), patch(
+            "se3.engine.steps.commit._update_docs",
+        ), patch(
+            "se3.engine.context_builder.ensure_code_index_fresh",
+        ):
+            return commit_handler(step, flow), step
+
+    def test_direct_minor_commit_creates_annotated_tag_on_version_commit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        result, step = self._run_version_commit(
+            repo,
+            suggested_version="1.1.0",
+            bump_type="minor",
+            is_tag=True,
+        )
+
+        assert result == StepStatus.COMPLETED
+        commit_hash = step.outputs["commit_hash"]
+        assert step.outputs["tag_created"] is True
+        assert step.outputs["tag_name"] == "v1.1.0"
+        assert _git(repo, "cat-file", "-t", "v1.1.0").stdout.strip() == "tag"
+        assert _git(repo, "rev-list", "-n", "1", "v1.1.0").stdout.strip() == commit_hash
+        subject = _git(repo, "log", "-1", "--format=%s", commit_hash).stdout.strip()
+        assert _tag_body(repo, "v1.1.0") == f"{subject}\n"
+        assert "pyproject.toml" in _head_tree_files(repo)
+
+    def test_direct_patch_commit_does_not_create_tag(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "fix.py").write_text("print('fix')\n", encoding="utf-8")
+
+        result, step = self._run_version_commit(
+            repo,
+            suggested_version="1.0.1",
+            bump_type="patch",
+            is_tag=False,
+        )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_name"] == "v1.0.1"
+        assert _git(repo, "tag", "--list", "v1.0.1").stdout.strip() == ""
+        assert step.outputs["version"] == "1.0.1"
+        assert step.outputs["committed"] is True
+
+    def test_worktree_commit_does_not_create_tag(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "worktree.py").write_text("print('intent only')\n", encoding="utf-8")
+
+        with patch("se3.engine.steps.commit.create_annotated_version_tag") as mock_tag:
+            result, step = self._run_version_commit(
+                repo,
+                suggested_version="1.1.0",
+                bump_type="minor",
+                is_tag=True,
+                is_worktree=True,
+            )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["tag_created"] is False
+        assert "tag_name" not in step.outputs
+        mock_tag.assert_not_called()
+        assert _git(repo, "tag", "--list", "v1.1.0").stdout.strip() == ""
+
+    def test_tag_failure_fails_step_with_diagnostics(self, tmp_path: Path) -> None:
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        with patch(
+            "se3.engine.steps.commit.create_annotated_version_tag",
+            side_effect=VersionTagError(
+                "v2.0.0",
+                "git command failed",
+                stderr="tag failure",
+                returncode=128,
+            ),
+        ):
+            result, step = self._run_version_commit(
+                repo,
+                suggested_version="2.0.0",
+                bump_type="major",
+                is_tag=True,
+            )
+
+        assert result == StepStatus.FAILED
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_name"] == "v2.0.0"
+        assert step.outputs["commit_created"] is True
+        assert step.outputs["committed"] is False
+        assert "v2.0.0" in step.error_message
+        assert "tag failure" in step.error_message
+        assert _git(repo, "tag", "--list", "v2.0.0").stdout.strip() == ""
 
 
 class TestDetectRuntimeLeaks:
