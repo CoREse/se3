@@ -1681,7 +1681,12 @@ class LLMCaller:
         env.pop("CLAUDECODE", None)
 
         start_time = time.time()
-        last_error = ""
+        # One entry per attempt. Rotation consumes an attempt slot and
+        # ``continue``s past the tail-on-last error assignment, so a sequence
+        # that rotates through every agent used to end with an empty reason —
+        # the final LLMCallError said only "failed after N attempts: ".
+        # Recording before the rotation branch keeps every attempt accounted for.
+        attempt_errors: List[str] = []
 
         for internal_attempt in range(self.max_retries):
             # ``is_retry`` gates retry-context injection AND dedup. Phase-2
@@ -1921,6 +1926,11 @@ class LLMCaller:
                     f"LLM call failed ({error_label}) on agent '{current_agent_name}', "
                     f"attempting agent rotation..."
                 )
+                attempt_errors.append(
+                    f"attempt {internal_attempt + 1}: agent '{current_agent_name}' failed "
+                    f"(infra_error={error_label}, exit={result.returncode}, "
+                    f"cmd={result.cmd_used})"
+                )
                 if self._rotate_agent():
                     # Rotation succeeded — next iteration uses the new agent.
                     # This consumes one of the max_retries attempt slots.
@@ -1929,17 +1939,25 @@ class LLMCaller:
                 # Rotation exhausted — fall through; remaining attempts run on
                 # the last agent (existing tail-on-last-agent behavior).
 
-                last_error = f"Command '{result.cmd_used}' failed with exit code {result.returncode}"
-                logger.warning(f"LLM call failed: {last_error}, internal attempt {internal_attempt + 1}/{self.max_retries}")
+                logger.warning(
+                    f"LLM call failed: {attempt_errors[-1]}, "
+                    f"internal attempt {internal_attempt + 1}/{self.max_retries}"
+                )
 
             except Exception as e:
-                last_error = str(e)
-                logger.warning(f"LLM call exception: {last_error}, internal attempt {internal_attempt + 1}/{self.max_retries}")
+                attempt_errors.append(
+                    f"attempt {internal_attempt + 1}: agent '{attempt_agent_name}' "
+                    f"raised {type(e).__name__}: {e}"
+                )
+                logger.warning(f"LLM call exception: {e}, internal attempt {internal_attempt + 1}/{self.max_retries}")
 
             if internal_attempt < self.max_retries - 1:
                 time.sleep(self.retry_delay)
 
-        raise LLMCallError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
+        reasons = "\n".join(attempt_errors) if attempt_errors else "no failure reason recorded"
+        raise LLMCallError(
+            f"LLM call failed after {self.max_retries} attempts:\n{reasons}"
+        )
 
     @staticmethod
     def _extract_text_from_ndjson(output: str) -> Optional[str]:
