@@ -45,7 +45,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from .disk_json_cache import (
     cached_content_digest,
@@ -366,6 +366,42 @@ class SessionMeta:
             "waiting_for_lock": self.waiting_for_lock,
             "resumable": self.resumable,
         }
+
+
+#: Meta fields whose change *alone* (everything else identical) is treated as
+#: non-substantive "liveness churn" rather than a real state change. An active
+#: flow appends a jsonl line every step, which bumps ``updated_at`` continuously
+#: without altering any operator-visible field. The daemon rate-limits an index
+#: delta whose only difference is one of these fields to the status-heartbeat
+#: cadence (see ``DaemonClient._compute_index_delta``), so an active flow stops
+#: re-pushing its meta row every few seconds purely for a timestamp tick, while a
+#: substantive change (status / step_count / resumable / …) is still delivered at
+#: once. Kept here — next to :class:`SessionMeta` — so the notion of "which meta
+#: fields are timestamp noise" lives with the meta schema, not in the client.
+THROTTLED_META_FIELDS: FrozenSet[str] = frozenset({"updated_at"})
+
+
+def meta_change_is_throttleable(
+    new_meta: Dict[str, Any], old_meta: Dict[str, Any]
+) -> bool:
+    """Return whether *new_meta* differs from *old_meta* only in throttled fields.
+
+    Both arguments are :meth:`SessionMeta.to_dict` outputs. Returns ``True`` when
+    every key outside :data:`THROTTLED_META_FIELDS` is identical *and* at least
+    one throttled field changed — i.e. the update is pure liveness churn safe to
+    rate-limit to the heartbeat. Any substantive difference (status, step_count,
+    …) returns ``False`` so the update is delivered immediately. Two identical
+    metas return ``False`` (nothing to throttle — there is no delta at all).
+    """
+    changed_throttled = False
+    for key in set(new_meta) | set(old_meta):
+        if new_meta.get(key) == old_meta.get(key):
+            continue
+        if key in THROTTLED_META_FIELDS:
+            changed_throttled = True
+        else:
+            return False
+    return changed_throttled
 
 
 @dataclass
