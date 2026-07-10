@@ -27,8 +27,8 @@ description: "merge 冲突解决被 code-index.md 撑爆：为机械可解文件
   ## 验证要点\n\n- 复现方法：git worktree add 临时目录 → merge 一个改动过 code-index.md 的分支 → 确认 A 不经\
   \ LLM\n  机械解决、无冲突标记残留、指纹匹配条目全部保留；\n- B：构造大文件冲突，确认 prompt 尺寸与文件大小无关；\n- C：全链失败时错误信息包含各\
   \ agent 的失败原因。"
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-10T13:55:58.862965'
-updated_at: '2026-07-10T13:59:00.506732'
+updated_at: '2026-07-10T17:02:22.787402'

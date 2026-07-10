@@ -1,0 +1,99 @@
+id: '283'
+description: |-
+  spec 治理迁移（v11.0.0，spec_gate/verify_spec → invariant_check）遗留的两个知识系统守卫缺口。
+
+  ## 缺口一：charter_freshness 只探测不闭环，advisory 无消费者
+
+  charter_freshness 检测到 diff 触及 charter 三类内容时，输出 charter_update_needed +
+  suggested_update，但没有专门消费者——summarize 与 WebUI 均无针对性渲染/聚合（仅步骤详情
+  的通用 outputs 展示可见），没人会回头翻已完成 flow 的单步详情，实践中建议不可达，
+  charter 持续腐化。
+
+  **修复：charter_freshness 自己在 handler 内闭环（不留 issue、不等人工、不经状态机路由）。**
+
+  原理：charter_freshness 位于 invariant_check 之后。invariant_check 通过已证明本次代码
+  变更合法（不违反旧 charter/任务文本/why-comments），因此一个**描述性**的 charter 更新
+  ——让宪法如实反映这个已通过全部审查的新现实——必然是应该做的，flow 内自动执行不构成
+  "被审者改写审判标准"（本 flow 锚已冻结，审判已结束）。
+
+  不引入 implement 子步骤：suggested_update 由 charter_freshness 生成、最终裁决也由它的
+  admission check 做，中间插 impl 并无真正的分权（生成者和裁判都没变），只多付一次 LLM
+  调用和状态机路由。admission_check_for_changes 是普通函数，进程内可直接调——整个闭环
+  收缩成单 handler 三段式：
+
+  三段顺序为 **propose → gate（内存中审候选文本）→ apply（过审才写盘）**。gate 审的是
+  文本而非磁盘状态，没有理由先写后审：先写后审存在崩溃窗口（apply 后 gate 前进程死亡
+  → 盘上留下未审文本，resume 时 propose 重判"已 fresh"、gate 永不补跑），且需要多余的
+  快照/回滚机制。先审后写则任何崩溃下盘上只可能是旧文本或完整过审的新文本，无需回滚。
+
+  1. **前置条件**（缺任一则保持今日 advisory 行为）：本 flow 中 invariant_check 已运行且
+     COMPLETED——三段论的前提是"变更已通过审查"，步骤序列因任务类型而异，必须显式校验；
+  2. **propose**：LLM 判断 freshness；需要更新时产出**锚定 patch**（禁止全文重写——全文
+     重写是无声删除的温床），prompt 明确"仅描述性更新，不得新增普适规则、不得删改与本次
+     变更无关的条款"。基准读**盘上** charter：本次任务可能是合法修宪（implement 已改过
+     charter.md），基于冻结锚文本算 patch 会覆盖任务的修改（冻结版只属于 invariant 锚）；
+  3. **gate**（两件套，对内存中候选文本执行；任一失败可带反馈在 handler 内有界重试一次，
+     仍失败则不写盘、降级 advisory、步骤照常 COMPLETED——宁旧勿劣）：
+     a. **机械锚定引用替换检查**（程序，非 LLM）：patch 只许两种操作——纯插入；及被替换
+        区域（其旧文本必须在 patch 中逐字引用，handler 校验引文与盘上文本精确匹配且唯一，
+        替换总量有界）。任何未经引用的删改一律拒绝。这是 spec_gate"requirement 集不许
+        缩水"精神的复活，但允许显式改写——纯增量（no-shrink）方案已论证不可行：freshness
+        的典型场景是修正过时陈述，纯增量只能拒绝或追加自相矛盾的新句，且是单调膨胀机，
+        与 admission 的体积红灯自相冲突。admission standard 经核对只管内容类别/海拔/大小、
+        不管既有条款被删削，故删改防线必须由本机械检查承担；
+     b. **admission check**（进程内直调 admission_check_for_changes）：审海拔/内容类别，
+        此路径上为 gating，并追加一问"被替换文本的移除是否削弱了与本次变更无关的约定"；
+  4. **apply**：temp+rename 原子写盘。resume 重入时 propose 对盘面重判，已应用则自然判
+     fresh 无操作，幂等。
+
+  这个子编辑不触发 invariant_check/self_check/test 重跑：charter 文本的对口审查者是上述
+  gate；冻结锚会把"修改旧规则"误读成"违反旧规则"（修宪张力），必须避开。
+
+  invariant_check 只认证了代码 diff、不认证 charter 更新文本本身，残余风险有三，
+  对应防线：过度立法（个例写成全局规则）→ propose 约束 + admission 的三类内容审查；
+  削弱旧法（删改无关既有约定）→ 锚定引用替换的机械校验 + admission 追加问；
+  海拔失守（低海拔细节渗入）→ admission check。
+
+  语义变化需同步：步骤注册表中 CHARTER_FRESHNESS 现声明 "read_only": True（models.py），
+  必须翻转并排查该标志的所有消费者（write-guard/worktree 保护可能依赖它）；docstring 与
+  WebUI 渲染如实反映"可能写 se3/charter.md"，step outputs 带 old→new diff 供事后审查；
+  可选增强：admission gate 的 LLM 调用配独立 agent 链（配置级）。
+  已核实：charter 原文无"human-maintained"条款，实现本 issue 不构成修宪前置。
+
+  已知接受的风险（记录，不设防）：两个 worktree flow 同时自动改 charter → charter.md
+  merge 冲突（小文件，LLM 冲突解决可承受）；worktree 模式下 merge 冲突解决可能改变最终
+  合入代码而 charter 描述照旧（罕见，等下次触及同类内容的 flow 自愈）。
+
+  ## 缺口二：why-comment 的无声删除无人守卫
+
+  spec 时代 spec_gate 守卫知识工件本身（spec 结构合法 + requirement 集不许缩水）。
+  迁移后 why/intent 落在就地 why-comments 里，工件保护只继承了一半：
+
+  - 已覆盖：invariant_check 的收割同时读 baseline commit 和工作区（_harvest_why_comments），
+    "删掉记载约束的注释、同时违反该约束"逃不掉——原文仍在锚池。
+  - 未覆盖：diff **单纯删除/改写 why-comment 而不违反它**，今天没有任何步骤过问。
+    知识无声流失，且再下一个 flow 的锚池里它已彻底不存在。
+
+  **修复方向**（实现时判断；注意：机械集合差不可直接接硬性 fix loop）：
+
+  警示——_extract_comments 收割的是全部 #/// 单行注释而非仅 why：被删的调试注释、重构中
+  移动/改写的注释（跨文件移动在 per-file 对比中即"删除"）都会进清单。把这种噪声接进硬性
+  fix loop，等于复发 self_check 当年"无锚 nit 空转修复循环"的旧病（锚定架构正是为杀它而建）。
+  因此：
+  1. **主推：标记前缀硬守卫**——仅当被删/被改注释命中 "WHY:"/"INVARIANT:" 前缀时
+     REVISION_NEEDED（恢复注释或显式声明理由），普通注释不拦。代价：需经修宪引入该
+     标记约定，并逐步回填存量关键 why-comments；
+  2. **辅助：机械清单 → LLM 复判 → 仅 advisory**——全量集合差先由 LLM 过滤"是否为有实义的
+     why 丢失"，结果只进 step outputs / summarize 摘要，不触发 fix loop。
+
+  ## 关联背景
+
+  - invariant_check 锚集 {task_description, charter, why-comments} 在 flow start 冻结
+    （_freeze_invariant_anchors），charter 只注入 INVARIANT_CHECK/CHARTER_FRESHNESS 两类步骤。
+  - 顺手项：invariant_check prompt 加一条豁免——"diff 编辑了 charter.md 且任务文本明确要求
+    该修改时，被任务点名修改的条款不得作为违规依据"——人工发起的修宪任务的误报保险。
+status: open
+tags: []
+source: human
+created_at: '2026-07-10T17:04:55.212124'
+updated_at: '2026-07-10T17:29:03.131797'
