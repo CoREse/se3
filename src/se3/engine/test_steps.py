@@ -555,7 +555,7 @@ class TestCommitVersionRaceGuard:
         return step
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -612,7 +612,7 @@ class TestCommitVersionRaceGuard:
             assert step.outputs["version"] == "10.7.2"
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -652,7 +652,7 @@ class TestCommitVersionRaceGuard:
             assert step.outputs["version"] == "10.7.1"
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -706,7 +706,7 @@ class TestCommitVersionRaceGuard:
             assert step.outputs["version"] == "10.8.0"
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -748,7 +748,7 @@ class TestCommitVersionRaceGuard:
             mock_bumper.set_version.assert_not_called()
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -803,7 +803,7 @@ class TestCommitVersionRaceGuard:
             assert step.outputs["version"] == "10.8.0"
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -856,7 +856,7 @@ class TestCommitVersionRaceGuard:
             assert written == ["10.7.2"]
 
     @patch("se3.engine.steps.commit._update_docs")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.version_analyze.version_analyze_handler")
     @patch("se3.engine.steps.commit.VersionBumper")
     @patch("se3.engine.steps.commit._load_version_config")
@@ -954,7 +954,11 @@ class TestLLMCallerIntegration:
         ]
         MockRunner.return_value = mock_runner
 
-        caller = LLMCaller(max_retries=3, retry_delay=0.01)
+        caller = LLMCaller(
+            agents=[{"name": "test-claude", "type": "claude-code", "cmd": "claude"}],
+            max_retries=3,
+            retry_delay=0.01,
+        )
         result = caller.call(prompt="test prompt")
 
         assert result == "success"
@@ -971,7 +975,11 @@ class TestLLMCallerIntegration:
         mock_runner.run_with_monitor.return_value = mock_result_fail
         MockRunner.return_value = mock_runner
 
-        caller = LLMCaller(max_retries=2, retry_delay=0.01)
+        caller = LLMCaller(
+            agents=[{"name": "test-claude", "type": "claude-code", "cmd": "claude"}],
+            max_retries=2,
+            retry_delay=0.01,
+        )
 
         with pytest.raises(LLMCallError):
             caller.call(prompt="test prompt")

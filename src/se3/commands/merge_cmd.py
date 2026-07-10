@@ -1141,6 +1141,7 @@ def run_merge(
         ReconcileError,
         ReconcileResult,
         VersionRegressionError,
+        is_version_tag_failure,
         reconcile,
     )
     from ..engine.version_intent import (
@@ -1466,7 +1467,7 @@ def run_merge(
             "unsettled. Fix the cause, then rerun `se3 merge` to re-attempt "
             "the reconcile.",
         ]
-        if "failed to create version tag" in reconcile_error:
+        if is_version_tag_failure(reconcile_error):
             lines.extend([
                 "",
                 "A version reconcile commit may already exist while the git tag "

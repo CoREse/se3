@@ -1,0 +1,7 @@
+id: '277'
+description: self check的规则是有issue就不通过，但是这个步骤仍然会输出一个passed的字段，这个和是否有issue不完全对应，会让不明就里的用户感到困惑。这是个历史遗留问题，删掉这个输出的passed字段，让是否pass的显示变成由程序根据是否有issue自动判断（至少webui里会显示passed的字样，cli有没有不记得）。
+status: in-progress
+tags: []
+source: human
+created_at: '2026-07-10T09:32:36.367201'
+updated_at: '2026-07-10T10:14:13.386063'

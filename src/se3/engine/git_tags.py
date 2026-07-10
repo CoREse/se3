@@ -15,10 +15,12 @@ class VersionTagError(RuntimeError):
         tag_name: str,
         message: str,
         *,
+        commit: Optional[str] = None,
         stderr: str = "",
         returncode: Optional[int] = None,
     ) -> None:
         self.tag_name = tag_name
+        self.commit = commit
         self.stderr = stderr
         self.returncode = returncode
         details = message
@@ -26,7 +28,11 @@ class VersionTagError(RuntimeError):
             details = f"{details} (exit {returncode})"
         if stderr:
             details = f"{details}: {stderr.strip()}"
-        super().__init__(f"failed to create version tag {tag_name}: {details}")
+        # Recovery from a tag failure is manual (`git tag -a <name> <commit>`),
+        # so the message must name BOTH the tag and the commit it belongs on —
+        # the version commit is already durable and nothing will retry it.
+        target = f" on commit {commit}" if commit else ""
+        super().__init__(f"failed to create version tag {tag_name}{target}: {details}")
 
 
 def tag_name_for_version(version: str) -> str:
@@ -42,6 +48,52 @@ def should_tag_semver_bump(bump_type: Optional[str]) -> bool:
     return str(bump_type or "").strip().lower() in {"major", "minor"}
 
 
+def semver_tag_decision(
+    current_version: Optional[str],
+    new_version: Optional[str],
+) -> Optional[bool]:
+    """The default-SemVer tag verdict implied by the two version numbers.
+
+    ``suggested_version`` is the authoritative version decision; ``bump_type`` is
+    free-form auxiliary text an LLM can garble in either direction (a real minor
+    release labelled ``patch``, or a patch-only release labelled ``minor``).
+    Whenever both versions parse as ``MAJOR.MINOR.…`` the comparison is the whole
+    truth: major/minor advance ⇒ tag, patch-only advance ⇒ no tag. Returns ``None``
+    when the versions are not comparable (a calendar scheme, an unreadable current
+    version): the default-SemVer policy has no verdict to give there, and callers
+    must not manufacture one from ``bump_type``.
+    """
+    current = _semver_major_minor(current_version)
+    new = _semver_major_minor(new_version)
+    if current is None or new is None:
+        return None
+    return new > current
+
+
+def semver_advance_requires_tag(
+    current_version: Optional[str],
+    new_version: Optional[str],
+) -> bool:
+    """Whether current -> new advances the SemVer major or minor component.
+
+    ``False`` for anything not parseable as ``MAJOR.MINOR.…``.
+    """
+    return semver_tag_decision(current_version, new_version) is True
+
+
+def _semver_major_minor(version: Optional[str]) -> Optional[tuple[int, int]]:
+    if not version:
+        return None
+    core = str(version).strip().lstrip("v").split("+", 1)[0].split("-", 1)[0]
+    parts = core.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
 def commit_subject(
     project_root: Path,
     commit: str,
@@ -49,17 +101,24 @@ def commit_subject(
     timeout: int = 30,
     tag_name: Optional[str] = None,
 ) -> str:
-    """Read the first line of the target commit message from git."""
+    """Read the first line of the target commit message from git.
+
+    ``%B`` (raw body) rather than ``%s``: git's ``%s`` is the subject *paragraph*,
+    folding a wrapped first paragraph's newlines into spaces. The tag message must
+    be exactly the first physical line of the commit message.
+    """
     result = _run_git(
         project_root,
         "log",
         "-1",
-        "--format=%s",
+        "--format=%B",
         commit,
         timeout=timeout,
         tag_name=tag_name,
+        commit=commit,
     )
-    return result.stdout.strip()
+    first_line, _, _ = result.stdout.partition("\n")
+    return first_line.strip()
 
 
 def create_annotated_version_tag(
@@ -82,6 +141,7 @@ def create_annotated_version_tag(
         commit,
         timeout=timeout,
         tag_name=tag_name,
+        commit=commit,
     )
     return tag_name
 
@@ -91,6 +151,7 @@ def _run_git(
     *args: str,
     timeout: int,
     tag_name: Optional[str] = None,
+    commit: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     cmd = ["git", "-C", str(project_root), *args]
     fallback_tag = tag_name or _tag_name_from_args(args)
@@ -107,15 +168,17 @@ def _run_git(
         raise VersionTagError(
             fallback_tag,
             f"git command timed out after {timeout}s",
+            commit=commit,
             stderr=stderr,
         ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
-        raise VersionTagError(fallback_tag, str(exc)) from exc
+        raise VersionTagError(fallback_tag, str(exc), commit=commit) from exc
 
     if result.returncode != 0:
         raise VersionTagError(
             fallback_tag,
             "git command failed",
+            commit=commit,
             stderr=result.stderr,
             returncode=result.returncode,
         )

@@ -423,6 +423,184 @@ def test_tag_failure_raises_reconcile_error(tmp_path, monkeypatch):
         reconcile(root)
 
 
+def test_noop_after_tag_failure_does_not_create_missing_tag(tmp_path, monkeypatch):
+    """Recovery from a tag failure is manual; a later no-op merge must not tag.
+
+    The reconcile commit is already durable and consumed, so a re-run has no
+    outstanding intents. Scanning history to finish that release's tag is exactly
+    the self-healing this flow must not do.
+    """
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+
+    def fail_tag(project_root, version, commit):
+        raise VersionTagError(f"v{version}", "tag failed", commit=commit)
+
+    monkeypatch.setattr(rec_mod, "create_annotated_version_tag", fail_tag)
+    with pytest.raises(ReconcileError, match="failed to create version tag v1.3.0"):
+        reconcile(root)
+    reconcile_commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+    assert _git(root, "tag", "--list", "v1.3.0").stdout.strip() == ""
+
+    monkeypatch.undo()
+    result = reconcile(root)
+
+    assert result.success
+    assert result.channel == "noop"
+    assert result.already_reconciled
+    assert result.tag_created is False
+    assert result.final_version is None
+    assert _git(root, "tag", "--list", "v1.3.0").stdout.strip() == ""
+    assert _git(root, "rev-parse", "HEAD").stdout.strip() == reconcile_commit
+
+
+def test_tag_failure_error_names_tag_and_reconcile_commit(tmp_path, monkeypatch):
+    """An operator must be able to hand-create the tag from the error alone."""
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+
+    real_tag = rec_mod.create_annotated_version_tag
+    seen: dict = {}
+
+    def fail_tag(project_root, version, commit):
+        seen["commit"] = commit
+        raise VersionTagError(
+            f"v{version}", "git command failed", commit=commit, returncode=128
+        )
+
+    monkeypatch.setattr(rec_mod, "create_annotated_version_tag", fail_tag)
+    with pytest.raises(ReconcileError) as excinfo:
+        reconcile(root)
+
+    message = str(excinfo.value)
+    assert "v1.3.0" in message
+    assert seen["commit"] in message
+    assert "exit 128" in message
+    assert real_tag is not None
+
+
+def test_reconcile_commit_hash_read_failure_raises(tmp_path, monkeypatch):
+    """A created reconcile commit whose hash cannot be read must fail loud.
+
+    Otherwise the release would be reported successful with its tag silently
+    skipped (the tag is created on that very hash).
+    """
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+
+    real_run_git = rec_mod._run_git
+    failed_once = False
+
+    def flaky_run_git(project_root, *args, **kwargs):
+        # Only the post-commit hash read fails; the rollback path's own rev-parse
+        # must still work so the test observes the real failure, not a cascade.
+        nonlocal failed_once
+        if not failed_once and args[:2] == ("rev-parse", "HEAD"):
+            failed_once = True
+            return subprocess.CompletedProcess(
+                ["git", *args], 128, stdout="", stderr="fatal: bad revision"
+            )
+        return real_run_git(project_root, *args, **kwargs)
+
+    monkeypatch.setattr(rec_mod, "_run_git", flaky_run_git)
+
+    with pytest.raises(ReconcileError, match="hash could not be read"):
+        reconcile(root)
+
+    monkeypatch.undo()
+    assert _git(root, "tag", "--list", "v1.3.0").stdout.strip() == ""
+
+
+def test_no_tag_bump_survives_unreadable_reconcile_hash(tmp_path, monkeypatch):
+    """A patch bump owes no tag, so an unreadable hash must not fail the merge.
+
+    The sha's only consumer is the tag block; without a tag to create there is
+    nothing lost, and failing here would abort an otherwise complete merge.
+    """
+    import sys
+
+    rec_mod = sys.modules["se3.engine.merge.reconcile"]
+    root = _make_project(tmp_path, "1.2.3")
+    _put_intent(root, "flowA", bump_type="patch", versions_changes=["fix"])
+
+    real_run_git = rec_mod._run_git
+    failed_once = False
+
+    def flaky_run_git(project_root, *args, **kwargs):
+        nonlocal failed_once
+        if not failed_once and args[:2] == ("rev-parse", "HEAD"):
+            failed_once = True
+            return subprocess.CompletedProcess(
+                ["git", *args], 128, stdout="", stderr="fatal: bad revision"
+            )
+        return real_run_git(project_root, *args, **kwargs)
+
+    monkeypatch.setattr(rec_mod, "_run_git", flaky_run_git)
+    result = reconcile(root)
+    monkeypatch.undo()
+
+    assert result.final_version == "1.2.4"
+    assert result.is_tag is False
+    assert result.tag_created is False
+    assert result.reconcile_commit is None
+    assert _git(root, "tag", "--list", "v1.2.4").stdout.strip() == ""
+
+
+def test_unscoped_noop_does_not_resurrect_deleted_historical_tag(tmp_path):
+    """A no-op reconcile must not re-tag an older release the operator untagged."""
+    root = _make_project(tmp_path, "1.2.3")
+
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+    first = reconcile(root)
+    assert first.tag_name == "v1.3.0"
+
+    _put_intent(root, "flowB", bump_type="minor", versions_changes=["feat b"])
+    second = reconcile(root)
+    assert second.tag_name == "v1.4.0"
+
+    # Operator deliberately drops the older tag to re-cut that release.
+    _git(root, "tag", "-d", "v1.3.0")
+
+    third = reconcile(root)
+
+    assert third.success
+    assert third.channel == "noop"
+    assert third.already_reconciled
+    assert third.final_version is None
+    assert third.tag_created is False
+    assert _git(root, "tag", "--list", "v1.3.0").stdout.strip() == ""
+
+
+def test_unscoped_noop_survives_historical_tag_collision(tmp_path):
+    """An old release whose tag peels elsewhere must not break the no-op path."""
+    root = _make_project(tmp_path, "1.2.3")
+    baseline = _git(root, "rev-parse", "HEAD").stdout.strip()
+
+    _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
+    reconcile(root)
+    _put_intent(root, "flowB", bump_type="minor", versions_changes=["feat b"])
+    assert reconcile(root).tag_name == "v1.4.0"
+
+    # Simulate a rewritten history: v1.3.0 now points at an unrelated commit.
+    _git(root, "tag", "-d", "v1.3.0")
+    _git(root, "tag", "-a", "v1.3.0", "-m", "rewritten", baseline)
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.channel == "noop"
+    assert result.already_reconciled
+
+
 def test_custom_rules_empty_response_raises(tmp_path):
     root = _make_project(tmp_path, "1.2.3")
     (root / "se3").mkdir(exist_ok=True)

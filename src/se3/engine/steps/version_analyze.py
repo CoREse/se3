@@ -299,7 +299,14 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             prompt=prompt,
             json_mode="two_phase",
         )
-        result = _parse_response(response, has_custom_rules=has_custom_rules)
+        result = _parse_response(
+            response,
+            has_custom_rules=has_custom_rules,
+            # The tag cross-check compares against the same baseline the LLM was
+            # told to compute suggested_version from, not the disk version (which
+            # may already carry this session's implement-stage bump).
+            current_version=pre_session_version,
+        )
     except Exception as e:
         logger.exception("Version analysis failed")
         step.error_message = (
@@ -808,7 +815,12 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _parse_response(response: str, *, has_custom_rules: bool = False) -> dict[str, Any]:
+def _parse_response(
+    response: str,
+    *,
+    has_custom_rules: bool = False,
+    current_version: str | None = None,
+) -> dict[str, Any]:
     """Parse the LLM response to extract version analysis.
     
     Parses and validates the LLM response.
@@ -835,11 +847,18 @@ def _parse_response(response: str, *, has_custom_rules: bool = False) -> dict[st
             f"suggested_version. Preview: {preview}..."
         )
 
-    return _validate_result(result, has_custom_rules=has_custom_rules)
+    return _validate_result(
+        result,
+        has_custom_rules=has_custom_rules,
+        current_version=current_version,
+    )
 
 
 def _validate_result(
-    result: dict[str, Any], *, has_custom_rules: bool = False
+    result: dict[str, Any],
+    *,
+    has_custom_rules: bool = False,
+    current_version: str | None = None,
 ) -> dict[str, Any]:
     """Validate and normalize the parsed result.
 
@@ -869,9 +888,17 @@ def _validate_result(
         raw_is_tag = result.get("is_tag")
         is_tag = raw_is_tag if isinstance(raw_is_tag, bool) else False
     else:
-        from ..git_tags import should_tag_semver_bump
+        from ..git_tags import semver_tag_decision
 
-        is_tag = should_tag_semver_bump(bump_type)
+        # The default policy tags a major/minor *version advance*, so the two
+        # version numbers are the only admissible evidence: suggested_version is
+        # the authoritative decision, while bump_type is an auxiliary label the LLM
+        # can garble in either direction (a patch-only advance labelled "minor").
+        # When the pair is not comparable SemVer the default policy simply has no
+        # verdict, and no tag is created — inferring one from the garble-prone
+        # label would tag a release the SemVer rule never asked to tag. A project
+        # on a non-SemVer scheme states its intent through se3/version-rules.md.
+        is_tag = semver_tag_decision(current_version, suggested_version) is True
 
     confidence = str(result.get("confidence", "medium")).lower()
     if confidence not in ("high", "medium", "low"):

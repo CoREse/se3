@@ -592,11 +592,14 @@ class TestReconcileFailureExitCode:
         The reconcile commit is created before the annotated tag. If tag
         creation fails, the CLI must not delete the source branch under
         ``--delete-merged`` and the rendered error must make the already-created
-        reconcile commit / missing-tag state diagnosable.
+        reconcile commit / missing-tag state diagnosable. A rerun does NOT
+        backfill the tag — the intents are consumed, so it is an ordinary no-op
+        and recovery is the operator's manual ``git tag -a``.
         """
         import sys
 
         from se3.engine.git_tags import VersionTagError
+        from se3.engine.git_tags import create_annotated_version_tag
         from se3.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "2.0.0")
@@ -606,13 +609,19 @@ class TestReconcileFailureExitCode:
 
         reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
 
-        def _tag_boom(*_args, **_kwargs):
-            raise VersionTagError("v2.1.0", "simulated tag helper failure")
+        tag_attempts = 0
+
+        def _tag_boom_once(*args, **kwargs):
+            nonlocal tag_attempts
+            tag_attempts += 1
+            if tag_attempts == 1:
+                raise VersionTagError("v2.1.0", "simulated tag helper failure")
+            return create_annotated_version_tag(*args, **kwargs)
 
         monkeypatch.setattr(
             reconcile_mod,
             "create_annotated_version_tag",
-            _tag_boom,
+            _tag_boom_once,
         )
 
         exit_code = run_merge(
@@ -628,6 +637,59 @@ class TestReconcileFailureExitCode:
         assert "failed to create version tag v2.1.0" in rendered
         assert "version reconcile commit may already exist" in rendered
         assert "source branch is preserved" in rendered
+
+        rerun_code = run_merge(
+            ["feature"], strategy="fast", delete_merged=True, project_root=root
+        )
+
+        assert rerun_code == 0
+        assert _git(root, "branch", "--list", "feature").stdout.strip() == ""
+        # No self-healing: the missing tag stays missing.
+        assert _git(root, "tag", "--list", "v2.1.0").stdout.strip() == ""
+        assert tag_attempts == 1
+
+    def test_unreadable_hash_failure_renders_tag_recovery_guidance(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """The unreadable-hash failure leaves the same wreckage as a tag failure.
+
+        A reconcile commit lands, its hash cannot be read, so the release tag is
+        never created. The operator must be told the commit exists and the source
+        branch was kept — the same guidance a ``VersionTagError`` renders.
+        """
+        import subprocess as _subprocess
+        import sys
+
+        root = _make_project(tmp_path, "2.0.0")
+        _make_feature_with_intent(
+            root, "feature", "flowA", bump_type="minor", change="feat A"
+        )
+
+        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        real_run_git = reconcile_mod._run_git
+
+        def _fake_run_git(project_root, *args, **kwargs):
+            if args[:2] == ("rev-parse", "HEAD"):
+                return _subprocess.CompletedProcess(
+                    args=list(args), returncode=128, stdout="",
+                    stderr="fatal: ambiguous argument 'HEAD'",
+                )
+            return real_run_git(project_root, *args, **kwargs)
+
+        monkeypatch.setattr(reconcile_mod, "_run_git", _fake_run_git)
+
+        exit_code = run_merge(
+            ["feature"], strategy="fast", delete_merged=True, project_root=root
+        )
+
+        rendered = capsys.readouterr().out
+        assert exit_code == 1
+        assert _git(root, "branch", "--list", "feature").stdout.strip() != ""
+        assert "v2.1.0 was NOT created" in rendered
+        assert "version reconcile commit may already exist" in rendered
+        assert "source branch is preserved" in rendered
+        # No fabricated commit-ish is offered as the tag target.
+        assert "unknown" not in rendered.lower()
 
 
 class TestNoConfirmationGate:
@@ -1043,6 +1105,119 @@ class TestReconcileIdempotencyAndRollback:
         assert read_current_version(root) == "1.0.0"
         status = _git(root, "status", "--porcelain").stdout.strip()
         assert status == "", f"working tree left dirty: {status!r}"
+
+    def test_unreadable_reconcile_hash_error_names_the_missing_tag(
+        self, tmp_path: Path
+    ) -> None:
+        """The failure must say which release tag is now missing (and how to find it)."""
+        from unittest.mock import patch
+
+        import pytest
+
+        import importlib
+
+        from se3.engine.merge.reconcile import ReconcileError, _commit_reconcile
+
+        # ``se3.engine.merge.reconcile`` the attribute is the re-exported function,
+        # not the submodule, so the module object must come from the import system.
+        reconcile_mod = importlib.import_module("se3.engine.merge.reconcile")
+
+        root = _make_project(tmp_path, "1.0.0")
+        (root / "pyproject.toml").write_text(
+            PYPROJECT_TEMPLATE.format(version="1.1.0"), encoding="utf-8"
+        )
+
+        real_run_git = reconcile_mod._run_git
+
+        def _fake_run_git(project_root, *args, **kwargs):
+            if args[:2] == ("rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=128, stdout="",
+                    stderr="fatal: ambiguous argument 'HEAD'",
+                )
+            return real_run_git(project_root, *args, **kwargs)
+
+        with patch.object(reconcile_mod, "_run_git", side_effect=_fake_run_git):
+            with pytest.raises(ReconcileError) as excinfo:
+                _commit_reconcile(
+                    root,
+                    "chore: reconcile version to 1.1.0 at merge",
+                    version_file=root / "pyproject.toml",
+                    intended_tag="v1.1.0",
+                )
+
+        message = str(excinfo.value)
+        assert "v1.1.0" in message
+        assert "could not be read" in message
+        assert "fatal: ambiguous argument 'HEAD'" in message
+        assert "unknown" not in message.lower()
+
+    def test_undo_last_reconcile_deletes_only_its_own_release_tag(
+        self, tmp_path: Path
+    ) -> None:
+        """Rejecting a version must not sweep away an operator's unrelated tags.
+
+        The reconcile commit sits on HEAD of the shared main checkout while the
+        review gate is pending, so an operator may tag it for their own reasons.
+        Only the tag named by the decision's own ``Version-Tag`` trailer belongs
+        to it.
+        """
+        from se3.engine.merge.reconcile import undo_last_reconcile
+
+        root = _make_project(tmp_path, "1.0.0")
+        (root / "pyproject.toml").write_text(
+            PYPROJECT_TEMPLATE.format(version="1.1.0"), encoding="utf-8"
+        )
+        _git(root, "add", "-A")
+        _git(
+            root, "commit", "-q", "-m",
+            "chore: reconcile version to 1.1.0 at merge\n\n"
+            "Version-Reconcile-Session: flowT\n"
+            "Version-Tag: v1.1.0",
+        )
+        # The release tag reconcile created, plus two unrelated operator tags that
+        # merely start with "v" and point at the very same commit.
+        _git(root, "tag", "-a", "v1.1.0", "-m", "chore: reconcile version to 1.1.0")
+        _git(root, "tag", "-a", "vendor-freeze", "-m", "operator marker")
+        _git(root, "tag", "-a", "v-rc-candidate", "-m", "operator marker")
+
+        assert undo_last_reconcile(root, "flowT") is True
+
+        assert _git(root, "tag", "--list", "v1.1.0").stdout.strip() == ""
+        assert _git(root, "tag", "--list", "vendor-freeze").stdout.strip() == (
+            "vendor-freeze"
+        )
+        assert _git(root, "tag", "--list", "v-rc-candidate").stdout.strip() == (
+            "v-rc-candidate"
+        )
+
+    def test_undo_last_reconcile_keeps_operator_tag_when_decision_tagged_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-tagging decision owns no ``v<version>`` tag, so undo must keep it.
+
+        Patch bumps (and custom rules with ``is_tag: false``) stamp no
+        ``Version-Tag`` trailer. If an operator hand-tags the pending reconcile
+        commit ``v1.0.1`` while the review gate is open, rejecting the version
+        must not delete a tag the version flow never created.
+        """
+        from se3.engine.merge.reconcile import undo_last_reconcile
+
+        root = _make_project(tmp_path, "1.0.0")
+        (root / "pyproject.toml").write_text(
+            PYPROJECT_TEMPLATE.format(version="1.0.1"), encoding="utf-8"
+        )
+        _git(root, "add", "-A")
+        _git(
+            root, "commit", "-q", "-m",
+            "chore: reconcile version to 1.0.1 at merge\n\n"
+            "Version-Reconcile-Session: flowP",
+        )
+        _git(root, "tag", "-a", "v1.0.1", "-m", "operator tagged this by hand")
+
+        assert undo_last_reconcile(root, "flowP") is True
+
+        assert _git(root, "tag", "--list", "v1.0.1").stdout.strip() == "v1.0.1"
 
     def test_undo_last_reconcile_preserves_unrelated_operator_edits(
         self, tmp_path: Path

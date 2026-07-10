@@ -673,12 +673,22 @@ def _build_commit_message(
     base_version: str,
     channel: str,
     intents: list[VersionIntent],
+    *,
+    tag_name: Optional[str] = None,
 ) -> str:
     """Compose the reconcile commit message with per-flow reconcile trailers.
 
     The trailer (``Version-Reconcile-Session: <flow_id>``) is the git-durable
     idempotency signal :func:`reconcile_commit_exists` looks for. The body can
     cite each session's now-superseded provisional suggestion for audit.
+
+    *tag_name* stamps a second git-durable trailer (``Version-Tag: <name>``)
+    recording that THIS decision owns that release tag. It is the only signal
+    :func:`undo_last_reconcile` can trust when it later decides whether it is
+    entitled to delete the tag: a decision that creates no tag (patch bump,
+    custom rule with ``is_tag: false``) stamps no trailer, so a same-named tag an
+    operator added by hand is left alone. Written before the tag is created — a
+    tag that failed to materialise simply leaves the delete a no-op.
     """
     lines = [
         f"chore: reconcile version to {final_version} at merge",
@@ -698,6 +708,8 @@ def _build_commit_message(
     lines.append("")
     for intent in intents:
         lines.append(f"{RECONCILE_TRAILER}: {intent.flow_id}")
+    if tag_name:
+        lines.append(f"{VERSION_TAG_TRAILER}: {tag_name}")
     return "\n".join(lines) + "\n"
 
 
@@ -707,12 +719,21 @@ def _commit_reconcile(
     *,
     version_file: Optional[Path] = None,
     allow_empty: bool = False,
+    intended_tag: Optional[str] = None,
 ) -> Optional[str]:
     """Stage version/doc/intent changes and create the reconcile commit.
 
+    *intended_tag* is the tag the caller will create on the resulting commit (or
+    ``None`` when this decision creates no tag). It decides what an unreadable
+    commit hash means: with a tag owed the release would silently lose its tag,
+    so we fail loud and the message becomes the operator's sole record of what
+    to recreate by hand; with no tag owed the sha has no consumer and the
+    reconcile stays a success.
+
     Returns the new commit sha, or ``None`` when there was nothing to commit
-    (e.g. version file already matched — the write was a no-op). Git failures
-    raise :class:`ReconcileError` so the caller decides recovery.
+    (e.g. version file already matched — the write was a no-op) or when no tag
+    is owed and the hash could not be read. Git failures raise
+    :class:`ReconcileError` so the caller decides recovery.
 
     *version_file* is the file the reconciled version was written to; it is
     included in the commit pathspec explicitly so a package.json / custom
@@ -782,7 +803,38 @@ def _commit_reconcile(
     rev = _run_git(
         project_root, "rev-parse", "HEAD", check=False, timeout=15
     )
-    return rev.stdout.strip() if rev.returncode == 0 else None
+    commit_hash = rev.stdout.strip() if rev.returncode == 0 else ""
+    if not commit_hash:
+        if intended_tag is None:
+            # No tag is owed, so an unreadable hash costs the caller nothing it
+            # needs: the commit is durable and the sha is only ever consumed by
+            # the tag block. Returning None keeps a patch/no-tag reconcile a
+            # success, exactly as before tagging existed.
+            return None
+        # A tag is owed but the commit is durable and unidentifiable, so it can
+        # neither be tagged nor reported. Failing loud beats returning success
+        # for a release whose tag was silently skipped — recovery is a manual
+        # ``git tag -a``. No placeholder commit-ish is invented: the message
+        # states the hash is unreadable and points at HEAD, the only honest
+        # locator left.
+        raise ReconcileError(
+            f"version tag {intended_tag} was NOT created; reconcile commit was "
+            f"created but its hash could not be read (git rev-parse HEAD "
+            f"failed): {rev.stderr.strip()}. The commit is the tip of "
+            f"{_describe_head_location(project_root)}"
+        )
+    return commit_hash
+
+
+def _describe_head_location(project_root: Path) -> str:
+    """An honest, human-usable locator for ``HEAD`` when its hash is unreadable."""
+    branch_ref = _run_git(
+        project_root, "rev-parse", "--abbrev-ref", "HEAD", check=False, timeout=15
+    )
+    branch = branch_ref.stdout.strip() if branch_ref.returncode == 0 else ""
+    if branch and branch != "HEAD":
+        return f"HEAD on branch {branch}"
+    return "HEAD (current branch could not be determined)"
 
 
 def _reconcile_owned_relpaths(project_root: Path) -> list[str]:
@@ -1528,12 +1580,59 @@ def _restore_reconcile_paths(project_root: Path) -> None:
             pass
 
 
-def _delete_version_tags_pointing_at(project_root: Path, commit: str) -> None:
-    """Delete version tags that point at an undone reconcile commit."""
+VERSION_TAG_TRAILER = "Version-Tag"
+
+
+def reconcile_commit_tag(message: str) -> Optional[str]:
+    """The release tag a reconcile commit claims ownership of, from its trailer.
+
+    Absence means the decision created no tag, so nothing on that commit is the
+    version flow's to delete — the tag name implied by the subject is NOT a
+    substitute (an operator may have tagged ``v<version>`` themselves while the
+    review gate was pending).
+    """
+    prefix = f"{VERSION_TAG_TRAILER}:"
+    for line in (message or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip() or None
+    return None
+
+
+def is_version_tag_failure(error_message: str) -> bool:
+    """Whether a reconcile error means a commit landed without its release tag.
+
+    Both failure modes leave the same durable wreckage — a reconcile commit on
+    HEAD with no annotated tag — and therefore need the same manual-recovery
+    guidance: ``create_annotated_version_tag`` raising ``VersionTagError``, and
+    ``_commit_reconcile`` failing to read back the hash it was about to tag.
+    """
+    text = error_message or ""
+    return "failed to create version tag" in text or (
+        "version tag" in text and "was NOT created" in text
+    )
+
+
+def _delete_version_tags_pointing_at(
+    project_root: Path, commit: str, tag_name: Optional[str]
+) -> None:
+    """Delete the release tag this reconcile created on an undone commit.
+
+    Scoped to the ONE tag name the rejected decision recorded in its
+    ``Version-Tag`` trailer, not to every ``v``-prefixed tag on the commit: the
+    reconcile commit sits on HEAD of a shared main checkout while a human review
+    gate is pending, so an operator is free to have tagged it with tags of their
+    own (``vendor-freeze``, ``v-rc-candidate``, or even ``v<final_version>`` when
+    the decision itself tagged nothing). Those are not ours to delete. When
+    *tag_name* is ``None`` (a non-tagging decision, or a commit predating the
+    trailer) nothing is deleted.
+    """
+    if not tag_name:
+        return
     refs = _run_git(
         project_root,
         "for-each-ref",
-        "refs/tags",
+        f"refs/tags/{tag_name}",
         "--format=%(refname:short)%09%(objectname)%09%(*objectname)",
         check=False,
         timeout=15,
@@ -1549,7 +1648,7 @@ def _delete_version_tags_pointing_at(project_root: Path, commit: str) -> None:
         if not parts:
             continue
         name = parts[0].strip()
-        if not name.startswith("v"):
+        if name != tag_name:
             continue
         object_name = parts[1].strip() if len(parts) > 1 else ""
         peeled_name = parts[2].strip() if len(parts) > 2 else ""
@@ -1632,6 +1731,13 @@ def undo_last_reconcile(project_root: Path, flow_id: str) -> bool:
     if head.returncode != 0 or not head.stdout.strip():
         return False
     head_commit = head.stdout.strip()
+    # The rejected decision's own release tag, read from the ``Version-Tag``
+    # trailer the decision stamped when it created one. Trailer-scoped, not
+    # subject-derived: a decision that tagged nothing (patch bump, custom rule
+    # with ``is_tag: false``) leaves no trailer, so an operator's hand-made
+    # ``v<version>`` on the pending commit is not ours to delete. Read before the
+    # reset, while the commit is still HEAD.
+    undone_tag = reconcile_commit_tag(head_msg.stdout or "")
     # Detach the operator's uncommitted edits on the reconcile-owned content paths
     # (version file / README / VERSIONS.md), snapshotted against the current
     # reconcile commit as their base, BEFORE unwinding it. Without this the scoped
@@ -1669,7 +1775,7 @@ def undo_last_reconcile(project_root: Path, flow_id: str) -> bool:
                 f"failed to undo prior reconcile commit: {reset.stderr.strip()}"
             )
         _restore_reconcile_paths(project_root)
-        _delete_version_tags_pointing_at(project_root, head_commit)
+        _delete_version_tags_pointing_at(project_root, head_commit, undone_tag)
     finally:
         # Replay the operator's detached edits onto the rolled-back (parent) content
         # via 3-way merge: on success the edit survives alongside the revert; on a
@@ -1852,6 +1958,11 @@ def reconcile(
     outstanding = _still_outstanding(intents)
 
     if not outstanding:
+        # A no-op stays a no-op: tag creation is scoped to the reconcile commit
+        # THIS call creates. Scanning history for a reconcile commit that lost its
+        # tag (a crash between ``git commit`` and ``git tag``) would let an
+        # unrelated merge resurrect a tag the operator deleted on purpose;
+        # recovery from a tag failure is a manual ``git tag -a``.
         # Reconcile ran; there was simply nothing left to apply. Not a fault.
         # Checked BEFORE any detach/residue handling so a run with nothing to do
         # never touches the operator's working tree.
@@ -2119,7 +2230,8 @@ def reconcile(
 
         if commit:
             message = _build_commit_message(
-                final_version, current_version, channel, outstanding
+                final_version, current_version, channel, outstanding,
+                tag_name=tag_name if (publish_release and is_tag) else None,
             )
             # allow_empty: reaching here means outstanding intents are being
             # consumed with commit=True, and upstream (reconcile_commit_exists in
@@ -2132,6 +2244,7 @@ def reconcile(
             reconcile_commit = _commit_reconcile(
                 project_root, message, version_file=version_file,
                 allow_empty=True,
+                intended_tag=tag_name if (publish_release and is_tag) else None,
             )
             if publish_release and is_tag and reconcile_commit:
                 try:

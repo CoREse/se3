@@ -18,6 +18,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from ..context import effective_task_type
 from ..git_tags import (
@@ -399,6 +400,10 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     original_version: str | None = None
     new_version: str | None = None
     version_bumped = False
+    # Whether the version commit for `new_version` already existed when this call
+    # started (i.e. an earlier call of THIS flow created it). Decided below, while
+    # git history is still free of this call's own commit; see the tag block.
+    is_own_version_replay = False
 
     try:
         # Attempt version bumping if enabled (and this commit is a release
@@ -451,6 +456,19 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 # it instead of colliding.
                 target_version = _guard_version_race(
                     step, flow, original_version, target_version,
+                    version_file=version_file,
+                    version_bumper=version_bumper,
+                )
+
+                # Own-replay verdict, decided BEFORE this call writes/commits
+                # anything: once this call's own commit lands, every git-durable
+                # probe would match it and the question "did an EARLIER call
+                # create the version commit?" becomes unanswerable.
+                is_own_version_replay = _version_commit_already_landed(
+                    flow,
+                    original_version,
+                    target_version,
+                    project_root=project_root,
                     version_file=version_file,
                     version_bumper=version_bumper,
                 )
@@ -616,14 +634,77 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.error_message = f"Failed to commit: {result.stderr}"
             return StepStatus.FAILED
 
-        # Get commit hash
-        commit_hash = _get_commit_hash(project_root)
+        # Get commit hash. Read once and keep the git stderr alongside it: the
+        # tag-failure message below owes the operator both the failure detail and
+        # a truthful statement about the commit, and a second `rev-parse` could
+        # disagree with the first (a transient index.lock clears) — reporting the
+        # hash as unreadable while a re-read just returned it would be a lie.
+        head_commit, head_commit_error = _read_head_commit(project_root)
+        commit_hash = head_commit or "unknown"
 
         # Clear version backup on successful commit (make bump permanent)
         if version_bumper:
             version_bumper.clear_backup()
 
+        if new_version:
+            # Durable own-replay marker for the version race guard: record the
+            # version this flow just committed onto the flow's persisted state so
+            # a later re-entry of the commit step can tell its own already-landed
+            # bump apart from a concurrent flow's — the only signal that works in
+            # script mode (no reconstructable version-file blob) and under
+            # version.include_in_commit_message: false (no Version: trailer). See
+            # _guard_version_race. Recorded before the tag attempt: the commit is
+            # already durable, so a tag failure below must not lose the marker.
+            _record_flow_committed_version(flow, new_version)
+
         should_create_tag = bool(new_version and step.inputs.get("is_tag") is True)
+        tag_skipped_reentry = False
+        if should_create_tag and is_own_version_replay:
+            # Tagging is scoped to the version commit THIS call created. On a
+            # re-entry (a fix-loop iteration, or a resume after the process died
+            # between `git commit` and the engine's step save) _guard_version_race
+            # hands the flow back its OWN already-landed version rather than
+            # bumping again, and this call is making an ordinary follow-up commit.
+            # So: never tag here. A tag the earlier call created is already right;
+            # a tag it failed to create stays missing — recovery is a manual
+            # `git tag -a`, never a backfill onto an unrelated commit.
+            #
+            # The verdict comes from the same own-commit evidence _guard_version_race
+            # trusts (durable flow marker, else the Flow: trailer + version-file blob
+            # probe), never from probing git for a same-named tag: tag existence
+            # cannot say whose tag it is, and its absence cannot license a backfill.
+            should_create_tag = False
+            tag_skipped_reentry = True
+        if should_create_tag and new_version and head_commit is None:
+            # The version commit is durable but git will not tell us which object
+            # it is, so there is nothing to tag and no honest commit-ish to hand
+            # the operator. Report the unreadable hash as such — emitting the
+            # legacy "unknown" placeholder here would read as a real commit value
+            # and send a manual `git tag -a <tag> unknown` straight into a fresh
+            # git failure.
+            tag_name = tag_name_for_version(new_version)
+            git_detail = f": {head_commit_error}" if head_commit_error else ""
+            step.error_message = (
+                f"failed to create version tag {tag_name}: the version commit was "
+                f"created but its hash could not be read "
+                f"(git rev-parse HEAD failed{git_detail}). "
+                f"The commit is the tip of {_describe_head_location(project_root)}; "
+                f"create the tag by hand with "
+                f"`git tag -a {tag_name} -m <commit subject> <commit>`."
+            )
+            logger.error(step.error_message)
+            # Deliberately no ``commit_hash`` output: the commit exists but its id
+            # is unknowable, and any placeholder would be a fabricated commit-ish.
+            step.outputs["commit_hash_readable"] = False
+            step.outputs["committed"] = True
+            step.outputs["commit_created"] = True
+            step.outputs["commit_message"] = commit_message
+            step.outputs["version"] = new_version
+            step.outputs["version_bumped"] = True
+            step.outputs["tag_name"] = tag_name
+            step.outputs["tag_created"] = False
+            step.outputs["tag_error"] = step.error_message
+            return StepStatus.FAILED
         if should_create_tag and new_version:
             tag_name = tag_name_for_version(new_version)
             try:
@@ -636,7 +717,11 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 logger.error("Failed to create version tag %s: %s", tag_name, exc)
                 step.error_message = str(exc)
                 step.outputs["commit_hash"] = commit_hash
-                step.outputs["committed"] = False
+                # The version commit is durable — reporting committed=False would
+                # both lie and make the renderer print "No changes to commit",
+                # hiding the tag name / target commit an operator needs to fix by
+                # hand. The step still returns FAILED.
+                step.outputs["committed"] = True
                 step.outputs["commit_created"] = True
                 step.outputs["commit_message"] = commit_message
                 step.outputs["version"] = new_version
@@ -651,6 +736,8 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["tag_created"] = False
             if new_version:
                 step.outputs["tag_name"] = tag_name_for_version(new_version)
+            if tag_skipped_reentry:
+                step.outputs["tag_skipped_reentry"] = True
 
         # Store outputs
         step.outputs["commit_hash"] = commit_hash
@@ -659,14 +746,6 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if new_version:
             step.outputs["version"] = new_version
             step.outputs["version_bumped"] = True
-            # Durable own-replay marker for the version race guard: record the
-            # version this flow just committed onto the flow's persisted state so
-            # a later re-entry of the commit step can tell its own already-landed
-            # bump apart from a concurrent flow's — the only signal that works in
-            # script mode (no reconstructable version-file blob) and under
-            # version.include_in_commit_message: false (no Version: trailer). See
-            # _guard_version_race.
-            _record_flow_committed_version(flow, new_version)
 
         logger.info(f"Changes committed: {commit_hash[:8]}")
 
@@ -987,6 +1066,52 @@ def _flow_wrote_version(
     return legacy.returncode == 0 and bool(legacy.stdout.strip())
 
 
+def _version_commit_already_landed(
+    flow: FlowInstance,
+    disk_version: str | None,
+    target_version: str,
+    project_root: Path,
+    version_file: Path | None = None,
+    version_bumper: VersionBumper | None = None,
+) -> bool:
+    """True when an EARLIER call of this flow already committed *target_version*.
+
+    Answers the only question the tag block needs: is this call the one creating
+    the version commit, or is it re-entering on a release an earlier invocation
+    already landed? Must be consulted BEFORE this call commits anything — once
+    our own commit exists, every own-write probe matches it unconditionally.
+
+    Two facts must both hold. (1) The version file already reads *target_version*,
+    so this call is not writing the bump. (2) That version is already *committed*
+    by us. Fact (2) cannot be dropped: the set_version→commit crash window leaves
+    the file at target with no commit behind it, and that resume genuinely is the
+    call that creates the version commit — it must tag.
+
+    Evidence for (2) mirrors :func:`_guard_version_race` exactly: the durable
+    ``flow_committed_version`` marker first, then the git-durable ``Flow:``
+    trailer + version-file blob probe, which survives the marker being lost when
+    the process dies after ``git commit`` but before the engine persists the step.
+    Deliberately never asks git whether the tag exists — tag existence cannot say
+    whose tag it is, and its absence cannot license a backfill (a re-entry after a
+    failed tag leaves the tag missing; recovery is a manual `git tag -a`).
+    """
+    if _normalize_version(disk_version) != _normalize_version(target_version):
+        return False
+
+    context = getattr(getattr(flow, "state", None), "context", None)
+    marker = context.get("flow_committed_version") if isinstance(context, dict) else None
+    if marker and _normalize_version(marker) == _normalize_version(target_version):
+        return True
+
+    return _flow_wrote_version(
+        project_root,
+        getattr(flow, "flow_id", None),
+        target_version,
+        version_file=version_file,
+        version_bumper=version_bumper,
+    )
+
+
 def _guard_version_race(
     step: Step,
     flow: FlowInstance,
@@ -1209,9 +1334,9 @@ def _reanalyze_version_with_baseline(
     ``version_analyze_handler`` so the new number is derived against the version
     a concurrent flow just wrote (honouring any ``se3/version-rules.md``, which a
     mechanical SemVer bump could not). The refreshed artifacts (bump_type,
-    commit_message, versions_changes, reasoning) are forwarded back onto the
-    commit step's inputs so the commit message and VERSIONS.md entry match the
-    recomputed version.
+    commit_message, versions_changes, reasoning, is_tag) are forwarded back onto
+    the commit step's inputs so the commit message, VERSIONS.md entry and tag
+    decision all match the recomputed version.
 
     Raises:
         RuntimeError: When no version_analyze step can be located, or the re-run
@@ -1260,6 +1385,12 @@ def _reanalyze_version_with_baseline(
     for key in ("bump_type", "commit_message", "versions_changes", "reasoning"):
         if key in va_step.outputs:
             step.inputs[key] = va_step.outputs[key]
+    # is_tag must track the recomputed version, not the superseded analysis:
+    # re-analysis against the drifted baseline can turn a minor into a patch (or
+    # vice versa), which flips the tag decision. Overwrite unconditionally —
+    # leaving a stale True would tag a patch release, a stale False would skip
+    # the tag for a minor one.
+    step.inputs["is_tag"] = va_step.outputs.get("is_tag") is True
     return new_suggested
 
 
@@ -1524,16 +1655,14 @@ def _generate_commit_message(
     return message
 
 
-def _get_commit_hash(project_root: Path) -> str:
-    """Get the current commit hash.
+def _read_head_commit(project_root: Path) -> tuple[Optional[str], str]:
+    """Read ``HEAD``'s commit hash, distinguishing "unreadable" from a value.
 
-    Returns ``'unknown'`` on repos with no commits or on any git failure.
-
-    Args:
-        project_root: Project root directory
-
-    Returns:
-        Commit hash string, or ``'unknown'`` if unavailable
+    Returns ``(hash, "")`` on success and ``(None, stderr)`` when git cannot
+    resolve ``HEAD``. The caller — not this helper — decides whether an
+    unreadable hash is benign (a repo with no commits) or a loud failure (a
+    version commit that can no longer be tagged), which is why no ``'unknown'``
+    placeholder is invented here.
     """
     try:
         result = subprocess.run(
@@ -1543,10 +1672,27 @@ def _get_commit_hash(project_root: Path) -> str:
             cwd=project_root,
         )
         if result.returncode != 0:
-            return "unknown"
-        return result.stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
+            return None, (result.stderr or "").strip()
+        return (result.stdout.strip() or None), ""
+    except Exception as exc:  # noqa: BLE001 - any git fault means "unreadable"
+        return None, str(exc)
+
+
+def _describe_head_location(project_root: Path) -> str:
+    """An honest, human-usable locator for ``HEAD`` when its hash is unreadable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        branch = result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:  # noqa: BLE001 - locator is best-effort
+        branch = ""
+    if branch and branch != "HEAD":
+        return f"HEAD on branch {branch}"
+    return "HEAD (current branch could not be determined)"
 
 
 def _generate_template_summary(flow: FlowInstance, step: Step) -> None:

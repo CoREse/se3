@@ -531,8 +531,9 @@ class TestEndToEndDoubleBumpReplay:
         # re-analysis that returns the same 5.2.0, halt to avoid a collision.
         with patch("se3.engine.steps.commit._has_changes", return_value=True), \
              patch("se3.engine.steps.commit._load_version_config") as mock_load_cfg, \
-             patch("se3.engine.steps.commit._get_commit_hash", return_value="ffffffff"), \
+             patch("se3.engine.steps.commit._read_head_commit", return_value=("ffffffff", "")), \
              patch("se3.engine.steps.commit._flow_wrote_version", return_value=True), \
+             patch("se3.engine.steps.commit.create_annotated_version_tag", return_value="v5.2.0"), \
              patch("se3.engine.steps.commit.subprocess") as mock_subproc, \
              patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             cfg = MagicMock()
@@ -610,6 +611,70 @@ class TestGuardVersionRaceOwnReplay:
 
         assert result == "5.3.0"
         m_re.assert_called_once()
+
+    def test_reanalysis_forwards_refreshed_is_tag(self, tmp_path):
+        """The recomputed tag decision must ride along with the recomputed version.
+
+        Fix (iteration 11): `_reanalyze_version_with_baseline` forwarded
+        bump_type/commit_message/versions_changes/reasoning but not `is_tag`, so
+        commit_handler tagged the RECOMPUTED version using the SUPERSEDED
+        analysis's tag decision — annotating a patch release, or silently
+        skipping the tag for a minor one.
+        """
+        from se3.engine.steps import commit as commit_mod
+        from se3.engine.steps import version_analyze as va_mod
+
+        flow = self._guard_flow(tmp_path)
+        va_step = Step(step_type=StepType.VERSION_ANALYZE, step_id="va-1")
+        flow.state.steps["va-1"] = va_step
+        flow.state.step_history.append("va-1")
+
+        step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
+        # Original (superseded) analysis said minor → tag.
+        step.inputs = {"pre_session_version": "5.1.0", "is_tag": True}
+
+        def fake_handler(s, _flow):
+            # Re-analysis against the drifted 5.2.0 baseline yields a patch.
+            s.outputs["suggested_version"] = "5.2.1"
+            s.outputs["bump_type"] = "patch"
+            s.outputs["is_tag"] = False
+            return StepStatus.COMPLETED
+
+        with patch.object(va_mod, "version_analyze_handler", fake_handler):
+            new_version = commit_mod._reanalyze_version_with_baseline(
+                step, flow, "5.2.0"
+            )
+
+        assert new_version == "5.2.1"
+        assert step.inputs["bump_type"] == "patch"
+        assert step.inputs["is_tag"] is False
+
+    def test_reanalysis_forwards_is_tag_true(self, tmp_path):
+        """Mirror case: patch → minor must start tagging."""
+        from se3.engine.steps import commit as commit_mod
+        from se3.engine.steps import version_analyze as va_mod
+
+        flow = self._guard_flow(tmp_path)
+        va_step = Step(step_type=StepType.VERSION_ANALYZE, step_id="va-1")
+        flow.state.steps["va-1"] = va_step
+        flow.state.step_history.append("va-1")
+
+        step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
+        step.inputs = {"pre_session_version": "5.1.0", "is_tag": False}
+
+        def fake_handler(s, _flow):
+            s.outputs["suggested_version"] = "5.3.0"
+            s.outputs["bump_type"] = "minor"
+            s.outputs["is_tag"] = True
+            return StepStatus.COMPLETED
+
+        with patch.object(va_mod, "version_analyze_handler", fake_handler):
+            new_version = commit_mod._reanalyze_version_with_baseline(
+                step, flow, "5.2.0"
+            )
+
+        assert new_version == "5.3.0"
+        assert step.inputs["is_tag"] is True
 
     def test_reanalysis_returning_disk_version_halts(self, tmp_path):
         """Re-analysis that still returns the drifted disk version must halt.

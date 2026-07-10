@@ -339,21 +339,24 @@ class TestTagDecisionOutput:
     """version_analyze exposes the tag decision metadata."""
 
     @pytest.mark.parametrize(
-        ("bump_type", "expected"),
+        ("bump_type", "suggested_version", "expected"),
         [
-            ("major", True),
-            ("minor", True),
-            ("patch", False),
+            ("major", "2.0.0", True),
+            ("minor", "1.1.0", True),
+            ("patch", "1.0.1", False),
         ],
     )
-    def test_default_semver_derives_is_tag_from_bump_type(self, bump_type, expected):
+    def test_default_semver_derives_is_tag_from_version_advance(
+        self, bump_type, suggested_version, expected
+    ):
         result = _validate_result(
             {
-                "suggested_version": "2.0.0",
+                "suggested_version": suggested_version,
                 "bump_type": bump_type,
                 "reasoning": "Default SemVer decision",
                 "confidence": "high",
-            }
+            },
+            current_version="1.0.0",
         )
         assert result["is_tag"] is expected
 
@@ -381,6 +384,69 @@ class TestTagDecisionOutput:
 
         assert result == StepStatus.COMPLETED
         assert step.outputs["is_tag"] is True
+
+    def test_malformed_bump_type_still_tags_a_minor_suggested_version(self):
+        """suggested_version is authoritative; garbled bump_type must not untag."""
+        result = _validate_result(
+            {
+                "suggested_version": "11.16.0",
+                "bump_type": "Minor Feature",
+                "reasoning": "New feature",
+                "confidence": "high",
+            },
+            current_version="11.15.3",
+        )
+        assert result["bump_type"] == "patch"
+        assert result["is_tag"] is True
+
+    def test_malformed_bump_type_on_patch_advance_does_not_tag(self):
+        result = _validate_result(
+            {
+                "suggested_version": "11.15.4",
+                "bump_type": "Bugfix",
+                "reasoning": "Fix",
+                "confidence": "high",
+            },
+            current_version="11.15.3",
+        )
+        assert result["is_tag"] is False
+
+    def test_minor_bump_type_on_patch_advance_does_not_tag(self):
+        """A patch-only version advance never tags, whatever bump_type claims."""
+        result = _validate_result(
+            {
+                "suggested_version": "11.15.4",
+                "bump_type": "minor",
+                "reasoning": "Fix",
+                "confidence": "high",
+            },
+            current_version="11.15.3",
+        )
+        assert result["bump_type"] == "minor"
+        assert result["is_tag"] is False
+
+    @pytest.mark.parametrize(
+        ("current_version", "suggested_version"),
+        [
+            ("not-a-version", "2026.07.09"),
+            ("1.0.0", "release-2"),
+            (None, "2.0.0"),
+        ],
+    )
+    def test_non_comparable_versions_never_tag_under_default_semver(
+        self, current_version, suggested_version
+    ):
+        """No SemVer delta ⇒ no default-policy verdict ⇒ no tag from bump_type."""
+        result = _validate_result(
+            {
+                "suggested_version": suggested_version,
+                "bump_type": "minor",
+                "reasoning": "Calendar release",
+                "confidence": "high",
+            },
+            current_version=current_version,
+        )
+        assert result["is_tag"] is False
 
     @pytest.mark.parametrize("is_tag", [True, False])
     def test_custom_rules_preserve_boolean_is_tag(self, is_tag):

@@ -1,0 +1,31 @@
+id: '276'
+description: '**2 pre-existing test failure(s)** detected during flow execution.
+
+  These failures were NOT introduced by the current change.
+
+
+  **Failing tests:**
+
+  - `src/se3/engine/test_steps.py::TestLLMCallerIntegration::test_llm_retry_success`:
+  test failed (details in pytest output)
+
+  - `src/se3/engine/test_steps.py::TestLLMCallerIntegration::test_llm_retry_exhausted`:
+  test failed (details in pytest output)
+
+
+  **Task:** 自动加git tag的功能，tag的名就是版本号，message就是commit message的第一行。默认的semver 2.0.0版本规则会对所有minor更新加tag，对于自定义版本规则，增加is
+  tag之类的字段，这个字段是true的时候加tag（对默认规则是否也要增加这个选项？）。然后对于worktree的session，在merge的reconcile的那个commit再加tag，但是tag的message还是保持这个session
+  commit步骤的那个commit的commit message第一行。
+
+
+  These tests should be investigated and fixed to prevent the broken-window effect.'
+status: open
+tags:
+- auto-discovered
+- source:test-pre-existing
+source: system
+created_at: '2026-07-09T17:15:46.486051'
+updated_at: '2026-07-09T17:15:46.486051'
+title: Pre-existing test failures (2 tests)
+priority: medium
+type: bug

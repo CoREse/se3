@@ -1,0 +1,8 @@
+id: '278'
+description: 历经几十轮的修复，现在discovery转到analyze时会丢失聊天记录track的问题终于修复了。但是，在worktree的任务里，discovery步骤第一轮之后的聊天记录消失，只能通过回复机制里的显示详情来查看它给出了什么需要判决的结果，而中间的聊天记录完全无法看到，这个问题仍然没有解决。解决它。
+status: open
+tags: []
+source: human
+created_at: '2026-07-10T10:37:06.282714'
+updated_at: '2026-07-10T10:37:06.282714'
+type: bug

@@ -77,7 +77,7 @@ def _default_version_config(**overrides) -> VersionConfig:
 class TestRuntimeErrorScriptModeAutoRepair:
     """read_version() raises RuntimeError in script mode -> auto-repair via generate_version_script()."""
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -116,7 +116,7 @@ class TestRuntimeErrorScriptModeAutoRepair:
         assert mock_bumper.read_version.call_count == 2
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -156,7 +156,7 @@ class TestRuntimeErrorScriptModeAutoRepair:
 class TestRuntimeErrorFileModeAutoRepair:
     """read_version() raises RuntimeError in file mode -> auto-repair via initialize_version_system()."""
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -196,7 +196,7 @@ class TestRuntimeErrorFileModeAutoRepair:
         assert mock_bumper.read_version.call_count == 2
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -232,7 +232,7 @@ class TestRuntimeErrorFileModeAutoRepair:
 class TestRuntimeErrorNoVersionFileAutoRepair:
     """read_version() raises RuntimeError on the no-version-file path (initialize then read)."""
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -271,7 +271,7 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
         assert mock_bumper.read_version.call_count == 2
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -311,7 +311,7 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
 class TestValueErrorKeyErrorRegression:
     """Existing ValueError/KeyError handling still works (regression tests)."""
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -344,7 +344,7 @@ class TestValueErrorKeyErrorRegression:
         mock_bumper.initialize_version_system.assert_called_once()
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -379,7 +379,7 @@ class TestValueErrorKeyErrorRegression:
         mock_gen.assert_called_once()
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -443,7 +443,7 @@ def _make_flow_with_state(**kwargs) -> FlowInstance:
 class TestTemplateSummaryGeneration:
     """Template summary is generated when SUMMARIZE step is absent."""
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc12345")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -467,7 +467,7 @@ class TestTemplateSummaryGeneration:
         assert result == StepStatus.COMPLETED
         mock_template.assert_called_once_with(flow, step)
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc12345")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -930,11 +930,14 @@ class TestCommitVersionTagIntegration:
         bump_type: str,
         is_tag: bool,
         is_worktree: bool = False,
+        flow_context: dict | None = None,
+        include_in_commit_message: bool = True,
     ) -> tuple[StepStatus, Step]:
         flow = _make_flow_with_state(
             change_path=repo / "se3.yaml",
             selected_steps=[StepType.VERSION_ANALYZE, StepType.COMMIT, StepType.SUMMARIZE],
         )
+        flow.state.context = flow_context if flow_context is not None else {}
         flow.baseline_commit = None
         flow.is_worktree_mode = is_worktree
         step = _make_step(
@@ -951,7 +954,7 @@ class TestCommitVersionTagIntegration:
             return_value=VersionConfig(
                 enabled=True,
                 file_path="pyproject.toml",
-                include_in_commit_message=True,
+                include_in_commit_message=include_in_commit_message,
             ),
         ), patch(
             "se3.engine.steps.commit._update_docs",
@@ -1057,10 +1060,325 @@ class TestCommitVersionTagIntegration:
         assert step.outputs["tag_created"] is False
         assert step.outputs["tag_name"] == "v2.0.0"
         assert step.outputs["commit_created"] is True
-        assert step.outputs["committed"] is False
+        # The version commit is durable, so the step must report it as committed —
+        # committed=False would make the renderer claim "No changes to commit".
+        assert step.outputs["committed"] is True
         assert "v2.0.0" in step.error_message
         assert "tag failure" in step.error_message
         assert _git(repo, "tag", "--list", "v2.0.0").stdout.strip() == ""
+
+    def test_tag_failure_error_names_tag_and_target_commit(self, tmp_path: Path) -> None:
+        """The operator recovers by hand, so the error must name both objects."""
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        def _boom(project_root, version, commit):
+            raise VersionTagError(
+                f"v{version}",
+                "git command failed",
+                commit=commit,
+                stderr="tag failure",
+                returncode=128,
+            )
+
+        with patch(
+            "se3.engine.steps.commit.create_annotated_version_tag",
+            side_effect=_boom,
+        ):
+            result, step = self._run_version_commit(
+                repo,
+                suggested_version="2.0.0",
+                bump_type="major",
+                is_tag=True,
+            )
+
+        assert result == StepStatus.FAILED
+        version_commit = step.outputs["commit_hash"]
+        assert "v2.0.0" in step.error_message
+        assert version_commit in step.error_message
+        assert "tag failure" in step.error_message
+
+    def test_unreadable_version_commit_hash_fails_without_fake_commit_ish(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An unreadable hash is reported as such — never as an ``unknown`` commit."""
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        with patch(
+            "se3.engine.steps.commit._read_head_commit",
+            return_value=(None, "fatal: bad revision"),
+        ), patch(
+            "se3.engine.steps.commit.create_annotated_version_tag",
+        ) as mock_tag:
+            result, step = self._run_version_commit(
+                repo,
+                suggested_version="2.0.0",
+                bump_type="major",
+                is_tag=True,
+            )
+
+        assert result == StepStatus.FAILED
+        mock_tag.assert_not_called()
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_name"] == "v2.0.0"
+        assert step.outputs["committed"] is True
+        assert step.outputs["commit_created"] is True
+        # No fabricated commit-ish anywhere: not as an output, not in the message.
+        assert "commit_hash" not in step.outputs
+        assert "unknown" not in step.error_message.lower()
+        assert "v2.0.0" in step.error_message
+        assert "could not be read" in step.error_message
+        assert "fatal: bad revision" in step.error_message
+        assert "HEAD" in step.error_message
+        assert _git(repo, "tag", "--list", "v2.0.0").stdout.strip() == ""
+
+    def test_reentry_after_tag_failure_commits_new_changes_and_never_backfills(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """No self-healing: a re-entry is an ordinary commit, not a tag repair.
+
+        The failed release's tag stays missing (recovery is a manual ``git tag
+        -a``) and is never backfilled onto the later fix commit, while the fixes
+        sitting in the working tree must still be committed rather than swallowed
+        by a tag-status fast path.
+        """
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        flow_context: dict = {}
+        with patch(
+            "se3.engine.steps.commit.create_annotated_version_tag",
+            side_effect=VersionTagError(
+                "v2.0.0",
+                "git command failed",
+                commit="deadbeef",
+                stderr="tag failure",
+                returncode=128,
+            ),
+        ):
+            failed_result, failed_step = self._run_version_commit(
+                repo,
+                suggested_version="2.0.0",
+                bump_type="major",
+                is_tag=True,
+                flow_context=flow_context,
+            )
+
+        assert failed_result == StepStatus.FAILED
+        version_commit = failed_step.outputs["commit_hash"]
+        assert _git(repo, "tag", "--list", "v2.0.0").stdout.strip() == ""
+        assert flow_context["flow_committed_version"] == "2.0.0"
+
+        # A follow-up fix lands in the working tree; the re-entry must commit it.
+        (repo / "fix.py").write_text("print('fix')\n", encoding="utf-8")
+
+        with patch(
+            "se3.engine.steps.commit.create_annotated_version_tag",
+        ) as mock_tag:
+            result, step = self._run_version_commit(
+                repo,
+                suggested_version="2.0.0",
+                bump_type="major",
+                is_tag=True,
+                flow_context=flow_context,
+            )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["committed"] is True
+        assert step.outputs["commit_hash"] != version_commit
+        tracked = _git(repo, "ls-files", "fix.py").stdout.strip()
+        assert tracked == "fix.py"
+        # The missing tag is NOT backfilled onto the fix commit — it stays missing
+        # until an operator creates it by hand on the version commit.
+        mock_tag.assert_not_called()
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_skipped_reentry"] is True
+        assert _git(repo, "tag", "--list", "v2.0.0").stdout.strip() == ""
+
+    def test_reentry_after_successful_tagged_commit_completes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A fix-loop re-entry must not trip over its own already-created tag.
+
+        _guard_version_race hands this flow back its own already-landed version,
+        so the tag block is reached again after ``v2.0.0`` landed on the earlier
+        version commit. Duplicate ``git tag -a`` would fail a step whose commit
+        landed fine. The shared ``flow_context`` stands in for the flow state the
+        state machine persists across a re-entry.
+        """
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        flow_context: dict = {}
+        first_result, first_step = self._run_version_commit(
+            repo,
+            suggested_version="2.0.0",
+            bump_type="major",
+            is_tag=True,
+            flow_context=flow_context,
+        )
+
+        assert first_result == StepStatus.COMPLETED
+        assert first_step.outputs["tag_created"] is True
+        version_commit = first_step.outputs["commit_hash"]
+        tagged = _git(repo, "rev-list", "-n", "1", "v2.0.0").stdout.strip()
+        assert tagged == version_commit
+        assert flow_context["flow_committed_version"] == "2.0.0"
+
+        (repo / "fix.py").write_text("print('fix')\n", encoding="utf-8")
+
+        result, step = self._run_version_commit(
+            repo,
+            suggested_version="2.0.0",
+            bump_type="major",
+            is_tag=True,
+            flow_context=flow_context,
+        )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["committed"] is True
+        assert step.outputs["commit_hash"] != version_commit
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_skipped_reentry"] is True
+        # The tag stays on the original version commit — never moved, never dup.
+        assert _git(repo, "rev-list", "-n", "1", "v2.0.0").stdout.strip() == (
+            version_commit
+        )
+        assert _git(repo, "ls-files", "fix.py").stdout.strip() == "fix.py"
+
+    def test_resume_after_lost_marker_skips_tag_via_git_durable_evidence(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A crash between `git tag` and the engine's step save must still resume.
+
+        The process dies after the version commit AND ``v2.0.0`` landed but before
+        the step is persisted, so the ``flow_committed_version`` marker is gone
+        (fresh, empty context). The re-entry must recognise its own already-landed
+        version commit through the git-durable Flow-trailer + blob probe rather
+        than re-running ``git tag -a`` against an existing tag and failing.
+        """
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        first_result, first_step = self._run_version_commit(
+            repo,
+            suggested_version="2.0.0",
+            bump_type="major",
+            is_tag=True,
+            flow_context={},
+        )
+        assert first_result == StepStatus.COMPLETED
+        version_commit = first_step.outputs["commit_hash"]
+
+        (repo / "fix.py").write_text("print('fix')\n", encoding="utf-8")
+
+        # Empty context == the marker never reached disk before the crash.
+        result, step = self._run_version_commit(
+            repo,
+            suggested_version="2.0.0",
+            bump_type="major",
+            is_tag=True,
+            flow_context={},
+        )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["committed"] is True
+        assert step.outputs["commit_hash"] != version_commit
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_skipped_reentry"] is True
+        assert _git(repo, "rev-list", "-n", "1", "v2.0.0").stdout.strip() == (
+            version_commit
+        )
+
+    def test_crash_before_commit_resume_still_tags_uncommitted_version_write(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """File-at-target with no commit behind it is NOT a re-entry — tag it.
+
+        The set_version→commit crash window leaves ``pyproject.toml`` already at
+        the target with the bump uncommitted. That resume is the call which
+        creates the version commit, so it owns the tag; treating "file already at
+        target" alone as a re-entry would leave the release permanently untagged.
+        """
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        # Crashed prior attempt: version written to the working tree, never committed.
+        _write_pyproject(repo, version="2.0.0")
+
+        result, step = self._run_version_commit(
+            repo,
+            suggested_version="2.0.0",
+            bump_type="major",
+            is_tag=True,
+            flow_context={},
+        )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["tag_created"] is True
+        assert step.outputs["tag_name"] == "v2.0.0"
+        assert _git(repo, "rev-list", "-n", "1", "v2.0.0").stdout.strip() == (
+            step.outputs["commit_hash"]
+        )
+
+    def test_foreign_preexisting_tag_fails_loudly(self, tmp_path: Path) -> None:
+        """A same-named tag this flow did not create is a collision, not success.
+
+        Without an own-replay marker the step must attempt the tag and surface
+        git's refusal, rather than completing with the release commit untagged.
+        """
+        repo = _init_git_repo(tmp_path)
+        _write_pyproject(repo)
+        _git(repo, "add", "pyproject.toml")
+        _git(repo, "commit", "-q", "-m", "add version")
+        # A manual / unrelated tag squatting on the name this release will need.
+        _git(repo, "tag", "-a", "v2.0.0", "-m", "manual tag")
+        squatted = _git(repo, "rev-list", "-n", "1", "v2.0.0").stdout.strip()
+
+        (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
+
+        result, step = self._run_version_commit(
+            repo,
+            suggested_version="2.0.0",
+            bump_type="major",
+            is_tag=True,
+        )
+
+        assert result == StepStatus.FAILED
+        assert step.outputs["tag_created"] is False
+        assert step.outputs["tag_name"] == "v2.0.0"
+        # The version commit is durable and must be reported as such, with the
+        # tag name, its target commit and git's own stderr in the error.
+        assert step.outputs["committed"] is True
+        commit_hash = step.outputs["commit_hash"]
+        assert commit_hash not in ("", "unknown", "no-changes")
+        assert "v2.0.0" in step.error_message
+        assert commit_hash in step.error_message
+        assert "already exists" in step.error_message
+        # The foreign tag is left exactly where it was — never moved or replaced.
+        assert _git(repo, "rev-list", "-n", "1", "v2.0.0").stdout.strip() == squatted
 
 
 class TestDetectRuntimeLeaks:
@@ -1307,7 +1625,7 @@ class TestCommitIdempotentVersionWrite:
     the commit step must accept that as a happy-path idempotent write.
     """
 
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc12345")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")

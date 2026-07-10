@@ -856,7 +856,10 @@ def _render_commit(step: Step) -> None:
 
     committed = outputs.get("committed", False)
 
-    if not committed:
+    # An error_message means the step failed; the no-op shortcut would bury the
+    # diagnostic (e.g. a tag failure naming the tag and its target commit) behind
+    # a misleading "No changes to commit".
+    if not committed and not step.error_message:
         render_full("[dim]No changes to commit[/dim]", title="Commit")
         return
 

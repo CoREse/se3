@@ -1,0 +1,7 @@
+id: '275'
+description: code-index对binary文件是怎么处理的？是不是只解析一下文件名就结束？
+status: resolved
+tags: []
+source: human
+created_at: '2026-07-08T16:01:20.646640'
+updated_at: '2026-07-09T15:59:29.037273'

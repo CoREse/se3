@@ -470,6 +470,24 @@ class TestRenderCommit:
         content = mock_render_full.call_args[0][0]
         assert "No changes to commit" in content
 
+    @patch("se3.engine.step_renderers.render_full")
+    def test_error_message_is_never_hidden_by_the_no_op_shortcut(self, mock_render_full):
+        """A failed step must show its diagnostic, not "No changes to commit"."""
+        step = _make_step(StepType.COMMIT, {"committed": False})
+        step.error_message = (
+            "failed to create version tag v2.0.0 on commit abc1234def5678: "
+            "git command failed (exit 128): tag already exists"
+        )
+
+        from se3.engine.step_renderers import _render_commit
+        _render_commit(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "No changes to commit" not in content
+        assert "v2.0.0" in content
+        assert "abc1234def5678" in content
+        assert "tag already exists" in content
+
 
 # ---------------------------------------------------------------------------
 # _render_self_check

@@ -115,7 +115,7 @@ def _docs_config():
 
 class TestReadmeAndVersionsUpdated:
     @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -170,7 +170,7 @@ class TestReadmeAndVersionsUpdated:
 
 class TestReadmeNoBadgeInsertsAfterHeading:
     @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -216,7 +216,7 @@ class TestReadmeNoBadgeInsertsAfterHeading:
 
 class TestVersionsCreatedWhenMissing:
     @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -257,7 +257,7 @@ class TestVersionsCreatedWhenMissing:
 
 class TestNoReadmeStillCommits:
     @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -297,7 +297,7 @@ class TestNoReadmeStillCommits:
 class TestDocsUpdateFailureDoesNotBlockCommit:
     @patch("se3.config.load_docs_config")
     @patch("se3.engine.docs_updater.DocumentationUpdater")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")
@@ -341,7 +341,7 @@ class TestDocsUpdateFailureDoesNotBlockCommit:
 class TestNoBumpSkipsDocs:
     @patch("se3.config.load_docs_config")
     @patch("se3.engine.docs_updater.DocumentationUpdater")
-    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc123")
+    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
     @patch("se3.engine.steps.commit.subprocess")
     @patch("se3.engine.steps.commit._has_changes", return_value=True)
     @patch("se3.engine.steps.commit._load_version_config")

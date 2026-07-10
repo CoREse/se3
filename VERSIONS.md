@@ -1,5 +1,15 @@
 # SE3 Framework Version History
 
+## 11.16.0 - 2026-07-10
+
+- Create an annotated git tag `vX.Y.Z` automatically when a release bumps the major or minor version; patch releases are left untagged under the default SemVer rules.
+- Use the first line of the tagged commit's message as the tag message, so `git tag -n` reads like the release history.
+- Tag the version commit directly in the normal (non-`--worktree`) commit step, immediately after the version file is written and committed.
+- Tag the reconcile commit produced by `se3 merge`'s `version_reconcile` step for `--worktree` flows, where sessions record only the version intent and no session-level tag; when one merge aggregates several worktree sessions, the tag message comes from the reconcile commit's first line.
+- Support an optional `is_tag` boolean in custom version rules to control tagging explicitly; the default SemVer path adds no new configuration.
+- Abort loudly when tag creation fails — the commit step returns FAILED and `se3 merge` exits non-zero — instead of silently leaving a released commit untagged.
+- Report tag failures with the tag name, the underlying git stderr, and an honest description of the target commit: its hash when readable, or an explicit statement that the version commit was created but its hash could not be read, never a fabricated placeholder.
+- Skip tag creation on commit-step re-entry when the version file already sits at the target version, so resuming a flow neither double-tags nor back-fills a tag from an earlier failed run.
 ## 11.15.3 - 2026-07-08
 
 - Fix right-side chat freezing during multi-round discovery where the left status pointer advanced but the chat stopped following
