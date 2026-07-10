@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.17.0 - 2026-07-10
+
+- Add a deterministic conflict-resolver framework that mechanically resolves and stages matched conflict files before any LLM call, so merges no longer depend on an agent for machine-resolvable paths
+- Resolve se3/code-index.md conflicts by file-entry-level fingerprint union, preferring entries whose content fingerprint matches the merged worktree and falling back deterministically to theirs, dropping entries whose file no longer exists
+- Resolve se3/issues/.next_id conflicts by taking the maximum of both sides, treating a single missing or malformed side as 0 and failing over to LLM resolution when both sides are unusable
+- Skip the LLM resolve pass entirely and stage plus commit directly when every conflict is settled deterministically
+- Remove the inline base/ours/theirs/working file dumps from the LLM conflict prompt, bounding prompt size independently of conflict file size; the prompt now points agents at git show :1:/:2:/:3:<path>
+- Fix LLM call failures reporting an empty reason after agent rotation exhausts all attempts; the error now lists each attempt's agent name, infra_error tag, and exit code
 ## 11.16.0 - 2026-07-10
 
 - Create an annotated git tag `vX.Y.Z` automatically when a release bumps the major or minor version; patch releases are left untagged under the default SemVer rules.

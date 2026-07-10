@@ -1,0 +1,34 @@
+id: '280'
+description: "merge 冲突解决被 code-index.md 撑爆：为机械可解文件增加确定性 resolver，并给 LLM 冲突 prompt\
+  \ 瘦身。\n\n## 背景（2026-07-10 实际故障）\n\n两个 worktree session（20260710-101426_af130971、20260710-101503_f0285271）的\
+  \ merge_integrate 全部以\nresolution_rejected 失败。根因链：\n\n1. se3/code-index.md（约 2.5MB\
+  \ / 12,610 行，有意跟踪在 git 里）在 master 和分支上都被重新生成，\n   merge 必然冲突（本次 36 个 hunk）。\n2.\
+  \ _build_editor_prompt（src/se3/engine/merge/conflict_resolver.py 的 \"Files to resolve\"\
+  \ 部分）对每个\n   冲突文件无条件内联 base/ours/theirs/working 四份完整内容，prompt 实测 9,882,736 字符，其中\
+  \ 99.97%\n   是这四份拷贝，其余全部内容（元数据、hunk 行号、规则）合计仅约 3.3KB。\n3. 冲突解决链上的所有 agent 调用全部失败（codex\
+  \ 明确报超 1,048,576 字符输入上限；claude 系 CLI 也\n   在数秒内失败），LLM 从未真正运行过一次。fast 策略 10 轮迭代全部空转后\
+  \ reject → merge --abort →\n   flow 挂起。\n\n## 修复内容（三项，同一个 issue）\n\n### A. merge\
+  \ 前置确定性 resolver 框架（主修复）\n\n在 merge orchestrator 调用 resolve_batch 之前增加一个按路径匹配的\"\
+  确定性 resolver 注册表\"：\n匹配到的冲突文件由程序机械解决并 git add，不进 LLM；剩余文件才走 LLM resolve_batch。\n\
+  不用 git merge driver（避免每个 clone/worktree 配 git config），后续如有需要再加可选的\n.gitattributes\
+  \ driver 外壳。\n\n首批注册两个 resolver：\n\n1. **se3/code-index.md — 条目级指纹合并**。不做文本 hunk\
+  \ 合并，直接解析 ours(:2:) 和 theirs(:3:)\n   两份完整 md（均无冲突标记，可用 CodeIndex.from_md 或轻量条目解析），按\
+  \ path/symbol id 做条目级 union：\n   - 只有一边有 → 保留；\n   - 两边指纹（<!--#<content-fp>|<list-fp>-->）相同\
+  \ → 任取；\n   - 两边不同 → 对 merge 后工作区实际文件计算指纹，content-fp 对得上的一边胜出；\n   - 都对不上 → 固定选\
+  \ theirs（确定性优先），指纹留错，由现有的索引自清洁/维护步骤在后续重新生成；\n   - 两边指纹都对但 summary 文本不同（各自重新生成、措辞不同）→\
+  \ 固定选 theirs；\n   - 条目对应文件在 merge 后不存在 → 删条目。\n   按确定性顺序重新渲染整个文件，构造上保证无冲突标记。最坏情况只是留下少量\
+  \ stale 条目，\n   由自清洁步骤修复——merge 时只需产出\"结构合法、尽量复用指纹匹配条目\"的 md，不追求完美。\n\n2. **se3/issues/.next_id\
+  \ — 取两边最大值**。\n\n### B. LLM 冲突 prompt 瘦身（一般性加固）\n\n_build_editor_prompt 删掉 base/ours/theirs/working\
+  \ 四个全文内联代码块。prompt 已含绝对路径和\n每个 hunk 的行号范围，resolver 的设计本来就是让 agent 用 Edit/Write 直接改盘上文件；\n\
+  补一句提示\"三方版本可用 git show :1:/:2:/:3:<path> 查看\"。改后 prompt 恒定在 KB 量级。\n即使 A 落地，其它大文件（lockfile、生成文档等）冲突时仍需要这层保护。\n\
+  \n### C. llm_caller last_error 空串修复（可观测性）\n\nsrc/se3/engine/llm_caller.py 的 _call_with_retry：当所有\
+  \ attempt 都通过 agent 轮换消耗掉时，\nlast_error 保持初始空串，最终报错为 \"LLM call failed after 3 attempts:\
+  \ \"（无任何原因）。\n轮换路径也应记录每次失败的原因（agent 名 + infra_error 标签 + 退出码），本次排查即被该空错误误导。\n\n\
+  ## 验证要点\n\n- 复现方法：git worktree add 临时目录 → merge 一个改动过 code-index.md 的分支 → 确认 A 不经\
+  \ LLM\n  机械解决、无冲突标记残留、指纹匹配条目全部保留；\n- B：构造大文件冲突，确认 prompt 尺寸与文件大小无关；\n- C：全链失败时错误信息包含各\
+  \ agent 的失败原因。"
+status: in-progress
+tags: []
+source: human
+created_at: '2026-07-10T13:55:58.862965'
+updated_at: '2026-07-10T13:59:00.506732'

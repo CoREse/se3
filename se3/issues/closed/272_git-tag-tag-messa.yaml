@@ -2,9 +2,9 @@ id: '272'
 description: 自动加git tag的功能，tag的名就是版本号，message就是commit message的第一行。默认的semver 2.0.0版本规则会对所有minor更新加tag，对于自定义版本规则，增加is
   tag之类的字段，这个字段是true的时候加tag（对默认规则是否也要增加这个选项？）。然后对于worktree的session，在merge的reconcile的那个commit再加tag，但是tag的message还是保持这个session
   commit步骤的那个commit的commit message第一行。
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-08T10:46:08.498894'
-updated_at: '2026-07-09T15:59:48.665490'
+updated_at: '2026-07-10T13:05:19.384145'
 type: feature

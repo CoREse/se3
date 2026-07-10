@@ -8,6 +8,7 @@ integration layer.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Sequence
 
@@ -49,10 +50,16 @@ def _entry(relpath: str, summary: str, content_fp: str, bullets: Sequence[str] =
     return "\n".join([head, *bullets])
 
 
-def _block(content_fp: str | None, summary: str, list_fp: str | None = LFP) -> FileBlock:
+def _block(
+    content_fp: str | None,
+    summary: str,
+    list_fp: str | None = LFP,
+    bullets: Sequence[str] = (),
+) -> FileBlock:
     return FileBlock(
         relpath="x.py",
         heading_line=f"### `x.py` (python) — {summary}",
+        bullet_lines=list(bullets),
         content_fp=content_fp,
         list_fp=list_fp,
         summary=summary,
@@ -124,6 +131,30 @@ def test_pick_falls_back_to_theirs_when_neither_side_matches_the_worktree():
 
     assert CodeIndexResolver._pick(ours, theirs, FP_C) == (theirs, "neither-matches-worktree")
     assert CodeIndexResolver._pick(ours, theirs, None) == (theirs, "neither-matches-worktree")
+
+
+def test_pick_keeps_theirs_symbols_whole_when_neither_side_matches_the_worktree():
+    # Neither side describes the post-merge file, so both symbol lists are
+    # stale; theirs is taken whole rather than mixed, keeping the output a pure
+    # function of its inputs. The index's rebuild step fixes the staleness.
+    ours = _block(FP_A, "ours", bullets=["- `f` (function) — f", "- `g_ours` (function) — g"])
+    theirs = _block(FP_B, "theirs", bullets=["- `f` (function) — f", "- `h_theirs` (function) — h"])
+
+    picked, reason = CodeIndexResolver._pick(ours, theirs, FP_C)
+
+    assert (picked, reason) == (theirs, "neither-matches-worktree")
+    assert picked.bullet_lines == ["- `f` (function) — f", "- `h_theirs` (function) — h"]
+
+
+def test_pick_takes_the_matching_sides_symbols_whole():
+    # ours' symbol list is exactly the post-merge file's; theirs' extra symbol
+    # names something the file no longer has, so grafting it in would be a lie.
+    ours = _block(FP_A, "ours", bullets=["- `f` (function) — f"])
+    theirs = _block(FP_B, "theirs", bullets=["- `f` (function) — f", "- `stale` (function) — s"])
+
+    picked, reason = CodeIndexResolver._pick(ours, theirs, FP_A)
+
+    assert (picked, reason) == (ours, "ours-matches-worktree")
 
 
 def test_pick_takes_theirs_when_fingerprints_agree_but_summaries_differ():
@@ -225,13 +256,47 @@ def test_code_index_resolver_matches_only_its_own_path():
         ("", "285", "285\n"),
         ("not-a-number", "285", "285\n"),
         (None, "285", "285\n"),
-        (None, None, "0\n"),
+        ("285", None, "285\n"),
     ],
 )
 def test_next_id_resolver_takes_the_maximum(tmp_path, monkeypatch, ours, theirs, expected):
     monkeypatch.setattr(dr, "_git_show_stage", _stage_stub(ours, theirs))
 
     assert NextIdResolver().resolve(tmp_path, dr.NEXT_ID_RELPATH) == expected
+
+
+@pytest.mark.parametrize("ours, theirs", [(None, None), ("", "  "), ("x", None)])
+def test_next_id_resolver_raises_when_no_side_is_usable(tmp_path, monkeypatch, ours, theirs):
+    # Staging a value that came from neither side would reissue allocated IDs.
+    monkeypatch.setattr(dr, "_git_show_stage", _stage_stub(ours, theirs))
+
+    with pytest.raises(ValueError):
+        NextIdResolver().resolve(tmp_path, dr.NEXT_ID_RELPATH)
+
+
+def test_next_id_resolver_propagates_git_failure(tmp_path, monkeypatch):
+    # A git failure must not masquerade as an absent side (which would silently
+    # drop the larger counter); it has to reach resolve_deterministic's fallback.
+    def boom(project_root, stage, relpath):
+        raise subprocess.TimeoutExpired(cmd="git show", timeout=120)
+
+    monkeypatch.setattr(dr, "_git_show_stage", boom)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        NextIdResolver().resolve(tmp_path, dr.NEXT_ID_RELPATH)
+
+
+def test_resolve_deterministic_falls_back_when_git_show_fails(tmp_path, monkeypatch):
+    def boom(project_root, stage, relpath):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(dr, "_git_show_stage", boom)
+
+    outcome = dr.resolve_deterministic(tmp_path, [dr.NEXT_ID_RELPATH])
+
+    assert outcome.resolved == []
+    assert outcome.remaining == [dr.NEXT_ID_RELPATH]
+    assert dr.NEXT_ID_RELPATH in outcome.failures
 
 
 def test_registry_holds_two_resolvers_with_disjoint_matches():
@@ -343,6 +408,23 @@ def test_a_failed_stage_restores_the_conflicted_working_tree(tmp_path, monkeypat
     assert outcome.remaining == ["counter"]
     # The LLM must inherit the original conflict, not a resolved-but-unstaged file.
     assert (tmp_path / "counter").read_text() == conflicted
+
+
+def test_a_failed_stage_removes_the_file_the_conflict_never_had(tmp_path, monkeypatch, git_calls):
+    # A rename/delete-shaped conflict leaves no working-tree copy.  A resolved
+    # file left behind after a failed stage would read as an already-handled
+    # conflict while the index entry is still unmerged.
+    monkeypatch.setattr(dr, "REGISTRY", [_StubResolver("ghost", "merged\n")])
+
+    def _boom(root, rel):
+        raise RuntimeError("git add exploded")
+
+    monkeypatch.setattr(dr, "_git_add", _boom)
+
+    outcome = resolve_deterministic(tmp_path, ["ghost"])
+
+    assert outcome.remaining == ["ghost"]
+    assert not (tmp_path / "ghost").exists()
 
 
 def test_resolved_and_remaining_partition_the_input_in_order(tmp_path, monkeypatch, git_calls):
@@ -556,3 +638,136 @@ def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_rep
     assert len(parents) == 3
     assert (repo / "src/added_theirs.py").exists()
     assert not (repo / "src/gone.py").exists()
+
+
+# ---------------------------------------------------------------------------
+# MergeOrchestrator._handle_conflict — the deterministic short-circuit
+#
+# The production failure this whole module exists for was a merge whose only
+# conflict was se3/code-index.md.  These tests drive the orchestrator through
+# that exact shape, so a regression in the short-circuit condition (or an
+# early-exit added to _apply_resolution) cannot silently route it back to the
+# LLM.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def orchestrator_repo(conflicted_repo, monkeypatch):
+    """``conflicted_repo`` with the LLM, guardrails and context-build disarmed."""
+    from se3.engine.merge import orchestrator as orch_mod
+
+    # The short-circuit must return before any conflict context is built: that
+    # call reads merge metadata whose failure would abort a merge with nothing
+    # left to inspect.
+    def _forbidden_context(*args, **kwargs):
+        raise AssertionError("conflict context must not be built")
+
+    monkeypatch.setattr(orch_mod, "build_conflict_context", _forbidden_context)
+    monkeypatch.setattr(
+        orch_mod.MergeOrchestrator, "_run_guardrails", lambda *a, **k: None
+    )
+    return conflicted_repo
+
+
+def _handle_conflict(repo: Path, strategy: str):
+    from se3.commands.merge.result_model import MergeReport
+    from se3.engine.merge.orchestrator import MergeOrchestrator
+
+    pre_merge_sha = _git(repo, "rev-parse", "HEAD").strip()
+    orch = MergeOrchestrator(
+        repo, strategy=strategy, delete_merged=False, acquire_lock=False
+    )
+    report = MergeReport()
+    result = orch._handle_conflict("feature", pre_merge_sha, report)
+    return result, report
+
+
+@pytest.mark.parametrize("strategy", ["fast", "safe", "strict"])
+def test_a_fully_deterministic_conflict_merges_without_the_llm(
+    orchestrator_repo, no_llm, strategy
+):
+    repo = orchestrator_repo
+
+    result, report = _handle_conflict(repo, strategy)
+
+    assert result == "merged"
+    # Even STRICT commits: its contract is that *contended content* reaches a
+    # human, and a regenerated index carries no decision to review.
+    assert report.human_call_file is None
+    # A real two-parent merge commit, with both sides' work in the tree.
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert len(parents) == 3
+    assert (repo / "src/added_theirs.py").exists()
+    assert (repo / "src/added_ours.py").exists()
+    assert _git(repo, "diff", "--name-only", "--diff-filter=U").strip() == ""
+    assert (repo / "se3/issues/.next_id").read_text(encoding="utf-8") == "12\n"
+    merged_index = (repo / "se3/code-index.md").read_text(encoding="utf-8")
+    assert not any(marker in merged_index for marker in MARKERS)
+
+
+def test_a_leftover_conflict_still_reaches_the_context_builder(orchestrator_repo, monkeypatch):
+    """One non-deterministic path is enough to keep the whole LLM path alive."""
+    from se3.engine.merge import orchestrator as orch_mod
+
+    repo = orchestrator_repo
+    # Make a third path conflict so ``remaining`` is non-empty.
+    _write(repo, "src/extra.py", "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> feature\n")
+
+    seen: dict = {}
+
+    def _record(project_root, ours, theirs, **kwargs):
+        seen["conflict_files"] = kwargs.get("conflict_files")
+        raise RuntimeError("stop here — the context builder was reached")
+
+    monkeypatch.setattr(orch_mod, "build_conflict_context", _record)
+    monkeypatch.setattr(
+        orch_mod.MergeOrchestrator, "_resolve_deterministic_conflicts",
+        lambda self: dr.DeterministicOutcome(
+            resolved=["se3/issues/.next_id"], remaining=["src/extra.py"]
+        ),
+    )
+
+    result, _report = _handle_conflict(repo, "fast")
+
+    assert result == "fast_abort"
+    assert seen["conflict_files"] == ["src/extra.py"]
+
+
+@pytest.mark.parametrize("broken", ["get_conflicting_files", "resolve_deterministic"])
+def test_a_broken_deterministic_pass_degrades_to_the_pre_change_behaviour(
+    orchestrator_repo, monkeypatch, broken
+):
+    """A crash anywhere in the pass must leave the LLM path exactly as it was.
+
+    The deterministic layer is an optimisation in front of the LLM, never a
+    precondition for it, so ``conflict_files=None`` (let ``build`` enumerate
+    the conflicts itself) is the required hand-off — not a half-filled outcome,
+    and not an ``AttributeError`` on ``None.remaining``.
+    """
+    from se3.engine.merge import orchestrator as orch_mod
+
+    repo = orchestrator_repo
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("deterministic pass exploded")
+
+    monkeypatch.setattr(orch_mod, broken, _boom)
+
+    seen: dict = {}
+
+    def _record(project_root, ours, theirs, **kwargs):
+        seen["conflict_files"] = kwargs.get("conflict_files", "<absent>")
+        raise RuntimeError("stop here — the context builder was reached")
+
+    monkeypatch.setattr(orch_mod, "build_conflict_context", _record)
+
+    orch = orch_mod.MergeOrchestrator(
+        repo, strategy="fast", delete_merged=False, acquire_lock=False
+    )
+    assert orch._resolve_deterministic_conflicts() is None
+
+    result, _report = _handle_conflict(repo, "fast")
+
+    assert result == "fast_abort"
+    # Reached the builder (a missing key would KeyError) and was handed the
+    # "enumerate them yourself" sentinel rather than a half-filled outcome.
+    assert seen["conflict_files"] is None

@@ -101,20 +101,22 @@ def _git_show_stage(project_root: Path, stage: int, relpath: str) -> Optional[st
     a modify/delete conflict has no ours- or theirs-side blob. Callers decide
     what an absent side means for their merge rule.
 
+    A *failure to ask git* is a different thing entirely and propagates as an
+    exception: swallowing a timeout or a missing git binary into ``None`` would
+    make "this side does not exist" indistinguishable from "we could not read
+    this side", and a resolver would then merge a side it never saw. Raising
+    sends the path to ``failures``/``remaining`` and on to the LLM instead.
+
     Bytes are decoded here rather than relying on ``text=True``, whose locale
     encoding would mangle a UTF-8 index on a non-UTF-8 host.
     """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project_root), "show", f":{stage}:{relpath}"],
-            capture_output=True,
-            timeout=120,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        logger.warning("git show :%d:%s failed: %s", stage, relpath, exc)
-        return None
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "show", f":{stage}:{relpath}"],
+        capture_output=True,
+        timeout=120,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
     if result.returncode != 0:
         return None
     return result.stdout.decode("utf-8", errors="replace")
@@ -134,11 +136,15 @@ def _git_rm(project_root: Path, relpath: str) -> None:
 
 @dataclass
 class FileBlock:
-    """One atomic md entry: a file heading plus every symbol bullet under it.
+    """One md entry: a file heading plus every symbol bullet under it.
 
-    The heading and its bullets are one unit because they are the product of a
-    single extraction pass — merging them independently would yield an entry
-    whose fingerprint disagrees with its own symbol list.
+    The block is the atomic unit of this merge — heading and bullets are the
+    product of a single extraction pass, and are never split or grafted across
+    sides, not even when neither side's fingerprint matches the post-merge file.
+    Interleaving two independently regenerated bullet lists would yield a hybrid
+    entry whose list fingerprint matches neither side; taking one side whole
+    keeps the entry internally consistent, and the index's own self-cleaning
+    step regenerates whatever went stale.
     """
 
     relpath: str
@@ -238,7 +244,7 @@ class CodeIndexResolver:
 
     Merge is not the place to rebuild the index. Where the fingerprints cannot
     settle a disagreement this resolver deliberately keeps a possibly-stale
-    entry (fixed side: theirs) instead of failing: the index's own
+    entry (a fixed choice of theirs) instead of failing: the index's own
     self-cleaning/rebuild step regenerates stale entries on the next run, and a
     fixed choice makes the output reproducible.
     """
@@ -288,9 +294,12 @@ class CodeIndexResolver:
         """Adjudicate one entry, returning the winner and why it won.
 
         ``actual_fp`` is the working-tree file's real fingerprint, and is only
-        consulted when the sides carry different content fingerprints. Every
-        undecidable case resolves to theirs: see the class docstring on why a
-        fixed, possibly-stale choice beats failing the merge.
+        consulted when the sides carry different content fingerprints. When one
+        side matches it, that side's symbol list describes the real file exactly
+        and is taken whole — grafting the other side's symbols in would add
+        entries for symbols the file no longer has. Every undecidable case
+        resolves to theirs — see the class docstring on why a fixed,
+        possibly-stale choice beats failing the merge.
         """
         if theirs is None:
             return ours, "only-ours"
@@ -311,12 +320,12 @@ class CodeIndexResolver:
 # .next_id — monotonic counter
 # ---------------------------------------------------------------------------
 
-def _parse_counter(text: Optional[str]) -> int:
-    """A counter side as an int; an absent or malformed side counts as zero."""
+def _parse_counter(text: Optional[str]) -> Optional[int]:
+    """A counter side as an int, or ``None`` when that side is absent or malformed."""
     try:
         return int((text or "").strip())
     except ValueError:
-        return 0
+        return None
 
 
 class NextIdResolver:
@@ -334,7 +343,17 @@ class NextIdResolver:
     def resolve(self, project_root: Path, relpath: str) -> str:
         ours = _parse_counter(_git_show_stage(project_root, STAGE_OURS, relpath))
         theirs = _parse_counter(_git_show_stage(project_root, STAGE_THEIRS, relpath))
-        return f"{max(ours, theirs)}\n"
+        usable = [value for value in (ours, theirs) if value is not None]
+        if not usable:
+            # The staged value must come from one of the sides. With neither side
+            # readable there is no such value — 0 would be a counter this merge
+            # invented, and reissuing already-allocated IDs is worse than falling
+            # back to the LLM.
+            raise ValueError(f"neither side of {relpath} holds a usable counter")
+        # One unusable side counts as 0 rather than as a failure: the surviving
+        # side's counter is still an upper bound on every ID either branch handed
+        # out, so it is the correct merge result on its own.
+        return f"{max(usable)}\n"
 
 
 REGISTRY: List[DeterministicResolver] = [CodeIndexResolver(), NextIdResolver()]
@@ -384,9 +403,11 @@ def resolve_deterministic(
 def _apply(project_root: Path, resolver: DeterministicResolver, relpath: str) -> None:
     """Write and stage *resolver*'s output, or restore the conflict and raise.
 
-    The pre-write bytes are restored when staging fails, so a half-applied
-    resolution never reaches the LLM fallback: it must see the original
-    marker-bearing file, not a resolved-but-unstaged one.
+    The pre-write working-tree state is restored when staging fails, so a
+    half-applied resolution never reaches the LLM fallback: it must see the
+    original marker-bearing file — or, where the conflict left no working-tree
+    copy at all, no file — rather than a resolved-but-unstaged one, which reads
+    as an already-handled conflict while the index entry is still unmerged.
     """
     merged = resolver.resolve(project_root, relpath)
     if not merged:
@@ -397,15 +418,18 @@ def _apply(project_root: Path, resolver: DeterministicResolver, relpath: str) ->
         raise ValueError("resolver output still contains conflict markers")
 
     target = project_root / relpath
-    try:
-        original = target.read_bytes()
-    except OSError:
-        original = None
+    # An unreadable existing file raises here, before anything is written: the
+    # path then stays untouched and falls back to the LLM, which is the safe
+    # outcome.  Only a genuinely absent file may be rolled back by unlinking.
+    existed = target.exists()
+    original = target.read_bytes() if existed else None
 
     _atomic_write_text(target, merged)
     try:
         _git_add(project_root, relpath)
     except Exception:
-        if original is not None:
-            target.write_bytes(original)
+        if existed:
+            target.write_bytes(original)  # type: ignore[arg-type]
+        else:
+            target.unlink(missing_ok=True)
         raise

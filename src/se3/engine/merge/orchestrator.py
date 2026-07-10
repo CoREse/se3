@@ -4420,6 +4420,39 @@ class MergeOrchestrator:
         # prompt that every agent rejects), and building their context means
         # reading four multi-megabyte copies we would then throw away.
         det_outcome = self._resolve_deterministic_conflicts()
+        ours_branch = getattr(self, "_current_branch", "HEAD")
+
+        # --- Nothing left for a human or an LLM to judge ---
+        # Every conflicting path had a mechanical merge rule, so the index is
+        # already fully staged.  Returning before ``build_conflict_context``
+        # matters: that call collects merge metadata (logs, base sha, per-file
+        # stage contents) whose failure would abort a merge that has, in fact,
+        # nothing left to inspect.  The context handed to ``_apply_resolution``
+        # is therefore synthesised, not built.  This short-circuits STRICT too:
+        # its contract is that *contended content* gets human review, and a
+        # regenerated index or a monotonic counter carries no decision to review.
+        if det_outcome is not None and det_outcome.resolved and not det_outcome.remaining:
+            self._log(
+                f"All {len(det_outcome.resolved)} conflict(s) resolved "
+                f"deterministically — committing merge without LLM"
+            )
+            from .conflict_context import ConflictContext
+            from .conflict_resolver import Confidence, LLMResolution
+            return self._apply_resolution(
+                branch,
+                LLMResolution(
+                    files=[],
+                    overall_confidence=Confidence.HIGH,
+                    flags={"llm_invoked": False, "deterministic": True},
+                ),
+                pre_merge_sha,
+                ConflictContext(
+                    project_root=self.project_root,
+                    ours_branch=ours_branch,
+                    theirs_branch=branch,
+                ),
+                report,
+            )
 
         # Build conflict context (must be called while mid-merge).
         # Narrowed from ``except Exception`` to a typed error set so
@@ -4434,7 +4467,6 @@ class MergeOrchestrator:
         #   * ValueError / RuntimeError — malformed conflict-input
         #     parsing (binary content, partial reads, etc.).
         try:
-            ours_branch = getattr(self, "_current_branch", "HEAD")
             context = build_conflict_context(
                 self.project_root,
                 ours_branch,
@@ -4507,29 +4539,6 @@ class MergeOrchestrator:
             # resolver input — this is structurally distinct from a real
             # conflict that the resolver rejected.
             return "context_build_failed"
-
-        # --- Nothing left for a human or an LLM to judge ---
-        # Every conflicting path had a mechanical merge rule, so the index is
-        # already fully staged.  This short-circuits STRICT too: its contract
-        # is that *contended content* gets human review, and a regenerated
-        # index or a monotonic counter carries no decision to review.
-        if det_outcome is not None and det_outcome.resolved and not context.files:
-            self._log(
-                f"All {len(det_outcome.resolved)} conflict(s) resolved "
-                f"deterministically — committing merge without LLM"
-            )
-            from .conflict_resolver import Confidence, LLMResolution
-            return self._apply_resolution(
-                branch,
-                LLMResolution(
-                    files=[],
-                    overall_confidence=Confidence.HIGH,
-                    flags={"llm_invoked": False, "deterministic": True},
-                ),
-                pre_merge_sha,
-                context,
-                report,
-            )
 
         # --- STRICT: short-circuit to human call, skip LLM ---
         if self.strategy == MergeStrategy.STRICT:
