@@ -1,4 +1,4 @@
-id: '276'
+id: '285'
 description: '**1 pre-existing test failure(s)** detected during flow execution.
 
   These failures were NOT introduced by the current change.
@@ -13,7 +13,10 @@ description: '**1 pre-existing test failure(s)** detected during flow execution.
   **Task:** 在没有配置的情况下，默认会按照支持的agent（现在是claude和codex）依次往下找能用的agent，而不是只看claude，没有claude就不工作。
 
 
-  These tests should be investigated and fixed to prevent the broken-window effect.'
+  These tests should be investigated and fixed to prevent the broken-window effect.
+
+
+  旧号 #276 → 新号 #285 (se3 merge)'
 status: open
 tags:
 - auto-discovered
