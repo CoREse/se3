@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from . import protocol
 from .disk_json_cache import read_engine_header
-from .history import enumerate_historical_project_roots
+from .history import _DESC_CLIP, _clip, enumerate_historical_project_roots
 from .supervisor import is_worktree_copy_root, resolve_worktree_main_root
 
 
@@ -90,14 +90,26 @@ class PendingCall:
     options: List[Any] = field(default_factory=list)
     step_id: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self, *, clip_prompt: bool = False) -> Dict[str, object]:
+        """Serialize this call.
+
+        *clip_prompt* truncates the (potentially large) ``prompt`` body to
+        :data:`~se3.daemon.history._DESC_CLIP` characters — the same standard the
+        history index clips task descriptions to. It is set only for the
+        *machine-wide* ``MachineStatus.pending_calls`` surface (the redundant
+        ~100 KB the traffic-reduction work targets), where the full prompt is
+        fetched on demand via a detail request. It is deliberately left ``False``
+        for a flow's own ``FlowSnapshot.pending_calls``, because the interactive
+        chip bar (confirm / discovery-confirm / retry chips) renders that prompt
+        verbatim and a truncated body would corrupt the operator's decision text.
+        """
         return {
             "call_id": self.call_id,
             "path": self.path,
             "project_root": self.project_root,
             "kind": self.kind,
             "created_at": self.created_at,
-            "prompt": self.prompt,
+            "prompt": _clip(self.prompt) if clip_prompt else self.prompt,
             "context": self.context,
             "options": self.options,
             "step_id": self.step_id,
@@ -163,8 +175,13 @@ class FlowSnapshot:
 class IssueSnapshot:
     """A single issue record for inclusion in :class:`MachineStatus`.
 
-    Carries every webui-relevant field so the frontend can render, filter and
-    operate on issues without a second round-trip to the daemon.
+    Carries every webui-relevant *summary* field so the frontend can render,
+    filter and operate on the issue list without a second round-trip. The
+    ``description`` is a truncated preview (clipped to
+    :data:`~se3.daemon.history._DESC_CLIP` at collection time) rather than the
+    full body: inlining every open+closed issue's full description is what made
+    the STATUS_UPDATE snapshot balloon to ~470 KB. The untruncated description
+    is fetched on demand (MSG_DETAIL_REQUEST) when the operator opens an issue.
     """
 
     id: str
@@ -216,7 +233,12 @@ class MachineStatus:
             "machine_id": self.machine_id,
             "hostname": self.hostname,
             "flows": [f.to_dict() for f in self.flows],
-            "pending_calls": [c.to_dict() for c in self.pending_calls],
+            # Machine-wide pending calls are clipped: this list is the ~100 KB
+            # redundant surface the traffic-reduction pass targets, and its full
+            # prompt bodies are fetched on demand (MSG_DETAIL_REQUEST). Per-flow
+            # ``FlowSnapshot.pending_calls`` stay un-clipped so the interactive
+            # chip bar keeps rendering full decision text.
+            "pending_calls": [c.to_dict(clip_prompt=True) for c in self.pending_calls],
             "project_roots": list(self.project_roots),
             "issues": [i.to_dict() for i in self.issues],
             "generated_at": self.generated_at,
@@ -1298,14 +1320,18 @@ class DaemonAggregator:
                     # it.  Skip only files missing a valid id — description is
                     # allowed to be empty so the webui surface matches the CLI.
                     raw_desc = data.get("description")
-                    # Normalize description: empty/None degrades to "", mirroring
-                    # Issue.from_dict's read-tolerance.
+                    # Normalize + clip description: empty/None degrades to "",
+                    # mirroring Issue.from_dict's read-tolerance, then truncate to
+                    # the shared _DESC_CLIP standard so the snapshot carries only a
+                    # preview (the full body is a MSG_DETAIL_REQUEST away). Clipping
+                    # at collection — not just in to_dict — also keeps the in-memory
+                    # snapshot bounded rather than holding every issue's full text.
                     result.append(
                         IssueSnapshot(
                             id=str(raw_id),
                             project_root=str(root),
                             title=data.get("title"),
-                            description=str(data.get("description") or ""),
+                            description=_clip(str(data.get("description") or "")),
                             status=str(data.get("status") or "open"),
                             priority=data.get("priority"),
                             type=data.get("type"),

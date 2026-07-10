@@ -29,13 +29,15 @@ local-only operation rather than crashing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from . import protocol
+from .wire_metrics import WireMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -250,9 +252,30 @@ class DaemonClient:
             0.1, min(float(history_poll_interval), self.status_interval)
         )
 
+        # Per-message-type sent-byte accountant. Every ``_send`` records the
+        # frame's type and encoded size here so the idle-vs-active traffic mix is
+        # observable at runtime (surfaced in the daemon status file) — the
+        # verification handle for "an idle daemon costs only keepalive-sized
+        # traffic" and the regression guard for this optimization.
+        self.metrics = WireMetrics()
+
         self._seq = 0
         self._connected = False
         self._last_error: Optional[str] = None
+        # Content signature of the last *full* STATUS_UPDATE snapshot pushed. On
+        # a status tick with an unchanged signature the client sends a tiny
+        # MSG_KEEPALIVE instead of re-shipping the (now-slimmed but still
+        # non-trivial) snapshot — the change-gate that makes steady-state idle
+        # traffic collapse to heartbeats. Reset per session so a fresh server
+        # always gets a full baseline snapshot first.
+        self._last_status_sig: Optional[str] = None
+        # Peer (server) protocol_version learned from WELCOME. Gates whether it
+        # is safe to emit the revision-3 traffic-reduction frames (keepalive):
+        # a legacy server that predates them would reject a keepalive as an
+        # unknown type and lose the heartbeat, so against such a peer the client
+        # keeps sending full STATUS_UPDATEs. ``None`` until WELCOME arrives —
+        # treated as "no support" so the pre-WELCOME baseline push is always full.
+        self._peer_protocol_version: Optional[Any] = None
         # Set when the server answers HELLO with ``WELCOME(accepted=false)``.
         # The run loop checks it after each session and stops reconnecting
         # rather than hammering the server with a key it has already rejected
@@ -381,6 +404,13 @@ class DaemonClient:
             self.server_url,
             open_timeout=10,
             max_size=protocol.MAX_WS_MESSAGE_BYTES,
+            # Explicitly enable permessage-deflate. ``websockets`` negotiates it
+            # by default, but pinning ``compression="deflate"`` here makes the
+            # second layer of traffic reduction (WS-level compression, orthogonal
+            # to the app-level slimming/gating) explicit and immune to a future
+            # library default change — a real ``full`` history-data / status frame
+            # is JSON that deflates ~5-10x.
+            compression="deflate",
         ) as ws:
             self._connected = True
             self._last_error = None
@@ -390,6 +420,11 @@ class DaemonClient:
             self._history_cursors = {}
             self._last_history_signature = {}
             self._last_calls_signature = {}
+            # Forget the prior status signature and peer version: a fresh (or
+            # reconnected) server must receive a full baseline STATUS_UPDATE, and
+            # its keepalive support is unknown until this session's WELCOME.
+            self._last_status_sig = None
+            self._peer_protocol_version = None
             # Bind the fast-push event to *this* session's running loop; the
             # previous session's event (if any) is dropped along with it.
             self._fast_push_event = asyncio.Event()
@@ -497,7 +532,13 @@ class DaemonClient:
             push_status = status_due or calls_changed or woke_for_fast_push
             if push_status:
                 last_status = now
-                await self._push_status(ws)
+                # A call-file change or a fast-push wake is a genuine content
+                # event that must ship a *real* STATUS_UPDATE, so it bypasses the
+                # keepalive content-gate. A plain heartbeat tick (status_due
+                # alone) may collapse to a keepalive when nothing actually
+                # changed since the last snapshot.
+                force = calls_changed or woke_for_fast_push
+                await self._push_status(ws, force=force)
             # Push history on a real disk change, or on the status tick (backstop).
             # The change check reads each active flow's engine.json + stats its
             # jsonl files; even with the reader's stat-keyed parse cache a cold
@@ -663,6 +704,8 @@ class DaemonClient:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
             await self._handle_history_index_request(ws)
+        elif message.type == protocol.MSG_DETAIL_REQUEST:
+            await self._handle_detail_request(ws, message.payload)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
 
@@ -677,6 +720,10 @@ class DaemonClient:
         and never contains the key itself, so it is safe to log; we never echo
         the credential we sent.
         """
+        # Record the server's advertised protocol_version so the status-push
+        # gate knows whether it may emit a keepalive (revision >= 3) or must keep
+        # sending full STATUS_UPDATEs to a legacy peer.
+        self._peer_protocol_version = payload.get("protocol_version")
         accepted = bool(payload.get("accepted", True))
         if accepted:
             logger.info("Server WELCOME received (accepted=True)")
@@ -1248,14 +1295,196 @@ class DaemonClient:
         except Exception:
             logger.exception("HISTORY_INDEX_REQUEST handling failed")
 
+    async def _handle_detail_request(self, ws: Any, payload: Dict[str, Any]) -> None:
+        """Answer a server DETAIL_REQUEST with the full issue / call text.
+
+        STATUS_UPDATE now carries only truncated issue descriptions and call
+        prompts; when the operator opens a detail view the server routes a
+        :data:`~se3.daemon.protocol.MSG_DETAIL_REQUEST` to the owning daemon,
+        which reads the untruncated artifact off disk and replies with a
+        :data:`~se3.daemon.protocol.MSG_DETAIL_DATA`.
+
+        Failure is *always* reported as ``ok=false`` DETAIL_DATA rather than
+        raising: a missing id, unreadable file, or read error must degrade to a
+        visible "detail unavailable" on the web side, never tear down the
+        connection. The disk read runs off the event loop (issue #243 A3) so a
+        large call file / issue YAML parse never stalls heartbeats or pushes.
+        """
+        request_id = str(payload.get("request_id") or "").strip()
+        kind = str(payload.get("kind") or "").strip()
+        target_id = str(payload.get("target_id") or "").strip()
+        project_root = str(payload.get("project_root") or "").strip()
+        if kind not in protocol.DETAIL_KINDS:
+            # A malformed request with no valid kind cannot be answered with a
+            # well-formed DETAIL_DATA (its kind must be one of DETAIL_KINDS), so
+            # there is nothing to correlate the reply to — log and drop.
+            logger.warning("Ignoring DETAIL_REQUEST with unknown kind %r", kind)
+            return
+
+        async def _reply(
+            *, ok: bool, detail: Optional[Dict[str, Any]] = None, error: str = ""
+        ) -> None:
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_detail_data(
+                        request_id,
+                        kind,
+                        detail=detail,
+                        ok=ok,
+                        error=error,
+                        seq=self._next_seq(),
+                    ),
+                )
+            except Exception:
+                logger.debug("DETAIL_DATA send failed", exc_info=True)
+
+        if not target_id:
+            await _reply(ok=False, error="missing target_id")
+            return
+        try:
+            detail = await asyncio.to_thread(
+                self._read_detail, kind, target_id, project_root
+            )
+        except Exception as exc:
+            logger.debug(
+                "DETAIL_REQUEST read failed for %s %s", kind, target_id,
+                exc_info=True,
+            )
+            await _reply(ok=False, error=str(exc) or type(exc).__name__)
+            return
+        if detail is None:
+            await _reply(ok=False, error=f"{kind} {target_id!r} not found")
+            return
+        await _reply(ok=True, detail=detail)
+        logger.info("DETAIL_REQUEST answered: %s %s", kind, target_id)
+
+    def _detail_root_candidates(self, project_root: str) -> List[str]:
+        """Ordered project roots to search for a detail artifact.
+
+        The server-supplied *project_root* (when present) is tried first; the
+        roots the last STATUS_UPDATE reported are the fallback so a request that
+        omits the root (or names a worktree copy) can still be resolved against
+        the machine's known projects. Runs synchronously — it only assembles a
+        small list — and is called from the worker thread in :meth:`_read_detail`.
+        """
+        roots: List[str] = []
+        seen: Set[str] = set()
+        for candidate in (project_root, *(self._last_known_project_roots or ())):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                roots.append(candidate)
+        return roots
+
+    def _read_detail(
+        self, kind: str, target_id: str, project_root: str
+    ) -> Optional[Dict[str, Any]]:
+        """Read one full-text detail artifact off disk (runs off-thread).
+
+        Returns the full-text record dict, or ``None`` when the artifact cannot
+        be located under any candidate root. Dispatches on *kind* to the issue
+        (``IssueManager``) or call-file reader.
+        """
+        if kind == protocol.DETAIL_KIND_ISSUE:
+            return self._read_issue_detail(target_id, project_root)
+        if kind == protocol.DETAIL_KIND_CALL:
+            return self._read_call_detail(target_id, project_root)
+        return None  # pragma: no cover - kind validated by caller
+
+    def _read_issue_detail(
+        self, issue_id: str, project_root: str
+    ) -> Optional[Dict[str, Any]]:
+        """Load an issue's full record via :class:`IssueManager`.
+
+        Tries each candidate root until the issue is found; returns its
+        untruncated ``to_dict`` (full description) or ``None``.
+        """
+        from ..engine.issue_manager import IssueManager
+
+        for root in self._detail_root_candidates(project_root):
+            try:
+                issue = IssueManager(Path(root)).load(issue_id)
+            except Exception:
+                logger.debug(
+                    "issue detail load failed under %s", root, exc_info=True
+                )
+                continue
+            if issue is not None:
+                return issue.to_dict()
+        return None
+
+    def _read_call_detail(
+        self, call_id: str, project_root: str
+    ) -> Optional[Dict[str, Any]]:
+        """Read a pending call's full file body (untruncated prompt).
+
+        Locates the ``se3/calls/`` file whose stem is *call_id* (ignoring its
+        ``.response`` answer siblings) under each candidate root and returns its
+        parsed JSON body with the ``call_id`` folded in, or ``None``.
+        """
+        for root in self._detail_root_candidates(project_root):
+            calls_dir = Path(root) / "se3" / "calls"
+            try:
+                entries = sorted(calls_dir.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                name = entry.name
+                if name.endswith(".response") or name.endswith(".response.json"):
+                    continue
+                if entry.stem != call_id:
+                    continue
+                try:
+                    body = json.loads(entry.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    logger.debug(
+                        "call detail read failed for %s", entry, exc_info=True
+                    )
+                    return None
+                if isinstance(body, dict):
+                    return {"call_id": call_id, **body}
+                return {"call_id": call_id, "prompt": str(body)}
+        return None
+
     # -- sending -----------------------------------------------------------
 
     async def _send(self, ws: Any, message: protocol.Message) -> None:
-        """JSON-encode and send *message* on the socket."""
-        await ws.send(message.to_json())
+        """JSON-encode, meter, and send *message* on the socket.
 
-    async def _push_status(self, ws: Any) -> None:
-        """Build and send a STATUS_UPDATE from the snapshot provider."""
+        The encoded frame's byte length is recorded against its message type in
+        :attr:`metrics` *before* the send so the per-type wire budget reflects
+        every frame that left (or attempted to leave) the socket. Metering is
+        wrapped defensively inside :meth:`WireMetrics.record`, so accounting can
+        never take down real traffic.
+        """
+        data = message.to_json()
+        self.metrics.record(message.type, len(data.encode("utf-8")))
+        await ws.send(data)
+
+    def _peer_supports_traffic_reduction(self) -> bool:
+        """Whether the connected server understands the revision-3 lean frames.
+
+        Delegates to :func:`~se3.daemon.protocol.supports_traffic_reduction` on
+        the peer version learned from WELCOME; ``None`` (pre-WELCOME / legacy)
+        degrades to ``False`` so the client never emits a keepalive a peer would
+        reject.
+        """
+        return protocol.supports_traffic_reduction(self._peer_protocol_version)
+
+    async def _push_status(self, ws: Any, *, force: bool = False) -> None:
+        """Build and send a STATUS_UPDATE, or a keepalive when unchanged.
+
+        The aggregated snapshot is hashed (excluding its always-moving
+        ``generated_at`` stamp). When *force* is false, the peer understands the
+        revision-3 frames, and the hash matches the last full snapshot pushed,
+        the client sends a tiny :data:`~se3.daemon.protocol.MSG_KEEPALIVE`
+        carrying just that signature — enough for the server to refresh the
+        daemon's last-seen time without re-shipping the whole snapshot. Otherwise
+        a full STATUS_UPDATE is sent and the signature is refreshed. *force* is
+        set on event-driven pushes (a call-file change / fast-push) that must
+        deliver real state regardless of the gate.
+        """
         try:
             # Building the snapshot walks ``se3/state`` and (via the aggregator's
             # all_project_roots → enumerate_historical_project_roots) the whole
@@ -1273,9 +1502,28 @@ class DaemonClient:
         # Cache the snapshot's project_roots so the issue-command hot path can
         # validate project_root without re-running the heavy snapshot provider.
         self._last_known_project_roots = set(snapshot.get("project_roots") or [])
+        signature = _status_signature(snapshot)
+        if (
+            not force
+            and signature == self._last_status_sig
+            and self._peer_supports_traffic_reduction()
+        ):
+            # Nothing changed since the last full snapshot and the server speaks
+            # the lean protocol — send a keepalive rather than the whole snapshot.
+            try:
+                await self._send(
+                    ws, protocol.make_keepalive(signature, seq=self._next_seq())
+                )
+            except Exception:
+                logger.debug("KEEPALIVE send failed", exc_info=True)
+            return
         message = protocol.make_status_update(snapshot, seq=self._next_seq())
         try:
             await self._send(ws, message)
+            # Only advance the gate baseline once the full snapshot actually left
+            # the socket, so a send failure re-sends a full snapshot next tick
+            # rather than silently degrading to keepalives against stale state.
+            self._last_status_sig = signature
         except Exception:
             # The receive loop will observe the closed socket and trigger a
             # reconnect; nothing more to do here.
@@ -1392,6 +1640,29 @@ class DaemonClient:
                 exc_info=True,
             )
             return set()
+
+
+def _status_signature(snapshot: Dict[str, Any]) -> str:
+    """Return a stable content hash of a machine-status *snapshot*.
+
+    The snapshot's ``generated_at`` wall-clock stamp is excluded — it moves on
+    every build, so hashing it would defeat the whole "unchanged since last
+    push?" gate. Everything else (flows, truncated issues, machine-wide calls,
+    project roots) is serialized deterministically (``sort_keys``) and hashed, so
+    two builds of genuinely identical state produce the same signature and the
+    push loop can send a keepalive instead of the full snapshot. Serialization
+    failures degrade to ``repr`` so a signature is always produced (a spurious
+    "changed" verdict is safe — it only forces a full push).
+    """
+    if isinstance(snapshot, dict):
+        payload = {k: v for k, v in snapshot.items() if k != "generated_at"}
+    else:  # pragma: no cover - snapshot provider always returns a dict
+        payload = snapshot
+    try:
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        blob = repr(payload)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _default_respond_handler(call_id: str, project_root: str, response: Any) -> None:

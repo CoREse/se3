@@ -853,10 +853,20 @@ class Daemon:
         instead of misreporting a connection.
         """
         client = self._client
+        # Per-message-type wire-byte counters exposed for the traffic-reduction
+        # acceptance check: an idle daemon's totals should be dominated by
+        # keepalive frames, an active one by the actual new conversation content.
+        wire_metrics: Dict[str, object] = {}
         if client is not None:
             server_configured = True
             connected = bool(getattr(client, "connected", False))
             last_error = getattr(client, "last_error", None)
+            metrics = getattr(client, "metrics", None)
+            if metrics is not None:
+                try:
+                    wire_metrics = metrics.snapshot()
+                except Exception:  # pragma: no cover - defensive
+                    wire_metrics = {}
         else:
             # No server_url configured: the daemon runs local-only and never
             # opens an outbound connection.
@@ -872,6 +882,7 @@ class Daemon:
             "server_configured": server_configured,
             "connected": connected,
             "last_error": last_error,
+            "wire_metrics": wire_metrics,
             "tracked_flows": [
                 rec.to_dict() for rec in flows if hasattr(rec, "to_dict")
             ],
