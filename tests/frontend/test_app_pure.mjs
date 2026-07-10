@@ -3875,6 +3875,14 @@ await confirmChipMod.registerConfirmChipTests({ app, check, checkAsync, findOne,
 const adjudicateReviewMod = await import("./adjudicate_review.test.mjs");
 await adjudicateReviewMod.registerAdjudicateReviewTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the self_check status-bar fallback tests: an assistant message's raw
+// LLM JSON reaches renderSelfCheckReport as synthetic outputs without the
+// `actionable_count` that self_check_handler adds later, so the renderer must
+// derive the count from issues.length instead of falling back to 0 and painting
+// a green ✓ PASSED above the very issues it lists.
+const selfCheckFallbackMod = await import("./self_check_passed_fallback.test.mjs");
+await selfCheckFallbackMod.registerSelfCheckPassedFallbackTests({ app, check, findOne, findAll });
+
 // Register the G3 live-append-after-respond tests (symptom A/B alignment).
 // These lock the #193 leftover "消息不显示" half: after a respond/interject the
 // daemon-pushed `mode: append` increments (re-broadcast by G1's ws.py fix) keep
