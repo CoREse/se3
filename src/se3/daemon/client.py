@@ -33,9 +33,9 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple
 
-from . import protocol
+from . import history, protocol
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +265,21 @@ class DaemonClient:
         # History push state, reset on every (re)connection so a freshly
         # connected server always receives a fresh index and full snapshots.
         self._last_index: Optional[list] = None
+        # Per-flow_id map of the last SessionMeta dict *actually pushed* to the
+        # server, the baseline the incremental HISTORY_INDEX_DELTA diffs against.
+        # A meta held back by the updated_at-only throttle is deliberately NOT
+        # updated here, so the next status tick re-detects and flushes it.
+        self._last_index_by_flow: Dict[str, Dict[str, Any]] = {}
+        # Whether a full HISTORY_INDEX baseline has been sent this session. Delta
+        # frames are only meaningful once the server holds a baseline to merge
+        # into, so the first push (and every force_index) sends a full frame and
+        # sets this; steady-state pushes then diff against ``_last_index_by_flow``.
+        self._index_primed = False
+        # Whether the connected server advertised protocol_version >= 3 in its
+        # WELCOME. Until then (and for a legacy peer) we drive full-frame
+        # semantics — a HISTORY_INDEX_DELTA sent to a v2 server would be rejected
+        # as an unknown type and the index update lost (see protocol docstring).
+        self._peer_supports_reduction = False
         self._history_cursors: Dict[str, Dict[str, int]] = {}
         # Last active-flow disk signature seen by the push loop; an unchanged
         # signature means there is nothing new to push (debounce).
@@ -387,6 +402,12 @@ class DaemonClient:
             # A new session: forget prior history state so the server gets a
             # fresh index and full active-flow snapshots after every reconnect.
             self._last_index = None
+            self._last_index_by_flow = {}
+            self._index_primed = False
+            # A new session optimistically assumes a legacy peer until the
+            # WELCOME reveals the server's protocol_version; the primer push is a
+            # full frame regardless, so this never withholds the baseline.
+            self._peer_supports_reduction = False
             self._history_cursors = {}
             self._last_history_signature = {}
             self._last_calls_signature = {}
@@ -518,7 +539,11 @@ class DaemonClient:
                     )
                     if invalidate is not None:
                         invalidate()
-                await self._push_history(ws)
+                # ``status_due`` doubles as the throttle window for updated_at-only
+                # meta churn: an active flow's timestamp-only delta is held back on
+                # a fast tick and only flushed on the status heartbeat, so it never
+                # re-pushes more often than the heartbeat itself.
+                await self._push_history(ws, status_tick=status_due)
 
     async def _wait_next_tick(self, stop_event: asyncio.Event) -> bool:
         """Wait one fast tick, returning whether the fast-push event woke us.
@@ -677,6 +702,14 @@ class DaemonClient:
         and never contains the key itself, so it is safe to log; we never echo
         the credential we sent.
         """
+        # Learn whether this server understands the revision-3 traffic-reduction
+        # frames. Recorded on both accept and reject paths (harmless on reject),
+        # so once accepted the steady-state pushes may switch from full
+        # HISTORY_INDEX to incremental deltas; a legacy (v2) server keeps
+        # full-frame semantics.
+        self._peer_supports_reduction = protocol.supports_traffic_reduction(
+            payload.get("protocol_version")
+        )
         accepted = bool(payload.get("accepted", True))
         if accepted:
             logger.info("Server WELCOME received (accepted=True)")
@@ -1281,13 +1314,23 @@ class DaemonClient:
             # reconnect; nothing more to do here.
             logger.debug("STATUS_UPDATE send failed", exc_info=True)
 
-    async def _push_history(self, ws: Any, *, force_index: bool = False) -> None:
-        """Report the history index (on change) and push active-flow deltas.
+    async def _push_history(
+        self, ws: Any, *, force_index: bool = False, status_tick: bool = False
+    ) -> None:
+        """Report the history index (delta or full) and push active-flow deltas.
 
-        The index is re-sent only when it actually changed since the last push
-        (or when *force_index* is set, used right after a (re)connect). Active
-        flows are read incrementally off ``self._history_cursors`` so each tick
-        ships only the conversation lines appended since the previous push.
+        The index is diffed against the last push and only the changed meta rows
+        travel — an incremental :data:`~se3.daemon.protocol.MSG_HISTORY_INDEX_DELTA`
+        keyed by ``flow_id`` — so index traffic scales with the number of
+        *changed* flows rather than the total flow count. A full
+        :data:`~se3.daemon.protocol.MSG_HISTORY_INDEX` baseline is sent on
+        (re)connect and on HISTORY_INDEX_REQUEST (*force_index*), and always to a
+        legacy peer that does not understand the delta frame. *status_tick* marks
+        the status-heartbeat tick, the only tick on which an updated_at-only meta
+        change is allowed to flush (its throttle window).
+
+        Active flows are read incrementally off ``self._history_cursors`` so each
+        tick ships only the conversation lines appended since the previous push.
         """
         provider = self._history_provider
         if provider is None:
@@ -1301,15 +1344,9 @@ class DaemonClient:
         except Exception:
             logger.exception("History index build failed; skipping history push")
             return
-        if force_index or index != self._last_index:
-            self._last_index = index
-            try:
-                await self._send(
-                    ws, protocol.make_history_index(index, seq=self._next_seq())
-                )
-            except Exception:
-                logger.debug("HISTORY_INDEX send failed", exc_info=True)
-                return
+        await self._push_history_index(
+            ws, index, force_index=force_index, status_tick=status_tick
+        )
         try:
             # read_active_flows fans out into multiple jsonl reads; offload so a
             # big active session does not stall the event loop.
@@ -1370,6 +1407,90 @@ class DaemonClient:
             except Exception:
                 logger.debug("HISTORY_DATA send failed", exc_info=True)
                 return
+
+    async def _push_history_index(
+        self,
+        ws: Any,
+        index: list,
+        *,
+        force_index: bool,
+        status_tick: bool,
+    ) -> None:
+        """Push the history index as a full baseline or an incremental delta.
+
+        A full :data:`~se3.daemon.protocol.MSG_HISTORY_INDEX` is sent when
+        *force_index* is set (connect / reconnect / HISTORY_INDEX_REQUEST), when
+        no baseline has been primed yet this session, or when the peer is a legacy
+        server that does not understand the delta frame — in the legacy/unprimed
+        case it is still debounced to a genuine change. Otherwise only the changed
+        meta rows travel as a delta (see :meth:`_compute_index_delta`).
+        """
+        current = {m["flow_id"]: m for m in index if m.get("flow_id")}
+        # Delta is safe only against a peer that advertised support AND a baseline
+        # it already holds. force_index deliberately re-establishes that baseline.
+        send_full = force_index or not self._peer_supports_reduction or not self._index_primed
+        if send_full:
+            # Debounce the baseline: a forced re-push always fires (the server's
+            # waiter must be resolved), but an unchanged index on an ordinary tick
+            # is not re-sent. Priming the by-flow baseline here means the very next
+            # delta diffs against exactly what the server now holds.
+            if force_index or index != self._last_index:
+                self._last_index = index
+                self._last_index_by_flow = dict(current)
+                self._index_primed = True
+                try:
+                    await self._send(
+                        ws, protocol.make_history_index(index, seq=self._next_seq())
+                    )
+                except Exception:
+                    logger.debug("HISTORY_INDEX send failed", exc_info=True)
+            return
+        upserts, removed = self._compute_index_delta(current, status_tick=status_tick)
+        if not upserts and not removed:
+            return
+        try:
+            await self._send(
+                ws,
+                protocol.make_history_index_delta(
+                    upserts, removed, seq=self._next_seq()
+                ),
+            )
+        except Exception:
+            logger.debug("HISTORY_INDEX_DELTA send failed", exc_info=True)
+
+    def _compute_index_delta(
+        self, current: Dict[str, Dict[str, Any]], *, status_tick: bool
+    ) -> Tuple[list, list]:
+        """Diff *current* meta rows against the last-pushed baseline.
+
+        Returns ``(upserts, removed)`` where *upserts* are the meta dicts that are
+        new or substantively changed since the last push and *removed* the
+        flow_ids that disappeared. A meta whose *only* change is an updated_at-only
+        liveness tick (see :func:`~se3.daemon.history.meta_change_is_throttleable`)
+        is held back on a non-status tick — its baseline entry is left untouched so
+        the next status tick re-detects and flushes it, capping such churn to the
+        heartbeat cadence. ``self._last_index_by_flow`` is advanced in place for
+        every row that is actually emitted so it always mirrors what the server
+        holds.
+        """
+        last = self._last_index_by_flow
+        upserts: list = []
+        for flow_id, meta in current.items():
+            prev = last.get(flow_id)
+            if prev == meta:
+                continue
+            if (
+                prev is not None
+                and not status_tick
+                and history.meta_change_is_throttleable(meta, prev)
+            ):
+                continue
+            upserts.append(meta)
+            last[flow_id] = meta
+        removed = [flow_id for flow_id in list(last) if flow_id not in current]
+        for flow_id in removed:
+            del last[flow_id]
+        return upserts, removed
 
     def _resumable_flow_ids(self, provider: Any) -> Set[str]:
         """Return flow_ids still resumable from disk (live ``engine.json`` flows).
