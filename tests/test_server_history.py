@@ -2070,6 +2070,7 @@ def test_history_detail_rejects_cache_replaced_after_pinned_pull(
             after=None,
             expected_machine_id=None,
             expected_owner=None,
+            known_signature=None,
         ):
             snapshot_calls.append(
                 (flow_id, after, expected_machine_id, expected_owner)
@@ -2132,6 +2133,7 @@ def test_history_detail_serves_full_after_same_owner_daemon_reconnect(
             after=None,
             expected_machine_id=None,
             expected_owner=None,
+            known_signature=None,
         ):
             # The second read (after the pull) validates against the owning
             # machine + owner; returning records models a successful
@@ -2201,6 +2203,7 @@ def test_history_detail_fails_closed_when_snapshot_validation_fails(
             after=None,
             expected_machine_id=None,
             expected_owner=None,
+            known_signature=None,
         ):
             # Validation never passes — models the bundle having moved to a
             # different machine/owner while the pull was in flight.

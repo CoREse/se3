@@ -32,12 +32,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from se3 import __version__
 from se3.daemon import protocol
+from se3.daemon.wire_metrics import WireMetrics
 
 from . import crypto
 from .bootstrap import DEFAULT_DB_PATH
@@ -56,6 +58,7 @@ from .persistence import IdentityAlreadyBound, Store
 from .state import ServerState
 from .ws import (
     ConnectionManager,
+    DetailRequestRegistry,
     HistoryRequestRegistry,
     IndexRefreshRegistry,
     InterjectionEventTracker,
@@ -65,6 +68,7 @@ from .ws import (
     broadcast_index_refresh,
     handle_daemon_connection,
     handle_ui_connection,
+    request_detail,
     request_history,
 )
 
@@ -91,6 +95,19 @@ HISTORY_INDEX_REFRESH_TIMEOUT = 2.0
 #: the daemon to acknowledge the ``MSG_ISSUE_COMMAND`` before giving up.
 #: Issue operations are lightweight YAML I/O so a short timeout suffices.
 ISSUE_COMMAND_TIMEOUT = 10.0
+
+#: Seconds an issue/call detail endpoint waits for the owning daemon to answer
+#: the on-demand ``MSG_DETAIL_REQUEST`` with the full text. A single issue YAML
+#: / call file read the daemon offloads to a thread, so a short window suffices;
+#: a slow / disconnected daemon degrades to a 504 / 503 rather than hanging.
+DETAIL_PULL_TIMEOUT = 10.0
+
+#: Minimum uncompressed response size (bytes) at which the GZip middleware
+#: kicks in. The multi-MB ``GET /api/history/{flow_id}`` full bundle is the
+#: target — gzip is 5–10x on that JSON — while tiny not-modified / delta / index
+#: replies stay uncompressed so their per-response CPU cost is not paid for no
+#: win.
+GZIP_MIN_SIZE = 1024
 
 #: When the daemon ack does not arrive within :data:`ISSUE_COMMAND_TIMEOUT`,
 #: the server does NOT immediately report failure — a heavy daemon-side snapshot
@@ -287,12 +304,24 @@ def create_app(
     / *rate_limiter* are injectable for tests.
     """
     app = FastAPI(title="SE3 Central Server", version=protocol.PROTOCOL_VERSION)
+    # GZip the large JSON responses (chiefly a real ``delivery: "full"`` history
+    # bundle re-build, which stays multi-MB even after differential/​not-modified
+    # shrinks the steady state). Compression is the second, orthogonal止血 layer
+    # to the delta protocol; the size floor keeps it off the many tiny
+    # not-modified / delta / status replies. Added before the routes so it wraps
+    # every response.
+    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
+    # One process-wide byte-accounting instance shared by the server→daemon
+    # downlink (ConnectionManager) and the server→browser fan-out (UiHub), so a
+    # single snapshot attributes traffic by message type across both legs.
+    wire_metrics = WireMetrics()
     state = ServerState()
-    manager = ConnectionManager()
-    ui_hub = UiHub()
+    manager = ConnectionManager(metrics=wire_metrics)
+    ui_hub = UiHub(metrics=wire_metrics)
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
     issue_command_registry = IssueCommandRegistry()
+    detail_registry = DetailRequestRegistry()
     interjection_tracker = InterjectionEventTracker()
 
     # -- auth / identity wiring (fail-closed) ------------------------------
@@ -322,6 +351,9 @@ def create_app(
     app.state.ui_hub = ui_hub
     app.state.history_registry = history_registry
     app.state.index_refresh_registry = index_refresh_registry
+    app.state.issue_command_registry = issue_command_registry
+    app.state.detail_registry = detail_registry
+    app.state.wire_metrics = wire_metrics
     app.state.interjection_tracker = interjection_tracker
     app.state.store = store
     app.state.identity = identity
@@ -358,6 +390,7 @@ def create_app(
             interjection_tracker,
             identity=identity,
             issue_registry=issue_command_registry,
+            detail_registry=detail_registry,
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
@@ -461,6 +494,21 @@ def create_app(
     @app.get("/api/version")
     async def version() -> dict:
         return {"version": __version__}
+
+    @app.get("/api/wire-metrics")
+    async def wire_metrics_snapshot(
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Per-message-type sent-byte counters for both server links.
+
+        The acceptance / regression surface for the traffic-reduction work:
+        keys prefixed ``ui:`` are the server→browser (/ws/ui) fan-out, the rest
+        are the server→daemon downlink, plus a synthetic ``__total__`` roll-up.
+        Idle (no active flow, no browser) traffic should stay keepalive-sized;
+        an active session should scale with new content, not with history / issue
+        / bundle size. Process-in-memory only.
+        """
+        return {"metrics": wire_metrics.snapshot()}
 
     @app.get("/api/machines")
     async def list_machines(
@@ -888,6 +936,127 @@ def create_app(
             )
         mid, root, issue = result
         return {"machine_id": mid, "project_root": root, "issue": issue}
+
+    # -- on-demand full-text detail (issue description / call prompt) --------
+    # STATUS_UPDATE now carries only truncated issue descriptions and call
+    # prompts (wire economy); the untruncated body is fetched on demand here.
+    # The server routes a MSG_DETAIL_REQUEST to the owning daemon and awaits the
+    # MSG_DETAIL_DATA reply via the DetailRequestRegistry, mirroring the issue
+    # command / history pull request-registry pattern.
+
+    async def _pull_detail(
+        kind: str,
+        target_id: str,
+        machine_id: str,
+        project_root: str,
+    ) -> Dict[str, Any]:
+        """Pull one issue/call full-text record from *machine_id*'s daemon.
+
+        Concurrent openers of the same ``(kind, target_id)`` share ONE downlink
+        pull (leader/follower). Raises 503 when the daemon is not connected /
+        the send fails, 504 on reply timeout, and 404 when the daemon reports
+        the target missing / unreadable.
+        """
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' is not connected",
+            )
+        request_id = uuid.uuid4().hex
+        fut, is_leader, active_rid = detail_registry.begin(
+            request_id, kind, target_id
+        )
+        if is_leader:
+            sent = await request_detail(
+                manager,
+                machine_id,
+                kind,
+                target_id,
+                request_id,
+                project_root=project_root,
+            )
+            if not sent:
+                detail_registry.discard(request_id, fut)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"failed to deliver DETAIL_REQUEST to '{machine_id}'",
+                )
+        try:
+            result = await asyncio.wait_for(fut, timeout=DETAIL_PULL_TIMEOUT)
+        except asyncio.TimeoutError:
+            detail_registry.discard(active_rid, fut)
+            raise HTTPException(
+                status_code=504,
+                detail=f"timed out fetching {kind} detail for '{target_id}'",
+            )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=404,
+                detail=result.get("error") or f"{kind} detail unavailable",
+            )
+        detail = result.get("detail")
+        return detail if isinstance(detail, dict) else {}
+
+    @app.get("/api/issues/{issue_id}/detail")
+    async def issue_detail(
+        issue_id: str,
+        machine_id: str = "",
+        project_root: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Fetch an issue's untruncated description from the owning daemon."""
+        scope = _scope_for(identity_)
+        result = await state.get_issue_by_id(
+            issue_id,
+            owner=scope,
+            machine_id=machine_id or None,
+            project_root=project_root or None,
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404, detail=f"issue '{issue_id}' not found"
+            )
+        mid, root, _ = result
+        detail = await _pull_detail(
+            protocol.DETAIL_KIND_ISSUE, issue_id, mid, root
+        )
+        return {"machine_id": mid, "project_root": root, "issue": detail}
+
+    @app.get("/api/calls/{call_id}/detail")
+    async def call_detail(
+        call_id: str,
+        machine_id: str = "",
+        project_root: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Fetch a pending call's untruncated prompt from the owning daemon.
+
+        When *machine_id* is supplied it is ownership-checked; otherwise the
+        owning machine (and its project root) is resolved by scanning the
+        owner's flows for the call.
+        """
+        scope = _scope_for(identity_)
+        mid = machine_id.strip()
+        root = project_root.strip()
+        if mid:
+            owned = await state.get_machine(mid, owner=scope)
+            if owned is None:
+                raise HTTPException(
+                    status_code=404, detail=f"machine '{mid}' not found"
+                )
+        else:
+            resolved = await state.find_call_owner(call_id, owner=scope)
+            if resolved is None:
+                raise HTTPException(
+                    status_code=404, detail=f"call '{call_id}' not found"
+                )
+            mid, resolved_root = resolved
+            if not root:
+                root = resolved_root
+        detail = await _pull_detail(
+            protocol.DETAIL_KIND_CALL, call_id, mid, root
+        )
+        return {"machine_id": mid, "call": detail}
 
     async def _reconcile_issue_command(
         *,
@@ -1652,6 +1821,7 @@ def create_app(
         flow_id: str,
         identity_: OwnerIdentity = Depends(require_owner),
         after: Optional[str] = None,
+        sig: Optional[str] = None,
     ) -> dict:
         # Ownership gate first: a flow whose owning machine belongs to another
         # owner (or is unknown) reads as absent — even if its records happen to
@@ -1669,11 +1839,14 @@ def create_app(
                 status_code=404,
                 detail=f"no history for flow '{flow_id}'",
             )
-        # Cache hit: serve a full or incremental snapshot atomically. ``after``
-        # is the opaque progress token the client echoes on a WS reconnect; the
-        # snapshot returns only the tail after it when it still pins the current
-        # bundle (``delivery: "delta"``), and the full records on every fallback
-        # (``delivery: "full"``). Binding ``expected_machine_id`` to the owning
+        # Cache hit: serve a not-modified / delta / full snapshot atomically.
+        # ``after`` is the opaque progress token the client echoes on a WS
+        # reconnect; ``sig`` is the bundle content signature it holds. When the
+        # token is still in sync AND the signature matches, the snapshot answers
+        # ``delivery: "not_modified"`` (extra-small — the self-heal poll's cheap
+        # "nothing changed" reply); a valid token behind the record count yields
+        # ``delivery: "delta"`` (the tail); every fallback yields
+        # ``delivery: "full"``. Binding ``expected_machine_id`` to the owning
         # machine makes a bundle that has since moved daemons read as a miss, so
         # we re-pull the authoritative records below rather than serve a stale
         # snapshot.
@@ -1682,6 +1855,7 @@ def create_app(
             after=after,
             expected_machine_id=owner_machine,
             expected_owner=target_owner,
+            known_signature=sig,
         )
         if snapshot is not None:
             return {"flow_id": flow_id, "cached": True, **snapshot}
@@ -1706,6 +1880,25 @@ def create_app(
         flow_project_root = await state.get_history_flow_project_root(
             flow_id, owner=target_owner
         )
+        # Full-rebuild throttle: a client stuck presenting a diverged token would
+        # otherwise force a fresh multi-MB回源 pull on every self-heal poll. If a
+        # full pull for this flow fired within the floor window, re-read the
+        # cache once — that recent pull may have just populated an authoritative
+        # bundle we can serve without another daemon round-trip — and only fall
+        # through to a fresh pull when it is still a genuine miss. (Concurrent
+        # misses already collapse onto one pull via the leader/follower registry
+        # below; this floor additionally rate-limits *sequential* rapid misses.)
+        if await state.full_pull_throttled(flow_id):
+            throttled = await state.get_history_snapshot(
+                flow_id,
+                after=after,
+                expected_machine_id=owner_machine,
+                expected_owner=target_owner,
+                known_signature=sig,
+            )
+            if throttled is not None:
+                return {"flow_id": flow_id, "cached": True, **throttled}
+        await state.mark_full_pull(flow_id)
         # Concurrent cache-miss requests for the same flow/machine (e.g. the
         # running-flow view and the history-detail view reconnecting at once)
         # share ONE in-flight daemon pull: only the leader sends the
@@ -1925,13 +2118,26 @@ def run(
         session_store=session_store,
         rate_limiter=rate_limiter,
     )
-    uvicorn.run(
-        app,
+    # Explicitly assert permessage-deflate on the server↔(daemon|browser) WS
+    # legs. uvicorn's ``websockets`` protocol negotiates it by default, but the
+    # traffic-reduction work depends on it, so we make the intent visible and
+    # confirmed rather than relying on an undocumented default. ``ws_per_message_deflate``
+    # only exists on newer uvicorn; fall back cleanly (the default already
+    # enables deflate) so an older pin does not break startup.
+    run_kwargs = dict(
         host=host,
         port=port,
         log_level=log_level,
         ws_max_size=protocol.MAX_WS_MESSAGE_BYTES,
     )
+    try:
+        uvicorn.run(app, ws_per_message_deflate=True, **run_kwargs)
+    except TypeError:
+        logger.debug(
+            "uvicorn lacks ws_per_message_deflate; relying on its default "
+            "(permessage-deflate still negotiated by the websockets protocol)"
+        )
+        uvicorn.run(app, **run_kwargs)
 
 
 def main(argv: Optional[list] = None) -> None:

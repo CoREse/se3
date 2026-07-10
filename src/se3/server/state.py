@@ -172,6 +172,27 @@ def decode_progress(
     }
 
 
+# -- history bundle content signature ---------------------------------------
+#
+# The progress *token* pins a client to an exact bundle lifecycle so a REST
+# reconnect can be served a delta. The bundle *signature* is the same three
+# facts (generation, record count, machine) rendered as a short, stable,
+# **non-secret** string the client can hold and echo verbatim to ask a cheap
+# "has anything changed?" question. It is deliberately O(1) — a hash of
+# ``(generation, total, machine_id)`` rather than of the record bodies — so the
+# self-heal poll that fires every few seconds against a multi-MB bundle costs a
+# constant-time compare, never a re-hash of the whole conversation (the very
+# cost this traffic-reduction work exists to remove). It changes exactly when a
+# delta would carry new tail (``total`` grew) or when the bundle was replaced
+# (``generation`` rolled) or re-pulled from a different daemon (``machine_id``),
+# which is precisely the "no new records" vs "new records" distinction the
+# not-modified fast path needs.
+def bundle_signature(generation: int, total: int, machine_id: str) -> str:
+    """Return the short content-version signature for a bundle snapshot."""
+    raw = f"{int(generation)}:{int(total)}:{machine_id}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 @dataclass
 class FlowSnapshot:
     """Server-side view of one flow on one machine.
@@ -314,6 +335,14 @@ class ServerState:
     #: permanently wedged.
     _HISTORY_RECOVERY_TTL: float = 30.0
 
+    #: Minimum seconds between cache-miss ``full`` daemon pulls for the SAME
+    #: flow. A self-heal poll that presents a diverged token forces one full
+    #: rebuild; without this floor a client stuck presenting the same stale
+    #: token would trigger a fresh multi-MB回源 pull on every poll. Sized to a
+    #: few poll intervals so a genuine divergence still heals promptly while a
+    #: repeated-miss storm collapses onto one in-flight pull.
+    _HISTORY_FULL_PULL_MIN_INTERVAL: float = 5.0
+
     def __init__(self) -> None:
         self._machines: Dict[str, MachineRecord] = {}
         # History relay caches. The server is a pure in-memory relay for
@@ -343,6 +372,12 @@ class ServerState:
         #: treats the marker as stale and re-arms a fresh pull, so the bundle
         #: still self-heals without the user exiting and re-entering the chat.
         self._history_recovery_inflight: Dict[str, float] = {}
+        #: flow_id -> monotonic time of the last cache-miss ``full`` daemon pull
+        #: dispatched by the REST endpoint. Used to rate-limit repeated full
+        #: rebuilds of the SAME flow (see :meth:`mark_full_pull` /
+        #: :meth:`full_pull_throttled`): a client that keeps presenting a
+        #: diverged token would otherwise fan out one 17 MB回源 pull per poll.
+        self._history_full_pull_at: Dict[str, float] = {}
         #: Monotonic counter handing out a fresh ``generation`` to every newly
         #: created / replaced history bundle, so a progress token is bound to
         #: exactly one bundle lifecycle (see ``encode_progress``).
@@ -590,6 +625,30 @@ class ServerState:
         result = await self.get_flow(flow_id, owner=owner)
         return result[0] if result is not None else None
 
+    async def find_call_owner(
+        self, call_id: str, *, owner: Optional[str] = None
+    ) -> Optional[Tuple[str, str]]:
+        """Resolve the machine + project_root owning a pending *call_id*.
+
+        Scans every owner-scoped flow's ``pending_calls`` for a matching
+        ``call_id`` and returns ``(machine_id, project_root)`` so the on-demand
+        detail endpoint can route a :data:`~se3.daemon.protocol.MSG_DETAIL_REQUEST`
+        to the daemon whose flow raised the call (its truncated prompt is
+        surfaced in STATUS_UPDATE; the full prompt is fetched on demand).
+        Returns ``None`` when no owner-scoped flow holds the call.
+        """
+        async with self._lock:
+            for machine_id, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
+                for flow in record.flows.values():
+                    for call in flow.pending_calls or []:
+                        if not isinstance(call, dict):
+                            continue
+                        if str(call.get("call_id") or "") == str(call_id):
+                            return machine_id, str(flow.project_root or "")
+        return None
+
     # -- resume helpers ----------------------------------------------------
 
     #: Flow statuses that the daemon can directly resume via
@@ -684,6 +743,88 @@ class ServerState:
         async with self._lock:
             cleaned = [dict(s) for s in (sessions or []) if isinstance(s, dict)]
             self._history_index[machine_id] = cleaned
+
+    async def merge_history_index_delta(
+        self,
+        machine_id: str,
+        upserts: List[Dict[str, Any]],
+        removed: List[str],
+    ) -> None:
+        """Merge a ``MSG_HISTORY_INDEX_DELTA`` into the machine's full index.
+
+        In the steady state a daemon reports only the SessionMeta rows that
+        changed (*upserts*, keyed by ``flow_id``) and the flow ids that vanished
+        (*removed*) instead of re-sending the whole index — so index traffic
+        scales with the number of *changed* flows, not the total flow count.
+        The server keeps the authoritative full index in memory and applies the
+        delta on top of it: each upsert replaces (or adds) the row for its
+        ``flow_id``, each removed id drops its row. A full
+        :meth:`update_history_index` still lands on connect / reconnect /
+        HISTORY_INDEX_REQUEST as the reconciliation baseline both ends agree on.
+
+        Existing insertion order is preserved (new flow ids append) so a
+        subsequent full re-push and this incremental path converge on the same
+        set; ``get_history_index`` re-sorts by ``updated_at`` regardless, so
+        order here is not load-bearing for the UI. Rows without a usable
+        ``flow_id`` are ignored — a delta row can only be addressed by id.
+        """
+        async with self._lock:
+            existing = self._history_index.get(machine_id, [])
+            by_id: Dict[str, Dict[str, Any]] = {}
+            order: List[str] = []
+            for session in existing:
+                fid = str(session.get("flow_id") or "")
+                if not fid:
+                    continue
+                if fid not in by_id:
+                    order.append(fid)
+                by_id[fid] = dict(session)
+            for up in upserts or []:
+                if not isinstance(up, dict):
+                    continue
+                fid = str(up.get("flow_id") or "")
+                if not fid:
+                    continue
+                if fid not in by_id:
+                    order.append(fid)
+                by_id[fid] = dict(up)
+            for fid in removed or []:
+                by_id.pop(str(fid), None)
+            self._history_index[machine_id] = [
+                by_id[fid] for fid in order if fid in by_id
+            ]
+
+    async def mark_full_pull(self, flow_id: str) -> None:
+        """Stamp the monotonic time of a cache-miss ``full`` daemon pull.
+
+        Called by the REST history endpoint right before it dispatches a回源
+        ``MSG_HISTORY_REQUEST`` for *flow_id*, so :meth:`full_pull_throttled`
+        can rate-limit a repeated-miss storm for the same flow.
+        """
+        async with self._lock:
+            self._history_full_pull_at[flow_id] = time.monotonic()
+
+    async def full_pull_throttled(
+        self, flow_id: str, *, min_interval: Optional[float] = None
+    ) -> bool:
+        """Return whether a full pull for *flow_id* fired within the floor window.
+
+        ``True`` means a cache-miss full rebuild for this flow was dispatched
+        less than *min_interval* seconds ago (default
+        :attr:`_HISTORY_FULL_PULL_MIN_INTERVAL`), so the caller should prefer a
+        already-cached snapshot over firing another multi-MB回源 pull. Measured
+        on the monotonic clock so a wall-clock step cannot defeat the floor.
+        """
+        window = (
+            self._HISTORY_FULL_PULL_MIN_INTERVAL
+            if min_interval is None
+            else min_interval
+        )
+        async with self._lock:
+            at = self._history_full_pull_at.get(flow_id)
+            if at is None:
+                return False
+            return (time.monotonic() - at) < window
 
     async def get_history_index(
         self, *, owner: Optional[str] = None
@@ -958,6 +1099,7 @@ class ServerState:
         after: Optional[str] = None,
         expected_machine_id: Optional[str] = None,
         expected_owner: Optional[str] = None,
+        known_signature: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Atomically read a full or incremental history snapshot for *flow_id*.
 
@@ -975,15 +1117,25 @@ class ServerState:
 
         Otherwise returns a dict with:
 
-        * ``delivery`` — ``"delta"`` when *after* is a valid progress token for
-          the current bundle (matching generation + machine + an in-range
-          offset), in which case ``records`` holds only the tail after that
-          offset; ``"full"`` for every fallback (no / malformed / stale token,
-          out-of-range offset, generation or machine mismatch), in which case
-          ``records`` holds the complete bundle.
+        * ``delivery`` — one of three states:
+          - ``"not_modified"`` — *after* is a valid token whose offset already
+            equals the record count AND *known_signature* matches the current
+            bundle signature, so the client is provably in sync. ``records`` is
+            empty; this is the extra-small idle-poll reply the self-heal path
+            gates on. Only ever returned when *known_signature* is supplied — an
+            older client that echoes only a token still gets a (records-empty)
+            ``"delta"`` here, so the new state is opt-in and backward compatible.
+          - ``"delta"`` — a valid token with an in-range offset behind the
+            record count; ``records`` holds only the tail after that offset.
+          - ``"full"`` — every fallback (no / malformed / stale token,
+            out-of-range offset, generation or machine mismatch); ``records``
+            holds the complete bundle.
         * ``progress`` — a fresh opaque token pinned to this snapshot's
           generation, machine and record count, for the client to echo on its
           next reconnect.
+        * ``signature`` — the bundle's short content-version signature (see
+          :func:`bundle_signature`), for the client to echo back as
+          *known_signature* so the server can answer ``not_modified`` cheaply.
         """
         async with self._lock:
             cached = self._history_data.get(flow_id)
@@ -1028,9 +1180,22 @@ class ServerState:
                 and token["machine_id"] == bundle_machine
                 and 0 <= token["offset"] <= total
             )
+            signature = bundle_signature(generation, total, bundle_machine)
             if is_delta:
                 out_records = list(records[token["offset"]:])
-                delivery = "delta"
+                # No new records AND the client echoed a signature that still
+                # matches ⇒ the extra-small not-modified reply. Gated on a
+                # supplied signature so a legacy client (token only) keeps
+                # getting the records-empty ``delta`` it already handles — the
+                # new state never reaches a consumer that cannot interpret it.
+                if (
+                    token["offset"] == total
+                    and known_signature is not None
+                    and known_signature == signature
+                ):
+                    delivery = "not_modified"
+                else:
+                    delivery = "delta"
             else:
                 # Full fallback MUST carry the whole bundle — never a slice — so
                 # the client rebuilds a record set identical to the on-disk jsonl.
@@ -1066,6 +1231,7 @@ class ServerState:
                     bundle_machine,
                     secret=self._history_progress_secret,
                 ),
+                "signature": signature,
                 "cursor": dict(cached.get("cursor") or {}),
                 "updated_at": cached.get("updated_at"),
             }

@@ -22,6 +22,7 @@ import time
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from se3.daemon import protocol
+from se3.daemon.wire_metrics import WireMetrics
 
 from .state import ServerState
 
@@ -69,9 +70,13 @@ except Exception:  # pragma: no cover - defensive
 class ConnectionManager:
     """Tracks live daemon WebSocket connections and routes downlink messages."""
 
-    def __init__(self) -> None:
+    def __init__(self, metrics: Optional[WireMetrics] = None) -> None:
         self._connections: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
+        # Per-message-type sent-byte accounting for the server→daemon downlink.
+        # Shared with the rest of the server so idle vs active traffic can be
+        # attributed by message type (the traffic-reduction acceptance surface).
+        self._metrics = metrics
 
     async def connect(self, machine_id: str, websocket: Any) -> None:
         """Register *websocket* as the live connection for *machine_id*.
@@ -115,8 +120,11 @@ class ConnectionManager:
         websocket = self._connections.get(machine_id)
         if websocket is None:
             return False
+        payload = message.to_json()
         try:
-            await websocket.send_text(message.to_json())
+            await websocket.send_text(payload)
+            if self._metrics is not None:
+                self._metrics.record(message.type, len(payload))
             return True
         except Exception:
             logger.warning("Failed to send %s to %s", message.type, machine_id)
@@ -151,8 +159,11 @@ class ConnectionManager:
         async with self._lock:
             if self._connections.get(machine_id) is not websocket:
                 return False
+        payload = message.to_json()
         try:
-            await websocket.send_text(message.to_json())
+            await websocket.send_text(payload)
+            if self._metrics is not None:
+                self._metrics.record(message.type, len(payload))
             return True
         except Exception:
             logger.warning("Failed to send %s to %s", message.type, machine_id)
@@ -372,6 +383,80 @@ class IssueCommandRegistry:
             self._waiters.pop(request_id, None)
 
 
+class DetailRequestRegistry:
+    """Tracks in-flight on-demand issue/call detail pulls awaiting a daemon reply.
+
+    STATUS_UPDATE now carries only truncated issue descriptions / call prompts;
+    when the operator opens a detail view the REST handler routes a
+    :data:`~se3.daemon.protocol.MSG_DETAIL_REQUEST` to the owning daemon and
+    parks an :class:`asyncio.Future` here keyed by ``request_id``. When the
+    matching :data:`~se3.daemon.protocol.MSG_DETAIL_DATA` lands on the daemon
+    receive loop the waiter is resolved with the daemon's payload. Concurrent
+    REST requests for the *same* ``(kind, target_id)`` share ONE downlink pull
+    via :meth:`begin` (leader/follower), mirroring
+    :class:`HistoryRequestRegistry`, so opening the same detail twice never
+    fans out two DETAIL_REQUESTs. Lives entirely in process memory.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: Dict[str, list] = {}
+        #: (kind, target_id) keys with a downlink DETAIL_REQUEST already in
+        #: flight, so a second opener joins the first pull instead of sending
+        #: its own.
+        self._inflight: Dict[Tuple[str, str], str] = {}
+
+    def begin(
+        self, request_id: str, kind: str, target_id: str
+    ) -> Tuple["asyncio.Future", bool, str]:
+        """Park a waiter and report whether this caller must send the downlink.
+
+        Returns ``(future, is_leader, active_request_id)``. ``is_leader`` is
+        ``True`` only for the first caller for ``(kind, target_id)`` with no
+        pull in flight — that caller sends the daemon ``MSG_DETAIL_REQUEST``
+        under *request_id*. A follower parks a waiter under the LEADER's already
+        in-flight ``request_id`` (returned as *active_request_id*) so the single
+        DETAIL_DATA reply resolves leader and followers together.
+        """
+        key = (kind, target_id)
+        active = self._inflight.get(key)
+        if active is None:
+            self._inflight[key] = request_id
+            active = request_id
+            is_leader = True
+        else:
+            is_leader = False
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiters.setdefault(active, []).append(fut)
+        return fut, is_leader, active
+
+    def resolve(self, request_id: str, data: Any) -> None:
+        """Resolve every waiter parked under *request_id* with *data*."""
+        for fut in self._waiters.pop(request_id, []):
+            if not fut.done():
+                fut.set_result(data)
+        # The pull for whatever (kind, target_id) this request_id led is done;
+        # let a later open start a fresh one.
+        self._inflight = {
+            key: rid for key, rid in self._inflight.items() if rid != request_id
+        }
+
+    def discard(self, request_id: str, fut: "asyncio.Future") -> None:
+        """Drop a single waiter (e.g. after a timeout) without resolving it."""
+        waiters = self._waiters.get(request_id)
+        if waiters and fut in waiters:
+            waiters.remove(fut)
+        if not self._waiters.get(request_id):
+            self._waiters.pop(request_id, None)
+            # No waiter left for this leader's pull — clear its in-flight marker
+            # so the next opener leads a fresh DETAIL_REQUEST rather than joining
+            # an abandoned one.
+            self._inflight = {
+                key: rid
+                for key, rid in self._inflight.items()
+                if rid != request_id
+            }
+
+
 async def broadcast_index_refresh(
     manager: ConnectionManager,
     registry: "IndexRefreshRegistry",
@@ -428,6 +513,30 @@ async def request_history(
             target_machine, connection, message
         )
     return await manager.send_to(target_machine, message)
+
+
+async def request_detail(
+    manager: ConnectionManager,
+    machine_id: str,
+    kind: str,
+    target_id: str,
+    request_id: str,
+    *,
+    project_root: str = "",
+) -> bool:
+    """Send a ``MSG_DETAIL_REQUEST`` to *machine_id* for one issue / call's full text.
+
+    Returns ``False`` when the machine has no live connection (the REST handler
+    maps that to a 503). *request_id* correlates the eventual
+    ``MSG_DETAIL_DATA`` back to the waiting request via
+    :class:`DetailRequestRegistry`.
+    """
+    if not manager.is_connected(machine_id):
+        return False
+    message = protocol.make_detail_request(
+        kind, target_id, project_root=project_root, request_id=request_id
+    )
+    return await manager.send_to(machine_id, message)
 
 
 class InterjectionEventTracker:
@@ -587,10 +696,14 @@ class UiHub:
     unfiltered stream, exactly as before multi-tenancy existed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, metrics: Optional[WireMetrics] = None) -> None:
         # websocket -> owner_id (None == unscoped/admin view)
         self._clients: Dict[Any, Optional[str]] = {}
         self._lock = asyncio.Lock()
+        # Per-frame-type sent-byte accounting for the server→browser leg,
+        # recorded under a ``ui:<type>`` key so the /ws/ui fan-out shows up
+        # distinctly from the server→daemon downlink in the metrics snapshot.
+        self._metrics = metrics
 
     async def register(self, websocket: Any, owner: Optional[str] = None) -> None:
         async with self._lock:
@@ -606,6 +719,17 @@ class UiHub:
     def client_count(self) -> int:
         """Number of currently-connected frontend clients."""
         return len(self._clients)
+
+    def record_send(self, ptype: str, nbytes: int) -> None:
+        """Attribute *nbytes* of a direct (non-fan-out) /ws/ui send by frame type.
+
+        The per-connection initial ``snapshot`` is sent straight down the new
+        socket rather than through :meth:`_fan_out`, so it bypasses the fan-out
+        accounting; this passthrough keeps that (potentially large) first frame
+        visible in the same ``ui:<type>`` breakdown.
+        """
+        if self._metrics is not None:
+            self._metrics.record(f"ui:{ptype or 'unknown'}", nbytes)
 
     def distinct_owners(self) -> set:
         """The set of distinct owners currently connected (may include ``None``).
@@ -676,10 +800,12 @@ class UiHub:
 
         dead = []
         for client, payload in targets:
+            text = json.dumps(payload, ensure_ascii=False, default=str)
             try:
-                await client.send_text(
-                    json.dumps(payload, ensure_ascii=False, default=str)
-                )
+                await client.send_text(text)
+                if self._metrics is not None:
+                    ptype = payload.get("type") if isinstance(payload, dict) else ""
+                    self._metrics.record(f"ui:{ptype or 'unknown'}", len(text))
             except Exception:  # pragma: no cover - best effort
                 dead.append(client)
         if dead:
@@ -712,6 +838,49 @@ async def _push_history_index(hub: Optional["UiHub"], state: ServerState) -> Non
         sessions = await state.get_history_index(owner=owner)
         payload_by_owner[owner] = {"type": "history_index", "sessions": sessions}
     await hub.broadcast_scoped(payload_by_owner)
+
+
+async def _push_history_index_delta(
+    hub: Optional["UiHub"],
+    state: ServerState,
+    machine_id: str,
+    upserts: list,
+    removed: list,
+) -> None:
+    """Broadcast an incremental history-index update to *machine_id*'s owner.
+
+    Instead of re-fanning the whole aggregated index to every ``/ws/ui`` client
+    on any active flow's ``updated_at`` tick (which scales with the *total* flow
+    count), relay only the changed SessionMeta rows the daemon reported. Each
+    upsert is annotated with its owning ``machine_id`` so the frontend can merge
+    the aggregated index by ``flow_id`` exactly as the full index push does. The
+    delta belongs to the reporting machine, so it is visible only to that
+    machine's owner (plus the admin view) — never another owner's console. A
+    frontend that predates this frame ignores the unknown ``type`` and instead
+    picks the change up on its next full ``GET /api/history`` refresh, so the
+    delta broadcast is backward compatible.
+    """
+    if hub is None or hub.client_count == 0:
+        return
+    if not upserts and not removed:
+        return
+    owner = await state.get_machine_owner(machine_id)
+    annotated = []
+    for row in upserts or []:
+        if not isinstance(row, dict):
+            continue
+        entry = dict(row)
+        entry.setdefault("machine_id", machine_id)
+        annotated.append(entry)
+    await hub.broadcast_owned(
+        {
+            "type": "history_index_delta",
+            "machine_id": machine_id,
+            "upserts": annotated,
+            "removed": [str(r) for r in (removed or [])],
+        },
+        owner,
+    )
 
 
 async def _push_history_data(
@@ -798,13 +967,13 @@ async def handle_ui_connection(
     await hub.register(websocket, owner)
     try:
         machines = await state.get_machines_full(owner=owner)
-        await websocket.send_text(
-            __import__("json").dumps(
-                {"type": "snapshot", "machines": machines},
-                ensure_ascii=False,
-                default=str,
-            )
+        snapshot_text = __import__("json").dumps(
+            {"type": "snapshot", "machines": machines},
+            ensure_ascii=False,
+            default=str,
         )
+        await websocket.send_text(snapshot_text)
+        hub.record_send("snapshot", len(snapshot_text))
         while True:
             # The frontend only listens; reading drives disconnect detection.
             await websocket.receive_text()
@@ -824,6 +993,7 @@ async def handle_daemon_connection(
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     identity: Optional["IdentityService"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
+    detail_registry: Optional["DetailRequestRegistry"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -921,6 +1091,7 @@ async def handle_daemon_connection(
             index_registry,
             interjection_tracker,
             issue_registry,
+            detail_registry,
         )
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
@@ -947,6 +1118,7 @@ async def _serve_loop(
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
+    detail_registry: Optional["DetailRequestRegistry"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -969,6 +1141,7 @@ async def _serve_loop(
                 index_registry,
                 interjection_tracker,
                 issue_registry,
+                detail_registry,
                 manager=manager,
                 connection=websocket,
             )
@@ -1015,6 +1188,7 @@ async def _handle_message(
     index_registry: Optional["IndexRefreshRegistry"] = None,
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
+    detail_registry: Optional["DetailRequestRegistry"] = None,
     *,
     manager: Optional["ConnectionManager"] = None,
     connection: Any = None,
@@ -1048,6 +1222,15 @@ async def _handle_message(
                         await hub.broadcast_owned(event, owner)
     elif message.type == protocol.MSG_PONG:
         await state.touch(machine_id)
+    elif message.type == protocol.MSG_KEEPALIVE:
+        # A keepalive stands in for a periodic STATUS_UPDATE when the daemon's
+        # aggregated snapshot signature is unchanged: nothing changed, so there
+        # is nothing to re-cache and nothing to re-broadcast to browsers. It
+        # carries the same liveness meaning as a STATUS_UPDATE — refresh the
+        # machine's last-seen so offline detection stays identical — but MUST
+        # NOT trigger a full ``_push_state`` fan-out (that would defeat the whole
+        # point of sending a keepalive instead of the ~573 KB snapshot).
+        await state.touch(machine_id)
     elif message.type == protocol.MSG_CALL_NOTIFICATION:
         # A pending call is also surfaced by the next STATUS_UPDATE; the
         # notification just refreshes liveness so the UI reacts promptly.
@@ -1065,6 +1248,29 @@ async def _handle_message(
         # session list was malformed — the daemon answered.
         if index_registry is not None:
             index_registry.resolve(machine_id)
+    elif message.type == protocol.MSG_HISTORY_INDEX_DELTA:
+        # Incremental index update: merge only the changed SessionMeta rows into
+        # the in-memory full index, then relay the SAME delta (not the whole
+        # aggregated index) to this owner's /ws/ui clients. This keeps index
+        # traffic scaling with the number of *changed* flows on both the
+        # daemon→server and server→browser legs. A delta is NOT a forced re-push,
+        # so it does not resolve an IndexRefreshRegistry waiter (those await the
+        # full MSG_HISTORY_INDEX a HISTORY_INDEX_REQUEST triggers).
+        upserts = message.payload.get("upserts") or []
+        removed = message.payload.get("removed") or []
+        if isinstance(upserts, list) and isinstance(removed, list):
+            await state.merge_history_index_delta(machine_id, upserts, removed)
+            await _push_history_index_delta(
+                hub, state, machine_id, upserts, removed
+            )
+    elif message.type == protocol.MSG_DETAIL_DATA:
+        # On-demand issue/call full-text reply. Resolve the parked REST waiter so
+        # the /api/issues/{id}/detail (or /api/calls/{id}/detail) handler that
+        # dispatched the MSG_DETAIL_REQUEST can return the untruncated content.
+        await state.touch(machine_id)
+        request_id = str(message.payload.get("request_id") or "")
+        if request_id and detail_registry is not None:
+            detail_registry.resolve(request_id, message.payload)
     elif message.type == protocol.MSG_HISTORY_DATA:
         # History records — either an on-demand pull's reply or an active
         # flow's incremental append. Cache them, resolve any waiting REST
