@@ -49,7 +49,15 @@ class TestLoadClaudeCommands:
     """Test loading and sorting claude commands."""
 
     def test_default_when_no_config(self, tmp_path):
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        # The built-in fallback chain is probed against PATH; pin which() to
+        # claude only so the result does not vary with the host's agents.
+        which_claude_only = patch(
+            "se3.config.shutil.which",
+            side_effect=lambda cmd, *a, **k: (
+                "/fake/bin/claude" if cmd == "claude" else None
+            ),
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path), which_claude_only:
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"
@@ -110,6 +118,21 @@ class TestLoadClaudeCommands:
             commands = load_claude_commands(None)
         assert commands[0]["cmd"] == "global-only"
 
+    def test_explicit_codex_default_is_never_dropped(self, tmp_path):
+        # An agent the user named explicitly must survive the legacy
+        # conversion verbatim: silently swallowing it would hide a config
+        # error behind a different agent doing the work.
+        (tmp_path / "se3.yaml").write_text(
+            "agents:\n"
+            "  my-codex:\n"
+            "    type: codex\n"
+            "    cmd: codex\n"
+            "llm_caller:\n  defaults:\n    - my-codex\n"
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            commands = load_claude_commands(tmp_path)
+        assert commands == [{"cmd": "codex", "priority": 0}]
+
 
 # =============================================================================
 # ClaudeCodeRunner identity & alias
@@ -137,7 +160,15 @@ class TestClaudeCodeRunnerIdentity:
         assert runner.command["cmd"] == "first"
 
     def test_construct_with_no_args_loads_default(self, tmp_path):
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        # Pin which(): the built-in chain is PATH-probed, and on a host with
+        # no built-in agent installed it fails loud rather than yielding claude.
+        which_claude_only = patch(
+            "se3.config.shutil.which",
+            side_effect=lambda cmd, *a, **k: (
+                "/fake/bin/claude" if cmd == "claude" else None
+            ),
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path), which_claude_only:
             runner = ClaudeCodeRunner(project_root=tmp_path)
         assert runner.command["cmd"] == "claude"
 

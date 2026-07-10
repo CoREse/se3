@@ -1,0 +1,17 @@
+{
+  "flow_id": "20260710-101503_f0285271",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] se3/code-index.md\n- [modified] se3/issues/.next_id\n- [modified] se3/issues/open/276_pre-existing-test-failures-1.yaml\n- [modified] src/se3/config.py\n- [modified] tests/engine/steps/test_version_analyze_session_commits.py\n- [modified] tests/engine/test_llm_caller_step_override.py\n- [modified] tests/test_agent_config.py\n- [modified] tests/test_agent_registry.py\n- [modified] tests/test_builtin_default_chain.py\n- [modified] tests/test_claude_runner.py\n- [modified] tests/test_plan_confirm_always_on.py\n\n### Implementation Groups:\n- config.py：built-in 候选表 + shutil.which 探测 + fail-loud: 在 src/se3/config.py 中新增 shutil import，把 _BUILTIN_DEFAULT_AGENT_NAME 常量替换为有序候选表 _BUILTIN_DEFAULT_AGENTS，新增 _builtin_default_chain() helper 完成 PATH 探测与全不可用时的 fail-loud，并把 _default_chain_from_data 第 ④ 档改为调用该 helper。①/②/③ 档、LLMCaller 轮换、AgentRunner 适配器一律不动。\n- 测试：探测排列组合覆盖 + 既有测试适配: 新建 tests/test_builtin_default_chain.py 覆盖四种 PATH 可用性排列与『显式 defaults 不受探测影响』的边界断言；同时修复两个因常量删除 / 链长度变化而必然打破的既有测试，并顺手把它们从隐性依赖宿主 PATH 改造为 mock 确定化。\n\n## Spec Changes\n\nNo spec changes recorded.\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Fix the built-in default agent chain so se3 works out of the box without `claude` installed",
+    "Probe PATH for each supported built-in agent (`claude`, then `codex`) and build the default chain from those actually available, preserving that order",
+    "Raise a clear error listing every supported built-in agent and its command name when none of them are found on PATH, instead of failing obscurely",
+    "Keep explicitly configured agents fail-loud: PATH probing applies only to the built-in fallback, never to `llm_caller.defaults` or migrated `claude_commands`",
+    "Leave LLMCaller runtime failure rotation unchanged — probing only decides the chain's initial members",
+    "Add tests covering every PATH-availability combination for the built-in chain and asserting explicit config is unaffected by probing"
+  ],
+  "bump_type": "patch",
+  "pre_session_baseline": "11.15.3",
+  "provisional_suggested_version": "11.15.4",
+  "consumed": false,
+  "consumed_by": null
+}

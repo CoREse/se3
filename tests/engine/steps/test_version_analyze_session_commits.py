@@ -529,6 +529,11 @@ class TestEndToEndDoubleBumpReplay:
         # history to grep); without this the guard would treat the flow's own
         # in-session bump as indistinguishable-from-concurrent drift and, on a
         # re-analysis that returns the same 5.2.0, halt to avoid a collision.
+        # ``create_annotated_version_tag`` shells out to git through its own
+        # module, so mocking ``commit.subprocess`` does not reach it and it
+        # would hit the non-repo tmp_path. A minor bump makes version_analyze
+        # emit is_tag=True, so commit does attempt the tag; stub it out because
+        # tagging is not what this replay test is asserting.
         with patch("se3.engine.steps.commit._has_changes", return_value=True), \
              patch("se3.engine.steps.commit._load_version_config") as mock_load_cfg, \
              patch("se3.engine.steps.commit._read_head_commit", return_value=("ffffffff", "")), \

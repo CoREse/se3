@@ -85,10 +85,16 @@ class TestStepOverrideChain:
             tmp_path, "implement",
             "      - override-a\n",
         )
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        which_claude_only = patch(
+            "se3.config.shutil.which",
+            side_effect=lambda cmd, *a, **k: (
+                "/fake/bin/claude" if cmd == "claude" else None
+            ),
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path), which_claude_only:
             # Running the 'plan' step — no override declared — gets the
-            # default chain (single default claude when nothing else is
-            # configured globally).
+            # built-in default chain. which() is pinned to claude only so the
+            # chain does not vary with the host's installed agents.
             caller = LLMCaller(project_root=tmp_path, step_type="plan")
 
         assert len(caller._agents) == 1

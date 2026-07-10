@@ -28,7 +28,6 @@ from se3.config import (
     load_agent_registry,
     load_agents,
     _slugify_cmd,
-    _BUILTIN_DEFAULT_AGENT_NAME,
 )
 
 
@@ -108,10 +107,15 @@ class TestDictForm:
         with _no_global(tmp_path):
             registry = load_agent_registry(tmp_path)
         assert registry == {}
-        # load_agents falls back to built-in.
-        with _no_global(tmp_path):
+        # load_agents falls back to the probed built-in chain. Pin which()
+        # so the result does not depend on the host's installed agents.
+        which_claude_only = patch(
+            "se3.config.shutil.which",
+            side_effect=lambda cmd, *a, **k: "/fake/bin/claude" if cmd == "claude" else None,
+        )
+        with _no_global(tmp_path), which_claude_only:
             chain = load_agents(tmp_path)
-        assert [a["name"] for a in chain] == [_BUILTIN_DEFAULT_AGENT_NAME]
+        assert [a["name"] for a in chain] == ["claude"]
 
 
 class TestEntryLevelMerge:
