@@ -266,6 +266,35 @@ def test_legacy_peer_always_gets_full_index_not_delta():
     assert _frames(ws, protocol.MSG_HISTORY_INDEX_DELTA) == []
 
 
+def test_index_push_frames_are_metered_by_type():
+    """Every index frame that leaves the socket is counted in ``metrics`` by type.
+
+    The per-type wire accounting is the verification handle for the whole
+    traffic-reduction pass: a full baseline and an incremental delta must land
+    under distinct message-type keys so "where are the bytes going?" is
+    answerable at runtime.
+    """
+    provider = _IndexProvider()
+    provider.metas = [_meta("f1"), _meta("f2")]
+    client = _make_client(provider)
+    ws = _FakeWS()
+
+    asyncio.run(client._push_history(ws, force_index=True))  # full baseline
+    provider.metas = [_meta("f1", status="done"), _meta("f2")]
+    asyncio.run(client._push_history(ws))  # delta
+
+    snap = client.metrics.snapshot()
+    assert snap[protocol.MSG_HISTORY_INDEX]["count"] == 1
+    assert snap[protocol.MSG_HISTORY_INDEX_DELTA]["count"] == 1
+    assert snap[protocol.MSG_HISTORY_INDEX]["bytes"] > 0
+    assert snap[protocol.MSG_HISTORY_INDEX_DELTA]["bytes"] > 0
+    # The single-flow delta is smaller than the two-flow full baseline it replaces.
+    assert (
+        snap[protocol.MSG_HISTORY_INDEX_DELTA]["bytes"]
+        < snap[protocol.MSG_HISTORY_INDEX]["bytes"]
+    )
+
+
 def test_active_flow_cursor_push_coexists_with_index_delta():
     provider = _IndexProvider()
     provider.metas = [_meta("f1")]
