@@ -1,5 +1,12 @@
 # SE3 Framework Version History
 
+## 11.17.1 - 2026-07-10
+
+- Fix WebUI self_check report cards rendering a green `✓ PASSED` badge while simultaneously listing issues below it
+- Derive the self_check issue count from `outputs.issues` when `actionable_count` is absent, instead of silently defaulting to zero
+- Use the neutral wording `✗ N issue(s)` on the derived path, since inline assistant-message issues are the LLM's raw unvalidated list rather than the filtered actionable set
+- Preserve existing behavior when `actionable_count` is present, including the `✗ N actionable issue(s)` label and the precedence of the `✗ FAILED` status branch
+- Add front-end regression tests for `renderSelfCheckReport` covering all status-badge branches, wired into the Python test suite via a pytest bridge
 ## 11.17.0 - 2026-07-10
 
 - Add a deterministic conflict-resolver framework that mechanically resolves and stages matched conflict files before any LLM call, so merges no longer depend on an agent for machine-resolvable paths

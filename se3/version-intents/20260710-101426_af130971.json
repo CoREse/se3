@@ -9,8 +9,9 @@
     "Add front-end regression tests for `renderSelfCheckReport` covering all status-badge branches, wired into the Python test suite via a pytest bridge"
   ],
   "bump_type": "patch",
+  "is_tag": null,
   "pre_session_baseline": "11.15.3",
   "provisional_suggested_version": "11.15.4",
-  "consumed": false,
+  "consumed": true,
   "consumed_by": null
 }
