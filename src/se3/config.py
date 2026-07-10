@@ -3,6 +3,7 @@
 import functools
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -1040,8 +1041,6 @@ def insert_confirmation_steps(
 
 _GLOBAL_CONFIG_PATH_SUFFIX = (".se3", "config.yaml")
 
-_BUILTIN_DEFAULT_AGENT_NAME = "claude"
-
 
 @dataclass
 class AgentDef:
@@ -1064,6 +1063,68 @@ class AgentDef:
             "cmd": self.cmd,
             "priority": self.priority,
         }
+
+
+# The agents se3 is willing to pick up on its own when the user has
+# configured nothing at all. Written order is chain order. Reuses AgentDef
+# (rather than a bare tuple) so the table and the registry speak the same
+# shape; it therefore has to sit below the dataclass. The ``priority``
+# defaults here are inert — _builtin_default_chain renumbers survivors.
+#
+# ``claude-interactive`` is deliberately absent: the PTY variant needs a
+# terminal and pexpect, so it is opt-in only and must never be auto-selected.
+_BUILTIN_DEFAULT_AGENTS: tuple[AgentDef, ...] = (
+    AgentDef(name="claude", type="claude-code", cmd="claude"),
+    AgentDef(name="codex", type="codex", cmd="codex"),
+)
+
+# Agent types whose ``cmd`` is the Claude CLI, i.e. the only ones that can be
+# handed to a consumer which builds Claude-specific argv (``-p``,
+# ``--output-format stream-json``, ``--setting-sources``).
+_CLAUDE_CLI_AGENT_TYPES = frozenset({"claude-code", "claude-interactive"})
+
+
+def _builtin_default_chain() -> list[dict]:
+    """Probe PATH for the built-in candidates; return the available ones.
+
+    Probing exists because a built-in chain is a *guess* made in the
+    absence of user intent, so it should match the machine it runs on.
+    ``shutil.which`` is used rather than a trial ``--version`` run: it
+    applies exactly the PATH resolution a later ``subprocess`` spawn will,
+    with no fork cost on the config-parsing hot path. Runtime failures of a
+    probed-OK agent (quota exhausted, expired login) remain LLMCaller's
+    rotation problem, not ours.
+
+    Results are intentionally not cached, so installing an agent takes
+    effect without restarting.
+
+    Raises ``ValueError`` when no candidate is on PATH.
+    """
+    chain: list[dict] = []
+    for candidate in _BUILTIN_DEFAULT_AGENTS:
+        if shutil.which(candidate.cmd) is None:
+            continue
+        # Renumber survivors from 0 so a chain of only the second candidate
+        # still starts at priority 0, matching the dense sequence the
+        # explicit-defaults paths produce via _registry_to_list.
+        agent = AgentDef(
+            name=candidate.name,
+            type=candidate.type,
+            cmd=candidate.cmd,
+            priority=len(chain),
+        )
+        chain.append(agent.to_agent_dict())
+    if chain:
+        return chain
+
+    supported = ", ".join(
+        f"{c.name} (command: {c.cmd})" for c in _BUILTIN_DEFAULT_AGENTS
+    )
+    raise ValueError(
+        "no built-in agent is available on PATH. Supported built-in agents: "
+        f"{supported}. Install one of them, or name an agent explicitly via "
+        "'llm_caller.defaults' in se3.yaml or ~/.se3/config.yaml."
+    )
 
 
 def _read_yaml(path: Path) -> Optional[dict]:
@@ -1477,19 +1538,16 @@ def _explicit_defaults(
     return names if names else None
 
 
-def _default_chain_from_data(
+def _default_chain_with_origin(
     global_data: dict, project_data: dict,
     project_source_label: str = PROJECT_CONFIG_FILENAME,
-) -> list[dict]:
-    """Build the default agent chain from already-parsed YAML data.
+) -> tuple[list[dict], bool]:
+    """Build the default agent chain, reporting whether it is the built-in one.
 
-    Priority (first non-empty wins):
-      1. ``project.llm_caller.defaults`` (explicit, name list)
-      2. ``global.llm_caller.defaults`` (explicit, name list)
-      3. Implicit defaults from legacy ``claude_commands`` (project > global)
-      4. Built-in ``[claude]``.
-
-    Unknown names at the selected level raise ``ValueError``.
+    The boolean exists for legacy Claude-only consumers: a chain the user
+    named (levels 1-3) must reach them verbatim, while the built-in chain
+    is only se3's own guess and may be narrowed to what the consumer can
+    actually run. See :func:`load_claude_commands`.
     """
     registry, legacy_defaults = _agent_registry_from_data(
         global_data, project_data, project_source_label,
@@ -1500,28 +1558,45 @@ def _default_chain_from_data(
     if project_names is not None:
         return _resolve_name_list(
             f"{project_source_label}: llm_caller.defaults", project_names, registry,
-        )
+        ), False
     global_names = _explicit_defaults(global_data, "~/.se3/config.yaml")
     if global_names is not None:
         return _resolve_name_list(
             "~/.se3/config.yaml: llm_caller.defaults", global_names, registry,
-        )
+        ), False
 
     # 3: implicit from legacy claude_commands.
     if legacy_defaults:
         return _resolve_name_list(
             "legacy claude_commands migration", legacy_defaults, registry,
-        )
+        ), False
 
     # 4: built-in.
-    return [
-        {
-            "name": _BUILTIN_DEFAULT_AGENT_NAME,
-            "type": "claude-code",
-            "cmd": _BUILTIN_DEFAULT_AGENT_NAME,
-            "priority": 0,
-        }
-    ]
+    return _builtin_default_chain(), True
+
+
+def _default_chain_from_data(
+    global_data: dict, project_data: dict,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
+) -> list[dict]:
+    """Build the default agent chain from already-parsed YAML data.
+
+    Priority (first non-empty wins):
+      1. ``project.llm_caller.defaults`` (explicit, name list)
+      2. ``global.llm_caller.defaults`` (explicit, name list)
+      3. Implicit defaults from legacy ``claude_commands`` (project > global)
+      4. Built-in candidates probed against PATH, in declared order; all
+         available ones form the chain. ``ValueError`` if none is available.
+
+    Levels 1-3 name agents explicitly and are never filtered by
+    availability — an unusable agent there is a config error the user must
+    see, not something to silently skip. Unknown names at the selected
+    level raise ``ValueError``.
+    """
+    chain, _from_builtin = _default_chain_with_origin(
+        global_data, project_data, project_source_label,
+    )
+    return chain
 
 
 def _valid_step_keys() -> set[str]:
@@ -2118,14 +2193,42 @@ def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
     Returns:
         List of command dictionaries with 'cmd' and 'priority' keys, in the
         configured chain order ('priority' is deprecated and not used for
-        ordering).
+        ordering). May be empty when the chain holds no Claude CLI agent;
+        callers already treat that as "no configured command".
     """
-    agents = load_agents(project_root)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    agents, from_builtin = _default_chain_with_origin(
+        global_data, project_data, project_source_label,
+    )
+    if from_builtin:
+        # The built-in chain may contain non-Claude agents (e.g. codex when
+        # claude is absent from PATH). Callers of this legacy API wrap the
+        # returned cmd in Claude CLI flags, so handing them codex would spawn
+        # the wrong binary with flags it does not understand. Nothing was
+        # named by the user here, so narrowing is safe; the explicit tiers
+        # are passed through verbatim so a real config error stays visible.
+        claude_agents = [
+            a for a in agents if a.get("type") in _CLAUDE_CLI_AGENT_TYPES
+        ]
+        if not claude_agents:
+            logger.warning(
+                "no Claude CLI agent is available on PATH; the built-in "
+                "chain resolved to %s, which cannot serve a Claude-only "
+                "caller",
+                [a.get("name") for a in agents],
+            )
+        agents = claude_agents
     return _agents_to_commands(agents)
 
 
 def _agents_to_commands(agents: list[dict]) -> list[dict]:
-    """Convert agent dicts back to legacy command dicts."""
+    """Convert agent dicts back to legacy command dicts.
+
+    Type-agnostic on purpose. Filtering by ``type`` here would silently
+    drop an agent the user named in ``llm_caller.defaults`` — the exact
+    failure mode the explicit tiers exist to prevent. The legacy shape
+    carries no type, so callers get whatever ``cmd`` the chain resolved to.
+    """
     return [
         {"cmd": a.get("cmd", "claude"), "priority": a.get("priority", 0)}
         for a in agents

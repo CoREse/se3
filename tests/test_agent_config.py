@@ -15,6 +15,20 @@ import se3.config as _cfg
 from se3.config import load_agents, load_claude_commands
 
 
+def _which_claude_only():
+    """Pin PATH probing so the built-in chain is deterministically [claude].
+
+    The built-in fallback probes each candidate command with shutil.which;
+    without this, results would vary with the host's installed agents.
+    """
+    return patch(
+        "se3.config.shutil.which",
+        side_effect=lambda cmd, *a, **k: (
+            "/fake/bin/claude" if cmd == "claude" else None
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_module_caches():
     _cfg._warned_unknown_step_keys_for.clear()
@@ -36,8 +50,8 @@ class TestLoadAgents:
     """Test load_agents() function."""
 
     def test_default_when_no_config(self, tmp_path):
-        """Should return built-in default agent when no config exists."""
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        """Should return the available built-in agents when no config exists."""
+        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
             agents = load_agents(tmp_path)
         assert len(agents) == 1
         assert agents[0]["name"] == "claude"
@@ -235,15 +249,21 @@ llm_caller:
         assert agents[0]["cmd"] == "global-claude"
 
     def test_registry_without_defaults_uses_built_in(self, tmp_path):
-        """A registry with no explicit defaults falls back to built-in claude."""
+        """A registry with no explicit defaults falls back to built-ins.
+
+        The built-in chain is probed against PATH, so which() is pinned to
+        expose only claude — otherwise the result would vary with whatever
+        agents the host running the suite has installed.
+        """
         (tmp_path / "se3.yaml").write_text("""agents:
   extra: {cmd: extra-claude}
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
             agents = load_agents(tmp_path)
 
         # Without explicit llm_caller.defaults and without legacy
-        # claude_commands, we fall back to the built-in claude chain.
+        # claude_commands, we fall back to the built-in candidates that are
+        # actually available on PATH.
         assert len(agents) == 1
         assert agents[0]["name"] == "claude"
         assert agents[0]["cmd"] == "claude"
@@ -285,7 +305,7 @@ llm_caller:
 
     def test_default_still_works(self, tmp_path):
         """Default behavior unchanged."""
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"

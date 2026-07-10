@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -125,10 +126,18 @@ class TestResolvePlanInputs:
     ):
         # No se3.yaml → plan must resolve to the default LLM chain, NOT None
         # (which would trip state_machine's human fallback).
-        resolved = resolve_confirm_inputs(tmp_path, "plan")
+        #
+        # The builtin chain probes PATH, so pin which commands resolve; without
+        # this the assertion would silently track whichever agents happen to be
+        # installed on the host.
+        with patch(
+            "se3.config.shutil.which",
+            side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
+        ):
+            resolved = resolve_confirm_inputs(tmp_path, "plan")
         assert resolved is not None
         assert resolved["reviewer"] is None
-        # default chain resolves to the builtin claude agent
+        # only claude is on PATH, so the builtin chain narrows to it
         assert resolved["agents"] == [
             {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}
         ]
