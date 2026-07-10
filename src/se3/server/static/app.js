@@ -50,6 +50,14 @@ const state = {
   // WS push replaces the cached bundle (the old token no longer pins it).
   // Kept independent from `historyProgress` so the two views never cross-feed.
   flowConversationProgress: null,
+  // Bundle content signature (a short version/hash) accompanying the last REST
+  // snapshot for the running-flow view. Echoed as `?sig=` alongside the progress
+  // token so the periodic self-heal / reconnect pull can be answered with an
+  // extra-small `delivery:"not_modified"` reply when the client is provably in
+  // sync — the G5 traffic-reduction win that turns "search the whole 17MB bundle
+  // every 3s" into "compare a signature". null = none held → the next pull omits
+  // `sig` and can only get delta/full. Reset wherever the progress token is.
+  flowConversationSignature: null,
   // Monotonic view-local epoch used to invalidate an in-flight REST snapshot
   // when a WS `mode: full` push replaces the authoritative bundle.
   flowConversationEpoch: 0,
@@ -172,6 +180,12 @@ const state = {
   // history detail and the running-flow view keep independent progress even
   // when both have the same flow open.
   historyProgress: null,
+  // Bundle content signature for the history-detail view's last REST snapshot —
+  // the history-view counterpart of `flowConversationSignature`. Echoed as
+  // `?sig=` on a reconnect re-fetch so an unchanged session can be answered
+  // `delivery:"not_modified"` instead of re-sending its whole bundle. Reset
+  // wherever `historyProgress` is.
+  historySignature: null,
   // History-detail counterpart of `flowConversationEpoch`.
   historyEpoch: 0,
   // project_root key of the currently-selected History tab; null lets
@@ -904,6 +918,14 @@ function connect() {
       applyMachines(msg.machines);
     } else if (msg.type === "history_index" && Array.isArray(msg.sessions)) {
       applyHistoryIndex(msg.sessions);
+    } else if (
+      msg.type === "history_index_delta" &&
+      (Array.isArray(msg.upserts) || Array.isArray(msg.removed))
+    ) {
+      // G5 differential index: only the SessionMeta rows that changed, merged
+      // by flow_id into the local aggregated index instead of re-fanning the
+      // whole index on any active flow's updated_at tick.
+      applyHistoryIndexDelta(msg.upserts, msg.removed);
     } else if (msg.type === "history_data" && msg.flow_id) {
       applyHistoryData(msg);
     } else if (msg.type === "interjection_event" && msg.call_id && msg.phase) {
@@ -1680,6 +1702,9 @@ function openFlowView(flowId) {
   // A different flow is opening: drop any progress token held for the prior
   // flow so its delta cursor can never be echoed against this flow's bundle.
   state.flowConversationProgress = null;
+  // ...and the bundle signature it was paired with, so the first self-heal for
+  // this flow can never send a prior flow's signature.
+  state.flowConversationSignature = null;
   // A freshly-opened flow forces a scroll to the bottom, so it starts as a
   // bottom-follower; a stale "scrolled up" intent from the prior flow must not
   // make this flow's first silent rebuild anchor an old tail (issue #260).
@@ -1776,6 +1801,7 @@ function doCloseFlowView() {
   state.flowMachineId = null;
   state.flowConversationRecords = [];
   state.flowConversationProgress = null;
+  state.flowConversationSignature = null;
   // Clear the progression baseline so a later openFlowView starts fresh.
   state.flowProgressionMarker = null;
   // Cancel any pending grace timer so a closed flow never fires a fallback
@@ -2022,15 +2048,17 @@ async function loadFlowConversation(flowId, opts) {
     container.__convState = null;
     container.appendChild(el("p", "empty", "Loading conversation…"));
   } else if (silent) {
-    // SILENT full rebuild: no destructive pre-clear and no placeholder, so the
-    // user sees no blank flash — the existing DOM stays put until the new data
-    // arrives and replaces it in one synchronous render below. Reset only the
-    // held progress token (a stale `mode: full` reload no longer pins a bundle);
-    // the fresh token is written back from the response. The records array and
-    // `__convState` are NOT emptied here — the `delivery: "full"` merge below
-    // discards the baseline and the append=false render rebuilds `__convState`,
-    // so any live append that lands during the await is still preserved.
-    state.flowConversationProgress = null;
+    // SILENT signature-check refresh (G5): no destructive pre-clear and no
+    // placeholder, so the user sees no blank flash — the existing DOM stays put
+    // until the response is folded in below. Unlike the old behaviour this path
+    // NO LONGER drops the held progress token / signature: it now ECHOES them
+    // (see the request below) so an unchanged bundle is answered with an
+    // extra-small `not_modified` (the common idle case) or a `delta` tail
+    // instead of re-shipping the whole 17MB bundle every 3s. A `delivery:"full"`
+    // is served only on a real divergence (token/signature stale), which then
+    // rebuilds the whole tree exactly as an exit/re-enter would — the #209
+    // freeze defence is preserved, only the per-poll cost is cut from "search
+    // the whole bundle" to "compare a signature". Nothing is reset here.
   }
   let requestEpoch = state.flowConversationEpoch;
   // Capture the records that belong to the snapshot generation represented by
@@ -2048,8 +2076,15 @@ async function loadFlowConversation(flowId, opts) {
     // a cleared/replaced bundle.
     const heldProgress = state.flowConversationRecords.length
       ? state.flowConversationProgress : null;
-    const url = incremental
-      ? historySnapshotUrl(flowId, heldProgress)
+    // The signature only travels with a live token (see historySnapshotUrl); an
+    // empty held set forced heldProgress to null above, so it is dropped too.
+    const heldSignature = heldProgress ? state.flowConversationSignature : null;
+    // A reconnect (incremental) AND the periodic self-heal (silent) both echo the
+    // held token + signature so the server can answer not_modified/delta instead
+    // of a full bundle. Only a first-open (neither flag) sends the bare no-token
+    // URL that forces a `delivery:"full"`.
+    const url = (incremental || silent)
+      ? historySnapshotUrl(flowId, heldProgress, heldSignature)
       : `/api/history/${encodeURIComponent(flowId)}`;
     const resp = await authedFetch(url);
     // The user may have opened another flow while this was in flight.
@@ -2117,9 +2152,17 @@ async function loadFlowConversation(flowId, opts) {
       requestRecords,
     );
     state.flowConversationProgress = result.progress;
+    // Refresh the held bundle signature so the next self-heal poll echoes the
+    // current generation. Guarded on a present value so a legacy / test response
+    // that omits `signature` does not clobber a good held signature to null.
+    if (result.signature != null) {
+      state.flowConversationSignature = result.signature;
+    }
     if (result.render === "noop") {
-      // Incremental delivery that, after dedup, added nothing new (e.g. the WS
-      // append for the same batch beat this fetch in). Nothing to repaint.
+      // Nothing to repaint: a `not_modified` reply (the client was provably in
+      // sync — the common idle self-heal case) or an incremental delivery that,
+      // after dedup, added nothing new (the WS append for the same batch beat
+      // this fetch in).
       return;
     }
     // Reconcile after the merge: if the response already holds the daemon's
@@ -2144,12 +2187,13 @@ async function loadFlowConversation(flowId, opts) {
     // Delta delivery → incremental append render (preserves DOM/fold state);
     // full fallback, or any echo removal, → authoritative full rebuild.
     const appendRender = result.render === "delta" && !echoRemoved;
-    if (silent) {
-      // Force a from-scratch rebuild of the conversation DOM: drop any
-      // incremental reconciliation state so renderConversation repaints the
-      // whole tree in one synchronous pass (no per-record flash) and rebuilds
-      // `__convState` from zero. A silent refresh always serves `delivery:
-      // "full"` (no `after` token), so appendRender is already false here.
+    if (silent && !appendRender) {
+      // A silent FULL rebuild (real divergence): drop any incremental
+      // reconciliation state so renderConversation repaints the whole tree in
+      // one synchronous pass (no per-record flash) and rebuilds `__convState`
+      // from zero. A silent DELTA (now possible since the self-heal echoes its
+      // token) instead folds the tail into the existing DOM — keep `__convState`
+      // so that cheap append path works, exactly like a reconnect delta.
       container.__convState = null;
     }
     renderConversation(container, state.flowConversationRecords, appendRender);
@@ -2157,12 +2201,14 @@ async function loadFlowConversation(flowId, opts) {
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) {
       scrollFlowConversationToBottom();
-    } else if (silent) {
-      // Re-anchor the reader's viewport to the same bubble (matched by recordKey
-      // across the rebuilt records), so content height changes above it do not
-      // shift the view. Falls back to the absolute pre-rebuild offset
-      // (preserveScrollTop, clamped to the new height) when the anchor is
-      // unusable — preserving the prior behaviour for DOM-free / edge cases.
+    } else if (silent && !appendRender) {
+      // A silent FULL rebuild re-lays-out every bubble at possibly different
+      // heights, so re-anchor the reader's viewport to the same bubble (matched
+      // by recordKey across the rebuilt records) so a height change above it does
+      // not shift the view (#209). A silent DELTA appended below the viewport
+      // moves nothing the reader can see, so it needs no re-anchor. Falls back to
+      // the absolute pre-rebuild offset (preserveScrollTop, clamped) when the
+      // anchor is unusable — preserving the prior behaviour for DOM-free cases.
       restoreScrollAnchor(
         container, state.flowConversationRecords, scrollAnchor, preserveScrollTop);
     }
@@ -2301,10 +2347,14 @@ function cancelProgressionGrace() {
 // append counter frozen at `seqAtSchedule` (the value at the moment the advance
 // was first detected — NOT re-snapshotted per cycle). When the window elapses
 // with the WS still silent (append counter has not moved past the frozen
-// snapshot) it does one silent full rebuild AND re-arms itself on the same
+// snapshot) it fires one silent self-heal AND re-arms itself on the same
 // cadence, so a WS that never recovers still keeps pulling freshly-written
 // mid-step content into the open view — the reader never has to exit and
-// re-enter. It STOPS (does not re-arm) the instant a genuine WS increment lands
+// re-enter. Since G5 that silent self-heal is a SIGNATURE-CHECK pull (it echoes
+// the held token + signature): it costs a not_modified reply when nothing
+// changed, folds in a delta tail when a little did, and only rebuilds the whole
+// tree on a real divergence — NOT an unconditional full re-ship every window.
+// It STOPS (does not re-arm) the instant a genuine WS increment lands
 // (appendSeq moves past the frozen snapshot ⇒ the healthy push path recovered),
 // the open flow changes, OR the flow reaches a terminal status (completed /
 // failed) — a terminal flow yields no further content, and its final append can
@@ -2331,8 +2381,10 @@ function armProgressionGrace(flowId, seqAtSchedule) {
     // recovers.
     if (state.selectedFlowId !== flowId) return;
     if (state.flowConversationAppendSeq > seqAtSchedule) return;
-    // WS stayed silent through this window: pull the latest disk state so
-    // mid-step content the broken WS never pushed still appears.
+    // WS stayed silent through this window: run the silent signature-check
+    // self-heal so mid-step content the broken WS never pushed still appears
+    // (a cheap not_modified/delta when little/nothing changed; a full rebuild
+    // only on a real divergence).
     loadFlowConversation(flowId, { silent: true });
     // Terminal-status stop condition. A completed / failed flow can produce no
     // further mid-step content, so this one catch-up pull (which surfaces any
@@ -2464,25 +2516,27 @@ function maybeRefreshConversationOnProgression(flow) {
 
 // The running-flow view's 3s detailPollTimer callback (G3). It refreshes the
 // left-side detail (sidebar / interventions) AND runs the right-side periodic
-// full-snapshot self-heal on the SAME cadence — reusing the left side's already
-// proven 3s rhythm and its epoch/seq race guards rather than adding a second
-// timer with duplicated lifecycle management. refreshFlowDetail is fire-and-
-// forget async; selfHealFlowConversation likewise. Kept as its own function (not
-// an inline arrow) so it is exportable for the DOM-stub tests.
+// self-heal on the SAME cadence — reusing the left side's already proven 3s
+// rhythm and its epoch/seq race guards rather than adding a second timer with
+// duplicated lifecycle management. refreshFlowDetail is fire-and-forget async;
+// selfHealFlowConversation likewise. Kept as its own function (not an inline
+// arrow) so it is exportable for the DOM-stub tests.
 function pollFlowView() {
   refreshFlowDetail();
   selfHealFlowConversation();
 }
 
-// Periodic full-snapshot self-heal for the open running-flow conversation. Every
-// tick re-pulls the whole history via loadFlowConversation's silent full path and
-// lets the idempotent reconcile (G2) converge, so any WS increment the push path
-// dropped, or any front-end/daemon/server misjudgement that stalled the delta
-// chain, is corrected at the next 3s tick — correctness no longer depends on the
-// increment link never misfiring. loadFlowConversation's silent path skips the
-// DOM rebuild when the snapshot matches what is already held (see
-// sameRenderedConversation), so the healthy path (WS already delivered
-// everything) stays a cheap no-op repaint-wise; only a real divergence repaints.
+// Periodic signature-check self-heal for the open running-flow conversation (G3,
+// slimmed by G5). Every tick loadFlowConversation's silent path echoes the held
+// progress token + bundle signature: the server answers not_modified when
+// nothing changed (the cheap idle case — no bundle re-ship, no repaint), a delta
+// tail when a little did, and only a full rebuild on a real divergence. So any WS
+// increment the push path dropped, or any front-end/daemon/server misjudgement
+// that stalled the delta chain, is still corrected at the next 3s tick — the #209
+// freeze defence is intact — but the per-poll WIRE cost is now a signature
+// comparison, not a full 17MB pull. The idempotent reconcile (G2) plus
+// sameRenderedConversation still guard against any repaint when a full reply
+// happens to match what is held.
 //
 // Terminal STATUS is deliberately NOT a stop condition. An earlier version
 // latched the self-heal off after one post-terminal catch-up pull, but the
@@ -4053,6 +4107,7 @@ function closeHistory() {
   state.selectedHistoryId = null;
   state.historyRecords = [];
   state.historyProgress = null;
+  state.historySignature = null;
   state.historySelectedProjectRoot = null;
   // Clear the per-session header so a stale flow_id / usage total can't bleed
   // into the next opened session.
@@ -4092,11 +4147,56 @@ async function fetchHistoryIndex() {
 }
 
 // Push handler: the daemon's full session index, rebroadcast by the server.
+// The full push is the authoritative BASELINE the differential deltas below
+// merge onto (it establishes the complete view on connect / reconnect / a
+// HISTORY_INDEX_REQUEST); a delta only ever mutates the rows that changed.
 function applyHistoryIndex(sessions) {
   state.historySessions = sessions;
   // Any history_index push — even an empty list — is an authoritative report
   // that the daemon has accounted for its history, so an empty result can now
   // settle into the confirmed-empty state instead of "still connecting".
+  state.historyIndexConfirmed = true;
+  if (isHistoryOpen()) renderHistoryList();
+}
+
+// Push handler: a DIFFERENTIAL session-index update (G5). Rather than re-fanning
+// the whole aggregated index whenever a single active flow's `updated_at` ticks
+// (which scales with the *total* flow count), the server relays only the changed
+// SessionMeta rows. Merge them into the local aggregated index by `flow_id`:
+// each upsert replaces-or-inserts its row, each removed id drops its row. The
+// full `applyHistoryIndex` push remains the baseline; a delta arriving before
+// any baseline simply seeds a partial view that the next full `GET /api/history`
+// / `history_index` push corrects — matching the server's backward-compat note.
+function applyHistoryIndexDelta(upserts, removed) {
+  // Merge into a flow_id → row map seeded from the current index so an upsert
+  // for an existing flow replaces it in place and a new flow is appended, then
+  // re-materialize the array. A Map preserves insertion order, so the sort below
+  // is what actually re-establishes the server's ordering.
+  const byId = new Map();
+  for (const s of state.historySessions || []) {
+    if (s && s.flow_id != null) byId.set(String(s.flow_id), s);
+  }
+  for (const up of upserts || []) {
+    if (up && typeof up === "object" && up.flow_id != null) {
+      byId.set(String(up.flow_id), up);
+    }
+  }
+  for (const rid of removed || []) {
+    byId.delete(String(rid));
+  }
+  // Re-sort by updated_at DESC (entries lacking it last) so an updated active
+  // flow rises to the top exactly as a fresh full index would order it — the
+  // server sorts the full index the same way (reverse string sort on updated_at)
+  // and the per-project bucketing keeps within-bucket input order.
+  state.historySessions = Array.from(byId.values()).sort((a, b) => {
+    const ta = String((a && a.updated_at) || "");
+    const tb = String((b && b.updated_at) || "");
+    if (ta < tb) return 1;
+    if (ta > tb) return -1;
+    return 0;
+  });
+  // A delta implies the daemon reported real history, so — like a full push —
+  // it settles the confirmed state (never leaves the view stuck "connecting").
   state.historyIndexConfirmed = true;
   if (isHistoryOpen()) renderHistoryList();
 }
@@ -4154,10 +4254,11 @@ function applyHistoryData(msg) {
       state.historyEpoch += 1;
       state.historyRecords = records;
       // A full push replaces the cached bundle server-side (a new generation),
-      // so any progress token we held no longer pins it — drop it so the next
-      // reconnect re-fetch falls back to a full load rather than echoing a
-      // stale delta cursor.
+      // so any progress token / signature we held no longer pins it — drop them
+      // so the next reconnect re-fetch falls back to a full load rather than
+      // echoing a stale delta cursor.
       state.historyProgress = null;
+      state.historySignature = null;
       renderHistoryRecords(msg.flow_id, state.historyRecords, append);
       refreshHistoryStickyHeader();
       updateHistoryUsageBadge(state.historyRecords);
@@ -4207,9 +4308,11 @@ function applyHistoryData(msg) {
     } else {
       state.flowConversationEpoch += 1;
       merged = records;
-      // Full push = new server bundle generation; the held delta cursor is now
-      // stale, so invalidate it (mirrors the history-view branch above).
+      // Full push = new server bundle generation; the held delta cursor and the
+      // signature it was paired with are now stale, so invalidate both (mirrors
+      // the history-view branch above).
       state.flowConversationProgress = null;
+      state.flowConversationSignature = null;
       // A mode:full WS push also delivered fresh authoritative records for the
       // open flow, so it likewise counts as the push path being alive.
       state.flowConversationAppendSeq += 1;
@@ -4488,6 +4591,7 @@ async function openHistorySession(flowId, opts) {
     // session's first fetch is a full load, never a delta against another's
     // bundle. A reconnect re-fetch of the *same* session repopulates it.
     state.historyProgress = null;
+    state.historySignature = null;
   }
   // Narrow screens switch to the detail panel; inert on desktop. Idempotent on
   // a reconnect refresh where the detail panel is already shown.
@@ -4540,8 +4644,9 @@ async function openHistorySession(flowId, opts) {
     // truncated session). An empty held set forces a full reload.
     const heldProgress = state.historyRecords.length
       ? state.historyProgress : null;
+    const heldSignature = heldProgress ? state.historySignature : null;
     const url = incremental
-      ? historySnapshotUrl(flowId, heldProgress)
+      ? historySnapshotUrl(flowId, heldProgress, heldSignature)
       : `/api/history/${encodeURIComponent(flowId)}`;
     const resp = await authedFetch(url);
     // The user may have clicked another session while this was in flight.
@@ -4574,8 +4679,12 @@ async function openHistorySession(flowId, opts) {
       requestRecords,
     );
     state.historyProgress = result.progress;
+    if (result.signature != null) {
+      state.historySignature = result.signature;
+    }
     if (result.render === "noop") {
-      // Delta added nothing new after dedup — keep the existing detail as-is.
+      // A `not_modified` reply, or a delta that added nothing new after dedup —
+      // keep the existing detail as-is.
       return;
     }
     state.historyRecords = result.records;
@@ -4931,6 +5040,80 @@ function renderIssuesList() {
   }
 }
 
+// The daemon clips issue descriptions / call prompts to this many characters
+// (with a trailing "...") before inlining them in a status snapshot — mirrors
+// se3.daemon.history._DESC_CLIP. A preview longer than this was therefore
+// clipped and has a full body worth pulling on demand.
+const DESC_CLIP = 200;
+
+// A preview text was truncated iff it exceeds the clip length: the clipper only
+// ever shortens (to exactly DESC_CLIP + "..."), so length > DESC_CLIP uniquely
+// identifies a clipped body. Pure.
+function descriptionLikelyTruncated(text) {
+  return typeof text === "string" && text.length > DESC_CLIP;
+}
+
+// Fetch one issue's untruncated description from the owning daemon (via the
+// server's on-demand `/api/issues/{id}/detail` downlink) and swap it into the
+// already-rendered detail pane. On success the truncated preview node is
+// replaced in place; on failure the preview is kept and the pre-created hint
+// `note` is revealed. A late response is dropped if the user has since selected
+// another issue (guarded on `selectedIssueId`), so a stale full body can never
+// overwrite a different issue's pane.
+async function loadIssueFullDescription(iss, descNode, note) {
+  const key = issueCompositeKey(iss);
+  const params = new URLSearchParams();
+  const mid = issueMachineId(iss);
+  if (mid) params.set("machine_id", mid);
+  if (iss.project_root) params.set("project_root", String(iss.project_root));
+  const qs = params.toString();
+  const url = `/api/issues/${encodeURIComponent(String(iss.id))}/detail`
+    + (qs ? `?${qs}` : "");
+  try {
+    const resp = await authedFetch(url);
+    if (!resp.ok) throw new Error(`status ${resp.status}`);
+    const data = await resp.json();
+    if (state.selectedIssueId !== key) return;   // user moved on — drop it
+    const full = data && data.issue && typeof data.issue.description === "string"
+      ? data.issue.description : null;
+    if (full != null && descNode) {
+      descNode.textContent = full;
+      if (note) note.classList.add("hidden");
+    } else if (note) {
+      // The daemon returned no description (e.g. the issue vanished) — keep the
+      // preview and surface the hint rather than blanking the field.
+      note.classList.remove("hidden");
+    }
+  } catch (_) {
+    if (state.selectedIssueId !== key) return;
+    if (note) note.classList.remove("hidden");
+  }
+}
+
+// Fetch one pending call's untruncated prompt from the owning daemon (via the
+// server's on-demand `/api/calls/{id}/detail` downlink). Returns the full prompt
+// string, or null when it is unavailable. The interactive chip bar renders a
+// flow's OWN pending_calls verbatim (never clipped), so this is only needed for
+// a surface fed by the machine-wide (clipped) pending_calls list; kept alongside
+// the issue loader so both on-demand detail pulls live in one place.
+async function fetchCallFullPrompt(callId, { machineId, projectRoot } = {}) {
+  const params = new URLSearchParams();
+  if (machineId) params.set("machine_id", String(machineId));
+  if (projectRoot) params.set("project_root", String(projectRoot));
+  const qs = params.toString();
+  const url = `/api/calls/${encodeURIComponent(String(callId))}/detail`
+    + (qs ? `?${qs}` : "");
+  try {
+    const resp = await authedFetch(url);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data && data.call && typeof data.call.prompt === "string"
+      ? data.call.prompt : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function openIssueDetail(issueId) {
   state.selectedIssueId = issueId;
   applyIssuesPanelAction("select-issue");
@@ -4991,9 +5174,21 @@ function renderIssueDetail(issueId) {
     detail.appendChild(row);
   }
 
-  // Description
+  // Description. The STATUS_UPDATE / REST issue mirror carries only a truncated
+  // preview (clipped to DESC_CLIP so the ~470 KB of full descriptions never
+  // inflate the snapshot); when the preview was clipped, pull the untruncated
+  // body on demand and swap it in place. A pre-created (hidden) note is toggled
+  // visible if the pull fails, so the truncated preview always survives.
   if (iss.description) {
-    detail.appendChild(el("div", "issue-detail-desc", iss.description));
+    const descNode = el("div", "issue-detail-desc", iss.description);
+    detail.appendChild(descNode);
+    if (descriptionLikelyTruncated(iss.description)) {
+      const note = el(
+        "div", "issue-detail-desc-note hidden",
+        "无法加载完整描述，重新打开可重试。");
+      detail.appendChild(note);
+      loadIssueFullDescription(iss, descNode, note);
+    }
   }
 
   // Action buttons
@@ -6244,11 +6439,16 @@ function dedupeSnapshotDiscovery(records) {
 // full snapshot — the first-open behaviour is unchanged. The token is encoded
 // via URLSearchParams so a base64url token (`-` / `_` / `=`) is transmitted
 // safely. Shared by both the running-flow and history-detail reconnect loaders.
-function historySnapshotUrl(flowId, progress) {
+function historySnapshotUrl(flowId, progress, signature) {
   const base = `/api/history/${encodeURIComponent(flowId)}`;
   if (!progress) return base;
   const params = new URLSearchParams();
   params.set("after", progress);
+  // The signature rides ALONGSIDE the token (never alone): the server only
+  // answers `not_modified` when BOTH the token is in-sync AND the signature
+  // matches, so a `sig` without an `after` offset is meaningless. Omitted when
+  // none is held so a token-only reconnect still gets a delta/full.
+  if (signature) params.set("sig", signature);
   return `${base}?${params.toString()}`;
 }
 
@@ -6319,18 +6519,22 @@ function stableMergeByTimestamp(held, fresh, requestBaseline) {
 // request, and therefore the only data safe to preserve across a full fallback
 // that invalidates the previous cache generation.
 //
-// Returns `{ records, progress, render }` where:
+// Returns `{ records, progress, signature, render }` where:
 //   * `records`  — the merged array the caller should adopt.
 //   * `progress` — the response's fresh progress token (a string, or null when
 //                  the response carried none) for the caller to store and echo
 //                  on its next reconnect.
+//   * `signature`— the response's bundle content signature (a string, or null),
+//                  for the caller to store and echo as `?sig=` so an unchanged
+//                  bundle can be answered `not_modified` next time.
 //   * `render`   — how the caller should paint the result:
 //       - "delta": an incremental delivery whose new records were appended
 //         (after `dedupeAppendRecords` filtered out anything already held);
 //         the caller MAY render incrementally (append-only).
-//       - "noop":  an incremental delivery that, after dedup, added nothing —
-//         the held array is returned unchanged (same reference) so the caller
-//         can skip both the state swap and the render.
+//       - "noop":  nothing to repaint — either a `not_modified` reply (the
+//         client was provably in sync) or a delta that, after dedup, added
+//         nothing. The held array is returned unchanged (same reference) so the
+//         caller can skip both the state swap and the render.
 //       - "full":  a full delivery (or any non-"delta" tag — the safe default);
 //         the server records are the new authority, with only live appends that
 //         arrived during the fetch preserved, and the caller MUST rebuild the
@@ -6342,6 +6546,17 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
     ? response.records : [];
   const progress = (response && typeof response.progress === "string")
     ? response.progress : null;
+  const signature = (response && typeof response.signature === "string")
+    ? response.signature : null;
+  if (response && response.delivery === "not_modified") {
+    // The client is provably in sync (the echoed token's offset equals the
+    // record count AND the echoed signature matched), so the server sent no
+    // records. Hold the existing array and skip every render — the extra-small
+    // idle-poll reply that keeps the periodic self-heal from re-searching the
+    // whole bundle. progress/signature are still refreshed so the next poll
+    // keeps comparing against the current generation.
+    return { records: base, progress, signature, render: "noop" };
+  }
   if (response && response.delivery === "delta") {
     // Idempotent reconcile: `fresh` are the genuinely-new lines to place by
     // timestamp; an existing `stepId#ordinal` that a retry rewrote is updated in
@@ -6353,7 +6568,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       // Every delta record is a byte-identical re-delivery of a line already
       // held (e.g. the WS append for the same batch beat the snapshot in).
       // Nothing to render.
-      return { records: base, progress, render: "noop" };
+      return { records: base, progress, signature, render: "noop" };
     }
     const fresh = rec.fresh;
     if (rec.updatedInPlace) {
@@ -6365,6 +6580,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
           ? stableMergeByTimestamp(rec.rebased, fresh, requestBaseline)
           : rec.rebased,
         progress,
+        signature,
         render: "full",
       };
     }
@@ -6397,7 +6613,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       ? recordSortTs(base[base.length - 1]) : -Infinity;
     const inOrder = fresh.every((r) => recordSortTs(r) > tailTs);
     if (inOrder) {
-      return { records: base.concat(fresh), progress, render: "delta" };
+      return { records: base.concat(fresh), progress, signature, render: "delta" };
     }
     return {
       // Pass the RAW `requestBaseline` (not the `base`-defaulted `baseline`) so
@@ -6407,6 +6623,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       // it, every held record is treated as a live append (delta wins ties).
       records: stableMergeByTimestamp(base, fresh, requestBaseline),
       progress,
+      signature,
       render: "full",
     };
   }
@@ -6450,6 +6667,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
     // never shows a doubled discovery bubble on the full-replace path.
     records: mergeSnapshotWithLiveAppends(dedupeSnapshotDiscovery(records), preserved),
     progress,
+    signature,
     render: "full",
   };
 }
@@ -12824,6 +13042,14 @@ if (typeof module !== "undefined" && module.exports) {
     openHistorySession,
     closeHistory,
     applyHistoryData,
+    // G5 differential history-index merge + detail lazy-load — exposed for the
+    // DOM-stub tests in tests/frontend/test_app_pure.mjs.
+    applyHistoryIndex,
+    applyHistoryIndexDelta,
+    descriptionLikelyTruncated,
+    loadIssueFullDescription,
+    fetchCallFullPrompt,
+    renderIssueDetail,
     // History list rendering + shared mutable state (exposed for the DOM-stub
     // tests in tests/frontend/test_app_pure.mjs).
     renderHistoryList,

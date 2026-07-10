@@ -2117,6 +2117,17 @@ check("mergeHistoryResponse unrecognised delivery defaults to full", () => {
   assert.equal(out.records.length, 1);
 });
 
+check("mergeHistoryResponse not_modified is a noop that preserves the held array and carries the signature", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const held = [r1];
+  const resp = { delivery: "not_modified", records: [], progress: "p2", signature: "sig2" };
+  const out = app.mergeHistoryResponse(resp, held);
+  assert.equal(out.render, "noop", "not_modified is a noop — nothing to repaint");
+  assert.equal(out.records, held, "the held array is returned by reference (no adopt)");
+  assert.equal(out.progress, "p2", "the fresh token is surfaced for the next poll");
+  assert.equal(out.signature, "sig2", "the signature is surfaced for the next poll");
+});
+
 check("mergeHistoryResponse delta with all-new records appends and reports render=delta", () => {
   const r1 = asstRecord("A1", 1, "s1", "discovery");
   const r2 = asstRecord("A2", 2, "s1", "discovery");
@@ -3982,6 +3993,12 @@ await progressionRefreshMod.registerProgressionRefreshTests({ app, check, checkA
 // mid-step content without the reader exiting and re-entering the session.
 const progressionFallbackRetryMod = await import("./progression_fallback_retry.test.mjs");
 await progressionFallbackRetryMod.registerProgressionFallbackRetryTests({ app, check, checkAsync, findOne, findAll });
+
+// Register the G5 differential-protocol tests: HISTORY_INDEX delta merge by
+// flow_id, the silent self-heal's not_modified/delta/full signature-check
+// handling, and issue-detail lazy-loading of the untruncated description.
+const historyIndexMergeMod = await import("./history_index_merge.test.mjs");
+await historyIndexMergeMod.registerHistoryIndexMergeTests({ app, check, checkAsync, findOne, findAll });
 
 // Register the element-anchored scroll-preservation tests (issue #217 / #209
 // jump fix): the silent rebuild anchors on the bubble the reader is looking at
@@ -5872,14 +5889,18 @@ await checkAsync("flow silent: no pre-clear / no Loading placeholder before data
   const c = document.getElementById("flow-conversation");
   c.innerHTML = ""; c.__convState = null;
 
-  // First open the flow with two records so there is existing rendered DOM.
+  // First open the flow with two records so there is existing rendered DOM. The
+  // full open hands back a progress token + bundle signature the silent self-heal
+  // will echo on its next pull (G5).
   setFetch({
     records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
-    progress: "tokA", delivery: "full",
+    progress: "tokA", signature: "sigA", delivery: "full",
   });
   await app.loadFlowConversation("F1");
   const firstBubble = bubbleNodes(c)[0];
   assert.ok(firstBubble, "existing conversation rendered");
+  assert.equal(app.state.flowConversationSignature, "sigA",
+    "the full open stored the bundle signature for the next self-heal");
 
   // A silent refresh starts; the response is deferred so we can inspect the DOM
   // in the window between fetch start and data arrival.
@@ -5890,9 +5911,13 @@ await checkAsync("flow silent: no pre-clear / no Loading placeholder before data
     "silent refresh must not clear the container before data arrives");
   assert.ok(!c.textContent.includes("Loading conversation"),
     "silent refresh must not insert a Loading placeholder");
-  // The silent pull is a full pull: no `after` token in the URL.
-  assert.ok(!String(__lastFetchUrl).includes("after="),
-    "silent refresh issues a full (no-after) pull: " + __lastFetchUrl);
+  // G5: the silent self-heal is now a SIGNATURE-CHECK pull — it echoes the held
+  // progress token AND signature so the server can answer not_modified/delta
+  // instead of re-shipping the whole bundle. It is no longer a bare full pull.
+  assert.ok(String(__lastFetchUrl).includes("after=tokA"),
+    "silent refresh echoes the held progress token: " + __lastFetchUrl);
+  assert.ok(String(__lastFetchUrl).includes("sig=sigA"),
+    "silent refresh echoes the held bundle signature: " + __lastFetchUrl);
 
   resolve({
     records: [
@@ -5900,12 +5925,14 @@ await checkAsync("flow silent: no pre-clear / no Loading placeholder before data
       asstRecord("B", 2, "s1", "discovery"),
       asstRecord("C", 3, "s1", "discovery"),
     ],
-    progress: "tokB", delivery: "full",
+    progress: "tokB", signature: "sigB", delivery: "full",
   });
   await pending;
   // Data arrived → whole-tree rebuild, fresh __convState, progress written back.
   assert.equal(app.state.flowConversationRecords.length, 3);
   assert.equal(app.state.flowConversationProgress, "tokB");
+  assert.equal(app.state.flowConversationSignature, "sigB",
+    "the fresh signature is written back for the next self-heal");
   assert.ok(!bubbleNodes(c).includes(firstBubble),
     "silent refresh rebuilds the DOM once data arrives (append=false)");
   assert.ok(c.__convState && c.__convState.count === 3,
@@ -6218,8 +6245,15 @@ await checkAsync("G3 poll: a terminal flow keeps self-healing every tick (never 
     }
     assert.equal(calls.length, 4,
       "a terminal flow issues a self-heal pull on every tick, not just once: " + calls.length);
-    assert.ok(calls.every((u) => u.includes("/api/history/") && !u.includes("after=")),
-      "every self-heal pull is a full (no-after) history pull");
+    assert.ok(calls.every((u) => u.includes("/api/history/")),
+      "every self-heal pull hits the history endpoint");
+    // G5: the first pull is a bare baseline (no token held yet), but once the
+    // server hands back a progress token every subsequent self-heal echoes it —
+    // the signature-check pull that replaces the old "re-ship the whole bundle".
+    assert.ok(!calls[0].includes("after="),
+      "the first self-heal (no token held) is a full baseline pull: " + calls[0]);
+    assert.ok(calls.slice(1).every((u) => u.includes("after=")),
+      "later self-heal pulls echo the held progress token (signature-check pull)");
   } finally {
     app.state.machines = savedMachines;
     globalThis.fetch = saved;

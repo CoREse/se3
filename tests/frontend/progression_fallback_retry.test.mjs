@@ -112,8 +112,16 @@ export async function registerProgressionFallbackRetryTests(ctx) {
       await waitWindows(5);
       assert.ok(calls.length >= 2,
         "continuous WS silence must drive multiple periodic pulls, got " + calls.length);
-      assert.ok(calls.every((u) => u.includes("/api/history/") && !u.includes("after=")),
-        "every periodic pull is a full (no-after) history pull");
+      assert.ok(calls.every((u) => u.includes("/api/history/")),
+        "every periodic pull hits the history endpoint");
+      // G5: the first pull is a bare baseline (no token held yet); once a token
+      // comes back every subsequent pull echoes it (a signature-check pull, not a
+      // whole-bundle re-ship). With delivery:"full" replies here the view still
+      // grows, but the WIRE is now a token-carrying request.
+      assert.ok(!calls[0].includes("after="),
+        "the first periodic pull (no token held) is a full baseline pull: " + calls[0]);
+      assert.ok(calls.slice(1).every((u) => u.includes("after=")),
+        "later periodic pulls echo the held progress token (signature-check pull)");
       // The mid-step content accumulated across windows with NO WS increment at all.
       assert.equal(app.state.flowConversationAppendSeq, 0,
         "no WS increment landed — the growth came purely from the periodic fallback");
