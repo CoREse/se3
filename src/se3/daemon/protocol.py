@@ -21,12 +21,14 @@ Every message is a JSON object with exactly four top-level keys::
 Message directions
 ------------------
 * daemon → server: :data:`MSG_HELLO`, :data:`MSG_STATUS_UPDATE`,
-  :data:`MSG_CALL_NOTIFICATION`, :data:`MSG_PONG`,
-  :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_DATA`,
+  :data:`MSG_KEEPALIVE`, :data:`MSG_CALL_NOTIFICATION`, :data:`MSG_PONG`,
+  :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_INDEX_DELTA`,
+  :data:`MSG_HISTORY_DATA`, :data:`MSG_DETAIL_DATA`, :data:`MSG_ISSUE_RESULT`,
   :data:`MSG_SPAWN_FAILED`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
   :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`,
+  :data:`MSG_ISSUE_COMMAND`, :data:`MSG_DETAIL_REQUEST`,
   :data:`MSG_END_SESSION`.
 
 Backward compatibility
@@ -36,6 +38,22 @@ revision will never *send* them; if it ever *receives* one it does not
 recognise, the frame is rejected as an unknown type — callers decoding
 untrusted frames should therefore tolerate :class:`ProtocolError` rather
 than crash, so new and old peers can interoperate.
+
+Protocol version 3 added the *traffic-reduction* messages
+(:data:`MSG_KEEPALIVE`, :data:`MSG_HISTORY_INDEX_DELTA`,
+:data:`MSG_DETAIL_REQUEST`, :data:`MSG_DETAIL_DATA`). Unlike the earlier
+additive types, these carry a real behavioural downgrade risk: if a daemon
+sent a KEEPALIVE (in place of a periodic STATUS_UPDATE) or an incremental
+HISTORY_INDEX_DELTA to a version-2 server, that server would reject the frame
+as an unknown type and lose the heartbeat / index update entirely. The version
+was therefore bumped to ``3`` so each side can read the peer's advertised
+``protocol_version`` (HELLO / WELCOME) and **fall back to the full-frame
+semantics** — periodic full STATUS_UPDATE and full HISTORY_INDEX, no keepalive
+or delta, detail inlined rather than fetched on demand — whenever the peer
+speaks a revision older than 3. The version-negotiation and fall-back logic
+lives in the daemon client and server relay; this module only owns the wire
+schema, the version constant, and this contract. Callers decoding untrusted
+frames must still tolerate :class:`ProtocolError` for genuinely unknown types.
 
 The multi-tenant control plane added an optional ``key`` field to the HELLO
 payload (the daemon credential the server resolves to an owner). It is purely
@@ -54,7 +72,34 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # Protocol revision. Bumped only on a breaking wire change; both daemon and
 # server advertise it in HELLO / WELCOME so a mismatch can be surfaced.
 # Revision "2" added the history messages (MSG_HISTORY_*).
-PROTOCOL_VERSION = "2"
+# Revision "3" added the traffic-reduction messages (MSG_KEEPALIVE,
+# MSG_HISTORY_INDEX_DELTA, MSG_DETAIL_REQUEST/DATA); a peer advertising "2" or
+# older must be driven with full-frame semantics (see the module docstring).
+PROTOCOL_VERSION = "3"
+
+#: Minimum peer ``protocol_version`` that understands the revision-3
+#: traffic-reduction messages. When a peer advertises a value below this in its
+#: HELLO / WELCOME, the sender MUST fall back to the full-frame semantics
+#: (periodic full STATUS_UPDATE + full HISTORY_INDEX, no keepalive/delta, detail
+#: inlined) instead of emitting a keepalive / index delta the peer would reject.
+#: Version strings are compared as integers with a safe fallback so a
+#: non-numeric or missing value degrades to "legacy" (full semantics).
+MIN_VERSION_TRAFFIC_REDUCTION = 3
+
+
+def supports_traffic_reduction(peer_version: Any) -> bool:
+    """Return whether *peer_version* understands the revision-3 lean messages.
+
+    Used by both the daemon client and the server relay to decide, per peer,
+    whether it is safe to emit :data:`MSG_KEEPALIVE` /
+    :data:`MSG_HISTORY_INDEX_DELTA` / detail messages, or whether the peer is a
+    legacy revision that must be driven with full-frame semantics. A missing or
+    non-numeric version degrades safely to ``False`` (full semantics).
+    """
+    try:
+        return int(str(peer_version).strip()) >= MIN_VERSION_TRAFFIC_REDUCTION
+    except (TypeError, ValueError):
+        return False
 
 # Default TCP port for the central server. This is the *single source of
 # truth* for the default port: ``se3-server`` binds it when ``--port`` is
@@ -97,6 +142,26 @@ MSG_CALL_NOTIFICATION = "call_notification"
 MSG_PONG = "pong"
 MSG_HISTORY_INDEX = "history_index"
 MSG_HISTORY_DATA = "history_data"
+#: daemon → server: an extra-small heartbeat frame emitted in place of a
+#: periodic STATUS_UPDATE when the aggregated snapshot's content signature is
+#: unchanged since the last push. It carries only the signature (and the seq /
+#: timestamp every frame has), so the server can refresh the daemon's
+#: online/last-seen time — preserving the exact offline-detection semantics of a
+#: STATUS_UPDATE — without the daemon re-sending the full snapshot. Revision 3;
+#: only sent to a peer that advertises support (see the module docstring).
+MSG_KEEPALIVE = "keepalive"
+#: daemon → server: an incremental history-index update carrying only the
+#: SessionMeta rows that changed (``upserts``, keyed by ``flow_id``) and the
+#: flow ids that disappeared (``removed``), instead of the whole index. The
+#: server merges it into its in-memory full index. Full :data:`MSG_HISTORY_INDEX`
+#: frames are still sent on connect / reconnect / HISTORY_INDEX_REQUEST as the
+#: reconciliation baseline. Revision 3; only sent to a supporting peer.
+MSG_HISTORY_INDEX_DELTA = "history_index_delta"
+#: daemon → server: deliver the full text requested by a :data:`MSG_DETAIL_REQUEST`
+#: (an issue's untruncated description, or a pending call's full prompt). Carries
+#: the echoed ``request_id`` so the server can correlate it to the waiting
+#: REST request, plus ``ok`` / ``detail`` / ``error``. Revision 3.
+MSG_DETAIL_DATA = "detail_data"
 #: daemon → server: report that a server-requested spawn / resume / project
 #: init failed *after* the SPAWN_FLOW was dispatched. ``POST /api/flows``
 #: replies ``202 dispatched`` immediately (the daemon spawns asynchronously),
@@ -145,6 +210,23 @@ MSG_ISSUE_COMMAND = "issue_command"
 #: Carries ``request_id`` (echoed from the command) and either ``ok=true``
 #: or ``ok=false`` with an ``error`` message.
 MSG_ISSUE_RESULT = "issue_result"
+
+#: server → daemon: pull the *full text* of a single issue or pending call on
+#: demand. STATUS_UPDATE now carries only truncated summaries (issue
+#: descriptions / call prompts clipped for wire economy); when the operator
+#: opens a detail view the server routes this request to the owning daemon,
+#: which reads the untruncated content and replies with :data:`MSG_DETAIL_DATA`.
+#: Revision 3; only used when the daemon advertises support.
+MSG_DETAIL_REQUEST = "detail_request"
+
+# -- detail-request kinds -------------------------------------------------
+# The ``kind`` field of a MSG_DETAIL_REQUEST / MSG_DETAIL_DATA payload names
+# which on-demand full-text artifact is being fetched, so the daemon knows
+# whether to read an issue record or a pending call file.
+DETAIL_KIND_ISSUE = "issue"
+DETAIL_KIND_CALL = "call"
+#: Every recognised detail-request kind.
+DETAIL_KINDS: FrozenSet[str] = frozenset({DETAIL_KIND_ISSUE, DETAIL_KIND_CALL})
 
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
@@ -199,7 +281,10 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_CALL_NOTIFICATION,
         MSG_PONG,
         MSG_HISTORY_INDEX,
+        MSG_HISTORY_INDEX_DELTA,
         MSG_HISTORY_DATA,
+        MSG_KEEPALIVE,
+        MSG_DETAIL_DATA,
         MSG_ISSUE_RESULT,
         MSG_SPAWN_FAILED,
     }
@@ -215,6 +300,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_HISTORY_INDEX_REQUEST,
         MSG_INTERJECT_FLOW,
         MSG_ISSUE_COMMAND,
+        MSG_DETAIL_REQUEST,
         MSG_END_SESSION,
     }
 )
@@ -697,3 +783,123 @@ def make_history_data(
         },
         seq=seq,
     )
+
+
+# -- traffic-reduction messages (protocol revision 3) ---------------------
+# These replace, in the steady state, the periodic *full* STATUS_UPDATE and
+# HISTORY_INDEX frames with change-driven / incremental ones, so an idle daemon
+# costs a keepalive rather than a ~573 KB snapshot every 5 s, and an active flow
+# costs only the meta row that changed rather than the whole index. Only emitted
+# to a peer that advertises protocol_version >= 3 (see supports_traffic_reduction).
+
+
+def make_keepalive(signature: str = "", *, seq: int = 0) -> Message:
+    """daemon → server: a minimal heartbeat sent when the status snapshot is
+    unchanged.
+
+    Emitted in place of a periodic :data:`MSG_STATUS_UPDATE` when the aggregated
+    snapshot's content *signature* matches the last one pushed: nothing changed,
+    so re-sending the (potentially large) snapshot is pure waste, but the server
+    still needs a liveness signal to keep its offline-detection timer from
+    tripping. The server treats a keepalive exactly like a STATUS_UPDATE for the
+    purpose of the daemon's last-seen time and does **not** re-broadcast state to
+    browsers. *signature* is the same content hash the daemon gates on, carried
+    so the server can confirm both ends agree on "nothing changed".
+    """
+    return Message(type=MSG_KEEPALIVE, payload={"signature": signature}, seq=seq)
+
+
+def make_history_index_delta(
+    upserts: Any = (),
+    removed: Any = (),
+    *,
+    seq: int = 0,
+) -> Message:
+    """daemon → server: an incremental history-index update.
+
+    *upserts* is a list of SessionMeta dicts (each carrying a ``flow_id``) that
+    were added or changed since the last index push; the server upserts them
+    into its in-memory full index keyed by ``flow_id``. *removed* is a list of
+    ``flow_id`` strings whose sessions disappeared and should be dropped. Sent
+    instead of a whole :data:`MSG_HISTORY_INDEX` for the common case where only a
+    few active flows' metas changed, so index traffic scales with the number of
+    *changed* flows rather than the total flow count. The full index is still
+    sent on connect / reconnect / HISTORY_INDEX_REQUEST as the baseline both
+    sides reconcile against.
+    """
+    return Message(
+        type=MSG_HISTORY_INDEX_DELTA,
+        payload={
+            "upserts": list(upserts),
+            "removed": list(removed),
+        },
+        seq=seq,
+    )
+
+
+def make_detail_request(
+    kind: str,
+    target_id: str,
+    *,
+    project_root: str = "",
+    request_id: str = "",
+    seq: int = 0,
+) -> Message:
+    """server → daemon: fetch the full text of one issue or pending call.
+
+    *kind* is :data:`DETAIL_KIND_ISSUE` or :data:`DETAIL_KIND_CALL`; *target_id*
+    is the issue id or call id whose untruncated content is wanted (STATUS_UPDATE
+    now carries only clipped summaries). *project_root* scopes the lookup to a
+    specific SE3 project when the server knows it. *request_id* correlates the
+    eventual :data:`MSG_DETAIL_DATA` reply back to the waiting REST request.
+
+    Raises :class:`ProtocolError` when *kind* is not a recognised detail kind.
+    """
+    if kind not in DETAIL_KINDS:
+        raise ProtocolError(
+            f"detail kind must be one of {sorted(DETAIL_KINDS)}, got {kind!r}"
+        )
+    payload: Dict[str, Any] = {
+        "kind": kind,
+        "target_id": target_id,
+    }
+    if project_root:
+        payload["project_root"] = project_root
+    if request_id:
+        payload["request_id"] = request_id
+    return Message(type=MSG_DETAIL_REQUEST, payload=payload, seq=seq)
+
+
+def make_detail_data(
+    request_id: str,
+    kind: str,
+    *,
+    detail: Optional[Dict[str, Any]] = None,
+    ok: bool = True,
+    error: str = "",
+    seq: int = 0,
+) -> Message:
+    """daemon → server: deliver the full text for a :data:`MSG_DETAIL_REQUEST`.
+
+    *request_id* echoes the request so the server can wake the correct waiter;
+    *kind* echoes the requested :data:`DETAIL_KINDS` value. On success *detail*
+    is the full-text record (e.g. the issue with its untruncated description, or
+    the call with its full prompt). When *ok* is ``False`` *error* explains why
+    the lookup failed (missing id, unreadable file, …) and *detail* is omitted.
+
+    Raises :class:`ProtocolError` when *kind* is not a recognised detail kind.
+    """
+    if kind not in DETAIL_KINDS:
+        raise ProtocolError(
+            f"detail kind must be one of {sorted(DETAIL_KINDS)}, got {kind!r}"
+        )
+    payload: Dict[str, Any] = {
+        "request_id": request_id,
+        "kind": kind,
+        "ok": ok,
+    }
+    if detail is not None:
+        payload["detail"] = dict(detail)
+    if error:
+        payload["error"] = error
+    return Message(type=MSG_DETAIL_DATA, payload=payload, seq=seq)

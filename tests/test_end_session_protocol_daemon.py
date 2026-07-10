@@ -39,9 +39,11 @@ def test_msg_end_session_is_server_to_daemon():
     assert protocol.MSG_END_SESSION not in protocol.DAEMON_TO_SERVER
 
 
-def test_protocol_version_unchanged():
-    """END_SESSION is additive — no PROTOCOL_VERSION bump."""
-    assert protocol.PROTOCOL_VERSION == "2"
+def test_protocol_version_current():
+    """END_SESSION was additive and did not itself bump PROTOCOL_VERSION; the
+    version later advanced to "3" for the (unrelated) traffic-reduction
+    messages, so simply pin the current revision here."""
+    assert protocol.PROTOCOL_VERSION == "3"
 
 
 def test_make_end_session_roundtrip():

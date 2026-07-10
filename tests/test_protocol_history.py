@@ -24,8 +24,11 @@ from se3.daemon.protocol import (
 )
 
 
-def test_protocol_version_bumped_to_2():
-    assert protocol.PROTOCOL_VERSION == "2"
+def test_protocol_version_bumped_to_3():
+    # Revision 3 added the traffic-reduction messages (keepalive / index-delta /
+    # detail); the bump is what lets each side detect a legacy peer and fall
+    # back to full-frame semantics.
+    assert protocol.PROTOCOL_VERSION == "3"
 
 
 def test_history_message_types_registered():
