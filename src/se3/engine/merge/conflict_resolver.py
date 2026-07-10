@@ -937,8 +937,21 @@ class ConflictResolver:
                     )
             lines.append("")
 
-        # Per-file blocks
+        # Per-file blocks.  The three-way contents are deliberately NOT
+        # inlined: each working-tree file already carries both sides
+        # verbatim inside its conflict markers, so inlining base/ours/
+        # theirs/working made the prompt scale with file size (a 2.5MB
+        # generated index once produced a ~10MB prompt that blew past
+        # every agent CLI's input limit).  Paths + hunk lines are enough
+        # for an LLM-as-editor; anything more it can pull on demand.
         lines.append("## Files to resolve")
+        lines.append(
+            "Each working-tree file below still contains its full conflict "
+            "markers, so reading it gives you both sides. If you need a clean "
+            "single-side view, run `git show :1:<path>` (base / common "
+            "ancestor), `git show :2:<path>` (ours) or `git show :3:<path>` "
+            "(theirs)."
+        )
         lines.append("")
         for cf in conflict_files:
             abs_path = context.project_root / cf.path
@@ -954,39 +967,23 @@ class ConflictResolver:
                 )
                 lines.append("")
                 continue
+            missing = [
+                name
+                for name, exists in (
+                    ("base", cf.base_exists),
+                    ("ours", cf.ours_exists),
+                    ("theirs", cf.theirs_exists),
+                )
+                if not exists
+            ]
+            if missing:
+                lines.append(
+                    f"Did not exist in: {', '.join(missing)}"
+                )
             if cf.hunks:
                 lines.append(f"Conflict hunks: {len(cf.hunks)}")
                 for hunk in cf.hunks:
                     lines.append(f"  Lines {hunk.start_line}-{hunk.end_line}")
-            lines.append("")
-            lines.append("#### Base version (common ancestor)")
-            if cf.base_exists:
-                lines.append("```")
-                lines.append(cf.base_content)
-                lines.append("```")
-            else:
-                lines.append("[file did not exist in base]")
-            lines.append("")
-            lines.append("#### Ours version (current branch)")
-            if cf.ours_exists:
-                lines.append("```")
-                lines.append(cf.ours_content)
-                lines.append("```")
-            else:
-                lines.append("[file did not exist in ours]")
-            lines.append("")
-            lines.append("#### Theirs version (incoming branch)")
-            if cf.theirs_exists:
-                lines.append("```")
-                lines.append(cf.theirs_content)
-                lines.append("```")
-            else:
-                lines.append("[file did not exist in theirs]")
-            lines.append("")
-            lines.append("#### Working tree (current state with conflict markers)")
-            lines.append("```")
-            lines.append(cf.working_content)
-            lines.append("```")
             lines.append("")
 
         lines.append("## Rules")
