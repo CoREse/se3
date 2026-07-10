@@ -1476,24 +1476,38 @@ class DaemonClient:
                     )
                     return None
                 if isinstance(body, dict):
-                    return {"call_id": call_id, **body}
+                    detail = {"call_id": call_id, **body}
+                    # Normalize the full text under the canonical ``prompt`` key
+                    # even for legacy call files that stored it under ``message``
+                    # or the discovery-call ``question`` field — mirroring the
+                    # aggregator's _parse_call_file fallback chain. Without this,
+                    # a legacy body carries no ``prompt`` key, the frontend reads
+                    # null, and the clipped preview is never swapped for the full
+                    # decision text.
+                    if not isinstance(detail.get("prompt"), str):
+                        fallback = body.get("message") or body.get("question")
+                        if isinstance(fallback, str):
+                            detail["prompt"] = fallback
+                    return detail
                 return {"call_id": call_id, "prompt": str(body)}
         return None
 
     # -- sending -----------------------------------------------------------
 
     async def _send(self, ws: Any, message: protocol.Message) -> None:
-        """JSON-encode, meter, and send *message* on the socket.
+        """JSON-encode, send, then meter *message* on the socket.
 
         The encoded frame's byte length is recorded against its message type in
-        :attr:`metrics` *before* the send so the per-type wire budget reflects
-        every frame that left (or attempted to leave) the socket. Metering is
+        :attr:`metrics` *after* ``ws.send`` returns, so a send that raises
+        (connection closing / backpressured) is not counted as bytes that left
+        the process — the per-type wire budget then reflects only frames that
+        actually reached the socket, matching the server send paths. Metering is
         wrapped defensively inside :meth:`WireMetrics.record`, so accounting can
         never take down real traffic.
         """
         data = message.to_json()
-        self.metrics.record(message.type, len(data.encode("utf-8")))
         await ws.send(data)
+        self.metrics.record(message.type, len(data.encode("utf-8")))
 
     def _peer_supports_traffic_reduction(self) -> bool:
         """Whether the connected server understands the revision-3 lean frames.
@@ -1680,18 +1694,23 @@ class DaemonClient:
         if send_full:
             # Debounce the baseline: a forced re-push always fires (the server's
             # waiter must be resolved), but an unchanged index on an ordinary tick
-            # is not re-sent. Priming the by-flow baseline here means the very next
-            # delta diffs against exactly what the server now holds.
+            # is not re-sent.
             if force_index or index != self._last_index:
-                self._last_index = index
-                self._last_index_by_flow = dict(current)
-                self._index_primed = True
                 try:
                     await self._send(
                         ws, protocol.make_history_index(index, seq=self._next_seq())
                     )
                 except Exception:
                     logger.debug("HISTORY_INDEX send failed", exc_info=True)
+                    return
+                # Advance the by-flow baseline only once the full frame left the
+                # socket, so a send failure re-pushes a full baseline next tick
+                # rather than leaving the server believing it holds rows it never
+                # received. Priming here means the very next delta diffs against
+                # exactly what the server now holds.
+                self._last_index = index
+                self._last_index_by_flow = dict(current)
+                self._index_primed = True
             return
         upserts, removed = self._compute_index_delta(current, status_tick=status_tick)
         if not upserts and not removed:
@@ -1705,6 +1724,17 @@ class DaemonClient:
             )
         except Exception:
             logger.debug("HISTORY_INDEX_DELTA send failed", exc_info=True)
+            return
+        # Only advance the baseline after the delta actually left the socket, so a
+        # transient send failure re-emits the same upserts/removals next tick
+        # instead of silently desyncing the server's mirror.
+        last = self._last_index_by_flow
+        for meta in upserts:
+            flow_id = meta.get("flow_id")
+            if flow_id:
+                last[flow_id] = meta
+        for flow_id in removed:
+            last.pop(flow_id, None)
 
     def _compute_index_delta(
         self, current: Dict[str, Dict[str, Any]], *, status_tick: bool
@@ -1717,9 +1747,10 @@ class DaemonClient:
         liveness tick (see :func:`~se3.daemon.history.meta_change_is_throttleable`)
         is held back on a non-status tick — its baseline entry is left untouched so
         the next status tick re-detects and flushes it, capping such churn to the
-        heartbeat cadence. ``self._last_index_by_flow`` is advanced in place for
-        every row that is actually emitted so it always mirrors what the server
-        holds.
+        heartbeat cadence. This method is **pure**: it does not mutate
+        ``self._last_index_by_flow``. The caller advances the baseline only after
+        the delta frame is successfully sent, so a transient send failure re-emits
+        the missed rows on the next tick rather than desyncing the server mirror.
         """
         last = self._last_index_by_flow
         upserts: list = []
@@ -1734,10 +1765,7 @@ class DaemonClient:
             ):
                 continue
             upserts.append(meta)
-            last[flow_id] = meta
         removed = [flow_id for flow_id in list(last) if flow_id not in current]
-        for flow_id in removed:
-            del last[flow_id]
         return upserts, removed
 
     def _resumable_flow_ids(self, provider: Any) -> Set[str]:

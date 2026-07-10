@@ -311,7 +311,9 @@ export function registerIssueManagementTests(ctx) {
       type: "bug",
       priority: "low",
     });
-    assert.equal(body.description, "new desc");
+    // description was NOT dirty — must not appear (the snapshot value is only a
+    // DESC_CLIP preview, so PATCHing it back would truncate the stored body).
+    assert.equal("description" in body, false);
     assert.equal(body.machine_id, "m1");
     assert.equal(body.project_root, "/proj");
     assert.equal(body.title, "Updated");
@@ -319,6 +321,16 @@ export function registerIssueManagementTests(ctx) {
     assert.equal("type" in body, false);
     assert.equal("priority" in body, false);
     assert.equal("tags" in body, false);
+  });
+
+  check("G7 buildIssueEditBody: includes description only when it is dirty", () => {
+    const dirty = new Set(["issue-description"]);
+    const body = app.buildIssueEditBody("edited body", "m1", "/proj", dirty, {
+      title: "T",
+    });
+    assert.equal(body.description, "edited body");
+    // title was NOT dirty — must not appear
+    assert.equal("title" in body, false);
   });
 
   check("G7 buildIssueEditBody: omits machine_id/project_root when empty", () => {

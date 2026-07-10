@@ -110,6 +110,19 @@ class ConnectionManager:
         """Whether *machine_id* currently has a live connection."""
         return machine_id in self._connections
 
+    def record_send(self, msg_type: str, nbytes: int) -> None:
+        """Account a direct server→daemon send in the wire metrics.
+
+        The handshake WELCOME and the heartbeat PING (and the reject-path
+        WELCOME frames) are written straight to the socket rather than routed
+        through :meth:`send_to` / :meth:`send_to_connection`, so their bytes
+        would otherwise never reach the metrics. Recording them here keeps the
+        per-type server→daemon total honest — an idle connection's only cost is
+        those periodic pings, and the traffic diagnostics must show it.
+        """
+        if self._metrics is not None:
+            self._metrics.record(msg_type, nbytes)
+
     @property
     def machine_ids(self) -> list:
         """A snapshot list of currently-connected machine ids."""
@@ -124,7 +137,7 @@ class ConnectionManager:
         try:
             await websocket.send_text(payload)
             if self._metrics is not None:
-                self._metrics.record(message.type, len(payload))
+                self._metrics.record(message.type, len(payload.encode("utf-8")))
             return True
         except Exception:
             logger.warning("Failed to send %s to %s", message.type, machine_id)
@@ -163,7 +176,7 @@ class ConnectionManager:
         try:
             await websocket.send_text(payload)
             if self._metrics is not None:
-                self._metrics.record(message.type, len(payload))
+                self._metrics.record(message.type, len(payload.encode("utf-8")))
             return True
         except Exception:
             logger.warning("Failed to send %s to %s", message.type, machine_id)
@@ -392,32 +405,50 @@ class DetailRequestRegistry:
     parks an :class:`asyncio.Future` here keyed by ``request_id``. When the
     matching :data:`~se3.daemon.protocol.MSG_DETAIL_DATA` lands on the daemon
     receive loop the waiter is resolved with the daemon's payload. Concurrent
-    REST requests for the *same* ``(kind, target_id)`` share ONE downlink pull
-    via :meth:`begin` (leader/follower), mirroring
+    REST requests for the *same physical target* — the full
+    ``(kind, target_id, machine_id, project_root)`` tuple — share ONE downlink
+    pull via :meth:`begin` (leader/follower), mirroring
     :class:`HistoryRequestRegistry`, so opening the same detail twice never
-    fans out two DETAIL_REQUESTs. Lives entirely in process memory.
+    fans out two DETAIL_REQUESTs. The machine id and project root are part of
+    the coalescing key on purpose: a local issue/call id (e.g. ``1``) is only
+    unique *within* one project on one machine, so two different owners /
+    projects that happen to share a numeric id must NOT join the same pull —
+    otherwise the single reply would resolve both futures with the first
+    caller's body, leaking one owner's issue/call detail to another. Lives
+    entirely in process memory.
     """
 
     def __init__(self) -> None:
         self._waiters: Dict[str, list] = {}
-        #: (kind, target_id) keys with a downlink DETAIL_REQUEST already in
-        #: flight, so a second opener joins the first pull instead of sending
-        #: its own.
-        self._inflight: Dict[Tuple[str, str], str] = {}
+        #: (kind, target_id, machine_id, project_root) keys with a downlink
+        #: DETAIL_REQUEST already in flight, so a second opener of the SAME
+        #: physical target joins the first pull instead of sending its own. The
+        #: machine/root are in the key so a same-id target on a different
+        #: machine/project never coalesces across owners.
+        self._inflight: Dict[Tuple[str, str, str, str], str] = {}
 
     def begin(
-        self, request_id: str, kind: str, target_id: str
+        self,
+        request_id: str,
+        kind: str,
+        target_id: str,
+        machine_id: str,
+        project_root: str,
     ) -> Tuple["asyncio.Future", bool, str]:
         """Park a waiter and report whether this caller must send the downlink.
 
         Returns ``(future, is_leader, active_request_id)``. ``is_leader`` is
-        ``True`` only for the first caller for ``(kind, target_id)`` with no
-        pull in flight — that caller sends the daemon ``MSG_DETAIL_REQUEST``
-        under *request_id*. A follower parks a waiter under the LEADER's already
-        in-flight ``request_id`` (returned as *active_request_id*) so the single
-        DETAIL_DATA reply resolves leader and followers together.
+        ``True`` only for the first caller for the physical target
+        ``(kind, target_id, machine_id, project_root)`` with no pull in flight —
+        that caller sends the daemon ``MSG_DETAIL_REQUEST`` under *request_id*. A
+        follower parks a waiter under the LEADER's already in-flight
+        ``request_id`` (returned as *active_request_id*) so the single
+        DETAIL_DATA reply resolves leader and followers together. Coalescing is
+        scoped to the exact machine + project root, never just the local id, so
+        a reply can never resolve a waiter that asked about a different owner's
+        target.
         """
-        key = (kind, target_id)
+        key = (kind, target_id, machine_id, project_root)
         active = self._inflight.get(key)
         if active is None:
             self._inflight[key] = request_id
@@ -434,7 +465,7 @@ class DetailRequestRegistry:
         for fut in self._waiters.pop(request_id, []):
             if not fut.done():
                 fut.set_result(data)
-        # The pull for whatever (kind, target_id) this request_id led is done;
+        # The pull for whatever physical target this request_id led is done;
         # let a later open start a fresh one.
         self._inflight = {
             key: rid for key, rid in self._inflight.items() if rid != request_id
@@ -805,7 +836,9 @@ class UiHub:
                 await client.send_text(text)
                 if self._metrics is not None:
                     ptype = payload.get("type") if isinstance(payload, dict) else ""
-                    self._metrics.record(f"ui:{ptype or 'unknown'}", len(text))
+                    self._metrics.record(
+                        f"ui:{ptype or 'unknown'}", len(text.encode("utf-8"))
+                    )
             except Exception:  # pragma: no cover - best effort
                 dead.append(client)
         if dead:
@@ -973,7 +1006,7 @@ async def handle_ui_connection(
             default=str,
         )
         await websocket.send_text(snapshot_text)
-        hub.record_send("snapshot", len(snapshot_text))
+        hub.record_send("snapshot", len(snapshot_text.encode("utf-8")))
         while True:
             # The frontend only listens; reading drives disconnect detection.
             await websocket.receive_text()
@@ -1017,6 +1050,18 @@ async def handle_daemon_connection(
     """
     await websocket.accept()
     machine_id: Optional[str] = None
+
+    async def _send_welcome(message: protocol.Message) -> None:
+        """Send a WELCOME straight to the socket and account its bytes.
+
+        Every WELCOME — accept and reject alike — bypasses the ConnectionManager
+        routing path, so it must be recorded here to keep the per-type
+        server→daemon byte total complete.
+        """
+        text = message.to_json()
+        await websocket.send_text(text)
+        manager.record_send(message.type, len(text.encode("utf-8")))
+
     try:
         # The first frame MUST be a HELLO identifying the machine.
         hello_raw = await websocket.receive_text()
@@ -1024,32 +1069,36 @@ async def handle_daemon_connection(
             hello = protocol.decode(hello_raw)
         except protocol.ProtocolError as exc:
             logger.warning("Rejecting connection: bad HELLO frame (%s)", exc)
-            await websocket.send_text(
-                protocol.make_welcome(SERVER_VERSION, accepted=False, reason=str(exc)).to_json()
+            await _send_welcome(
+                protocol.make_welcome(SERVER_VERSION, accepted=False, reason=str(exc))
             )
             await websocket.close()
             return
         if hello.type != protocol.MSG_HELLO:
             reason = f"expected HELLO, got {hello.type}"
             logger.warning("Rejecting connection: %s", reason)
-            await websocket.send_text(
-                protocol.make_welcome(SERVER_VERSION, accepted=False, reason=reason).to_json()
+            await _send_welcome(
+                protocol.make_welcome(SERVER_VERSION, accepted=False, reason=reason)
             )
             await websocket.close()
             return
 
         machine_id = str(hello.payload.get("machine_id") or "").strip()
         if not machine_id:
-            await websocket.send_text(
+            await _send_welcome(
                 protocol.make_welcome(
                     SERVER_VERSION, accepted=False, reason="missing machine_id"
-                ).to_json()
+                )
             )
             await websocket.close()
             return
 
         hostname = str(hello.payload.get("hostname") or "")
         se3_version = str(hello.payload.get("se3_version") or "")
+        # Record the peer's wire revision so the detail leg can degrade to
+        # full-frame semantics for a pre-v3 daemon (which would silently drop a
+        # MSG_DETAIL_REQUEST). Missing/blank reads as legacy downstream.
+        peer_protocol_version = str(hello.payload.get("protocol_version") or "")
 
         # Authenticate the daemon's key → owner_id when an identity service is
         # wired. The key is a secret credential and is NEVER logged (only the
@@ -1063,22 +1112,26 @@ async def handle_daemon_connection(
                     "Rejecting daemon %s: unauthorized or missing daemon key",
                     machine_id,
                 )
-                await websocket.send_text(
+                await _send_welcome(
                     protocol.make_welcome(
                         SERVER_VERSION,
                         accepted=False,
                         reason="unauthorized daemon key",
-                    ).to_json()
+                    )
                 )
                 await websocket.close()
                 return
             identity.bind_machine(machine_id, owner_id)
 
         await state.register_machine(
-            machine_id, hostname, se3_version, owner_id=owner_id
+            machine_id,
+            hostname,
+            se3_version,
+            owner_id=owner_id,
+            protocol_version=peer_protocol_version,
         )
         await manager.connect(machine_id, websocket)
-        await websocket.send_text(protocol.make_welcome(SERVER_VERSION).to_json())
+        await _send_welcome(protocol.make_welcome(SERVER_VERSION))
         await _push_state(hub, state, "status_update")
 
         await _serve_loop(
@@ -1159,7 +1212,12 @@ async def _serve_loop(
                 return
             seq += 1
             try:
-                await websocket.send_text(protocol.make_ping(seq=seq).to_json())
+                ping_text = protocol.make_ping(seq=seq).to_json()
+                await websocket.send_text(ping_text)
+                # Account the heartbeat: on an idle connection the periodic PING
+                # is the ONLY server→daemon traffic, so it must show in the
+                # per-type metrics rather than being silently omitted.
+                manager.record_send(protocol.MSG_PING, len(ping_text.encode("utf-8")))
             except Exception:
                 return
 

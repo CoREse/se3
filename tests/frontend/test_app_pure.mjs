@@ -6080,6 +6080,76 @@ function installRouterFetch(historyPayload, flowPayload) {
   return calls;
 }
 
+await checkAsync("reply-context: expanding a clipped call prompt lazy-loads the full body", async () => {
+  // STATUS_UPDATE now clips a flow's own pending_calls prompt to DESC_CLIP; the
+  // reply-context carries only the preview and must fetch the untruncated body
+  // on demand (GET /api/calls/{id}/detail) when the operator expands it.
+  const saved = globalThis.fetch;
+  const reply = document.getElementById("flow-reply-context");
+  const CLIPPED = "y".repeat(200) + "...";        // looks DESC_CLIP-clipped
+  const FULL = "y".repeat(4000) + " full tail";
+  app.state.flowInterjectRequested = false;
+  app.state.flowReplyPromptExpanded = {};
+  app.state.flowReplyPromptScroll = {};
+  app.state.flowReplyPromptFull = {};
+  try {
+    let hitUrl = null;
+    globalThis.fetch = (url) => {
+      hitUrl = String(url);
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({ machine_id: "m1", call: { prompt: FULL } }),
+      });
+    };
+    app.renderInterventions({
+      status: "running",
+      pending_calls: [
+        { call_id: "big_call", kind: "call", prompt: CLIPPED, project_root: "/p" },
+      ],
+    });
+    // Collapsed by default → no fetch yet.
+    assert.equal(hitUrl, null, "no detail fetch before the body is expanded");
+    const toggle = findOne(reply, "flow-reply-prompt-toggle");
+    toggle.dispatch("click");                     // expand → triggers the pull
+    await flushTicks();
+    assert.ok(hitUrl && hitUrl.includes("/api/calls/big_call/detail"),
+      "expanding a clipped prompt pulls the full body from the call detail endpoint: " + hitUrl);
+    // The full text is cached so a subsequent rebuild mounts it directly.
+    assert.equal(app.state.flowReplyPromptFull["big_call"], FULL,
+      "the fetched full prompt is cached by call_id");
+    const body = findOne(reply, "flow-reply-prompt");
+    assert.ok(body.textContent.includes("full tail"),
+      "the expanded body shows the untruncated prompt after the pull");
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+await checkAsync("reply-context: a short (un-clipped) call prompt never fetches detail", async () => {
+  // A prompt at/under DESC_CLIP is carried verbatim, so expanding it must not
+  // fire a needless detail pull.
+  const saved = globalThis.fetch;
+  const reply = document.getElementById("flow-reply-context");
+  app.state.flowInterjectRequested = false;
+  app.state.flowReplyPromptExpanded = {};
+  app.state.flowReplyPromptFull = {};
+  try {
+    let fetched = false;
+    globalThis.fetch = () => { fetched = true; return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) }); };
+    app.renderInterventions({
+      status: "running",
+      pending_calls: [
+        { call_id: "small_call", kind: "call", prompt: "short prompt", project_root: "/p" },
+      ],
+    });
+    findOne(reply, "flow-reply-prompt-toggle").dispatch("click");
+    await flushTicks();
+    assert.equal(fetched, false, "a short prompt is complete on the wire — no detail pull on expand");
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
 await checkAsync("G3 poll: pollFlowView issues a full history self-heal pull and renders it", async () => {
   const saved = globalThis.fetch;
   const savedMachines = app.state.machines;

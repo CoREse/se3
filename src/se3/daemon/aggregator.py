@@ -95,13 +95,17 @@ class PendingCall:
 
         *clip_prompt* truncates the (potentially large) ``prompt`` body to
         :data:`~se3.daemon.history._DESC_CLIP` characters — the same standard the
-        history index clips task descriptions to. It is set only for the
-        *machine-wide* ``MachineStatus.pending_calls`` surface (the redundant
-        ~100 KB the traffic-reduction work targets), where the full prompt is
-        fetched on demand via a detail request. It is deliberately left ``False``
-        for a flow's own ``FlowSnapshot.pending_calls``, because the interactive
-        chip bar (confirm / discovery-confirm / retry chips) renders that prompt
-        verbatim and a truncated body would corrupt the operator's decision text.
+        history index clips task descriptions to. It is set ``True`` on BOTH
+        STATUS_UPDATE surfaces — the machine-wide ``MachineStatus.pending_calls``
+        aggregate AND each flow's own ``FlowSnapshot.pending_calls`` — so no full
+        prompt body ever inlines into the periodic snapshot (an active flow's
+        discovery_confirm prompt can embed a whole refined task description).
+        The interactive chip bar loads the untruncated prompt on demand via
+        ``GET /api/calls/{id}/detail`` (the server routes a DETAIL_REQUEST to the
+        owning daemon); the reply-context's collapsed body swaps the full text in
+        when the operator expands it, so the decision text is never lost — it is
+        just no longer carried on every tick. The parameter defaults to ``False``
+        so a caller that genuinely needs the verbatim body still can.
         """
         return {
             "call_id": self.call_id,
@@ -162,7 +166,16 @@ class FlowSnapshot:
             "total_steps": self.total_steps,
             "progress": self.progress,
             "updated_at": self.updated_at,
-            "pending_calls": [c.to_dict() for c in self.pending_calls],
+            # Clip the prompt here too: an active flow's pending call can carry a
+            # large prompt (a discovery_confirm embeds a whole refined task
+            # description), and it rides in every full STATUS_UPDATE baseline and
+            # every server/UI re-broadcast. The interactive chip renders the
+            # untruncated body only on demand (GET /api/calls/{id}/detail), so the
+            # wire carries only the _DESC_CLIP preview — matching the machine-wide
+            # pending_calls surface and closing the last full-prompt inline leak.
+            "pending_calls": [
+                c.to_dict(clip_prompt=True) for c in self.pending_calls
+            ],
             "log_count": self.log_count,
             "issue_count": self.issue_count,
             "summary": self.summary,
@@ -236,8 +249,9 @@ class MachineStatus:
             # Machine-wide pending calls are clipped: this list is the ~100 KB
             # redundant surface the traffic-reduction pass targets, and its full
             # prompt bodies are fetched on demand (MSG_DETAIL_REQUEST). Per-flow
-            # ``FlowSnapshot.pending_calls`` stay un-clipped so the interactive
-            # chip bar keeps rendering full decision text.
+            # ``FlowSnapshot.pending_calls`` are clipped the same way, and the
+            # interactive chip bar upgrades a chip's prompt to the full decision
+            # text on demand (GET /api/calls/{id}/detail).
             "pending_calls": [c.to_dict(clip_prompt=True) for c in self.pending_calls],
             "project_roots": list(self.project_roots),
             "issues": [i.to_dict() for i in self.issues],

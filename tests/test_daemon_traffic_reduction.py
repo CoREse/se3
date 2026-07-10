@@ -20,8 +20,15 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from se3.daemon import protocol
-from se3.daemon.aggregator import DaemonAggregator, MachineStatus, PendingCall
+from se3.daemon.aggregator import (
+    DaemonAggregator,
+    FlowSnapshot,
+    MachineStatus,
+    PendingCall,
+)
 from se3.daemon.client import DaemonClient, _status_signature
 from se3.daemon.history import _DESC_CLIP
 
@@ -102,7 +109,7 @@ def test_short_issue_description_untouched(tmp_path: Path) -> None:
     assert issues[0].description == "short body"
 
 
-def test_machine_wide_pending_call_prompt_clipped_but_flow_full() -> None:
+def test_status_update_pending_call_prompts_clipped_on_both_surfaces() -> None:
     long_prompt = "P" * 4000
     call = PendingCall(
         call_id="c1",
@@ -118,9 +125,18 @@ def test_machine_wide_pending_call_prompt_clipped_but_flow_full() -> None:
     assert len(wire["prompt"]) <= _DESC_CLIP + 3
     assert wire["prompt"].endswith("...")
 
-    # The flow's own pending_calls keep the full prompt for the chip bar.
-    full = call.to_dict()
-    assert full["prompt"] == long_prompt
+    # A flow's OWN pending_calls now clip too: an active flow's prompt rides in
+    # every full STATUS_UPDATE baseline + server/UI re-broadcast, so inlining the
+    # full body there was the last full-prompt leak. The reply-context chip loads
+    # the untruncated prompt on demand via GET /api/calls/{id}/detail.
+    flow = FlowSnapshot(project_root="/p", flow_id="f1", pending_calls=[call])
+    flow_wire = flow.to_dict()["pending_calls"][0]
+    assert len(flow_wire["prompt"]) <= _DESC_CLIP + 3
+    assert flow_wire["prompt"].endswith("...")
+
+    # The default (raw) serialization still hands back the verbatim body for any
+    # caller that genuinely needs it.
+    assert call.to_dict()["prompt"] == long_prompt
 
 
 # --------------------------------------------------------------------------- #
@@ -271,6 +287,45 @@ def test_detail_request_returns_full_call_prompt(tmp_path: Path) -> None:
     assert reply.payload["detail"]["call_id"] == "c1"
 
 
+def test_detail_request_normalizes_legacy_call_fields(tmp_path: Path) -> None:
+    """A legacy call body storing its text under ``message``/``question``
+    surfaces the full text under the canonical ``prompt`` key, so the frontend
+    (which reads only ``detail.call.prompt``) can swap out the clipped preview.
+    """
+    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir.mkdir(parents=True, exist_ok=True)
+    long_message = "M" * 3000
+    long_question = "?" * 3000
+    (calls_dir / "legacy_msg.json").write_text(
+        json.dumps({"kind": "call", "message": long_message}), encoding="utf-8"
+    )
+    (calls_dir / "legacy_q.json").write_text(
+        json.dumps({"question": long_question}), encoding="utf-8"
+    )
+    client = _make_client()
+
+    async def fetch(call_id: str):
+        ws = _FakeWS()
+        await client._dispatch(
+            ws,
+            protocol.make_detail_request(
+                protocol.DETAIL_KIND_CALL,
+                call_id,
+                project_root=str(tmp_path),
+                request_id="rq",
+            ),
+        )
+        return ws.sent[0]
+
+    msg_reply = asyncio.run(fetch("legacy_msg"))
+    assert msg_reply.payload["ok"] is True
+    assert msg_reply.payload["detail"]["prompt"] == long_message
+
+    q_reply = asyncio.run(fetch("legacy_q"))
+    assert q_reply.payload["ok"] is True
+    assert q_reply.payload["detail"]["prompt"] == long_question
+
+
 def test_detail_request_missing_target_replies_error(tmp_path: Path) -> None:
     client = _make_client()
     ws = _FakeWS()
@@ -333,3 +388,48 @@ def test_send_accrues_wire_metrics() -> None:
     assert snap[protocol.MSG_KEEPALIVE]["count"] == 1
     assert snap["__total__"]["count"] == 2
     assert snap["__total__"]["bytes"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# WS-level compression (permessage-deflate)
+# --------------------------------------------------------------------------- #
+
+
+def test_session_dials_with_permessage_deflate() -> None:
+    """``_session`` must pin ``compression="deflate"`` on ``websockets.connect``.
+
+    This is one of the two WS-level compression legs the traffic-reduction work
+    installed (the server leg is locked in test_server_g4_relay). A refactor that
+    drops the kwarg would silently multiply steady-state WS traffic ~5-10x on
+    full-frame sends, so lock the connect kwargs here.  A stub ``websockets``
+    captures the call and aborts the session at ``__aenter__`` before any real
+    I/O.
+    """
+    client = _make_client()
+    captured = {}
+
+    class _StubConnect:
+        def __init__(self, url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self):
+            # Abort before HELLO / the push+receive loops: we only need the
+            # connect kwargs, and raising here unwinds _session cleanly.
+            raise RuntimeError("stop-after-connect")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _StubWebsockets:
+        @staticmethod
+        def connect(url, **kwargs):
+            return _StubConnect(url, **kwargs)
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="stop-after-connect"):
+            await client._session(asyncio.Event(), _StubWebsockets)
+
+    asyncio.run(scenario())
+    assert captured["kwargs"].get("compression") == "deflate"
+    assert captured["kwargs"].get("max_size") == protocol.MAX_WS_MESSAGE_BYTES

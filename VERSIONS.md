@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.18.0 - 2026-07-11
+
+- Reduce daemon status traffic by sending lightweight issue/call summaries with clipped descriptions and content-hash gated keepalive frames instead of constant full snapshots
+- Add delta HISTORY_INDEX updates so only changed flow metadata is pushed after the initial full sync, instead of resending the entire index on any change
+- Fetch issue and pending-call full detail on demand via new REST/downlink endpoints when opened in the WebUI, rather than inlining all bodies in every snapshot
+- Rework chat-page self-heal to validate a bundle signature against the held progress token, returning not-modified/delta/full responses so large sessions no longer re-transfer the whole conversation every 3s
+- Enable gzip compression for large REST history responses and confirm permessage-deflate on the daemon and browser WebSocket legs
+- Add per-message-type wire byte counters on daemon and server for traffic observability and regression tracking
 ## 11.17.2 - 2026-07-10
 
 - Fix the built-in default agent chain so se3 works out of the box without `claude` installed

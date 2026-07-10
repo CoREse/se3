@@ -258,6 +258,16 @@ const state = {
   // instead of snapping it back to the top. Reset on openFlowView /
   // doCloseFlowView alongside flowReplyPromptExpanded.
   flowReplyPromptScroll: {},
+  // Cache of on-demand-fetched untruncated pending-call prompts, keyed by
+  // call_id. STATUS_UPDATE now clips a flow's own pending_calls prompt to
+  // DESC_CLIP (wire economy — a discovery_confirm prompt can embed a whole
+  // refined task description), so the reply-context's collapsed body carries
+  // only the preview. When the operator expands a clipped body we fetch the
+  // full prompt once via GET /api/calls/{id}/detail and cache it here; the 3s
+  // poll / ws-push rebuilds then reuse the cached full text instead of the
+  // preview (and never re-fetch). A pending call's prompt is immutable, so a
+  // call_id key is stable. Reset on openFlowView / doCloseFlowView.
+  flowReplyPromptFull: {},
 
   // ---- Diff-aware render signatures (plan B: skip empty rebuilds) ----
   // Per-region cache of the last rendered data's signature, keyed by region
@@ -1447,10 +1457,18 @@ function buildIssueCreateBody(description, machineId, projectRoot, title, type, 
 
 // Build the PATCH body for ``PATCH /api/issues/{id}`` (edit).  Only includes
 // fields the user actually modified (tracked via a dirty set).  Pure.
+//
+// ``description`` is gated on the dirty set just like the other fields: the
+// STATUS_UPDATE snapshot carries only a DESC_CLIP-truncated preview, so
+// unconditionally PATCHing the form's textarea value back would overwrite the
+// issue's stored full body with the 200-char preview whenever the user edits
+// only (say) the priority. The server's PATCH leaves description untouched when
+// the key is absent, so omitting it is lossless.
 function buildIssueEditBody(description, machineId, projectRoot, dirtyFields, formValues) {
-  const body = { description };
+  const body = {};
   if (machineId) body.machine_id = machineId;
   if (projectRoot) body.project_root = projectRoot;
+  if (dirtyFields.has("issue-description")) body.description = description;
   if (dirtyFields.has("issue-title"))   body.title = formValues.title || "";
   if (dirtyFields.has("issue-type"))    body.type = formValues.type || "";
   if (dirtyFields.has("issue-priority")) body.priority = formValues.priority || "";
@@ -1741,6 +1759,7 @@ function openFlowView(flowId) {
   state.interjectionToastsSeen = {};
   state.flowReplyPromptExpanded = {};
   state.flowReplyPromptScroll = {};
+  state.flowReplyPromptFull = {};
   // Force the next frame of every diff-aware render region to rebuild: this is
   // both first-open and the flow-switch path (the containers are reused), so a
   // signature cached against the prior flow must not skip this flow's rebuild.
@@ -1828,6 +1847,7 @@ function doCloseFlowView() {
   state.interjectionToastsSeen = {};
   state.flowReplyPromptExpanded = {};
   state.flowReplyPromptScroll = {};
+  state.flowReplyPromptFull = {};
   // Clear the diff-aware render-signature cache so a later openFlowView starts
   // with no stale signatures pinning a closed flow's panels.
   resetRenderSignatures();
@@ -3083,7 +3103,21 @@ function computeInterventions(flow) {
         id: "call:" + (callId || ("idx" + i)),
         kind: kind,
         callId: callId,
+        // STATUS_UPDATE clips this prompt to DESC_CLIP; the reply-context
+        // lazy-loads the untruncated body on expand via GET /api/calls/{id}/
+        // detail (needs the owning project root to disambiguate a local id).
         prompt: String(c.prompt || c.message || ""),
+        projectRoot: c.project_root != null ? String(c.project_root) : "",
+        // Pin the on-demand full-prompt pull to the flow's owning daemon.
+        // project_root alone is ambiguous when one owner has two daemons on the
+        // same absolute path with a colliding local call_id; the open flow's
+        // machine_id disambiguates so the server returns THIS call's full body.
+        machineId:
+          c.machine_id != null
+            ? String(c.machine_id)
+            : state.flowMachineId
+              ? String(state.flowMachineId)
+              : "",
         context: c.context != null ? c.context : null,
         options: Array.isArray(c.options) ? c.options : [],
         synthetic: false,
@@ -3357,11 +3391,21 @@ function safeStringify(value) {
 //   opts.onScroll  — callback invoked with the body's current scrollTop whenever
 //                    the user scrolls the expanded body, so the caller can record
 //                    the latest reading position for the next rebuild.
+//   opts.loadFullText — optional async function returning the untruncated body
+//                    (or null). Invoked at most once, the first time the block is
+//                    shown expanded (either mounted already-expanded from a
+//                    persisted state, or on the user's expand click). Its resolved
+//                    text replaces the mounted (clipped preview) body in place, so
+//                    STATUS_UPDATE can carry only the DESC_CLIP preview while the
+//                    full prompt is fetched on demand. Failures are swallowed
+//                    (the preview stays); it is never called for a body that is
+//                    never expanded.
 function buildCollapsiblePrompt(promptText, opts) {
   const initialExpanded = opts && opts.expanded;
   const onToggle = opts && opts.onToggle;
   const onScroll = opts && opts.onScroll;
   const restoreScrollTop = opts && opts.scrollTop;
+  const loadFullText = opts && opts.loadFullText;
   const wrap = el("div", "flow-reply-prompt-wrap");
   const collapsedLabel = "▸ 展开消息详情";
   const expandedLabel = "▾ 收起消息详情";
@@ -3370,9 +3414,27 @@ function buildCollapsiblePrompt(promptText, opts) {
   btn.type = "button";
   const body = el("div", "flow-reply-prompt" + (initialExpanded ? "" : " hidden"));
   body.appendChild(renderMarkdown(promptText));
+  // Fetch-and-swap the untruncated body the first time it is shown expanded.
+  // Guarded so the network call fires once per mounted block and only when the
+  // caller actually wants a full-text upgrade for a clipped preview.
+  let fullRequested = false;
+  const requestFull = () => {
+    if (fullRequested || typeof loadFullText !== "function") return;
+    fullRequested = true;
+    Promise.resolve()
+      .then(loadFullText)
+      .then((full) => {
+        if (typeof full === "string" && full && full !== promptText) {
+          body.innerHTML = "";
+          body.appendChild(renderMarkdown(full));
+        }
+      })
+      .catch(() => {});
+  };
   let expanded = !!initialExpanded;
   if (initialExpanded) {
     wrap.classList.add("expanded");
+    requestFull();
   }
   // Record the live reading position on every scroll so the captured scrollTop
   // is decoupled from when (polling vs ws push) the next rebuild fires.
@@ -3394,6 +3456,7 @@ function buildCollapsiblePrompt(promptText, opts) {
     btn.textContent = expanded ? expandedLabel : collapsedLabel;
     if (onToggle) onToggle(expanded);
     if (expanded) {
+      requestFull();
       requestAnimationFrame(() => body.scrollIntoView({ block: "nearest" }));
     }
   });
@@ -3565,13 +3628,42 @@ function updateReplyBox(flow) {
   // in style.css), so even a very long prompt — e.g. a `discovery_confirm`
   // whose prompt embeds an entire refined task description — can never push the
   // textarea / options / Send out of view.
-  if (target.prompt) {
-    ctx.appendChild(buildCollapsiblePrompt(target.prompt, {
+  const cachedFull =
+    target.callId && state.flowReplyPromptFull
+      ? state.flowReplyPromptFull[target.callId]
+      : null;
+  // Once fetched, reuse the cached untruncated body so the 3s poll / ws-push
+  // rebuild does not fall back to the DESC_CLIP preview (and never re-fetches).
+  const promptText =
+    typeof cachedFull === "string" && cachedFull ? cachedFull : target.prompt;
+  // A real (non-synthetic) call's prompt whose preview is DESC_CLIP-clipped can
+  // be upgraded on demand; synthetic / local interjection prompts are the user's
+  // own verbatim draft and are never clipped, so they need no fetch.
+  const needsFull =
+    !!target.callId &&
+    !target.synthetic &&
+    cachedFull == null &&
+    descriptionLikelyTruncated(target.prompt);
+  if (promptText) {
+    ctx.appendChild(buildCollapsiblePrompt(promptText, {
       expanded: !!state.flowReplyPromptExpanded[target.id],
       // Restore the last reading position so the 3s detail poll / ws push
       // rebuild of this context block (ctx.innerHTML="") does not snap an
       // expanded long 「消息详情」 body back to the top while the user reads.
       scrollTop: state.flowReplyPromptScroll[target.id],
+      loadFullText: needsFull
+        ? () =>
+            fetchCallFullPrompt(target.callId, {
+              machineId: target.machineId,
+              projectRoot: target.projectRoot,
+            }).then((full) => {
+              // Cache so subsequent rebuilds mount the full body directly.
+              if (typeof full === "string" && full) {
+                state.flowReplyPromptFull[target.callId] = full;
+              }
+              return full;
+            })
+        : null,
       onToggle(v) {
         state.flowReplyPromptExpanded[target.id] = v;
         // Collapsing discards the saved position so a later re-expand starts
@@ -5060,8 +5152,12 @@ function descriptionLikelyTruncated(text) {
 // `note` is revealed. A late response is dropped if the user has since selected
 // another issue (guarded on `selectedIssueId`), so a stale full body can never
 // overwrite a different issue's pane.
-async function loadIssueFullDescription(iss, descNode, note) {
-  const key = issueCompositeKey(iss);
+// Fetch one issue's untruncated description from the owning daemon (via the
+// server's on-demand `/api/issues/{id}/detail` downlink). Returns the full
+// description string, or null when it is unavailable. Shared by the detail
+// pane's lazy upgrade and the edit modal's textarea pre-fill, so an edit starts
+// from the full body rather than the DESC_CLIP preview.
+async function fetchIssueFullDescription(iss) {
   const params = new URLSearchParams();
   const mid = issueMachineId(iss);
   if (mid) params.set("machine_id", mid);
@@ -5069,13 +5165,18 @@ async function loadIssueFullDescription(iss, descNode, note) {
   const qs = params.toString();
   const url = `/api/issues/${encodeURIComponent(String(iss.id))}/detail`
     + (qs ? `?${qs}` : "");
+  const resp = await authedFetch(url);
+  if (!resp.ok) throw new Error(`status ${resp.status}`);
+  const data = await resp.json();
+  return data && data.issue && typeof data.issue.description === "string"
+    ? data.issue.description : null;
+}
+
+async function loadIssueFullDescription(iss, descNode, note) {
+  const key = issueCompositeKey(iss);
   try {
-    const resp = await authedFetch(url);
-    if (!resp.ok) throw new Error(`status ${resp.status}`);
-    const data = await resp.json();
+    const full = await fetchIssueFullDescription(iss);
     if (state.selectedIssueId !== key) return;   // user moved on — drop it
-    const full = data && data.issue && typeof data.issue.description === "string"
-      ? data.issue.description : null;
     if (full != null && descNode) {
       descNode.textContent = full;
       if (note) note.classList.add("hidden");
@@ -5092,10 +5193,11 @@ async function loadIssueFullDescription(iss, descNode, note) {
 
 // Fetch one pending call's untruncated prompt from the owning daemon (via the
 // server's on-demand `/api/calls/{id}/detail` downlink). Returns the full prompt
-// string, or null when it is unavailable. The interactive chip bar renders a
-// flow's OWN pending_calls verbatim (never clipped), so this is only needed for
-// a surface fed by the machine-wide (clipped) pending_calls list; kept alongside
-// the issue loader so both on-demand detail pulls live in one place.
+// string, or null when it is unavailable. Both STATUS_UPDATE pending_calls
+// surfaces (the machine-wide aggregate AND a flow's own list) now clip the prompt
+// to DESC_CLIP for wire economy, so the reply-context's collapsed body calls this
+// to upgrade the preview to the full text when the operator expands it; kept
+// alongside the issue loader so both on-demand detail pulls live in one place.
 async function fetchCallFullPrompt(callId, { machineId, projectRoot } = {}) {
   const params = new URLSearchParams();
   if (machineId) params.set("machine_id", String(machineId));
@@ -5300,8 +5402,33 @@ function _updateIssueProjectManualVisibility() {
   if (sel.value === PROJECT_MANUAL_SENTINEL) manualInput.focus();
 }
 
+// Lock/unlock the edit modal's description textarea while its full body is being
+// fetched. The STATUS_UPDATE mirror carries only the DESC_CLIP preview, so until
+// the untruncated body arrives the textarea would hold "preview...". Letting the
+// user edit that and save would PATCH the truncated text back over the stored
+// full description. Disabling the field while loading — and keeping it disabled
+// with a failure hint if the fetch never resolves — makes that truncation
+// impossible: a disabled field never enters the dirty set, so buildIssueEditBody
+// omits `description` and the stored body is left untouched. Other fields stay
+// editable. `phase` is "clear" (enable, hide hint), "loading", or "failed".
+function _setIssueDescriptionLock(phase, message) {
+  const ta = $("issue-description");
+  const hint = $("issue-description-hint");
+  if (phase === "clear") {
+    if (ta) ta.disabled = false;
+    if (hint) { hint.classList.add("hidden"); hint.textContent = ""; }
+    return;
+  }
+  if (ta) ta.disabled = true;
+  if (hint) {
+    hint.textContent = message || "";
+    hint.classList.remove("hidden");
+  }
+}
+
 function openIssueCreateModal() {
   $("issue-modal-title").textContent = "新建 Issue";
+  _setIssueDescriptionLock("clear");
   $("issue-description").value = "";
   $("issue-title").value = "";
   $("issue-type").value = "";
@@ -5326,6 +5453,7 @@ function openIssueCreateModal() {
 function openIssueEditModal(iss) {
   if (!iss) return;
   $("issue-modal-title").textContent = "编辑 Issue #" + (iss.id || "?");
+  _setIssueDescriptionLock("clear");
   $("issue-description").value = iss.description || "";
   $("issue-title").value = iss.title || "";
   $("issue-type").value = iss.type || "";
@@ -5343,6 +5471,51 @@ function openIssueEditModal(iss) {
   $("issue-machine-row").classList.add("hidden");
   $("issue-modal").classList.remove("hidden");
   $("issue-description").focus();
+
+  // The snapshot description is a DESC_CLIP-truncated preview. Upgrade the
+  // textarea to the untruncated body on demand so an edit starts from — and
+  // saves back — the full description, not the 200-char preview. While the fetch
+  // is in flight the field is DISABLED (see _setIssueDescriptionLock): editing
+  // the visible "preview..." and saving would overwrite the stored full body
+  // with the truncated text. On success we swap in the full body and re-enable;
+  // on failure (or a null body) the field stays disabled with a hint, so the
+  // description can never be silently truncated by an edit — other fields remain
+  // editable and the PATCH omits description (it never became dirty).
+  if (descriptionLikelyTruncated(iss.description)) {
+    // Issue identity is composite (id + machine_id + project_root): the same
+    // numeric id can name a different issue on another machine/project. Pin all
+    // three so a stale in-flight fetch cannot populate the modal after the user
+    // reopened it on a same-id issue from a different machine/project.
+    const issueId = String(iss.id || "");
+    const machineId = String(issueMachineId(iss) || "");
+    const projectRoot = String(iss.project_root || "");
+    _setIssueDescriptionLock("loading", "完整描述加载中…");
+    const _stillEditingThisIssue = () => {
+      const form = $("issue-form");
+      return form.dataset.mode === "edit"
+        && form.dataset.issueId === issueId
+        && form.dataset.machineId === machineId
+        && form.dataset.projectRoot === projectRoot;
+    };
+    fetchIssueFullDescription(iss).then((full) => {
+      if (!_stillEditingThisIssue()) return;
+      if (full == null) {
+        _setIssueDescriptionLock(
+          "failed",
+          "完整描述加载失败，暂无法编辑描述（可关闭后重试）；其他字段仍可修改。");
+        return;
+      }
+      if (!_issueFormDirty.has("issue-description")) {
+        $("issue-description").value = full;
+      }
+      _setIssueDescriptionLock("clear");
+    }).catch(() => {
+      if (!_stillEditingThisIssue()) return;
+      _setIssueDescriptionLock(
+        "failed",
+        "完整描述加载失败，暂无法编辑描述（可关闭后重试）；其他字段仍可修改。");
+    });
+  }
 }
 
 function closeIssueModal() {
@@ -13048,6 +13221,7 @@ if (typeof module !== "undefined" && module.exports) {
     applyHistoryIndexDelta,
     descriptionLikelyTruncated,
     loadIssueFullDescription,
+    fetchIssueFullDescription,
     fetchCallFullPrompt,
     renderIssueDetail,
     // History list rendering + shared mutable state (exposed for the DOM-stub

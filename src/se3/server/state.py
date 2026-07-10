@@ -286,6 +286,13 @@ class MachineRecord:
     machine_id: str
     hostname: str = ""
     se3_version: str = ""
+    #: The wire ``protocol_version`` the daemon advertised in its HELLO. Drives
+    #: the per-machine full-frame fall-back on the detail leg: a daemon speaking
+    #: a revision older than 3 (see :func:`protocol.supports_traffic_reduction`)
+    #: never received the DETAIL_REQUEST message type and would silently drop it,
+    #: so the server must NOT route a detail pull to it — its STATUS_UPDATE mirror
+    #: already carries the untruncated body. Empty string means "unknown / legacy".
+    protocol_version: str = ""
     owner_id: Optional[str] = None
     connected_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -298,6 +305,7 @@ class MachineRecord:
             "machine_id": self.machine_id,
             "hostname": self.hostname,
             "se3_version": self.se3_version,
+            "protocol_version": self.protocol_version,
             "owner_id": self.owner_id,
             "connected_at": self.connected_at,
             "last_seen": self.last_seen,
@@ -402,6 +410,7 @@ class ServerState:
         se3_version: str = "",
         *,
         owner_id: Optional[str] = None,
+        protocol_version: str = "",
     ) -> MachineRecord:
         """Register (or refresh) a machine on HELLO and mark it online.
 
@@ -428,6 +437,7 @@ class ServerState:
                     machine_id=machine_id,
                     hostname=hostname,
                     se3_version=se3_version,
+                    protocol_version=protocol_version,
                     owner_id=owner_id,
                     connected_at=now,
                     last_seen=now,
@@ -437,6 +447,10 @@ class ServerState:
             else:
                 record.hostname = hostname or record.hostname
                 record.se3_version = se3_version or record.se3_version
+                # Always refresh the advertised protocol version on reconnect —
+                # unlike hostname/se3_version this must reflect the CURRENT peer
+                # even if it downgraded, so the detail-leg fall-back stays correct.
+                record.protocol_version = protocol_version
                 if record.owner_id != owner_id:
                     # Owner takeover on a forgeable machine_id: scrub the prior
                     # owner's flows and history so the new owner can never read
@@ -569,6 +583,24 @@ class ServerState:
                 return None
             return record.to_dict()
 
+    async def machine_supports_detail_pull(
+        self, machine_id: str, *, owner: Optional[str] = None
+    ) -> bool:
+        """Whether *machine_id*'s daemon understands the on-demand detail leg.
+
+        Returns ``True`` only when the machine is known (and owner-visible) and
+        advertised a protocol version that includes ``MSG_DETAIL_REQUEST``
+        (revision 3+). A pre-v3 daemon would silently drop the frame, so the
+        detail endpoint must fall back to serving the STATUS_UPDATE mirror
+        instead of parking a waiter that can only time out. An unknown machine
+        reads ``False`` (fail-closed to the mirror path).
+        """
+        async with self._lock:
+            record = self._machines.get(machine_id)
+            if record is None or not _owned(record, owner):
+                return False
+            return protocol.supports_traffic_reduction(record.protocol_version)
+
     async def get_machines_full(
         self, *, owner: Optional[str] = None
     ) -> List[Dict[str, Any]]:
@@ -626,7 +658,11 @@ class ServerState:
         return result[0] if result is not None else None
 
     async def find_call_owner(
-        self, call_id: str, *, owner: Optional[str] = None
+        self,
+        call_id: str,
+        *,
+        owner: Optional[str] = None,
+        project_root: Optional[str] = None,
     ) -> Optional[Tuple[str, str]]:
         """Resolve the machine + project_root owning a pending *call_id*.
 
@@ -636,17 +672,61 @@ class ServerState:
         to the daemon whose flow raised the call (its truncated prompt is
         surfaced in STATUS_UPDATE; the full prompt is fetched on demand).
         Returns ``None`` when no owner-scoped flow holds the call.
+
+        ``call_id`` is only unique within a single project; two owner-scoped
+        projects can each hold a pending call with the same local id. When the
+        caller knows the *project_root* of the call whose full prompt it wants,
+        it MUST be passed so resolution is pinned to that project — otherwise an
+        earlier-scanned project's matching call would misroute the detail
+        request to the wrong daemon / filesystem target.
         """
         async with self._lock:
             for machine_id, record in self._machines.items():
                 if not _owned(record, owner):
                     continue
                 for flow in record.flows.values():
+                    if project_root and str(flow.project_root or "") != str(
+                        project_root
+                    ):
+                        continue
                     for call in flow.pending_calls or []:
                         if not isinstance(call, dict):
                             continue
                         if str(call.get("call_id") or "") == str(call_id):
                             return machine_id, str(flow.project_root or "")
+        return None
+
+    async def get_pending_call(
+        self,
+        call_id: str,
+        *,
+        owner: Optional[str] = None,
+        machine_id: Optional[str] = None,
+        project_root: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the mirror dict of pending *call_id*, or ``None``.
+
+        Used by the detail endpoint's pre-v3 fall-back: when the owning daemon
+        does not speak the DETAIL_REQUEST protocol, its STATUS_UPDATE mirror
+        already carries the untruncated prompt, so the endpoint serves this dict
+        directly rather than pulling. Scoping mirrors :meth:`find_call_owner`.
+        """
+        async with self._lock:
+            for mid, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
+                if machine_id and mid != machine_id:
+                    continue
+                for flow in record.flows.values():
+                    if project_root and str(flow.project_root or "") != str(
+                        project_root
+                    ):
+                        continue
+                    for call in flow.pending_calls or []:
+                        if not isinstance(call, dict):
+                            continue
+                        if str(call.get("call_id") or "") == str(call_id):
+                            return dict(call)
         return None
 
     # -- resume helpers ----------------------------------------------------

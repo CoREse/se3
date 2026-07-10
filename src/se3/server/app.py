@@ -39,6 +39,7 @@ from pydantic import BaseModel
 
 from se3 import __version__
 from se3.daemon import protocol
+from se3.daemon.history import _clip as _clip_desc
 from se3.daemon.wire_metrics import WireMetrics
 
 from . import crypto
@@ -952,10 +953,14 @@ def create_app(
     ) -> Dict[str, Any]:
         """Pull one issue/call full-text record from *machine_id*'s daemon.
 
-        Concurrent openers of the same ``(kind, target_id)`` share ONE downlink
-        pull (leader/follower). Raises 503 when the daemon is not connected /
-        the send fails, 504 on reply timeout, and 404 when the daemon reports
-        the target missing / unreadable.
+        Concurrent openers of the same physical target
+        ``(kind, target_id, machine_id, project_root)`` share ONE downlink pull
+        (leader/follower). The machine/root are part of the coalescing key so two
+        owners with the same local issue/call id on different machines/projects
+        never join one pull (which would leak one owner's detail to the other).
+        Raises 503 when the daemon is not connected / the send fails, 504 on
+        reply timeout, and 404 when the daemon reports the target missing /
+        unreadable.
         """
         if not manager.is_connected(machine_id):
             raise HTTPException(
@@ -964,7 +969,7 @@ def create_app(
             )
         request_id = uuid.uuid4().hex
         fut, is_leader, active_rid = detail_registry.begin(
-            request_id, kind, target_id
+            request_id, kind, target_id, machine_id, project_root
         )
         if is_leader:
             sent = await request_detail(
@@ -1016,7 +1021,15 @@ def create_app(
             raise HTTPException(
                 status_code=404, detail=f"issue '{issue_id}' not found"
             )
-        mid, root, _ = result
+        mid, root, mirror_issue = result
+        # A pre-v3 daemon never received MSG_DETAIL_REQUEST and would silently
+        # drop it (parking a doomed waiter until DETAIL_PULL_TIMEOUT → 504). But
+        # its STATUS_UPDATE mirror still carries the untruncated description
+        # (it does no wire-economy clipping), so serve that directly. This keeps
+        # the WebUI working against an un-upgraded daemon in a staggered rollout:
+        # no 10 s wait, no spurious "load failed" hint, no locked edit textarea.
+        if not await state.machine_supports_detail_pull(mid, owner=scope):
+            return {"machine_id": mid, "project_root": root, "issue": mirror_issue}
         detail = await _pull_detail(
             protocol.DETAIL_KIND_ISSUE, issue_id, mid, root
         )
@@ -1045,7 +1058,13 @@ def create_app(
                     status_code=404, detail=f"machine '{mid}' not found"
                 )
         else:
-            resolved = await state.find_call_owner(call_id, owner=scope)
+            # Pin resolution to the supplied project_root: a local call_id is
+            # only unique within one project, so a bare scan could match an
+            # earlier owner-scoped project's same-id call and misroute the
+            # detail request to the wrong daemon.
+            resolved = await state.find_call_owner(
+                call_id, owner=scope, project_root=root or None
+            )
             if resolved is None:
                 raise HTTPException(
                     status_code=404, detail=f"call '{call_id}' not found"
@@ -1053,6 +1072,16 @@ def create_app(
             mid, resolved_root = resolved
             if not root:
                 root = resolved_root
+        # Pre-v3 daemons drop MSG_DETAIL_REQUEST silently; their STATUS_UPDATE
+        # mirror already carries the untruncated prompt, so serve it directly
+        # instead of parking a waiter that can only time out (→ 504). Mirrors the
+        # issue_detail fall-back so the WebUI degrades gracefully in a staggered
+        # multi-machine rollout.
+        if not await state.machine_supports_detail_pull(mid, owner=scope):
+            mirror = await state.get_pending_call(
+                call_id, owner=scope, machine_id=mid, project_root=root or None
+            )
+            return {"machine_id": mid, "call": mirror or {}}
         detail = await _pull_detail(
             protocol.DETAIL_KIND_CALL, call_id, mid, root
         )
@@ -1130,6 +1159,18 @@ def create_app(
                 return target_issue_id if status == "open" else None
             if operation == "edit":
                 for key, val in (expected_fields or {}).items():
+                    if key == "description":
+                        # The STATUS_UPDATE issue mirror carries only the
+                        # _DESC_CLIP preview of each description, not the full
+                        # body (detail-on-demand). Compare the expected text
+                        # clipped the same way, else any edit whose new
+                        # description exceeds _DESC_CLIP chars could never match
+                        # the (already-clipped) mirror and this ack-timeout
+                        # fallback would falsely report a successful edit as
+                        # failed.
+                        if str(iss.get(key) or "") != _clip_desc(str(val or "")):
+                            return None
+                        continue
                     if not _field_matches(iss.get(key), val):
                         return None
                 return target_issue_id

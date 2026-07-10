@@ -243,6 +243,45 @@ def test_find_call_owner_scans_pending_calls():
     asyncio.run(scenario())
 
 
+def test_find_call_owner_disambiguates_by_project_root():
+    # A local call_id is only unique within one project; two projects can each
+    # hold the same id. When project_root is supplied resolution must pin to it
+    # so the detail request is not misrouted to the earlier-scanned project.
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            {
+                "flows": [
+                    {
+                        "flow_id": "fa",
+                        "project_root": "/proj/a",
+                        "pending_calls": [{"call_id": "dup", "prompt": "a"}],
+                    }
+                ]
+            },
+        )
+        await state.update_status(
+            "m2",
+            {
+                "flows": [
+                    {
+                        "flow_id": "fb",
+                        "project_root": "/proj/b",
+                        "pending_calls": [{"call_id": "dup", "prompt": "b"}],
+                    }
+                ]
+            },
+        )
+        found = await state.find_call_owner("dup", project_root="/proj/b")
+        assert found == ("m2", "/proj/b")
+        # Unknown project_root for that call yields no owner (not a misroute).
+        assert await state.find_call_owner("dup", project_root="/proj/z") is None
+
+    asyncio.run(scenario())
+
+
 # --------------------------------------------------------------------------
 # _handle_message — keepalive / index-delta / detail-data dispatch
 # --------------------------------------------------------------------------
@@ -319,7 +358,9 @@ def test_detail_data_resolves_registry_waiter():
     reg = DetailRequestRegistry()
 
     async def scenario():
-        fut, is_leader, active = reg.begin("req1", protocol.DETAIL_KIND_ISSUE, "I1")
+        fut, is_leader, active = reg.begin(
+            "req1", protocol.DETAIL_KIND_ISSUE, "I1", "m1", "/p"
+        )
         assert is_leader and active == "req1"
         msg = protocol.make_detail_data(
             "req1", protocol.DETAIL_KIND_ISSUE, detail={"id": "I1", "description": "full"}
@@ -335,14 +376,45 @@ def test_detail_registry_followers_share_one_pull():
     reg = DetailRequestRegistry()
 
     async def scenario():
-        f1, lead1, a1 = reg.begin("r1", protocol.DETAIL_KIND_CALL, "C1")
-        f2, lead2, a2 = reg.begin("r2", protocol.DETAIL_KIND_CALL, "C1")
+        # Same physical target (same machine + root) → follower joins the leader.
+        f1, lead1, a1 = reg.begin("r1", protocol.DETAIL_KIND_CALL, "C1", "m1", "/p")
+        f2, lead2, a2 = reg.begin("r2", protocol.DETAIL_KIND_CALL, "C1", "m1", "/p")
         assert lead1 is True and lead2 is False
         # The follower parks under the leader's request id, so ONE reply wakes both.
         assert a2 == "r1"
         reg.resolve("r1", {"ok": True, "detail": {"id": "C1"}})
         assert (await asyncio.wait_for(f1, 1.0))["detail"]["id"] == "C1"
         assert (await asyncio.wait_for(f2, 1.0))["detail"]["id"] == "C1"
+
+    asyncio.run(scenario())
+
+
+def test_detail_registry_scopes_coalescing_to_machine_and_root():
+    """A same local id on a different machine/project must NOT share a pull.
+
+    The local issue/call id (e.g. ``C1``) is only unique within one project on
+    one machine. If coalescing keyed on ``(kind, id)`` alone, owner B opening
+    ``C1`` on a different machine/project while owner A's ``C1`` pull is still in
+    flight would join A's pull and receive A's body — a cross-owner leak. Keying
+    on the full ``(kind, id, machine, root)`` tuple keeps each physical target's
+    pull independent.
+    """
+    reg = DetailRequestRegistry()
+
+    async def scenario():
+        # Owner A: C1 on machine m1 / project /a.
+        fa, leada, aa = reg.begin("ra", protocol.DETAIL_KIND_CALL, "C1", "m1", "/a")
+        # Owner B: SAME local id C1 but a different machine + project.
+        fb, leadb, ab = reg.begin("rb", protocol.DETAIL_KIND_CALL, "C1", "m2", "/b")
+        # Both must lead their own pull — neither joins the other.
+        assert leada is True and leadb is True
+        assert aa == "ra" and ab == "rb"
+        # A's reply resolves ONLY A's waiter; B keeps waiting for its own.
+        reg.resolve("ra", {"ok": True, "detail": {"id": "C1", "body": "A-secret"}})
+        assert (await asyncio.wait_for(fa, 1.0))["detail"]["body"] == "A-secret"
+        assert not fb.done()
+        reg.resolve("rb", {"ok": True, "detail": {"id": "C1", "body": "B-secret"}})
+        assert (await asyncio.wait_for(fb, 1.0))["detail"]["body"] == "B-secret"
 
     asyncio.run(scenario())
 
@@ -378,6 +450,62 @@ def test_gzip_middleware_registered():
 
     app, _ = authed_app()
     assert any(mw.cls is GZipMiddleware for mw in app.user_middleware)
+
+
+def test_run_enables_ws_per_message_deflate(monkeypatch):
+    """``run()`` must pass ``ws_per_message_deflate=True`` to uvicorn.
+
+    This is one of the two WS-level compression legs the traffic-reduction work
+    installed (the daemon leg is locked in test_daemon_traffic_reduction). A
+    later refactor that drops the kwarg would silently multiply steady-state WS
+    traffic on full-frame sends, so pin it here.
+    """
+    import sys
+    import types
+
+    from se3.server import app as app_mod
+
+    captured = {}
+
+    def _fake_run(application, **kwargs):
+        captured["kwargs"] = kwargs
+
+    fake_uvicorn = types.SimpleNamespace(run=_fake_run)
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    # Skip the (heavy) real app build — we only assert the run() kwargs.
+    monkeypatch.setattr(app_mod, "create_app", lambda **kw: object())
+
+    app_mod.run(host="127.0.0.1", port=0)
+
+    assert captured["kwargs"].get("ws_per_message_deflate") is True
+    assert captured["kwargs"].get("ws_max_size") == protocol.MAX_WS_MESSAGE_BYTES
+
+
+def test_run_falls_back_when_uvicorn_lacks_deflate_kwarg(monkeypatch):
+    """On an older uvicorn (no ``ws_per_message_deflate``), ``run()`` retries
+    without the kwarg rather than crashing — the websockets protocol still
+    negotiates deflate by default, so the fallback is safe."""
+    import sys
+    import types
+
+    from se3.server import app as app_mod
+
+    calls = []
+
+    def _fake_run(application, **kwargs):
+        calls.append(kwargs)
+        if "ws_per_message_deflate" in kwargs:
+            raise TypeError("run() got an unexpected keyword argument")
+
+    fake_uvicorn = types.SimpleNamespace(run=_fake_run)
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setattr(app_mod, "create_app", lambda **kw: object())
+
+    app_mod.run(host="127.0.0.1", port=0)
+
+    assert len(calls) == 2
+    assert "ws_per_message_deflate" in calls[0]
+    assert "ws_per_message_deflate" not in calls[1]
 
 
 def test_history_bundle_large_json_served_intact(client_and_app):
@@ -545,3 +673,90 @@ def _drain_index_requests_soft(daemon):
         protocol.decode(daemon.receive_text())
     except Exception:
         pass
+
+
+def _authed_hello_v2(app, machine_id="m1"):
+    """An authenticated HELLO advertising the pre-detail (revision-2) protocol.
+
+    Such a daemon never learned MSG_DETAIL_REQUEST, so the server must serve the
+    STATUS_UPDATE mirror on the detail leg rather than routing a doomed pull.
+    """
+    msg = protocol.make_hello(
+        machine_id, "host", "6.4.0", key=app.state.test_daemon_key
+    )
+    msg.payload["protocol_version"] = "2"
+    return msg.to_json()
+
+
+def test_wire_metrics_records_welcome_and_ping(client_and_app):
+    # The handshake WELCOME (and the periodic PING) are written straight to the
+    # daemon socket, bypassing ConnectionManager routing; they must still show up
+    # in the per-type server→daemon metrics so idle traffic is not under-reported.
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        snap = client.get("/api/wire-metrics").json()["metrics"]
+        assert snap.get(protocol.MSG_WELCOME, {}).get("bytes", 0) > 0
+        assert snap.get(protocol.MSG_WELCOME, {}).get("count", 0) >= 1
+
+
+def test_issue_detail_pre_v3_daemon_serves_mirror(client_and_app):
+    # A pre-v3 daemon would silently drop a MSG_DETAIL_REQUEST, so opening an
+    # issue whose (un-clipped) description exceeds DESC_CLIP must NOT park a
+    # doomed waiter (→ 10 s / 504). The mirror already holds the full body; serve
+    # it directly. No DETAIL_REQUEST is expected on the wire.
+    client, app = client_and_app
+    full_desc = "x" * 500  # >200 chars: would look "truncated" to the frontend
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(_authed_hello_v2(app, "m1"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        daemon.send_text(
+            protocol.make_status_update(
+                {
+                    "issues": [
+                        {"id": "I1", "project_root": "/proj", "description": full_desc}
+                    ]
+                }
+            ).to_json()
+        )
+        for _ in range(50):
+            if client.get("/api/issues", params={"include_closed": True}).json()["count"]:
+                break
+        # Must return immediately with the full body. A synchronous GET here
+        # would block for DETAIL_PULL_TIMEOUT (→ 504) if the server had parked a
+        # doomed detail pull, so a fast 200 with the mirror body proves the
+        # pre-v3 fall-back short-circuited the downlink.
+        resp = client.get("/api/issues/I1/detail")
+        assert resp.status_code == 200
+        assert resp.json()["issue"]["description"] == full_desc
+
+
+def test_call_detail_pre_v3_daemon_serves_mirror(client_and_app):
+    client, app = client_and_app
+    full_prompt = "p" * 500
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(_authed_hello_v2(app, "m1"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        daemon.send_text(
+            protocol.make_status_update(
+                {
+                    "flows": [
+                        {
+                            "flow_id": "f1",
+                            "project_root": "/proj",
+                            "pending_calls": [{"call_id": "c9", "prompt": full_prompt}],
+                        }
+                    ]
+                }
+            ).to_json()
+        )
+        for _ in range(50):
+            flows = client.get("/api/machines/m1/flows").json().get("flows")
+            if flows:
+                break
+        # A fast 200 (rather than a 10 s / 504 park) proves the pre-v3 fall-back
+        # served the mirror instead of routing a doomed DETAIL_REQUEST.
+        resp = client.get("/api/calls/c9/detail")
+        assert resp.status_code == 200
+        assert resp.json()["call"]["prompt"] == full_prompt

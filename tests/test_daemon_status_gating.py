@@ -234,11 +234,12 @@ def test_issue_snapshot_to_dict_is_a_summary():
 
 
 def test_machine_wide_pending_call_prompt_is_clipped():
-    """A machine-wide pending call clips its prompt; the full body is fetched later.
+    """``clip_prompt=True`` clips the prompt; the full body is fetched on demand.
 
-    The per-flow chip bar renders the prompt verbatim, so ``clip_prompt`` is
-    False by default and only the machine-wide surface (the ~100 KB redundant
-    list) clips.
+    Both STATUS_UPDATE pending_calls surfaces (machine-wide and a flow's own)
+    pass ``clip_prompt=True`` so no full prompt inlines into the snapshot. The
+    parameter still defaults to ``False`` for any caller that wants the verbatim
+    body, which this test also pins.
     """
     call = PendingCall(
         call_id="c1",
@@ -246,6 +247,6 @@ def test_machine_wide_pending_call_prompt_is_clipped():
         project_root="/p",
         prompt="y" * 500,
     )
-    assert call.to_dict()["prompt"] == "y" * 500  # per-flow: verbatim
-    clipped = call.to_dict(clip_prompt=True)["prompt"]  # machine-wide: clipped
+    assert call.to_dict()["prompt"] == "y" * 500  # default: verbatim
+    clipped = call.to_dict(clip_prompt=True)["prompt"]  # STATUS_UPDATE: clipped
     assert clipped == "y" * _DESC_CLIP + "..."
