@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.17.2 - 2026-07-10
+
+- Fix the built-in default agent chain so se3 works out of the box without `claude` installed
+- Probe PATH for each supported built-in agent (`claude`, then `codex`) and build the default chain from those actually available, preserving that order
+- Raise a clear error listing every supported built-in agent and its command name when none of them are found on PATH, instead of failing obscurely
+- Keep explicitly configured agents fail-loud: PATH probing applies only to the built-in fallback, never to `llm_caller.defaults` or migrated `claude_commands`
+- Leave LLMCaller runtime failure rotation unchanged — probing only decides the chain's initial members
+- Add tests covering every PATH-availability combination for the built-in chain and asserting explicit config is unaffected by probing
 ## 11.17.1 - 2026-07-10
 
 - Fix WebUI self_check report cards rendering a green `✓ PASSED` badge while simultaneously listing issues below it
