@@ -30,6 +30,11 @@ from .conflict_resolver import (
     MergeStrategy,
     _load_max_conflict_resolve_iterations,
 )
+from .deterministic_resolvers import (
+    DeterministicOutcome,
+    _find_resolver,
+    resolve_deterministic,
+)
 from ...commands.merge.secret_redact import redact_text
 from .guardrail_repair import GuardrailRepairer, GuardrailRepairInconsistentState
 from .guardrails import (
@@ -4362,6 +4367,36 @@ class MergeOrchestrator:
             )
         return "non_conflict_failure"
 
+    def _resolve_deterministic_conflicts(self) -> Optional[DeterministicOutcome]:
+        """Mechanically resolve and stage the conflicts a resolver owns.
+
+        Returns ``None`` when the pass could not run at all.  This layer is an
+        optimisation in front of the LLM path, never a precondition for it: any
+        escaping exception degrades to "resolve nothing deterministically",
+        which is precisely the behaviour that existed before it. A bug here
+        must not be able to fail a merge that would otherwise have succeeded.
+        """
+        try:
+            conflict_paths = get_conflicting_files(self.project_root)
+            outcome = resolve_deterministic(self.project_root, conflict_paths)
+        except Exception as exc:
+            self._log(
+                f"Deterministic conflict pass failed ({exc}) — "
+                f"every conflict falls back to the LLM"
+            )
+            return None
+
+        for path in outcome.resolved:
+            resolver = _find_resolver(path)
+            name = resolver.name if resolver is not None else "?"
+            self._log(f"Deterministically resolved: {path} by {name}")
+        for path, reason in outcome.failures.items():
+            self._log(
+                f"Deterministic resolver failed for {path} ({reason}) — "
+                f"falling back to LLM"
+            )
+        return outcome
+
     def _handle_conflict(
         self,
         branch: str,
@@ -4378,6 +4413,14 @@ class MergeOrchestrator:
             resolver input — distinct from a real conflict-resolution
             rejection), or "conflict" (if rejected/aborted).
         """
+        # Settle the mechanically-resolvable conflicts before any context is
+        # built.  Two reasons this runs first rather than filtering
+        # ``context.files`` afterwards: the LLM must never see these files
+        # (a regenerated 2.5MB code-index alone yielded a ~10M-char editor
+        # prompt that every agent rejects), and building their context means
+        # reading four multi-megabyte copies we would then throw away.
+        det_outcome = self._resolve_deterministic_conflicts()
+
         # Build conflict context (must be called while mid-merge).
         # Narrowed from ``except Exception`` to a typed error set so
         # programming bugs (TypeError/AttributeError) crash loudly
@@ -4392,7 +4435,15 @@ class MergeOrchestrator:
         #     parsing (binary content, partial reads, etc.).
         try:
             ours_branch = getattr(self, "_current_branch", "HEAD")
-            context = build_conflict_context(self.project_root, ours_branch, branch)
+            context = build_conflict_context(
+                self.project_root,
+                ours_branch,
+                branch,
+                # ``None`` (the deterministic pass could not run) lets ``build``
+                # enumerate the conflicts itself — i.e. the pre-deterministic
+                # behaviour, exactly.
+                conflict_files=det_outcome.remaining if det_outcome else None,
+            )
         except (
             subprocess.SubprocessError,
             OSError,
@@ -4456,6 +4507,29 @@ class MergeOrchestrator:
             # resolver input — this is structurally distinct from a real
             # conflict that the resolver rejected.
             return "context_build_failed"
+
+        # --- Nothing left for a human or an LLM to judge ---
+        # Every conflicting path had a mechanical merge rule, so the index is
+        # already fully staged.  This short-circuits STRICT too: its contract
+        # is that *contended content* gets human review, and a regenerated
+        # index or a monotonic counter carries no decision to review.
+        if det_outcome is not None and det_outcome.resolved and not context.files:
+            self._log(
+                f"All {len(det_outcome.resolved)} conflict(s) resolved "
+                f"deterministically — committing merge without LLM"
+            )
+            from .conflict_resolver import Confidence, LLMResolution
+            return self._apply_resolution(
+                branch,
+                LLMResolution(
+                    files=[],
+                    overall_confidence=Confidence.HIGH,
+                    flags={"llm_invoked": False, "deterministic": True},
+                ),
+                pre_merge_sha,
+                context,
+                report,
+            )
 
         # --- STRICT: short-circuit to human call, skip LLM ---
         if self.strategy == MergeStrategy.STRICT:

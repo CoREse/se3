@@ -355,3 +355,204 @@ def test_resolved_and_remaining_partition_the_input_in_order(tmp_path, monkeypat
     assert outcome.resolved == ["ok"]
     assert outcome.remaining == ["a", "b", "c"]
     assert sorted(outcome.resolved + outcome.remaining) == sorted(paths)
+
+
+# ---------------------------------------------------------------------------
+# integration: a real git repository, a real conflicted merge
+# ---------------------------------------------------------------------------
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout
+
+
+def _real_fp(text: str) -> str:
+    """The content fingerprint code_index would record for a file of *text*."""
+    from se3.engine.code_index import _fp, _sha256_prefix
+
+    return _fp(_sha256_prefix(text.encode("utf-8")))
+
+
+def _index_md(dir_summary: str, entries: list[tuple[str, str, str]]) -> str:
+    """Render a code-index md for ``(relpath, summary, content_fp)`` entries."""
+    lines = ["# Code Index", "", f"## `src/` — {dir_summary} <!--#dddd|eeee-->", ""]
+    for relpath, summary, content_fp in sorted(entries):
+        lines.append(
+            f"### `{relpath}` (python) — {summary} <!--#{content_fp}|{LFP}-->"
+        )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write(repo: Path, relpath: str, text: str) -> None:
+    path = repo / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+KEEP_SRC = "def keep():\n    return 1\n"
+GONE_SRC = "def gone():\n    return 0\n"
+EDIT_BASE_SRC = "def edit():\n    return 'base'\n"
+EDIT_OURS_SRC = "def edit():\n    return 'ours'\n"
+ADDED_OURS_SRC = "def added_ours():\n    pass\n"
+ADDED_THEIRS_SRC = "def added_theirs():\n    pass\n"
+
+
+@pytest.fixture
+def conflicted_repo(tmp_path: Path) -> Path:
+    """A repo mid-merge, with both deterministic files genuinely conflicted.
+
+    The two sides regenerate ``se3/code-index.md`` the way the real index step
+    does — every entry rewritten, the dir heading reworded — so git's textual
+    merge conflicts even though the entries themselves merge cleanly. That is
+    the exact shape of the failure this resolver exists to absorb.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "master")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+
+    # --- base ---
+    for relpath, src in [
+        ("src/keep.py", KEEP_SRC),
+        ("src/gone.py", GONE_SRC),
+        ("src/edit.py", EDIT_BASE_SRC),
+    ]:
+        _write(repo, relpath, src)
+    _write(repo, "se3/issues/.next_id", "5\n")
+    _write(repo, "se3/code-index.md", _index_md("base dir", [
+        ("src/keep.py", "keeps things", _real_fp(KEEP_SRC)),
+        ("src/gone.py", "will vanish", _real_fp(GONE_SRC)),
+        ("src/edit.py", "base wording", _real_fp(EDIT_BASE_SRC)),
+    ]))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "feature")
+
+    # --- ours (master): edits edit.py, adds a file, bumps the counter ---
+    _write(repo, "src/edit.py", EDIT_OURS_SRC)
+    _write(repo, "src/added_ours.py", ADDED_OURS_SRC)
+    _write(repo, "se3/issues/.next_id", "9\n")
+    _write(repo, "se3/code-index.md", _index_md("ours dir wording", [
+        ("src/keep.py", "keeps things (ours wording)", _real_fp(KEEP_SRC)),
+        ("src/gone.py", "will vanish", _real_fp(GONE_SRC)),
+        ("src/edit.py", "returns ours", _real_fp(EDIT_OURS_SRC)),
+        ("src/added_ours.py", "added on ours", _real_fp(ADDED_OURS_SRC)),
+    ]))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "ours")
+
+    # --- theirs: deletes gone.py, adds a file, bumps the counter higher ---
+    _git(repo, "checkout", "-q", "feature")
+    (repo / "src/gone.py").unlink()
+    _write(repo, "src/added_theirs.py", ADDED_THEIRS_SRC)
+    _write(repo, "se3/issues/.next_id", "12\n")
+    _write(repo, "se3/code-index.md", _index_md("theirs dir wording", [
+        ("src/keep.py", "keeps things (theirs wording)", _real_fp(KEEP_SRC)),
+        # A stale entry for edit.py: theirs never saw the ours-side edit.
+        ("src/edit.py", "base wording", _real_fp(EDIT_BASE_SRC)),
+        ("src/added_theirs.py", "added on theirs", _real_fp(ADDED_THEIRS_SRC)),
+    ]))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "theirs")
+
+    _git(repo, "checkout", "-q", "master")
+    import subprocess
+
+    merge = subprocess.run(
+        ["git", "-C", str(repo), "merge", "feature"],
+        capture_output=True, text=True,
+    )
+    assert merge.returncode != 0, "fixture must produce a real conflict"
+    return repo
+
+
+@pytest.fixture
+def no_llm(monkeypatch):
+    """Any LLM call from this point on is a test failure."""
+    from se3.engine.llm_caller import LLMCaller
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("the LLM must not be called for deterministic conflicts")
+
+    monkeypatch.setattr(LLMCaller, "call", _forbidden)
+
+
+def test_real_merge_conflict_is_resolved_without_the_llm(conflicted_repo, no_llm):
+    from se3.engine.worktree import get_conflicting_files
+
+    repo = conflicted_repo
+    conflicts = get_conflicting_files(repo)
+    assert set(conflicts) == {"se3/code-index.md", "se3/issues/.next_id"}
+
+    outcome = resolve_deterministic(repo, conflicts)
+
+    assert sorted(outcome.resolved) == ["se3/code-index.md", "se3/issues/.next_id"]
+    assert outcome.remaining == []
+    assert outcome.failures == {}
+    # Both paths left git's index: nothing is unmerged, so a merge commit is possible.
+    assert _git(repo, "diff", "--name-only", "--diff-filter=U").strip() == ""
+
+
+def test_resolved_index_unions_entries_and_drops_the_deleted_file(conflicted_repo, no_llm):
+    from se3.engine.worktree import get_conflicting_files
+
+    repo = conflicted_repo
+    resolve_deterministic(repo, get_conflicting_files(repo))
+    merged = (repo / "se3/code-index.md").read_text(encoding="utf-8")
+
+    assert not any(marker in merged for marker in MARKERS)
+    # Single-sided entries survive from both sides.
+    assert "`src/added_ours.py`" in merged
+    assert "`src/added_theirs.py`" in merged
+    # The file that did not survive the merge takes its entry with it.
+    assert "`src/gone.py`" not in merged
+    # edit.py: the fingerprints disagree, and it is ours that matches the
+    # post-merge working tree — so ours wins over the stale theirs entry.
+    assert "returns ours" in merged
+    assert "base wording" not in merged
+    assert _real_fp(EDIT_OURS_SRC) in merged
+    # keep.py: same fingerprint, different regenerated wording → fixed on theirs.
+    assert "keeps things (theirs wording)" in merged
+    assert "keeps things (ours wording)" not in merged
+    # A dir-heading disagreement is likewise settled on theirs.
+    assert "theirs dir wording" in merged
+
+
+def test_staged_index_matches_the_working_tree(conflicted_repo, no_llm):
+    from se3.engine.worktree import get_conflicting_files
+
+    repo = conflicted_repo
+    resolve_deterministic(repo, get_conflicting_files(repo))
+
+    staged = _git(repo, "show", ":se3/code-index.md")
+    assert staged == (repo / "se3/code-index.md").read_text(encoding="utf-8")
+
+
+def test_next_id_takes_the_larger_counter(conflicted_repo, no_llm):
+    from se3.engine.worktree import get_conflicting_files
+
+    repo = conflicted_repo
+    resolve_deterministic(repo, get_conflicting_files(repo))
+
+    assert (repo / "se3/issues/.next_id").read_text(encoding="utf-8") == "12\n"
+
+
+def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_repo, no_llm):
+    from se3.engine.worktree import get_conflicting_files
+
+    repo = conflicted_repo
+    resolve_deterministic(repo, get_conflicting_files(repo))
+    _git(repo, "commit", "--no-edit", "-m", "Merge branch 'feature'")
+
+    # A real merge commit: two parents, and both sides' files in the tree.
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert len(parents) == 3
+    assert (repo / "src/added_theirs.py").exists()
+    assert not (repo / "src/gone.py").exists()

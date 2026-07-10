@@ -3480,7 +3480,7 @@ class TestStrictShortCircuit:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         # Mock build_conflict_context to raise
-        def mock_build_context(project_root, ours, theirs):
+        def mock_build_context(project_root, ours, theirs, **kwargs):
             raise RuntimeError("mock context failure")
 
         monkeypatch.setattr(
@@ -3517,7 +3517,7 @@ class TestStrictShortCircuit:
         """default + build_conflict_context raises -> abort, reported as conflict_context_failed."""
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
-        def mock_build_context(project_root, ours, theirs):
+        def mock_build_context(project_root, ours, theirs, **kwargs):
             raise RuntimeError("mock context failure")
 
         monkeypatch.setattr(
@@ -3555,7 +3555,7 @@ class TestStrictShortCircuit:
         """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
-        def mock_build_context(project_root, ours, theirs):
+        def mock_build_context(project_root, ours, theirs, **kwargs):
             raise RuntimeError("mock context failure")
 
         monkeypatch.setattr(
