@@ -11405,9 +11405,16 @@ function renderTestReport(step, outputs) {
 
 function renderSelfCheckReport(step, outputs) {
   const frag = document.createDocumentFragment();
-  const actionable = outputs.actionable_count != null
-    ? Number(outputs.actionable_count) : 0;
   const issues = Array.isArray(outputs.issues) ? outputs.issues : [];
+  // `actionable_count` exists only on a real step.outputs — self_check_handler
+  // computes it after `_validate_and_filter_issues`. The synthetic outputs that
+  // makeStructuredAssistantRenderer builds from an assistant message carry the
+  // LLM's raw JSON, which has no such key; falling back to 0 there rendered a
+  // green "✓ PASSED" above a list of issues. Derive from issues.length instead,
+  // and keep the wording neutral on that path — those issues are unvalidated,
+  // so we cannot assert they are actionable.
+  const hasCount = outputs.actionable_count != null;
+  const actionable = hasCount ? Number(outputs.actionable_count) : issues.length;
   const status = String(step.status || "").toLowerCase();
 
   const bar = el("div", "step-report__status-bar");
@@ -11416,8 +11423,9 @@ function renderSelfCheckReport(step, outputs) {
   } else if (actionable === 0) {
     bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
   } else {
-    bar.appendChild(el("span", "step-report__label fail",
-      `✗ ${actionable} actionable issue(s)`));
+    bar.appendChild(el("span", "step-report__label fail", hasCount
+      ? `✗ ${actionable} actionable issue(s)`
+      : `✗ ${actionable} issue(s)`));
   }
   frag.appendChild(bar);
 

@@ -1,0 +1,16 @@
+{
+  "flow_id": "20260710-101426_af130971",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] src/se3/server/static/app.js\n- [modified] tests/frontend/self_check_passed_fallback.test.mjs\n- [modified] tests/frontend/test_app_pure.mjs\n- [modified] tests/test_frontend_self_check_passed_fallback.py\n\n### Implementation Groups:\n- 修复 renderSelfCheckReport 的 actionable_count 缺失回落: 在 `src/se3/server/static/app.js` 的 `renderSelfCheckReport` 中，把 `actionable_count` 缺失时回落为 `0` 的逻辑改为从 `outputs.issues` 数组长度派生，并在派生路径使用中性措辞 `✗ N issue(s)`。保持 `status === \"failed\"` 分支优先、保持 `actionable_count` 存在时的既有行为与措辞逐字不变。\n- 新增 renderSelfCheckReport 前端回归测试与 pytest 桥接: 新增 `tests/frontend/self_check_passed_fallback.test.mjs`（双模式：可被 harness 注册，也可 `node` 单跑），覆盖状态栏的五个分支与一个健壮性用例；在 `tests/frontend/test_app_pure.mjs` 中注册；新增 pytest 桥接把它拉进 Python 测试套件。\n\n## Spec Changes\n\nNo spec changes recorded.\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Fix WebUI self_check report cards rendering a green `✓ PASSED` badge while simultaneously listing issues below it",
+    "Derive the self_check issue count from `outputs.issues` when `actionable_count` is absent, instead of silently defaulting to zero",
+    "Use the neutral wording `✗ N issue(s)` on the derived path, since inline assistant-message issues are the LLM's raw unvalidated list rather than the filtered actionable set",
+    "Preserve existing behavior when `actionable_count` is present, including the `✗ N actionable issue(s)` label and the precedence of the `✗ FAILED` status branch",
+    "Add front-end regression tests for `renderSelfCheckReport` covering all status-badge branches, wired into the Python test suite via a pytest bridge"
+  ],
+  "bump_type": "patch",
+  "pre_session_baseline": "11.15.3",
+  "provisional_suggested_version": "11.15.4",
+  "consumed": false,
+  "consumed_by": null
+}
