@@ -65,6 +65,18 @@ version:
 # LLM caller chain (optional)
 # llm_caller:
 #   defaults: [primary]
+
+# Language configuration (optional) — two independent settings, merged
+# project-over-global with ~/.se3/config.yaml.
+# language:
+#   # Unified human language: drives BOTH the CLI/WebUI UI copy AND the LLM
+#   # human-facing step outputs (summarize / discovery / confirmed steps).
+#   # CLI resolution precedence: SE3_LANG env > this key > ~/.se3/config.yaml >
+#   # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
+#   language: en-US
+#   # Knowledge-asset language: the writing language of charter.md and the
+#   # code-index. e.g. "zh-CN", "en-US". null = no restriction (LLM decides).
+#   spec_language: null
 """
 
 # Default .gitignore template for SE3 projects.
