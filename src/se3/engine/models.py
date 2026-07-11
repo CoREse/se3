@@ -923,6 +923,8 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
             "suggested_update",
             "charter_auto_updated",
             "charter_diff",
+            "gate_verdicts",
+            "degraded_reason",
         ],
     },
     StepType.VERIFY_SPEC: {
