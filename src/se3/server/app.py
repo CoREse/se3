@@ -1880,6 +1880,87 @@ def create_app(
                 status_code=404,
                 detail=f"no history for flow '{flow_id}'",
             )
+
+        async def _pull_from_daemon(connection: Any, project_root: str) -> None:
+            """Dispatch a coalesced daemon full pull for this flow and await it.
+
+            Shared by the cache-miss path and the running-worktree self-heal
+            reconcile so both go through the SAME leader/follower coalescing:
+            concurrent callers for ``(flow_id, owner_machine)`` collapse onto one
+            in-flight ``MSG_HISTORY_REQUEST``; a follower whose leader failed
+            before dispatching (``_PullAbandoned``) retries as a fresh leader
+            rather than waiting out the timeout behind a pull that will never be
+            answered. Raises ``HTTPException`` 404 when no connected daemon owns
+            the flow and 504 on a pull timeout.
+            """
+            while True:
+                fut, is_leader = history_registry.begin_pull(flow_id, owner_machine)
+                pull_dispatched = False
+                try:
+                    if is_leader:
+                        # The leader's daemon send is INSIDE this try so the
+                        # ``finally`` also covers a cancellation that fires while
+                        # ``send_text`` is blocked: without it, a client
+                        # disconnecting mid-send would leave the leader's waiter
+                        # parked and the key marked in-flight forever, turning
+                        # every later request into a follower that sends no new
+                        # ``MSG_HISTORY_REQUEST`` and merely times out.
+                        sent = await request_history(
+                            manager,
+                            state,
+                            flow_id,
+                            machine_id=owner_machine,
+                            connection=connection,
+                            project_root=project_root or "",
+                        )
+                        if not sent:
+                            raise HTTPException(
+                                status_code=404,
+                                detail=(
+                                    "no connected daemon owns history for flow "
+                                    f"'{flow_id}'"
+                                ),
+                            )
+                        pull_dispatched = True
+                    await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
+                    return
+                except asyncio.TimeoutError:
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"timed out pulling history for flow '{flow_id}'",
+                    )
+                except _PullAbandoned:
+                    # Our leader failed before dispatching a daemon request and
+                    # released us (the in-flight marker is already cleared). Loop
+                    # back to try to become the new leader ourselves rather than
+                    # parking behind an abandoned pull until the timeout.
+                    continue
+                finally:
+                    if is_leader and not pull_dispatched:
+                        # The leader failed or was cancelled BEFORE a successful
+                        # daemon dispatch (its send returned ``False`` or it was
+                        # cancelled before / while sending). Release every
+                        # follower parked behind it and clear the in-flight marker
+                        # so the next request leads a fresh pull immediately —
+                        # otherwise ``discard`` would leave the marker set
+                        # (followers remain) and strand them until
+                        # ``HISTORY_PULL_TIMEOUT`` waiting on a
+                        # ``MSG_HISTORY_REQUEST`` that was never sent.
+                        history_registry.fail_pull(
+                            flow_id, owner_machine, exclude=fut
+                        )
+                    else:
+                        # Drop our waiter on every other exit path — timeout,
+                        # cancellation after a successful dispatch, a follower
+                        # leaving, or success. On success ``resolve`` has already
+                        # popped this waiter and cleared the in-flight marker, so
+                        # the call is a no-op; otherwise it removes the now-dead
+                        # waiter and, when it was the last one for the key, clears
+                        # the marker. Because the leader keeps the pull genuinely
+                        # in flight here, followers correctly stay parked on the
+                        # already-dispatched request.
+                        history_registry.discard(flow_id, fut, owner_machine)
+
         # Cache hit: serve a not-modified / delta / full snapshot atomically.
         # ``after`` is the opaque progress token the client echoes on a WS
         # reconnect; ``sig`` is the bundle content signature it holds. When the
@@ -1899,6 +1980,53 @@ def create_app(
             known_signature=sig,
         )
         if snapshot is not None:
+            # Running-worktree self-heal. A ``not_modified`` reply means the
+            # client is provably in sync with the SERVER CACHE — but for a live
+            # ``--worktree`` flow whose discovery is still appending rounds, the
+            # cache itself can be behind the daemon: a round the live push dropped
+            # or collided on never landed, so both cache and client freeze at the
+            # first round and every later poll keeps answering ``not_modified``.
+            # When that flow is still running under a worktree root, reconcile the
+            # cache against the daemon ONCE — subject to the same
+            # ``full_pull_throttled`` floor the cache-miss path uses, so a 3 s
+            # self-heal poll cannot fan out one回源 pull per tick. A no-op re-pull
+            # keeps the bundle generation (see ``append_history``) so an already
+            # in-sync client still gets ``not_modified``; a re-pull that brings
+            # the missing round rolls the generation and the re-read below serves
+            # it as ``full``. Ordinary (non-worktree / completed) flows skip this
+            # entirely and are served straight from cache, unchanged.
+            if (
+                snapshot.get("delivery") == "not_modified"
+                and not await state.full_pull_throttled(flow_id)
+                and await state.is_active_worktree_flow(
+                    flow_id, owner=target_owner
+                )
+            ):
+                owner_connection = await manager.get_connection(owner_machine)
+                if owner_connection is not None:
+                    reconcile_root = await state.get_history_flow_project_root(
+                        flow_id, owner=target_owner
+                    )
+                    await state.mark_full_pull(flow_id)
+                    try:
+                        await _pull_from_daemon(
+                            owner_connection, reconcile_root or ""
+                        )
+                    except HTTPException:
+                        # The reconcile is best-effort robustness: if the daemon
+                        # pull fails (no connection) or times out, fall through
+                        # and serve the cache we already hold rather than turning
+                        # a routine self-heal poll into a user-visible error.
+                        pass
+                    reconciled = await state.get_history_snapshot(
+                        flow_id,
+                        after=after,
+                        expected_machine_id=owner_machine,
+                        expected_owner=target_owner,
+                        known_signature=sig,
+                    )
+                    if reconciled is not None:
+                        return {"flow_id": flow_id, "cached": True, **reconciled}
             return {"flow_id": flow_id, "cached": True, **snapshot}
         # Cache miss (no bundle, or the bundle's machine no longer matches the
         # owning daemon): pull on demand from the daemon owning this flow. Any
@@ -1942,83 +2070,13 @@ def create_app(
         await state.mark_full_pull(flow_id)
         # Concurrent cache-miss requests for the same flow/machine (e.g. the
         # running-flow view and the history-detail view reconnecting at once)
-        # share ONE in-flight daemon pull: only the leader sends the
-        # ``MSG_HISTORY_REQUEST``, the followers park on the same reply. This
-        # prevents a second daemon reply from arriving after both waiters were
-        # already resolved by the first — which, finding no waiter, would
-        # replace the cache generation and broadcast ``mode: full`` to every UI
-        # consumer, clearing the progress tokens REST just handed back.
-        #
-        # The loop lets a follower whose leader failed *before* dispatching a
-        # daemon request (``_PullAbandoned``) retry as a fresh leader instead of
-        # waiting out ``HISTORY_PULL_TIMEOUT`` behind a pull that will never be
-        # answered.
-        while True:
-            fut, is_leader = history_registry.begin_pull(flow_id, owner_machine)
-            pull_dispatched = False
-            try:
-                if is_leader:
-                    # The leader's daemon send is INSIDE this try so the
-                    # ``finally`` also covers a cancellation that fires while
-                    # ``send_text`` is blocked: without it, a client
-                    # disconnecting mid-send would leave the leader's waiter
-                    # parked and the key marked in-flight forever, turning every
-                    # later request into a follower that sends no new
-                    # ``MSG_HISTORY_REQUEST`` and merely times out.
-                    sent = await request_history(
-                        manager,
-                        state,
-                        flow_id,
-                        machine_id=owner_machine,
-                        connection=owner_connection,
-                        project_root=flow_project_root or "",
-                    )
-                    if not sent:
-                        raise HTTPException(
-                            status_code=404,
-                            detail=(
-                                "no connected daemon owns history for flow "
-                                f"'{flow_id}'"
-                            ),
-                        )
-                    pull_dispatched = True
-                await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
-                break
-            except asyncio.TimeoutError:
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"timed out pulling history for flow '{flow_id}'",
-                )
-            except _PullAbandoned:
-                # Our leader failed before dispatching a daemon request and
-                # released us (the in-flight marker is already cleared). Loop
-                # back to try to become the new leader ourselves rather than
-                # parking behind an abandoned pull until the timeout.
-                continue
-            finally:
-                if is_leader and not pull_dispatched:
-                    # The leader failed or was cancelled BEFORE a successful
-                    # daemon dispatch (its send returned ``False`` or it was
-                    # cancelled before / while sending). Release every follower
-                    # parked behind it and clear the in-flight marker so the
-                    # next request leads a fresh pull immediately — otherwise
-                    # ``discard`` would leave the marker set (followers remain)
-                    # and strand them until ``HISTORY_PULL_TIMEOUT`` waiting on
-                    # a ``MSG_HISTORY_REQUEST`` that was never sent.
-                    history_registry.fail_pull(
-                        flow_id, owner_machine, exclude=fut
-                    )
-                else:
-                    # Drop our waiter on every other exit path — timeout,
-                    # cancellation after a successful dispatch, a follower
-                    # leaving, or success. On success ``resolve`` has already
-                    # popped this waiter and cleared the in-flight marker, so
-                    # the call is a no-op; otherwise it removes the now-dead
-                    # waiter and, when it was the last one for the key, clears
-                    # the marker. Because the leader keeps the pull genuinely in
-                    # flight here, followers correctly stay parked on the
-                    # already-dispatched request.
-                    history_registry.discard(flow_id, fut, owner_machine)
+        # share ONE in-flight daemon pull via ``_pull_from_daemon``: only the
+        # leader sends the ``MSG_HISTORY_REQUEST``, the followers park on the same
+        # reply. This prevents a second daemon reply from arriving after both
+        # waiters were already resolved by the first — which, finding no waiter,
+        # would replace the cache generation and broadcast ``mode: full`` to every
+        # UI consumer, clearing the progress tokens REST just handed back.
+        await _pull_from_daemon(owner_connection, flow_project_root or "")
         # Re-read the just-populated cache as a full snapshot so the response
         # carries ``delivery: "full"`` plus a fresh ``progress`` token the
         # client can use for its next reconnect. ``get_history_snapshot`` with

@@ -474,3 +474,94 @@ def test_pending_calls_signature_includes_worktree_run_calls(tmp_path):
     assert wt_key in sig
     names = [entry[0] for entry in sig[wt_key]]
     assert "discovery_1.json" in names
+
+
+# --------------------------------------------------------------------------
+# G2: history relay passes G1's disambiguated identity through losslessly
+# and the self-heal reconcile stays behind the existing full-pull throttle.
+# --------------------------------------------------------------------------
+
+
+def test_history_relay_preserves_step_id_and_ordinal_identity():
+    """The server relay never inspects or rewrites record identity: G1's
+    per-physical-file ``step_id`` and per-file ``ordinal`` reach the frontend
+    bundle verbatim, so a worktree discovery's distinct sidecar streams survive.
+    """
+    from se3.server.state import ServerState
+
+    state = ServerState()
+
+    async def scenario():
+        records = [
+            {
+                "step_id": "01_discovery_ab12",
+                "step_type": "discovery",
+                "ordinal": 0,
+                "message": {"round": 1},
+            },
+            # A round from a sidecar file: SAME ordinal 0 but a DISTINCT step_id.
+            {
+                "step_id": "01_discovery_ab12.from-wt__b",
+                "step_type": "discovery",
+                "ordinal": 0,
+                "message": {"round": 2},
+            },
+        ]
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, records, machine_id="m1"
+        )
+        snap = await state.get_history_snapshot("f1")
+        got = snap["records"]
+        assert [r["step_id"] for r in got] == [
+            "01_discovery_ab12",
+            "01_discovery_ab12.from-wt__b",
+        ]
+        # Same ordinal on two distinct ids is NOT collapsed to a duplicate.
+        assert [r["ordinal"] for r in got] == [0, 0]
+        assert got == records  # nothing dropped or rewritten
+
+    asyncio.run(scenario())
+
+
+def test_history_append_does_not_dedupe_same_ordinal_records():
+    """An append extends the bundle without deduping — a later round carrying an
+    ordinal already present under a DISTINCT step id is not mistaken for a
+    duplicate frame and dropped."""
+    from se3.server.state import ServerState
+
+    state = ServerState()
+
+    async def scenario():
+        await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [{"step_id": "01_discovery", "ordinal": 0, "message": {"r": 1}}],
+            machine_id="m1",
+        )
+        applied = await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_APPEND,
+            [{"step_id": "01_discovery.from-wt", "ordinal": 0, "message": {"r": 2}}],
+            machine_id="m1",
+        )
+        assert applied is True
+        snap = await state.get_history("f1")
+        assert len(snap["records"]) == 2
+
+    asyncio.run(scenario())
+
+
+def test_reconcile_full_pull_respects_existing_throttle():
+    """The self-heal reconcile is gated on the SAME full-pull throttle the
+    cache-miss path uses, so an idle poll cannot fan out one daemon pull per
+    tick: right after a full pull the flow reads as throttled."""
+    from se3.server.state import ServerState
+
+    state = ServerState()
+
+    async def scenario():
+        assert await state.full_pull_throttled("f1") is False
+        await state.mark_full_pull("f1")
+        assert await state.full_pull_throttled("f1") is True
+
+    asyncio.run(scenario())

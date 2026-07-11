@@ -1046,6 +1046,35 @@ class ServerState:
                 # its reply, or a concurrent full pull beat it). Clear the marker
                 # so a later re-desync can dispatch a fresh recovery.
                 self._history_recovery_inflight.pop(flow_id, None)
+                # INVARIANT: an identical full replace MUST keep the existing
+                # bundle generation. The running-worktree self-heal reconcile
+                # (see ``is_active_worktree_flow`` / the history endpoint) fires a
+                # cursorless — hence ``full`` — pull on a throttle even when the
+                # daemon has nothing new to add, so a live worktree discovery can
+                # catch a round the live push dropped. If we rebuilt the bundle
+                # (and rolled a fresh ``generation``) on such a no-op re-pull, we
+                # would invalidate every outstanding progress token and force each
+                # in-sync client into a full re-fetch + DOM rebuild on the very
+                # next poll — the churn the delta/not-modified path exists to
+                # avoid. So when the incoming full records are identical to the
+                # cached bundle from the SAME machine, keep the bundle and its
+                # generation (only the cursor may advance); the token stays valid
+                # and the next poll still answers the cheap ``not_modified``.
+                if (
+                    existing is not None
+                    and str(existing.get("machine_id") or "") == machine_id
+                    and existing.get("records") == new_records
+                ):
+                    if cursor:
+                        existing["cursor"] = dict(cursor)
+                    existing["updated_at"] = time.time()
+                    generation = self._ensure_generation(existing)
+                    logger.debug(
+                        "hist-diag append_history APPLIED-full-noop flow=%s "
+                        "records=%d (identical bundle, generation %d kept)",
+                        flow_id, len(new_records), generation,
+                    )
+                    return True
                 self._history_data[flow_id] = {
                     "flow_id": flow_id,
                     "machine_id": machine_id,
@@ -1412,6 +1441,39 @@ class ServerState:
                     if root:
                         return root
             return None
+
+    async def is_active_worktree_flow(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> bool:
+        """Whether *flow_id* is a still-running ``--worktree`` isolation flow.
+
+        The history self-heal uses this to decide whether a ``not_modified``
+        cache reply for a live flow should be reconciled against the daemon once
+        (subject to :meth:`full_pull_throttled`). A running worktree flow's
+        discovery step appends round after round inside the worktree; if the live
+        push dropped or collided on a round, the server cache freezes at the
+        first one and every later poll keeps answering ``not_modified`` — the
+        "worktree discovery only shows round 1" symptom. Re-pulling the whole
+        bundle from the daemon reconciles it.
+
+        Returns ``True`` only when an owner-visible live flow with this id is
+        ``running`` AND its ``project_root`` points inside
+        ``…/se3/worktrees/<name>`` (:func:`_is_worktree_session_path`). A
+        completed / failed / paused flow, or any non-worktree flow, returns
+        ``False`` so the reconcile never fires for an ordinary session (which is
+        served entirely from cache exactly as before).
+        """
+        async with self._lock:
+            for machine_id, record in self._machines.items():
+                if not _owned(record, owner):
+                    continue
+                flow = record.flows.get(flow_id)
+                if flow is None:
+                    continue
+                if str(flow.status or "").lower() != "running":
+                    return False
+                return _is_worktree_session_path(flow.project_root)
+        return False
 
     # -- issue mirror (from daemon STATUS_UPDATE snapshots) -----------------
 

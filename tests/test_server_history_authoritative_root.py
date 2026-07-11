@@ -184,6 +184,340 @@ def _receive_until(daemon, msg_type):
         assert frame.type == protocol.MSG_HISTORY_INDEX_REQUEST
 
 
+# --------------------------------------------------------------------------
+# ServerState.is_active_worktree_flow — unit (self-heal gate)
+# --------------------------------------------------------------------------
+
+
+def test_is_active_worktree_flow_true_for_running_worktree():
+    """A running flow under ``se3/worktrees/<name>`` is an active worktree flow."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": "f1",
+                        "status": "running",
+                        "project_root": "/repo/se3/worktrees/wt-a",
+                    }
+                ],
+            },
+        )
+        assert await state.is_active_worktree_flow("f1") is True
+
+    asyncio.run(scenario())
+
+
+def test_is_active_worktree_flow_false_when_completed():
+    """A completed worktree flow is no longer active — no reconcile pull."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": "f1",
+                        "status": "completed",
+                        "project_root": "/repo/se3/worktrees/wt-a",
+                    }
+                ],
+            },
+        )
+        assert await state.is_active_worktree_flow("f1") is False
+
+    asyncio.run(scenario())
+
+
+def test_is_active_worktree_flow_false_for_non_worktree():
+    """A running flow under an ordinary root is NOT a worktree flow (unchanged)."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": "f1",
+                        "status": "running",
+                        "project_root": "/repo",
+                    }
+                ],
+            },
+        )
+        assert await state.is_active_worktree_flow("f1") is False
+
+    asyncio.run(scenario())
+
+
+def test_is_active_worktree_flow_false_for_unknown_flow():
+    state = ServerState()
+    assert asyncio.run(state.is_active_worktree_flow("ghost")) is False
+
+
+def test_is_active_worktree_flow_owner_scoped():
+    """One owner's active worktree flow is invisible to another owner's gate."""
+    state = ServerState()
+
+    async def scenario():
+        await state.register_machine("m1", owner_id="owner-a")
+        await state.update_status(
+            "m1",
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": "f1",
+                        "status": "running",
+                        "project_root": "/repo/se3/worktrees/wt-a",
+                    }
+                ],
+            },
+        )
+        assert await state.is_active_worktree_flow("f1", owner="owner-a") is True
+        assert await state.is_active_worktree_flow("f1", owner="owner-b") is False
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# ServerState.append_history — idempotent full re-pull keeps the generation
+# --------------------------------------------------------------------------
+
+
+def test_identical_full_repull_keeps_generation():
+    """A no-op reconcile full pull MUST NOT roll the bundle generation.
+
+    The running-worktree self-heal re-pulls the whole bundle on a throttle even
+    when the daemon has nothing new. If an identical replace rolled a fresh
+    generation it would invalidate every outstanding progress token and force an
+    in-sync client into a full re-fetch on the next poll — the churn the
+    delta/not-modified path exists to avoid.
+    """
+    state = ServerState()
+
+    async def scenario():
+        recs = [
+            {
+                "step_id": "01_discovery_ab12",
+                "step_type": "discovery",
+                "ordinal": 0,
+                "message": {"round": 1},
+            }
+        ]
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, recs, machine_id="m1"
+        )
+        gen1 = (await state.get_history("f1"))["generation"]
+        # An identical full re-pull from the same machine keeps generation.
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, list(recs), machine_id="m1"
+        )
+        assert applied is True
+        snap2 = await state.get_history("f1")
+        assert snap2["generation"] == gen1
+        assert len(snap2["records"]) == 1
+        # A full re-pull that actually GREW (a new round arrived) rolls a fresh
+        # generation so the client is told to re-fetch the enlarged bundle.
+        grown = recs + [
+            {
+                "step_id": "01_discovery_ab12",
+                "step_type": "discovery",
+                "ordinal": 1,
+                "message": {"round": 2},
+            }
+        ]
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, grown, machine_id="m1"
+        )
+        snap3 = await state.get_history("f1")
+        assert snap3["generation"] != gen1
+        assert len(snap3["records"]) == 2
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# history_detail running-worktree self-heal reconcile (integration)
+# --------------------------------------------------------------------------
+
+
+def _sync_live_flow(client, flow_id="f1"):
+    """Block until a STATUS_UPDATE-reported live flow is visible over REST."""
+    for _ in range(200):
+        if client.get(f"/api/flows/{flow_id}").status_code == 200:
+            return
+    raise AssertionError(f"flow {flow_id} never became live")
+
+
+def _report_running_flow(daemon, project_root, flow_id="f1"):
+    daemon.send_text(
+        protocol.make_status_update(
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": flow_id,
+                        "status": "running",
+                        "project_root": project_root,
+                    }
+                ],
+            }
+        ).to_json()
+    )
+
+
+def _first_full_pull(client, daemon, records, flow_id="f1"):
+    """Run the cache-miss GET, answer the daemon pull, return the JSON body."""
+    result: dict = {}
+
+    def do_get():
+        result["resp"] = client.get(f"/api/history/{flow_id}")
+
+    worker = threading.Thread(target=do_get)
+    worker.start()
+    try:
+        _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
+        daemon.send_text(
+            protocol.make_history_data(
+                flow_id, protocol.HISTORY_MODE_FULL, records
+            ).to_json()
+        )
+    finally:
+        worker.join(timeout=5)
+    return result["resp"].json()
+
+
+def test_running_worktree_selfheal_reconciles_missing_round(
+    client_and_app, monkeypatch
+):
+    """A running worktree flow whose cache froze at round 1 self-heals: the
+    ``not_modified`` poll reconciles against the daemon and the missing round 2
+    lands in the response, identity fields intact."""
+    from se3.server.state import ServerState as _SS
+
+    client, app = client_and_app
+    # Drop the reconcile throttle so the self-heal fires on the very next poll
+    # (the throttle itself is asserted separately below).
+    monkeypatch.setattr(_SS, "_HISTORY_FULL_PULL_MIN_INTERVAL", 0.0)
+    wt = "/repo/se3/worktrees/wt-a"
+    round1 = {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "ordinal": 0,
+        "message": {"round": 1},
+    }
+    round2 = {
+        "step_id": "01_discovery_ab12.from-wt__b",
+        "step_type": "discovery",
+        "ordinal": 0,
+        "message": {"round": 2},
+    }
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        _report_running_flow(daemon, wt)
+        _sync_live_flow(client)
+
+        # Cache miss → daemon returns only round 1 (the "stuck at round 1" cache).
+        body1 = _first_full_pull(client, daemon, [round1])
+        assert body1["delivery"] == "full"
+        assert len(body1["records"]) == 1
+
+        # The client is now provably in sync with the (incomplete) cache, so a
+        # bare poll would answer not_modified forever. The self-heal reconcile
+        # re-pulls the daemon, which now has round 2 as well.
+        result: dict = {}
+
+        def do_poll():
+            result["resp"] = client.get(
+                "/api/history/f1",
+                params={"after": body1["progress"], "sig": body1["signature"]},
+            )
+
+        worker = threading.Thread(target=do_poll)
+        worker.start()
+        try:
+            _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
+            daemon.send_text(
+                protocol.make_history_data(
+                    "f1", protocol.HISTORY_MODE_FULL, [round1, round2]
+                ).to_json()
+            )
+        finally:
+            worker.join(timeout=5)
+
+        body2 = result["resp"].json()
+        assert body2["delivery"] == "full"
+        steps = [(r["step_id"], r["ordinal"]) for r in body2["records"]]
+        # Both rounds present, and G1's distinct per-file identity is preserved
+        # verbatim through the relay (round 2 not dropped as a duplicate ordinal).
+        assert ("01_discovery_ab12", 0) in steps
+        assert ("01_discovery_ab12.from-wt__b", 0) in steps
+
+
+def test_running_worktree_selfheal_respects_throttle(client_and_app):
+    """Within the throttle window the self-heal does NOT re-pull the daemon: an
+    in-sync poll answers ``not_modified`` cheaply, so the 3 s self-heal cannot
+    fan out one回源 pull per tick."""
+    client, app = client_and_app  # default throttle (>0) in effect
+    wt = "/repo/se3/worktrees/wt-a"
+    round1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"round": 1}}
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        _report_running_flow(daemon, wt)
+        _sync_live_flow(client)
+
+        body1 = _first_full_pull(client, daemon, [round1])
+        # Immediately re-poll: the cache-miss pull above just stamped a full pull,
+        # so the reconcile is throttled and no MSG_HISTORY_REQUEST is emitted —
+        # the poll returns straight from cache. (If it wrongly re-pulled, this GET
+        # would block on a daemon reply we never send.)
+        resp2 = client.get(
+            "/api/history/f1",
+            params={"after": body1["progress"], "sig": body1["signature"]},
+        )
+        body2 = resp2.json()
+        assert body2["delivery"] == "not_modified"
+        assert body2["records"] == []
+
+
+def test_non_worktree_flow_never_reconciles(client_and_app, monkeypatch):
+    """An ordinary (non-worktree) running flow is served straight from cache even
+    with the throttle disabled — the self-heal reconcile is worktree-only, so
+    normal sessions are unaffected."""
+    from se3.server.state import ServerState as _SS
+
+    client, app = client_and_app
+    monkeypatch.setattr(_SS, "_HISTORY_FULL_PULL_MIN_INTERVAL", 0.0)
+    round1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"round": 1}}
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        _report_running_flow(daemon, "/repo")  # ordinary root, not a worktree
+        _sync_live_flow(client)
+
+        body1 = _first_full_pull(client, daemon, [round1])
+        # Even with the throttle off, a non-worktree flow's in-sync poll answers
+        # not_modified without re-pulling the daemon.
+        resp2 = client.get(
+            "/api/history/f1",
+            params={"after": body1["progress"], "sig": body1["signature"]},
+        )
+        body2 = resp2.json()
+        assert body2["delivery"] == "not_modified"
+        assert body2["records"] == []
+
+
 def test_cache_miss_pull_sends_authoritative_project_root(client_and_app):
     """``GET /api/history/{flow_id}`` cache miss must tell the daemon the flow's
     authoritative ``SessionMeta.project_root`` (the worktree root), not an empty
