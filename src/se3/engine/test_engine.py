@@ -21,6 +21,7 @@ from .models import (
 )
 from .persistence import PersistenceManager
 from .state_machine import StateMachine
+from .steps import charter_freshness
 
 
 class TestModels:
@@ -765,6 +766,317 @@ class TestCharterRefactorRouting:
             anchors["charter"] = "FROZEN-SENTINEL"
             sm.init_flow(flow)
             assert flow.state.context["invariant_anchors"]["charter"] == "FROZEN-SENTINEL"
+
+
+class TestKnowledgeGuardIntegration:
+    """G6: end-to-end, state-machine-level integration for the two knowledge
+    guards, driven through the *real* routing in real task-type sequences (the
+    isolated-handler behavior is covered by tests/test_charter_freshness.py and
+    tests/test_why_comment_guard.py):
+
+    - the charter_freshness closed loop (propose -> gate -> apply) auto-updates
+      the on-disk charter and the flow proceeds straight to version_analyze,
+      re-running NONE of the already-COMPLETED review steps (no reflow — the
+      sub-edit deliberately does not re-trigger invariant_check/self_check/test);
+    - a sequence without invariant_check keeps charter_freshness advisory-only;
+    - an invariant_check WHY:-deletion REVISION_NEEDED rides the SAME shared
+      implement fix loop (and the same shared max_fix_iterations bound) as
+      TEST/SELF_CHECK, and coexists with the charter auto-update in one flow.
+    """
+
+    _DISK_CHARTER = (
+        "# Charter\n\n"
+        "## Purpose\n"
+        "The alpha subsystem drives the widget loop.\n\n"
+        "## Conventions\n"
+        "- Log via logging.\n"
+    )
+
+    _REPLACE_PATCH = [{
+        "op": "replace",
+        "old_text": "The alpha subsystem drives the widget loop.",
+        "new_text": "The beta subsystem drives the widget loop.",
+    }]
+
+    _REVIEW_STEPS = (StepType.TEST, StepType.SELF_CHECK, StepType.INVARIANT_CHECK)
+
+    # --- helpers -------------------------------------------------------
+
+    def _write_charter(self, root, text):
+        se3_dir = root / "se3"
+        se3_dir.mkdir(parents=True, exist_ok=True)
+        (se3_dir / "charter.md").write_text(text, encoding="utf-8")
+
+    def _install_fake_caller(self, monkeypatch, responses):
+        """Stub charter_freshness's LLMCaller with a queued-response fake (same
+        shape tests/test_charter_freshness.py uses)."""
+        state = {"prompts": [], "responses": list(responses), "calls": 0,
+                 "init_kwargs": None}
+
+        class FakeCaller:
+            def __init__(self, *args, **kwargs):
+                state["init_kwargs"] = kwargs
+
+            def call(self, prompt, **kwargs):
+                state["calls"] += 1
+                state["prompts"].append(prompt)
+                if not state["responses"]:
+                    raise AssertionError("unexpected extra LLM call")
+                return state["responses"].pop(0)
+
+        monkeypatch.setattr(charter_freshness, "LLMCaller", FakeCaller)
+        return state
+
+    def _propose(self, update, patch, *, touched=None, suggested="do it"):
+        return json.dumps({
+            "charter_update_needed": update,
+            "touched_classes": touched or (["top-level architecture"] if update else []),
+            "reason": "r",
+            "suggested_update": suggested if update else "",
+            "patch": patch,
+        })
+
+    def _gate(self, admitted, *, violations=None, weakened=None):
+        return json.dumps({
+            "admitted": admitted,
+            "violations": violations or [],
+            "weakened_removals": weakened or [],
+        })
+
+    def _register_recording_mocks(self, sm, *, changed_files=("src/foo.py",)):
+        """Register a COMPLETED-returning mock for every step type. IMPLEMENT
+        publishes ``files_changed`` so _build_step_inputs hands charter_freshness
+        a non-empty ``changes_made`` (the diff that makes the closed loop run)."""
+        def make(step_type):
+            def handler(step, flow):
+                if step_type == StepType.IMPLEMENT:
+                    step.outputs["files_changed"] = list(changed_files)
+                return StepStatus.COMPLETED
+            return handler
+
+        for step_type in StepType:
+            sm.register_handler(step_type, make(step_type))
+
+    def _drive(self, sm, flow, order, max_steps=80):
+        """Run the flow to a terminal status, recording the type of every step
+        actually executed (fix-loop re-runs included)."""
+        flow.status = FlowStatus.RUNNING
+        taken = 0
+        while flow.status == FlowStatus.RUNNING and taken < max_steps:
+            step = flow.state.get_current_step()
+            if not step:
+                break
+            order.append(step.step_type)
+            sm.run_step(flow, step)
+            sm.transition_to_next(flow)
+            taken += 1
+        return taken
+
+    def _make_flow(self, sm, tmp_path, task_type):
+        flow = sm.create_flow(f"touch the architecture ({task_type})", task_type=task_type)
+        # project_root = change_path.parent; keep it == tmp_path so the handler
+        # reads/writes the same se3/charter.md the anchors were frozen from.
+        flow.change_path = tmp_path / "change"
+        # Skip the pre-implement baseline subprocess (no git / no tests here).
+        flow.state.baseline_failures = []
+        sm.init_flow(flow)
+        return flow
+
+    def _charter_step(self, flow):
+        return next(
+            s for s in flow.state.steps.values()
+            if s.step_type == StepType.CHARTER_FRESHNESS
+        )
+
+    # --- tests ---------------------------------------------------------
+
+    def test_charter_auto_update_does_not_reflow_completed_review_steps(
+        self, tmp_path, monkeypatch,
+    ):
+        """A feature flow whose charter_freshness passes the gate writes the
+        charter and advances straight to version_analyze — invariant_check,
+        self_check and test each ran exactly once and NONE re-ran after the
+        auto-update."""
+        self._write_charter(tmp_path, self._DISK_CHARTER)
+        state = self._install_fake_caller(monkeypatch, [
+            self._propose(True, self._REPLACE_PATCH),
+            self._gate(True),
+        ])
+        sm = StateMachine(tmp_path)
+        self._register_recording_mocks(sm)
+        sm.register_handler(
+            StepType.CHARTER_FRESHNESS, charter_freshness.charter_freshness_handler,
+        )
+
+        flow = self._make_flow(sm, tmp_path, "feature")
+        order = []
+        self._drive(sm, flow, order)
+
+        assert flow.status == FlowStatus.COMPLETED
+        # propose + gate only.
+        assert state["calls"] == 2
+        # The charter was actually rewritten on disk (closed loop applied).
+        on_disk = (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+        assert "beta subsystem" in on_disk
+        assert "alpha subsystem" not in on_disk
+
+        cf_step = self._charter_step(flow)
+        assert cf_step.outputs["charter_auto_updated"] is True
+
+        # No fix loop was triggered: each review step ran exactly once.
+        for st in self._REVIEW_STEPS:
+            assert order.count(st) == 1, st
+        assert order.count(StepType.CHARTER_FRESHNESS) == 1
+
+        # Nothing re-ran AFTER the charter auto-update; the flow only moved
+        # forward into version_analyze -> commit -> summarize.
+        last_cf = max(i for i, s in enumerate(order) if s == StepType.CHARTER_FRESHNESS)
+        tail = order[last_cf + 1:]
+        assert not (set(tail) & set(self._REVIEW_STEPS)), (
+            "a review step re-ran after the charter auto-update"
+        )
+        assert StepType.VERSION_ANALYZE in tail
+        assert StepType.COMMIT in tail
+        assert StepType.SUMMARIZE in tail
+        assert (
+            tail.index(StepType.VERSION_ANALYZE)
+            < tail.index(StepType.COMMIT)
+            < tail.index(StepType.SUMMARIZE)
+        )
+        # The auto-update also did not bump the shared fix counter.
+        assert flow.state.get_fix_iteration() == 0
+
+    def test_charter_freshness_stays_advisory_without_invariant_check_in_sequence(
+        self, tmp_path, monkeypatch,
+    ):
+        """The 'small' sequence has no invariant_check, so even when the LLM
+        proposes a concrete patch the precondition fails: charter_freshness stays
+        advisory (single propose call, no gate), leaves the charter byte-for-byte
+        unchanged, and the flow still COMPLETES."""
+        self._write_charter(tmp_path, self._DISK_CHARTER)
+        state = self._install_fake_caller(monkeypatch, [
+            self._propose(True, self._REPLACE_PATCH),
+        ])
+        sm = StateMachine(tmp_path)
+        self._register_recording_mocks(sm)
+        sm.register_handler(
+            StepType.CHARTER_FRESHNESS, charter_freshness.charter_freshness_handler,
+        )
+
+        flow = self._make_flow(sm, tmp_path, "small")
+        assert StepType.INVARIANT_CHECK not in flow.state.selected_steps
+        order = []
+        self._drive(sm, flow, order)
+
+        assert flow.status == FlowStatus.COMPLETED
+        # Only the propose call fired; the gate never ran.
+        assert state["calls"] == 1
+        # Prefer-stale-over-degraded: disk unchanged.
+        assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == self._DISK_CHARTER
+
+        cf_step = self._charter_step(flow)
+        assert cf_step.outputs["charter_auto_updated"] is False
+        assert cf_step.outputs["degraded_reason"] == "invariant_check_not_completed"
+        # The advisory suggestion is still surfaced for the summarize/WebUI channel.
+        assert cf_step.outputs["suggested_update"] == "do it"
+
+    def test_why_comment_deletion_routes_shared_fix_loop_and_coexists_with_charter_update(
+        self, tmp_path, monkeypatch,
+    ):
+        """A first-pass invariant_check flags a WHY:-comment deletion
+        (REVISION_NEEDED) — it rides the SAME implement fix loop as TEST/SELF_CHECK
+        (fix_iteration bumped, implement re-run) — then passes; the charter
+        auto-update then applies in the same flow, and the flow completes with no
+        review step re-running after the charter write."""
+        self._write_charter(tmp_path, self._DISK_CHARTER)
+        state = self._install_fake_caller(monkeypatch, [
+            self._propose(True, self._REPLACE_PATCH),
+            self._gate(True),
+        ])
+        sm = StateMachine(tmp_path)
+        self._register_recording_mocks(sm)
+        sm.register_handler(
+            StepType.CHARTER_FRESHNESS, charter_freshness.charter_freshness_handler,
+        )
+
+        inv_calls = {"n": 0}
+
+        def invariant_handler(step, flow):
+            inv_calls["n"] += 1
+            if inv_calls["n"] == 1:
+                # Mimic the why-comment hard guard's REVISION_NEEDED output: a
+                # WHY:-prefixed comment was deleted without restatement.
+                step.outputs["fix_needed"] = True
+                step.outputs["fix_instructions"] = (
+                    "restore the deleted `# WHY:` comment or restate its intent"
+                )
+                step.outputs["fix_context"] = {
+                    "reason": "invariant_check",
+                    "issues": [{"type": "why_comment_deleted", "quote": "# WHY: bound"}],
+                }
+                return StepStatus.REVISION_NEEDED
+            return StepStatus.COMPLETED
+
+        sm.register_handler(StepType.INVARIANT_CHECK, invariant_handler)
+
+        flow = self._make_flow(sm, tmp_path, "feature")
+        assert flow.state.get_fix_iteration() == 0
+        order = []
+        self._drive(sm, flow, order)
+
+        assert flow.status == FlowStatus.COMPLETED
+        # The why-deletion REVISION_NEEDED routed the shared fix loop.
+        assert inv_calls["n"] >= 2, "invariant_check was not re-run after the WHY fix"
+        assert flow.state.get_fix_iteration() >= 1
+        assert order.count(StepType.IMPLEMENT) >= 2, "implement fix loop did not re-run"
+
+        # Both guards succeeded in the same flow: the charter was auto-updated.
+        on_disk = (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+        assert "beta subsystem" in on_disk
+        cf_step = self._charter_step(flow)
+        assert cf_step.outputs["charter_auto_updated"] is True
+
+        # The charter auto-update itself did not reflow any review step.
+        last_cf = max(i for i, s in enumerate(order) if s == StepType.CHARTER_FRESHNESS)
+        assert not (set(order[last_cf + 1:]) & set(self._REVIEW_STEPS))
+
+    def test_why_comment_deletion_respects_shared_max_fix_iterations_bound(
+        self, tmp_path, monkeypatch,
+    ):
+        """An always-failing WHY:-deletion invariant_check exhausts the SAME
+        shared max_fix_iterations bound as TEST/SELF_CHECK and FAILs the flow —
+        the charter auto-update never runs (no propose/gate call)."""
+        self._write_charter(tmp_path, self._DISK_CHARTER)
+        state = self._install_fake_caller(monkeypatch, [])  # any LLM call is a failure
+        sm = StateMachine(tmp_path)
+        # Tiny shared bound so the loop exhausts quickly.
+        sm._get_max_fix_iterations = lambda: 2  # type: ignore[assignment]
+        self._register_recording_mocks(sm)
+        sm.register_handler(
+            StepType.CHARTER_FRESHNESS, charter_freshness.charter_freshness_handler,
+        )
+
+        def always_why_revision(step, flow):
+            step.outputs["fix_needed"] = True
+            step.outputs["fix_instructions"] = "restore the deleted `# WHY:` comment"
+            step.outputs["fix_context"] = {
+                "reason": "invariant_check",
+                "issues": [{"type": "why_comment_deleted"}],
+            }
+            return StepStatus.REVISION_NEEDED
+
+        sm.register_handler(StepType.INVARIANT_CHECK, always_why_revision)
+
+        flow = self._make_flow(sm, tmp_path, "feature")
+        order = []
+        self._drive(sm, flow, order)
+
+        assert flow.status == FlowStatus.FAILED
+        # The flow died in the invariant fix loop, before charter_freshness — so
+        # the closed loop never made an LLM call and never touched the charter.
+        assert state["calls"] == 0
+        assert StepType.CHARTER_FRESHNESS not in order
+        assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == self._DISK_CHARTER
 
 
 class TestStreamProgressHistory:
