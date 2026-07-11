@@ -782,8 +782,18 @@ class LLMCaller:
         fix_iteration: int = 0,
         self_check_pass_index: Optional[int] = None,
         on_agent_change: Optional[Callable[[str, Optional[str]], None]] = None,
+        force_read_only: bool = False,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
+        # WHY: decouples the step's registry-level read_only from a single LLM
+        # call's read-only posture. charter_freshness declares read_only=False
+        # (its handler writes se3/charter.md), yet its LLM sub-calls must stay
+        # read-only — they only PROPOSE candidate charter text, the handler's
+        # Python does the writing. Passing force_read_only=True re-applies both
+        # the prompt READ-ONLY injection and the runner --disallowedTools lock
+        # for that call without touching is_step_read_only (the shared source of
+        # truth). Default False preserves current behavior for every other step.
+        self.force_read_only = force_read_only
         # Optional notification invoked whenever the agent selected for an
         # attempt is known — once as (agent_name, None) when the attempt starts
         # (including each rotation, so retries surface their real agent) and
@@ -1028,7 +1038,9 @@ class LLMCaller:
             get_read_only_injection,
             get_spec_write_protection_injection,
         )
-        read_only_constraint = get_read_only_injection(self.step_type)
+        read_only_constraint = get_read_only_injection(
+            self.step_type, force=self.force_read_only
+        )
         if read_only_constraint:
             prompt = f"{prompt}{read_only_constraint}"
             logger.debug(f"Injected read-only constraint for step '{self.step_type}'")
@@ -1764,9 +1776,14 @@ class LLMCaller:
                 # runner translates the caller's intent (prompt, read-only
                 # flag, context files) into its own agent-specific CLI flags.
                 from .context_builder import is_step_read_only
+                # force_read_only ORs on top of the registry decision: a step
+                # that writes files (read_only=False) can still hold this LLM
+                # sub-call read-only, so the runner emits its --disallowedTools
+                # tool-level lock. Never the reverse — a read-only step cannot be
+                # forced writable here.
                 args = current_runner.build_call_args(
                     prompt=effective_prompt,
-                    read_only=is_step_read_only(self.step_type),
+                    read_only=is_step_read_only(self.step_type) or self.force_read_only,
                     context_files=context_files,
                     spec_guard_plugin=self._resolve_spec_guard_settings(),
                 )

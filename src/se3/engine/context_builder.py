@@ -630,7 +630,7 @@ def is_step_read_only(step_type: str) -> bool:
     )
 
 
-def get_read_only_injection(step_type: str) -> str:
+def get_read_only_injection(step_type: str, force: bool = False) -> str:
     """Get read-only constraint prompt injection for a step.
 
     Delegates the read-only decision to :func:`is_step_read_only`, which
@@ -641,11 +641,15 @@ def get_read_only_injection(step_type: str) -> str:
     Args:
         step_type: Current step type name (e.g., "analyze", "implement",
             "sync_scan")
+        force: Emit the constraint even when ``step_type`` is not registry
+            read-only. Used by a call-level read-only override (LLMCaller's
+            ``force_read_only``) so a step whose handler writes files can still
+            hold its LLM sub-call read-only without mutating ``is_step_read_only``.
 
     Returns:
         Read-only constraint prompt string, or empty string if step is not read-only.
     """
-    if not is_step_read_only(step_type):
+    if not force and not is_step_read_only(step_type):
         return ""
 
     return (
@@ -673,8 +677,15 @@ def _is_spec_write_protected_step(step_type: str) -> bool:
     A step is spec-write-protected when it is a non-read-only LLM step (a
     STEP_POOL step with ``uses_llm=True`` and ``read_only=False``) that is NOT
     in :data:`SPEC_WRITE_ALLOWED_STEPS`. This currently covers ``implement``
-    (its three templates), ``propose``, ``design``, and ``plan_tasks``, and
-    auto-extends to any future non-read-only LLM step.
+    (its three templates), ``propose``, ``design``, ``plan_tasks``, and — since
+    its read_only flip — ``charter_freshness``, and auto-extends to any future
+    non-read-only LLM step.
+
+    WHY (charter_freshness connateral effect): flipping charter_freshness to
+    read_only=False makes it match here, so its LLM call now also receives the
+    se3/specs/ write-protection injection. This is harmless and directionally
+    correct — the charter_freshness handler writes se3/charter.md, never
+    se3/specs/, so forbidding spec-file writes constrains nothing it needs.
 
     The sync pseudo-steps are exempt without needing the explicit
     ``SPEC_WRITE_ALLOWED_STEPS`` check, because they are absent from STEP_POOL

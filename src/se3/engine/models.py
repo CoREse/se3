@@ -894,20 +894,36 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.CHARTER_FRESHNESS: {
         "name": "charter_freshness",
-        # Advisory, never blocking: it only flags when the diff plausibly
-        # touches one of charter's three content classes, mirroring
-        # version_analyze's "LLM reads the change -> suggests" shape.
+        # WHY: read_only is False even though the LLM sub-call stays read-only.
+        # The handler itself may write se3/charter.md: sitting after a COMPLETED
+        # invariant_check, a *descriptive* charter update (making the constitution
+        # reflect the already-approved new reality) is closed inside the handler
+        # via propose -> gate -> apply, with no issue and no state-machine route.
+        # The registry must declare that write truthfully (write-guard / audit
+        # consumers key off read_only), so it is flipped to False; the LLM
+        # sub-process is kept read-only out-of-band via LLMCaller(force_read_only)
+        # rather than by lying in the registry. Never blocks the flow.
         "description": (
-            "Charter freshness advisory: does this diff touch any of charter's "
-            "three content classes (project identity / top-level architecture / "
-            "project-wide cross-cutting conventions)? Hit => surface an update "
-            "prompt; the overwhelming majority of flows pass cheaply. Never "
+            "Charter freshness: does this diff touch any of charter's three "
+            "content classes (project identity / top-level architecture / "
+            "project-wide cross-cutting conventions)? On a hit the handler may "
+            "write se3/charter.md itself — a descriptive, anchored, gated update "
+            "closed in-handler (propose -> gate -> apply); write execution is the "
+            "handler's Python, the LLM sub-call only proposes text and stays "
+            "read-only. The overwhelming majority of flows pass cheaply. Never "
             "blocks the flow."
         ),
         "uses_llm": True,
-        "read_only": True,
+        "read_only": False,
         "inputs": ["task_description", "charter", "changes_made"],
-        "outputs": ["charter_update_needed", "touched_classes", "reason", "suggested_update"],
+        "outputs": [
+            "charter_update_needed",
+            "touched_classes",
+            "reason",
+            "suggested_update",
+            "charter_auto_updated",
+            "charter_diff",
+        ],
     },
     StepType.VERIFY_SPEC: {
         "name": "verify_spec",

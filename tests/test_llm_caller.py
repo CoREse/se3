@@ -268,3 +268,59 @@ class TestReadOnlyToolDisallowList:
         """STEP_POOL read-only steps also get tool-layer enforcement."""
         args = self._run_and_capture_args("analyze")
         assert "--disallowedTools" in args
+
+
+class TestForceReadOnlyOverride:
+    """Call-level read-only override: a step whose registry read_only is False
+    (its handler writes files) can still hold a single LLM sub-call read-only by
+    constructing LLMCaller(force_read_only=True). Both enforcement points must
+    fire — the prompt READ-ONLY injection and the runner --disallowedTools lock —
+    without mutating is_step_read_only. charter_freshness is the motivating step
+    (read_only flipped to False for its in-handler charter write)."""
+
+    def _run_and_capture_args(self, step_type: str, force_read_only: bool):
+        caller = _make_caller(step_type=step_type, force_read_only=force_read_only)
+        runner = _ArgsCapturingRunner()
+        with patch.object(LLMCaller, "_get_current_runner", return_value=runner), \
+             patch.object(LLMCaller, "_record_prompt"), \
+             patch.object(LLMCaller, "_record_response"):
+            caller.call("do the thing", json_mode="off")
+        assert runner.captured_args is not None
+        return runner.captured_args
+
+    def test_baseline_charter_freshness_is_writable(self):
+        """Sanity: with the read_only flip, charter_freshness alone (no force)
+        gets NO tool-level lock — the handler is the writer."""
+        from se3.engine.context_builder import is_step_read_only
+
+        assert is_step_read_only("charter_freshness") is False
+        args = self._run_and_capture_args("charter_freshness", force_read_only=False)
+        assert "--disallowedTools" not in args
+
+    def test_force_read_only_adds_runner_disallowed_tools(self):
+        """Enforcement point 1: runner receives read_only=True even though the
+        step's registry read_only is False."""
+        args = self._run_and_capture_args("charter_freshness", force_read_only=True)
+        assert "--disallowedTools" in args
+        for tool in ("Write", "Edit", "NotebookEdit"):
+            assert tool in args
+
+    @patch.object(LLMCaller, "_call_with_retry")
+    def test_force_read_only_injects_prompt_constraint(self, mock_retry):
+        """Enforcement point 2: the prompt gains the READ-ONLY STEP CONSTRAINT
+        block when force_read_only=True on an otherwise-writable step."""
+        mock_retry.return_value = "ok"
+        _make_caller(
+            step_type="charter_freshness", force_read_only=True
+        ).call("propose charter patch", json_mode="off")
+        assert "READ-ONLY STEP CONSTRAINT" in mock_retry.call_args[1]["prompt"]
+
+    @patch.object(LLMCaller, "_call_with_retry")
+    def test_default_no_force_no_prompt_constraint(self, mock_retry):
+        """Default force_read_only=False leaves a writable step's prompt clean —
+        behavior identical to before the override existed."""
+        mock_retry.return_value = "ok"
+        _make_caller(
+            step_type="charter_freshness", force_read_only=False
+        ).call("propose charter patch", json_mode="off")
+        assert "READ-ONLY STEP CONSTRAINT" not in mock_retry.call_args[1]["prompt"]

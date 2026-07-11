@@ -37,8 +37,17 @@ from se3.engine.context_builder import (
 
 
 # Steps that MUST receive the spec-write-protection injection: every
-# non-read-only LLM step except the exempt write-spec steps.
-PROTECTED_STEPS = ["implement", "propose", "design", "plan_tasks"]
+# non-read-only LLM step except the exempt write-spec steps. charter_freshness
+# joined this set when its read_only was flipped to False (its handler writes
+# se3/charter.md) — the injection only forbids se3/specs/ writes, which it never
+# does, so the connateral effect is harmless and directionally correct.
+PROTECTED_STEPS = [
+    "implement",
+    "propose",
+    "design",
+    "plan_tasks",
+    "charter_freshness",
+]
 
 # The four sync pseudo-steps (read + write paths) — all exempt.
 SYNC_STEPS = ["sync_scan", "sync_analyze", "sync_resolve", "sync_respond"]
