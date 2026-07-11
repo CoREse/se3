@@ -1,0 +1,10 @@
+{
+  "cli.common.done": "完成",
+  "cli.common.cancelled": "已取消",
+  "cli.common.yes": "是",
+  "cli.common.no": "否",
+  "cli.run.starting": "开始运行：{task}",
+  "cli.run.completed": "运行完成，用时 {seconds} 秒",
+  "cli.error.not_a_project": "当前目录不是 se3 项目（在 {path} 中未找到 se3.yaml）。",
+  "cli.greeting": "你好，{name}！"
+}

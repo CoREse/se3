@@ -1,0 +1,11 @@
+{
+  "cli.common.done": "Done",
+  "cli.common.cancelled": "Cancelled",
+  "cli.common.yes": "yes",
+  "cli.common.no": "no",
+  "cli.run.starting": "Starting run: {task}",
+  "cli.run.resume_hint": "Resume this flow with: se3 run --resume",
+  "cli.run.completed": "Run completed in {seconds}s",
+  "cli.error.not_a_project": "Not an se3 project (no se3.yaml found in {path}).",
+  "cli.greeting": "Hello, {name}!"
+}

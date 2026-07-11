@@ -2294,12 +2294,21 @@ def get_language_labels(language: str) -> dict[str, str]:
 
 @dataclass
 class LanguageConfig:
-    """Language configuration for controlling output language.
+    """Unified human-language configuration.
 
-    Two-tier language settings:
-    - language: for human-facing steps (summarize, discovery, confirmed steps)
-    - spec_language: for spec writing (update_spec step)
-    Both default to None (no restriction).
+    Two settings, each merged project-over-global (project ``se3.yaml`` /
+    ``se3.local.yaml`` wins over ``~/.se3/config.yaml``, per field):
+
+    - ``language``: the *unified human language*. Drives BOTH the fixed CLI /
+      console UI text (via :mod:`se3.i18n`) AND the human-facing LLM output
+      language injection (summarize / discovery / confirmed steps).
+    - ``spec_language``: the *knowledge-asset language* — the language in which
+      ``charter.md`` and the code-index are written (injected into the
+      charter_freshness and code-index summary prompts).
+
+    Both default to ``None`` (no restriction). ``language`` also feeds the
+    :mod:`se3.i18n` resolution chain as its project/global config tier, so the
+    UI-text path and the LLM-injection path read a single merged source.
     """
 
     language: Optional[str] = None
@@ -2307,16 +2316,36 @@ class LanguageConfig:
 
     @classmethod
     def load(cls, project_root: Path) -> "LanguageConfig":
-        """Load language configuration from the active project YAML."""
-        data, _src = load_project_yaml(project_root)
-        if not data:
-            return cls()
-        lang_section = data.get("language", {})
-        if not lang_section or not isinstance(lang_section, dict):
-            return cls()
+        """Load the merged language config for ``project_root``.
+
+        Merges the ``language:`` section of the active project YAML (worktree-
+        aware ``se3.local.yaml`` → ``se3.yaml`` selection) over the global
+        ``~/.se3/config.yaml``, field by field: a project value overrides the
+        global one, an unset project field inherits the global value, and a
+        field absent from both is ``None``. Reuses :func:`_load_agent_configs`
+        so global/project reads follow the exact pattern the agent and
+        confirmation loaders already use.
+        """
+        global_data, project_data, _src = _load_agent_configs(project_root)
+
+        def _section(data: dict) -> dict:
+            sec = data.get("language")
+            return sec if isinstance(sec, dict) else {}
+
+        project_section = _section(project_data)
+        global_section = _section(global_data)
+
+        def _pick(key: str) -> Optional[str]:
+            # project-over-global: an explicit non-None project value wins; a
+            # missing/None project field falls through to the global value.
+            val = project_section.get(key)
+            if val is not None:
+                return val
+            return global_section.get(key)
+
         return cls(
-            language=lang_section.get("language"),
-            spec_language=lang_section.get("spec_language"),
+            language=_pick("language"),
+            spec_language=_pick("spec_language"),
         )
 
 

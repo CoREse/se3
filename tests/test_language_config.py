@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from pathlib import Path
 
@@ -11,6 +13,39 @@ from se3.engine.context_builder import (
     HUMAN_FACING_STEPS,
     SPEC_STEPS,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_global_home(tmp_path_factory, monkeypatch):
+    """Point ``~/.se3/config.yaml`` at an empty isolated home.
+
+    LanguageConfig.load now merges the global ``~/.se3/config.yaml`` in, so
+    every test must run against a clean home or a developer's real global
+    ``language:`` setting would leak into (and flip) these assertions. Tests
+    that specifically exercise the global tier write their own file under this
+    isolated home via the ``global_home`` fixture.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr("se3.config.Path.home", lambda: home)
+    return home
+
+
+@pytest.fixture
+def global_home(_isolated_global_home):
+    """Return the isolated home dir; helper to write ~/.se3/config.yaml."""
+    return _isolated_global_home
+
+
+def _write_global_language(home: Path, language=None, spec_language=None) -> None:
+    """Write a ~/.se3/config.yaml with a language section under ``home``."""
+    cfg_dir = home / ".se3"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["language:"]
+    lines.append(f"  language: {language}" if language else "  language: null")
+    lines.append(
+        f"  spec_language: {spec_language}" if spec_language else "  spec_language: null"
+    )
+    (cfg_dir / "config.yaml").write_text("\n".join(lines) + "\n")
 
 
 # --- LanguageConfig loading tests ---
@@ -89,6 +124,54 @@ class TestLanguageConfigLoad:
         (tmp_path / "se3.yaml").write_text("language: zh-CN\n")
         config = LanguageConfig.load(tmp_path)
         assert config.language is None
+        assert config.spec_language is None
+
+
+class TestLanguageConfigGlobalMerge:
+    """Project-over-global merge of the language section (task 2)."""
+
+    def test_project_overrides_global(self, tmp_path, global_home):
+        """A project value wins over the global one, field by field."""
+        _write_global_language(global_home, language="en-US", spec_language="en-US")
+        (tmp_path / "se3.yaml").write_text(
+            "language:\n  language: zh-CN\n  spec_language: ja\n"
+        )
+        config = LanguageConfig.load(tmp_path)
+        assert config.language == "zh-CN"
+        assert config.spec_language == "ja"
+
+    def test_global_only(self, tmp_path, global_home):
+        """With no project value, the global value is used."""
+        _write_global_language(global_home, language="zh-CN", spec_language="en-US")
+        # No project se3.yaml at all.
+        config = LanguageConfig.load(tmp_path)
+        assert config.language == "zh-CN"
+        assert config.spec_language == "en-US"
+
+    def test_global_fills_missing_project_field(self, tmp_path, global_home):
+        """An unset project field inherits the global value (per-field merge)."""
+        _write_global_language(global_home, language="en-US", spec_language="ko")
+        # Project sets only language; spec_language should fall through.
+        (tmp_path / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+        config = LanguageConfig.load(tmp_path)
+        assert config.language == "zh-CN"
+        assert config.spec_language == "ko"
+
+    def test_neither_set_is_none(self, tmp_path, global_home):
+        """Both None when neither project nor global set a value."""
+        _write_global_language(global_home)  # both null
+        config = LanguageConfig.load(tmp_path)
+        assert config.language is None
+        assert config.spec_language is None
+
+    def test_project_null_falls_through_to_global(self, tmp_path, global_home):
+        """An explicit project null does not mask a set global value."""
+        _write_global_language(global_home, language="zh-CN")
+        (tmp_path / "se3.yaml").write_text(
+            "language:\n  language: null\n  spec_language: null\n"
+        )
+        config = LanguageConfig.load(tmp_path)
+        assert config.language == "zh-CN"
         assert config.spec_language is None
 
 
