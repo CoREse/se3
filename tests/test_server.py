@@ -628,6 +628,14 @@ def test_static_assets_served(client_and_app):
     assert css.status_code == 200 and "control plane" in css.text.lower()
     js = client.get("/app.js")
     assert js.status_code == 200 and "WebSocket" in js.text
+    # WebUI i18n locale dictionaries load from the root static mount at /i18n/
+    # (the same origin as app.js), NOT /static/i18n/. Lock that serving path so
+    # a regression in the mount or the fetch URL surfaces here.
+    en = client.get("/i18n/en-US.json")
+    assert en.status_code == 200, "en-US locale must be served at /i18n/en-US.json"
+    assert "nav.history" in en.json(), "en-US baseline dict looks malformed"
+    zh = client.get("/i18n/zh-CN.json")
+    assert zh.status_code == 200, "zh-CN locale must be served at /i18n/zh-CN.json"
 
 
 def test_ui_ws_receives_initial_snapshot(client_and_app):

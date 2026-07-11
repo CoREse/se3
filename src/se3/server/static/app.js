@@ -681,6 +681,187 @@ function el(tag, cls, text) {
   return node;
 }
 
+// ---------------------------------------------------------------------------
+// I18N — client-side UI-language subsystem
+// ---------------------------------------------------------------------------
+//
+// WebUI interface language is a per-user client preference (localStorage), NOT
+// tied to any project's se3.yaml — this is a multi-tenant control plane, so a
+// single project's language must never dictate the operator's chrome. en-US is
+// the baseline dictionary and the per-key fallback; the selected language is
+// layered over it in t(). A missing key falls back to en-US, then to the key
+// itself, and a failed fetch degrades to an empty dict — so a network hiccup or
+// an untranslated key never blanks the UI: index.html keeps English text as the
+// in-markup default until a dictionary paints over it. Adding a language is a
+// data change: drop a new locales JSON and register its code in SUPPORTED — no
+// business code changes.
+
+const I18N = {
+  SUPPORTED: ["en-US", "zh-CN"],
+  FALLBACK: "en-US",
+  STORAGE_KEY: "se3_ui_lang",
+  lang: "en-US",
+  // Loaded flat key→string dictionaries, keyed by language code. en-US is the
+  // always-present baseline; the active language is layered over it in t().
+  dicts: { "en-US": {}, "zh-CN": {} },
+  // Optional re-render hook invoked after a language switch so dynamic UI can
+  // repaint. Wired in init(); a no-op / undefined in the require-loaded module.
+  onLangChange: null,
+
+  // Pure: choose the initial language from a stored preference, the browser's
+  // navigator.language, and the supported-language list. Precedence:
+  // localStorage exact match > navigator.language exact match > navigator
+  // primary-subtag prefix match (e.g. "zh" / "zh-TW" → "zh-CN") > en-US.
+  resolveInitialLang(stored, navLang, supported) {
+    const list = Array.isArray(supported) && supported.length
+      ? supported : ["en-US"];
+    if (stored && list.includes(stored)) return stored;
+    const nav = String(navLang || "");
+    if (nav && list.includes(nav)) return nav;
+    const prim = nav.split("-")[0].toLowerCase();
+    if (prim) {
+      for (const code of list) {
+        if (code.split("-")[0].toLowerCase() === prim) return code;
+      }
+    }
+    return list.includes("en-US") ? "en-US" : list[0];
+  },
+
+  // Pure: resolve `key` against the active dict, then the baseline dict, then
+  // the key itself; interpolate {name} placeholders from `params`. Never throws
+  // — a malformed template returns the un-interpolated string.
+  lookup(key, params, primary, fallback) {
+    let tmpl = (primary && primary[key] != null) ? primary[key]
+      : (fallback && fallback[key] != null) ? fallback[key] : key;
+    tmpl = String(tmpl);
+    if (params && typeof params === "object") {
+      try {
+        tmpl = tmpl.replace(/\{(\w+)\}/g, (m, k) =>
+          (params[k] != null ? String(params[k]) : m));
+      } catch (_) { /* fail-safe: return the un-interpolated template */ }
+    }
+    return tmpl;
+  },
+
+  t(key, params) {
+    return I18N.lookup(
+      key, params, I18N.dicts[I18N.lang], I18N.dicts[I18N.FALLBACK]);
+  },
+
+  // Resolve `key` to a translation, or null when it is absent from BOTH the
+  // active and baseline dictionaries. applyStaticTranslations uses this (rather
+  // than t()) so a total miss — e.g. a boot-time fetch failure that leaves the
+  // dicts empty — leaves the node's in-markup English fallback untouched instead
+  // of painting the raw dotted key over it. t() still returns the key itself for
+  // dynamic (JS-generated) text, where a visible key is the fixable fallback.
+  resolve(key, params) {
+    const p = I18N.dicts[I18N.lang];
+    const f = I18N.dicts[I18N.FALLBACK];
+    if (p && p[key] != null) return I18N.lookup(key, params, p, f);
+    if (f && f[key] != null) return I18N.lookup(key, params, f, f);
+    return null;
+  },
+
+  // Fetch one language's dictionary JSON, caching it on `dicts`. A failed fetch
+  // resolves to an empty dict (never rejects) so callers degrade to the
+  // baseline / in-markup English rather than throwing on a boot-time network
+  // error.
+  async load(code) {
+    if (I18N.dicts[code] && Object.keys(I18N.dicts[code]).length) {
+      return I18N.dicts[code];
+    }
+    try {
+      // The frontend is served from the root static mount (same origin as
+      // app.js / style.css), so locale files load from /i18n/, not /static/.
+      const resp = await fetch(`/i18n/${code}.json`);
+      if (!resp.ok) throw new Error(`i18n ${code} ${resp.status}`);
+      I18N.dicts[code] = await resp.json();
+    } catch (_) {
+      I18N.dicts[code] = I18N.dicts[code] || {};
+    }
+    return I18N.dicts[code];
+  },
+
+  // Apply data-i18n / -placeholder / -title attributes across a DOM scope
+  // (defaults to the whole document). No-op where querySelectorAll is absent
+  // (the require-loaded module in the pure tests).
+  applyStaticTranslations(root) {
+    const scope = root
+      || (typeof document !== "undefined" ? document : null);
+    if (!scope || typeof scope.querySelectorAll !== "function") return;
+    const sels = ["[data-i18n]", "[data-i18n-placeholder]", "[data-i18n-title]"];
+    for (const sel of sels) {
+      for (const node of scope.querySelectorAll(sel)) {
+        // resolve() (not t()) so a missing key leaves the in-markup fallback.
+        applyNodeTranslations(node, I18N.resolve);
+      }
+    }
+  },
+
+  // Switch the active language: persist the choice, ensure both the baseline
+  // and target dictionaries are loaded, then repaint static + dynamic UI.
+  async setLang(code) {
+    const next = I18N.SUPPORTED.includes(code) ? code : I18N.FALLBACK;
+    I18N.lang = next;
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(I18N.STORAGE_KEY, next);
+      }
+    } catch (_) { /* localStorage may throw in restricted contexts */ }
+    await Promise.all([I18N.load(I18N.FALLBACK), I18N.load(next)]);
+    I18N.applyStaticTranslations();
+    if (typeof I18N.onLangChange === "function") I18N.onLangChange();
+  },
+};
+
+// Pure per-node attribute application (exported for the DOM-stub tests): reads
+// data-i18n (→ textContent), data-i18n-placeholder (→ placeholder), and
+// data-i18n-title (→ title) and writes the translated string via `tfn`. Each
+// attribute is independent so a single node can localize several surfaces.
+function applyNodeTranslations(node, tfn) {
+  if (!node || typeof node.getAttribute !== "function") return;
+  // A null/undefined result means "no translation" — leave the in-markup
+  // fallback (text / placeholder / title) untouched rather than blanking it.
+  const textKey = node.getAttribute("data-i18n");
+  if (textKey) {
+    const v = tfn(textKey);
+    if (v != null) node.textContent = v;
+  }
+  const phKey = node.getAttribute("data-i18n-placeholder");
+  if (phKey) {
+    const v = tfn(phKey);
+    if (v != null) {
+      node.placeholder = v;
+      if (typeof node.setAttribute === "function") {
+        node.setAttribute("placeholder", v);
+      }
+    }
+  }
+  const titleKey = node.getAttribute("data-i18n-title");
+  if (titleKey) {
+    const v = tfn(titleKey);
+    if (v != null) {
+      node.title = v;
+      if (typeof node.setAttribute === "function") {
+        node.setAttribute("title", v);
+      }
+    }
+  }
+}
+
+// Localize a DYNAMIC (JS-rendered) UI string, with the in-code literal as the
+// built-in fallback. Uses I18N.resolve (not t()): when a dictionary is loaded
+// the translation wins; a total miss — a boot-time fetch failure or the
+// document-less unit-test environment where the dicts stay empty — returns the
+// original literal instead of painting a raw dotted key. This mirrors the
+// data-i18n static-fallback contract for JS-generated chrome, and keeps every
+// render-time string re-resolved on a language switch (never cached at module
+// load). `params` interpolates {name} placeholders in the dict template.
+function tf(key, fallback, params) {
+  const v = I18N.resolve(key, params);
+  return v != null ? v : fallback;
+}
+
 function statusClass(status) {
   const s = String(status || "unknown").toLowerCase();
   if (["running", "completed", "failed", "paused", "init"].includes(s)) return s;
@@ -1032,9 +1213,9 @@ function applyInterjectionEvent(msg) {
   if (isOpenFlow && !state.interjectionToastsSeen[toastKey]) {
     state.interjectionToastsSeen[toastKey] = true;
     if (phase === "pending") {
-      showToast("info", "插话已送达,等待 flow 消费");
+      showToast("info", tf("toast.interjectionDelivered", "插话已送达,等待 flow 消费"));
     } else if (phase === "consumed") {
-      showToast("success", "插话已被消费");
+      showToast("success", tf("toast.interjectionConsumed", "插话已被消费"));
     }
   }
 
@@ -1110,7 +1291,7 @@ function applySpawnFailed(msg) {
   const projectRoot = String(msg.project_root || "");
   const reason = String(msg.error || "unknown error");
   const where = projectRoot ? ` (${projectRoot})` : "";
-  showToast("error", `启动任务失败${where}：${reason}`);
+  showToast("error", tf("toast.taskLaunchFailed", `启动任务失败${where}：${reason}`, { where, reason }));
 }
 
 // Clear pending-Send bookkeeping and re-enable the Send button via a
@@ -2799,23 +2980,23 @@ async function resumeFlow(flowId) {
       { method: "POST" },
     );
     if (resp.ok) {
-      showToast("success", `Resume dispatched for ${flowId.slice(0, 8)}…`);
+      showToast("success", tf("toast.resumeDispatched", `Resume dispatched for ${flowId.slice(0, 8)}…`, { id: flowId.slice(0, 8) }));
     } else if (resp.status === 404) {
-      showToast("error", "Flow not found or not resumable.");
+      showToast("error", tf("toast.resumeNotFound", "Flow not found or not resumable."));
     } else if (resp.status === 409) {
       // The flow exists but is not resumable right now — typically it is still
       // running (a live process holds it). Surface the backend's explicit
       // rejection detail rather than a misleading "dispatched" success.
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || "该 flow 仍在运行，无法 resume");
+      showToast("error", detail || tf("toast.resumeStillRunning", "该 flow 仍在运行，无法 resume"));
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || `Resume failed (${resp.status}).`);
+      showToast("error", detail || tf("toast.resumeFailed", `Resume failed (${resp.status}).`, { status: resp.status }));
     }
   } catch (_) {
-    showToast("error", "Network error — could not dispatch resume.");
+    showToast("error", tf("toast.resumeNetworkError", "Network error — could not dispatch resume."));
   } finally {
     state.resumeFlowRequests.delete(flowId);
     renderFlows();
@@ -2953,22 +3134,22 @@ async function endFlow(flowId) {
       { method: "POST" },
     );
     if (resp.ok || resp.status === 202) {
-      showToast("success", `End dispatched for ${flowId.slice(0, 8)}…`);
+      showToast("success", tf("toast.endDispatched", `End dispatched for ${flowId.slice(0, 8)}…`, { id: flowId.slice(0, 8) }));
     } else if (resp.status === 404) {
-      showToast("error", "Flow not found.");
+      showToast("error", tf("toast.flowNotFound", "Flow not found."));
     } else if (resp.status === 409) {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || "该 session 已结束，无法再次结束。");
+      showToast("error", detail || tf("toast.endAlreadyEnded", "该 session 已结束，无法再次结束。"));
     } else if (resp.status === 503) {
-      showToast("error", "机器未连接 — 无法下发结束指令。");
+      showToast("error", tf("toast.endMachineOffline", "机器未连接 — 无法下发结束指令。"));
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || `End failed (${resp.status}).`);
+      showToast("error", detail || tf("toast.endFailed", `End failed (${resp.status}).`, { status: resp.status }));
     }
   } catch (_) {
-    showToast("error", "Network error — could not dispatch end.");
+    showToast("error", tf("toast.endNetworkError", "Network error — could not dispatch end."));
   } finally {
     state.endSessionRequests.delete(flowId);
     renderFlows();
@@ -3866,13 +4047,13 @@ function submitReply(event) {
   const entries = state.flowInterventions || [];
   const target = entries.find((e) => e.id === state.flowReplyTargetId);
   if (!state.selectedFlowId || !target) {
-    showToast("error", "No interaction is selected to respond to.");
+    showToast("error", tf("toast.noInteractionSelected", "No interaction is selected to respond to."));
     return;
   }
   const input = $("flow-reply-input");
   const text = input.value.trim();
   if (!text) {
-    showToast("error", "Response must not be empty.");
+    showToast("error", tf("toast.responseEmpty", "Response must not be empty."));
     return;
   }
   // CONFIRM gates route the free-text box through the structured decision
@@ -3919,7 +4100,7 @@ function armPendingSend(target) {
     // ws delayed past 8s — force-unlock and tell the user the next press is
     // possible but the daemon may already have queued the first one.
     if (state.pendingSendSettleKey) {
-      showToast("info", "ws delayed, retry possible");
+      showToast("info", tf("toast.wsDelayed", "ws delayed, retry possible"));
     }
     // Clear synthetic-pending visual state too — without ws confirmation
     // we cannot tell if the real chip will ever arrive, so let the user
@@ -3983,7 +4164,7 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
         $("flow-reply-input").value = "";
         autoGrowReplyTextarea();
       }
-      showToast("success", approved ? "已批准。" : "已打回。");
+      showToast("success", approved ? tf("toast.approved", "已批准。") : tf("toast.rejected", "已打回。"));
       // Optimistic echo as a human-readable user bubble so the decision shows
       // immediately without waiting for the next history_data push.
       const echo = approved
@@ -3997,11 +4178,11 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
-      showToast("error", `Could not send: ${message}`);
+      showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
       settlePendingSend();
     }
   } catch (_) {
-    showToast("error", "Could not send — network error reaching the server.");
+    showToast("error", tf("toast.sendNetworkError", "Could not send — network error reaching the server."));
     settlePendingSend();
   } finally {
     if (state.selectedFlowId === flowId && state.flowDetail) {
@@ -4067,8 +4248,8 @@ async function sendReply(flowId, target, text) {
         state.flowSyntheticInterjectPending = true;
       }
       showToast("success", target.kind === "interjection"
-        ? "Interjection sent."
-        : "Response sent.");
+        ? tf("toast.interjectionSent", "Interjection sent.")
+        : tf("toast.responseSent", "Response sent."));
       // Optimistic echo. `appendLocalReply` is best-effort: it writes the echo
       // record into `state.flowConversationRecords` first, then renders behind
       // its own try/catch, so it never throws back into this success path.
@@ -4076,13 +4257,13 @@ async function sendReply(flowId, target, text) {
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
-      showToast("error", `Could not send: ${message}`);
+      showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
       // Error path — settle immediately so the user can retry without
       // waiting on a ws update that will never come for this failed POST.
       settlePendingSend();
     }
   } catch (_) {
-    showToast("error", "Could not send — network error reaching the server.");
+    showToast("error", tf("toast.sendNetworkError", "Could not send — network error reaching the server."));
     settlePendingSend();
   } finally {
     // Re-render so the chip-bar reflects the freshly-set
@@ -5593,7 +5774,7 @@ async function submitIssueForm(event) {
 
     if (resp.ok || resp.status === 202) {
       closeIssueModal();
-      showToast("success", mode === "create" ? "Issue 已创建。" : "Issue 已更新。");
+      showToast("success", mode === "create" ? tf("toast.issueCreated", "Issue 已创建。") : tf("toast.issueUpdated", "Issue 已更新。"));
       fetchIssues();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -5690,7 +5871,7 @@ async function confirmIssueAction() {
 
     if (resp.ok || resp.status === 202) {
       closeIssueActionModal();
-      showToast("success", action === "close" ? "Issue 已关闭。" : "Issue 已重开。");
+      showToast("success", action === "close" ? tf("toast.issueClosed", "Issue 已关闭。") : tf("toast.issueReopened", "Issue 已重开。"));
       fetchIssues();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -5810,16 +5991,16 @@ async function confirmIssueLaunch() {
     });
     if (resp.status === 202) {
       closeIssueLaunchModal();
-      showToast("success", "已从 Issue 派发 flow。");
+      showToast("success", tf("toast.issueFlowDispatched", "已从 Issue 派发 flow。"));
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
       if (errBox) showFormError(errBox, message);
-      showToast("error", `启动 flow 失败：${message}`);
+      showToast("error", tf("toast.flowLaunchFailed", `启动 flow 失败：${message}`, { message }));
     }
   } catch (_) {
     if (errBox) showFormError(errBox, "Network error — could not reach the server.");
-    showToast("error", "启动 flow 失败 — 网络错误。");
+    showToast("error", tf("toast.flowLaunchNetworkError", "启动 flow 失败 — 网络错误。"));
   } finally {
     if (key) state.issueLaunchRequests.delete(key);
     if (confirmBtn) confirmBtn.disabled = false;
@@ -7169,7 +7350,16 @@ const STEP_STATUS_DISPLAY = {
 // dropped. Exposed for unit testing.
 function stepStatusDisplay(status) {
   const key = String(status == null ? "" : status).toLowerCase();
-  if (STEP_STATUS_DISPLAY[key]) return STEP_STATUS_DISPLAY[key];
+  const base = STEP_STATUS_DISPLAY[key];
+  if (base) {
+    // Resolve the label via I18N at RENDER time (the map is a module-load const
+    // evaluated before the dicts load, so it can't call t() in its initializer).
+    // resolve() returns null on a total miss (e.g. the document-less unit-test
+    // environment where the dicts stay empty) → we keep the map's built-in
+    // label as the offline fallback; when the dicts are loaded it localizes.
+    const tr = I18N.resolve(`status.step.${key}`);
+    return { icon: base.icon, text: tr != null ? tr : base.text };
+  }
   return { icon: "•", text: key || "running" };
 }
 
@@ -7181,7 +7371,12 @@ function stepStatusDisplay(status) {
 function groupStatusLabel(groupId, status) {
   const gid = String(groupId == null ? "" : groupId).trim() || "?";
   const key = String(status == null ? "" : status).toLowerCase();
-  const text = GROUP_STATUS_TEXT[key] || String(status == null ? "" : status);
+  // Localize known statuses via I18N.resolve at render time, keeping the map's
+  // built-in label as the offline fallback (null resolve = empty test dicts);
+  // an unknown status keeps its raw token so nothing is silently dropped.
+  const known = GROUP_STATUS_TEXT[key];
+  const tr = known ? I18N.resolve(`status.group.${key}`) : null;
+  const text = (tr != null ? tr : known) || String(status == null ? "" : status);
   return text ? `${gid} ${text}` : gid;
 }
 
@@ -7219,9 +7414,12 @@ function indexProgressLabel(path, done, total) {
   if (Number.isFinite(t) && t > 0) {
     const d = Number(done);
     const shown = Number.isFinite(d) ? d : 0;
-    return `更新 code-index：${p} (${shown}/${t})`;
+    // Localize at render time; the built-in template is the offline fallback.
+    const tr = I18N.resolve("indexProgress.withTotal", { path: p, done: shown, total: t });
+    return tr != null ? tr : `更新 code-index：${p} (${shown}/${t})`;
   }
-  return `更新 code-index：${p}`;
+  const tr = I18N.resolve("indexProgress.noTotal", { path: p });
+  return tr != null ? tr : `更新 code-index：${p}`;
 }
 
 // Resolve the conversation step-header label for a step type. Known step types
@@ -12424,17 +12622,17 @@ async function submitNewTask(event) {
     });
     if (resp.status === 202) {
       closeNewTask();
-      showToast("success", "Task published.");
+      showToast("success", tf("toast.taskPublished", "Task published."));
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
       showFormError(errBox, message);
-      showToast("error", `Could not publish task: ${message}`);
+      showToast("error", tf("toast.taskPublishFailed", `Could not publish task: ${message}`, { message }));
       submit.disabled = false;
     }
   } catch (err) {
     showFormError(errBox, "Network error — could not reach the server.");
-    showToast("error", "Could not publish task — network error.");
+    showToast("error", tf("toast.taskPublishNetworkError", "Could not publish task — network error."));
     submit.disabled = false;
   }
 }
@@ -12711,7 +12909,7 @@ async function createDaemonKey(event) {
       $("keys-reveal-value").textContent = data.key || "";
       $("keys-reveal").classList.remove("hidden");
       $("keys-label").value = "";
-      showToast("success", "Daemon key created — copy it now.");
+      showToast("success", tf("toast.keyCreated", "Daemon key created — copy it now."));
       loadDaemonKeys();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -12734,7 +12932,7 @@ async function revokeDaemonKey(keyId) {
       { method: "DELETE" },
     );
     if (resp.ok) {
-      showToast("success", "Daemon key revoked.");
+      showToast("success", tf("toast.keyRevoked", "Daemon key revoked."));
       loadDaemonKeys();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -12855,7 +13053,7 @@ async function createUser(event) {
       $("users-password").value = "";
       $("users-display-name").value = "";
       $("users-is-admin").checked = false;
-      showToast("success", "用户已创建。");
+      showToast("success", tf("toast.userCreated", "用户已创建。"));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -12878,7 +13076,7 @@ async function deleteUser(ownerId, label) {
       { method: "DELETE" },
     );
     if (resp.ok) {
-      showToast("success", `已删除用户 ${label || ownerId}。`);
+      showToast("success", tf("toast.userDeleted", `已删除用户 ${label || ownerId}。`, { name: label || ownerId }));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -12910,7 +13108,7 @@ async function resetPassword(ownerId, label) {
       },
     );
     if (resp.ok) {
-      showToast("success", `已重置 ${label || ownerId} 的密码。`);
+      showToast("success", tf("toast.passwordReset", `已重置 ${label || ownerId} 的密码。`, { name: label || ownerId }));
     } else {
       const detail = await resp.json().catch(() => ({}));
       showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
@@ -12934,7 +13132,7 @@ async function toggleAdmin(ownerId, isAdmin) {
       },
     );
     if (resp.ok) {
-      showToast("success", isAdmin ? "已设为管理员。" : "已取消管理员。");
+      showToast("success", isAdmin ? tf("toast.adminGranted", "已设为管理员。") : tf("toast.adminRevoked", "已取消管理员。"));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -12949,7 +13147,69 @@ async function toggleAdmin(ownerId, isAdmin) {
 // Wiring
 // ---------------------------------------------------------------------------
 
+// Repaint the dynamic (JS-rendered) UI after a language switch. The static
+// data-i18n nodes are handled by applyStaticTranslations; here we force the
+// diff-aware list renderers to rebuild by clearing their cached signatures, so
+// any localized chrome they emit reflects the new language immediately rather
+// than being skipped as "unchanged".
+function rerenderDynamic() {
+  try {
+    if (typeof resetRenderSignatures === "function") resetRenderSignatures();
+    if (typeof renderMachines === "function") renderMachines();
+    if (typeof renderFlows === "function") renderFlows();
+  } catch (_) { /* best-effort repaint; never break a language switch */ }
+}
+
+// Resolve the initial UI language (localStorage > navigator > en-US), wire the
+// top-bar switch control, then load the baseline + selected dictionaries and
+// paint the static text. Idempotent-safe: called once from init().
+function initI18n() {
+  let stored = null;
+  try {
+    if (typeof localStorage !== "undefined") {
+      stored = localStorage.getItem(I18N.STORAGE_KEY);
+    }
+  } catch (_) { /* localStorage may throw in restricted contexts */ }
+  const navLang =
+    (typeof navigator !== "undefined" && navigator.language) || "";
+  I18N.lang = I18N.resolveInitialLang(stored, navLang, I18N.SUPPORTED);
+  I18N.onLangChange = rerenderDynamic;
+
+  const sel = $("lang-select");
+  if (sel) {
+    sel.innerHTML = "";
+    for (const code of I18N.SUPPORTED) {
+      const opt = document.createElement("option");
+      opt.value = code;
+      // Endonyms (native language names) — identical across every dictionary,
+      // so the label reads correctly whichever language is active.
+      opt.textContent = I18N.t(`lang.${code}`);
+      sel.appendChild(opt);
+    }
+    sel.value = I18N.lang;
+    sel.addEventListener("change", (e) => {
+      const s = $("lang-select");
+      I18N.setLang(e.target.value).then(() => {
+        if (s) s.value = I18N.lang;
+      });
+    });
+  }
+
+  // Load baseline + selected dicts, then paint. Fetch failure degrades to the
+  // in-markup English (I18N.load never rejects).
+  Promise.all([I18N.load(I18N.FALLBACK), I18N.load(I18N.lang)]).then(() => {
+    if (sel) {
+      for (const opt of sel.children) {
+        opt.textContent = I18N.t(`lang.${opt.value}`);
+      }
+      sel.value = I18N.lang;
+    }
+    I18N.applyStaticTranslations();
+  });
+}
+
 function init() {
+  initI18n();
   $("new-task-btn").addEventListener("click", openNewTask);
   $("new-task-close").addEventListener("click", closeNewTask);
   $("new-task-form").addEventListener("submit", submitNewTask);
@@ -13427,6 +13687,10 @@ if (typeof module !== "undefined" && module.exports) {
     // Reply-panel diff-aware equality (G4) — exposed for the DOM-free tests in
     // tests/frontend/test_app_pure.mjs.
     interventionsSignature,
+    // WebUI i18n subsystem (G6) — exposed for the DOM-free + DOM-stub tests in
+    // tests/frontend/i18n_render_switch.test.mjs.
+    I18N,
+    applyNodeTranslations,
     state,
   };
 }
