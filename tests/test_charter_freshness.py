@@ -20,6 +20,7 @@ import pytest
 
 from se3.engine.steps import charter_freshness
 from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from se3.engine import charter
 
 
 # ---------------------------------------------------------------------------
@@ -206,3 +207,108 @@ def test_admission_check_runs_no_warn_when_charter_small(tmp_path, monkeypatch):
     assert step.outputs["admission_checked"] is True
     assert step.outputs["admission_over_threshold"] is False
     assert "admission_warning" not in step.outputs
+
+
+# ---------------------------------------------------------------------------
+# admission gate prompt builder + check_admission in-memory candidate path (G2)
+# ---------------------------------------------------------------------------
+
+def test_admission_gate_prompt_includes_standard_and_removal_question():
+    """The gate prompt embeds the full admission standard and the extra
+    removal-weakening question that the plain standard does not carry."""
+    prompt = charter.build_admission_gate_prompt(
+        candidate_text="# Charter\n\n## Purpose\nnew descriptive line.\n",
+        replaced_texts=[],
+        diff_summary="Added a code-index subsystem.",
+    )
+
+    assert charter.CHARTER_ADMISSION_STANDARD in prompt
+    assert charter.CHARTER_ADMISSION_GATE_REMOVAL_QUESTION in prompt
+    # The candidate full text and the JSON verdict schema keys are present.
+    assert "new descriptive line." in prompt
+    assert "admitted" in prompt
+    assert "violations" in prompt
+    assert "weakened_removals" in prompt
+    assert "Added a code-index subsystem." in prompt
+
+
+def test_admission_gate_prompt_pure_insertion_states_no_removal():
+    """Empty replaced_texts (a pure-insertion patch) yields a prompt that says
+    no text is removed, so the removal question is trivially satisfied."""
+    prompt = charter.build_admission_gate_prompt(
+        candidate_text="# Charter\nbody\n",
+        replaced_texts=None,
+    )
+
+    assert "PURE INSERTION" in prompt
+    # No verbatim "replaced passage" block for an insert-only patch.
+    assert "replaced passage #" not in prompt
+
+
+def test_admission_gate_prompt_lists_each_replaced_text_verbatim():
+    """Every replaced (removed) passage is rendered verbatim so the gate can
+    judge each removal individually."""
+    replaced = [
+        "Old convention A that is being reworded.",
+        "Stale statement B corrected by this change.",
+    ]
+    prompt = charter.build_admission_gate_prompt(
+        candidate_text="# Charter\nrewritten body\n",
+        replaced_texts=replaced,
+        diff_summary="Reword two stale statements.",
+    )
+
+    for text in replaced:
+        assert text in prompt
+    assert "replaced passage #1" in prompt
+    assert "replaced passage #2" in prompt
+
+
+def test_admission_gate_prompt_filters_blank_replaced_entries():
+    """Blank / non-string replaced entries are dropped; if none survive the
+    prompt degrades to the pure-insertion wording."""
+    prompt = charter.build_admission_gate_prompt(
+        candidate_text="# Charter\nbody\n",
+        replaced_texts=["   ", "", None, 123],
+    )
+
+    assert "PURE INSERTION" in prompt
+    assert "replaced passage #" not in prompt
+
+
+def test_check_admission_in_memory_candidate_under_threshold():
+    """check_admission accepts an in-memory candidate string directly and reports
+    over_threshold False for a small candidate (the byte check is a monitoring
+    light, never blocking)."""
+    candidate = "# Charter\n\n## Purpose\nsmall and tidy.\n"
+
+    result = charter.check_admission(candidate)
+
+    assert result.over_threshold is False
+    assert result.warning is None
+    assert result.size_bytes == len(candidate.encode("utf-8"))
+    assert result.admission_standard is charter.CHARTER_ADMISSION_STANDARD
+
+
+def test_check_admission_in_memory_candidate_over_threshold():
+    """An over-threshold candidate sets over_threshold and a monitoring warning
+    without raising or blocking."""
+    candidate = "# Charter\n\n" + ("x" * 40000)
+
+    result = charter.check_admission(candidate)
+
+    assert result.over_threshold is True
+    assert result.warning is not None
+    assert "monitoring threshold" in result.warning
+    assert result.size_bytes == len(candidate.encode("utf-8"))
+
+
+def test_check_admission_respects_custom_threshold_for_candidate():
+    """A tiny custom threshold flips a normally-small candidate to over_threshold,
+    confirming the in-memory path honours the threshold argument."""
+    candidate = "# Charter\nbody\n"
+
+    result = charter.check_admission(candidate, threshold_bytes=4)
+
+    assert result.over_threshold is True
+    assert result.threshold_bytes == 4

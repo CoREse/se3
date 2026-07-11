@@ -17,6 +17,10 @@ Three capabilities live here:
   guards against low-level content leaking into the charter; the byte threshold
   is a **monitoring light**, not a hard wall — over-threshold flags a review of
   whether low-level content has leaked in, it never blocks.
+- :func:`build_admission_gate_prompt` — the LLM prompt builder for the
+  ``charter_freshness`` auto-update closed loop. On that path the admission
+  verdict is **gating** (a candidate charter is written only if admitted), and
+  the prompt adds a removal-weakening question the plain standard omits.
 
 This module has **no import-time side effects** and depends only on the
 standard library, so prompt modules, the migrate command, and tests can import
@@ -202,6 +206,135 @@ def admission_check_for_changes(
         return None
     charter_text = load_charter(project_root)
     return check_admission(charter_text, threshold_bytes=threshold_bytes)
+
+
+# ---------------------------------------------------------------------------
+# admission gate — LLM prompt for the charter_freshness auto-update closed loop
+# ---------------------------------------------------------------------------
+# The charter_freshness step runs a propose -> gate -> apply closed loop that may
+# auto-write se3/charter.md. Its gate has two halves: the mechanical anchored-
+# replace check (a program), and this LLM admission gate (b). On THIS path the
+# admission verdict is **gating**, not the monitoring-light role check_admission
+# plays elsewhere — the candidate text is only written to disk if this gate (and
+# the mechanical check) pass. Beyond the standard altitude/content-class audit,
+# the gate asks one extra question the plain admission standard does not cover:
+# whether removing any replaced text weakened a pre-existing convention that is
+# unrelated to the current change (the admission standard audits content
+# class / altitude / size, but is silent on the *deletion* of existing clauses,
+# so that defence must be carried here and by the mechanical anchored check).
+CHARTER_ADMISSION_GATE_REMOVAL_QUESTION = (
+    "Does the removal of any replaced text weaken a convention or constraint "
+    "that is unrelated to the current change? A descriptive freshness update "
+    "may reword or correct a stale statement, but it MUST NOT quietly drop or "
+    "dilute an existing agreement that this change did not touch. For every "
+    "replaced (removed) passage listed above, judge whether its removal erases "
+    "a still-valid, out-of-scope commitment; list any such removals in "
+    "`weakened_removals`."
+)
+
+
+def build_admission_gate_prompt(
+    candidate_text: str,
+    replaced_texts: Optional[list] = None,
+    diff_summary: str = "",
+) -> str:
+    """Build the LLM prompt for the charter-auto-update admission **gate**.
+
+    This is gate half (b) of the ``charter_freshness`` propose -> gate -> apply
+    closed loop. Unlike :func:`check_admission` (whose byte check is a
+    *monitoring light*), the verdict this prompt elicits is **gating**: the
+    candidate charter text is written to ``se3/charter.md`` only if the LLM
+    admits it (and the mechanical anchored-replace check also passes).
+
+    The prompt injects, in order:
+
+    - :data:`CHARTER_ADMISSION_STANDARD` — the normative altitude/content-class
+      standard (what the charter MAY vs MUST NOT carry);
+    - the full ``candidate_text`` — the proposed post-update charter, judged as
+      a whole so leaked low-level content or over-legislation is visible;
+    - each entry of ``replaced_texts`` — the old passages this patch removes /
+      rewrites, listed verbatim so the gate can judge each removal;
+    - an optional ``diff_summary`` describing the code change that triggered the
+      freshness update (context for "is this update merely descriptive");
+    - :data:`CHARTER_ADMISSION_GATE_REMOVAL_QUESTION` — the extra removal-weakening
+      question that the plain admission standard does not cover.
+
+    ``replaced_texts`` may be empty / ``None`` for a pure-insertion patch (no old
+    text removed); the prompt then states that no text is being removed so the
+    removal question is trivially satisfied.
+
+    The LLM is instructed to reply with a JSON object of the shape::
+
+        {
+          "admitted": bool,           # true iff the candidate passes the gate
+          "violations": [str, ...],   # altitude/content-class problems, if any
+          "weakened_removals": [str, ...]  # out-of-scope commitments a removal erased
+        }
+
+    Returns the prompt string. Pure string assembly — no I/O, no LLM call.
+    """
+    replaced = [t for t in (replaced_texts or []) if isinstance(t, str) and t.strip()]
+
+    if replaced:
+        removed_block_lines = ["The following existing charter passages are being "
+                               "REMOVED or REWRITTEN by this update:", ""]
+        for i, text in enumerate(replaced, start=1):
+            removed_block_lines.append(f"--- replaced passage #{i} ---")
+            removed_block_lines.append(text)
+            removed_block_lines.append("")
+        removed_block = "\n".join(removed_block_lines).rstrip()
+    else:
+        removed_block = (
+            "This update is a PURE INSERTION: no existing charter text is being "
+            "removed or rewritten. The removal-weakening question below is "
+            "therefore trivially satisfied (`weakened_removals` must be empty)."
+        )
+
+    diff_block = (
+        diff_summary.strip()
+        if diff_summary and diff_summary.strip()
+        else "(no diff summary provided)"
+    )
+
+    return f"""\
+You are the admission GATE for a proposed descriptive update to the project
+charter (`se3/charter.md`). On this path your verdict is BINDING: the candidate
+charter below is written to disk only if you admit it. Judge whether the
+candidate stays within the charter admission standard AND whether any removed
+text weakens an unrelated existing convention.
+
+{CHARTER_ADMISSION_STANDARD}
+
+## Change that triggered this update
+
+{diff_block}
+
+## Candidate charter (proposed full text after the update)
+
+{candidate_text}
+
+## Removed / rewritten passages
+
+{removed_block}
+
+## Removal-weakening question
+
+{CHARTER_ADMISSION_GATE_REMOVAL_QUESTION}
+
+## Your verdict
+
+Reply with ONLY a JSON object of this exact shape:
+
+{{
+  "admitted": true or false,
+  "violations": ["<altitude / content-class problem>", ...],
+  "weakened_removals": ["<out-of-scope commitment a removal erased>", ...]
+}}
+
+Set `admitted` to false if the candidate carries low-level content that belongs
+in code-index, over-legislates a one-off as a universal rule, or if any removal
+weakens an unrelated existing convention. Otherwise set `admitted` to true with
+empty lists."""
 
 
 def check_admission(
