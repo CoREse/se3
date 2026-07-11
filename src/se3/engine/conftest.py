@@ -105,3 +105,24 @@ def _no_real_code_index_refresh(monkeypatch):
         "se3.engine.context_builder.ensure_code_index_fresh",
         lambda *args, **kwargs: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _force_en_us_ui_language(monkeypatch):
+    """Pin the i18n UI language to en-US for co-located engine tests.
+
+    Twin of the fixture in ``tests/conftest.py`` (kept in sync). ``se3.i18n``
+    resolves the UI language lazily from ``Path.cwd()`` — the repo root, whose
+    ``se3.yaml`` sets ``language: zh-CN`` — so a ``t()``-rendered display string
+    (e.g. ``render_usage_block``) would render Chinese and break an English
+    assertion. ``SE3_LANG=en-US`` (highest precedence) plus a singleton reset
+    keeps rendered text the stable en-US reference for these tests too.
+    """
+    import se3.i18n as _i18n
+
+    monkeypatch.setenv("SE3_LANG", "en-US")
+    _i18n.reset_language()
+    _i18n.clear_caches()
+    yield
+    _i18n.reset_language()
+    _i18n.clear_caches()

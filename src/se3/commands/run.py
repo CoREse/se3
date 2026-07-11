@@ -48,6 +48,7 @@ try:
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
     from ..engine.sink import CliSink, HistorySink, JsonSink
+    from ..i18n import t
     from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
@@ -71,6 +72,7 @@ except ImportError:
     )
     from engine.event_stream import EventEmitter, EventType, new_event
     from engine.sink import CliSink, HistorySink, JsonSink
+    from i18n import t
     from cli import _read_multiline_input
 
 
@@ -294,10 +296,14 @@ def _handle_confirm_pause(
 
     # The reviewed step's output was already displayed by render_step_output
     # in the previous iteration, so just prompt directly.
-    options = ["Approve and continue", "Request changes", "Exit (pause flow)"]
+    options = [
+        t("cli.run.confirm.opt_approve"),
+        t("cli.run.confirm.opt_request_changes"),
+        t("cli.run.confirm.opt_exit"),
+    ]
     try:
         choice = prompt_user_choice(
-            f"Review {step_to_review_type} output above:", options
+            t("cli.run.confirm.review_prompt", step_type=step_to_review_type), options
         )
     except (KeyboardInterrupt, EOFError):
         persistence.save_flow(flow)
@@ -314,8 +320,8 @@ def _handle_confirm_pause(
     if not approved:
         # Get feedback from user
         feedback = _read_multiline_input(
-            prompt_title="Feedback",
-            prompt_message="Describe the changes you'd like (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+            prompt_title=t("cli.run.confirm.feedback_title"),
+            prompt_message=t("cli.run.confirm.feedback_message"),
             history=prompt_history,
         )
         if feedback is None:
@@ -336,8 +342,12 @@ def _handle_confirm_pause(
         with open(response_path, "w") as f:
             json.dump(response_data, f, indent=2, ensure_ascii=False)
 
-    status_text = "Approved" if approved else f"Changes requested: {feedback}"
-    render_full(status_text, title="Confirmation Result")
+    status_text = (
+        t("cli.run.confirm.approved")
+        if approved
+        else t("cli.run.confirm.changes_requested", feedback=feedback)
+    )
+    render_full(status_text, title=t("cli.run.confirm.result_title"))
 
     return True
 
@@ -402,16 +412,16 @@ def prompt_user_choice(message: str, options: List[str]) -> int:
 
     while True:
         try:
-            choice = input("\nSelect (number): ").strip()
+            choice = input(t("cli.run.choice.select")).strip()
             idx = int(choice) - 1
             if 0 <= idx < len(options):
                 return idx
-            print(f"Please enter a number between 1 and {len(options)}")
+            print(t("cli.run.choice.enter_between", n=len(options)))
         except ValueError:
-            print("Please enter a valid number")
+            print(t("cli.run.choice.enter_valid"))
         except EOFError:
             # Handle non-interactive mode - default to last option (typically Abort)
-            print(f"Non-interactive mode detected, selecting option {len(options)} ({options[-1]})")
+            print(t("cli.run.choice.non_interactive", n=len(options), option=options[-1]))
             return len(options) - 1
 
 
@@ -660,7 +670,7 @@ def _await_terminal_or_web_choice_interactive(
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
 
-    session = PromptSession(message="\nSelect (number): ")
+    session = PromptSession(message=t("cli.run.choice.select"))
     web_sentinel = object()
 
     async def _race() -> Tuple[str, Optional[int]]:
@@ -701,9 +711,7 @@ def _await_terminal_or_web_choice_interactive(
                         idx = -1
                     if 0 <= idx < len(options):
                         return (_FAILURE_SRC_TERMINAL, idx)
-                    print(
-                        f"Please enter a number between 1 and {len(options)}"
-                    )
+                    print(t("cli.run.choice.enter_between", n=len(options)))
         except (KeyboardInterrupt, EOFError):
             pass
         finally:
@@ -853,8 +861,7 @@ def _drain_pending_interjections(
                     "Failed to write user interjection to history jsonl"
                 )
         get_console().print(
-            f"[dim]Interjection received from web console: "
-            f"{text[:80]}[/dim]"
+            t("cli.run.interjection_received", text=text[:80])
         )
 
     if current_step is not None:
@@ -945,52 +952,62 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
 
     if not active_flows:
         if not flows and not worktree_runs:
-            get_console().print("[dim]No existing flows found. Starting new flow.[/dim]")
+            get_console().print(t("cli.run.resume.no_flows"))
         else:
-            get_console().print("[dim]No in-progress flows found.[/dim]")
+            get_console().print(t("cli.run.resume.no_in_progress"))
             if flows:
-                get_console().print(f"[dim]Found {len(flows)} completed flow(s).[/dim]")
+                get_console().print(t("cli.run.resume.found_completed", count=len(flows)))
         return None
 
     if len(active_flows) == 1:
         flow = active_flows[0]
         is_failed = flow["status"] == FlowStatus.FAILED.value
-        label = "failed" if is_failed else "interrupted"
-        wt_suffix = " (worktree)" if flow.get("is_worktree_run") else ""
-        content = [
-            f"Found {label} flow:",
-            "",
-            f"  ID: {flow['id']}{wt_suffix}",
-            f"  Description: {flow['description']}",
-            f"  Current step: {flow['current_step']}",
-        ]
-        render_full("\n".join(content), title="Resume Flow")
+        label = t("cli.run.resume.label_failed") if is_failed else t("cli.run.resume.label_interrupted")
+        wt_suffix = t("cli.run.resume.worktree_suffix") if flow.get("is_worktree_run") else ""
+        render_full(
+            t(
+                "cli.run.resume.single_body",
+                label=label,
+                flow_id=flow["id"],
+                wt_suffix=wt_suffix,
+                description=flow["description"],
+                current_step=flow["current_step"],
+            ),
+            title=t("cli.run.resume.title"),
+        )
 
-        action = "Retry failed flow" if is_failed else "Resume this flow"
-        options = [action, "Start new flow"]
-        choice = prompt_user_choice("What would you like to do?", options)
+        action = t("cli.run.resume.action_retry") if is_failed else t("cli.run.resume.action_resume")
+        options = [action, t("cli.run.start_new_flow")]
+        choice = prompt_user_choice(t("cli.run.what_to_do"), options)
 
         if choice == 0:
             return flow['id']
         return None
 
     # Multiple active flows
-    content = [f"Found {len(active_flows)} resumable flows:", ""]
+    content = [t("cli.run.resume.multi_header", count=len(active_flows)), ""]
     options = []
     for flow in active_flows:
-        status_tag = " [FAILED]" if flow["status"] == FlowStatus.FAILED.value else ""
-        wt_tag = " [worktree]" if flow.get("is_worktree_run") else ""
+        status_tag = t("cli.run.resume.tag_failed") if flow["status"] == FlowStatus.FAILED.value else ""
+        wt_tag = t("cli.run.resume.tag_worktree") if flow.get("is_worktree_run") else ""
         options.append(
-            f"{flow['description']} (step: {flow['current_step']}){wt_tag}{status_tag}"
+            t(
+                "cli.run.resume.flow_option",
+                description=flow["description"],
+                current_step=flow["current_step"],
+                wt_tag=wt_tag,
+                status_tag=status_tag,
+            )
         )
-    options.append("Start new flow")
+    start_new = t("cli.run.start_new_flow")
+    options.append(start_new)
 
     for i, opt in enumerate(options[:-1], 1):
         content.append(f"  {i}. {opt}")
-    content.append(f"  {len(options)}. Start new flow")
+    content.append(f"  {len(options)}. {start_new}")
 
-    render_full("\n".join(content), title="Resume Flow")
-    choice = prompt_user_choice("Which flow to resume?", options)
+    render_full("\n".join(content), title=t("cli.run.resume.title"))
+    choice = prompt_user_choice(t("cli.run.resume.which_flow"), options)
 
     if choice < len(active_flows):
         return active_flows[choice]["id"]
@@ -1011,17 +1028,16 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
         StepStatus to continue, or None to exit
     """
     user_input = _read_multiline_input(
-        prompt_title="Additional Instruction",
-        prompt_message="Enter additional instruction (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel, empty to retry as-is):",
+        prompt_title=t("cli.run.interrupt.title"),
+        prompt_message=t("cli.run.interrupt.message"),
         history=prompt_history,
     )
     if user_input is None:
         # Cancelled (Ctrl+C): save and exit
         persistence.save_flow(flow)
         render_full(
-            "Interrupted by user. Flow state saved.\n"
-            "Resume with: se3 run --resume",
-            title="Exit"
+            t("cli.run.interrupt.saved_body"),
+            title=t("cli.run.interrupt.exit_title"),
         )
         return None
     if user_input:
@@ -1057,12 +1073,9 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
                 interjections=flow.state.context["user_interjections"],
             )
         )
-        get_console().print(
-            "[dim]Additional instruction recorded — retrying step "
-            "with persistent interjection.[/dim]"
-        )
+        get_console().print(t("cli.run.interrupt.recorded"))
     else:
-        get_console().print("[dim]Retrying step as-is...[/dim]")
+        get_console().print(t("cli.run.interrupt.retry_as_is"))
     # Reset step to PENDING so it re-runs
     current_step.status = StepStatus.PENDING
     persistence.save_flow(flow)
@@ -1117,7 +1130,7 @@ def _restore_discovery_display(current_step: Any) -> None:
         )
     else:
         # No history yet — show generic resume notice
-        get_console().print("[dim]Resuming discovery — please respond to continue.[/dim]")
+        get_console().print(t("cli.run.discovery.resume_notice"))
 
 
 def _maybe_write_discovery_call(
@@ -1418,9 +1431,8 @@ def _handle_discovery_pause(
         )
 
     render_full(
-        "Discovery mode is exploring your requirements.\n"
-        "Please respond to the questions above to help clarify what you want to build.",
-        title="Discovery Pause"
+        t("cli.run.discovery.pause_body"),
+        title=t("cli.run.discovery.pause_title"),
     )
 
     # Drain on entry so any interjection queued before this pause is folded
@@ -1437,8 +1449,8 @@ def _handle_discovery_pause(
         while True:
             source, value = _await_terminal_or_web(
                 call_file,
-                prompt_title="Discovery Response",
-                prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+                prompt_title=t("cli.run.discovery.response_title"),
+                prompt_message=t("cli.run.discovery.response_message"),
                 history=prompt_history,
                 strip=True,
                 tick_callback=_tick,
@@ -1448,17 +1460,14 @@ def _handle_discovery_pause(
                 # User cancelled
                 persistence.save_flow(flow)
                 render_full(
-                    "Discovery paused. Flow state saved.\n"
-                    "Resume with: se3 run --resume",
-                    title="Paused"
+                    t("cli.run.discovery.paused_body"),
+                    title=t("cli.run.discovery.paused_title"),
                 )
                 return None
 
             if not value:
                 # Empty terminal input — ask again (web never submits empty).
-                get_console().print(
-                    "[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]"
-                )
+                get_console().print(t("cli.run.discovery.provide_response"))
                 continue
 
             # Prefix any buffered interjections (collected by drain ticks while
@@ -1532,8 +1541,8 @@ def _handle_discovery_programmatic_confirm(
         while True:
             source, user_input = _await_terminal_or_web(
                 call_file,
-                prompt_title="Discovery Confirmation",
-                prompt_message="Type 1 to confirm and proceed, or type your questions/feedback to continue discovery (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+                prompt_title=t("cli.run.discovery.confirm_title"),
+                prompt_message=t("cli.run.discovery.confirm_message"),
                 history=prompt_history,
                 strip=False,
                 tick_callback=_tick,
@@ -1548,9 +1557,8 @@ def _handle_discovery_programmatic_confirm(
                 # left to re-read, so pausing is the only safe behavior.
                 persistence.save_flow(flow)
                 render_full(
-                    "Discovery paused. Flow state saved.\n"
-                    "Resume with: se3 run --resume",
-                    title="Paused",
+                    t("cli.run.discovery.paused_body"),
+                    title=t("cli.run.discovery.paused_title"),
                 )
                 return None
 
@@ -1588,9 +1596,7 @@ def _handle_discovery_programmatic_confirm(
             # clear the programmatic confirm flag, use this input as the next
             # discovery user input directly (no separate prompt for questions)
             current_step.outputs.pop("awaiting_programmatic_confirm", None)
-            get_console().print(
-                "[dim]Captured input — continuing discovery with your feedback.[/dim]"
-            )
+            get_console().print(t("cli.run.discovery.captured_input"))
             prefix = (
                 _consume_paused_interjection_prefix(flow)
                 if project_root is not None
@@ -2314,7 +2320,7 @@ def _run_flow_impl(
             )
             flow = persistence.load_flow_by_id(flow_id)
             if not flow:
-                display_error(f"Flow '{flow_id}' not found")
+                display_error(t("cli.run.error.flow_not_found", flow_id=flow_id))
                 return 1
 
             # A COMPLETED flow is terminal and must not be resumed, regardless of
@@ -2325,9 +2331,7 @@ def _run_flow_impl(
             # recovered snapshot so a stale COMPLETED snapshot is never
             # re-materialized as the live engine.json.
             if flow.status == FlowStatus.COMPLETED:
-                display_error(
-                    f"Flow '{flow_id}' is already completed and cannot be resumed"
-                )
+                display_error(t("cli.run.error.flow_completed", flow_id=flow_id))
                 return 1
 
             # Recovered from its per-flow resumable snapshot (engine.json holds a
@@ -2383,15 +2387,18 @@ def _run_flow_impl(
                 persistence.save_flow(flow)
 
             # Display flow info with full content
-            content = [
-                f"Resuming flow: {flow.flow_id}",
-                f"Current step: {flow.state.current_step_id}",
-                f"Task: {flow.task_description}",
-            ]
-            render_full("\n".join(content), title="Flow Info")
+            render_full(
+                t(
+                    "cli.run.flow_info.body",
+                    flow_id=flow.flow_id,
+                    current_step=flow.state.current_step_id,
+                    task=flow.task_description,
+                ),
+                title=t("cli.run.flow_info.title"),
+            )
         else:
             if not task_description:
-                display_error("Task description required for new flow")
+                display_error(t("cli.run.error.task_required"))
                 return 1
 
             flow = state_machine.create_flow(
@@ -2437,19 +2444,19 @@ def _run_flow_impl(
 
             # Display new flow info with full content
             content = [
-                f"Created new flow: {flow.flow_id}",
-                f"Task: {task_description}",
+                t("cli.run.new_flow.created", flow_id=flow.flow_id),
+                t("cli.run.new_flow.task", task=task_description),
             ]
 
             # Only show type if explicitly provided (pending is auto-detect)
             if task_type and task_type != "pending":
-                content.append(f"Type: {task_type} (user-specified)")
+                content.append(t("cli.run.new_flow.type_user", task_type=task_type))
             else:
-                content.append("Type: pending (will be determined by analyze)")
+                content.append(t("cli.run.new_flow.type_pending"))
 
             if change_name:
-                content.append(f"Change: {change_name}")
-            render_full("\n".join(content), title="New Flow")
+                content.append(t("cli.run.new_flow.change", change_name=change_name))
+            render_full("\n".join(content), title=t("cli.run.new_flow.title"))
 
         # Initialize flow metadata and baseline commit (idempotent — safe for both
         # new and resumed flows).
@@ -2480,7 +2487,7 @@ def _run_flow_impl(
 
         current_step = flow.state.get_current_step()
         if not current_step:
-            get_console().print("[dim]No current step — marking flow complete[/dim]")
+            get_console().print(t("cli.run.no_current_step"))
             _complete_flow_via_fallback(flow)
             persistence.save_flow(flow)
             break
@@ -2537,8 +2544,7 @@ def _run_flow_impl(
                 "applying transition without re-running"
             )
             get_console().print(
-                f"[yellow]Resuming: revision was already requested from "
-                f"{current_step.step_type.value}[/yellow]"
+                t("cli.run.revision_resuming", step_type=current_step.step_type.value)
             )
             # Emit the persisted token_usage before transitioning. When the
             # process crashed after run_step saved REVISION_NEEDED + token_usage
@@ -2599,10 +2605,7 @@ def _run_flow_impl(
                 step_id=current_step.step_id,
                 step_type=current_step.step_type.value,
             ))
-            get_console().print(
-                "[yellow]Interrupted while waiting for the main-worktree "
-                "lock — exiting (resume with `se3 run --resume`).[/yellow]"
-            )
+            get_console().print(t("cli.run.interrupted_waiting_lock"))
             return 130
 
         # Display compact step header — skip for CONFIRM steps (the prompt speaks for itself)
@@ -2615,7 +2618,7 @@ def _run_flow_impl(
             if display_type:
                 type_suffix = f" [dim]({display_type})[/dim]"
             elif flow.state.is_type_pending():
-                type_suffix = " [dim](pending)[/dim]"
+                type_suffix = t("cli.run.pending_suffix")
 
             console = get_console()
             console.print(Rule(f"[bold]{step_type_value}[/bold]{type_suffix}", style="cyan"))
@@ -2661,7 +2664,7 @@ def _run_flow_impl(
         if current_step.step_type == StepType.CONFIRM and flow_id and current_step.status == StepStatus.PAUSED:
             existing_result = _check_confirm_response(flow, current_step, project_root)
             if existing_result:
-                get_console().print(f"[dim]Found existing confirmation response: {existing_result.value}[/dim]")
+                get_console().print(t("cli.run.confirm.found_existing", value=existing_result.value))
                 result = existing_result
                 # No LLM call — the user response was already on disk.
                 step_ran_llm = False
@@ -2931,12 +2934,16 @@ def _run_flow_impl(
 
         if result == StepStatus.FAILED:
             error_msg = current_step.error_message or "Unknown error"
-            display_error(f"Step failed: {error_msg}")
+            display_error(t("cli.run.error.step_failed", error=error_msg))
 
             max_retries = 3
             if current_step.retry_count >= max_retries:
                 display_error(
-                    f"Max retries ({max_retries}) reached for step {current_step.step_type.value}"
+                    t(
+                        "cli.run.error.max_retries",
+                        max_retries=max_retries,
+                        step_type=current_step.step_type.value,
+                    )
                 )
                 # Auto-fail: exit without asking user (no FLOW_PAUSED, no
                 # decision chip, no prompt — unchanged from the prior behavior).
@@ -2976,10 +2983,7 @@ def _run_flow_impl(
 
             if action == "pause":
                 get_console().print(
-                    "[yellow]Step failed with no interactive terminal — wrote "
-                    f"a retry_decision call ({Path(info).name}). Pausing the "
-                    "flow; respond via the web console or `se3 run --resume`."
-                    "[/yellow]"
+                    t("cli.run.failure.paused_non_interactive", call_name=Path(info).name)
                 )
                 flow.status = FlowStatus.PAUSED
                 persistence.save_flow(flow)
@@ -2992,9 +2996,13 @@ def _run_flow_impl(
                 # answers first wins; the losing side is torn down by the race
                 # helper (poller cancelled + artifacts cleaned), so the chip
                 # vanishes and the answer is never consumed twice.
-                options = ["Retry this step", "Skip to next step", "Abort flow"]
+                options = [
+                    t("cli.run.failure.opt_retry"),
+                    t("cli.run.failure.opt_skip"),
+                    t("cli.run.failure.opt_abort"),
+                ]
                 _source, choice = _await_terminal_or_web_choice(
-                    info, message="What would you like to do?", options=options,
+                    info, message=t("cli.run.what_to_do"), options=options,
                 )
                 if choice is None:
                     # Ctrl+C / EOF with no answer — treat as abort, matching the
@@ -3029,7 +3037,7 @@ def _run_flow_impl(
 
         # Handle REVISION_NEEDED status from CONFIRM step
         if result == StepStatus.REVISION_NEEDED:
-            get_console().print("[yellow]Revision requested — returning to previous step[/yellow]")
+            get_console().print(t("cli.run.revision_requested"))
             # Mark the CONFIRM step as completed with revision info
             current_step.status = StepStatus.REVISION_NEEDED
             # Transition will handle going back to the previous step
@@ -3039,7 +3047,13 @@ def _run_flow_impl(
 
         step_duration = (datetime.now() - step_start_time).total_seconds()
         console = get_console()
-        console.print(f"  [green]✓[/green] [bold]{current_step.step_type.value}[/bold] completed [dim]({step_duration:.1f}s)[/dim]")
+        console.print(
+            t(
+                "cli.run.step_completed",
+                step_type=current_step.step_type.value,
+                duration=step_duration,
+            )
+        )
 
         # Transition to next step
         state_machine.transition_to_next(flow)
@@ -3052,7 +3066,7 @@ def _run_flow_impl(
         emitter.emit(new_event(
             EventType.FLOW_COMPLETED, flow_id=flow.flow_id,
         ))
-        display_success("Flow completed successfully!")
+        display_success(t("cli.run.flow_completed"))
         # Synchronous (non-worktree) from-issue finalization: the source issue
         # is resolved here, at the flow's true terminal state, rather than in
         # the cli.py wrapper. This is the ONLY point common to both the first
@@ -3064,7 +3078,7 @@ def _run_flow_impl(
         _finalize_sync_source_issue(project_root, flow, is_worktree_mode, resolved=True)
         # Session-level token/cost summary (sum of every step's usage). Renders
         # nothing when the flow consumed no LLM tokens.
-        render_usage_block(flow.state.session_token_usage, title="Session Token Usage")
+        render_usage_block(flow.state.session_token_usage, title=t("cli.run.session_usage_title"))
         return 0
     elif flow.status == FlowStatus.FAILED:
         current_step = flow.state.get_current_step()
@@ -3072,15 +3086,15 @@ def _run_flow_impl(
         emitter.emit(new_event(
             EventType.FLOW_FAILED, flow_id=flow.flow_id, message=error_msg,
         ))
-        display_error(f"Flow failed: {error_msg}")
+        display_error(t("cli.run.error.flow_failed", error=error_msg))
         # Failed sync from-issue run: return the source issue to OPEN (existing
         # semantics), now also covering the resume path.
         _finalize_sync_source_issue(project_root, flow, is_worktree_mode, resolved=False)
         # Still surface whatever tokens/cost were consumed before the failure.
-        render_usage_block(flow.state.session_token_usage, title="Session Token Usage")
+        render_usage_block(flow.state.session_token_usage, title=t("cli.run.session_usage_title"))
         return 1
     else:
-        get_console().print(f"[dim]Flow ended with status: {flow.status.value}[/dim]")
+        get_console().print(t("cli.run.flow_ended_status", status=flow.status.value))
         return 0
 
 
@@ -3449,20 +3463,17 @@ def _finalize_worktree_cleanup(
         project_root, worktree_branch, worktree_original_branch
     ):
         display_error(
-            "\n".join(
-                [
-                    f"Worktree flow COMPLETED but branch '{worktree_branch}' has "
-                    f"not landed on '{target}' — no merge is present.",
-                    "This flow predates the in-flow merge steps; its work is "
-                    f"preserved in the worktree '{worktree_path}'.",
-                    f"Merge it manually with: se3 merge {worktree_branch}",
-                ]
+            t(
+                "cli.run.merge.not_landed",
+                branch=worktree_branch,
+                target=target,
+                worktree_path=worktree_path,
             )
         )
         return 1
 
     get_console().print(
-        Rule(f"[bold]worktree merge[/bold] [dim]→ {target}[/dim]", style="cyan")
+        Rule(t("cli.run.merge.header", target=target), style="cyan")
     )
 
     # Capture branch→issue BEFORE cleanup archives/removes the worktree (whose
@@ -3509,9 +3520,9 @@ def _finalize_worktree_cleanup(
     resolved = _backfill_resolved_source_issues(
         project_root, [worktree_branch], branch_issue_map
     )
-    display_success(f"Merged '{worktree_branch}' back into '{target}'.")
+    display_success(t("cli.run.merge.merged", branch=worktree_branch, target=target))
     for issue_id in resolved:
-        get_console().print(f"[dim]Resolved source issue #{issue_id}[/dim]")
+        get_console().print(t("cli.run.merge.resolved_issue", issue_id=issue_id))
     return 0
 
 
@@ -3547,7 +3558,7 @@ def run_worktree_mode(
     try:
         original_branch = get_current_branch(project_root)
     except RuntimeError as exc:
-        display_error(f"Cannot start --worktree run: {exc}")
+        display_error(t("cli.run.worktree.cannot_start", error=exc))
         return 1
 
     worktree_branch = _generate_worktree_branch_name(task)
@@ -3555,7 +3566,7 @@ def run_worktree_mode(
     try:
         worktree_path = fork_worktree(project_root, original_branch, worktree_branch)
     except Exception as exc:  # noqa: BLE001 - surface any git failure cleanly
-        display_error(f"Failed to create isolation worktree: {exc}")
+        display_error(t("cli.run.worktree.create_failed", error=exc))
         return 1
 
     # Topology changed (a worktree was added); drop any cached main-repo
@@ -3563,15 +3574,13 @@ def run_worktree_mode(
     clear_main_repo_root_cache()
 
     render_full(
-        "\n".join(
-            [
-                "Started an isolated --worktree run.",
-                f"  Branch: {worktree_branch}",
-                f"  Worktree: {worktree_path}",
-                f"  Merges back into: {original_branch}",
-            ]
+        t(
+            "cli.run.worktree.started",
+            branch=worktree_branch,
+            worktree_path=worktree_path,
+            original=original_branch,
         ),
-        title="Worktree Run",
+        title=t("cli.run.worktree.title"),
     )
 
     # Own the worktree's ``run.pid`` marker for the ENTIRE worktree-run lifecycle
@@ -3622,15 +3631,13 @@ def run_worktree_mode(
                 target_branch=original_branch,
             )
             render_full(
-                "\n".join(
-                    [
-                        f"Worktree run did not complete (exit {exit_code}).",
-                        f"State preserved in worktree '{worktree_path}' "
-                        f"(branch '{worktree_branch}').",
-                        "Resume with: se3 run --resume",
-                    ]
+                t(
+                    "cli.run.worktree.did_not_complete",
+                    exit_code=exit_code,
+                    worktree_path=worktree_path,
+                    branch=worktree_branch,
                 ),
-                title="Worktree Run Paused",
+                title=t("cli.run.worktree.paused_title"),
             )
             return exit_code
 
@@ -3643,16 +3650,13 @@ def run_worktree_mode(
         status = _worktree_flow_status(worktree_path)
         if status != FlowStatus.COMPLETED.value:
             render_full(
-                "\n".join(
-                    [
-                        f"Worktree run paused (status: {status or 'unknown'}); "
-                        "no merge attempted.",
-                        f"State preserved in worktree '{worktree_path}' "
-                        f"(branch '{worktree_branch}').",
-                        "It will be resumed once the pending input is answered.",
-                    ]
+                t(
+                    "cli.run.worktree.paused_no_merge",
+                    status=status or "unknown",
+                    worktree_path=worktree_path,
+                    branch=worktree_branch,
                 ),
-                title="Worktree Run Paused",
+                title=t("cli.run.worktree.paused_title"),
             )
             return exit_code
 
@@ -3853,10 +3857,7 @@ def _resume_worktree_run(
     worktree_original_branch = run.get("worktree_original_branch")
 
     if not worktree_path.exists():
-        display_error(
-            f"Worktree path no longer exists: {worktree_path}. "
-            "Cannot resume this worktree run."
-        )
+        display_error(t("cli.run.worktree.path_gone", worktree_path=worktree_path))
         return 1
 
     # Own the worktree's ``run.pid`` marker for the whole resume lifecycle (flow
@@ -3895,14 +3896,12 @@ def _resume_worktree_run(
                 target_branch=worktree_original_branch,
             )
             render_full(
-                "\n".join(
-                    [
-                        f"Worktree run did not complete (exit {exit_code}).",
-                        f"State preserved in worktree '{worktree_path}'.",
-                        "Resume again with: se3 run --resume",
-                    ]
+                t(
+                    "cli.run.worktree.did_not_complete_resume",
+                    exit_code=exit_code,
+                    worktree_path=worktree_path,
                 ),
-                title="Worktree Run Paused",
+                title=t("cli.run.worktree.paused_title"),
             )
             return exit_code
 
@@ -3913,23 +3912,17 @@ def _resume_worktree_run(
         status = _worktree_flow_status(worktree_path)
         if status != FlowStatus.COMPLETED.value:
             render_full(
-                "\n".join(
-                    [
-                        f"Worktree run paused again (status: {status or 'unknown'}); "
-                        "no merge attempted.",
-                        f"State preserved in worktree '{worktree_path}'.",
-                        "It will be resumed once the pending input is answered.",
-                    ]
+                t(
+                    "cli.run.worktree.paused_again",
+                    status=status or "unknown",
+                    worktree_path=worktree_path,
                 ),
-                title="Worktree Run Paused",
+                title=t("cli.run.worktree.paused_title"),
             )
             return exit_code
 
         if not worktree_branch:
-            display_error(
-                "Worktree run completed but no isolation branch was recorded; "
-                "cannot merge automatically. Merge manually if needed."
-            )
+            display_error(t("cli.run.worktree.no_branch"))
             return 1
 
         # In-flow merge already landed the branch on master (see

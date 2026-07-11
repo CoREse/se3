@@ -46,6 +46,31 @@ import se3.config as _cfg  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _force_en_us_ui_language(monkeypatch):
+    """Pin the i18n UI language to en-US for every test.
+
+    ``se3.i18n`` resolves the active UI language lazily from ``Path.cwd()`` — and
+    the suite runs from the repo root, whose ``se3.yaml`` sets ``language: zh-CN``.
+    Without this, any test that exercises a ``t()``-rendered CLI/display string
+    would see Chinese and its English assertion would break, making output
+    determinism depend on the repo's own config and the host locale. Forcing
+    ``SE3_LANG=en-US`` (the highest-precedence source) plus a singleton reset
+    makes rendered text the stable en-US reference for all tests. Tests that
+    specifically exercise other languages override this with their own
+    ``monkeypatch.setenv``/``set_language`` (applied after this fixture) and a
+    reset — e.g. the i18n precedence-chain tests, which ``delenv`` it entirely.
+    """
+    import se3.i18n as _i18n
+
+    monkeypatch.setenv("SE3_LANG", "en-US")
+    _i18n.reset_language()
+    _i18n.clear_caches()
+    yield
+    _i18n.reset_language()
+    _i18n.clear_caches()
+
+
+@pytest.fixture(autouse=True)
 def _reset_config_warning_dedup_sets():
     """Clear all ``_warned_*_for`` sets in se3.config around each test.
 

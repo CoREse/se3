@@ -15,6 +15,7 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 
+from ..i18n import t
 from .token_usage import UsageTotals, format_cost
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -93,7 +94,7 @@ def render_block_footer(color: str) -> None:
 
 
 def render_usage_block(
-    totals: Any, title: str = "Token Usage"
+    totals: Any, title: Optional[str] = None
 ) -> None:
     """Render an aligned token / cost summary as a reverse-color block.
 
@@ -110,7 +111,9 @@ def render_usage_block(
 
     Args:
         totals: A ``UsageTotals``, a usage dict, or ``None``.
-        title: Heading shown in the reverse-color title block.
+        title: Heading shown in the reverse-color title block. ``None`` uses the
+            i18n-rendered default ("Token Usage"); resolved here rather than in
+            the signature default so language selection stays lazy per-call.
     """
     if totals is None:
         return
@@ -119,12 +122,15 @@ def render_usage_block(
     if totals.is_empty():
         return
 
+    if title is None:
+        title = t("cli.display.usage.title")
+
     rows = [
-        ("Input tokens", f"{totals.input_tokens:,}"),
-        ("Output tokens", f"{totals.output_tokens:,}"),
-        ("Cache read", f"{totals.cache_read_input_tokens:,}"),
-        ("Cache creation", f"{totals.cache_creation_input_tokens:,}"),
-        ("Cost", format_cost(totals.total_cost_usd)),
+        (t("cli.display.usage.input_tokens"), f"{totals.input_tokens:,}"),
+        (t("cli.display.usage.output_tokens"), f"{totals.output_tokens:,}"),
+        (t("cli.display.usage.cache_read"), f"{totals.cache_read_input_tokens:,}"),
+        (t("cli.display.usage.cache_creation"), f"{totals.cache_creation_input_tokens:,}"),
+        (t("cli.display.usage.cost"), format_cost(totals.total_cost_usd)),
     ]
     label_w = max(len(label) for label, _ in rows)
     value_w = max(len(value) for _, value in rows)
@@ -177,14 +183,14 @@ def render_proposal(proposal: Dict[str, Any]) -> None:
     # Summary section
     summary = proposal.get("summary", "")
     if summary:
-        lines.append("[bold cyan]Summary:[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.display.proposal.summary')}[/bold cyan]")
         lines.append(summary)
         lines.append("")
 
     # Files to modify
     files_to_modify = proposal.get("files_to_modify", [])
     if files_to_modify:
-        lines.append("[bold yellow]Files to Modify:[/bold yellow]")
+        lines.append(f"[bold yellow]{t('cli.display.proposal.files_to_modify')}[/bold yellow]")
         for f in files_to_modify:
             if isinstance(f, dict):
                 path = f.get("path", "")
@@ -199,7 +205,7 @@ def render_proposal(proposal: Dict[str, Any]) -> None:
     # Files to create
     files_to_create = proposal.get("files_to_create", [])
     if files_to_create:
-        lines.append("[bold green]Files to Create:[/bold green]")
+        lines.append(f"[bold green]{t('cli.display.proposal.files_to_create')}[/bold green]")
         for f in files_to_create:
             if isinstance(f, dict):
                 path = f.get("path", "")
@@ -214,7 +220,7 @@ def render_proposal(proposal: Dict[str, Any]) -> None:
     # Rationale
     rationale = proposal.get("rationale", "")
     if rationale:
-        lines.append("[bold magenta]Rationale:[/bold magenta]")
+        lines.append(f"[bold magenta]{t('cli.display.proposal.rationale')}[/bold magenta]")
         lines.append(rationale)
         lines.append("")
 
@@ -231,7 +237,7 @@ def render_proposal(proposal: Dict[str, Any]) -> None:
                 lines.append("")
 
     content = "\n".join(lines)
-    render_full(content, title="Proposal")
+    render_full(content, title=t("cli.display.proposal.title"))
 
 
 def render_design(design: Dict[str, Any]) -> None:
@@ -249,14 +255,14 @@ def render_design(design: Dict[str, Any]) -> None:
     # Overview section
     overview = design.get("overview", "")
     if overview:
-        lines.append("[bold cyan]Overview[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.display.design.overview')}[/bold cyan]")
         lines.append(overview)
         lines.append("")
 
     # Components section
     components = design.get("components", [])
     if components:
-        lines.append("[bold yellow]Components[/bold yellow]")
+        lines.append(f"[bold yellow]{t('cli.display.design.components')}[/bold yellow]")
         for comp in components:
             if isinstance(comp, dict):
                 name = comp.get("name", "")
@@ -271,7 +277,7 @@ def render_design(design: Dict[str, Any]) -> None:
     # Interfaces section
     interfaces = design.get("interfaces", [])
     if interfaces:
-        lines.append("[bold green]Interfaces[/bold green]")
+        lines.append(f"[bold green]{t('cli.display.design.interfaces')}[/bold green]")
         for iface in interfaces:
             if isinstance(iface, dict):
                 name = iface.get("name", "")
@@ -289,14 +295,14 @@ def render_design(design: Dict[str, Any]) -> None:
     # Key Decisions section
     decisions = design.get("decisions", [])
     if decisions:
-        lines.append("[bold magenta]Key Decisions[/bold magenta]")
+        lines.append(f"[bold magenta]{t('cli.display.design.key_decisions')}[/bold magenta]")
         for decision in decisions:
             if isinstance(decision, dict):
                 decision_text = decision.get("decision", "")
                 reason = decision.get("reason", "")
                 lines.append(f"\n• {decision_text}")
                 if reason:
-                    lines.append(f"  [dim]Reason: {reason}[/dim]")
+                    lines.append(f"  [dim]{t('cli.display.design.reason')}{reason}[/dim]")
             else:
                 lines.append(f"  • {decision}")
         lines.append("")
@@ -321,7 +327,7 @@ def render_design(design: Dict[str, Any]) -> None:
                 lines.append("")
 
     content = "\n".join(lines)
-    render_full(content, title="Design Document")
+    render_full(content, title=t("cli.display.design.title"))
 
 
 def render_spec_content(spec: Dict[str, Any]) -> None:
@@ -342,11 +348,11 @@ def render_spec_content(spec: Dict[str, Any]) -> None:
     spec_type = spec.get("type", "")
 
     if title:
-        lines.append(f"[bold cyan]Title:[/bold cyan] {title}")
+        lines.append(f"[bold cyan]{t('cli.display.spec.field_title')}[/bold cyan] {title}")
     if version:
-        lines.append(f"[bold cyan]Version:[/bold cyan] {version}")
+        lines.append(f"[bold cyan]{t('cli.display.spec.field_version')}[/bold cyan] {version}")
     if spec_type:
-        lines.append(f"[bold cyan]Type:[/bold cyan] {spec_type}")
+        lines.append(f"[bold cyan]{t('cli.display.spec.field_type')}[/bold cyan] {spec_type}")
 
     if title or version or spec_type:
         lines.append("")
@@ -356,14 +362,14 @@ def render_spec_content(spec: Dict[str, Any]) -> None:
     # Description
     description = spec.get("description", "")
     if description:
-        lines.append("[bold yellow]Description[/bold yellow]")
+        lines.append(f"[bold yellow]{t('cli.display.spec.description')}[/bold yellow]")
         lines.append(description)
         lines.append("")
 
     # Requirements section
     requirements = spec.get("requirements", [])
     if requirements:
-        lines.append("[bold green]Requirements[/bold green]")
+        lines.append(f"[bold green]{t('cli.display.spec.requirements')}[/bold green]")
         for req in requirements:
             if isinstance(req, dict):
                 req_id = req.get("id", "")
@@ -402,7 +408,7 @@ def render_spec_content(spec: Dict[str, Any]) -> None:
                 lines.append("")
 
     content = "\n".join(lines)
-    render_full(content, title="Spec Content")
+    render_full(content, title=t("cli.display.spec.title"))
 
 
 def render_text(content: str, title: Optional[str] = None, style: Optional[str] = None) -> None:
@@ -476,7 +482,7 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
 
         if displayed >= max_lines:
             remaining = total - displayed
-            text.append(f"\n... ({remaining} more lines)", style="dim")
+            text.append("\n" + t("cli.display.diff.more_lines", remaining=remaining), style="dim")
             break
 
         if displayed > 0:
@@ -507,7 +513,7 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
         displayed += 1
 
     if displayed > 0:
-        console.print(_reverse_title(f"Diff: {file_path}", "yellow"))
+        console.print(_reverse_title(t("cli.display.diff.heading", file_path=file_path), "yellow"))
         console.print("")
         console.print(text)
         console.print("")
