@@ -681,6 +681,174 @@ function el(tag, cls, text) {
   return node;
 }
 
+// ---------------------------------------------------------------------------
+// I18N — client-side UI-language subsystem
+// ---------------------------------------------------------------------------
+//
+// WebUI interface language is a per-user client preference (localStorage), NOT
+// tied to any project's se3.yaml — this is a multi-tenant control plane, so a
+// single project's language must never dictate the operator's chrome. en-US is
+// the baseline dictionary and the per-key fallback; the selected language is
+// layered over it in t(). A missing key falls back to en-US, then to the key
+// itself, and a failed fetch degrades to an empty dict — so a network hiccup or
+// an untranslated key never blanks the UI: index.html keeps English text as the
+// in-markup default until a dictionary paints over it. Adding a language is a
+// data change: drop a new locales JSON and register its code in SUPPORTED — no
+// business code changes.
+
+const I18N = {
+  SUPPORTED: ["en-US", "zh-CN"],
+  FALLBACK: "en-US",
+  STORAGE_KEY: "se3_ui_lang",
+  lang: "en-US",
+  // Loaded flat key→string dictionaries, keyed by language code. en-US is the
+  // always-present baseline; the active language is layered over it in t().
+  dicts: { "en-US": {}, "zh-CN": {} },
+  // Optional re-render hook invoked after a language switch so dynamic UI can
+  // repaint. Wired in init(); a no-op / undefined in the require-loaded module.
+  onLangChange: null,
+
+  // Pure: choose the initial language from a stored preference, the browser's
+  // navigator.language, and the supported-language list. Precedence:
+  // localStorage exact match > navigator.language exact match > navigator
+  // primary-subtag prefix match (e.g. "zh" / "zh-TW" → "zh-CN") > en-US.
+  resolveInitialLang(stored, navLang, supported) {
+    const list = Array.isArray(supported) && supported.length
+      ? supported : ["en-US"];
+    if (stored && list.includes(stored)) return stored;
+    const nav = String(navLang || "");
+    if (nav && list.includes(nav)) return nav;
+    const prim = nav.split("-")[0].toLowerCase();
+    if (prim) {
+      for (const code of list) {
+        if (code.split("-")[0].toLowerCase() === prim) return code;
+      }
+    }
+    return list.includes("en-US") ? "en-US" : list[0];
+  },
+
+  // Pure: resolve `key` against the active dict, then the baseline dict, then
+  // the key itself; interpolate {name} placeholders from `params`. Never throws
+  // — a malformed template returns the un-interpolated string.
+  lookup(key, params, primary, fallback) {
+    let tmpl = (primary && primary[key] != null) ? primary[key]
+      : (fallback && fallback[key] != null) ? fallback[key] : key;
+    tmpl = String(tmpl);
+    if (params && typeof params === "object") {
+      try {
+        tmpl = tmpl.replace(/\{(\w+)\}/g, (m, k) =>
+          (params[k] != null ? String(params[k]) : m));
+      } catch (_) { /* fail-safe: return the un-interpolated template */ }
+    }
+    return tmpl;
+  },
+
+  t(key, params) {
+    return I18N.lookup(
+      key, params, I18N.dicts[I18N.lang], I18N.dicts[I18N.FALLBACK]);
+  },
+
+  // Resolve `key` to a translation, or null when it is absent from BOTH the
+  // active and baseline dictionaries. applyStaticTranslations uses this (rather
+  // than t()) so a total miss — e.g. a boot-time fetch failure that leaves the
+  // dicts empty — leaves the node's in-markup English fallback untouched instead
+  // of painting the raw dotted key over it. t() still returns the key itself for
+  // dynamic (JS-generated) text, where a visible key is the fixable fallback.
+  resolve(key, params) {
+    const p = I18N.dicts[I18N.lang];
+    const f = I18N.dicts[I18N.FALLBACK];
+    if (p && p[key] != null) return I18N.lookup(key, params, p, f);
+    if (f && f[key] != null) return I18N.lookup(key, params, f, f);
+    return null;
+  },
+
+  // Fetch one language's dictionary JSON, caching it on `dicts`. A failed fetch
+  // resolves to an empty dict (never rejects) so callers degrade to the
+  // baseline / in-markup English rather than throwing on a boot-time network
+  // error.
+  async load(code) {
+    if (I18N.dicts[code] && Object.keys(I18N.dicts[code]).length) {
+      return I18N.dicts[code];
+    }
+    try {
+      // The frontend is served from the root static mount (same origin as
+      // app.js / style.css), so locale files load from /i18n/, not /static/.
+      const resp = await fetch(`/i18n/${code}.json`);
+      if (!resp.ok) throw new Error(`i18n ${code} ${resp.status}`);
+      I18N.dicts[code] = await resp.json();
+    } catch (_) {
+      I18N.dicts[code] = I18N.dicts[code] || {};
+    }
+    return I18N.dicts[code];
+  },
+
+  // Apply data-i18n / -placeholder / -title attributes across a DOM scope
+  // (defaults to the whole document). No-op where querySelectorAll is absent
+  // (the require-loaded module in the pure tests).
+  applyStaticTranslations(root) {
+    const scope = root
+      || (typeof document !== "undefined" ? document : null);
+    if (!scope || typeof scope.querySelectorAll !== "function") return;
+    const sels = ["[data-i18n]", "[data-i18n-placeholder]", "[data-i18n-title]"];
+    for (const sel of sels) {
+      for (const node of scope.querySelectorAll(sel)) {
+        // resolve() (not t()) so a missing key leaves the in-markup fallback.
+        applyNodeTranslations(node, I18N.resolve);
+      }
+    }
+  },
+
+  // Switch the active language: persist the choice, ensure both the baseline
+  // and target dictionaries are loaded, then repaint static + dynamic UI.
+  async setLang(code) {
+    const next = I18N.SUPPORTED.includes(code) ? code : I18N.FALLBACK;
+    I18N.lang = next;
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(I18N.STORAGE_KEY, next);
+      }
+    } catch (_) { /* localStorage may throw in restricted contexts */ }
+    await Promise.all([I18N.load(I18N.FALLBACK), I18N.load(next)]);
+    I18N.applyStaticTranslations();
+    if (typeof I18N.onLangChange === "function") I18N.onLangChange();
+  },
+};
+
+// Pure per-node attribute application (exported for the DOM-stub tests): reads
+// data-i18n (→ textContent), data-i18n-placeholder (→ placeholder), and
+// data-i18n-title (→ title) and writes the translated string via `tfn`. Each
+// attribute is independent so a single node can localize several surfaces.
+function applyNodeTranslations(node, tfn) {
+  if (!node || typeof node.getAttribute !== "function") return;
+  // A null/undefined result means "no translation" — leave the in-markup
+  // fallback (text / placeholder / title) untouched rather than blanking it.
+  const textKey = node.getAttribute("data-i18n");
+  if (textKey) {
+    const v = tfn(textKey);
+    if (v != null) node.textContent = v;
+  }
+  const phKey = node.getAttribute("data-i18n-placeholder");
+  if (phKey) {
+    const v = tfn(phKey);
+    if (v != null) {
+      node.placeholder = v;
+      if (typeof node.setAttribute === "function") {
+        node.setAttribute("placeholder", v);
+      }
+    }
+  }
+  const titleKey = node.getAttribute("data-i18n-title");
+  if (titleKey) {
+    const v = tfn(titleKey);
+    if (v != null) {
+      node.title = v;
+      if (typeof node.setAttribute === "function") {
+        node.setAttribute("title", v);
+      }
+    }
+  }
+}
+
 function statusClass(status) {
   const s = String(status || "unknown").toLowerCase();
   if (["running", "completed", "failed", "paused", "init"].includes(s)) return s;
@@ -12949,7 +13117,69 @@ async function toggleAdmin(ownerId, isAdmin) {
 // Wiring
 // ---------------------------------------------------------------------------
 
+// Repaint the dynamic (JS-rendered) UI after a language switch. The static
+// data-i18n nodes are handled by applyStaticTranslations; here we force the
+// diff-aware list renderers to rebuild by clearing their cached signatures, so
+// any localized chrome they emit reflects the new language immediately rather
+// than being skipped as "unchanged".
+function rerenderDynamic() {
+  try {
+    if (typeof resetRenderSignatures === "function") resetRenderSignatures();
+    if (typeof renderMachines === "function") renderMachines();
+    if (typeof renderFlows === "function") renderFlows();
+  } catch (_) { /* best-effort repaint; never break a language switch */ }
+}
+
+// Resolve the initial UI language (localStorage > navigator > en-US), wire the
+// top-bar switch control, then load the baseline + selected dictionaries and
+// paint the static text. Idempotent-safe: called once from init().
+function initI18n() {
+  let stored = null;
+  try {
+    if (typeof localStorage !== "undefined") {
+      stored = localStorage.getItem(I18N.STORAGE_KEY);
+    }
+  } catch (_) { /* localStorage may throw in restricted contexts */ }
+  const navLang =
+    (typeof navigator !== "undefined" && navigator.language) || "";
+  I18N.lang = I18N.resolveInitialLang(stored, navLang, I18N.SUPPORTED);
+  I18N.onLangChange = rerenderDynamic;
+
+  const sel = $("lang-select");
+  if (sel) {
+    sel.innerHTML = "";
+    for (const code of I18N.SUPPORTED) {
+      const opt = document.createElement("option");
+      opt.value = code;
+      // Endonyms (native language names) — identical across every dictionary,
+      // so the label reads correctly whichever language is active.
+      opt.textContent = I18N.t(`lang.${code}`);
+      sel.appendChild(opt);
+    }
+    sel.value = I18N.lang;
+    sel.addEventListener("change", (e) => {
+      const s = $("lang-select");
+      I18N.setLang(e.target.value).then(() => {
+        if (s) s.value = I18N.lang;
+      });
+    });
+  }
+
+  // Load baseline + selected dicts, then paint. Fetch failure degrades to the
+  // in-markup English (I18N.load never rejects).
+  Promise.all([I18N.load(I18N.FALLBACK), I18N.load(I18N.lang)]).then(() => {
+    if (sel) {
+      for (const opt of sel.children) {
+        opt.textContent = I18N.t(`lang.${opt.value}`);
+      }
+      sel.value = I18N.lang;
+    }
+    I18N.applyStaticTranslations();
+  });
+}
+
 function init() {
+  initI18n();
   $("new-task-btn").addEventListener("click", openNewTask);
   $("new-task-close").addEventListener("click", closeNewTask);
   $("new-task-form").addEventListener("submit", submitNewTask);
@@ -13427,6 +13657,10 @@ if (typeof module !== "undefined" && module.exports) {
     // Reply-panel diff-aware equality (G4) — exposed for the DOM-free tests in
     // tests/frontend/test_app_pure.mjs.
     interventionsSignature,
+    // WebUI i18n subsystem (G6) — exposed for the DOM-free + DOM-stub tests in
+    // tests/frontend/i18n_render_switch.test.mjs.
+    I18N,
+    applyNodeTranslations,
     state,
   };
 }

@@ -117,6 +117,23 @@ h1, h2, h3 { font-weight: 600; }
 }
 .se3-version:empty { display: none; }
 
+/* Per-user UI-language switch — a compact, low-chrome select that sits inline
+   in the top bar next to the connection status. Kept visually quiet so it never
+   competes with the functional controls; always visible (including on the login
+   gate) since the interface language is a client preference, not an app action. */
+.lang-select {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel, var(--bg));
+  color: var(--fg-dim);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.lang-select:hover { border-color: var(--accent); color: var(--fg); }
+
 button {
   background: var(--accent);
   color: #fff;
@@ -2961,6 +2978,16 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   }
   .topbar-right {
     gap: 8px;
+  }
+
+  /* The language switch stays inline in the compact bar (it is NOT part of the
+     auth overflow menu, so a visitor can pick a language on the login gate). It
+     shrinks to give the version/connection badges and hamburger room, and the
+     16px form-control zoom-suppression rule above already keeps its tap target
+     usable without triggering iOS focus-zoom. */
+  .lang-select {
+    padding: 4px 6px;
+    max-width: 30vw;
   }
 
   /* -- topbar overflow menu (mobile) --------------------------------- *

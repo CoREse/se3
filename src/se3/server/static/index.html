@@ -8,10 +8,18 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>SE3&nbsp;Control&nbsp;Plane</h1>
+    <h1 data-i18n="topbar.title">SE3&nbsp;Control&nbsp;Plane</h1>
     <div class="topbar-right">
       <span id="se3-version" class="se3-version"></span>
-      <span id="conn-status" class="conn conn-connecting">connecting&hellip;</span>
+      <span id="conn-status" class="conn conn-connecting"
+            data-i18n="topbar.connecting">connecting&hellip;</span>
+      <!-- Per-user UI-language switch. Always visible (NOT auth-only) so the
+           language can be chosen on the login gate too; the choice persists in
+           localStorage and never reads any project's se3.yaml. Options are
+           populated by initI18n() from I18N.SUPPORTED. -->
+      <select id="lang-select" class="lang-select"
+              data-i18n-title="lang.label" title="Language"
+              aria-label="Language"></select>
       <!-- Hamburger toggle for the mobile-portrait overflow menu. Hidden on
            desktop (@media min-width:601px) and while unauthenticated (auth-only);
            on a narrow screen it expands #nav-menu into a dropdown. No top-bar
@@ -27,16 +35,22 @@
            so applyAuthState's global querySelectorAll gating still applies. -->
       <div id="nav-menu" class="nav-menu">
         <!-- Auth-only controls: hidden until an owner is resolved. -->
-        <button id="history-btn" type="button" class="ghost-btn auth-only hidden">History</button>
-        <button id="issues-btn" type="button" class="ghost-btn auth-only hidden">Issues</button>
-        <button id="keys-btn" type="button" class="ghost-btn auth-only hidden">Daemon&nbsp;Keys</button>
+        <button id="history-btn" type="button" class="ghost-btn auth-only hidden"
+                data-i18n="nav.history">History</button>
+        <button id="issues-btn" type="button" class="ghost-btn auth-only hidden"
+                data-i18n="nav.issues">Issues</button>
+        <button id="keys-btn" type="button" class="ghost-btn auth-only hidden"
+                data-i18n="nav.keys">Daemon&nbsp;Keys</button>
         <!-- Admin-only control: hidden for non-admin owners even once authenticated
              (the .admin-only class is toggled by applyAuthState off is_admin). The
              server enforces admin on every /api/users route — this is UX only. -->
-        <button id="users-btn" type="button" class="ghost-btn admin-only hidden">用户管理</button>
-        <button id="new-task-btn" type="button" class="auth-only hidden">+ New Task</button>
+        <button id="users-btn" type="button" class="ghost-btn admin-only hidden"
+                data-i18n="nav.users">User Management</button>
+        <button id="new-task-btn" type="button" class="auth-only hidden"
+                data-i18n="nav.newTask">+ New Task</button>
         <span id="owner-label" class="owner-label auth-only hidden"></span>
-        <button id="logout-btn" type="button" class="ghost-btn auth-only hidden">Logout</button>
+        <button id="logout-btn" type="button" class="ghost-btn auth-only hidden"
+                data-i18n="nav.logout">Logout</button>
       </div>
     </div>
   </header>
@@ -45,32 +59,34 @@
        app surface so an unauthenticated visitor sees only the login ceremony. -->
   <div id="login-view" class="login-view">
     <div class="login-card">
-      <h2>Sign in</h2>
-      <p class="login-sub">Authenticate to view and control your daemons.</p>
+      <h2 data-i18n="login.title">Sign in</h2>
+      <p class="login-sub" data-i18n="login.subtitle">Authenticate to view and control your daemons.</p>
 
       <form id="login-form" class="login-form">
-        <label for="login-username">Username</label>
+        <label for="login-username" data-i18n="login.username">Username</label>
         <input type="text" id="login-username" autocomplete="username"
                autocapitalize="off" spellcheck="false" required />
 
-        <label for="login-password">Password</label>
+        <label for="login-password" data-i18n="login.password">Password</label>
         <input type="password" id="login-password"
                autocomplete="current-password" required />
 
         <p id="login-error" class="form-error hidden"></p>
-        <button type="submit" id="login-submit">Sign in</button>
+        <button type="submit" id="login-submit" data-i18n="login.submit">Sign in</button>
       </form>
 
       <div class="login-breakglass">
-        <button type="button" id="breakglass-toggle" class="link-btn">
+        <button type="button" id="breakglass-toggle" class="link-btn"
+                data-i18n="login.breakglassToggle">
           Use a break-glass admin token
         </button>
         <form id="breakglass-form" class="login-form hidden">
-          <label for="breakglass-token">Break-glass token</label>
+          <label for="breakglass-token" data-i18n="login.breakglassLabel">Break-glass token</label>
           <input type="password" id="breakglass-token"
                  autocomplete="one-time-code" spellcheck="false" />
           <p id="breakglass-error" class="form-error hidden"></p>
-          <button type="submit" id="breakglass-submit">Enter as admin</button>
+          <button type="submit" id="breakglass-submit"
+                  data-i18n="login.breakglassSubmit">Enter as admin</button>
         </form>
       </div>
     </div>
@@ -78,9 +94,9 @@
 
   <main id="main-layout" class="layout hidden">
     <aside class="machines-pane">
-      <h2>Machines</h2>
+      <h2 data-i18n="machines.title">Machines</h2>
       <ul id="machine-list" class="machine-list">
-        <li class="empty">No machines connected.</li>
+        <li class="empty" data-i18n="machines.empty">No machines connected.</li>
       </ul>
     </aside>
 
@@ -89,10 +105,10 @@
            (single-view panel switch). Hidden on desktop, where both panes show
            side by side. -->
       <button id="flows-back-btn" type="button" class="flows-back-btn"
-              aria-label="返回机器列表">&larr; 机器</button>
-      <h2 id="flows-heading">Flows</h2>
+              aria-label="Back to machine list" data-i18n="flows.back">&larr; Machines</button>
+      <h2 id="flows-heading" data-i18n="flows.title">Flows</h2>
       <div id="flow-list" class="flow-list">
-        <p class="empty">Select a machine to view its flows.</p>
+        <p class="empty" data-i18n="flows.empty">Select a machine to view its flows.</p>
       </div>
     </section>
   </main>
@@ -100,17 +116,17 @@
   <!-- History view (session list + session detail) -->
   <div id="history-view" class="history-view hidden">
     <div class="history-head">
-      <h3>History</h3>
+      <h3 data-i18n="history.title">History</h3>
       <button id="history-close" type="button" class="icon-btn">&times;</button>
     </div>
-    <div id="history-stale" class="stale-banner hidden">
-      &#9888; 连接断开，数据可能陈旧
+    <div id="history-stale" class="stale-banner hidden" data-i18n="common.staleBanner">
+      &#9888; Connection lost — data may be stale
     </div>
     <div class="history-body">
       <aside class="history-list-pane">
-        <h4>Sessions</h4>
+        <h4 data-i18n="history.sessions">Sessions</h4>
         <div id="history-list" class="history-list">
-          <p class="empty">Loading history&hellip;</p>
+          <p class="empty" data-i18n="history.loading">Loading history&hellip;</p>
         </div>
       </aside>
       <section class="history-detail-pane">
@@ -119,8 +135,8 @@
              flows-back-btn). Hidden on desktop, where both panes show side by
              side. -->
         <button id="history-back-btn" type="button" class="history-back-btn"
-                aria-label="返回会话列表">&larr; 会话列表</button>
-        <h4 id="history-detail-title">Session</h4>
+                aria-label="Back to session list" data-i18n="history.back">&larr; Sessions</button>
+        <h4 id="history-detail-title" data-i18n="history.detailTitle">Session</h4>
         <!-- The full flow_id of the open session, shown as its own dedicated
              line independent of the title's task_description→flow_id fallback so
              the se3 flow_id is always identifiable and copyable. -->
@@ -129,9 +145,10 @@
              running-flow view's .flow-usage-badge styling and accounting.
              Hidden until this session has consumed tokens. -->
         <div id="history-usage-badge" class="flow-usage-badge hidden"
-             title="本次 session 已消耗的 token 与成本合计"></div>
+             data-i18n-title="history.usageTitle"
+             title="Total tokens and cost consumed by this session"></div>
         <div id="history-detail" class="history-detail">
-          <p class="empty">Select a session to view its step records.</p>
+          <p class="empty" data-i18n="history.detailEmpty">Select a session to view its step records.</p>
         </div>
       </section>
     </div>
@@ -140,42 +157,43 @@
   <!-- Issues view (list + detail) — mirrors the history view layout. -->
   <div id="issues-view" class="issues-view hidden">
     <div class="issues-head">
-      <h3>Issues</h3>
+      <h3 data-i18n="issues.title">Issues</h3>
       <button id="issues-close" type="button" class="icon-btn">&times;</button>
     </div>
-    <div id="issues-stale" class="stale-banner hidden">
-      &#9888; 连接断开，数据可能陈旧
+    <div id="issues-stale" class="stale-banner hidden" data-i18n="common.staleBanner">
+      &#9888; Connection lost — data may be stale
     </div>
     <div class="issues-body">
       <aside class="issues-list-pane">
         <div class="issues-toolbar">
           <label class="issues-toggle-label">
             <input type="checkbox" id="issues-show-closed" />
-            <span>显示已关闭</span>
+            <span data-i18n="issues.showClosed">Show closed</span>
           </label>
           <select id="issues-source-filter" class="issues-filter-select">
-            <option value="">全部来源</option>
-            <option value="human">人工</option>
-            <option value="system">系统</option>
+            <option value="" data-i18n="issues.sourceAll">All sources</option>
+            <option value="human" data-i18n="issues.sourceHuman">Human</option>
+            <option value="system" data-i18n="issues.sourceSystem">System</option>
           </select>
           <select id="issues-project-filter" class="issues-filter-select">
-            <option value="">全部项目</option>
+            <option value="" data-i18n="issues.projectAll">All projects</option>
           </select>
           <select id="issues-type-filter" class="issues-filter-select">
-            <option value="">全部类型</option>
+            <option value="" data-i18n="issues.typeAll">All types</option>
           </select>
-          <button id="issues-create-btn" type="button" class="ghost-btn">+ 新建</button>
+          <button id="issues-create-btn" type="button" class="ghost-btn"
+                  data-i18n="issues.create">+ New</button>
         </div>
         <div id="issues-list" class="issues-list">
-          <p class="empty">Loading issues&hellip;</p>
+          <p class="empty" data-i18n="issues.loading">Loading issues&hellip;</p>
         </div>
       </aside>
       <section class="issues-detail-pane">
         <button id="issues-back-btn" type="button" class="issues-back-btn"
-                aria-label="返回 issue 列表">&larr; Issue 列表</button>
-        <h4 id="issues-detail-title">Issue</h4>
+                aria-label="Back to issue list" data-i18n="issues.back">&larr; Issues</button>
+        <h4 id="issues-detail-title" data-i18n="issues.detailTitle">Issue</h4>
         <div id="issues-detail" class="issues-detail">
-          <p class="empty">选择一个 issue 查看详情。</p>
+          <p class="empty" data-i18n="issues.detailEmpty">Select an issue to view details.</p>
         </div>
       </section>
     </div>
@@ -185,35 +203,39 @@
   <div id="issue-modal" class="modal hidden">
     <div class="modal-card">
       <div class="modal-head">
-        <h3 id="issue-modal-title">新建 Issue</h3>
+        <h3 id="issue-modal-title" data-i18n="issueModal.title">New Issue</h3>
         <button id="issue-modal-close" type="button" class="icon-btn">&times;</button>
       </div>
       <form id="issue-form" class="modal-body">
         <div id="issue-machine-row" class="form-row">
           <div class="form-col">
-            <label for="issue-machine">机器</label>
+            <label for="issue-machine" data-i18n="issueModal.machine">Machine</label>
             <select id="issue-machine"></select>
           </div>
           <div class="form-col">
-            <label for="issue-project">项目</label>
+            <label for="issue-project" data-i18n="issueModal.project">Project</label>
             <select id="issue-project"></select>
           </div>
         </div>
         <input type="text" id="issue-project-manual" class="hidden"
+               data-i18n-placeholder="common.absolutePathPlaceholder"
                placeholder="/absolute/path/to/project" autocomplete="off" />
 
-        <label for="issue-description">描述 <span class="required">*</span></label>
+        <label for="issue-description"><span data-i18n="issueModal.description">Description</span> <span class="required">*</span></label>
         <textarea id="issue-description" rows="5" required
-                  placeholder="描述这个问题或建议&hellip;"></textarea>
+                  data-i18n-placeholder="issueModal.descriptionPlaceholder"
+                  placeholder="Describe the problem or suggestion&hellip;"></textarea>
         <p id="issue-description-hint" class="form-hint hidden"></p>
 
-        <label for="issue-title">标题（可选）</label>
-        <input type="text" id="issue-title" placeholder="留空则自动从描述派生"
+        <label for="issue-title" data-i18n="issueModal.titleLabel">Title (optional)</label>
+        <input type="text" id="issue-title"
+               data-i18n-placeholder="issueModal.titlePlaceholder"
+               placeholder="Leave blank to derive from the description"
                autocomplete="off" spellcheck="false" />
 
         <div class="form-row">
           <div class="form-col">
-            <label for="issue-type">类型（可选）</label>
+            <label for="issue-type" data-i18n="issueModal.type">Type (optional)</label>
             <select id="issue-type">
               <option value="">-</option>
               <option value="bug">bug</option>
@@ -224,7 +246,7 @@
             </select>
           </div>
           <div class="form-col">
-            <label for="issue-priority">优先级（可选）</label>
+            <label for="issue-priority" data-i18n="issueModal.priority">Priority (optional)</label>
             <select id="issue-priority">
               <option value="">-</option>
               <option value="critical">critical</option>
@@ -235,13 +257,15 @@
           </div>
         </div>
 
-        <label for="issue-tags">标签（可选，逗号分隔）</label>
-        <input type="text" id="issue-tags" placeholder="例如: ui, performance, docs"
+        <label for="issue-tags" data-i18n="issueModal.tags">Tags (optional, comma-separated)</label>
+        <input type="text" id="issue-tags"
+               data-i18n-placeholder="issueModal.tagsPlaceholder"
+               placeholder="e.g. ui, performance, docs"
                autocomplete="off" spellcheck="false" />
 
         <p id="issue-form-error" class="form-error hidden"></p>
         <div class="modal-actions">
-          <button type="submit" id="issue-form-submit">创建</button>
+          <button type="submit" id="issue-form-submit" data-i18n="issueModal.submit">Create</button>
         </div>
       </form>
     </div>
@@ -251,19 +275,20 @@
   <div id="issue-action-modal" class="modal hidden">
     <div class="modal-card modal-card-sm">
       <div class="modal-head">
-        <h3 id="issue-action-title">确认操作</h3>
+        <h3 id="issue-action-title" data-i18n="issueAction.title">Confirm action</h3>
         <button id="issue-action-close" type="button" class="icon-btn">&times;</button>
       </div>
       <div class="modal-body">
         <p id="issue-action-message"></p>
         <label for="issue-action-reason" id="issue-action-reason-label"
-               class="hidden">关闭原因（可选）</label>
+               class="hidden" data-i18n="issueAction.reasonLabel">Close reason (optional)</label>
         <input type="text" id="issue-action-reason" class="hidden"
-               placeholder="关闭原因&hellip;" autocomplete="off" spellcheck="false" />
+               data-i18n-placeholder="issueAction.reasonPlaceholder"
+               placeholder="Close reason&hellip;" autocomplete="off" spellcheck="false" />
         <p id="issue-action-error" class="form-error hidden"></p>
         <div class="modal-actions">
-          <button type="button" id="issue-action-confirm">确认</button>
-          <button type="button" id="issue-action-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="issue-action-confirm" data-i18n="issueAction.confirm">Confirm</button>
+          <button type="button" id="issue-action-cancel" class="ghost-btn" data-i18n="common.cancel">Cancel</button>
         </div>
       </div>
     </div>
@@ -273,16 +298,17 @@
   <div id="end-session-modal" class="modal hidden">
     <div class="modal-card modal-card-sm">
       <div class="modal-head">
-        <h3 id="end-session-title">结束 Session</h3>
+        <h3 id="end-session-title" data-i18n="endSession.title">End Session</h3>
         <button id="end-session-close" type="button" class="icon-btn">&times;</button>
       </div>
       <div class="modal-body">
-        <p id="end-session-message">确认结束并归档该 session；若为 worktree
-          会被清理归档，未提交的工作不会合并进主分支。</p>
+        <p id="end-session-message" data-i18n="endSession.message">Confirm ending and archiving this session;
+          a worktree session will be cleaned up and archived, and uncommitted work will not be merged
+          into the main branch.</p>
         <p id="end-session-error" class="form-error hidden"></p>
         <div class="modal-actions">
-          <button type="button" id="end-session-confirm" class="btn-end">结束并归档</button>
-          <button type="button" id="end-session-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="end-session-confirm" class="btn-end" data-i18n="endSession.confirm">End and archive</button>
+          <button type="button" id="end-session-cancel" class="ghost-btn" data-i18n="common.cancel">Cancel</button>
         </div>
       </div>
     </div>
@@ -292,24 +318,24 @@
   <div id="issue-launch-modal" class="modal hidden">
     <div class="modal-card modal-card-sm">
       <div class="modal-head">
-        <h3 id="issue-launch-title">从 Issue 启动 Flow</h3>
+        <h3 id="issue-launch-title" data-i18n="issueLaunch.title">Launch Flow from Issue</h3>
         <button id="issue-launch-close" type="button" class="icon-btn">&times;</button>
       </div>
       <div class="modal-body">
         <p id="issue-launch-message"></p>
         <label class="checkbox-label" for="issue-launch-discover">
           <input type="checkbox" id="issue-launch-discover">
-          先进入 discovery 步骤（多轮需求澄清）
+          <span data-i18n="issueLaunch.discover">Start from discovery step (multi-turn requirement clarification)</span>
         </label>
         <label class="checkbox-label" for="issue-launch-worktree">
           <input type="checkbox" id="issue-launch-worktree">
-          Run in isolation (worktree mode &mdash; flow runs in an isolated
-          worktree, then auto-merges back)
+          <span data-i18n="common.worktreeOption">Run in isolation (worktree mode &mdash; flow runs in an isolated
+          worktree, then auto-merges back)</span>
         </label>
         <p id="issue-launch-error" class="form-error hidden"></p>
         <div class="modal-actions">
-          <button type="button" id="issue-launch-confirm">启动 flow</button>
-          <button type="button" id="issue-launch-cancel" class="ghost-btn">取消</button>
+          <button type="button" id="issue-launch-confirm" data-i18n="issueLaunch.confirm">Launch flow</button>
+          <button type="button" id="issue-launch-cancel" class="ghost-btn" data-i18n="common.cancel">Cancel</button>
         </div>
       </div>
     </div>
@@ -327,12 +353,13 @@
       <button id="flow-sidebar-toggle" type="button"
               class="icon-btn flow-sidebar-toggle"
               aria-expanded="false" aria-controls="flow-sidebar-body"
-              title="显示 / 隐藏 flow 详情">&#9776;</button>
-      <h3 id="flow-view-title">Flow</h3>
+              data-i18n-title="flow.sidebarToggleTitle"
+              title="Show / hide flow details">&#9776;</button>
+      <h3 id="flow-view-title" data-i18n="flow.title">Flow</h3>
       <button id="flow-view-close" type="button" class="icon-btn">&times;</button>
     </div>
-    <div id="flow-view-stale" class="stale-banner hidden">
-      &#9888; 连接断开，数据可能陈旧
+    <div id="flow-view-stale" class="stale-banner hidden" data-i18n="common.staleBanner">
+      &#9888; Connection lost — data may be stale
     </div>
     <div class="flow-view-body">
       <!-- Mobile-only (G4): tap-to-close backdrop behind the open sidebar
@@ -340,35 +367,39 @@
       <div id="flow-sidebar-backdrop" class="flow-sidebar-backdrop"></div>
       <aside class="flow-sidebar">
         <div id="flow-sidebar-body" class="flow-sidebar-body">
-          <p class="empty">Loading flow details&hellip;</p>
+          <p class="empty" data-i18n="flow.sidebarLoading">Loading flow details&hellip;</p>
         </div>
       </aside>
       <section class="flow-main">
         <div id="flow-conversation" class="history-detail flow-conversation">
-          <p class="empty">Select a flow to view its conversation.</p>
+          <p class="empty" data-i18n="flow.conversationEmpty">Select a flow to view its conversation.</p>
         </div>
         <!-- Session token/cost total (G4): a low-key badge docked at the
              bottom-left corner of the main column, between the conversation
              and the reply box, so it never obscures the scroll area. Hidden
              until this flow has consumed tokens. -->
         <div id="flow-usage-badge" class="flow-usage-badge hidden"
-             title="本次 flow 已消耗的 token 与成本合计"></div>
+             data-i18n-title="flow.usageTitle"
+             title="Total tokens and cost consumed by this flow"></div>
         <form id="flow-reply-form" class="flow-reply">
           <div id="flow-interventions" class="flow-interventions"></div>
           <!-- Both the context text and the textarea placeholder are static
                fallbacks; updateReplyBox() rewrites them per selected chip
                (a confirm gate lists 批准/打回/approve/reject and its
                "will be treated as a revision request" fallback wording). -->
-          <div id="flow-reply-context" class="flow-reply-context">
-            目前没有待处理的交互项。
+          <div id="flow-reply-context" class="flow-reply-context"
+               data-i18n="flow.replyContext">
+            No pending interaction items right now.
           </div>
           <div class="flow-reply-row">
             <button type="button" id="flow-interject-btn"
                     class="reply-icon-btn interject hidden"
+                    data-i18n-title="flow.interjectTitle"
                     title="Interject into this running flow">&#9998;</button>
             <textarea id="flow-reply-input" rows="6"
-                      placeholder="暂无待处理项&hellip;"></textarea>
-            <button type="submit" id="flow-reply-submit" disabled>Send</button>
+                      data-i18n-placeholder="flow.replyPlaceholder"
+                      placeholder="No pending items&hellip;"></textarea>
+            <button type="submit" id="flow-reply-submit" disabled data-i18n="flow.replySubmit">Send</button>
           </div>
         </form>
       </section>
@@ -379,32 +410,33 @@
   <div id="new-task-modal" class="modal hidden">
     <div class="modal-card">
       <div class="modal-head">
-        <h3>Publish New Task</h3>
+        <h3 data-i18n="newTask.title">Publish New Task</h3>
         <button id="new-task-close" type="button" class="icon-btn">&times;</button>
       </div>
       <form id="new-task-form" class="modal-body">
-        <label for="nt-machine">Target machine</label>
+        <label for="nt-machine" data-i18n="newTask.machine">Target machine</label>
         <select id="nt-machine" required></select>
 
-        <label for="nt-project">Project</label>
+        <label for="nt-project" data-i18n="newTask.project">Project</label>
         <select id="nt-project" required></select>
-        <p id="nt-project-empty" class="form-hint hidden">
+        <p id="nt-project-empty" class="form-hint hidden" data-i18n="newTask.projectEmpty">
           This daemon has no registered project roots — pick &ldquo;Other path&hellip;&rdquo;
           to enter one manually.
         </p>
         <input type="text" id="nt-project-manual"
                class="hidden"
+               data-i18n-placeholder="common.absolutePathPlaceholder"
                placeholder="/absolute/path/to/project"
                autocomplete="off"
                spellcheck="false" />
-        <p id="nt-project-manual-hint" class="form-hint hidden">
+        <p id="nt-project-manual-hint" class="form-hint hidden" data-i18n="newTask.projectManualHint">
           Enter an absolute path. The daemon will run <code>se3 init</code>
           there first if the directory is not yet an SE3 project.
         </p>
 
-        <label for="nt-type">Task type</label>
+        <label for="nt-type" data-i18n="newTask.type">Task type</label>
         <select id="nt-type">
-          <option value="pending">auto</option>
+          <option value="pending" data-i18n="newTask.typeAuto">auto</option>
           <option value="feature">feature</option>
           <option value="bugfix">bugfix</option>
           <option value="review">review</option>
@@ -412,24 +444,25 @@
           <option value="directive">directive</option>
         </select>
 
-        <label for="nt-task">Task description</label>
+        <label for="nt-task" data-i18n="newTask.task">Task description</label>
         <textarea id="nt-task" rows="5" required
+                  data-i18n-placeholder="newTask.taskPlaceholder"
                   placeholder="Describe the task to run&hellip;"></textarea>
 
         <label class="checkbox-label" for="nt-discover">
           <input type="checkbox" id="nt-discover">
-          Start from discovery step (multi-turn requirement clarification)
+          <span data-i18n="newTask.discover">Start from discovery step (multi-turn requirement clarification)</span>
         </label>
 
         <label class="checkbox-label" for="nt-worktree">
           <input type="checkbox" id="nt-worktree">
-          Run in isolation (worktree mode &mdash; flow runs in an isolated
-          worktree, then auto-merges back)
+          <span data-i18n="common.worktreeOption">Run in isolation (worktree mode &mdash; flow runs in an isolated
+          worktree, then auto-merges back)</span>
         </label>
 
         <p id="nt-error" class="form-error hidden"></p>
         <div class="modal-actions">
-          <button type="submit" id="nt-submit">Publish</button>
+          <button type="submit" id="nt-submit" data-i18n="newTask.submit">Publish</button>
         </div>
       </form>
     </div>
@@ -439,25 +472,27 @@
   <div id="keys-modal" class="modal hidden">
     <div class="modal-card">
       <div class="modal-head">
-        <h3>Daemon Keys</h3>
+        <h3 data-i18n="keys.title">Daemon Keys</h3>
         <button id="keys-close" type="button" class="icon-btn">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="form-hint">
+        <p class="form-hint" data-i18n="keys.hint">
           A daemon authenticates to this server with a key bound to your owner
           account. The plaintext is shown <strong>only once</strong> at creation
           — copy it into the daemon's <code>--daemon-key</code> config.
         </p>
 
         <form id="keys-create-form" class="keys-create">
-          <input type="text" id="keys-label" placeholder="Label (optional)"
+          <input type="text" id="keys-label"
+                 data-i18n-placeholder="keys.labelPlaceholder"
+                 placeholder="Label (optional)"
                  autocomplete="off" spellcheck="false" />
-          <button type="submit" id="keys-create-submit">Create key</button>
+          <button type="submit" id="keys-create-submit" data-i18n="keys.create">Create key</button>
         </form>
 
         <!-- One-time plaintext reveal of a freshly minted key. -->
         <div id="keys-reveal" class="keys-reveal hidden">
-          <p class="keys-reveal-note">
+          <p class="keys-reveal-note" data-i18n="keys.revealNote">
             Copy this key now — it will not be shown again.
           </p>
           <code id="keys-reveal-value" class="keys-reveal-value"></code>
@@ -466,7 +501,7 @@
         <p id="keys-error" class="form-error hidden"></p>
 
         <div id="keys-list" class="keys-list">
-          <p class="empty">Loading keys&hellip;</p>
+          <p class="empty" data-i18n="keys.loading">Loading keys&hellip;</p>
         </div>
       </div>
     </div>
@@ -478,34 +513,41 @@
   <div id="users-modal" class="modal hidden">
     <div class="modal-card">
       <div class="modal-head">
-        <h3>用户管理</h3>
+        <h3 data-i18n="users.title">User Management</h3>
         <button id="users-close" type="button" class="icon-btn">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="form-hint">
-          创建、删除本地用户，重置本地用户密码，或切换管理员标志。
-          所有权限判定均在服务端强制执行——你无法删除或降权自己、系统中最后一个管理员，
-          或保留的 break-glass 管理账户。
+        <p class="form-hint" data-i18n="users.hint">
+          Create and delete local users, reset local-user passwords, or toggle the
+          admin flag. All permission checks are enforced server-side — you cannot
+          delete or demote yourself, the last admin in the system, or the reserved
+          break-glass admin account.
         </p>
 
         <form id="users-create-form" class="users-create">
-          <input type="text" id="users-username" placeholder="用户名"
+          <input type="text" id="users-username"
+                 data-i18n-placeholder="users.usernamePlaceholder"
+                 placeholder="Username"
                  autocomplete="off" autocapitalize="off" spellcheck="false" />
-          <input type="password" id="users-password" placeholder="密码"
+          <input type="password" id="users-password"
+                 data-i18n-placeholder="users.passwordPlaceholder"
+                 placeholder="Password"
                  autocomplete="new-password" />
-          <input type="text" id="users-display-name" placeholder="显示名（可选）"
+          <input type="text" id="users-display-name"
+                 data-i18n-placeholder="users.displayNamePlaceholder"
+                 placeholder="Display name (optional)"
                  autocomplete="off" spellcheck="false" />
           <label class="checkbox-label" for="users-is-admin">
             <input type="checkbox" id="users-is-admin">
-            管理员
+            <span data-i18n="users.isAdmin">Admin</span>
           </label>
-          <button type="submit" id="users-create-submit">新建用户</button>
+          <button type="submit" id="users-create-submit" data-i18n="users.create">Create user</button>
         </form>
 
         <p id="users-error" class="form-error hidden"></p>
 
         <div id="users-list" class="users-list">
-          <p class="empty">Loading users&hellip;</p>
+          <p class="empty" data-i18n="users.loading">Loading users&hellip;</p>
         </div>
       </div>
     </div>
