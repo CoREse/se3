@@ -3953,6 +3953,14 @@ e2eConsistencyMod.registerConsoleE2EConsistencyTests({ app, check, findOne, find
 const snapshotDiscoveryMod = await import("./snapshot_discovery_dedup.test.mjs");
 snapshotDiscoveryMod.registerSnapshotDiscoveryDedupTests({ app, check, findOne, findAll });
 
+// Register the G3 worktree multi-round discovery reconcile guard. Pins that the
+// frontend consumes G1's per-physical-file disambiguated step_id so a worktree
+// flow's 2nd+ discovery round (primary file rounds + a ``.from-<branch>``
+// sidecar) all render, and that dedupeSnapshotDiscovery drops only a
+// byte-identical clone — never a legitimately-different record on ordinal reuse.
+const worktreeDiscoveryMod = await import("./worktree_discovery_multiround.test.mjs");
+worktreeDiscoveryMod.registerWorktreeDiscoveryMultiroundTests({ app, check, findOne, findAll });
+
 // Register the issue-#209 frontend real-frame replay guard (G3 task 2). Replays
 // the EXACT real frame sequence G1 captured
 // (tests/frontend/fixtures/issue_209/daemon_frames.json) through the production

@@ -6328,6 +6328,14 @@ function legacyKeyFromNorm(n) {
 // fall back to the legacy coarse content key so their behaviour is unchanged.
 // The `#` separator and short length make an ordinal key un-collidable with any
 // legacy key.
+//
+// WHY the raw `stepId` is used verbatim (never re-folded): a worktree flow's
+// discovery is surfaced from several physical .jsonl files (the worktree
+// primary plus a ``.from-<branch>`` merge-back sidecar), whose per-file line
+// ordinals both restart at 0. The daemon reader (G1) gives each physical file a
+// DISTINCT step_id, so consuming it as-is keeps `stepId#ordinal` globally unique
+// across sources — the 2nd+ discovery round no longer collides with round 1 and
+// so is neither dropped nor overwritten by the idempotent reconcile.
 function recordKey(rec) {
   const n = normalizeRecord(rec);
   const ord = recordOrdinal(rec);
@@ -6578,27 +6586,45 @@ function reconcileAppendRecords(existing, incoming) {
 // full` snapshot — which the `mergeHistoryResponse` full path adopts wholesale
 // and which `dedupeAppendRecords` (append-only) does NOT cover — it would
 // render as a doubled discovery bubble. This pass drops a discovery record
-// whose `recordKey` was already seen EARLIER in the same snapshot, keeping the
-// first occurrence and preserving order. It is scoped strictly to discovery
+// whose `recordKey` was already seen EARLIER in the same snapshot ONLY when the
+// earlier record carried byte-identical content — a genuine clone. It keeps the
+// first occurrence and preserves order. It is scoped strictly to discovery
 // records: every non-discovery record passes through untouched (so the later
 // analyze/plan/implement steps and the recordKey identity / incremental cursor
 // of the rest of the conversation are unchanged), and when nothing is dropped
 // the original array reference is returned so the common path is a no-op.
+//
+// WHY the content compare (not a bare `recordKey` de-dup): a worktree flow's
+// discovery is split across physical .jsonl files (the worktree primary plus a
+// ``.from-<branch>`` merge-back sidecar). G1's daemon reader gives each file a
+// distinct step_id so `stepId#ordinal` stays globally unique — but this guard
+// must not depend on that holding. If two discovery records ever collide on
+// `recordKey` yet carry DIFFERENT content they are NOT clones (the pathological
+// ordinal reuse that erased the 2nd+ discovery round pre-G1); dropping the
+// later one would silently lose a legitimate round. Comparing content first
+// keeps a true clone collapsed to one bubble while never deleting a distinct
+// record that merely reuses a physical ordinal.
 function dedupeSnapshotDiscovery(records) {
   if (!Array.isArray(records) || records.length < 2) return records;
-  const seen = new Set();
+  // recordKey -> the set of content signatures already kept for that key.
+  const seen = new Map();
   let dropped = false;
   const out = [];
   for (const rec of records) {
-    let isDiscovery = false;
-    try {
-      isDiscovery =
-        String((normalizeRecord(rec).stepType) || "").toLowerCase() === "discovery";
-    } catch (_) { isDiscovery = false; }
+    let norm = null;
+    try { norm = normalizeRecord(rec); } catch (_) { norm = null; }
+    const isDiscovery =
+      !!norm && String(norm.stepType || "").toLowerCase() === "discovery";
     if (isDiscovery) {
       const key = recordKey(rec);
-      if (seen.has(key)) { dropped = true; continue; }
-      seen.add(key);
+      const sig = legacyKeyFromNorm(norm);
+      const sigs = seen.get(key);
+      if (sigs) {
+        if (sigs.has(sig)) { dropped = true; continue; }  // byte-identical clone
+        sigs.add(sig);
+      } else {
+        seen.set(key, new Set([sig]));
+      }
     }
     out.push(rec);
   }
