@@ -78,6 +78,11 @@ queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式
 - 测试放在 `tests/` 目录，命名 `test_*.py`，使用 pytest。受控例外：
   `src/se3/engine/` 允许与引擎源码同位放置 pytest 测试模块，用于覆盖紧耦合的引擎
   内部行为（私有 helper、状态机内部分支、step 内部细节）。
+- **关键 why-comment 标记前缀**：记载绑定意图/不变量（binding intent/invariant）
+  的关键 why-comment 应以 `WHY:` 或 `INVARIANT:` 前缀显式标注。此类被标记的注释受
+  `invariant_check` 硬守卫保护——diff 删除或改写它而未恢复、亦未以更新后的
+  `WHY:`/`INVARIANT:` 注释显式声明新理由时，将触发 REVISION_NEEDED；普通注释不受此
+  约束。存量关键注释的前缀回填经后续 issue 渐进进行。
 
 ### Requirement: Key Constraints
 项目级强制约束（违反即视为错误的硬约定）。

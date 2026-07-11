@@ -56,6 +56,24 @@ logger = logging.getLogger(__name__)
 # verbatim_quote can substring-match the human-written rationale.
 _COMMENT_MARKERS = ("#", "//")
 
+# Marker prefixes (checked on the comment BODY, after the ``#`` / ``//`` marker
+# has been stripped) that flag a comment as carrying *binding* intent — a why /
+# invariant the author explicitly asked to be protected. A diff that DELETES or
+# rewrites such a marked comment (without restoring it or declaring a reason) is
+# hard-guarded into REVISION_NEEDED (缺口二); unmarked comments never block, so
+# the mechanical set-diff cannot spin the fix loop on debug/refactor noise.
+_WHY_MARKER_PREFIXES = ("WHY:", "INVARIANT:")
+
+
+def _is_marked_why_comment(body: str) -> bool:
+    """True when ``body`` (a marker-stripped comment) carries a WHY:/INVARIANT: tag.
+
+    Case-insensitive; the colon is required so ``# WHY not`` prose does not trip
+    the hard guard. Only explicitly tagged comments are machine-protected.
+    """
+    upper = body.strip().upper()
+    return any(upper.startswith(p) for p in _WHY_MARKER_PREFIXES)
+
 
 def _extract_comments(text: str) -> list[str]:
     """Return the text of single-line comments (``#`` / ``//``) in ``text``.
@@ -155,6 +173,105 @@ def _harvest_why_comments(
     return out
 
 
+def _deleted_comments_by_file(
+    project_root: Path,
+    changed_files: set[str],
+    baseline_commit: str | None,
+) -> dict[str, list[str]]:
+    """Per-file set-diff of colocated comments: baseline HAS, working tree LACKS.
+
+    For each changed file, compare the comment set at the frozen baseline (via
+    ``git show <baseline>:<rel>``) against the current working-tree comment set;
+    a comment present at baseline but absent now was **deleted or rewritten** (a
+    rewrite makes the old body vanish, which is a "deletion" of the old text —
+    exactly the silent knowledge loss 缺口二 guards). Returns ``{rel: [body, …]}``
+    for files that lost at least one comment, preserving baseline order.
+
+    Silently skips (contributes nothing) when there is no baseline commit, the
+    file did not exist at baseline (a newly added file loses nothing), or either
+    revision is binary/unreadable — mirroring ``_harvest_why_comments``' best-
+    effort, never-raise contract so this side-channel can never break the step.
+    """
+    out: dict[str, list[str]] = {}
+    if not baseline_commit:
+        return out
+    for rel in sorted(changed_files):
+        if not isinstance(rel, str) or not rel:
+            continue
+        baseline_text = _read_baseline_file(project_root, baseline_commit, rel)
+        if baseline_text is None:
+            # No baseline copy (new file, or unreadable at baseline) → nothing to
+            # have lost. Skip silently.
+            continue
+        # Working-tree comment set. A file deleted outright reads as empty, so
+        # every baseline comment counts as lost (the whole file's intent is gone).
+        working_text = ""
+        path = project_root / rel
+        try:
+            if path.is_file():
+                working_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Unreadable working copy: we cannot reliably diff, so skip rather
+            # than flag every baseline comment as a phantom deletion.
+            continue
+
+        working_set = set(_extract_comments(working_text))
+        deleted = [
+            body for body in _extract_comments(baseline_text)
+            if body not in working_set
+        ]
+        if deleted:
+            out[rel] = deleted
+    return out
+
+
+def _build_why_comment_guard_issues(
+    deleted_by_file: dict[str, list[str]],
+) -> list[dict]:
+    """Synthesize anchored issues for deleted/rewritten WHY:/INVARIANT: comments.
+
+    缺口二 hard guard: only comments the author explicitly tagged with a
+    WHY:/INVARIANT: prefix are protected. Each such lost comment becomes an
+    issue whose ``verbatim_quote`` is the comment body itself — which is still in
+    the anchor pool because ``_harvest_why_comments`` reads the baseline copy —
+    so it survives ``_validate_and_filter_issues``' verbatim-quote check. The
+    issue is grounded via ``missing_in`` (the file that should have kept the
+    comment), and ``expected_behavior`` names the two accepted exits: restore the
+    comment, or record the reason in an updated WHY:/INVARIANT: comment.
+    """
+    issues: list[dict] = []
+    for rel in sorted(deleted_by_file):
+        for body in deleted_by_file[rel]:
+            if not _is_marked_why_comment(body):
+                continue
+            issues.append({
+                "severity": "high",
+                "actual_behavior": (
+                    f"the diff deleted or rewrote a marked intent comment in "
+                    f"{rel} without restoring it: \"{body}\""
+                ),
+                "expected_behavior": (
+                    "A WHY:/INVARIANT: comment records binding intent and must "
+                    "not be silently dropped. Either restore the comment, or, if "
+                    "the intent genuinely changed, record the new reasoning in an "
+                    "updated WHY:/INVARIANT: comment at the same location."
+                ),
+                "divergence": (
+                    f"after this change {rel} no longer carries the recorded "
+                    f"intent \"{body}\", so the knowledge is lost from the "
+                    f"code and from the next flow's anchor pool"
+                ),
+                "expectation_source": {
+                    "type": "why_comment",
+                    "verbatim_quote": body,
+                },
+                "evidence_lines": [],
+                "missing_in": [rel],
+                "out_of_scope": False,
+            })
+    return issues
+
+
 def _build_anchor_inputs(step: Step, flow: FlowInstance, project_root: Path) -> dict:
     """Assemble the synthetic step_inputs that drives self_check's validators.
 
@@ -244,6 +361,9 @@ A *binding invariant* is a rule that the Task Description, the Charter, or a tou
 ## HARD scope limit (this is the whole point of this check)
 You may ONLY report a violation when you can quote the recorded rule **verbatim** from the anchored material above. If a concern is real but is not written down anywhere above, it is OUT OF SCOPE here — do NOT report it. Unwritten expectations are intentionally not machine-guarded. This is NOT a free code review: do NOT report style, missing tests, performance, or "nice to have" concerns, and do NOT report anything a downstream specialized step owns (e.g. version bumping is decided by version_analyze).
 
+## Constitutional-amendment exemption
+If the diff edits `se3/charter.md` AND the Task Description explicitly calls for that charter change, the specific clauses the task directs you to modify MUST NOT be cited as a violation: a task-sanctioned amendment to the charter is legitimate governance, not a breach of the (now-superseded) old text. Do not read a directed rewrite of an old rule as a violation of that old rule. All OTHER invariants — and every charter clause the task did NOT name — still apply in full.
+
 ## Issue Schema (HARD requirements — handler validates and drops violators)
 Each issue MUST be a JSON object with:
 - `severity`: one of "critical" / "high" / "medium" / "low"
@@ -285,6 +405,106 @@ If the diff violates no recorded invariant, return an empty issues array.
 
 # Two-segment marker only: USER_CONTENT region is empty (no user literal here).
 INVARIANT_CHECK_PROMPT = inject_boundary(INVARIANT_CHECK_PROMPT, "## Task Description\n")
+
+
+WHY_LOSS_REJUDGE_PROMPT = """You are triaging comment deletions for lost *intent* knowledge.
+
+The diff below deleted or rewrote the following single-line comments (they were present at the flow's baseline but are gone from the working tree now). NONE of them carried an explicit WHY:/INVARIANT: marker (those are handled elsewhere), so this is an ADVISORY triage only — nothing here blocks the flow.
+
+Your ONLY job: decide which of these deletions represent a **meaningful loss of "why / intent" knowledge** — the reasoning behind a non-obvious trade-off, a constraint, or the reason a code path exists. EXCLUDE noise:
+- debug / commented-out code / TODO scaffolding,
+- a comment that merely restates what the code does,
+- a comment that was clearly MOVED (its text likely reappears elsewhere in the diff, e.g. a refactor relocating a block across files — in a per-file diff a move looks like a deletion),
+- trivial or obvious remarks.
+
+## Deleted comments (per file)
+{deleted_block}
+
+Respond in JSON:
+```json
+{{
+    "losses": [
+        {{ "file": "<path the comment was deleted from>",
+           "comment": "<the deleted comment text, verbatim>",
+           "why_it_matters": "<one line: what intent knowledge is lost>" }}
+    ]
+}}
+```
+If none of them is a meaningful why/intent loss, return an empty losses array.
+"""
+
+
+def _format_deleted_comments_block(losses_by_file: dict[str, list[str]]) -> str:
+    """Render the non-marked deleted comments for the advisory re-judge prompt."""
+    lines: list[str] = []
+    for rel in sorted(losses_by_file):
+        bodies = losses_by_file[rel]
+        if not bodies:
+            continue
+        lines.append(f"### {rel}")
+        for body in bodies:
+            lines.append(f"- {body}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _rejudge_why_losses(
+    project_root: Path,
+    flow: FlowInstance,
+    step: Step,
+    losses_by_file: dict[str, list[str]],
+) -> list[dict]:
+    """Advisory-only LLM triage of unmarked comment deletions (缺口二).
+
+    Filters the full mechanical set-diff down to deletions that are a *meaningful*
+    why/intent loss (dropping debug/move/restatement noise), returning a list of
+    ``{file, comment, why_it_matters}`` dicts destined for ``step.outputs`` only —
+    NEVER the fix loop. Any failure (no losses, LLM error, unparsable / malformed
+    response) degrades silently to ``[]`` so this side-channel cannot affect the
+    main audit's return value.
+    """
+    if not losses_by_file:
+        return []
+    try:
+        prompt = WHY_LOSS_REJUDGE_PROMPT.format(
+            deleted_block=_format_deleted_comments_block(losses_by_file),
+        )
+        caller = LLMCaller(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=step.step_id,
+            step_type=step.step_type.value,
+        )
+        response = caller.call(
+            prompt=prompt,
+            json_mode="two_phase",
+            json_schema_hint=(
+                '{"losses": [{"file": "...", "comment": "...", '
+                '"why_it_matters": "..."}]}'
+            ),
+            required_keys=["losses"],
+        )
+        result = parse_json_response(response, required_keys=["losses"])
+        if not result:
+            return []
+        losses = result.get("losses", [])
+        if not isinstance(losses, list):
+            return []
+        cleaned: list[dict] = []
+        for entry in losses:
+            if not isinstance(entry, dict):
+                continue
+            comment = entry.get("comment")
+            if isinstance(comment, str) and comment.strip():
+                cleaned.append({
+                    "file": entry.get("file", ""),
+                    "comment": comment,
+                    "why_it_matters": entry.get("why_it_matters", ""),
+                })
+        return cleaned
+    except Exception:
+        # Advisory side-channel: never let a triage failure disturb the audit.
+        logger.info("why-comment loss re-judge failed; degrading to none", exc_info=True)
+        return []
 
 
 def _has_changed_files(changes_made: Any) -> bool:
@@ -425,9 +645,55 @@ def invariant_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         step.outputs["invariant_check_result"] = result
         step.outputs["raw_issues"] = raw_issues
+        step.outputs["validation_stats"] = validation_stats
+
+        # -----------------------------------------------------------------
+        # 缺口二: guard the knowledge artifacts (why-comments) themselves.
+        # A diff that DELETES/rewrites a comment WITHOUT violating it slips past
+        # the anchored audit above (nothing contradicts a recorded rule). Two
+        # channels, split by explicit author intent:
+        #   • hard guard — comments tagged WHY:/INVARIANT: become anchored issues
+        #     that join the fix loop (their body is still in the anchor pool via
+        #     the baseline harvest, so they pass verbatim-quote validation);
+        #   • advisory — every OTHER deletion goes through a single LLM triage
+        #     (meaningful why loss vs debug/move/restatement noise) and lands in
+        #     step.outputs only, NEVER the fix loop. Feeding the raw set-diff into
+        #     a hard fix loop would revive self_check's old anchor-less nit churn.
+        baseline_commit = getattr(flow, "baseline_commit", None)
+        changed_paths = _changed_paths({"changes_made": changes_made})
+        deleted_by_file = _deleted_comments_by_file(
+            project_root, changed_paths, baseline_commit
+        )
+
+        guard_raw = _build_why_comment_guard_issues(deleted_by_file)
+        hard_violations: list[dict] = []
+        if guard_raw:
+            hard_violations, _ = _validate_and_filter_issues(
+                guard_raw, anchor_inputs,
+            )
+            if hard_violations:
+                logger.warning(
+                    "invariant_check: %d marked why-comment(s) deleted/rewritten "
+                    "without restoration — routing to fix loop.",
+                    len(hard_violations),
+                )
+        step.outputs["why_comment_hard_violations"] = hard_violations
+
+        # Advisory: full set-diff MINUS the marked (hard-guarded) comments.
+        advisory_by_file: dict[str, list[str]] = {}
+        for rel, bodies in deleted_by_file.items():
+            unmarked = [b for b in bodies if not _is_marked_why_comment(b)]
+            if unmarked:
+                advisory_by_file[rel] = unmarked
+        why_comment_losses = _rejudge_why_losses(
+            project_root, flow, step, advisory_by_file
+        )
+        step.outputs["why_comment_losses"] = why_comment_losses
+
+        # Merge the hard-guard violations with the LLM's anchored violations.
+        kept_issues = kept_issues + hard_violations
         step.outputs["issues"] = kept_issues
         step.outputs["actionable_count"] = len(kept_issues)
-        step.outputs["validation_stats"] = validation_stats
 
         if not kept_issues:
             logger.info("invariant_check passed (no recorded invariant violated).")

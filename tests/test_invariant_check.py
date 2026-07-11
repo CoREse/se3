@@ -248,8 +248,12 @@ def test_deleted_why_comment_invariant_recovered_from_baseline(tmp_path, monkeyp
     src = tmp_path / "src"
     src.mkdir()
     f = src / "ledger.py"
+    # A plain (unmarked) rationale comment: this test isolates baseline
+    # anchor-recovery. The WHY:/INVARIANT: marker-prefix hard guard is covered
+    # separately in tests/test_why_comment_guard.py, so we deliberately avoid the
+    # marker here to keep the assertion (exactly one LLM-reported violation).
     f.write_text(
-        "# Invariant: account balance must never go negative\n"
+        "# balance rule: account balance must never go negative\n"
         "def debit(x):\n    return x\n",
         encoding="utf-8",
     )
@@ -268,9 +272,14 @@ def test_deleted_why_comment_invariant_recovered_from_baseline(tmp_path, monkeyp
     quote = "account balance must never go negative"
     issue = _grounded_issue(quote, "src/ledger.py")
     issue["expectation_source"]["type"] = "why_comment"
-    state = _install_fake_caller(
-        monkeypatch, [json.dumps({"issues": [issue], "summary": "x"})]
-    )
+    # Response #1: the main audit (the anchored violation). Response #2: the
+    # advisory why-comment-loss triage, which now also runs because the diff
+    # deleted a comment (a plain, unmarked one — so it takes the advisory path,
+    # not the hard guard). It reports no meaningful loss here.
+    state = _install_fake_caller(monkeypatch, [
+        json.dumps({"issues": [issue], "summary": "x"}),
+        json.dumps({"losses": []}),
+    ])
     # The ONLY anchor is the deleted why-comment, recoverable from baseline.
     flow = _make_flow(tmp_path, task="")
     flow.baseline_commit = baseline
@@ -282,9 +291,12 @@ def test_deleted_why_comment_invariant_recovered_from_baseline(tmp_path, monkeyp
 
     result = invariant_check.invariant_check_handler(step, flow)
 
-    assert state["calls"] == 1
+    assert state["calls"] == 2  # main audit + advisory loss triage
     assert result is StepStatus.REVISION_NEEDED
+    # Only the LLM's anchored violation survives; the unmarked deletion is
+    # advisory-only, so it adds no hard issue.
     assert step.outputs["actionable_count"] == 1
+    assert step.outputs["why_comment_hard_violations"] == []
 
 
 def test_unparsable_llm_response_fails(tmp_path, monkeypatch):
