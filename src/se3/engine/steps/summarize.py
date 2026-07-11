@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..llm_caller import LLMCaller
-from ..models import FlowInstance, Step, StepStatus
+from ..models import FlowInstance, Step, StepStatus, StepType
 from ..prompt_markers import inject_boundary
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,13 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         commit_info=commit_info,
         completion_section=completion_section,
     )
+
+    # Surface the knowledge-artifact guard results (charter auto-update /
+    # advisory + why-comment losses) so they are reachable in the flow-level
+    # report rather than stranded in a step detail view nobody reopens.
+    knowledge_section = _format_knowledge_guards(flow)
+    if knowledge_section:
+        prompt += knowledge_section
 
     # Append language instruction if configured.
     # Note: summarize deliberately does NOT receive B-class issue-discovery
@@ -239,6 +246,117 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
         lines.append(f"Issues found: {len(issues)} ({error_count} errors)")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# knowledge-artifact guard aggregation (charter_freshness + invariant_check)
+# ---------------------------------------------------------------------------
+# charter_freshness closes its own propose->gate->apply loop and invariant_check
+# records advisory why-comment losses, but both results only live in the single
+# step's detail view — which nobody revisits after a flow finishes. summarize is
+# the one flow-level consumer everyone reads, so it surfaces them here: without
+# this, an auto-applied charter update, a degraded advisory, or a lost why-
+# comment would be practically unreachable.
+
+# Cap the charter diff excerpt so a large descriptive rewrite cannot flood the
+# session report (or the LLM prompt) — the full diff stays in the step outputs.
+MAX_CHARTER_DIFF_CHARS = 2000
+
+
+def _collect_knowledge_guard_outputs(
+    flow: FlowInstance,
+) -> tuple[dict[str, Any], list[dict]]:
+    """Pull the charter_freshness outputs and invariant_check why-comment losses.
+
+    Returns ``(charter_outputs, why_losses)``. Scans ``flow.state.steps`` rather
+    than ``step.inputs`` so summarize stays self-contained (the state machine
+    does not forward these fields). When a step ran more than once (fix-loop
+    re-run), the last occurrence carrying the field wins.
+    """
+    charter_outputs: dict[str, Any] = {}
+    why_losses: list[dict] = []
+    state = getattr(flow, "state", None)
+    if state is None:
+        return charter_outputs, why_losses
+    for step in state.steps.values():
+        outputs = step.outputs if isinstance(step.outputs, dict) else {}
+        if step.step_type is StepType.CHARTER_FRESHNESS:
+            charter_outputs = outputs
+        elif step.step_type is StepType.INVARIANT_CHECK:
+            losses = outputs.get("why_comment_losses")
+            if isinstance(losses, list) and losses:
+                why_losses = losses
+    return charter_outputs, why_losses
+
+
+def _format_why_loss(loss: Any) -> str:
+    """Render one ``{file, comment, why_it_matters}`` advisory entry as one line."""
+    if not isinstance(loss, dict):
+        return str(loss)
+    comment = str(loss.get("comment", "") or "").strip()
+    file = str(loss.get("file", "") or "").strip()
+    why = str(loss.get("why_it_matters", "") or "").strip()
+    head = f"`{file}`: " if file else ""
+    body = comment or "(comment)"
+    tail = f" — {why}" if why else ""
+    return f"{head}{body}{tail}"
+
+
+def _format_knowledge_guards(flow: FlowInstance) -> str:
+    """Build the flow-level "Knowledge Guards" markdown section (or "").
+
+    Covers three shapes: charter auto-updated (note + capped diff excerpt),
+    charter update advised but not applied (suggested_update + degraded reason),
+    and non-empty why-comment losses. Returns "" when nothing happened so the
+    common flow's report is unchanged.
+    """
+    charter_outputs, why_losses = _collect_knowledge_guard_outputs(flow)
+    lines: list[str] = []
+
+    if charter_outputs:
+        auto_updated = bool(charter_outputs.get("charter_auto_updated"))
+        update_needed = bool(charter_outputs.get("charter_update_needed"))
+        if auto_updated:
+            lines.append("### Charter Auto-Update")
+            lines.append(
+                "The project charter (`se3/charter.md`) was automatically updated "
+                "to descriptively reflect this session's already-reviewed changes."
+            )
+            diff = str(charter_outputs.get("charter_diff", "") or "")
+            if diff:
+                excerpt = diff[:MAX_CHARTER_DIFF_CHARS]
+                if len(diff) > MAX_CHARTER_DIFF_CHARS:
+                    excerpt += "\n… (diff truncated)"
+                lines.append("```diff")
+                lines.append(excerpt)
+                lines.append("```")
+        elif update_needed:
+            lines.append("### Charter Update Advisory")
+            lines.append(
+                "The diff appears to touch the charter but it was NOT auto-updated; "
+                "a manual charter review/update is advised."
+            )
+            suggested = str(charter_outputs.get("suggested_update", "") or "").strip()
+            if suggested:
+                lines.append(f"- Suggested update: {suggested}")
+            reason = str(charter_outputs.get("degraded_reason", "") or "").strip()
+            if reason:
+                lines.append(f"- Not auto-applied because: {reason}")
+
+    if why_losses:
+        lines.append("### Why-Comment Losses (advisory)")
+        lines.append(
+            "These meaningful why/intent comments were removed or rewritten this "
+            "session — review whether the recorded intent was lost:"
+        )
+        for loss in why_losses[:10]:
+            lines.append(f"- {_format_why_loss(loss)}")
+        if len(why_losses) > 10:
+            lines.append(f"- … and {len(why_losses) - 10} more")
+
+    if not lines:
+        return ""
+    return "\n## Knowledge Guards\n" + "\n".join(lines) + "\n"
 
 
 def _resolve_verified(verification_result: dict[str, Any]) -> bool | None:
@@ -438,6 +556,12 @@ def _create_basic_summary_text(
         f"### Handoff Context",
         handoff,
     ])
+
+    # Same knowledge-guard aggregation the LLM prompt gets, so the deterministic
+    # fallback report is not blind to charter auto-updates / why-comment losses.
+    knowledge_section = _format_knowledge_guards(flow)
+    if knowledge_section:
+        lines.append(knowledge_section)
 
     return "\n".join(lines)
 

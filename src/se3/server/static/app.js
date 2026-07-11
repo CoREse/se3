@@ -9333,6 +9333,8 @@ const STEP_RESULT_FIELDS = {
     "confidence", "reasoning"],
   summarize: ["summary"],
   discovery: ["content", "refined_description", "questions"],
+  charter_freshness: ["charter_update_needed", "charter_auto_updated",
+    "charter_diff", "suggested_update", "touched_classes"],
 };
 
 // True when `value` is a dict carrying at least one of `stepType`'s result
@@ -10797,6 +10799,7 @@ const STEP_REPORT_TITLES = {
   update_spec: "Spec Update",
   spec_gate: "Spec Gate",
   version_analyze: "Version Analysis",
+  charter_freshness: "Charter Freshness",
   commit: "Commit",
   // The two worktree-merge steps that replaced the retired "合并中" bypass.
   merge_integrate: "Merge",
@@ -12103,6 +12106,66 @@ function renderSpecGateReport(step, outputs) {
   return frag;
 }
 
+// -- charter_freshness ------------------------------------------------------
+//
+// The step sits after invariant_check and may auto-write se3/charter.md itself
+// (a descriptive update reflecting the already-reviewed change) via its
+// propose->gate->apply closed loop, or degrade to an advisory suggestion. The
+// card renders three shapes: auto-updated (note + the old→new unified diff in a
+// monospace block), update advised but not applied (suggested_update + the
+// degraded reason), and fresh / untouched (a one-line pass note).
+function renderCharterFreshnessReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const updateNeeded = !!outputs.charter_update_needed;
+  const autoUpdated = !!outputs.charter_auto_updated;
+
+  const bar = el("div", "step-report__status-bar");
+  if (autoUpdated) {
+    bar.appendChild(el("span", "step-report__label ok", "✓ charter auto-updated"));
+  } else if (updateNeeded) {
+    bar.appendChild(el("span", "step-report__label warn", "charter update advised"));
+  } else {
+    bar.appendChild(el("span", "step-report__label ok", "✓ charter fresh"));
+  }
+  const touched = outputs.touched_classes;
+  if (Array.isArray(touched) && touched.length) {
+    bar.append(el("span", "step-report__sep", "│"),
+      el("span", "step-report__muted", "touched: " + touched.join(", ")));
+  }
+  frag.appendChild(bar);
+
+  if (autoUpdated) {
+    frag.appendChild(el("div", "step-report__muted",
+      "se3/charter.md was updated to describe the already-reviewed change."));
+    const diff = outputs.charter_diff;
+    if (diff) {
+      const pre = el("pre", "step-report__diff");
+      pre.textContent = String(diff);
+      frag.appendChild(reportSection("Charter diff (old → new)", pre));
+    }
+  } else if (updateNeeded) {
+    if (outputs.suggested_update) {
+      frag.appendChild(reportSection("Suggested update",
+        String(outputs.suggested_update)));
+    }
+    if (outputs.degraded_reason) {
+      frag.appendChild(el("div", "step-report__muted",
+        "Not auto-applied: " + String(outputs.degraded_reason)));
+    }
+  }
+
+  if (outputs.reason) {
+    frag.appendChild(el("div", "step-report__muted", String(outputs.reason)));
+  }
+
+  // Human-amendment monitoring light: when the diff itself edited the charter.
+  if (outputs.admission_warning) {
+    frag.appendChild(reportSection("Charter admission",
+      String(outputs.admission_warning)));
+  }
+  return frag;
+}
+
 const STEP_REPORT_RENDERERS = {
   analyze: renderAnalyzeReport,
   plan: renderPlanReport,
@@ -12116,6 +12179,7 @@ const STEP_REPORT_RENDERERS = {
   summarize: renderSummarizeReport,
   discovery: renderDiscoveryReport,
   spec_gate: renderSpecGateReport,
+  charter_freshness: renderCharterFreshnessReport,
 };
 
 // Build the role / attempt / timestamp header line for one record.

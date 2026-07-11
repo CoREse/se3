@@ -2614,6 +2614,22 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg-dim);
 }
 
+/* charter_freshness renders the old→new unified charter diff in this block. */
+.step-report__diff {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+  max-height: 320px;
+  overflow: auto;
+}
+
 .step-report__markdown { color: var(--fg); }
 .step-report__markdown .md-p { margin: 6px 0; }
 .step-report__markdown .md-p:first-child { margin-top: 0; }

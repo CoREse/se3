@@ -660,11 +660,11 @@ check("normalizeRecord on real jsonl sample yields authoritative step types", ()
 });
 
 // -- step report renderer registry -----------------------------------------
-check("STEP_REPORT_RENDERERS covers the 12 named step types", () => {
+check("STEP_REPORT_RENDERERS covers the 13 named step types", () => {
   const expected = [
     "analyze", "plan", "implement", "test", "self_check", "verify_spec",
     "update_spec", "spec_gate", "commit", "version_analyze", "summarize",
-    "discovery",
+    "discovery", "charter_freshness",
   ];
   for (const t of expected) {
     assert.equal(
@@ -672,9 +672,8 @@ check("STEP_REPORT_RENDERERS covers the 12 named step types", () => {
       "missing renderer for " + t,
     );
   }
-  // Exactly 12 — the prior 11 plus the spec_gate summary renderer (PROPOSE/
-  // DESIGN are deprecated and intentionally excluded; DISCOVERY adds a frontend
-  // renderer).
+  // Exactly 13 — the prior 12 plus the charter_freshness report renderer
+  // (PROPOSE/DESIGN are deprecated and intentionally excluded).
   assert.equal(Object.keys(app.STEP_REPORT_RENDERERS).length, expected.length);
 });
 check("STEP_REPORT_TITLES covers every step type from models.StepType", () => {
@@ -5431,6 +5430,69 @@ check("spec_gate STEP_RESULT_FIELDS recognizes gate result records", () => {
 
 check("spec_gate has a header title", () => {
   assert.equal(app.stepHeaderLabel("spec_gate", "01_spec_gate_x"), "SPEC GATE");
+});
+
+// -- charter_freshness (G5) --------------------------------------------------
+
+check("charter_freshness STEP_RESULT_FIELDS recognizes result records", () => {
+  assert.ok(Array.isArray(app.STEP_RESULT_FIELDS.charter_freshness),
+    "charter_freshness fields missing");
+  // Presence (not non-emptiness) of any result key counts as a result.
+  assert.equal(
+    app.isStepResultDict("charter_freshness", { charter_update_needed: false }), true);
+  assert.equal(
+    app.isStepResultDict("charter_freshness", { charter_auto_updated: true }), true);
+  assert.equal(
+    app.isStepResultDict("charter_freshness", { charter_diff: "--- a\n+++ b" }), true);
+  // A tool-call JSON carrying none of the fields is not a result.
+  assert.equal(app.isStepResultDict("charter_freshness", { command: "ls" }), false);
+});
+
+check("charter_freshness report renders the auto-update diff", () => {
+  const step = { status: "completed", step_type: "charter_freshness" };
+  const outputs = {
+    charter_update_needed: true,
+    charter_auto_updated: true,
+    touched_classes: ["conventions"],
+    charter_diff: "--- se3/charter.md (old)\n+++ se3/charter.md (new)\n-old line\n+new line",
+  };
+  const frag = app.STEP_REPORT_RENDERERS.charter_freshness(step, outputs);
+  assert.ok(frag.textContent.includes("auto-updated"), "expected auto-updated label");
+  const pre = findOne(frag, "step-report__diff");
+  assert.ok(pre, "expected a diff block");
+  assert.ok(pre.textContent.includes("+new line"), "diff content missing");
+  assert.ok(frag.textContent.includes("conventions"), "touched class missing");
+});
+
+check("charter_freshness report renders the advisory (not applied) shape", () => {
+  const step = { status: "completed", step_type: "charter_freshness" };
+  const frag = app.STEP_REPORT_RENDERERS.charter_freshness(step, {
+    charter_update_needed: true,
+    charter_auto_updated: false,
+    suggested_update: "Record the new runner adapter in the architecture section.",
+    degraded_reason: "invariant_check_not_completed",
+  });
+  assert.ok(frag.textContent.includes("advised"), "expected advisory label");
+  assert.ok(frag.textContent.includes("Record the new runner adapter"),
+    "expected suggested_update");
+  assert.ok(frag.textContent.includes("invariant_check_not_completed"),
+    "expected degraded reason");
+  assert.equal(!!findOne(frag, "step-report__diff"), false, "no diff when not applied");
+});
+
+check("charter_freshness report renders the fresh (no-op) shape", () => {
+  const step = { status: "completed", step_type: "charter_freshness" };
+  const frag = app.STEP_REPORT_RENDERERS.charter_freshness(step, {
+    charter_update_needed: false,
+    charter_auto_updated: false,
+    reason: "No changes in this flow; charter unaffected.",
+  });
+  assert.ok(/fresh/i.test(frag.textContent), "expected fresh label");
+  assert.ok(frag.textContent.includes("charter unaffected"), "expected reason line");
+});
+
+check("charter_freshness has a report card title", () => {
+  assert.equal(app.reportCardTitle("charter_freshness"), "Charter Freshness · 结果");
 });
 
 // -- Agent/model badge (G1) ---------------------------------------------------

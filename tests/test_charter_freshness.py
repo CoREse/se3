@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from se3.engine.steps import charter_freshness
+from se3.engine.steps import summarize
 from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
 from se3.engine import charter
 
@@ -553,3 +554,98 @@ def test_closed_loop_llm_failure_is_non_blocking(tmp_path, monkeypatch):
     assert step.outputs["charter_auto_updated"] is False
     assert step.outputs["skipped_reason"] == "llm_error"
     assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
+
+
+# ---------------------------------------------------------------------------
+# summarize aggregation of the knowledge-guard results (G5)
+# ---------------------------------------------------------------------------
+# summarize is the sole flow-level consumer of the charter_freshness auto-update
+# / advisory and the invariant_check why-comment losses; without it those results
+# are stranded in a step detail view nobody reopens. These tests exercise the
+# three shapes through the deterministic aggregation helpers (no LLM needed).
+
+def _flow_with_guard_steps(
+    tmp_path: Path,
+    *,
+    charter_outputs=None,
+    invariant_outputs=None,
+) -> FlowInstance:
+    flow = _make_flow(tmp_path)
+    if charter_outputs is not None:
+        flow.state.add_step(Step(
+            step_type=StepType.CHARTER_FRESHNESS,
+            status=StepStatus.COMPLETED,
+            outputs=dict(charter_outputs),
+        ))
+    if invariant_outputs is not None:
+        flow.state.add_step(Step(
+            step_type=StepType.INVARIANT_CHECK,
+            status=StepStatus.COMPLETED,
+            outputs=dict(invariant_outputs),
+        ))
+    return flow
+
+
+def test_summarize_aggregates_charter_auto_update(tmp_path):
+    flow = _flow_with_guard_steps(tmp_path, charter_outputs={
+        "charter_update_needed": True,
+        "charter_auto_updated": True,
+        "touched_classes": ["conventions"],
+        "charter_diff": "--- se3/charter.md (old)\n+++ se3/charter.md (new)\n-old\n+new",
+    })
+
+    section = summarize._format_knowledge_guards(flow)
+    assert "Charter Auto-Update" in section
+    assert "+new" in section  # diff excerpt is embedded
+
+    # The deterministic fallback report also carries it.
+    text = summarize._create_basic_summary_text(flow, {}, {}, "task")
+    assert "Charter Auto-Update" in text
+    assert "+new" in text
+
+
+def test_summarize_aggregates_charter_advisory_and_reason(tmp_path):
+    flow = _flow_with_guard_steps(tmp_path, charter_outputs={
+        "charter_update_needed": True,
+        "charter_auto_updated": False,
+        "suggested_update": "Record the new runner adapter in the architecture section.",
+        "degraded_reason": "invariant_check_not_completed",
+    })
+
+    section = summarize._format_knowledge_guards(flow)
+    assert "Charter Update Advisory" in section
+    assert "Record the new runner adapter" in section
+    assert "invariant_check_not_completed" in section
+
+
+def test_summarize_aggregates_why_comment_losses(tmp_path):
+    flow = _flow_with_guard_steps(
+        tmp_path,
+        invariant_outputs={
+            "why_comment_losses": [
+                {"file": "src/foo.py", "comment": "# guards the retry window",
+                 "why_it_matters": "the constraint is now undocumented"},
+            ],
+        },
+    )
+
+    section = summarize._format_knowledge_guards(flow)
+    assert "Why-Comment Losses" in section
+    assert "guards the retry window" in section
+    assert "src/foo.py" in section
+
+
+def test_summarize_no_guard_activity_adds_nothing(tmp_path):
+    # charter fresh, no why losses -> empty section, base report unchanged.
+    flow = _flow_with_guard_steps(
+        tmp_path,
+        charter_outputs={
+            "charter_update_needed": False,
+            "charter_auto_updated": False,
+        },
+        invariant_outputs={"why_comment_losses": []},
+    )
+
+    assert summarize._format_knowledge_guards(flow) == ""
+    text = summarize._create_basic_summary_text(flow, {}, {}, "task")
+    assert "Knowledge Guards" not in text
