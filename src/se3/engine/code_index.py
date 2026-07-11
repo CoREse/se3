@@ -60,7 +60,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional
 
-from ..config import CodeIndexConfig, load_code_index_config
+from ..config import (
+    CodeIndexConfig,
+    get_language_instruction,
+    load_code_index_config,
+    load_language_config,
+)
 from . import file_enum
 
 try:  # POSIX advisory locking; absent on some platforms (e.g. Windows).
@@ -1070,6 +1075,17 @@ def _make_llm_summarizer(
     others.
     """
 
+    # code-index summaries are a knowledge asset, so they are written in the
+    # configured spec_language when set. Resolved ONCE here (not per group) so a
+    # build's many concurrent groups share one config read; appended to each
+    # group's prompt. Unset spec_language yields "" (zero-injection: the prompt —
+    # and thus prior behaviour — is byte-for-byte unchanged).
+    spec_lang_instruction = get_language_instruction(
+        load_language_config(project_root).spec_language,
+        "code_index",
+        for_spec=True,
+    )
+
     def _summarize_group(item: tuple[str, List[SummaryTarget]]) -> Dict[str, str]:
         # A single per-file group: build the prompt, call this group's OWN caller,
         # and map the JSON result back onto the group's targets. Runs on a worker
@@ -1092,7 +1108,7 @@ def _make_llm_summarizer(
                 "Respond with a JSON object mapping each node id to its "
                 "one-sentence summary.\n\n"
                 f"Path: {relpath}\n\nNodes:\n{listing}"
-            )
+            ) + spec_lang_instruction
             caller = LLMCaller(project_root=project_root, step_type="code_index")
             raw = caller.call(prompt, json_mode="two_phase")
             parsed = json.loads(raw) if isinstance(raw, str) else {}
