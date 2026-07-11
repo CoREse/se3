@@ -849,6 +849,19 @@ function applyNodeTranslations(node, tfn) {
   }
 }
 
+// Localize a DYNAMIC (JS-rendered) UI string, with the in-code literal as the
+// built-in fallback. Uses I18N.resolve (not t()): when a dictionary is loaded
+// the translation wins; a total miss — a boot-time fetch failure or the
+// document-less unit-test environment where the dicts stay empty — returns the
+// original literal instead of painting a raw dotted key. This mirrors the
+// data-i18n static-fallback contract for JS-generated chrome, and keeps every
+// render-time string re-resolved on a language switch (never cached at module
+// load). `params` interpolates {name} placeholders in the dict template.
+function tf(key, fallback, params) {
+  const v = I18N.resolve(key, params);
+  return v != null ? v : fallback;
+}
+
 function statusClass(status) {
   const s = String(status || "unknown").toLowerCase();
   if (["running", "completed", "failed", "paused", "init"].includes(s)) return s;
@@ -1200,9 +1213,9 @@ function applyInterjectionEvent(msg) {
   if (isOpenFlow && !state.interjectionToastsSeen[toastKey]) {
     state.interjectionToastsSeen[toastKey] = true;
     if (phase === "pending") {
-      showToast("info", "插话已送达,等待 flow 消费");
+      showToast("info", tf("toast.interjectionDelivered", "插话已送达,等待 flow 消费"));
     } else if (phase === "consumed") {
-      showToast("success", "插话已被消费");
+      showToast("success", tf("toast.interjectionConsumed", "插话已被消费"));
     }
   }
 
@@ -1278,7 +1291,7 @@ function applySpawnFailed(msg) {
   const projectRoot = String(msg.project_root || "");
   const reason = String(msg.error || "unknown error");
   const where = projectRoot ? ` (${projectRoot})` : "";
-  showToast("error", `启动任务失败${where}：${reason}`);
+  showToast("error", tf("toast.taskLaunchFailed", `启动任务失败${where}：${reason}`, { where, reason }));
 }
 
 // Clear pending-Send bookkeeping and re-enable the Send button via a
@@ -2967,23 +2980,23 @@ async function resumeFlow(flowId) {
       { method: "POST" },
     );
     if (resp.ok) {
-      showToast("success", `Resume dispatched for ${flowId.slice(0, 8)}…`);
+      showToast("success", tf("toast.resumeDispatched", `Resume dispatched for ${flowId.slice(0, 8)}…`, { id: flowId.slice(0, 8) }));
     } else if (resp.status === 404) {
-      showToast("error", "Flow not found or not resumable.");
+      showToast("error", tf("toast.resumeNotFound", "Flow not found or not resumable."));
     } else if (resp.status === 409) {
       // The flow exists but is not resumable right now — typically it is still
       // running (a live process holds it). Surface the backend's explicit
       // rejection detail rather than a misleading "dispatched" success.
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || "该 flow 仍在运行，无法 resume");
+      showToast("error", detail || tf("toast.resumeStillRunning", "该 flow 仍在运行，无法 resume"));
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || `Resume failed (${resp.status}).`);
+      showToast("error", detail || tf("toast.resumeFailed", `Resume failed (${resp.status}).`, { status: resp.status }));
     }
   } catch (_) {
-    showToast("error", "Network error — could not dispatch resume.");
+    showToast("error", tf("toast.resumeNetworkError", "Network error — could not dispatch resume."));
   } finally {
     state.resumeFlowRequests.delete(flowId);
     renderFlows();
@@ -3121,22 +3134,22 @@ async function endFlow(flowId) {
       { method: "POST" },
     );
     if (resp.ok || resp.status === 202) {
-      showToast("success", `End dispatched for ${flowId.slice(0, 8)}…`);
+      showToast("success", tf("toast.endDispatched", `End dispatched for ${flowId.slice(0, 8)}…`, { id: flowId.slice(0, 8) }));
     } else if (resp.status === 404) {
-      showToast("error", "Flow not found.");
+      showToast("error", tf("toast.flowNotFound", "Flow not found."));
     } else if (resp.status === 409) {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || "该 session 已结束，无法再次结束。");
+      showToast("error", detail || tf("toast.endAlreadyEnded", "该 session 已结束，无法再次结束。"));
     } else if (resp.status === 503) {
-      showToast("error", "机器未连接 — 无法下发结束指令。");
+      showToast("error", tf("toast.endMachineOffline", "机器未连接 — 无法下发结束指令。"));
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || `End failed (${resp.status}).`);
+      showToast("error", detail || tf("toast.endFailed", `End failed (${resp.status}).`, { status: resp.status }));
     }
   } catch (_) {
-    showToast("error", "Network error — could not dispatch end.");
+    showToast("error", tf("toast.endNetworkError", "Network error — could not dispatch end."));
   } finally {
     state.endSessionRequests.delete(flowId);
     renderFlows();
@@ -4034,13 +4047,13 @@ function submitReply(event) {
   const entries = state.flowInterventions || [];
   const target = entries.find((e) => e.id === state.flowReplyTargetId);
   if (!state.selectedFlowId || !target) {
-    showToast("error", "No interaction is selected to respond to.");
+    showToast("error", tf("toast.noInteractionSelected", "No interaction is selected to respond to."));
     return;
   }
   const input = $("flow-reply-input");
   const text = input.value.trim();
   if (!text) {
-    showToast("error", "Response must not be empty.");
+    showToast("error", tf("toast.responseEmpty", "Response must not be empty."));
     return;
   }
   // CONFIRM gates route the free-text box through the structured decision
@@ -4087,7 +4100,7 @@ function armPendingSend(target) {
     // ws delayed past 8s — force-unlock and tell the user the next press is
     // possible but the daemon may already have queued the first one.
     if (state.pendingSendSettleKey) {
-      showToast("info", "ws delayed, retry possible");
+      showToast("info", tf("toast.wsDelayed", "ws delayed, retry possible"));
     }
     // Clear synthetic-pending visual state too — without ws confirmation
     // we cannot tell if the real chip will ever arrive, so let the user
@@ -4151,7 +4164,7 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
         $("flow-reply-input").value = "";
         autoGrowReplyTextarea();
       }
-      showToast("success", approved ? "已批准。" : "已打回。");
+      showToast("success", approved ? tf("toast.approved", "已批准。") : tf("toast.rejected", "已打回。"));
       // Optimistic echo as a human-readable user bubble so the decision shows
       // immediately without waiting for the next history_data push.
       const echo = approved
@@ -4165,11 +4178,11 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
-      showToast("error", `Could not send: ${message}`);
+      showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
       settlePendingSend();
     }
   } catch (_) {
-    showToast("error", "Could not send — network error reaching the server.");
+    showToast("error", tf("toast.sendNetworkError", "Could not send — network error reaching the server."));
     settlePendingSend();
   } finally {
     if (state.selectedFlowId === flowId && state.flowDetail) {
@@ -4235,8 +4248,8 @@ async function sendReply(flowId, target, text) {
         state.flowSyntheticInterjectPending = true;
       }
       showToast("success", target.kind === "interjection"
-        ? "Interjection sent."
-        : "Response sent.");
+        ? tf("toast.interjectionSent", "Interjection sent.")
+        : tf("toast.responseSent", "Response sent."));
       // Optimistic echo. `appendLocalReply` is best-effort: it writes the echo
       // record into `state.flowConversationRecords` first, then renders behind
       // its own try/catch, so it never throws back into this success path.
@@ -4244,13 +4257,13 @@ async function sendReply(flowId, target, text) {
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
-      showToast("error", `Could not send: ${message}`);
+      showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
       // Error path — settle immediately so the user can retry without
       // waiting on a ws update that will never come for this failed POST.
       settlePendingSend();
     }
   } catch (_) {
-    showToast("error", "Could not send — network error reaching the server.");
+    showToast("error", tf("toast.sendNetworkError", "Could not send — network error reaching the server."));
     settlePendingSend();
   } finally {
     // Re-render so the chip-bar reflects the freshly-set
@@ -5761,7 +5774,7 @@ async function submitIssueForm(event) {
 
     if (resp.ok || resp.status === 202) {
       closeIssueModal();
-      showToast("success", mode === "create" ? "Issue 已创建。" : "Issue 已更新。");
+      showToast("success", mode === "create" ? tf("toast.issueCreated", "Issue 已创建。") : tf("toast.issueUpdated", "Issue 已更新。"));
       fetchIssues();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -5858,7 +5871,7 @@ async function confirmIssueAction() {
 
     if (resp.ok || resp.status === 202) {
       closeIssueActionModal();
-      showToast("success", action === "close" ? "Issue 已关闭。" : "Issue 已重开。");
+      showToast("success", action === "close" ? tf("toast.issueClosed", "Issue 已关闭。") : tf("toast.issueReopened", "Issue 已重开。"));
       fetchIssues();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -5978,16 +5991,16 @@ async function confirmIssueLaunch() {
     });
     if (resp.status === 202) {
       closeIssueLaunchModal();
-      showToast("success", "已从 Issue 派发 flow。");
+      showToast("success", tf("toast.issueFlowDispatched", "已从 Issue 派发 flow。"));
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
       if (errBox) showFormError(errBox, message);
-      showToast("error", `启动 flow 失败：${message}`);
+      showToast("error", tf("toast.flowLaunchFailed", `启动 flow 失败：${message}`, { message }));
     }
   } catch (_) {
     if (errBox) showFormError(errBox, "Network error — could not reach the server.");
-    showToast("error", "启动 flow 失败 — 网络错误。");
+    showToast("error", tf("toast.flowLaunchNetworkError", "启动 flow 失败 — 网络错误。"));
   } finally {
     if (key) state.issueLaunchRequests.delete(key);
     if (confirmBtn) confirmBtn.disabled = false;
@@ -7337,7 +7350,16 @@ const STEP_STATUS_DISPLAY = {
 // dropped. Exposed for unit testing.
 function stepStatusDisplay(status) {
   const key = String(status == null ? "" : status).toLowerCase();
-  if (STEP_STATUS_DISPLAY[key]) return STEP_STATUS_DISPLAY[key];
+  const base = STEP_STATUS_DISPLAY[key];
+  if (base) {
+    // Resolve the label via I18N at RENDER time (the map is a module-load const
+    // evaluated before the dicts load, so it can't call t() in its initializer).
+    // resolve() returns null on a total miss (e.g. the document-less unit-test
+    // environment where the dicts stay empty) → we keep the map's built-in
+    // label as the offline fallback; when the dicts are loaded it localizes.
+    const tr = I18N.resolve(`status.step.${key}`);
+    return { icon: base.icon, text: tr != null ? tr : base.text };
+  }
   return { icon: "•", text: key || "running" };
 }
 
@@ -7349,7 +7371,12 @@ function stepStatusDisplay(status) {
 function groupStatusLabel(groupId, status) {
   const gid = String(groupId == null ? "" : groupId).trim() || "?";
   const key = String(status == null ? "" : status).toLowerCase();
-  const text = GROUP_STATUS_TEXT[key] || String(status == null ? "" : status);
+  // Localize known statuses via I18N.resolve at render time, keeping the map's
+  // built-in label as the offline fallback (null resolve = empty test dicts);
+  // an unknown status keeps its raw token so nothing is silently dropped.
+  const known = GROUP_STATUS_TEXT[key];
+  const tr = known ? I18N.resolve(`status.group.${key}`) : null;
+  const text = (tr != null ? tr : known) || String(status == null ? "" : status);
   return text ? `${gid} ${text}` : gid;
 }
 
@@ -7387,9 +7414,12 @@ function indexProgressLabel(path, done, total) {
   if (Number.isFinite(t) && t > 0) {
     const d = Number(done);
     const shown = Number.isFinite(d) ? d : 0;
-    return `更新 code-index：${p} (${shown}/${t})`;
+    // Localize at render time; the built-in template is the offline fallback.
+    const tr = I18N.resolve("indexProgress.withTotal", { path: p, done: shown, total: t });
+    return tr != null ? tr : `更新 code-index：${p} (${shown}/${t})`;
   }
-  return `更新 code-index：${p}`;
+  const tr = I18N.resolve("indexProgress.noTotal", { path: p });
+  return tr != null ? tr : `更新 code-index：${p}`;
 }
 
 // Resolve the conversation step-header label for a step type. Known step types
@@ -12592,17 +12622,17 @@ async function submitNewTask(event) {
     });
     if (resp.status === 202) {
       closeNewTask();
-      showToast("success", "Task published.");
+      showToast("success", tf("toast.taskPublished", "Task published."));
     } else {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
       showFormError(errBox, message);
-      showToast("error", `Could not publish task: ${message}`);
+      showToast("error", tf("toast.taskPublishFailed", `Could not publish task: ${message}`, { message }));
       submit.disabled = false;
     }
   } catch (err) {
     showFormError(errBox, "Network error — could not reach the server.");
-    showToast("error", "Could not publish task — network error.");
+    showToast("error", tf("toast.taskPublishNetworkError", "Could not publish task — network error."));
     submit.disabled = false;
   }
 }
@@ -12879,7 +12909,7 @@ async function createDaemonKey(event) {
       $("keys-reveal-value").textContent = data.key || "";
       $("keys-reveal").classList.remove("hidden");
       $("keys-label").value = "";
-      showToast("success", "Daemon key created — copy it now.");
+      showToast("success", tf("toast.keyCreated", "Daemon key created — copy it now."));
       loadDaemonKeys();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -12902,7 +12932,7 @@ async function revokeDaemonKey(keyId) {
       { method: "DELETE" },
     );
     if (resp.ok) {
-      showToast("success", "Daemon key revoked.");
+      showToast("success", tf("toast.keyRevoked", "Daemon key revoked."));
       loadDaemonKeys();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -13023,7 +13053,7 @@ async function createUser(event) {
       $("users-password").value = "";
       $("users-display-name").value = "";
       $("users-is-admin").checked = false;
-      showToast("success", "用户已创建。");
+      showToast("success", tf("toast.userCreated", "用户已创建。"));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -13046,7 +13076,7 @@ async function deleteUser(ownerId, label) {
       { method: "DELETE" },
     );
     if (resp.ok) {
-      showToast("success", `已删除用户 ${label || ownerId}。`);
+      showToast("success", tf("toast.userDeleted", `已删除用户 ${label || ownerId}。`, { name: label || ownerId }));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -13078,7 +13108,7 @@ async function resetPassword(ownerId, label) {
       },
     );
     if (resp.ok) {
-      showToast("success", `已重置 ${label || ownerId} 的密码。`);
+      showToast("success", tf("toast.passwordReset", `已重置 ${label || ownerId} 的密码。`, { name: label || ownerId }));
     } else {
       const detail = await resp.json().catch(() => ({}));
       showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
@@ -13102,7 +13132,7 @@ async function toggleAdmin(ownerId, isAdmin) {
       },
     );
     if (resp.ok) {
-      showToast("success", isAdmin ? "已设为管理员。" : "已取消管理员。");
+      showToast("success", isAdmin ? tf("toast.adminGranted", "已设为管理员。") : tf("toast.adminRevoked", "已取消管理员。"));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
