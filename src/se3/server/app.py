@@ -1986,8 +1986,10 @@ def create_app(
             # cache itself can be behind the daemon: a round the live push dropped
             # or collided on never landed, so both cache and client freeze at the
             # first round and every later poll keeps answering ``not_modified``.
-            # When that flow is still running under a worktree root, reconcile the
-            # cache against the daemon ONCE — subject to the same
+            # When that flow is still active under a worktree root — RUNNING or
+            # PAUSED-on-a-human-reply, the exact state a discovery round enters
+            # right after writing its records — reconcile the cache against the
+            # daemon ONCE — subject to the same
             # ``full_pull_throttled`` floor the cache-miss path uses, so a 3 s
             # self-heal poll cannot fan out one回源 pull per tick. A no-op re-pull
             # keeps the bundle generation (see ``append_history``) so an already

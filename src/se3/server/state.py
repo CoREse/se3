@@ -1456,12 +1456,18 @@ class ServerState:
         "worktree discovery only shows round 1" symptom. Re-pulling the whole
         bundle from the daemon reconciles it.
 
-        Returns ``True`` only when an owner-visible live flow with this id is
-        ``running`` AND its ``project_root`` points inside
-        ``…/se3/worktrees/<name>`` (:func:`_is_worktree_session_path`). A
-        completed / failed / paused flow, or any non-worktree flow, returns
-        ``False`` so the reconcile never fires for an ordinary session (which is
-        served entirely from cache exactly as before).
+        Returns ``True`` when an owner-visible flow with this id is still active
+        (``running`` OR ``paused``) AND its ``project_root`` points inside
+        ``…/se3/worktrees/<name>`` (:func:`_is_worktree_session_path`). The
+        ``paused`` state matters precisely for the failing case: a discovery
+        round writes its chat records and then blocks on a human reply/decision
+        call, flipping the flow to ``paused`` while the round-2 records are still
+        only on the daemon and never reached the server cache. Gating on
+        ``running`` alone stranded that pending-reply window — the self-heal was
+        skipped exactly when it was needed — so the intermediate chat stayed
+        invisible. A terminal ``completed`` / ``failed`` flow, or any
+        non-worktree flow, returns ``False`` so the reconcile never fires for an
+        ordinary session (which is served entirely from cache exactly as before).
         """
         async with self._lock:
             for machine_id, record in self._machines.items():
@@ -1470,7 +1476,7 @@ class ServerState:
                 flow = record.flows.get(flow_id)
                 if flow is None:
                     continue
-                if str(flow.status or "").lower() != "running":
+                if str(flow.status or "").lower() not in ("running", "paused"):
                     return False
                 return _is_worktree_session_path(flow.project_root)
         return False

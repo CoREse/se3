@@ -212,6 +212,31 @@ def test_is_active_worktree_flow_true_for_running_worktree():
     asyncio.run(scenario())
 
 
+def test_is_active_worktree_flow_true_for_paused_worktree():
+    """A paused worktree flow (discovery blocked on a human reply) is still
+    active: round-2 chat records may be on the daemon but not yet in the server
+    cache, so the self-heal gate must fire during the pending-reply window."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": "f1",
+                        "status": "paused",
+                        "project_root": "/repo/se3/worktrees/wt-a",
+                    }
+                ],
+            },
+        )
+        assert await state.is_active_worktree_flow("f1") is True
+
+    asyncio.run(scenario())
+
+
 def test_is_active_worktree_flow_false_when_completed():
     """A completed worktree flow is no longer active — no reconcile pull."""
     state = ServerState()

@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.20.1 - 2026-07-11
+
+- Fix worktree discovery chat history disappearing after the first round — all rounds now stay visible in the live console instead of only via the verdict-detail view
+- Make daemon history reads assign globally unique, stable record identities (stepId#ordinal) across worktree main files, main-branch copies, and .from-<branch> sidecars, eliminating cross-file identity collisions
+- Stabilize the daemon's physical-copy selection for the active step and align cursor keys with the offset table so full and append reads agree
+- Make the server history relay pass through disambiguated record identities, and have the 3s self-heal re-query the daemon when its cache is incomplete instead of returning not_modified
+- Harden the WebUI console reconcile to consume disambiguated identities and compare record content before deduplication, so legitimate records sharing an ordinal are no longer dropped
+- Add daemon, server, frontend, and end-to-end regression tests covering multi-round worktree discovery history and the discovery→analyze handoff
 ## 11.20.0 - 2026-07-11
 
 - Make charter_freshness self-closing: it now proposes, gates, and atomically applies descriptive updates to se3/charter.md in-flow instead of emitting unreachable advisory suggestions

@@ -45,8 +45,8 @@ description: "spec 治理迁移（v11.0.0，spec_gate/verify_spec → invariant_
   \ start 冻结\n  （_freeze_invariant_anchors），charter 只注入 INVARIANT_CHECK/CHARTER_FRESHNESS\
   \ 两类步骤。\n- 顺手项：invariant_check prompt 加一条豁免——\"diff 编辑了 charter.md 且任务文本明确要求\n \
   \ 该修改时，被任务点名修改的条款不得作为违规依据\"——人工发起的修宪任务的误报保险。"
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-10T17:04:55.212124'
-updated_at: '2026-07-11T14:52:40.410001'
+updated_at: '2026-07-11T18:24:18.428695'
