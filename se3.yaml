@@ -4,7 +4,6 @@
 human_call:
   timeout_days: 7
   directory: se3/calls  # Human calls directory (legacy: human-calls)
-  language: zh-CN  # Language for human call messages (e.g., zh-CN, en-US)
 
 session:
   progress_file: progress.md
@@ -73,16 +72,23 @@ version:
   # Optional: customize version rules by creating se3/version-rules.md
   # (natural-language Markdown). When absent, default SemVer 2.0.0 applies.
 
+# Language Configuration
+# Two independent language settings, merged project-over-global with
+# ~/.se3/config.yaml.
+language:
+  # Unified human language: drives BOTH the CLI/WebUI UI copy AND the
+  # LLM human-facing step outputs (summarize / discovery / confirmed steps).
+  # CLI resolution precedence: SE3_LANG env > this key > ~/.se3/config.yaml >
+  # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
+  # null = no LLM-output restriction (UI copy still resolves via the chain).
+  language: zh-CN
+  # Knowledge-asset language: the writing language of charter.md and the
+  # code-index (injected into the charter_freshness and code-index summary
+  # prompts). e.g. "zh-CN", "en-US". null = no restriction (LLM decides).
+  spec_language: en-US
+
 # E2E / Visual regression testing (optional)
 # Requires Puppeteer MCP or similar browser automation tool
-# Language Configuration
-# Controls the language used in human-facing outputs and spec writing
-language:
-  language: zh-CN                        # Language for human-facing steps (summarize, discovery, confirmed steps)
-                                        # e.g., "zh-CN", "en-US". null = no restriction (LLM decides)
-  spec_language: en-US                   # Language for spec writing (update_spec step)
-                                        # e.g., "zh-CN", "en". null = no restriction (LLM decides)
-
 e2e:
   baseline_dir: .e2e-baselines        # Where to store baseline screenshots
   diff_threshold: 0.1                 # Pixel difference threshold (0-1)
