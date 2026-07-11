@@ -20,8 +20,8 @@ description: 'merge_integrate 应在 merge 前自动 commit 主仓库的 issue �
   附带修复：(1) _abort_merge 应把 "There is no merge to abort (MERGE_HEAD missing)" 视为成功，否则所有
   merge 启动前的失败都被改写成误导性的 merge_abort_failed（本例 failure_detail 为 null，真实原因被完全掩盖）；(2)
   dirty 文件不在自管路径内时应报专用的 dirty_working_tree failure_reason 并在 failure_detail 中列出文件清单。'
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-10T21:14:28.308128'
-updated_at: '2026-07-11T12:36:03.270870'
+updated_at: '2026-07-11T14:38:35.697121'

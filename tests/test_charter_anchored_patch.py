@@ -76,6 +76,35 @@ def test_multiple_nonoverlapping_ops_apply_in_one_pass():
     assert "alpha subsystem" not in candidate
 
 
+def test_apply_patch_is_order_independent_for_adjacent_insert_and_replace():
+    """A zero-width insert anchored right before a replaced span must not
+    duplicate the removed text, regardless of the op order the LLM emits.
+
+    Regression: the applier sorted edits by start offset only while the
+    validator's overlap check sorted by (start, end) and admits an insert whose
+    zero-width point equals a same-start replace. With replace listed first, the
+    start-only sort applied it before the insert, and the insert's backward
+    cursor reset re-emitted the just-removed old_text in the tail append.
+    """
+    text = "HEAD\nMIDDLE\nTAIL\n"
+    replace_first = [
+        {"op": "replace", "old_text": "MIDDLE\n", "new_text": "NEWMID\n"},
+        {"op": "insert_after", "anchor": "HEAD\n", "new_text": "INSERTED\n"},
+    ]
+    insert_first = [
+        {"op": "insert_after", "anchor": "HEAD\n", "new_text": "INSERTED\n"},
+        {"op": "replace", "old_text": "MIDDLE\n", "new_text": "NEWMID\n"},
+    ]
+    expected = "HEAD\nINSERTED\nNEWMID\nTAIL\n"
+    for ops in (replace_first, insert_first):
+        ok, reason = cf._validate_anchored_patch(text, ops)
+        assert ok is True, reason
+        candidate = cf._apply_patch(text, ops)
+        assert candidate == expected
+        # The replaced passage must not survive duplicated next to its replacement.
+        assert candidate.count("MIDDLE\n") == 0
+
+
 # ---------------------------------------------------------------------------
 # reject paths — each returns a feedable reason
 # ---------------------------------------------------------------------------
@@ -132,6 +161,18 @@ def test_over_char_budget_is_rejected():
     ok, reason = cf._validate_anchored_patch(CHARTER, ops)
     assert ok is False
     assert "too much text" in reason
+
+
+def test_mass_removal_behind_short_replacement_is_rejected():
+    # A single replace that quotes a large unique region and deletes it behind a
+    # short new_text passes the new-char bound but must be caught by the
+    # removed-char bound — otherwise mass deletion slips past the mechanical gate.
+    big_region = "z" * (cf.MAX_PATCH_OLD_CHARS + 1)
+    text = "# Charter\n\n" + big_region + "\n"
+    ops = [{"op": "replace", "old_text": big_region, "new_text": "x"}]
+    ok, reason = cf._validate_anchored_patch(text, ops)
+    assert ok is False
+    assert "removes too much text" in reason
 
 
 def test_too_many_ops_is_rejected():

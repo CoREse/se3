@@ -26,8 +26,10 @@ when it changed nothing.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -215,18 +217,149 @@ def _deleted_comments_by_file(
             # than flag every baseline comment as a phantom deletion.
             continue
 
-        working_set = set(_extract_comments(working_text))
-        deleted = [
-            body for body in _extract_comments(baseline_text)
-            if body not in working_set
-        ]
+        # INVARIANT: multiset (occurrence-counted) difference, not a plain set
+        # difference. If a file holds two identical comments and the diff removes
+        # only one, exactly one occurrence must count as deleted — a set
+        # membership test would see the surviving copy and silently drop the loss.
+        working_counts = Counter(_extract_comments(working_text))
+        deleted: list[str] = []
+        for body in _extract_comments(baseline_text):
+            if working_counts.get(body, 0) > 0:
+                working_counts[body] -= 1
+            else:
+                deleted.append(body)
         if deleted:
             out[rel] = deleted
     return out
 
 
+def _marked_comments_with_pos(text: str) -> list[tuple[int, str]]:
+    """Return ``(line_index, body)`` for each MARKED (WHY:/INVARIANT:) comment.
+
+    The line index lets the pairing prefer the positionally-nearest candidate when
+    a file has several marked comments. Unlike the retired code-slot correlation it
+    does NOT inspect the surrounding code, so a comment that was rewritten *together
+    with the code it annotates* is still eligible to pair with its replacement —
+    "the comment moves with its code" is the typical in-place re-declaration, which
+    must never be forced to keep the annotated code byte-identical.
+    """
+    out: list[tuple[int, str]] = []
+    for i, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        marker = next((m for m in _COMMENT_MARKERS if stripped.startswith(m)), None)
+        if marker is None:
+            continue
+        body = stripped[len(marker):].strip()
+        if body and _is_marked_why_comment(body):
+            out.append((i, body))
+    return out
+
+
+def _rewritten_marked_exemptions(
+    project_root: Path,
+    changed_files: set[str],
+    baseline_commit: str | None,
+) -> dict[str, Counter]:
+    """Per-file count of deleted marked comment occurrences re-declared in the diff.
+
+    A deleted marked comment is EXEMPT from the hard guard when the diff carries an
+    updated WHY:/INVARIANT: comment that stands in for it — the second accepted exit
+    ("record the reason in an updated comment"). The rule is a purely mechanical
+    one-to-one pairing, and this is the SOLE authoritative semantics: a deleted
+    marked comment is exempt **if and only if** it pairs one-to-one with a marked
+    comment newly added or rewritten **in the same file**. Pairing does NOT require
+    the annotated code to stay byte-identical, so ``# WHY: use SQLite`` above
+    ``DATABASE='sqlite'`` rewritten to ``# WHY: use Postgres for HA`` above
+    ``DATABASE='postgres'`` — or a rewrite of a comment at end-of-file — still
+    counts as an in-place re-declaration. When counts are unequal, pairs are chosen
+    greedily by text similarity then positional proximity; each replacement exempts
+    AT MOST one deletion, so a net loss (more deletions than new marked comments)
+    still leaves the unpaired deletions guarded.
+
+    Pairing is strictly SAME-FILE. A marked comment that vanishes from one file and
+    reappears verbatim in *another* changed file is NOT exempted — an unpaired
+    same-file deletion always triggers REVISION_NEEDED, regardless of any verbatim
+    reappearance elsewhere. (A cross-file channel would let an unrelated addition in
+    some other file swallow a genuine loss, and would falsely consume a legitimate
+    in-place rewrite whose new text happens to match a deletion elsewhere. The exit
+    for a genuine move is the same as for any relocation: re-declare the rationale
+    with a marked comment in the file that lost it, which the same-file pairing then
+    naturally exempts.)
+
+    Same best-effort, never-raise contract as its siblings (no baseline / unreadable
+    file → contributes nothing). A brand-new file (no baseline) contributes only
+    additions; a file deleted outright reads as an empty working tree so all its
+    baseline marked comments count as deleted.
+    """
+    out: dict[str, Counter] = {}
+    if not baseline_commit:
+        return out
+
+    for rel in sorted(changed_files):
+        if not isinstance(rel, str) or not rel:
+            continue
+        baseline_text = _read_baseline_file(project_root, baseline_commit, rel)
+        working_text = ""
+        path = project_root / rel
+        try:
+            if path.is_file():
+                working_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Unreadable working copy: cannot diff reliably, skip (mirror sibling).
+            continue
+        # A file absent at baseline contributes no deletions, only additions.
+        base = _marked_comments_with_pos(baseline_text) if baseline_text is not None else []
+        work = _marked_comments_with_pos(working_text)
+        # INVARIANT: occurrence-counted (multiset) diff, not set membership. Two
+        # identical marked comments where the diff rewrites only one must yield
+        # exactly one deletion and one addition to pair; a set test would cancel
+        # both against the surviving copy and see no change at all.
+        work_counts = Counter(b for _, b in work)
+        dels: list[tuple[int, str]] = []
+        for pos, b in base:
+            if work_counts.get(b, 0) > 0:
+                work_counts[b] -= 1
+            else:
+                dels.append((pos, b))
+        base_counts = Counter(b for _, b in base)
+        adds: list[tuple[int, str]] = []
+        for pos, b in work:
+            if base_counts.get(b, 0) > 0:
+                base_counts[b] -= 1
+            else:
+                adds.append((pos, b))
+        if not dels or not adds:
+            continue
+
+        # Greedy one-to-one pairing WITHIN this file only. An in-place rewrite may
+        # share no words with the old rationale, so every (deletion, addition) pair
+        # is eligible; highest similarity first, then closest position, ``di``/``ai``
+        # keep the sort stable. Each addition exempts at most one deletion.
+        candidates: list[tuple[float, int, int, int]] = []
+        for di, (dpos, dbody) in enumerate(dels):
+            for ai, (apos, abody) in enumerate(adds):
+                similarity = difflib.SequenceMatcher(None, dbody, abody).ratio()
+                proximity = -abs(dpos - apos)
+                candidates.append((similarity, proximity, di, ai))
+        candidates.sort(key=lambda c: (-c[0], -c[1], c[2], c[3]))
+
+        used_del: set[int] = set()
+        used_add: set[int] = set()
+        for _similarity, _proximity, di, ai in candidates:
+            if di in used_del or ai in used_add:
+                continue
+            used_del.add(di)
+            used_add.add(ai)
+            # Count exemptions per body occurrence, not as a set. Each pairing
+            # exempts exactly ONE deleted occurrence; storing a bare set would let
+            # a single pairing exempt every identical deletion of that body.
+            out.setdefault(rel, Counter())[dels[di][1]] += 1
+    return out
+
+
 def _build_why_comment_guard_issues(
     deleted_by_file: dict[str, list[str]],
+    exempt_by_file: dict[str, Counter] | None = None,
 ) -> list[dict]:
     """Synthesize anchored issues for deleted/rewritten WHY:/INVARIANT: comments.
 
@@ -238,11 +371,34 @@ def _build_why_comment_guard_issues(
     issue is grounded via ``missing_in`` (the file that should have kept the
     comment), and ``expected_behavior`` names the two accepted exits: restore the
     comment, or record the reason in an updated WHY:/INVARIANT: comment.
+
+    ``exempt_by_file`` maps each file to a ``Counter`` of deleted marked comment
+    bodies → how many occurrences were re-declared in the diff; each occurrence is
+    consumed once so identical duplicates are exempted individually
+    (``_rewritten_marked_exemptions`` pairs a dropped
+    comment one-to-one with a newly added/rewritten marked comment IN THE SAME FILE,
+    so a completely-reworded rationale, or a comment rewritten together with its
+    code, is still recognised as a re-declaration). The pairing is one-to-one and
+    same-file: each new marked comment exempts at most one deletion, so a net loss
+    (more marked deletions than new marked comments) still leaves the unpaired
+    deletions guarded, and a comment that merely reappears in another file is not
+    exempt.
     """
+    exempt_by_file = exempt_by_file or {}
     issues: list[dict] = []
     for rel in sorted(deleted_by_file):
+        # Copy so we can decrement: each exemption covers ONE deleted occurrence.
+        exempt = Counter(exempt_by_file.get(rel) or {})
         for body in deleted_by_file[rel]:
             if not _is_marked_why_comment(body):
+                continue
+            # A marked comment re-declared at the SAME code slot IS the "updated
+            # WHY:/INVARIANT: comment" exit — the author re-declared the rationale
+            # in place, so treat the dropped old text as a rewrite, not a loss.
+            # Consume one exemption per paired occurrence; an unpaired identical
+            # deletion (more removals than re-declarations) still routes to fix.
+            if exempt.get(body, 0) > 0:
+                exempt[body] -= 1
                 continue
             issues.append({
                 "severity": "high",
@@ -664,8 +820,13 @@ def invariant_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         deleted_by_file = _deleted_comments_by_file(
             project_root, changed_paths, baseline_commit
         )
+        exempt_by_file = _rewritten_marked_exemptions(
+            project_root, changed_paths, baseline_commit
+        )
 
-        guard_raw = _build_why_comment_guard_issues(deleted_by_file)
+        guard_raw = _build_why_comment_guard_issues(
+            deleted_by_file, exempt_by_file
+        )
         hard_violations: list[dict] = []
         if guard_raw:
             hard_violations, _ = _validate_and_filter_issues(

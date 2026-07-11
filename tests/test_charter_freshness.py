@@ -427,6 +427,38 @@ def test_gate_reject_twice_degrades_without_writing(tmp_path, monkeypatch):
     assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
 
 
+def test_gate_malformed_response_fails_closed_without_writing(tmp_path, monkeypatch):
+    """A gate response with string-typed fields is NOT coerced into a pass.
+
+    ``{"admitted": "false", "weakened_removals": "drops a rule"}`` must fail the
+    gate (fail-closed) rather than being smoothed to ``admitted=True`` with empty
+    findings — the propose->gate->apply contract requires a proven pass before any
+    write, so the charter stays byte-for-byte unchanged.
+    """
+    _write_charter(tmp_path, _DISK_CHARTER)
+    malformed = json.dumps({
+        "admitted": "false",              # string, not bool
+        "weakened_removals": "drops a rule",  # string, not list
+    })
+    state = _install_fake_caller(monkeypatch, [
+        _propose(True, _REPLACE_PATCH),
+        malformed,
+        _propose(True, _REPLACE_PATCH),
+        malformed,  # retry also malformed -> degrade
+    ])
+    flow = _with_completed_invariant_check(_make_flow(tmp_path))
+    step = _make_step({"changes_made": {"files_changed": ["src/foo.py"]}})
+
+    result = charter_freshness.charter_freshness_handler(step, flow)
+
+    assert result is StepStatus.COMPLETED
+    assert step.outputs["charter_auto_updated"] is False
+    assert "degraded_reason" in step.outputs
+    assert step.outputs["gate_verdicts"].get("llm_malformed")
+    # Prefer-stale-over-degraded: disk is byte-for-byte unchanged.
+    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
+
+
 def test_gate_reject_then_retry_succeeds(tmp_path, monkeypatch):
     """A first-round gate rejection feeds back; the corrected second-round patch
     passes and is applied."""

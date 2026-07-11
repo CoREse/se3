@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.20.0 - 2026-07-11
+
+- Make charter_freshness self-closing: it now proposes, gates, and atomically applies descriptive updates to se3/charter.md in-flow instead of emitting unreachable advisory suggestions
+- Guard charter auto-updates with a mechanical anchored-patch replacement check plus an in-process admission gate that also asks whether removed text weakens unrelated agreements, degrading to advisory (prefer-stale) on failure
+- Add a WHY:/INVARIANT: marker hard guard in invariant_check that flags silent deletion or rewrite of marked why-comments unless 1:1 paired with an added/rewritten marker comment in the same diff
+- Add an advisory LLM channel that reports meaningful why-comment losses to step outputs and the summary without triggering a fix loop
+- Flip the CHARTER_FRESHNESS read_only registry flag and add an explicit LLMCaller read-only override, audit all flag consumers, and add a constitutional-amendment exemption to the invariant_check prompt
+- Surface charter auto-update old->new diffs and why-comment loss lists in the summarize step and the WebUI
 ## 11.19.0 - 2026-07-11
 
 - Auto-commit dirty SE3 self-managed state (se3/issues/, se3/code-index.md) as a 'chore: sync issue state' commit before merge_integrate starts, so uncommitted issue-state changes no longer block merges with 'local changes would be overwritten'

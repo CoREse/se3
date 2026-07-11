@@ -100,6 +100,13 @@ logger = logging.getLogger(__name__)
 # human can look. These are deliberately generous headroom, not tight limits.
 MAX_PATCH_OPS = 20
 MAX_PATCH_NEW_CHARS = 8000
+# WHY: replace ops must not become a mass-deletion vector. A verbatim-unique
+# `old_text` proves the removed text was quoted, but says nothing about its
+# size — a single replace could quote (and delete) nearly the whole charter
+# while inserting a short `new_text`, slipping mass deletion past the mechanical
+# gate and leaving it to the LLM admission gate alone. Bounding the total
+# removed length keeps deletion surgical here, in the program, not deferred.
+MAX_PATCH_OLD_CHARS = 8000
 
 #: Two attempts total: an initial propose -> gate, then one bounded retry with
 #: the gate's structured failure fed back into the propose prompt. A second
@@ -258,7 +265,8 @@ def _validate_anchored_patch(text: str, ops: Any) -> tuple[bool, str]:
     produces a candidate equal to the input. A patch is rejected — with a
     human/LLM-feedable *reason* — when it:
 
-    - is not a list, or exceeds the op / total-new-char bounds;
+    - is not a list, or exceeds the op / total-new-char / total-removed-char
+      bounds;
     - contains an op that is not ``insert_after`` or ``replace``;
     - has an ``anchor`` / ``old_text`` that is missing, non-string, empty, or
       matches the on-disk text zero or multiple times (must be verbatim-unique);
@@ -266,7 +274,10 @@ def _validate_anchored_patch(text: str, ops: Any) -> tuple[bool, str]:
 
     Verbatim-unique matching is what makes an unquoted deletion impossible: the
     only text a ``replace`` may remove is text it quoted, and the quote must
-    exist exactly as written on disk.
+    exist exactly as written on disk. Bounding the total quoted-and-removed
+    length is the companion defence — it stops a replace op from quoting a huge
+    unique region (or nearly the whole charter) and deleting it behind a short
+    ``new_text``, which the new-char bound alone would not catch.
     """
     if not isinstance(ops, list):
         return False, "patch must be a list of operations"
@@ -276,6 +287,7 @@ def _validate_anchored_patch(text: str, ops: Any) -> tuple[bool, str]:
         return False, f"patch has too many operations ({len(ops)} > {MAX_PATCH_OPS})"
 
     total_new = 0
+    total_old = 0
     for i, op in enumerate(ops, start=1):
         if not isinstance(op, dict):
             return False, f"operation #{i} is not an object"
@@ -315,6 +327,7 @@ def _validate_anchored_patch(text: str, ops: Any) -> tuple[bool, str]:
                     f"operation #{i}: 'old_text' matches {count} places in the "
                     "charter (it must be unique — quote more surrounding text)"
                 )
+            total_old += len(old_text)
         else:
             return False, (
                 f"operation #{i}: unknown op {kind!r} — only 'insert_after' and "
@@ -325,6 +338,13 @@ def _validate_anchored_patch(text: str, ops: Any) -> tuple[bool, str]:
         return False, (
             f"patch inserts too much text ({total_new} > {MAX_PATCH_NEW_CHARS} "
             "chars) — a freshness update must be surgical, not a rewrite"
+        )
+
+    if total_old > MAX_PATCH_OLD_CHARS:
+        return False, (
+            f"patch removes too much text ({total_old} > {MAX_PATCH_OLD_CHARS} "
+            "chars quoted for replacement) — a freshness update must be surgical, "
+            "not a mass deletion behind a short replacement"
         )
 
     # Reject overlapping edits: two ops that touch the same region make the
@@ -349,7 +369,14 @@ def _apply_patch(text: str, ops: list) -> str:
     """
     if not ops:
         return text
-    edits = sorted(_resolve_edits(text, ops), key=lambda e: e[0])
+    # Sort by (start, end) — the SAME key the validator's overlap check uses.
+    # WHY: the validator admits a zero-width insert_after whose insertion point
+    # equals the start of a same-position replace span; a start-only sort would
+    # keep such ties in LLM-supplied op order, so a replace listed before its
+    # preceding insert would apply first and the insert's backward cursor reset
+    # would re-emit the replaced old_text. Ordering the zero-width insert before
+    # the same-start replace makes the result independent of op order.
+    edits = sorted(_resolve_edits(text, ops), key=lambda e: (e[0], e[1]))
     out: list[str] = []
     cursor = 0
     for start, end, replacement in edits:
@@ -520,13 +547,29 @@ def _run_gate(
         verdicts["llm_admitted"] = None
         return False, candidate, verdicts, "admission gate LLM response was unparsable"
 
-    admitted = bool(gate_result.get("admitted"))
-    violations = gate_result.get("violations") or []
-    weakened = gate_result.get("weakened_removals") or []
+    # A gate is a proof of passage: only a real boolean ``admitted: true`` and
+    # real list findings count. Coercing string-typed ("false", "drops a rule")
+    # fields would let a malformed response masquerade as a clean pass, so any
+    # type deviation fails the gate (fail-closed) rather than being smoothed over.
+    admitted_raw = gate_result.get("admitted")
+    violations = gate_result.get("violations", [])
+    weakened = gate_result.get("weakened_removals", [])
+    malformed: list[str] = []
+    if not isinstance(admitted_raw, bool):
+        malformed.append(f"admitted={admitted_raw!r} (expected bool)")
     if not isinstance(violations, list):
-        violations = []
+        malformed.append(f"violations={violations!r} (expected list)")
     if not isinstance(weakened, list):
-        weakened = []
+        malformed.append(f"weakened_removals={weakened!r} (expected list)")
+    if malformed:
+        verdicts["llm_malformed"] = malformed
+        return (
+            False, candidate, verdicts,
+            "admission gate response was malformed (fail-closed): "
+            + "; ".join(malformed),
+        )
+
+    admitted = admitted_raw
     verdicts["llm_admitted"] = admitted
     verdicts["llm_violations"] = violations
     verdicts["llm_weakened_removals"] = weakened

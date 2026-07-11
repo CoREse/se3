@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,412 @@ def test_restored_marked_comment_passes(tmp_path, monkeypatch):
     assert result is StepStatus.COMPLETED
     assert step.outputs["why_comment_hard_violations"] == []
     assert step.outputs["actionable_count"] == 0
+
+
+def test_rewritten_marked_comment_with_updated_rationale_passes(tmp_path, monkeypatch):
+    """Rewriting a marked comment into a NEW marked comment is a declared update.
+
+    The old body vanishes (so ``_deleted_comments_by_file`` reports it), but the
+    working tree now carries an updated WHY:/INVARIANT: comment declaring the new
+    reason — the second accepted exit. This must NOT block the flow.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/proto.py",
+        "# WHY: cache old protocol decision\ndef f():\n    return 1\n",
+    )
+    # rewrite the marked comment, explicitly re-declaring the updated rationale
+    (tmp_path / "src/proto.py").write_text(
+        "# WHY: cache new protocol decision after API migration\n"
+        "def f():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    # only the main audit runs; no advisory (the sole deletion is marked, and it
+    # is suppressed by the replacement, so nothing routes to the advisory triage).
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/proto.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert result is StepStatus.COMPLETED
+    assert step.outputs["why_comment_hard_violations"] == []
+    assert step.outputs["actionable_count"] == 0
+
+
+def test_rewritten_marked_comment_with_wholly_new_rationale_passes(tmp_path, monkeypatch):
+    """A rewrite that records a COMPLETELY new reason for the same code is a
+    declared update, not a silent loss.
+
+    Regression for the token-overlap heuristic: replacing
+    ``# WHY: use SQLite because deployment is single-node`` with
+    ``# WHY: use Postgres because HA now requires shared storage`` shares almost no
+    words, yet it explicitly re-declares intent over the SAME code line, so the
+    code-slot correlation must recognise it as a rewrite and NOT block the flow.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/db.py",
+        "# WHY: use SQLite because deployment is single-node\n"
+        "engine = make_engine()\n",
+    )
+    (tmp_path / "src/db.py").write_text(
+        "# WHY: use Postgres because HA now requires shared storage\n"
+        "engine = make_engine()\n",
+        encoding="utf-8",
+    )
+
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/db.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert result is StepStatus.COMPLETED
+    assert step.outputs["why_comment_hard_violations"] == []
+    assert step.outputs["actionable_count"] == 0
+
+
+def test_same_file_marked_addition_covers_deletion_one_to_one(tmp_path, monkeypatch):
+    """A same-file marked addition covers a marked deletion one-to-one (net-count).
+
+    The hard guard's authoritative rule is a purely mechanical 1:1 pairing: it
+    only guarantees marked comments suffer no NET silent loss. Deleting
+    ``# WHY: enforce tenant isolation`` while adding a NEW marked comment in the
+    same file leaves the marked-comment count intact, so the guard does NOT block —
+    whether the new reason is a semantically adequate replacement is the LLM main
+    audit's job, not the hard guard's. Net LOSS (more deletions than new marked
+    comments) is still caught — see ``test_partial_rewrite_in_shared_slot`` and
+    ``test_sibling_marked_comment_in_same_slot_does_not_swallow_deletion``.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/multi.py",
+        "# WHY: enforce tenant isolation\n"
+        "def a():\n    return 1\n"
+        "def b():\n    return 2\n",
+    )
+    # drop the protected comment; add a NEW marked comment elsewhere (1 for 1).
+    (tmp_path / "src/multi.py").write_text(
+        "def a():\n    return 1\n"
+        "# WHY: cache parsed config\n"
+        "def b():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/multi.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert result is StepStatus.COMPLETED
+    assert step.outputs["why_comment_hard_violations"] == []
+    assert invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/multi.py"}, baseline
+    ) == {"src/multi.py": Counter({"WHY: enforce tenant isolation": 1})}
+
+
+def test_sibling_marked_comment_in_same_slot_does_not_swallow_deletion(tmp_path, monkeypatch):
+    """Two protected comments over the same code, one dropped, one kept verbatim.
+
+    Regression for the per-slot exemption bug: the working tree kept
+    ``# WHY: keep audit trail mandatory`` (a verbatim survivor, NOT a new rewrite)
+    over the same ``def handle():``. The mere presence of a marked comment in that
+    shared slot must not exempt the genuinely-deleted
+    ``# WHY: enforce tenant isolation`` — it is a distinct intent that vanished, so
+    it must route to REVISION_NEEDED.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/svc.py",
+        "# WHY: enforce tenant isolation\n"
+        "# WHY: keep audit trail mandatory\n"
+        "def handle():\n    return 1\n",
+    )
+    # drop the tenant-isolation comment; keep the audit-trail one verbatim.
+    (tmp_path / "src/svc.py").write_text(
+        "# WHY: keep audit trail mandatory\n"
+        "def handle():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/svc.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert result is StepStatus.REVISION_NEEDED
+    hard = step.outputs["why_comment_hard_violations"]
+    assert len(hard) == 1
+    assert hard[0]["expectation_source"]["verbatim_quote"] == "WHY: enforce tenant isolation"
+
+    # And the exemption helper alone must not list the dropped sibling.
+    exemptions = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/svc.py"}, baseline
+    )
+    assert exemptions == {}
+
+
+def test_both_siblings_rewritten_in_same_slot_are_exempt(tmp_path):
+    """When BOTH protected comments over the same code are genuinely rewritten,
+    each gained its own replacement, so both old bodies are exempt."""
+    baseline = _init_repo_with(
+        tmp_path, "src/svc.py",
+        "# WHY: enforce tenant isolation\n"
+        "# WHY: keep audit trail mandatory\n"
+        "def handle():\n    return 1\n",
+    )
+    (tmp_path / "src/svc.py").write_text(
+        "# WHY: enforce strict tenant isolation across shards\n"
+        "# WHY: retain the immutable audit log for compliance\n"
+        "def handle():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    out = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/svc.py"}, baseline
+    )
+    assert out == {
+        "src/svc.py": Counter({
+            "WHY: enforce tenant isolation": 1,
+            "WHY: keep audit trail mandatory": 1,
+        })
+    }
+
+
+def test_partial_rewrite_in_shared_slot_guards_all_dropped(tmp_path):
+    """Two dropped protected comments but only ONE new marked comment.
+
+    One-to-one pairing: the single new marked comment exempts the deletion it is
+    most similar to (``enforce tenant isolation``), and the unpaired deletion
+    (``keep audit trail mandatory``) stays guarded — a net loss is never silently
+    swallowed."""
+    baseline = _init_repo_with(
+        tmp_path, "src/svc.py",
+        "# WHY: enforce tenant isolation\n"
+        "# WHY: keep audit trail mandatory\n"
+        "def handle():\n    return 1\n",
+    )
+    # both old bodies gone, only ONE new marked comment took their place.
+    (tmp_path / "src/svc.py").write_text(
+        "# WHY: enforce strict tenant isolation across shards\n"
+        "def handle():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    out = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/svc.py"}, baseline
+    )
+    assert out == {"src/svc.py": Counter({"WHY: enforce tenant isolation": 1})}
+
+
+def test_rewritten_marked_exemptions_pairs_rewrite_in_place(tmp_path):
+    """A deleted marked comment is exempt when a new marked comment re-declares it.
+
+    The old body is exempt because the working tree carries a NEW marked comment in
+    the same file (plain, unmarked comments are ignored by the pairing). The
+    replacement need not sit over byte-identical code — the 1:1 same-file pairing
+    recognises it as an in-place re-declaration.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/proto.py",
+        "# WHY: old reason\n# a plain note\ndef f():\n    return 1\n",
+    )
+    (tmp_path / "src/proto.py").write_text(
+        "# WHY: new reason after migration\n"
+        "# another plain note\n"
+        "def f():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    out = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/proto.py"}, baseline
+    )
+    # the deleted marked comment re-declared by a new marked comment is exempt.
+    assert out == {"src/proto.py": Counter({"WHY: old reason": 1})}
+
+
+def test_rewrite_of_comment_and_its_code_together_is_exempt(tmp_path, monkeypatch):
+    """A comment rewritten TOGETHER with the code it annotates is a re-declaration.
+
+    Finding-1 regression: the retired code-slot correlation demanded the annotated
+    code stay byte-identical, so rewriting ``# WHY: use sqlite`` above
+    ``DATABASE = 'sqlite'`` into ``# WHY: use postgres for HA`` above
+    ``DATABASE = 'postgres'`` computed a different slot and blocked the flow. The
+    1:1 same-file pairing ignores the surrounding code, so this is correctly exempt.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/db.py",
+        "# WHY: use sqlite\nDATABASE = 'sqlite'\n",
+    )
+    (tmp_path / "src/db.py").write_text(
+        "# WHY: use postgres for HA\nDATABASE = 'postgres'\n",
+        encoding="utf-8",
+    )
+
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/db.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert result is StepStatus.COMPLETED
+    assert step.outputs["why_comment_hard_violations"] == []
+    assert invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/db.py"}, baseline
+    ) == {"src/db.py": Counter({"WHY: use sqlite": 1})}
+
+
+def test_eof_marked_comment_rewrite_is_exempt(tmp_path):
+    """A marked comment at end-of-file (no following code) can still be re-declared.
+
+    Finding-2 regression: the retired code-slot correlation skipped any slot whose
+    following-code line was ``None`` (a comment at EOF), so rewriting a tail
+    ``# WHY:`` rationale could never be exempted. The position-based pairing has no
+    such requirement.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/tail.py",
+        "def f():\n    return 1\n# WHY: legacy tail rationale\n",
+    )
+    (tmp_path / "src/tail.py").write_text(
+        "def f():\n    return 1\n# WHY: new tail rationale\n",
+        encoding="utf-8",
+    )
+
+    out = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/tail.py"}, baseline
+    )
+    assert out == {"src/tail.py": Counter({"WHY: legacy tail rationale": 1})}
+
+
+def test_cross_file_marked_move_is_not_exempt(tmp_path, monkeypatch):
+    """A marked comment that vanishes from one file and reappears in another is NOT exempt.
+
+    The authoritative rule is SAME-FILE only: a deleted marked comment is exempt iff
+    it pairs one-to-one with a marked comment newly added/rewritten in the SAME file.
+    A refactor that deletes ``a.py`` (dropping its ``# WHY:`` comment) and re-adds the
+    function + comment verbatim in ``b.py`` leaves an UNPAIRED same-file deletion in
+    ``a.py``, which must trigger REVISION_NEEDED regardless of the verbatim
+    reappearance elsewhere. The accepted exit is to re-declare the rationale in the
+    file that lost it (which same-file pairing then exempts).
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/a.py",
+        "# WHY: pin the retry budget\ndef work():\n    return 1\n",
+    )
+    # a.py deleted entirely; the function + its marked comment reappear in b.py.
+    (tmp_path / "src/a.py").unlink()
+    (tmp_path / "src/b.py").write_text(
+        "# WHY: pin the retry budget\ndef work():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    # No same-file addition in a.py, so the cross-file reappearance yields no exemption.
+    out = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/a.py", "src/b.py"}, baseline
+    )
+    assert out == {}
+
+    # And the handler must route the unpaired deletion to the fix loop.
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/a.py", "src/b.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert result is StepStatus.REVISION_NEEDED
+    violations = step.outputs["why_comment_hard_violations"]
+    assert len(violations) == 1
+    assert violations[0]["missing_in"] == ["src/a.py"]
+    assert "WHY: pin the retry budget" in violations[0]["actual_behavior"]
+
+
+def test_duplicate_marked_comment_one_rewritten_guards_the_other(tmp_path, monkeypatch):
+    """Two IDENTICAL marked comments, both dropped, only ONE re-declared.
+
+    Occurrence-accounting regression: a set-valued exemption would store the
+    single body once and skip BOTH identical deletions, silently swallowing the
+    unpaired loss. With per-occurrence counting the one re-declaration exempts
+    exactly one occurrence and the second deletion still routes to the fix loop.
+    """
+    baseline = _init_repo_with(
+        tmp_path, "src/dup.py",
+        "# WHY: preserve cache invariant\n"
+        "def a():\n    return 1\n"
+        "# WHY: preserve cache invariant\n"
+        "def b():\n    return 2\n",
+    )
+    # both identical marked comments removed; only ONE new marked comment added.
+    (tmp_path / "src/dup.py").write_text(
+        "# WHY: updated cache invariant\n"
+        "def a():\n    return 1\n"
+        "def b():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    # The exemption helper credits exactly one occurrence, not both.
+    out = invariant_check._rewritten_marked_exemptions(
+        tmp_path, {"src/dup.py"}, baseline
+    )
+    assert out == {"src/dup.py": Counter({"WHY: preserve cache invariant": 1})}
+
+    # The per-file deletion multiset counts BOTH removed occurrences.
+    deleted = invariant_check._deleted_comments_by_file(
+        tmp_path, {"src/dup.py"}, baseline
+    )
+    assert deleted["src/dup.py"].count("WHY: preserve cache invariant") == 2
+
+    # One occurrence exempt, the other still a hard violation.
+    issues = invariant_check._build_why_comment_guard_issues(deleted, out)
+    marked = [
+        i for i in issues
+        if i["expectation_source"]["verbatim_quote"] == "WHY: preserve cache invariant"
+    ]
+    assert len(marked) == 1
+
+    state = _install_fake_caller(monkeypatch, [json.dumps({"issues": [], "summary": "ok"})])
+    flow = _make_flow(tmp_path, task="")
+    flow.baseline_commit = baseline
+    step = _make_step({
+        "task_description": "",
+        "charter": "",
+        "changes_made": {"files_changed": ["src/dup.py"]},
+    })
+    result = invariant_check.invariant_check_handler(step, flow)
+    assert result is StepStatus.REVISION_NEEDED
+    hard = step.outputs["why_comment_hard_violations"]
+    assert len(hard) == 1
+    assert hard[0]["expectation_source"]["verbatim_quote"] == "WHY: preserve cache invariant"
 
 
 # ---------------------------------------------------------------------------
