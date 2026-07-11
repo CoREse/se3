@@ -233,8 +233,19 @@ def test_read_flow_backfills_discovery_only_in_main(tmp_path):
     assert [r["step_type"] for r in read.records] == ["discovery", "analyze"]
 
 
-def test_read_flow_dedup_prefers_more_complete_copy(tmp_path):
-    """When two roots hold the same-named file, the larger (more complete) wins."""
+def test_read_flow_prefers_worktree_write_root_copy_stably(tmp_path):
+    """When two roots hold the same-named file, the worktree copy wins — stably.
+
+    ``run_worktree_mode`` forks first and runs discovery ENTIRELY in the worktree
+    (``run_flow(project_root=<worktree>)``), so the worktree copy is the *actual
+    write root* — the one that grows every round. A pure ``largest-copy-wins``
+    rule flipped the selection from the (initially larger) main copy to the
+    worktree copy the instant the worktree file overtook it, desyncing the
+    by-name cursor from the by-abs-path offset table and dropping the rounds
+    after the first. The reader now prefers the worktree copy regardless of its
+    transient byte size, so the selection is stable across snapshots and every
+    round the worktree writes is read in full.
+    """
     main = tmp_path / "main"
     wt = _make_worktree(main)
     flow_id = "wt-complete"
@@ -242,23 +253,35 @@ def test_read_flow_dedup_prefers_more_complete_copy(tmp_path):
     main_flow = _flow_dir(main, flow_id)
     wt_flow = _flow_dir(wt, flow_id)
 
-    # Main repo's discovery is the complete one (two records) ...
+    # A stale/larger pre-existing main copy must NOT be preferred over the live
+    # worktree copy: preferring the larger main copy is exactly what would flip
+    # the selection mid-flow once the worktree overtook it.
     _write_jsonl(
         main_flow / "01_discovery_ab.jsonl",
-        [_msg("user", "the task"), _msg("assistant", "full discovery answer")],
+        [_msg("user", "the task"), _msg("assistant", "stale main answer")],
     )
-    # ... while the worktree's clone is a truncated single-record copy.
+    # The worktree copy is the live writer; it starts with just the first round.
     _write_jsonl(
         wt_flow / "01_discovery_ab.jsonl",
         [_msg("user", "the task")],
     )
 
     reader = _make_reader(main, wt)
-    read = reader.read_flow(flow_id, project_root=str(wt))
+    first = reader.read_flow(flow_id, project_root=str(wt))
+    # The worktree (write-root) copy is chosen even though the main copy is
+    # currently larger — no flip risk when the worktree grows past it.
+    assert [r["message"]["content"] for r in first.records] == ["the task"]
 
-    contents = [r["message"]["content"] for r in read.records]
-    # The more complete (main) copy is chosen, so no record is lost.
-    assert contents == ["the task", "full discovery answer"]
+    # The worktree writes its later rounds (now overtaking the main copy). With a
+    # stable worktree selection this is a plain incremental append — every round
+    # is read, none dropped.
+    _append_jsonl(
+        wt_flow / "01_discovery_ab.jsonl",
+        [_msg("assistant", "round 2"), _msg("user", "round 3")],
+    )
+    second = reader.read_flow(flow_id, project_root=str(wt), cursor=first.cursor)
+    assert second.mode == HISTORY_MODE_APPEND
+    assert [r["message"]["content"] for r in second.records] == ["round 2", "round 3"]
 
 
 def test_read_flow_incremental_across_merge(tmp_path):

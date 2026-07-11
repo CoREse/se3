@@ -8,10 +8,16 @@ daemon history reader previously enumerated only ``*.jsonl`` via ``glob``, so
 those sidecars — and therefore everything after a worktree session's first
 record — were never read or pushed.
 
-These tests pin the fix: :class:`DaemonHistoryReader` now merges the primary
-file and its sidecars under one logical step id, reads every record with no
-loss / no duplication / correct ordering, advances its incremental cursor
-correctly, and parses the step type with the sidecar suffix stripped.
+These tests pin the fix: :class:`DaemonHistoryReader` now reads the primary
+file and its sidecars with no loss / no duplication / correct ordering, advances
+its incremental cursor correctly, and parses the step type with the sidecar
+suffix stripped.
+
+Design group G1 further hardens the *identity* the reader emits: each physical
+file (the primary and every sidecar) gets its OWN frontend-facing step id that
+KEEPS the ``.from-<branch>`` marker (:func:`_display_step_id`), so their per-file
+ordinals no longer collide at ``step_id#ordinal`` and the frontend renders every
+stream. The step *type* is still parsed from the folded logical id.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ import json
 from se3.daemon.history import (
     DaemonHistoryReader,
     _count_jsonl,
+    _display_step_id,
     _iter_history_jsonl,
     _logical_step_id,
     parse_step_type_from_step_id,
@@ -81,6 +88,30 @@ def test_logical_step_id_strips_sidecar_suffix():
     assert _logical_step_id("weird_name") == "weird_name"
 
 
+def test_display_step_id_keeps_sidecar_marker():
+    """The frontend-facing id keeps the sidecar marker so streams stay distinct.
+
+    Unlike the logical id (which folds primary + sidecars to one id), the display
+    id keeps the ``.from-<branch>`` marker so a step's primary file and each of
+    its sidecars form DISTINCT ``step_id#ordinal`` namespaces and the frontend
+    never drops the second file's records as ordinal-collision duplicates.
+    """
+    # A non-sidecar name is identical to its logical id (common single-file case).
+    assert _display_step_id("01_discovery_ab12.jsonl") == "01_discovery_ab12"
+    # A sidecar keeps its branch marker → distinct from the primary.
+    assert (
+        _display_step_id("01_discovery_ab12.jsonl.from-worktree__b")
+        == "01_discovery_ab12.from-worktree__b"
+    )
+    # A hash-disambiguated sidecar keeps the whole marker → distinct again.
+    assert (
+        _display_step_id("01_discovery_ab12.jsonl.from-worktree__b.0a1b2c3d")
+        == "01_discovery_ab12.from-worktree__b.0a1b2c3d"
+    )
+    # A name without ``.jsonl`` is returned unchanged.
+    assert _display_step_id("weird_name") == "weird_name"
+
+
 def test_parse_step_type_strips_sidecar_suffix():
     # Logical step id (the normal caller input) still works.
     assert parse_step_type_from_step_id("01_discovery_ab12") == "discovery"
@@ -134,7 +165,12 @@ def test_count_jsonl_counts_logical_steps(tmp_path):
 
 
 def test_read_flow_merges_primary_and_sidecar(tmp_path):
-    """Primary + sidecar records merge under one step id, in order, no loss/dup."""
+    """Primary + sidecar records all read, in order, no loss/dup.
+
+    The primary and its sidecar now carry DISTINCT display step ids (the sidecar
+    keeps its ``.from-<branch>`` marker), so their per-file ordinals — both
+    starting at 0 — no longer collide at ``step_id#ordinal``.
+    """
     flow_dir = _flow_dir(tmp_path, "wt-1")
     # Primary file: the single first record that landed in the main session.
     _write_jsonl(
@@ -154,9 +190,18 @@ def test_read_flow_merges_primary_and_sidecar(tmp_path):
     # All three records present, none lost, none duplicated.
     contents = [r["message"]["content"] for r in read.records]
     assert contents == ["the task", "clarifying question", "an answer"]
-    # Every record carries the same logical step id and the parsed step type.
-    assert {r["step_id"] for r in read.records} == {"01_discovery_ab12"}
+    # Primary and sidecar emit DISTINCT display step ids so their ordinal-0
+    # records do not collide; the step type is still the folded logical type.
+    assert {r["step_id"] for r in read.records} == {
+        "01_discovery_ab12",
+        "01_discovery_ab12.from-worktree__b",
+    }
     assert {r["step_type"] for r in read.records} == {"discovery"}
+
+    # (step_id, ordinal) is globally unique across the two physical files even
+    # though each file numbers its own lines from 0.
+    keys = [(r["step_id"], r["ordinal"]) for r in read.records]
+    assert len(keys) == len(set(keys))
 
     # Cursor is keyed by the *physical* file name (primary + sidecar separately).
     assert read.cursor["01_discovery_ab12.jsonl"] == 1
@@ -176,7 +221,10 @@ def test_read_flow_sidecar_only_step(tmp_path):
 
     contents = [r["message"]["content"] for r in read.records]
     assert contents == ["analysis one", "analysis two"]
-    assert all(r["step_id"] == "02_analyze_cc" for r in read.records)
+    # Sidecar-only step: its id keeps the branch marker; type still parsed folded.
+    assert all(
+        r["step_id"] == "02_analyze_cc.from-worktree__b" for r in read.records
+    )
     assert all(r["step_type"] == "analyze" for r in read.records)
 
 
@@ -209,7 +257,9 @@ def test_read_flow_incremental_cursor_advances_over_sidecar(tmp_path):
         "follow up",
         "second reply",
     ]
-    assert all(r["step_id"] == "01_discovery_ab12" for r in second.records)
+    assert all(
+        r["step_id"] == "01_discovery_ab12.from-worktree__b" for r in second.records
+    )
     assert second.cursor["01_discovery_ab12.jsonl.from-worktree__b"] == 3
     assert second.cursor["01_discovery_ab12.jsonl"] == 1
 
@@ -221,7 +271,11 @@ def test_read_flow_incremental_cursor_advances_over_sidecar(tmp_path):
 
 
 def test_read_flow_multiple_sidecars_for_one_step(tmp_path):
-    """Several sidecars (hash-disambiguated) for one step all merge in order."""
+    """Several sidecars (hash-disambiguated) for one step all read in order.
+
+    Each physical file — primary and both sidecars — emits a distinct display
+    step id, so their ordinal-0 records never collide.
+    """
     flow_dir = _flow_dir(tmp_path, "wt-4")
     _write_jsonl(
         flow_dir / "01_discovery_ab12.jsonl", [_msg("user", "task")]
@@ -244,8 +298,15 @@ def test_read_flow_multiple_sidecars_for_one_step(tmp_path):
         "branch b reply",
         "branch b reply (hash)",
     ]
-    assert {r["step_id"] for r in read.records} == {"01_discovery_ab12"}
+    assert {r["step_id"] for r in read.records} == {
+        "01_discovery_ab12",
+        "01_discovery_ab12.from-worktree__b",
+        "01_discovery_ab12.from-worktree__b.0a1b2c3d",
+    }
     assert {r["step_type"] for r in read.records} == {"discovery"}
+    # (step_id, ordinal) unique across all three physical files.
+    keys = [(r["step_id"], r["ordinal"]) for r in read.records]
+    assert len(keys) == len(set(keys))
     # Each physical file tracked independently in the cursor.
     assert read.cursor["01_discovery_ab12.jsonl"] == 1
     assert read.cursor["01_discovery_ab12.jsonl.from-worktree__b"] == 1

@@ -507,6 +507,20 @@ class DaemonHistoryReader:
         # reader-internal optimization state and cold-starts after a restart.
         self._prefix_hashers: Dict[str, "hashlib._Hash"] = {}
 
+        # (flow_id, bare-filename) -> absolute path last read for that name. The
+        # wire cursor is keyed by BARE filename ({name: line-count}) while the
+        # offset table is keyed by ABSOLUTE path, so when ``_merge_flow_jsonl``
+        # switches which physical copy of a step it selects (e.g. an active
+        # worktree flow whose main pre-fork clone was chosen before the worktree
+        # file appeared), the new copy's offset entry is absent (full read) yet
+        # the by-name cursor still carries the OLD copy's consumed line count.
+        # Honouring that stale by-name cursor as the full-read ``start`` skips the
+        # new copy's leading lines. This map lets ``read_flow`` recognise a copy
+        # switch and read the new copy cleanly from line 0 instead of trusting the
+        # other copy's cursor. Reader-internal state, not part of the wire cursor
+        # contract.
+        self._cursor_source: Dict[str, str] = {}
+
     def invalidate_index_cache(self) -> None:
         """Drop the cached index, forcing the next ``build_index`` to rebuild.
 
@@ -1080,11 +1094,29 @@ class DaemonHistoryReader:
 
         The cursor is keyed by physical filename, so each logical step MUST
         resolve to exactly ONE physical file or two copies of the same step
-        would render twice. The chosen copy is the most complete one (largest
-        byte size), with ties broken by directory priority (the authoritative
-        root comes first in *flow_dirs*); this keeps the result stable (a given
-        step file is only ever *written* by one root, so the other root's copy
-        is a static pre-fork clone) and loses no records.
+        would render twice. The chosen copy is, in order of precedence:
+
+          1. the copy under a ``se3/worktrees/<name>`` isolation dir — the
+             *actual write root* of a live ``--worktree`` flow, whose discovery
+             runs entirely in the worktree (``run_worktree_mode`` forks, then
+             ``run_flow(project_root=<worktree>)``). Its file GROWS every round
+             while the main-repo clone stays a static pre-fork snapshot, so a
+             pure ``largest-copy-wins`` rule would flip the selection from the
+             (initially equal-or-larger) main clone to the worktree copy MID-FLOW
+             the instant the worktree file overtook it. That flip changed the
+             chosen file's absolute path while its bare filename stayed the same,
+             desyncing the by-name cursor from the by-abs-path offset table and
+             dropping the rounds after the first (the ``--worktree`` discovery
+             "only round 1 shows" bug). Sticking to the worktree copy — which
+             does not change between snapshots — makes the selection stable;
+          2. otherwise the most complete copy (largest byte size);
+          3. ties broken by directory priority (the authoritative root comes
+             first in *flow_dirs*).
+
+        This loses no records (the worktree copy is the one being written, so it
+        is the most complete for a live worktree flow) and keeps the result
+        stable across snapshots. Post-merge (single root, no worktree isolation
+        dirs) no copy is under ``se3/worktrees`` so rule 2/3 apply unchanged.
 
         A logical step unique to a single root is always included, so a split
         history — discovery only in the main repo, later steps only in the
@@ -1097,10 +1129,14 @@ class DaemonHistoryReader:
         its sidecars and steps stay in ``NN_`` order, matching
         :func:`_iter_history_jsonl`'s single-root ordering.
         """
-        # logical-step-key -> (priority, size, path); priority = index in
-        # flow_dirs (lower index = higher priority = authoritative root first).
-        chosen: Dict[str, Tuple[int, int, Path]] = {}
+        # logical-step-key -> (is_worktree, priority, size, path); priority =
+        # index in flow_dirs (lower index = higher priority = authoritative root
+        # first). ``is_worktree`` (1 for a copy under a se3/worktrees isolation
+        # dir, else 0) is the PRIMARY, size-independent tiebreak so a live
+        # worktree flow's growing copy is chosen from the start and never flips.
+        chosen: Dict[str, Tuple[int, int, int, Path]] = {}
         for priority, flow_dir in enumerate(flow_dirs):
+            is_worktree = 1 if _is_worktree_copy(flow_dir) else 0
             for jsonl in _iter_history_jsonl(flow_dir):
                 try:
                     size = jsonl.stat().st_size
@@ -1109,16 +1145,18 @@ class DaemonHistoryReader:
                 key = _cross_root_step_key(jsonl.name)
                 prev = chosen.get(key)
                 if prev is None:
-                    chosen[key] = (priority, size, jsonl)
+                    chosen[key] = (is_worktree, priority, size, jsonl)
                     continue
-                prev_priority, prev_size, _prev_path = prev
-                # More complete (larger) wins; on an exact tie the
-                # higher-priority (authoritative) root's copy wins.
-                if size > prev_size or (
-                    size == prev_size and priority < prev_priority
+                prev_worktree, prev_priority, prev_size, _prev_path = prev
+                # Precedence: worktree write-root copy (stable) > more complete
+                # (larger) > higher-priority (authoritative) root on an exact tie.
+                if (is_worktree, size, -priority) > (
+                    prev_worktree,
+                    prev_size,
+                    -prev_priority,
                 ):
-                    chosen[key] = (priority, size, jsonl)
-        return [entry[2] for entry in sorted(chosen.values(), key=lambda e: e[2].name)]
+                    chosen[key] = (is_worktree, priority, size, jsonl)
+        return [entry[3] for entry in sorted(chosen.values(), key=lambda e: e[3].name)]
 
     @staticmethod
     def _head_signature(path: Path, offset: int) -> Optional[bytes]:
@@ -1319,15 +1357,32 @@ class DaemonHistoryReader:
         for jsonl in self._merge_flow_jsonl(flow_dirs):
             if truncated:
                 break
-            # Merge a step's primary ``*.jsonl`` and its ``*.jsonl.from-<branch>``
-            # sidecars under one logical step id so a worktree merge-back's
-            # records group into the same step stream as the primary file.
-            step_id = _logical_step_id(jsonl.name)
-            step_type = parse_step_type_from_step_id(step_id)
+            # Emit a per-physical-file *display* step id that KEEPS the
+            # ``.from-<branch>`` sidecar marker, so a step's primary file and its
+            # sidecars form DISTINCT frontend streams whose ``step_id#ordinal``
+            # keys never collide (see :func:`_display_step_id`). Step *type* is
+            # still parsed from the folded logical id so the sidecar marker never
+            # corrupts the record's ``step_type``.
+            step_id = _display_step_id(jsonl.name)
+            step_type = parse_step_type_from_step_id(_logical_step_id(jsonl.name))
             # Cursor / offset table stay keyed by the *physical* file name and
             # absolute path, so each file (primary and each sidecar) advances
             # independently and is never read twice.
             jsonl_key = str(jsonl)
+
+            # Detect a physical-copy switch for this bare filename. The wire
+            # cursor is keyed by bare filename but the offset table by absolute
+            # path, so when ``_merge_flow_jsonl`` picks a DIFFERENT copy of the
+            # same step than last round (e.g. an active worktree flow whose main
+            # pre-fork clone was chosen before the worktree file appeared), the
+            # by-name cursor still holds the OLD copy's consumed count. Reusing it
+            # as the full-read ``start`` would skip the new copy's leading lines,
+            # so a switch forces a clean read from line 0 of the new copy below.
+            # Scoped by flow_id so two unrelated flows that happen to share a
+            # step filename never look like a copy switch of each other.
+            source_key = f"{flow_id}\x00{jsonl.name}"
+            prior_source = self._cursor_source.get(source_key)
+            copy_switched = prior_source is not None and prior_source != jsonl_key
 
             # --- Determine whether we can do an incremental read -----------
             cursor_lines = int(cursor.get(jsonl.name, 0) or 0)
@@ -1340,6 +1395,10 @@ class DaemonHistoryReader:
                 cur_mtime = st.st_mtime
             except OSError:
                 continue
+
+            # Record which physical copy this bare filename resolved to THIS
+            # round, so the next round can detect a copy switch (see above).
+            self._cursor_source[source_key] = jsonl_key
 
             prev = self._read_offsets.get(jsonl_key)
 
@@ -1425,6 +1484,7 @@ class DaemonHistoryReader:
                 and cur_size >= prev[1]            # file has not shrunk
                 and prev[1] >= 0                   # offset is valid
                 and not rewritten                  # rewrite check passed
+                and not copy_switched              # same physical copy as before
             )
             # HOP-2 DEBUG: the per-file incremental-read decision. A freshly
             # created boundary file (02_analyze) has prev=None → full read from
@@ -1606,7 +1666,14 @@ class DaemonHistoryReader:
                 total_physical_lines = len(complete_lines) + (
                     1 if tail is not None else 0
                 )
-                if rewritten or start > total_physical_lines:
+                # A copy switch (this bare filename now resolves to a different
+                # physical file) makes the by-name cursor refer to the OTHER
+                # copy's line numbering, so it MUST NOT be honoured as ``start``:
+                # reset to 0 and re-emit the new copy from the beginning. The
+                # frontend reconciles by ``step_id#ordinal``, so re-emitting lines
+                # it already has is idempotent while the genuinely new later rounds
+                # (higher ordinals) finally arrive.
+                if rewritten or copy_switched or start > total_physical_lines:
                     start = 0
 
                 def _emit(line_text: str, ordinal: int) -> bool:
@@ -1943,6 +2010,43 @@ def _logical_step_id(filename: str) -> str:
     return filename[:idx]
 
 
+def _display_step_id(filename: str) -> str:
+    """Return the *frontend-facing* step id for a physical history file.
+
+    Unlike :func:`_logical_step_id` — which folds a step's primary file and its
+    ``.from-<branch>`` sidecars to ONE id so their step-type parses identically —
+    this KEEPS the sidecar branch marker so the primary file and each sidecar
+    form DISTINCT frontend streams.
+
+    WHY: the frontend reconciles records by ``step_id#ordinal`` and each physical
+    file numbers its own lines from 0, so folding several physical files under one
+    logical step id made their ordinals collide — the second file's record at
+    ordinal N looked like a duplicate of the first file's ordinal N and was
+    dropped (the worktree discovery "records after round 1 vanish" bug). Because
+    :func:`_merge_flow_jsonl` guarantees the surviving physical files all carry
+    DISTINCT :func:`_cross_root_step_key`s (true cross-root clones are already
+    de-duped to one), a per-physical-file id keeps ``step_id#ordinal`` globally
+    unique and stable across full/append reads (each file's ordinals are its own
+    stable line numbers). A non-sidecar name is identical to its logical id, so
+    the common single-file case is unchanged. Examples::
+
+        01_discovery_ab12.jsonl                   -> "01_discovery_ab12"
+        01_discovery_ab12.jsonl.from-worktree__b  -> "01_discovery_ab12.from-worktree__b"
+
+    Step *type* is still parsed from the logical id (see :func:`read_flow`), so
+    the sidecar marker in the id never corrupts the record's ``step_type``.
+    """
+    idx = filename.find(".jsonl")
+    if idx < 0:
+        return filename
+    stem = filename[:idx]
+    suffix = filename[idx + len(".jsonl") :]
+    m = re.match(r"\.from-(.+)$", suffix)
+    if m:
+        return f"{stem}.from-{m.group(1)}"
+    return stem
+
+
 def _cross_root_step_key(filename: str) -> str:
     """Return a *cross-root* logical step identity for merge de-duplication.
 
@@ -1998,6 +2102,24 @@ def _cross_root_step_key(filename: str) -> str:
         stem = "_".join(parts[:-1])
 
     return f"{stem}{group}\x00{sidecar}"
+
+
+def _is_worktree_copy(flow_dir: Path) -> bool:
+    """Return whether *flow_dir* lives inside an ``se3/worktrees/<name>`` sandbox.
+
+    A ``se3 run --worktree`` flow body executes inside
+    ``<main_root>/se3/worktrees/<name>/`` and writes its history to
+    ``…/se3/worktrees/<name>/se3/history/<flow_id>``. That copy is the *actual
+    write root* of a live worktree flow, so ``_merge_flow_jsonl`` prefers it as a
+    stable, size-independent selection (see there). Detected structurally by an
+    adjacent ``se3`` / ``worktrees`` path segment pair, matching
+    :func:`resolve_worktree_main_root`'s ``<main>/se3/worktrees/<name>`` layout.
+    """
+    parts = flow_dir.parts
+    for i in range(1, len(parts)):
+        if parts[i] == "worktrees" and parts[i - 1] == "se3":
+            return True
+    return False
 
 
 def _iter_history_jsonl(flow_dir: Path) -> List[Path]:
