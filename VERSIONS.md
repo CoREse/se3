@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.19.0 - 2026-07-11
+
+- Auto-commit dirty SE3 self-managed state (se3/issues/, se3/code-index.md) as a 'chore: sync issue state' commit before merge_integrate starts, so uncommitted issue-state changes no longer block merges with 'local changes would be overwritten'
+- Turn .next_id and code-index conflicts into normal three-way merge conflicts that the deterministic resolvers (max-of-next-id, code-index) can resolve automatically
+- Add dedicated dirty_working_tree failure reason that lists the offending files in failure_detail when dirty tracked files fall outside the self-managed whitelist
+- Fix _abort_merge to treat 'no merge to abort' (missing MERGE_HEAD) as success, so pre-merge startup failures report their real cause instead of a misleading merge_abort_failed
+- Treat 'nothing to commit' during the sync commit (e.g. only untracked files) as a clean tree and proceed directly to merge
+- Render the new dirty_working_tree failure reason in the merge CLI output
 ## 11.18.0 - 2026-07-11
 
 - Reduce daemon status traffic by sending lightweight issue/call summaries with clipped descriptions and content-hash gated keepalive frames instead of constant full snapshots

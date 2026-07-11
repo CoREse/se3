@@ -38,6 +38,18 @@ class TestFailureReasonValues:
     def test_postcond_branch_not_merged(self) -> None:
         assert FailureReason.POSTCOND_BRANCH_NOT_MERGED == 900
 
+    def test_dirty_working_tree(self) -> None:
+        assert FailureReason.DIRTY_WORKING_TREE == 934
+
+    def test_dirty_working_tree_in_repo_state_group(self) -> None:
+        # Belongs to the 93x repo-state fail-fast family, ordered after
+        # the REPO_* states and before the 98x input-validation group.
+        assert (
+            FailureReason.REPO_UNSUPPORTED_STATE
+            < FailureReason.DIRTY_WORKING_TREE
+            < FailureReason.NO_BRANCHES
+        )
+
     def test_lock_busy(self) -> None:
         assert FailureReason.LOCK_BUSY == 990
 
@@ -56,6 +68,23 @@ class TestLegacyString:
     def test_from_legacy_string_exact_match(self) -> None:
         reason, detail = from_legacy_string("merge_conflict")
         assert reason is FailureReason.MERGE_CONFLICT
+        assert detail is None
+
+    def test_dirty_working_tree_legacy_string_property(self) -> None:
+        assert (
+            FailureReason.DIRTY_WORKING_TREE.legacy_string == "dirty_working_tree"
+        )
+
+    def test_from_legacy_string_dirty_working_tree(self) -> None:
+        reason, detail = from_legacy_string("dirty_working_tree")
+        assert reason is FailureReason.DIRTY_WORKING_TREE
+        assert detail is None
+
+    def test_dirty_working_tree_round_trips(self) -> None:
+        legacy = to_legacy_string(FailureReason.DIRTY_WORKING_TREE)
+        assert legacy == "dirty_working_tree"
+        parsed, detail = from_legacy_string(legacy)
+        assert parsed is FailureReason.DIRTY_WORKING_TREE
         assert detail is None
 
     def test_from_legacy_string_none(self) -> None:

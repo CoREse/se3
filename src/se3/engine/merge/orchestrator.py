@@ -86,6 +86,49 @@ logger = logging.getLogger(__name__)
 # library contract without forking a second nearly-identical dataclass.
 MergeResult = MergeReport
 
+# POSIX relative-path prefixes of the git-tracked data SE3 delegates to a
+# running session to mutate in the MAIN working tree between commit steps.
+# Two classes of such committed data exist and BOTH must be here, or a merge
+# git could complete is blocked with a spurious dirty_working_tree:
+#   * se3/issues/ — issue open/close writes files under it and bumps
+#     se3/issues/.next_id (divergence routed to NextIdResolver);
+#   * se3/code-index.md — flow steps rewrite it incrementally, so it is
+#     routinely dirty between commit steps (the repo is in exactly this state
+#     right now); its divergence has its own deterministic code-index resolver
+#     (#280, same class as NextIdResolver).
+# When any of these are dirty at merge start git refuses to begin the merge
+# ("Your local changes would be overwritten by merge"), so the pre-flight
+# auto-commits them into a sync commit and lets the three-way merge + the
+# matching deterministic resolver take over. The whitelist is a CLOSED list
+# split by entry kind so each kind's match semantics are explicit at the
+# definition site (extending it to other tier-A delegated data is a one-line
+# change to the matching tuple):
+#   * _SELF_MANAGED_DIRTY_PREFIXES — directory-prefix entries (trailing slash),
+#     matched by path prefix so a match is confined to paths INSIDE the dir
+#     (never a sibling like se3/issuesX);
+#   * _SELF_MANAGED_DIRTY_FILES — exact-file entries, matched by full-path
+#     equality ONLY — NOT a prefix, so a tracked sibling like
+#     se3/code-index.md.bak / .orig is treated as an outside file, not silently
+#     swallowed by the whitelist.
+_SELF_MANAGED_DIRTY_PREFIXES: tuple[str, ...] = ("se3/issues/",)
+_SELF_MANAGED_DIRTY_FILES: tuple[str, ...] = ("se3/code-index.md",)
+
+
+def _is_self_managed_dirty_path(path: str) -> bool:
+    """True if *path* (a POSIX repo-relative path) is SE3 self-managed.
+
+    A :data:`_SELF_MANAGED_DIRTY_PREFIXES` entry is a directory prefix and
+    matches any path strictly inside it; a :data:`_SELF_MANAGED_DIRTY_FILES`
+    entry is a FILE and matches only that exact path. Using exact equality for
+    file entries (rather than ``str.startswith``) is what keeps siblings such
+    as ``se3/code-index.md.bak`` OUT of the whitelist — otherwise their dirty
+    state would be misclassified as self-managed while the sync commit's
+    pathspec never actually stages them.
+    """
+    if any(path.startswith(pref) for pref in _SELF_MANAGED_DIRTY_PREFIXES):
+        return True
+    return path in _SELF_MANAGED_DIRTY_FILES
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write *content* to *path* atomically.
@@ -1569,6 +1612,19 @@ class MergeOrchestrator:
         self._log(f"Current branch: {current_branch}")
         self._log(f"Branches to merge ({len(branches)}): {', '.join(branches)}")
         self._log(f"Strategy: {self.strategy.value}")
+
+        # Dirty pre-flight (lock held, repo-state validated, BEFORE the
+        # pre_merge_sha capture below): auto-commit self-managed issue state so
+        # a branch that also touched se3/issues/.next_id can actually START its
+        # merge and route the divergence through NextIdResolver. Placing this
+        # ahead of the pre_merge_sha capture makes the "chore: sync issue state"
+        # commit part of the rollback baseline — _rollback_to can never discard
+        # it — and ensures the pre-merge version read happens on the post-sync
+        # HEAD. Dirty tracked files outside the self-managed whitelist fail loud.
+        if not self._preflight_dirty_tracked_files(report, branches):
+            self._write_log()
+            report.log_file = self.log_file
+            return report
 
         # Capture pre-merge state for SemVer aggregation
         try:
@@ -4353,6 +4409,13 @@ class MergeOrchestrator:
                     if stderr_msg
                     else FailureReason.FAST_FAILURE.legacy_string
                 )
+                # Also surface the raw git error as structured detail, not only
+                # embedded in the compound reason string, so consumers reading
+                # failure_detail (e.g. a merge git refused to START, where
+                # _abort_merge now succeeds and leaves the real cause here) see
+                # the diagnostic instead of a null.
+                if stderr_msg:
+                    report.failure_detail = stderr_msg
             return "fast_abort"
         if not self._abort_merge():
             self._log(
@@ -4365,6 +4428,12 @@ class MergeOrchestrator:
                 if stderr_msg
                 else FailureReason.MERGE_FAILED.legacy_string
             )
+            # Mirror the raw git error into structured detail (see the FAST
+            # branch above) so a merge that git refused to START — where
+            # _abort_merge now reports success — preserves its real cause in
+            # failure_detail rather than leaving it null.
+            if stderr_msg:
+                report.failure_detail = stderr_msg
         return "non_conflict_failure"
 
     def _resolve_deterministic_conflicts(self) -> Optional[DeterministicOutcome]:
@@ -6312,6 +6381,239 @@ class MergeOrchestrator:
                 )
             return call_file
 
+    def _preflight_dirty_tracked_files(
+        self, report: MergeReport, branches: list[str]
+    ) -> bool:
+        """Ensure the main working tree is clean enough for merge to START.
+
+        A running session opens/closes issues in the MAIN repository between
+        commit steps, leaving se3/issues/ files and se3/issues/.next_id dirty.
+        When a branch being merged touched the same file (typically .next_id),
+        git refuses to even begin the merge ("Your local changes would be
+        overwritten by merge") — and an UNCOMMITTED change is not a merge side,
+        so the deterministic/LLM resolvers never get a chance to run.
+
+        Resolution: if every dirty tracked path is self-managed — under a
+        directory prefix (:data:`_SELF_MANAGED_DIRTY_PREFIXES`) or an exact
+        file entry (:data:`_SELF_MANAGED_DIRTY_FILES`) — auto-commit it as
+        "chore: sync issue state" so the .next_id divergence becomes an
+        ordinary three-way conflict that NextIdResolver (max-of-two-counters)
+        resolves. Any dirty tracked path OUTSIDE the whitelist is a genuine
+        operator-state problem we must not silently commit, so we fail loud
+        with :data:`FailureReason.DIRTY_WORKING_TREE` and the file list.
+
+        Must run INSIDE the merge lock, AFTER _check_repo_state, and BEFORE the
+        pre_merge_sha capture — so the sync commit is part of the rollback
+        baseline (_rollback_to can never discard issue state) and the
+        pre-merge version read happens on the correct HEAD. The caller owns the
+        _write_log / report.log_file bookkeeping on the False path.
+
+        Returns:
+            True if the merge may proceed (clean, or self-managed files were
+            committed); False if a structured failure was written to *report*.
+        """
+        try:
+            status_result = _run_git(
+                self.project_root,
+                "status", "--porcelain=v1", "-uno", "-z",
+                check=False, timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self._log(
+                f"git status (dirty pre-flight) timed out: {exc}",
+                level=logging.ERROR,
+            )
+            report.success = False
+            report.failure_reason = FailureReason.UNEXPECTED.legacy_string
+            report.failure_detail = f"dirty pre-flight git status timed out: {exc}"
+            report.unattempted_branches = list(branches)
+            return False
+        if status_result.returncode != 0:
+            self._log(
+                "git status (dirty pre-flight) failed: "
+                f"{redact_text(status_result.stderr.strip())}",
+                level=logging.ERROR,
+            )
+            report.success = False
+            report.failure_reason = FailureReason.UNEXPECTED.legacy_string
+            report.failure_detail = (
+                "dirty pre-flight git status returned "
+                f"{status_result.returncode}: {status_result.stderr.strip()}"
+            )
+            report.unattempted_branches = list(branches)
+            return False
+
+        # Parse the NUL-separated porcelain-v1 records. Each record is
+        # "XY <path>"; a rename/copy (R/C in the status field) carries its
+        # source path in the FOLLOWING NUL-separated token, so we consume two
+        # tokens and require BOTH ends to be self-managed. -z avoids the "->"
+        # arrow and quoting ambiguity for paths with spaces.
+        tokens = status_result.stdout.split("\0")
+        all_paths: list[str] = []
+        outside_paths: list[str] = []
+        conflict_paths: list[str] = []
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if not tok:
+                i += 1
+                continue
+            xy = tok[:2]
+            # Unmerged (conflict) entries — a 'U' in either column, or
+            # both-added/both-deleted (AA/DD) — mean a merge is ALREADY in
+            # progress in the main working tree. We must never start a second
+            # merge on top of one: the conflict markers can't be swept into a
+            # sync commit (that would commit broken content) and starting a
+            # new `git merge` on an in-flight merge is exactly the state this
+            # pre-flight exists to refuse. So we treat every conflicted path as
+            # a hard blocker, listed in the dirty_working_tree failure detail,
+            # regardless of whether it falls under a self-managed prefix.
+            if "U" in xy or xy == "AA" or xy == "DD":
+                conflict_paths.append(tok[3:])
+                all_paths.append(tok[3:])
+                i += 1
+                continue
+            entry_paths = [tok[3:]]
+            if "R" in xy or "C" in xy:
+                # Rename/copy: the second (source) path is the next token.
+                i += 1
+                if i < len(tokens) and tokens[i]:
+                    entry_paths.append(tokens[i])
+            for p in entry_paths:
+                all_paths.append(p)
+                if not _is_self_managed_dirty_path(p):
+                    outside_paths.append(p)
+            i += 1
+
+        if not all_paths:
+            # Clean (tracked) working tree — proceed. Untracked-only files do
+            # not block merge start, so we deliberately leave them alone.
+            return True
+
+        if outside_paths or conflict_paths:
+            conflict_sorted = sorted(set(conflict_paths))
+            outside_sorted = sorted(set(outside_paths) - set(conflict_paths))
+            inside_sorted = sorted(
+                set(all_paths) - set(outside_paths) - set(conflict_paths)
+            )
+            block_reasons = []
+            if conflict_sorted:
+                block_reasons.append("an unresolved merge is in progress")
+            if outside_sorted:
+                block_reasons.append(
+                    "dirty tracked files exist outside SE3 self-managed paths"
+                )
+            self._log(
+                "Refusing to start merge: "
+                + " and ".join(block_reasons)
+                + f": {', '.join(conflict_sorted + outside_sorted)}",
+                level=logging.ERROR,
+            )
+            detail_lines = [
+                "Cannot start merge: the main working tree is not in a clean "
+                "state; resolve/commit or restore the paths below first.",
+            ]
+            if conflict_sorted:
+                detail_lines.append(
+                    "Unresolved merge conflicts (a merge is already in "
+                    "progress):"
+                )
+                detail_lines += [f"  - {p}" for p in conflict_sorted]
+            if outside_sorted:
+                detail_lines.append("Dirty tracked files outside self-managed paths:")
+                detail_lines += [f"  - {p}" for p in outside_sorted]
+            if inside_sorted:
+                detail_lines.append(
+                    "Within self-managed paths "
+                    f"({', '.join(_SELF_MANAGED_DIRTY_PREFIXES + _SELF_MANAGED_DIRTY_FILES)}):"
+                )
+                detail_lines += [f"  - {p}" for p in inside_sorted]
+            report.success = False
+            report.failure_reason = FailureReason.DIRTY_WORKING_TREE.legacy_string
+            report.failure_detail = "\n".join(detail_lines)
+            report.unattempted_branches = list(branches)
+            return False
+
+        # All dirty tracked files are self-managed: auto-commit them so the
+        # divergence enters the three-way merge as a real "ours" side. Use
+        # ``git add -A -- se3/issues`` so newly-opened (untracked) issue yaml
+        # files — which always accompany a .next_id bump — are swept in too,
+        # making the sync commit semantically complete.
+        self._log(
+            "Auto-committing dirty self-managed issue state before merge: "
+            f"{', '.join(sorted(set(all_paths)))}"
+        )
+        # Derive the add pathspecs from the dirty tracked paths that actually
+        # need committing, NOT from a whitelist entry merely existing on disk.
+        # Two ways the on-disk-existence heuristic went wrong:
+        #   * a whitelist FILE that exists but is gitignored-untracked (e.g.
+        #     se3/code-index.md on a pre-migrate .gitignore that never
+        #     whitelisted it) makes `git add` fatal with "paths are ignored",
+        #     aborting a sync whose every dirty file was under se3/issues/;
+        #   * an ABSENT file entry makes `git add` fatal with "did not match".
+        # Including a whitelist entry only when a dirty tracked path matches it
+        # sidesteps both. Directory entries add the dir pathspec so newly-opened
+        # (untracked) issue yaml under it is swept in with the .next_id bump;
+        # file entries add the exact tracked path (which git add accepts even if
+        # a .gitignore pattern would otherwise cover it).
+        add_targets: list[str] = []
+        for pref in _SELF_MANAGED_DIRTY_PREFIXES:
+            if any(p.startswith(pref) for p in all_paths):
+                add_targets.append(pref.rstrip("/"))
+        for exact in _SELF_MANAGED_DIRTY_FILES:
+            if exact in all_paths:
+                add_targets.append(exact)
+        try:
+            add_result = _run_git(
+                self.project_root,
+                "add", "-A", "--", *add_targets,
+                check=False, timeout=30,
+            )
+            if add_result.returncode != 0:
+                report.success = False
+                report.failure_reason = FailureReason.DIRTY_WORKING_TREE.legacy_string
+                report.failure_detail = (
+                    f"auto-commit failed: git add returned "
+                    f"{add_result.returncode}: {add_result.stderr.strip()}"
+                )
+                report.unattempted_branches = list(branches)
+                return False
+            commit_result = _run_git(
+                self.project_root,
+                "commit", "-m", "chore: sync issue state",
+                check=False, timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            report.success = False
+            report.failure_reason = FailureReason.DIRTY_WORKING_TREE.legacy_string
+            report.failure_detail = f"auto-commit failed: git timed out: {exc}"
+            report.unattempted_branches = list(branches)
+            return False
+        if commit_result.returncode != 0:
+            # "nothing to commit" is NOT a failure: after `git add` the index
+            # equals HEAD, so the whitelist is effectively clean (e.g. a
+            # self-managed file was edited then restored to its HEAD content
+            # without unstaging). The goal is to auto-commit and START the
+            # merge, not to block an already-mergeable tree — so treat it as
+            # success and proceed. git prints "nothing to commit" on stdout.
+            combined = f"{commit_result.stdout} {commit_result.stderr}".lower()
+            if "nothing to commit" in combined:
+                self._log(
+                    "Auto-commit found nothing to commit (index equals HEAD) "
+                    "— working tree effectively clean, proceeding with merge"
+                )
+                return True
+            report.success = False
+            report.failure_reason = FailureReason.DIRTY_WORKING_TREE.legacy_string
+            report.failure_detail = (
+                f"auto-commit failed: git commit returned "
+                f"{commit_result.returncode}: {commit_result.stderr.strip()}"
+            )
+            report.unattempted_branches = list(branches)
+            return False
+        self._log("Committed 'chore: sync issue state' — proceeding with merge")
+        return True
+
     def _abort_merge(self) -> bool:
         """Abort the current merge to restore working tree.
 
@@ -6332,9 +6634,22 @@ class MergeOrchestrator:
         if abort_result.returncode == 0:
             self._log("git merge --abort succeeded")
             return True
-        else:
-            self._log(f"git merge --abort failed: {redact_text(abort_result.stderr.strip())}")
-            return False
+        # A non-zero rc when there is simply no merge in progress is NOT a
+        # failure: the target state (no merge residue in the working tree)
+        # already holds. git emits "fatal: There is no merge to abort
+        # (MERGE_HEAD missing)." with rc=128 in that case. Treating it as
+        # success is what keeps a merge that never STARTED (e.g. blocked
+        # pre-flight) from having its real failure_reason overwritten with a
+        # misleading merge_abort_failed. Match both stable substrings, case-
+        # insensitively, against combined stdout+stderr.
+        combined = f"{abort_result.stdout} {abort_result.stderr}".lower()
+        if "no merge to abort" in combined or "merge_head missing" in combined:
+            self._log(
+                "git merge --abort: no merge in progress — treating abort as success"
+            )
+            return True
+        self._log(f"git merge --abort failed: {redact_text(abort_result.stderr.strip())}")
+        return False
 
     @staticmethod
     def _violations_to_dicts(violations: list, branch: str = "") -> list[dict]:

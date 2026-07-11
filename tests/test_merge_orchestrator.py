@@ -1924,6 +1924,17 @@ class TestMergeOrchestratorConflictResolution:
             ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
             capture_output=True, text=True, check=False,
         )
+        # This test pre-stages an in-progress merge as a fixture shortcut, to
+        # inject a specific working-tree state before conflict resolution runs.
+        # The dirty pre-flight now (correctly) refuses to START a merge on top
+        # of a pre-existing one — in production the orchestrator holds the lock
+        # and never leaves a merge in progress, so a lingering MERGE_HEAD is an
+        # anomaly to block, not to bulldoze. Bypass it here since we are
+        # unit-testing the resolution path, not the pre-flight.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_preflight_dirty_tracked_files",
+            lambda self, report, branches: True,
+        )
         # The merge should have produced a conflict
         assert "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr, (
             f"Expected conflict but got: {merge_result.stdout} {merge_result.stderr}"
@@ -2769,6 +2780,17 @@ class TestMergeOrchestratorCleanupInteraction:
             ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
             capture_output=True, text=True, check=False,
         )
+        # This test pre-stages an in-progress merge as a fixture shortcut, to
+        # inject a specific working-tree state before conflict resolution runs.
+        # The dirty pre-flight now (correctly) refuses to START a merge on top
+        # of a pre-existing one — in production the orchestrator holds the lock
+        # and never leaves a merge in progress, so a lingering MERGE_HEAD is an
+        # anomaly to block, not to bulldoze. Bypass it here since we are
+        # unit-testing the resolution path, not the pre-flight.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_preflight_dirty_tracked_files",
+            lambda self, report, branches: True,
+        )
         assert "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr, (
             f"Expected conflict but got: {merge_result.stdout} {merge_result.stderr}"
         )
@@ -2894,6 +2916,17 @@ class TestMergeOrchestratorCleanupInteraction:
         merge_result = subprocess.run(
             ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
             capture_output=True, text=True, check=False,
+        )
+        # This test pre-stages an in-progress merge as a fixture shortcut, to
+        # inject a specific working-tree state before conflict resolution runs.
+        # The dirty pre-flight now (correctly) refuses to START a merge on top
+        # of a pre-existing one — in production the orchestrator holds the lock
+        # and never leaves a merge in progress, so a lingering MERGE_HEAD is an
+        # anomaly to block, not to bulldoze. Bypass it here since we are
+        # unit-testing the resolution path, not the pre-flight.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_preflight_dirty_tracked_files",
+            lambda self, report, branches: True,
         )
         assert "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr, (
             f"Expected conflict but got: {merge_result.stdout} {merge_result.stderr}"
@@ -3090,6 +3123,17 @@ class TestMergeOrchestratorCleanupInteraction:
             ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
             capture_output=True, text=True, check=False,
         )
+        # This test pre-stages an in-progress merge as a fixture shortcut, to
+        # inject a specific working-tree state before conflict resolution runs.
+        # The dirty pre-flight now (correctly) refuses to START a merge on top
+        # of a pre-existing one — in production the orchestrator holds the lock
+        # and never leaves a merge in progress, so a lingering MERGE_HEAD is an
+        # anomaly to block, not to bulldoze. Bypass it here since we are
+        # unit-testing the resolution path, not the pre-flight.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_preflight_dirty_tracked_files",
+            lambda self, report, branches: True,
+        )
         assert "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr
         (tmp_path / "shared.txt").write_text("resolved content without markers\n")
 
@@ -3179,6 +3223,17 @@ class TestMergeOrchestratorCleanupInteraction:
             ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
             capture_output=True, text=True, check=False,
         )
+        # This test pre-stages an in-progress merge as a fixture shortcut, to
+        # inject a specific working-tree state before conflict resolution runs.
+        # The dirty pre-flight now (correctly) refuses to START a merge on top
+        # of a pre-existing one — in production the orchestrator holds the lock
+        # and never leaves a merge in progress, so a lingering MERGE_HEAD is an
+        # anomaly to block, not to bulldoze. Bypass it here since we are
+        # unit-testing the resolution path, not the pre-flight.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_preflight_dirty_tracked_files",
+            lambda self, report, branches: True,
+        )
         assert "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr
         (tmp_path / "shared.txt").write_text("resolved content without markers\n")
 
@@ -3251,6 +3306,17 @@ class TestMergeOrchestratorCleanupInteraction:
         merge_result = subprocess.run(
             ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
             capture_output=True, text=True, check=False,
+        )
+        # This test pre-stages an in-progress merge as a fixture shortcut, to
+        # inject a specific working-tree state before conflict resolution runs.
+        # The dirty pre-flight now (correctly) refuses to START a merge on top
+        # of a pre-existing one — in production the orchestrator holds the lock
+        # and never leaves a merge in progress, so a lingering MERGE_HEAD is an
+        # anomaly to block, not to bulldoze. Bypass it here since we are
+        # unit-testing the resolution path, not the pre-flight.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_preflight_dirty_tracked_files",
+            lambda self, report, branches: True,
         )
         assert "CONFLICT" in merge_result.stdout or "CONFLICT" in merge_result.stderr
         (tmp_path / "shared.txt").write_text("resolved content without markers\n")
@@ -8395,3 +8461,79 @@ class TestMergeOrchestratorBatchResolverIntegration:
         assert report.success is False
         # Fast strategy never writes a human call file on resolution failure.
         assert report.human_call_file is None
+
+
+class TestAbortMergeNoMergeInProgress:
+    """G2: ``_abort_merge`` must treat 'no merge to abort' as success.
+
+    Otherwise every failure that happens BEFORE git merge even starts (e.g.
+    a blocked dirty pre-flight, or a merge that git refused to begin) has its
+    real ``failure_reason`` overwritten with a misleading
+    ``merge_abort_failed`` — exactly the root-cause masking this change fixes.
+    """
+
+    def _make_orch(self, tmp_path: Path) -> MergeOrchestrator:
+        _init_repo(tmp_path)
+        return MergeOrchestrator(project_root=tmp_path, delete_merged=False)
+
+    def test_merge_head_missing_treated_as_success(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        orch = self._make_orch(tmp_path)
+
+        def fake_run_git(project_root, *args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=list(args),
+                returncode=128,
+                stdout="",
+                stderr="fatal: There is no merge to abort (MERGE_HEAD missing).\n",
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", fake_run_git
+        )
+        assert orch._abort_merge() is True
+
+    def test_real_abort_failure_returns_false(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        orch = self._make_orch(tmp_path)
+
+        def fake_run_git(project_root, *args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=list(args),
+                returncode=1,
+                stdout="",
+                stderr="fatal: unable to write new index file\n",
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", fake_run_git
+        )
+        assert orch._abort_merge() is False
+
+    def test_clean_abort_returns_true(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        orch = self._make_orch(tmp_path)
+
+        def fake_run_git(project_root, *args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=list(args), returncode=0, stdout="", stderr="",
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", fake_run_git
+        )
+        assert orch._abort_merge() is True
+
+    def test_timeout_returns_false(self, tmp_path: Path, monkeypatch) -> None:
+        orch = self._make_orch(tmp_path)
+
+        def fake_run_git(project_root, *args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git merge --abort", timeout=30)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", fake_run_git
+        )
+        assert orch._abort_merge() is False

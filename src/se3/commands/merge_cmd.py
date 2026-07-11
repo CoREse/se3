@@ -1638,6 +1638,12 @@ def run_merge(
         lines = [first_line, ""]
         if report.failed_branch:
             lines.append(f"Failed branch: {report.failed_branch}")
+        # The dirty-working-tree pre-flight packs the offending file list into
+        # failure_detail; surface it so the operator sees exactly what to
+        # commit or restore. Scoped to this reason to avoid changing output
+        # for the many other reasons that also populate failure_detail.
+        if report.failure_reason == "dirty_working_tree" and report.failure_detail:
+            lines.append(report.failure_detail)
         if report.runtime_sync_collision_path:
             lines.append(
                 f"Colliding path: se3/{report.runtime_sync_collision_path}"
@@ -1717,6 +1723,13 @@ def _failure_title_and_summary(
         return (
             "Merge aborted",
             "Merge aborted: git merge --abort failed — working tree may still be mid-merge",
+        )
+    if failure_reason == "dirty_working_tree":
+        return (
+            "Merge not started",
+            "Merge not started: the main working tree has uncommitted tracked "
+            "changes outside SE3 self-managed paths — commit or restore them "
+            "first (see failure detail for the file list)",
         )
     if failure_reason == "guardrail_violation_call_failed":
         return (

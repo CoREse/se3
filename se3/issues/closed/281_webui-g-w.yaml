@@ -2,8 +2,8 @@ id: '281'
 description: webui产生了巨量的流量（一天几十G），这只是一个轻量的webui，传输的只有人的prompt和se3的输出内容（只有在有需求的时候才显示raw
   data等，但其实就算全部raw data加起来也不应该有这么多，我怀疑是不是接受了全量的test结果），不应该有这么多流量。查看一下怎么回事，优化一下。（也有可能是大session，每次刷新都会全量把历史记录发过来吗？因为是在这个大session
   20260710-135900_e3d56baa运行的时候导致烧了这么多流量的，而且如果我点进去聊天页面，它可能会把我整个服务器给卡掉线(我发现不点进聊天界面也会卡掉线，也许是daemon和webui的通信的问题（但也可能是其它的因素导致的比如vscode的git插件等问题和se3无关）））
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-07-10T15:31:50.881050'
-updated_at: '2026-07-10T21:18:11.805825'
+updated_at: '2026-07-11T05:14:29.141648'

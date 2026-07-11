@@ -125,6 +125,11 @@ class FailureReason(IntEnum):
     REPO_DETACHED_HEAD = 931
     REPO_SHALLOW = 932
     REPO_UNSUPPORTED_STATE = 933
+    # Merge could not even start because the main working tree has dirty
+    # tracked files outside the SE3 self-managed data paths (se3/issues/).
+    # Same fail-fast family as the REPO_* states above — a pre-merge
+    # repository condition the operator must clear before merge can run.
+    DIRTY_WORKING_TREE = 934
 
     # --- 98x: input validation ------------------------------------------
     NO_BRANCHES = 980
@@ -232,6 +237,7 @@ _LEGACY_STRING_MAP: dict[str, FailureReason] = {
     "repo_detached_head": FailureReason.REPO_DETACHED_HEAD,
     "repo_shallow": FailureReason.REPO_SHALLOW,
     "repo_unsupported_state": FailureReason.REPO_UNSUPPORTED_STATE,
+    "dirty_working_tree": FailureReason.DIRTY_WORKING_TREE,
     # Legacy spellings derived from exception class names.  Older code
     # paths derived these strings via ``type(exc).__name__.replace(
     # "Error", "").lower()``; the explicit alias keeps the on-disk
