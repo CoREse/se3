@@ -1,6 +1,6 @@
-"""Group G2 — close the discovery first-reply observability blind spot.
+"""Worktree discovery observability seam — per-hop AND end-to-end regression.
 
-These tests lock in the cooperative invariant that a ``se3 run --worktree``
+The earlier tests lock in the cooperative invariant that a ``se3 run --worktree``
 flow is observable (and its discovery first reply fully readable) from the very
 first on-disk write, while the transient worktree sandbox never leaks into the
 New Task project dropdown.
@@ -12,20 +12,30 @@ the worktree's live history during the discovery startup window. The run-command
 fix saves ``engine.json`` eagerly for a worktree-mode flow (carrying
 ``is_worktree_mode=True`` + ``worktree_path`` at status ``INIT``) before the
 first LLM call writes any history.
+
+Group G4 adds the END-TO-END coverage for issue #278 (worktree discovery chat
+records after round 1 vanished from the live console): the tests below chain the
+REAL daemon ``read_flow`` → REAL server ``ServerState`` relay → a faithful port
+of the ``app.js`` frontend reconcile, so a multi-round worktree discovery is
+verified fully visible across the WHOLE seam — a collision an isolated per-hop
+unit missed still fails here.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
 from pathlib import Path
 
+from se3.daemon import protocol
 from se3.daemon.aggregator import DaemonAggregator
 from se3.daemon.history import DaemonHistoryReader
 from se3.engine.models import FlowStatus
 from se3.engine.persistence import PersistenceManager
 from se3.engine.state_machine import StateMachine
+from se3.server.state import ServerState
 
 
 def _eager_save_worktree_flow(worktree_root: Path, branch: str = "worktree/feat-x"):
@@ -270,3 +280,346 @@ def test_seam_observable_and_readable_yet_never_registered(tmp_path):
     # The registry callback only ever recorded the main root.
     assert all("/se3/worktrees/" not in r for r in persisted)
     assert main_real in [os.path.realpath(r) for r in persisted]
+
+
+# ==========================================================================
+# Group G4 — end-to-end: worktree multi-round discovery live chat is fully
+# visible across the WHOLE seam (daemon read_flow → server relay → frontend
+# reconcile), with NO 2nd+ round loss (issue #278).
+# ==========================================================================
+#
+# The reported bug (#278): in a ``se3 run --worktree`` flow the discovery
+# step's chat records after the FIRST round vanished from the web console —
+# only round 1 rendered live, and everything the agent said in later rounds was
+# reachable ONLY through the adjudication "show details" affordance, never as
+# live chat. G1 fixed the daemon read path (distinct per-physical-file step_id +
+# stable worktree copy selection + copy-switch clean re-read), G2 proved the
+# server relay passes that disambiguated identity through losslessly, G3
+# hardened the frontend reconcile. This module's earlier tests lock the
+# observe/register seam per-hop; the tests below chain ALL THREE hops with the
+# REAL daemon reader and REAL server ``ServerState`` so a regression in any one
+# hop that only manifests end-to-end (a collision the isolated unit missed)
+# still fails here.
+#
+# The frontend is mirrored by :class:`_FrontendConsole`, a faithful port of the
+# reconcile invariants in ``server/static/app.js`` — ``recordKey`` (the stable
+# ``stepId#ordinal`` identity), ``reconcileAppendRecords`` (idempotent append),
+# and ``dedupeSnapshotDiscovery`` (content-aware full-snapshot de-dup). The JS
+# node harness (``tests/frontend/worktree_discovery_multiround.test.mjs``) pins
+# the real JS; this port lets the SAME records flow through the real Python hops
+# into a frontend without a browser.
+
+
+def _disc_msg(role, content):
+    return {"role": role, "content": content}
+
+
+class _FrontendConsole:
+    """Faithful Python mirror of the ``app.js`` history reconcile.
+
+    Consumes the exact ``(mode, records)`` frames the daemon push loop hands the
+    server relay (and which the server re-broadcasts over ``/ws/ui`` verbatim),
+    reconciling them the way the WebUI does: a ``full`` snapshot replaces the
+    held records after :meth:`_dedupe_snapshot_discovery`, an ``append`` batch is
+    merged idempotently by :meth:`_record_key`. ``held`` is what the chat would
+    render.
+    """
+
+    def __init__(self):
+        self.held: list = []
+
+    # -- identity (mirrors app.js recordKey / recordOrdinal / legacyKeyFromNorm)
+    @staticmethod
+    def _ordinal(rec):
+        o = rec.get("ordinal")
+        if o is None and isinstance(rec.get("message"), dict):
+            o = rec["message"].get("ordinal")
+        return o if isinstance(o, int) else None
+
+    @staticmethod
+    def _legacy_key(rec):
+        msg = rec.get("message") if isinstance(rec.get("message"), dict) else rec
+        content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+        return "\x00".join(
+            [
+                str(rec.get("step_id", "")),
+                str(msg.get("role", "")),
+                str(len(content)),
+                content[:96],
+            ]
+        )
+
+    def _record_key(self, rec):
+        ordinal = self._ordinal(rec)
+        step_id = rec.get("step_id")
+        if ordinal is not None and step_id:
+            return f"{step_id}#{ordinal}"
+        return self._legacy_key(rec)
+
+    # -- dedupeSnapshotDiscovery: content-aware de-dup of a full snapshot ------
+    def _dedupe_snapshot_discovery(self, records):
+        seen: dict = {}
+        out = []
+        for rec in records:
+            if str(rec.get("step_type", "")).lower() == "discovery":
+                key = self._record_key(rec)
+                sig = self._legacy_key(rec)
+                sigs = seen.get(key)
+                if sigs is not None:
+                    if sig in sigs:  # byte-identical clone — drop
+                        continue
+                    sigs.add(sig)
+                else:
+                    seen[key] = {sig}
+            out.append(rec)
+        return out
+
+    # -- reconcileAppendRecords: idempotent append merge ----------------------
+    def _reconcile_append(self, incoming):
+        idx_by_key = {self._record_key(r): i for i, r in enumerate(self.held)}
+        fresh_keys: set = set()
+        for rec in incoming:
+            key = self._record_key(rec)
+            if key in idx_by_key:
+                at = idx_by_key[key]
+                # Same stable line: converge to newest content in place (a retry
+                # rewrote it), skip a byte-identical re-delivery. Never a 2nd
+                # bubble.
+                if self._legacy_key(self.held[at]) != self._legacy_key(rec):
+                    self.held[at] = rec
+                continue
+            if key in fresh_keys:
+                continue
+            fresh_keys.add(key)
+            self.held.append(rec)
+
+    def apply(self, mode, records):
+        """Apply one daemon push frame exactly as the WebUI would."""
+        recs = [dict(r) for r in records]
+        if mode == protocol.HISTORY_MODE_FULL:
+            self.held = self._dedupe_snapshot_discovery(recs)
+        else:
+            self._reconcile_append(recs)
+
+    # -- assertions helpers ---------------------------------------------------
+    def contents(self):
+        return [r["message"]["content"] for r in self.held]
+
+    def keys(self):
+        return [self._record_key(r) for r in self.held]
+
+
+def _make_reader(*roots):
+    return DaemonHistoryReader(
+        project_roots_provider=lambda: [str(r) for r in roots]
+    )
+
+
+def _wt_flow_dir(root, flow_id):
+    d = root / "se3" / "history" / flow_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _make_worktree(main_root, name="wt__b"):
+    (main_root / "se3").mkdir(parents=True, exist_ok=True)
+    wt = main_root / "se3" / "worktrees" / name
+    wt.mkdir(parents=True, exist_ok=True)
+    return wt
+
+
+def _write_jsonl(path, lines):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+    )
+
+
+def _append_jsonl(path, lines):
+    with path.open("a", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(json.dumps(line) + "\n")
+
+
+def test_e2e_worktree_multiround_discovery_all_rounds_reach_frontend(tmp_path):
+    """#278 end-to-end: every discovery round reaches the frontend chat, live.
+
+    Chains the WHOLE seam for a live ``--worktree`` discovery whose single
+    append-only file grows across four rounds (the real
+    ``run_worktree_mode`` topology — discovery runs entirely in the worktree):
+
+        REAL DaemonHistoryReader.read_flow (incremental)
+          → REAL ServerState.append_history (relay cache + /ws/ui broadcast)
+          → _FrontendConsole reconcile (recordKey = stepId#ordinal)
+
+    Asserts that every intermediate round's chat records — not just round 1 —
+    render on the frontend, that the final adjudication verdict is visible, that
+    no round is dropped or duplicated, and that the server's authoritative
+    bundle matches what the frontend holds (relay is lossless).
+    """
+    main = tmp_path / "main"
+    wt = _make_worktree(main)
+    flow_id = "wt-e2e"
+    disc = _wt_flow_dir(wt, flow_id) / "01_discovery_ab12.jsonl"
+
+    reader = _make_reader(main, wt)
+    console = _FrontendConsole()
+    state = ServerState()
+
+    # The four discovery rounds, appended one at a time to the SAME worktree
+    # file exactly as the engine's append-only chat_history writer does. The
+    # last assistant line is the adjudication verdict that "show details"
+    # surfaced pre-fix but the live chat did not.
+    rounds = [
+        [
+            _disc_msg("user", "the task"),
+            _disc_msg("assistant", "round 1: thinking… + first reply"),
+        ],
+        [
+            _disc_msg("user", "round 2 clarification answer"),
+            _disc_msg("assistant", "round 2: refined reply"),
+        ],
+        [
+            _disc_msg("user", "round 3 clarification answer"),
+            _disc_msg("assistant", "round 3: more detail"),
+        ],
+        [
+            _disc_msg("assistant", "VERDICT: ready — proceeding to analyze"),
+        ],
+    ]
+
+    async def scenario():
+        cursor = None
+        seen_full = False
+        for i, round_lines in enumerate(rounds):
+            if i == 0:
+                _write_jsonl(disc, round_lines)
+            else:
+                _append_jsonl(disc, round_lines)
+
+            # -- HOP 1: the daemon push loop reads the growing live file -------
+            read = reader.read_flow(
+                flow_id, project_root=str(wt), cursor=cursor
+            )
+            cursor = read.cursor
+
+            # The very first frame MUST be a full snapshot (the server discards a
+            # first-sighting append), and every later frame an incremental append
+            # — the stable worktree selection keeps the reads incremental.
+            if not seen_full:
+                assert read.mode == protocol.HISTORY_MODE_FULL
+                seen_full = True
+            else:
+                assert read.mode == protocol.HISTORY_MODE_APPEND
+                # A live worktree round MUST carry records (the #278 symptom was
+                # the daemon emitting an EMPTY append for round 2+ because the
+                # cursor had wrongly consumed them).
+                assert read.records, f"round {i + 1} produced no daemon records"
+
+            # -- HOP 2: the server relay caches + would broadcast the frame ----
+            applied = await state.append_history(
+                flow_id, read.mode, read.records, machine_id="m1"
+            )
+            assert applied is True, f"relay discarded round {i + 1}'s frame"
+
+            # -- HOP 3: the frontend applies the same (mode, records) frame ----
+            console.apply(read.mode, read.records)
+
+        # Every round's chat is present on the frontend, in order — the 2nd, 3rd
+        # and 4th rounds did NOT vanish after round 1 (the #278 regression).
+        assert console.contents() == [
+            "the task",
+            "round 1: thinking… + first reply",
+            "round 2 clarification answer",
+            "round 2: refined reply",
+            "round 3 clarification answer",
+            "round 3: more detail",
+            "VERDICT: ready — proceeding to analyze",
+        ]
+        # The adjudication verdict is a live chat bubble, not only reachable via
+        # "show details".
+        assert "VERDICT: ready — proceeding to analyze" in console.contents()
+        # Every record keeps a globally-unique stable identity (no collision that
+        # would let a reconcile silently drop a round).
+        keys = console.keys()
+        assert len(keys) == len(set(keys))
+
+        # The server's authoritative bundle is lossless and matches the frontend
+        # exactly (relay added/dropped nothing).
+        bundle = await state.get_history(flow_id)
+        assert bundle is not None
+        bundle_contents = [r["message"]["content"] for r in bundle["records"]]
+        assert bundle_contents == console.contents()
+
+    asyncio.run(scenario())
+
+
+def test_e2e_worktree_discovery_cross_source_rounds_all_render(tmp_path):
+    """#278 end-to-end with a split-root topology: primary + sidecar both render.
+
+    A worktree discovery whose records are surfaced from MORE than one physical
+    file — the worktree primary plus a ``.from-<branch>`` merge-back sidecar,
+    each numbering its own lines from 0 — is the exact case the pre-G1 fold
+    collided (the sidecar's ordinal-0 record shared ``stepId#ordinal`` with the
+    primary's and was dropped as a duplicate). Chained through the real reader +
+    real relay + frontend reconcile, BOTH sources must render, and the frontend
+    dedupe must keep the distinct-content records while the identity stays
+    unique.
+    """
+    main = tmp_path / "main"
+    flow_id = "wt-e2e-sidecar"
+    flow_dir = _wt_flow_dir(main, flow_id)
+    # Post-merge single-root topology: the primary discovery file plus the
+    # worktree's collision sidecar (both begin at ordinal 0).
+    _write_jsonl(
+        flow_dir / "01_discovery_ab12.jsonl",
+        [
+            _disc_msg("user", "the task"),
+            _disc_msg("assistant", "primary round reply"),
+        ],
+    )
+    _write_jsonl(
+        flow_dir / "01_discovery_ab12.jsonl.from-worktree__b",
+        [
+            _disc_msg("assistant", "sidecar round reply"),
+            _disc_msg("assistant", "VERDICT from sidecar"),
+        ],
+    )
+
+    reader = _make_reader(main)
+    console = _FrontendConsole()
+    state = ServerState()
+
+    async def scenario():
+        read = reader.read_flow(flow_id, project_root=str(main))
+        # The primary's and sidecar's ordinal-0 records carry DISTINCT step_ids,
+        # so their stepId#ordinal keys never collide (pre-G1 they folded to one).
+        step_ids = {r["step_id"] for r in read.records}
+        assert step_ids == {
+            "01_discovery_ab12",
+            "01_discovery_ab12.from-worktree__b",
+        }
+
+        applied = await state.append_history(
+            flow_id, read.mode, read.records, machine_id="m1"
+        )
+        assert applied is True
+        console.apply(read.mode, read.records)
+
+        # Both physical sources render in full — the sidecar round is NOT dropped
+        # as a duplicate of the primary's ordinal-0 record.
+        assert console.contents() == [
+            "the task",
+            "primary round reply",
+            "sidecar round reply",
+            "VERDICT from sidecar",
+        ]
+        keys = console.keys()
+        assert len(keys) == len(set(keys))
+
+        bundle = await state.get_history(flow_id)
+        assert [r["message"]["content"] for r in bundle["records"]] == (
+            console.contents()
+        )
+
+    asyncio.run(scenario())

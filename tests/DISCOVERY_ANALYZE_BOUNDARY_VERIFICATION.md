@@ -218,3 +218,154 @@ the automated proof. To confirm once by hand after these fixes:
 5. Repeat step 1–3 for a normal boundary (analyze→plan) to confirm no regression,
    and for a `se3 run --worktree` flow to confirm the worktree root-swap is
    unaffected.
+
+---
+
+# Worktree Multi-Round Discovery — Live Chat Loss After Round 1 (issue #278)
+
+Follow-up to the #260 boundary fix above. **Status: FIXED** — the
+discovery→analyze track loss is closed, but a *distinct* worktree-only blind
+spot remained: in a `se3 run --worktree` flow the discovery step's chat records
+**after the first round** vanished from the live web console. Only round 1
+rendered; everything the agent said in later rounds was reachable ONLY through
+the adjudication "显示详情 / show details" affordance, never as live chat.
+
+## Symptom (as reported)
+
+> 在 worktree 的任务里，discovery 步骤第一轮之后的聊天记录消失，只能通过回复机制里的
+> 显示详情来查看它给出了什么需要判决的结果，而中间的聊天记录完全无法看到。
+
+## Root cause — an identity collision in the daemon read path
+
+`run_worktree_mode` forks the worktree first and runs discovery ENTIRELY in the
+worktree (`run_flow(project_root=<worktree>)`), so a single worktree discovery
+`.jsonl` file holds every round (append-only) — the engine WRITE side was
+already correct. The loss was in the **daemon read path**, where one logical
+step was surfaced from several physical files and the identity the frontend
+reconciles by (`stepId#ordinal`) collided:
+
+1. **Folded step ids (primary).** `_merge_flow_jsonl` can surface a step's
+   primary file plus its `.from-<branch>` sidecar (and, transiently, a
+   cross-root main copy). The old reader folded every physical file under ONE
+   logical `step_id` while each file numbered its own lines from 0, so a
+   sidecar's ordinal-0 record shared `stepId#ordinal` with the primary's — and
+   the frontend's idempotent reconcile dropped (or in-place-overwrote) the 2nd+
+   round as a "duplicate".
+2. **Copy-selection thrash + cursor desync (reinforcing).** The `largest-copy-wins`
+   selection could flip mid-flow from the (initially larger) static main clone
+   to the growing worktree copy. The wire cursor is keyed by bare filename but
+   the offset table by absolute path, so the flip made the by-name cursor look
+   already-consumed and the later rounds were skipped (an empty `append`).
+3. **Server cache never self-healed (why it persisted).** The 3 s self-heal only
+   returned `not_modified` from the server cache and never re-questioned the
+   daemon, so a round the live push dropped/collided stayed missing until
+   exit/re-enter.
+
+## Fixes that landed (G1 daemon · G2 server · G3 frontend)
+
+**Daemon read path (G1, `daemon/history.py`).**
+* `_display_step_id` gives each physical file its OWN frontend-facing step id
+  (keeping the `.from-<branch>` sidecar marker) while step *type* is still parsed
+  from the folded logical id — so `stepId#ordinal` is globally unique and stable
+  across full/append reads, and `step_type` is never corrupted by the marker.
+* `_merge_flow_jsonl` prefers the worktree write-root copy (structurally detected
+  by `_is_worktree_copy`) as a stable, size-independent selection, so a live
+  worktree flow's growing copy is chosen from the start and never flips.
+* `read_flow` detects a physical-copy switch for a bare filename
+  (`_cursor_source`) and reads the new copy cleanly from line 0 rather than
+  trusting the other copy's by-name cursor — the re-emitted early lines reconcile
+  idempotently by `stepId#ordinal`.
+
+**Server relay (G2, `server/state.py`, `server/app.py`).** Confirmed the relay
+passes G1's disambiguated `step_id`/`ordinal` through `append_history` /
+`get_history` verbatim (records are opaque, no dedup). Added
+`ServerState.is_active_worktree_flow` and a running-worktree self-heal reconcile
+to `GET /api/history/{flow_id}`: when the cache says `not_modified` but the flow
+is a live worktree run and not throttled, it re-pulls the daemon (via the
+authoritative worktree root) so a dropped/collided round is filled in; the
+identical-full-replace branch keeps the bundle generation so a no-op reconcile
+does not churn tokens.
+
+**Frontend reconcile (G3, `server/static/app.js`).** `recordKey` consumes G1's
+disambiguated `step_id` verbatim (documented the invariant now spanning
+cross-source physical files). `dedupeSnapshotDiscovery` compares CONTENT (the
+`legacyKeyFromNorm` signature) before dropping a discovery record — only a
+byte-identical clone is de-duped, so a legitimately-different 2nd+ round that
+happens to reuse a physical ordinal is never silently deleted.
+
+## End-to-end acceptance (G4)
+
+The seam is verified per-hop AND end-to-end:
+
+* **Daemon read path** (`tests/test_daemon_worktree_discovery_multiround.py`,
+  `tests/test_daemon_history_worktree_merge.py`,
+  `tests/test_worktree_history_sidecar.py`): a live worktree discovery file's
+  rounds all read with unique, stable `(step_id, ordinal)` pairs across
+  full+append; the merge selection sticks to the worktree copy across snapshots
+  (no thrash, no re-emit churn); a late-appearing worktree copy re-reads cleanly;
+  primary + sidecar surface as DISTINCT streams whose ordinals never collide.
+* **Server relay** (`tests/test_server_history_authoritative_root.py`,
+  `tests/test_interjection_fast_push.py`): the disambiguated identity passes
+  through the relay verbatim; the running-worktree self-heal reconciles a
+  cache stuck at round 1 by re-questioning the daemon (respecting the throttle;
+  non-worktree/completed flows unaffected); an identical full re-pull keeps the
+  generation.
+* **Frontend reconcile** (`tests/frontend/worktree_discovery_multiround.test.mjs`,
+  registered in `tests/frontend/test_app_pure.mjs`): cross-source records that
+  share a physical ordinal keep distinct `recordKey`s and both render; a 2nd+
+  round appends (is not dropped); `dedupeSnapshotDiscovery` de-dups only a
+  byte-identical clone.
+* **Full seam end-to-end** (`tests/test_worktree_seam_regression.py`, **new in
+  G4**): `test_e2e_worktree_multiround_discovery_all_rounds_reach_frontend`
+  chains the REAL `DaemonHistoryReader.read_flow` → REAL
+  `ServerState.append_history` relay → a faithful `_FrontendConsole` port of the
+  `app.js` reconcile (`recordKey` / `reconcileAppendRecords` /
+  `dedupeSnapshotDiscovery`), driving a four-round live worktree discovery whose
+  single append-only file grows each round. It asserts every intermediate round's
+  chat records reach the frontend (not just round 1), the final adjudication
+  verdict is a live chat bubble, no round is dropped/duplicated (all
+  `stepId#ordinal` keys unique), and the server's authoritative bundle matches
+  the frontend exactly (lossless relay). The append frames are asserted non-empty
+  so a copy-selection/cursor regression that emitted an empty round-2 append
+  fails here. `test_e2e_worktree_discovery_cross_source_rounds_all_render` runs
+  the same seam over the primary + `.from-<branch>` sidecar split-root topology
+  and asserts both sources render with distinct step ids.
+
+## Full-suite regression run
+
+`python -m pytest tests src/se3/engine` on this branch (G1–G3 merged + G4 e2e):
+
+```
+7923 passed, 1 deselected, 9 warnings in 355.29s (0:05:55)
+```
+
+Exit code 0, zero failures, on a single clean pass (no concurrency-contention
+ERRORs, so no clean re-run was needed).
+
+* The discovery→analyze boundary chain (issue #260, section above) is
+  **not regressed** — its `test_discovery_analyze_ws_delivery.py` boundary e2e,
+  the daemon cache/transition suites, and the server relay self-heal suite all
+  pass alongside the new #278 worktree coverage.
+* The 1 deselected case is the headless-Chromium e2e
+  (`test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser`,
+  deselected in `pyproject.toml` for the missing `libnspr4.so`); its node-stub
+  sibling covers the same logic.
+* Known environment-conditional failures (the 4 `test_steps.py` codex-runner /
+  discovery token-usage cases, and mass `test_worktree_*` git-contention ERRORs
+  under concurrent-session load) are NOT #278 regressions — they pre-exist on a
+  clean HEAD and clear on a clean re-run.
+
+## Manual browser verification (not an automated gate)
+
+As with #260, real-browser observation is a manual check (this host lacks
+`libnspr4.so` for the Chromium e2e). To confirm once by hand:
+
+1. Start a real `se3-server` + `se3 daemon`, open the WebUI, and start a real
+   `se3 run --worktree --discover "<task>"` so the flow enters **discovery**
+   inside its worktree.
+2. Open the flow's chat and answer the discovery clarification prompts across
+   **several rounds**.
+3. Confirm, WITHOUT using "显示详情 / show details" and without exiting/re-entering
+   the chat: every round's intermediate chat (round 2, 3, …), not only round 1,
+   appears as live chat; the adjudication verdict shows as a normal chat bubble;
+   no round is doubled.
