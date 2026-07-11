@@ -672,6 +672,19 @@ def charter_freshness_handler(step: Step, flow: FlowInstance) -> StepStatus:
     charter_diff = ""
     feedback = "_(none)_"
 
+    # spec_language is the knowledge-asset language: the charter is a knowledge
+    # asset, so its authored patch must be written in that language when set.
+    # Resolved once (config read is not free) and appended to the propose prompt;
+    # when spec_language is unset get_language_instruction returns "" so the
+    # prompt is byte-for-byte unchanged (zero-injection back-compat).
+    from ...config import get_language_instruction, load_language_config
+
+    spec_lang_instruction = get_language_instruction(
+        load_language_config(project_root).spec_language,
+        "charter_freshness",
+        for_spec=True,
+    )
+
     for attempt in range(MAX_GATE_ATTEMPTS):
         prompt = CHARTER_FRESHNESS_PROMPT.format(
             admission_standard=CHARTER_ADMISSION_STANDARD,
@@ -679,7 +692,7 @@ def charter_freshness_handler(step: Step, flow: FlowInstance) -> StepStatus:
             changes_made=diff_summary,
             charter=charter_for_prompt,
             feedback=feedback,
-        )
+        ) + spec_lang_instruction
         try:
             response = caller.call(
                 prompt=prompt,

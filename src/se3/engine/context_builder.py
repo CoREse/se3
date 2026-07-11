@@ -19,7 +19,15 @@ logger = logging.getLogger(__name__)
 # Steps whose output is human-facing (always use general language setting)
 HUMAN_FACING_STEPS = {"summarize", "discovery"}
 
-# Steps that write specs (use spec_language setting)
+# Steps that write the knowledge asset governed by spec_language.
+# spec_language is now the *knowledge-asset language* — the language in which
+# charter.md and the code-index are written. This state-machine mapping still
+# routes update_spec (the legacy spec-writing step) through spec_language for
+# backward compatibility; the two live knowledge-asset writers (charter_freshness
+# and code-index summaries) inject spec_language directly at their own prompt
+# assembly, NOT through this mapping, because neither routes through
+# get_step_language_instruction. The sync_* write paths keep their existing
+# injection via get_spec_language_instruction unchanged.
 SPEC_STEPS = {"update_spec"}
 
 
@@ -76,14 +84,17 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
 
 
 def get_spec_language_instruction(project_root: Path) -> str:
-    """Language instruction for spec-writing paths outside the run engine.
+    """Language instruction for knowledge-asset write paths outside the engine.
 
-    The ``sync_*`` modules (``sync_engine`` / ``sync_discovery`` /
-    ``sync_analyzer``) write or regenerate spec files but are NOT ``se3 run``
-    state-machine steps, so they cannot route through
-    :func:`get_step_language_instruction`. This helper gives them the same
+    spec_language governs the *knowledge-asset language*. The ``sync_*`` modules
+    (``sync_engine`` / ``sync_discovery`` / ``sync_analyzer``) write or regenerate
+    spec files but are NOT ``se3 run`` state-machine steps, so they cannot route
+    through :func:`get_step_language_instruction`. This helper gives them the same
     spec-flavored instruction ``update_spec`` receives, driven by
-    ``language.spec_language``.
+    ``language.spec_language``. (The two live knowledge-asset writers —
+    charter_freshness and code-index summaries — inject spec_language at their own
+    prompt assembly rather than through this helper; the sync_* injection points
+    here are unchanged.)
 
     Returns the instruction string (technical symbols preserved, spec_language
     authoritative), or ``""`` when ``spec_language`` is unset — preserving the
