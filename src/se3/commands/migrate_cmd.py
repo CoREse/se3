@@ -47,6 +47,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..engine import charter as charter_mod
+from ..i18n import t
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -712,14 +713,14 @@ SPEC_TO_NEW_SYSTEM = register_migrator(
 # ---------------------------------------------------------------------------
 
 def _display_report(report: MigrationReport, migrator_id: str) -> None:
-    table = Table(title=f"Migration: {migrator_id}")
-    table.add_column("Step", style="cyan")
-    table.add_column("Status", style="bold")
-    table.add_column("Detail")
+    table = Table(title=t("migrate.report.title", migrator_id=migrator_id))
+    table.add_column(t("migrate.report.col_step"), style="cyan")
+    table.add_column(t("migrate.report.col_status"), style="bold")
+    table.add_column(t("migrate.report.col_detail"))
     styles = {
-        "OK": "[green]OK[/green]",
-        "SKIP": "[yellow]SKIP[/yellow]",
-        "FAIL": "[red]FAIL[/red]",
+        "OK": t("migrate.report.status_ok"),
+        "SKIP": t("migrate.report.status_skip"),
+        "FAIL": t("migrate.report.status_fail"),
     }
     for r in report.results:
         table.add_row(r.name, styles.get(r.status, r.status), r.detail)
@@ -727,9 +728,9 @@ def _display_report(report: MigrationReport, migrator_id: str) -> None:
     console.print(table)
     if report.notes:
         console.print()
-        console.print("[bold]Notes (review):[/bold]")
+        console.print(t("migrate.report.notes_header"))
         for note in report.notes:
-            console.print(f"  - {note}")
+            console.print(t("migrate.report.note_line", note=note))
     console.print()
 
 
@@ -748,11 +749,11 @@ def list_command() -> None:
     """List the available migrations."""
     migrators = list_migrators()
     if not migrators:
-        console.print("No migrations registered.")
+        console.print(t("migrate.list.none"))
         raise typer.Exit(0)
-    table = Table(title="Available migrations")
-    table.add_column("ID", style="cyan")
-    table.add_column("Description")
+    table = Table(title=t("migrate.list.title"))
+    table.add_column(t("migrate.list.col_id"), style="cyan")
+    table.add_column(t("migrate.list.col_description"))
     for m in migrators:
         table.add_row(m.id, m.description)
     console.print(table)
@@ -775,7 +776,7 @@ def run_command(
     if migrator is None:
         ids = ", ".join(m.id for m in list_migrators()) or "(none)"
         console.print(
-            f"[red]Unknown migration:[/red] {migrator_id!r}. Available: {ids}"
+            t("migrate.run.unknown", migrator_id=migrator_id, ids=ids)
         )
         raise typer.Exit(1)
 

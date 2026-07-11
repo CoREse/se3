@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from rich.console import Console
 from rich.table import Table
 
+from ..i18n import t
+
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -77,14 +79,11 @@ def end_session(
     try:
         project_root = _resolve_main_root(project_root)
         if project_root is None:
-            console.print(
-                "[red]Could not find project root "
-                "(no .git, se3.yaml, se3.local.yaml, or se3.config.yaml found)[/red]"
-            )
+            console.print(t("end_session.no_project_root"))
             return 1
-        results.append(("Resolve root", "OK", str(project_root)))
+        results.append((t("end_session.step.resolve_root"), "OK", str(project_root)))
     except Exception as e:  # noqa: BLE001
-        results.append(("Resolve root", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.resolve_root"), "FAIL", str(e)[:80]))
         logger.warning("Step 1 (resolve root) failed: %s", e)
         _display_results(results)
         return 1
@@ -103,15 +102,21 @@ def end_session(
         if wt_record is not None:
             results.append(
                 (
-                    "Find worktree",
+                    t("end_session.step.find_worktree"),
                     "OK",
-                    f"branch={wt_record.get('worktree_branch')}",
+                    t("end_session.detail.branch", branch=wt_record.get("worktree_branch")),
                 )
             )
         else:
-            results.append(("Find worktree", "SKIP", "Main-branch session"))
+            results.append(
+                (
+                    t("end_session.step.find_worktree"),
+                    "SKIP",
+                    t("end_session.detail.main_branch_session"),
+                )
+            )
     except Exception as e:  # noqa: BLE001
-        results.append(("Find worktree", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.find_worktree"), "FAIL", str(e)[:80]))
         logger.warning("Step 2 (find worktree) failed: %s", e)
 
     # -- Step 3: terminate the live se3 run process -----------------------
@@ -134,13 +139,13 @@ def end_session(
             grace_seconds=grace_seconds,
         )
         results.append(
-            ("Terminate process", "OK" if terminate_ok else "FAIL", detail)
+            (t("end_session.step.terminate_process"), "OK" if terminate_ok else "FAIL", detail)
         )
         if not terminate_ok:
             logger.warning("Step 3 (terminate process) did not confirm exit: %s", detail)
     except Exception as e:  # noqa: BLE001
         terminate_ok = False
-        results.append(("Terminate process", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.terminate_process"), "FAIL", str(e)[:80]))
         logger.warning("Step 3 (terminate process) failed: %s", e)
 
     # -- Step 4: archive ---------------------------------------------------
@@ -150,16 +155,20 @@ def end_session(
     if not terminate_ok:
         results.append(
             (
-                "Archive session",
+                t("end_session.step.archive_session"),
                 "SKIP",
-                "Process still alive — archive skipped to avoid losing live work",
+                t("end_session.detail.process_still_alive"),
             )
         )
     elif wt_record is not None and archive_worktree:
         _archive_worktree_session(project_root, flow_id, wt_record, results)
     elif wt_record is not None and not archive_worktree:
         results.append(
-            ("Archive worktree", "SKIP", "--no-archive-worktree given")
+            (
+                t("end_session.step.archive_worktree"),
+                "SKIP",
+                t("end_session.detail.no_archive_worktree_given"),
+            )
         )
     else:
         _archive_main_session(project_root, flow_id, results)
@@ -346,7 +355,7 @@ def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
     session process is still alive.
     """
     if not _proc_alive(pid):
-        return True, f"pid {pid} not running"
+        return True, t("end_session.term.not_running", pid=pid)
 
     own = os.getpid()
     # Capture the full tree up front, before SIGTERM orphans the children.
@@ -362,12 +371,12 @@ def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
         except ProcessLookupError:
             continue
         except OSError as exc:
-            sigterm_failed.append(f"pid {p} SIGTERM failed: {exc}")
+            sigterm_failed.append(t("end_session.term.sigterm_failed", pid=p, exc=exc))
 
     deadline = time.monotonic() + max(0.0, grace_seconds)
     while time.monotonic() < deadline:
         if not _any_alive(tree):
-            return True, f"pid {pid} tree terminated (SIGTERM, {n} proc)"
+            return True, t("end_session.term.sigterm_ok", pid=pid, n=n)
         time.sleep(0.1)
 
     # Escalate: re-collect descendants of still-alive members (late-spawned
@@ -386,17 +395,17 @@ def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
         except ProcessLookupError:
             continue
         except OSError as exc:
-            kill_failed.append(f"pid {p} SIGKILL failed: {exc}")
+            kill_failed.append(t("end_session.term.sigkill_failed", pid=p, exc=exc))
 
     # Brief wait for the kernel to reap the whole tree.
     kill_deadline = time.monotonic() + 2.0
     while time.monotonic() < kill_deadline:
         if not _any_alive(survivors):
-            return True, f"pid {pid} tree killed (SIGKILL, {len(survivors)} proc)"
+            return True, t("end_session.term.sigkill_ok", pid=pid, n=len(survivors))
         time.sleep(0.1)
 
     alive = sorted(p for p in survivors if _proc_alive(p))
-    detail = f"tree of pid {pid} still alive after SIGKILL: {alive}"
+    detail = t("end_session.term.still_alive", pid=pid, alive=alive)
     if kill_failed:
         detail += "; " + "; ".join(kill_failed)
     return False, detail
@@ -663,7 +672,7 @@ def _terminate_session_process(
         pids = _discover_pids_for_flow(flow_id, main_root, worktree_path)
 
     if not pids:
-        return True, "no live process found"
+        return True, t("end_session.term.no_live_process")
 
     all_ok = True
     details: List[str] = []
@@ -711,14 +720,18 @@ def _archive_worktree_session(
             archive_path = _archive_worktree(
                 project_root, branch or (flow_id or "worktree"), worktree_path
             )
-            results.append(("Archive worktree", "OK", str(archive_path)))
+            results.append((t("end_session.step.archive_worktree"), "OK", str(archive_path)))
             archive_ok = True
         except Exception as e:  # noqa: BLE001
-            results.append(("Archive worktree", "FAIL", str(e)[:80]))
+            results.append((t("end_session.step.archive_worktree"), "FAIL", str(e)[:80]))
             logger.warning("Archive worktree failed: %s", e)
     else:
         results.append(
-            ("Archive worktree", "SKIP", "Worktree dir already gone")
+            (
+                t("end_session.step.archive_worktree"),
+                "SKIP",
+                t("end_session.detail.worktree_dir_gone"),
+            )
         )
         # Nothing on disk to lose — the branch metadata cleanup is still safe.
         archive_ok = True
@@ -730,11 +743,17 @@ def _archive_worktree_session(
             project_root, worktree_path, force=True
         )
         if promoted is not None:
-            results.append(("Promote state", "OK", str(promoted)))
+            results.append((t("end_session.step.promote_state"), "OK", str(promoted)))
         else:
-            results.append(("Promote state", "SKIP", "No engine.json to promote"))
+            results.append(
+                (
+                    t("end_session.step.promote_state"),
+                    "SKIP",
+                    t("end_session.detail.no_engine_json_to_promote"),
+                )
+            )
     except Exception as e:  # noqa: BLE001
-        results.append(("Promote state", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.promote_state"), "FAIL", str(e)[:80]))
         logger.warning("Promote state failed: %s", e)
 
     # 4.3 — sync the worktree's history into the main project's history.
@@ -742,9 +761,9 @@ def _archive_worktree_session(
         synced = _sync_worktree_history(
             project_root, worktree_path, flow_id, branch
         )
-        results.append(("Sync history", "OK", f"{synced} file(s)"))
+        results.append((t("end_session.step.sync_history"), "OK", t("end_session.detail.files_synced", count=synced)))
     except Exception as e:  # noqa: BLE001
-        results.append(("Sync history", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.sync_history"), "FAIL", str(e)[:80]))
         logger.warning("Sync history failed: %s", e)
 
     # 4.4 — clear the worktree's resumable snapshot. Done BEFORE the worktree
@@ -758,13 +777,17 @@ def _archive_worktree_session(
     if worktree_path.exists():
         try:
             _clear_resumable(worktree_path, flow_id)
-            results.append(("Clear resumable", "OK", flow_id or "(unknown)"))
+            results.append((t("end_session.step.clear_resumable"), "OK", flow_id or t("end_session.detail.unknown")))
         except Exception as e:  # noqa: BLE001
-            results.append(("Clear resumable", "FAIL", str(e)[:80]))
+            results.append((t("end_session.step.clear_resumable"), "FAIL", str(e)[:80]))
             logger.warning("Clear resumable failed: %s", e)
     else:
         results.append(
-            ("Clear resumable", "SKIP", "Worktree dir already gone")
+            (
+                t("end_session.step.clear_resumable"),
+                "SKIP",
+                t("end_session.detail.worktree_dir_gone"),
+            )
         )
 
     # 4.5 — delete the isolation branch and force-clean the worktree.
@@ -773,9 +796,9 @@ def _archive_worktree_session(
     if not archive_ok:
         results.append(
             (
-                "Cleanup branch",
+                t("end_session.step.cleanup_branch"),
                 "SKIP",
-                "Archive not created — worktree/branch preserved",
+                t("end_session.detail.archive_not_created"),
             )
         )
     else:
@@ -795,9 +818,9 @@ def _archive_worktree_session(
                 detail = (
                     cleanup_branch
                     if branch
-                    else f"{cleanup_branch} (inferred)"
+                    else t("end_session.detail.inferred", branch=cleanup_branch)
                 )
-                results.append(("Cleanup branch", "OK", detail))
+                results.append((t("end_session.step.cleanup_branch"), "OK", detail))
             else:
                 # No branch recorded and none inferable — remove the worktree
                 # directory + registration by path so it is not left behind.
@@ -823,21 +846,21 @@ def _archive_worktree_session(
                 if worktree_path.exists():
                     results.append(
                         (
-                            "Cleanup worktree",
+                            t("end_session.step.cleanup_worktree"),
                             "FAIL",
-                            f"Worktree dir still present: {worktree_path}",
+                            t("end_session.detail.worktree_still_present", worktree_path=worktree_path),
                         )
                     )
                 else:
                     results.append(
                         (
-                            "Cleanup worktree",
+                            t("end_session.step.cleanup_worktree"),
                             "OK",
-                            f"Removed by path: {worktree_path}",
+                            t("end_session.detail.removed_by_path", worktree_path=worktree_path),
                         )
                     )
         except Exception as e:  # noqa: BLE001
-            results.append(("Cleanup branch", "FAIL", str(e)[:80]))
+            results.append((t("end_session.step.cleanup_branch"), "FAIL", str(e)[:80]))
             logger.warning("Cleanup branch/worktree failed: %s", e)
 
 
@@ -870,33 +893,34 @@ def _archive_main_session(
             # do we fall back to the unconditional clear.
             if flow_id and str(main_flow_id) != str(flow_id):
                 if main_flow_id:
-                    detail = (
-                        f"Main engine.json is flow {main_flow_id}, "
-                        f"not {flow_id}"
+                    detail = t(
+                        "end_session.detail.main_flow_mismatch",
+                        main_flow_id=main_flow_id,
+                        flow_id=flow_id,
                     )
                 else:
-                    detail = (
-                        "Main engine.json flow_id absent/unreadable; "
-                        f"cannot confirm it is {flow_id}"
+                    detail = t(
+                        "end_session.detail.main_flow_unreadable",
+                        flow_id=flow_id,
                     )
-                results.append(("Archive session", "SKIP", detail))
+                results.append((t("end_session.step.archive_session"), "SKIP", detail))
             else:
                 pm.clear_state()
-                results.append(("Archive session", "OK", "Session archived"))
+                results.append((t("end_session.step.archive_session"), "OK", t("end_session.detail.session_archived")))
         else:
-            results.append(("Archive session", "SKIP", "No session to archive"))
+            results.append((t("end_session.step.archive_session"), "SKIP", t("end_session.detail.no_session_to_archive")))
     except Exception as e:  # noqa: BLE001
-        results.append(("Archive session", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.archive_session"), "FAIL", str(e)[:80]))
         logger.warning("Archive main session failed: %s", e)
 
     try:
         if flow_id:
             PersistenceManager(project_root).clear_resumable_snapshot(flow_id)
-            results.append(("Clear resumable", "OK", flow_id))
+            results.append((t("end_session.step.clear_resumable"), "OK", flow_id))
         else:
-            results.append(("Clear resumable", "SKIP", "No flow_id"))
+            results.append((t("end_session.step.clear_resumable"), "SKIP", t("end_session.detail.no_flow_id")))
     except Exception as e:  # noqa: BLE001
-        results.append(("Clear resumable", "FAIL", str(e)[:80]))
+        results.append((t("end_session.step.clear_resumable"), "FAIL", str(e)[:80]))
         logger.warning("Clear resumable (main) failed: %s", e)
 
 
@@ -1042,15 +1066,15 @@ def _clear_resumable(worktree_path: Path, flow_id: Optional[str]) -> None:
 # --------------------------------------------------------------------------
 def _display_results(results: List[Tuple[str, str, str]]) -> None:
     """Display end-session results as a Rich table (mirrors salvage)."""
-    table = Table(title="End Session Results")
-    table.add_column("Step", style="cyan")
-    table.add_column("Status", style="bold")
-    table.add_column("Detail")
+    table = Table(title=t("end_session.table.title"))
+    table.add_column(t("end_session.table.col_step"), style="cyan")
+    table.add_column(t("end_session.table.col_status"), style="bold")
+    table.add_column(t("end_session.table.col_detail"))
 
     status_styles = {
-        "OK": "[green]OK[/green]",
-        "SKIP": "[yellow]SKIP[/yellow]",
-        "FAIL": "[red]FAIL[/red]",
+        "OK": t("end_session.status.ok"),
+        "SKIP": t("end_session.status.skip"),
+        "FAIL": t("end_session.status.fail"),
     }
 
     for step_name, status, detail in results:

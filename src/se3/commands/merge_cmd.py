@@ -16,6 +16,7 @@ from typing import Callable, Optional
 from ..engine.display import render_text
 from ..engine.merge.runtime_sync import DEST_HASH_UNAVAILABLE
 from ..engine.worktree import get_current_branch
+from ..i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -190,32 +191,34 @@ def validate_branch_names(branches: list[str]) -> None:
             see exactly which input is rejected.
     """
     if not branches:
-        raise ValueError("At least one branch name is required.")
+        raise ValueError(t("cli.merge.validate.no_branches"))
 
     rejected: list[str] = []
     for branch in branches:
         if not isinstance(branch, str):
-            rejected.append(f"{branch!r}: not a string")
+            rejected.append(t("cli.merge.validate.not_a_string", branch=repr(branch)))
             continue
         if branch == "":
-            rejected.append("'' (empty string): branch name must be non-empty")
+            rejected.append(t("cli.merge.validate.empty_string"))
             continue
         if branch.startswith("-"):
             rejected.append(
-                f"{branch!r}: branch names must not start with '-' "
-                "(could be misinterpreted as a CLI flag)"
+                t("cli.merge.validate.leading_dash", branch=repr(branch))
             )
             continue
         if branch in ("HEAD", "@"):
             rejected.append(
-                f"{branch!r}: reserved git pseudo-ref"
+                t("cli.merge.validate.reserved_pseudoref", branch=repr(branch))
             )
             continue
         bad_chars = sorted({c for c in branch if c in _BRANCH_METACHARACTERS})
         if bad_chars:
             rejected.append(
-                f"{branch!r}: contains shell metacharacter(s) "
-                f"{''.join(repr(c) for c in bad_chars)}"
+                t(
+                    "cli.merge.validate.shell_metachar",
+                    branch=repr(branch),
+                    chars="".join(repr(c) for c in bad_chars),
+                )
             )
             continue
         glob_chars = sorted(
@@ -223,20 +226,21 @@ def validate_branch_names(branches: list[str]) -> None:
         )
         if glob_chars:
             rejected.append(
-                f"{branch!r}: contains git-ref-invalid character(s) "
-                f"{''.join(repr(c) for c in glob_chars)} "
-                "(see git check-ref-format — `?`, `*`, `[`, `]` are not "
-                "permitted in branch names)"
+                t(
+                    "cli.merge.validate.git_ref_glob",
+                    branch=repr(branch),
+                    chars="".join(repr(c) for c in glob_chars),
+                )
             )
             continue
         if any(ord(c) < 0x20 for c in branch):
             rejected.append(
-                f"{branch!r}: contains control character(s) (ASCII < 0x20)"
+                t("cli.merge.validate.control_char", branch=repr(branch))
             )
             continue
         if " " in branch:
             rejected.append(
-                f"{branch!r}: branch names must not contain spaces"
+                t("cli.merge.validate.spaces", branch=repr(branch))
             )
             continue
         # git ref-format rules — minimal subset most likely to bite users
@@ -260,15 +264,14 @@ def validate_branch_names(branches: list[str]) -> None:
             or "^" in branch
         ):
             rejected.append(
-                f"{branch!r}: violates git ref-format rules "
-                "(see git check-ref-format)"
+                t("cli.merge.validate.ref_format", branch=repr(branch))
             )
             continue
 
     if rejected:
-        message = (
-            "Invalid branch name(s):\n  - "
-            + "\n  - ".join(rejected)
+        message = t(
+            "cli.merge.validate.invalid_header",
+            rejected="\n  - ".join(rejected),
         )
         raise ValueError(message)
 
@@ -297,32 +300,25 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
     """
     if report.runtime_sync_skipped_branches:
         lines.append("")
-        lines.append(
-            "WARNING: Runtime data was not synced for these branches "
-            "(no bound worktree found):"
-        )
+        lines.append(t("cli.merge.runtime_sync.skipped_branches_header"))
         for b in report.runtime_sync_skipped_branches:
             lines.append(f"  - {b}")
     if report.runtime_sync_skipped_files:
         lines.append("")
-        lines.append(
-            "WARNING: Runtime sync skipped files (some entries may "
-            "indicate data loss — e.g. destination path is a directory "
-            "or non-regular entry (FIFO/socket/device), sidecar name too "
-            "long, sidecar disambiguation exhausted, or sidecar path is "
-            "a directory; see log for details):"
-        )
+        lines.append(t("cli.merge.runtime_sync.skipped_files_header"))
         for branch, files in report.runtime_sync_skipped_files:
             lines.append(f"  - {branch}: {', '.join(files)}")
     if report.runtime_sync_idempotent_bypasses:
         lines.append("")
-        lines.append(
-            "Runtime sync idempotent bypasses (sidecar already matched "
-            "source content — possible stale sidecar leftovers from a "
-            "prior aborted run that may mask a new collision):"
-        )
+        lines.append(t("cli.merge.runtime_sync.idempotent_bypasses_header"))
         for branch, count in report.runtime_sync_idempotent_bypasses:
-            lines.append(f"  - {branch}: {count} file(s)")
+            lines.append(
+                t(
+                    "cli.merge.runtime_sync.branch_file_count",
+                    branch=branch,
+                    count=count,
+                )
+            )
         # Per-file paths (parallel to the audit-only collision rendering):
         # without these, an operator investigating the stale-sidecar warning
         # had to cross-reference logs or programmatically read
@@ -336,12 +332,15 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
                 )
     if report.runtime_sync_discarded:
         lines.append("")
-        lines.append(
-            "Runtime sync discarded (tier B branch-side state preserved "
-            "by current branch):"
-        )
+        lines.append(t("cli.merge.runtime_sync.discarded_header"))
         for branch, files in report.runtime_sync_discarded:
-            lines.append(f"  - {branch}: {len(files)} file(s)")
+            lines.append(
+                t(
+                    "cli.merge.runtime_sync.branch_file_count",
+                    branch=branch,
+                    count=len(files),
+                )
+            )
     if report.runtime_sync_collisions:
         written_collisions = [
             c for c in report.runtime_sync_collisions if c.written
@@ -351,7 +350,7 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
         ]
         if written_collisions:
             lines.append("")
-            lines.append("Runtime sync collisions (sidecar bypass):")
+            lines.append(t("cli.merge.runtime_sync.collisions_sidecar_header"))
             for collision in written_collisions:
                 lines.append(
                     f"  - {collision.branch}: {collision.original_rel_path} "
@@ -361,10 +360,7 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
                 )
         if audit_only_collisions:
             lines.append("")
-            lines.append(
-                "Runtime sync collisions (audit-only — sidecar NOT written; "
-                "source data is NOT recoverable from disk):"
-            )
+            lines.append(t("cli.merge.runtime_sync.collisions_audit_header"))
             for collision in audit_only_collisions:
                 # dest_hash may be the DEST_HASH_UNAVAILABLE sentinel here
                 # when the destination file was unhashable; render it
@@ -385,11 +381,7 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
     committed_renumbers = getattr(report, "committed_issue_renumbers", None)
     if committed_renumbers:
         lines.append("")
-        lines.append(
-            "Committed issue renumbers (a merged branch's issue shared its "
-            "numeric ID with an existing issue; the incoming copy took a "
-            "new ID and #old references were rewritten):"
-        )
+        lines.append(t("cli.merge.runtime_sync.committed_renumbers_header"))
         for record in committed_renumbers:
             lines.append(
                 f"  - #{record.old_id} -> #{record.new_id} "
@@ -399,18 +391,18 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
     ambiguous_refs = getattr(report, "ambiguous_issue_references", None)
     if ambiguous_refs:
         lines.append("")
-        lines.append(
-            "Ambiguous issue references (several merged issues shared one "
-            "old ID, so these #old references could not be repointed to a "
-            "single target; a note was recorded in each affected issue):"
-        )
+        lines.append(t("cli.merge.runtime_sync.ambiguous_refs_header"))
         for entry in ambiguous_refs:
             candidates = ", ".join(
                 f"#{c}" for c in entry.get("candidates", [])
             )
             lines.append(
-                f"  - {entry.get('file')}: #{entry.get('old_id')} "
-                f"(candidates: {candidates})"
+                t(
+                    "cli.merge.runtime_sync.ambiguous_ref_line",
+                    file=entry.get("file"),
+                    old_id=entry.get("old_id"),
+                    candidates=candidates,
+                )
             )
 
 
@@ -434,7 +426,9 @@ def _append_human_call_lines(
     """
     if not suppress_human_call:
         if report.human_call_file:
-            lines.append(f"Call file: {report.human_call_file}")
+            lines.append(
+                t("cli.merge.human_call.call_file", path=report.human_call_file)
+            )
         return
 
     escalations = getattr(report, "recorded_escalations", None) or []
@@ -445,10 +439,7 @@ def _append_human_call_lines(
     # caller's failure-reason lines stand alone.
     if not report.human_call_file and not escalations:
         return
-    lines.append(
-        "Merge escalated to human review (no call file — `se3 merge` runs "
-        "without a confirmation gate)."
-    )
+    lines.append(t("cli.merge.human_call.escalated"))
     for esc in escalations:
         etype = esc.get("type", "escalation")
         branch = esc.get("branch", "")
@@ -456,11 +447,8 @@ def _append_human_call_lines(
         violations = esc.get("violations")
         if violations:
             for v in violations:
-                lines.append(f"      violation: {v}")
-    lines.append(
-        "Recovery: resolve the reported issue, then rerun `se3 merge` "
-        "(already-merged branches are skipped)."
-    )
+                lines.append(t("cli.merge.human_call.violation_line", violation=v))
+    lines.append(t("cli.merge.human_call.recovery"))
 
 
 def _split_merged_buckets(
@@ -547,15 +535,13 @@ def _append_split_branch_lines(
 ) -> None:
     """Append per-bucket branch listings to *lines* in place."""
     if newly:
-        lines.append(f"Newly merged ({len(newly)}):")
+        lines.append(t("cli.merge.newly_merged_header", count=len(newly)))
         for b in newly:
             lines.append(f"  - {b}")
     if already:
         if newly:
             lines.append("")
-        lines.append(
-            f"Already an ancestor of HEAD — no new commit ({len(already)}):"
-        )
+        lines.append(t("cli.merge.already_ancestor_header", count=len(already)))
         for b in already:
             lines.append(f"  - {b}")
 
@@ -632,8 +618,8 @@ def _fast_stash_dirty(
         f"(label: {label}). Will pop after merge."
     )
     render_text(
-        f"Auto-stashed dirty working tree (label: {label}).",
-        title="Fast Merge: Pre-Stash",
+        t("cli.merge.fast_stash.prestash_msg", label=label),
+        title=t("cli.merge.fast_stash.prestash_title"),
     )
     return label
 
@@ -721,17 +707,22 @@ def _fast_stash_pop(
     # guards against.
     if outcome.archive_failed:
         archived = outcome.archived
-        msg = (
-            f"Fast stash-pop did NOT finalize recovery (label: {stash_label}); "
-            f"live stash kept for manual recovery"
-            + (
-                f"; {len(outcome.unresolved_files)} path(s) remain unmerged"
-                if outcome.unresolved_files else ""
+        unmerged_suffix = (
+            t(
+                "cli.merge.fast_stash.pop_incomplete_unmerged",
+                count=len(outcome.unresolved_files),
             )
-            + "."
+            if outcome.unresolved_files else ""
+        )
+        msg = t(
+            "cli.merge.fast_stash.pop_incomplete",
+            label=stash_label,
+            unmerged=unmerged_suffix,
         )
         audit_messages.append(msg)
-        render_text(msg, title="Fast Merge: Stash-Pop Recovery Incomplete")
+        render_text(
+            msg, title=t("cli.merge.fast_stash.pop_incomplete_title")
+        )
         # Whenever content WAS archived (case-a sides captured before an
         # unresolved resolution), the audit issue must still carry the
         # manifest pointers so the operator can recover — not just be told to
@@ -773,14 +764,15 @@ def _fast_stash_pop(
         return True
 
     archived = outcome.archived
-    msg = (
-        f"Fast stash-pop recovered safely (label: {stash_label}; "
-        f"{len(outcome.case_a_files)} tracked / "
-        f"{len(outcome.case_b_files)} untracked-collision; "
-        f"{len(archived)} file(s) archived)."
+    msg = t(
+        "cli.merge.fast_stash.pop_recovered",
+        label=stash_label,
+        tracked=len(outcome.case_a_files),
+        untracked=len(outcome.case_b_files),
+        archived=len(archived),
     )
     audit_messages.append(msg)
-    render_text(msg, title="Fast Merge: Stash-Pop Recovery")
+    render_text(msg, title=t("cli.merge.fast_stash.pop_recovered_title"))
 
     description = (
         f"Fast strategy auto-stashed dirty working tree ({stash_label}) "
@@ -1049,7 +1041,7 @@ def run_merge(
     try:
         validate_branch_names(branches)
     except ValueError as exc:
-        render_text(str(exc), title="Merge Error")
+        render_text(str(exc), title=t("cli.merge.error_title"))
         return 1
 
     # Validate working tree is clean — non-fast strategies refuse to
@@ -1061,10 +1053,8 @@ def run_merge(
     if strategy != "fast":
         if not _is_working_tree_clean(project_root):
             render_text(
-                "Working tree is not clean. Please commit or stash your "
-                "changes before merging, or use --strategy=fast to "
-                "auto-stash.",
-                title="Merge Error",
+                t("cli.merge.working_tree_not_clean"),
+                title=t("cli.merge.error_title"),
             )
             return 1
     else:
@@ -1075,9 +1065,8 @@ def run_merge(
         # callers still get a clear error before touching git.
         if _git_operation_in_progress(project_root):
             render_text(
-                "A git operation (merge/cherry-pick/rebase) is already "
-                "in progress. Resolve it before running `se3 merge`.",
-                title="Merge Error",
+                t("cli.merge.git_operation_in_progress"),
+                title=t("cli.merge.error_title"),
             )
             return 1
 
@@ -1085,8 +1074,8 @@ def run_merge(
         current_branch = get_current_branch(project_root)
     except RuntimeError as exc:
         render_text(
-            f"Cannot merge in detached HEAD state: {exc}",
-            title="Merge Error",
+            t("cli.merge.detached_head", error=exc),
+            title=t("cli.merge.error_title"),
         )
         return 1
 
@@ -1105,20 +1094,20 @@ def run_merge(
     for branch in branches:
         if branch == current_branch:
             render_text(
-                f"Cannot merge the current branch ('{branch}') into itself.",
-                title="Merge Error",
+                t("cli.merge.cannot_merge_self", branch=branch),
+                title=t("cli.merge.error_title"),
             )
             return 1
         if branch in ("main", "master"):
             render_text(
-                f"Cannot merge '{branch}' — it is a protected base branch.",
-                title="Merge Error",
+                t("cli.merge.cannot_merge_protected", branch=branch),
+                title=t("cli.merge.error_title"),
             )
             return 1
         if not _branch_exists(project_root, branch):
             render_text(
-                f"Branch '{branch}' does not exist.",
-                title="Merge Error",
+                t("cli.merge.branch_not_exist", branch=branch),
+                title=t("cli.merge.error_title"),
             )
             return 1
 
@@ -1378,23 +1367,26 @@ def run_merge(
             lock.release()
     except MergeLockBusy as exc:
         render_text(
-            f"Another `se3 merge` is in progress (lock held by pid={exc.holder_pid}).\n"
-            f"Lock file: {exc.lock_file}\n\n"
-            f"Wait for the in-progress merge to finish before retrying.",
-            title="Merge Already In Progress",
+            t(
+                "cli.merge.lock_busy",
+                holder_pid=exc.holder_pid,
+                lock_file=exc.lock_file,
+            ),
+            title=t("cli.merge.lock_busy_title"),
         )
         return 1
     except MergeLockStale as exc:
         if exc.holder_pid is None:
-            pid_msg = "(unparseable pid)"
+            pid_msg = t("cli.merge.lock_stale.pid_unparseable")
         else:
-            pid_msg = f"(holder pid={exc.holder_pid} no longer exists)"
+            pid_msg = t("cli.merge.lock_stale.pid_gone", holder_pid=exc.holder_pid)
         render_text(
-            f"Merge lock appears stale {pid_msg}.\n"
-            f"Lock file: {exc.lock_file}\n\n"
-            f"Remove the stale lock file and retry:\n"
-            f"  rm {exc.lock_file}",
-            title="Merge Lock Stale",
+            t(
+                "cli.merge.lock_stale",
+                pid_msg=pid_msg,
+                lock_file=exc.lock_file,
+            ),
+            title=t("cli.merge.lock_stale_title"),
         )
         return 1
 
@@ -1407,19 +1399,7 @@ def run_merge(
         # so we surface a failure that points the operator at the kept stash
         # and the archived content. ``_fast_stash_pop`` already filed the
         # detailed audit issue and archive manifest.
-        lines = [
-            "Branches merged, but post-merge stash-pop recovery did NOT "
-            "finalize — manual intervention required.",
-            "",
-            "Your pre-merge uncommitted changes are preserved in the live git "
-            "stash and archived under se3/worktrees/.archive; the working tree "
-            "may still contain unmerged paths.",
-            "",
-            "Inspect and recover:",
-            "  git status                 -- check for unmerged paths",
-            "  git stash list             -- the kept pre-merge stash",
-            "  git stash show -p stash@{0}",
-        ]
+        lines = [t("cli.merge.stash_pop_incomplete.body")]
         # Back-fill source-issue resolution HERE too, before the non-zero
         # return. The branch merge itself landed (``report.success``) — the
         # commits are now ancestors of the target branch — so a
@@ -1440,10 +1420,12 @@ def run_merge(
         if resolved_issue_ids:
             lines.append("")
             for issue_id in resolved_issue_ids:
-                lines.append(f"Resolved source issue #{issue_id}")
+                lines.append(
+                    t("cli.merge.resolved_source_issue", issue_id=issue_id)
+                )
         render_text(
             "\n".join(lines),
-            title="Merge: Stash-Pop Recovery Incomplete",
+            title=t("cli.merge.stash_pop_incomplete.title"),
         )
         return 1
 
@@ -1458,26 +1440,20 @@ def run_merge(
         # still-outstanding intents (idempotent, never double-bumps), so the
         # rerun re-attempts just the version decision.
         lines = [
-            "Branches integrated, but version reconcile FAILED — the final "
-            "version was NOT landed.",
+            t("cli.merge.reconcile_failed.summary"),
             "",
-            f"Reason: {reconcile_error}",
+            t("cli.merge.reason", reason=reconcile_error),
             "",
-            "The branch merges are committed; only the version decision is "
-            "unsettled. Fix the cause, then rerun `se3 merge` to re-attempt "
-            "the reconcile.",
+            t("cli.merge.reconcile_failed.recovery"),
         ]
         if is_version_tag_failure(reconcile_error):
             lines.extend([
                 "",
-                "A version reconcile commit may already exist while the git tag "
-                "is missing. The source branch is preserved for recovery; inspect "
-                "HEAD and create or repair the missing annotated tag before "
-                "considering the release complete.",
+                t("cli.merge.reconcile_failed.tag_note"),
             ])
         if report.log_file:
-            lines.append(f"Log file: {report.log_file}")
-        render_text("\n".join(lines), title="Merge: Version Reconcile Failed")
+            lines.append(t("cli.merge.log_file", path=report.log_file))
+        render_text("\n".join(lines), title=t("cli.merge.reconcile_failed.title"))
         return 1
 
     if report.success:
@@ -1499,60 +1475,76 @@ def run_merge(
         # a re-run actually made progress or was an idempotent no-op.
         newly, already = _split_merged_buckets(report, project_root)
         total = len(newly) + len(already)
-        lines = [f"Successfully merged {total} branch(es):", ""]
+        lines = [t("cli.merge.success.summary", total=total), ""]
         _append_split_branch_lines(lines, newly, already)
         if report.final_version:
             lines.append("")
             effective_base = report.effective_pre_merge_version or report.pre_merge_version or '?'
-            lines.append(f"Version: {effective_base} -> {report.final_version}")
+            lines.append(
+                t(
+                    "cli.merge.version_line",
+                    base=effective_base,
+                    final=report.final_version,
+                )
+            )
             if (
                 report.effective_pre_merge_version
                 and report.pre_merge_version
                 and report.effective_pre_merge_version != report.pre_merge_version
             ):
                 lines.append(
-                    f"  (HEAD already at {report.pre_merge_version} from prior merges)"
+                    t(
+                        "cli.merge.version_head_note",
+                        version=report.pre_merge_version,
+                    )
                 )
             if getattr(report, "version_higher_than_target", False):
-                lines.append(
-                    "  WARNING: On-disk version is HIGHER than the aggregated target. "
-                    "Possible manual bump or anomalous state."
-                )
+                lines.append(t("cli.merge.version_higher_warning"))
         if report.version_aggregation_error:
             lines.append("")
-            lines.append(f"WARNING: Version aggregation failed: {report.version_aggregation_error}")
+            lines.append(
+                t(
+                    "cli.merge.version_aggregation_failed",
+                    error=report.version_aggregation_error,
+                )
+            )
         _append_runtime_sync_lines(lines, report)
         if report.cleanup_report:
             cr = report.cleanup_report
             lines.append("")
             if cr.archived:
-                lines.append("Archived worktrees (before delete):")
+                lines.append(t("cli.merge.cleanup.archived_header"))
                 for b, archive_path in cr.archived:
                     lines.append(f"  - {b} -> {archive_path}")
             if cr.deleted:
-                lines.append(f"Deleted branches: {', '.join(cr.deleted)}")
+                lines.append(
+                    t("cli.merge.cleanup.deleted", branches=", ".join(cr.deleted))
+                )
             if cr.skipped_dirty:
-                lines.append("Skipped (dirty worktree):")
+                lines.append(t("cli.merge.cleanup.skipped_dirty_header"))
                 for b, reason in cr.skipped_dirty:
                     lines.append(f"  - {b}: {reason}")
             if cr.skipped_archive_failed:
-                lines.append(
-                    "Skipped (archive failed — preserving worktree + branch):"
-                )
+                lines.append(t("cli.merge.cleanup.skipped_archive_failed_header"))
                 for b, reason in cr.skipped_archive_failed:
                     lines.append(f"  - {b}: {reason}")
             if cr.skipped_protected:
-                lines.append(f"Skipped (protected): {', '.join(cr.skipped_protected)}")
+                lines.append(
+                    t(
+                        "cli.merge.cleanup.skipped_protected",
+                        branches=", ".join(cr.skipped_protected),
+                    )
+                )
             if cr.skipped_unknown_state:
-                lines.append("Skipped (unknown state):")
+                lines.append(t("cli.merge.cleanup.skipped_unknown_header"))
                 for b, reason in cr.skipped_unknown_state:
                     lines.append(f"  - {b}: {reason}")
             if cr.skipped_worktree_remove_failed:
-                lines.append("Skipped (worktree removal failed):")
+                lines.append(t("cli.merge.cleanup.skipped_worktree_remove_header"))
                 for b, reason in cr.skipped_worktree_remove_failed:
                     lines.append(f"  - {b}: {reason}")
             if cr.skipped_not_merged:
-                lines.append("Skipped (not fully merged):")
+                lines.append(t("cli.merge.cleanup.skipped_not_merged_header"))
                 for b, reason in cr.skipped_not_merged:
                     lines.append(f"  - {b}: {reason}")
         # Backfill "merge succeeded → source issue resolved" for any branch
@@ -1570,28 +1562,30 @@ def run_merge(
         if resolved_issue_ids:
             lines.append("")
             for issue_id in resolved_issue_ids:
-                lines.append(f"Resolved source issue #{issue_id}")
-        render_text("\n".join(lines), title="Merge Complete")
+                lines.append(
+                    t("cli.merge.resolved_source_issue", issue_id=issue_id)
+                )
+        render_text("\n".join(lines), title=t("cli.merge.complete_title"))
         return 0
     elif report.rollback_failed:
-        reason_text = report.failure_reason or "unknown"
+        reason_text = report.failure_reason or t("cli.merge.unknown")
         lines = [
-            f"CRITICAL: Git rollback failed (reason: {reason_text}).",
+            t("cli.merge.rollback_failed.summary", reason=reason_text),
             "",
-            "The working tree is in an INCONSISTENT state. Manual intervention is required.",
+            t("cli.merge.rollback_failed.body"),
             "",
-            "Recovery commands:",
-            "  git status          -- inspect the current state",
-            "  git reflog          -- find a known-good commit to reset to",
-            "  git reset --hard <known-good-sha>  -- force restore (DESTRUCTIVE)",
-            "",
-            f"Failed branch: {report.failed_branch}",
+            t("cli.merge.failed_branch", branch=report.failed_branch),
         ]
         if report.merged_branches:
-            lines.append(f"Branches already merged: {', '.join(report.merged_branches)}")
+            lines.append(
+                t(
+                    "cli.merge.branches_already_merged",
+                    branches=", ".join(report.merged_branches),
+                )
+            )
         _append_human_call_lines(lines, report, suppress_human_call)
         if report.log_file:
-            lines.append(f"Log file: {report.log_file}")
+            lines.append(t("cli.merge.log_file", path=report.log_file))
         # Defense-in-depth: runtime_sync_collisions / idempotent / discarded
         # are populated only by _sync_runtime in lenient mode after a
         # successful git merge, while rollback_failed only arises from
@@ -1600,7 +1594,7 @@ def run_merge(
         # set here ensures that if a future change ever makes them co-occur,
         # the output remains consistent across CLI branches.
         _append_runtime_sync_lines(lines, report)
-        render_text("\n".join(lines), title="Merge Rollback Failed -- Repository May Be Corrupted")
+        render_text("\n".join(lines), title=t("cli.merge.rollback_failed.title"))
         return 1
     elif report.pending_human:
         title, first_line = _failure_title_and_summary(
@@ -1614,20 +1608,23 @@ def run_merge(
         if newly or already:
             total = len(newly) + len(already)
             lines.append(
-                f"Branches merged before pause ({total}):"
+                t("cli.merge.branches_merged_before_pause", total=total)
             )
             _append_split_branch_lines(lines, newly, already)
             lines.append("")
         if report.unattempted_branches:
             lines.append(
-                f"Unattempted branches ({len(report.unattempted_branches)}):"
+                t(
+                    "cli.merge.unattempted_branches_count",
+                    count=len(report.unattempted_branches),
+                )
             )
             for b in report.unattempted_branches:
                 lines.append(f"  - {b}")
             lines.append("")
         _append_human_call_lines(lines, report, suppress_human_call)
         if report.log_file:
-            lines.append(f"Log file: {report.log_file}")
+            lines.append(t("cli.merge.log_file", path=report.log_file))
         _append_runtime_sync_lines(lines, report)
         render_text("\n".join(lines), title=title)
         return 130  # Interrupted by user / pending human
@@ -1637,7 +1634,7 @@ def run_merge(
         )
         lines = [first_line, ""]
         if report.failed_branch:
-            lines.append(f"Failed branch: {report.failed_branch}")
+            lines.append(t("cli.merge.failed_branch", branch=report.failed_branch))
         # The dirty-working-tree pre-flight packs the offending file list into
         # failure_detail; surface it so the operator sees exactly what to
         # commit or restore. Scoped to this reason to avoid changing output
@@ -1646,24 +1643,38 @@ def run_merge(
             lines.append(report.failure_detail)
         if report.runtime_sync_collision_path:
             lines.append(
-                f"Colliding path: se3/{report.runtime_sync_collision_path}"
+                t(
+                    "cli.merge.colliding_path",
+                    path=report.runtime_sync_collision_path,
+                )
             )
         # Only show the raw failure_reason when _failure_title_and_summary
         # fell back to the generic message (i.e. the reason has no dedicated
         # entry).  This removes the need to maintain a manual exclusion list.
         if (
             report.failure_reason
-            and first_line == f"Merge failed: {report.failure_reason}."
+            and first_line == t(
+                "cli.merge.failure.generic",
+                failure_reason=report.failure_reason,
+            )
         ):
-            lines.append(f"Reason: {report.failure_reason}")
+            lines.append(t("cli.merge.reason", reason=report.failure_reason))
         if report.merged_branches:
-            lines.append(f"Branches already merged: {', '.join(report.merged_branches)}")
+            lines.append(
+                t(
+                    "cli.merge.branches_already_merged",
+                    branches=", ".join(report.merged_branches),
+                )
+            )
         if report.unattempted_branches:
             lines.append(
-                f"Unattempted branches: {', '.join(report.unattempted_branches)}"
+                t(
+                    "cli.merge.unattempted_branches_list",
+                    branches=", ".join(report.unattempted_branches),
+                )
             )
         if report.log_file:
-            lines.append(f"Log file: {report.log_file}")
+            lines.append(t("cli.merge.log_file", path=report.log_file))
         _append_runtime_sync_lines(lines, report)
         render_text("\n".join(lines), title=title)
         return 1
@@ -1685,214 +1696,213 @@ def _failure_title_and_summary(
     # Prefix matches first — compound reasons carry diagnostic detail
     if failure_reason and failure_reason.startswith("fast_failure"):
         detail = failure_reason[len("fast_failure"):].strip(": ")
-        msg = "Merge aborted: fast strategy merge failed"
+        msg = t("cli.merge.failure.fast_failure")
         if detail:
-            msg += f" — {detail}"
-        return ("Merge aborted", msg)
+            msg += t("cli.merge.failure.detail_suffix", detail=detail)
+        return (t("cli.merge.title.aborted"), msg)
 
     if failure_reason and failure_reason.startswith("fast_abort"):
         detail = failure_reason[len("fast_abort"):].strip(": ")
-        msg = "Merge aborted: fast strategy could not resolve conflict"
+        msg = t("cli.merge.failure.fast_abort")
         if detail:
-            msg += f" — {detail}"
-        return ("Merge aborted", msg)
+            msg += t("cli.merge.failure.detail_suffix", detail=detail)
+        return (t("cli.merge.title.aborted"), msg)
 
     if failure_reason and failure_reason.startswith("merge_failed"):
         detail = failure_reason[len("merge_failed"):].strip(": ")
-        msg = "Merge failed: git merge operation failed"
+        msg = t("cli.merge.failure.merge_failed")
         if detail:
-            msg += f" — {detail}"
-        return ("Merge failed", msg)
+            msg += t("cli.merge.failure.detail_suffix", detail=detail)
+        return (t("cli.merge.title.failed"), msg)
 
     if failure_reason == "merge_conflict":
         return (
-            "Merge failed",
-            "Merge failed: git merge conflict (could not be resolved)",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.merge_conflict"),
         )
     if failure_reason == "guardrail_violation":
         return (
-            "Merge failed",
-            "Merge failed: post-merge guardrails violation",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.guardrail_violation"),
         )
     if failure_reason == "guardrail_violation_no_rollback":
         return (
-            "Merge failed",
-            "Merge failed: post-merge guardrails violation (could not roll back — merge commit may still be in HEAD)",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.guardrail_violation_no_rollback"),
         )
     if failure_reason == "merge_abort_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: git merge --abort failed — working tree may still be mid-merge",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.merge_abort_failed"),
         )
     if failure_reason == "dirty_working_tree":
         return (
-            "Merge not started",
-            "Merge not started: the main working tree has uncommitted tracked "
-            "changes outside SE3 self-managed paths — commit or restore them "
-            "first (see failure detail for the file list)",
+            t("cli.merge.title.not_started"),
+            t("cli.merge.failure.dirty_working_tree"),
         )
     if failure_reason == "guardrail_violation_call_failed":
         return (
-            "Merge failed",
-            "Merge failed: post-merge guardrails violation (call file could not be written)",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.guardrail_violation_call_failed"),
         )
     if failure_reason == "guardrail_repair_stalled_call_failed":
         return (
-            "Merge failed",
-            "Merge failed: post-merge guardrails violation — repair stalled and call file could not be written",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.guardrail_repair_stalled_call_failed"),
         )
     if failure_reason == "guardrail_repair_exhausted_call_failed":
         return (
-            "Merge failed",
-            "Merge failed: post-merge guardrails violation — repair exhausted and call file could not be written",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.guardrail_repair_exhausted_call_failed"),
         )
     if failure_reason == "guardrail_repair_stalled":
         return (
-            "Merge paused for human review",
-            "Merge paused: fast strategy could not auto-repair guardrails violation (repair stalled)",
+            t("cli.merge.title.paused"),
+            t("cli.merge.failure.guardrail_repair_stalled"),
         )
     if failure_reason == "guardrail_repair_exhausted":
         return (
-            "Merge paused for human review",
-            "Merge paused: fast strategy could not auto-repair guardrails violation (repair exhausted)",
+            t("cli.merge.title.paused"),
+            t("cli.merge.failure.guardrail_repair_exhausted"),
         )
     if failure_reason == "human_call_write_failed":
         return (
-            "Merge failed",
-            "Merge failed: conflict resolution required human review, but the call file could not be written",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.human_call_write_failed"),
         )
     if failure_reason == "incomplete_resolution_call_failed":
         return (
-            "Merge failed",
-            "Merge failed: LLM resolution was incomplete and the call file could not be written",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.incomplete_resolution_call_failed"),
         )
     if failure_reason == "guardrail_check_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: guardrails check failed",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.guardrail_check_failed"),
         )
     if failure_reason == "guardrail_check_failed_and_rollback_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: guardrails check crashed and rollback also failed — working tree may be in an inconsistent state",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.guardrail_check_failed_and_rollback_failed"),
         )
     if failure_reason == "guardrail_repair_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: fast strategy could not auto-repair guardrails violation",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.guardrail_repair_failed"),
         )
     if failure_reason == "conflict_context_failed":
         if pending_human:
             return (
-                "Merge failed",
-                "Merge failed: failed to build conflict context — paused for human review",
+                t("cli.merge.title.failed"),
+                t("cli.merge.failure.conflict_context_failed_pending"),
             )
         return (
-            "Merge aborted",
-            "Merge aborted: failed to build conflict context for conflict resolution",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.conflict_context_failed"),
         )
     if failure_reason == "conflict_context_failed_call_file_write_failed":
         return (
-            "Merge failed",
-            "Merge failed: failed to build conflict context and could not write human call file",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.conflict_context_failed_call_file_write_failed"),
         )
     if failure_reason == "llm_resolution_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: fast strategy LLM resolution failed",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.llm_resolution_failed"),
         )
     if failure_reason == "incomplete_resolution":
         return (
-            "Merge aborted",
-            "Merge aborted: fast strategy — LLM resolution was incomplete",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.incomplete_resolution"),
         )
     if failure_reason == "resolution_rejected":
         return (
-            "Merge aborted",
-            "Merge aborted: fast strategy rejected the LLM resolution",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.resolution_rejected"),
         )
     if failure_reason == "binary_file_conflict_fast_abort":
         return (
-            "Merge aborted",
-            "Merge aborted: fast strategy — binary file conflict cannot be auto-resolved",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.binary_file_conflict_fast_abort"),
         )
     if failure_reason == "binary_file_conflict":
         return (
-            "Merge aborted",
-            "Merge aborted: binary file conflict requires human review",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.binary_file_conflict"),
         )
     if failure_reason == "resolution_validation_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: resolved content failed validation",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.resolution_validation_failed"),
         )
     if failure_reason == "resolution_write_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: failed to write or stage resolved files",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.resolution_write_failed"),
         )
     if failure_reason == "resolution_commit_failed":
         return (
-            "Merge aborted",
-            "Merge aborted: merge commit failed after resolution",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.resolution_commit_failed"),
         )
     if failure_reason == "resolution_commit_timeout":
         return (
-            "Merge aborted",
-            "Merge aborted: conflict resolution succeeded but git commit timed out",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.resolution_commit_timeout"),
         )
     if failure_reason == "merge_timed_out":
         return (
-            "Merge aborted",
-            "Merge aborted: git merge timed out",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.merge_timed_out"),
         )
     if failure_reason == "rollback_failed":
         return (
-            "Merge failed",
-            "Merge failed: git rollback failed after guardrail violation",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.rollback_failed"),
         )
     if failure_reason == "guardrail_missing_post_sha":
         return (
-            "Merge aborted",
-            "Merge aborted: guardrails check could not verify merge — post-merge commit SHA was unavailable",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.guardrail_missing_post_sha"),
         )
     if failure_reason == "guardrail_missing_pre_sha":
         return (
-            "Merge aborted",
-            "Merge aborted: guardrails check could not verify merge — pre-merge commit SHA was unavailable (merge commit may still be in HEAD)",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.guardrail_missing_pre_sha"),
         )
     if failure_reason == "guardrail_missing_pre_and_post_sha":
         return (
-            "Merge aborted",
-            "Merge aborted: guardrails check could not verify merge — both pre-merge and post-merge commit SHAs were unavailable (merge commit may still be in HEAD)",
+            t("cli.merge.title.aborted"),
+            t("cli.merge.failure.guardrail_missing_pre_and_post_sha"),
         )
     if failure_reason == "pending_human":
         return (
-            "Merge paused for human review",
-            "Merge paused: conflict resolution requires your decision",
+            t("cli.merge.title.paused"),
+            t("cli.merge.failure.pending_human"),
         )
     if failure_reason == "runtime_sync_collision":
         return (
-            "Merge failed",
-            "Merge failed: runtime sync collision — a tier A file already exists in se3/. "
-            "Check se3/ for the colliding file and resolve manually.",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.runtime_sync_collision"),
         )
     if failure_reason == "version_higher_than_target":
         return (
-            "Merge failed",
-            "Merge failed: on-disk version is higher than the aggregated target — "
-            "possible manual bump or stale pre-merge version",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.version_higher_than_target"),
         )
     if failure_reason == "runtime_sync_os_error":
         return (
-            "Merge failed",
-            "Merge failed: runtime sync OS error — check file permissions and disk space.",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.runtime_sync_os_error"),
         )
     if failure_reason == "runtime_sync_timeout":
         return (
-            "Merge failed",
-            "Merge failed: runtime sync timed out — the bound worktree may be unreachable.",
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.runtime_sync_timeout"),
         )
     if failure_reason:
-        return ("Merge failed", f"Merge failed: {failure_reason}.")
-    return ("Merge failed", "Merge failed.")
+        return (
+            t("cli.merge.title.failed"),
+            t("cli.merge.failure.generic", failure_reason=failure_reason),
+        )
+    return (t("cli.merge.title.failed"), t("cli.merge.failure.no_reason"))

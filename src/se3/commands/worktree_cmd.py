@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..engine.merge.worktree_gc import gc_worktree_runs
+from ..i18n import t
 
 console = Console()
 
@@ -104,75 +105,68 @@ def gc_command(
         dry_run=dry_run,
     )
 
-    mode = "[cyan]DRY RUN[/cyan] — " if dry_run else ""
+    mode = t("worktree.gc.dry_run_prefix") if dry_run else ""
     console.print()
     console.print(
-        f"{mode}Worktree GC over [bold]{root}[/bold] "
-        f"(max age {max_age_hours:g}h)"
+        t("worktree.gc.header", mode=mode, root=root, hours=max_age_hours)
     )
 
     # --- Section 1: archived + reclaimed space --------------------------------
     if report.archived:
         table = Table(
             title=(
-                "Archived (dry run — would archive)"
+                t("worktree.gc.archived_title_dry")
                 if dry_run
-                else "Archived"
+                else t("worktree.gc.archived_title")
             ),
         )
-        table.add_column("Worktree", style="cyan")
-        table.add_column("Archive path")
-        table.add_column("Size", justify="right")
+        table.add_column(t("worktree.gc.col_worktree"), style="cyan")
+        table.add_column(t("worktree.gc.col_archive_path"))
+        table.add_column(t("worktree.gc.col_size"), justify="right")
         for name, archive_path, size in report.archived:
             table.add_row(
                 name,
-                str(archive_path) if archive_path else "(dry run)",
+                str(archive_path) if archive_path else t("worktree.gc.cell_dry_run"),
                 _format_bytes(size),
             )
         console.print()
         console.print(table)
     else:
         console.print()
-        console.print("No worktree runs matched for reclamation.")
+        console.print(t("worktree.gc.no_matches"))
 
     console.print(
-        f"\nReclaimed space: [bold]{_format_bytes(report.reclaimed_bytes)}[/bold]"
-        + (" (projected)" if dry_run else "")
+        t("worktree.gc.reclaimed", size=_format_bytes(report.reclaimed_bytes))
+        + (t("worktree.gc.projected") if dry_run else "")
     )
 
     # --- Section 2: retained unmerged branches (the safety promise) -----------
     if report.retained_unmerged:
         console.print()
-        console.print(
-            "[bold yellow]⚠ WARNING: completed worktree branches were kept "
-            "because they are NOT merged.[/bold yellow]"
-        )
-        console.print(
-            "[yellow]These refs were preserved so no unmerged work is lost. "
-            "Merge or delete them manually once reviewed.[/yellow]"
-        )
-        table = Table(title="Retained unmerged branches")
-        table.add_column("Branch", style="yellow")
-        table.add_column("Original branch")
-        table.add_column("Reason")
+        console.print(t("worktree.gc.retained_warning"))
+        console.print(t("worktree.gc.retained_detail"))
+        table = Table(title=t("worktree.gc.retained_title"))
+        table.add_column(t("worktree.gc.col_branch"), style="yellow")
+        table.add_column(t("worktree.gc.col_original_branch"))
+        table.add_column(t("worktree.gc.col_reason"))
         for branch, original, reason in report.retained_unmerged:
-            table.add_row(branch, original or "(unknown)", reason)
+            table.add_row(branch, original or t("worktree.gc.cell_unknown"), reason)
         console.print(table)
 
     # --- Section 3: skipped + errors ------------------------------------------
     if report.skipped:
-        table = Table(title="Skipped")
-        table.add_column("Worktree", style="dim")
-        table.add_column("Reason")
+        table = Table(title=t("worktree.gc.skipped_title"))
+        table.add_column(t("worktree.gc.col_worktree"), style="dim")
+        table.add_column(t("worktree.gc.col_reason"))
         for name, reason in report.skipped:
             table.add_row(name, reason)
         console.print()
         console.print(table)
 
     if report.errors:
-        table = Table(title="Errors")
-        table.add_column("Worktree", style="red")
-        table.add_column("Reason")
+        table = Table(title=t("worktree.gc.errors_title"))
+        table.add_column(t("worktree.gc.col_worktree"), style="red")
+        table.add_column(t("worktree.gc.col_reason"))
         for name, reason in report.errors:
             table.add_row(name, reason)
         console.print()

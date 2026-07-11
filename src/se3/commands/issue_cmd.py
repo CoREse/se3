@@ -33,6 +33,7 @@ from rich.table import Table
 
 from ..engine.display import render_block_footer, render_block_header
 from ..engine.issue_manager import KNOWN_TYPES, IssueManager, IssueStatus
+from ..i18n import t
 
 app = typer.Typer(help="Manage SE3 issues")
 console = Console()
@@ -141,11 +142,10 @@ def _open_editor_with_content(content: str) -> Optional[str]:
             result = subprocess.run(editor_argv + [tmp_path])
         except FileNotFoundError:
             raise EditorError(
-                f"editor not found: {editor_argv[0]!r}. "
-                "Set $EDITOR to a valid editor command."
+                t("issue.editor_not_found", editor=repr(editor_argv[0]))
             )
         except OSError as e:
-            raise EditorError(f"failed to launch editor: {e}")
+            raise EditorError(t("issue.editor_launch_failed", error=e))
         if result.returncode != 0:
             return None
         edited = Path(tmp_path).read_text(encoding="utf-8")
@@ -198,12 +198,12 @@ def _parse_edited_issue_yaml(text: str) -> dict:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise ValueError(f"Invalid YAML: {e}") from e
+        raise ValueError(t("issue.invalid_yaml", error=e)) from e
     if not data or not isinstance(data, dict):
-        raise ValueError("Invalid YAML: content is empty or not a mapping")
+        raise ValueError(t("issue.invalid_yaml_empty"))
     desc = data.get("description", "")
     if not desc or not str(desc).strip():
-        raise ValueError("Issue description must not be empty")
+        raise ValueError(t("issue.desc_empty_yaml"))
     return data
 
 
@@ -229,7 +229,7 @@ def list_cmd(
     VALID_SOURCES = {"human", "system"}
     if source_filter is not None and source_filter not in VALID_SOURCES:
         raise typer.BadParameter(
-            f"Invalid source '{source_filter}'. Must be one of: human, system",
+            t("issue.list.invalid_source", source=source_filter),
             param_hint="--source",
         )
     project_root = get_project_root()
@@ -237,20 +237,22 @@ def list_cmd(
     issues = mgr.list_issues(include_closed=show_all, type_filter=type_filter, source_filter=source_filter)
 
     if not issues:
-        label = "open " if not show_all else ""
-        typer.echo(f"No {label}issues found.")
+        if show_all:
+            typer.echo(t("issue.list.none_all"))
+        else:
+            typer.echo(t("issue.list.none_open"))
         return
 
-    title = "All Issues" if show_all else "Open Issues"
+    title = t("issue.list.title_all") if show_all else t("issue.list.title_open")
     table = Table(title=title)
-    table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Title", style="white")
-    table.add_column("Type")
-    table.add_column("Status")
-    table.add_column("Priority")
-    table.add_column("Source", style="dim")
-    table.add_column("Tags", style="dim")
-    table.add_column("Created", style="dim")
+    table.add_column(t("issue.col.id"), style="cyan", no_wrap=True)
+    table.add_column(t("issue.col.title"), style="white")
+    table.add_column(t("issue.col.type"))
+    table.add_column(t("issue.col.status"))
+    table.add_column(t("issue.col.priority"))
+    table.add_column(t("issue.col.source"), style="dim")
+    table.add_column(t("issue.col.tags"), style="dim")
+    table.add_column(t("issue.col.created"), style="dim")
 
     for issue in issues:
         sc = _status_color(issue.status)
@@ -287,7 +289,7 @@ def show_cmd(
     issue = mgr.load(issue_id)
 
     if not issue:
-        typer.echo(f"Issue '{issue_id}' not found.", err=True)
+        typer.echo(t("issue.not_found", issue_id=issue_id), err=True)
         raise typer.Exit(1)
 
     sc = _status_color(issue.status)
@@ -297,19 +299,23 @@ def show_cmd(
     priority_str = issue.priority or "-"
     type_str = issue.type or "-"
 
-    content = (
-        f"[bold]Title:[/bold] {issue.display_title}\n"
-        f"[bold]Type:[/bold] [{tc}]{type_str}[/{tc}]\n"
-        f"[bold]Status:[/bold] [{sc}]{issue.status.value}[/{sc}]\n"
-        f"[bold]Priority:[/bold] [{pc}]{priority_str}[/{pc}]\n"
-        f"[bold]Source:[/bold] {issue.source}\n"
-        f"[bold]Tags:[/bold] {tags_str}\n"
-        f"[bold]Created:[/bold] {_format_datetime(issue.created_at)}\n"
-        f"[bold]Updated:[/bold] {_format_datetime(issue.updated_at)}\n"
-        f"\n[bold]Description:[/bold]\n{issue.description}"
+    content = t(
+        "issue.show.detail",
+        title=issue.display_title,
+        tc=tc,
+        type=type_str,
+        sc=sc,
+        status=issue.status.value,
+        pc=pc,
+        priority=priority_str,
+        source=issue.source,
+        tags=tags_str,
+        created=_format_datetime(issue.created_at),
+        updated=_format_datetime(issue.updated_at),
+        description=issue.description,
     )
 
-    render_block_header(f"Issue {issue.id}", "cyan")
+    render_block_header(t("issue.show.header", id=issue.id), "cyan")
     console.print(content)
     console.print()
     render_block_footer("cyan")
@@ -342,15 +348,15 @@ def create_cmd(
         try:
             edited = _open_editor_with_content(template)
         except EditorError as e:
-            typer.echo(f"Error: {e}", err=True)
+            typer.echo(f"{t('cli.common.error')}: {e}", err=True)
             raise typer.Exit(1)
         if edited is None:
-            typer.echo("Cancelled.", err=True)
+            typer.echo(t("issue.cancelled"), err=True)
             raise typer.Exit(1)
         try:
             data = _parse_edited_issue_yaml(edited)
         except ValueError as e:
-            typer.echo(f"Error: {e}", err=True)
+            typer.echo(f"{t('cli.common.error')}: {e}", err=True)
             raise typer.Exit(1)
 
         desc = str(data.get("description", "")).strip()
@@ -371,18 +377,18 @@ def create_cmd(
             type=str(iss_type).strip() if iss_type else None,
             source="human",
         )
-        typer.echo(f"Created issue {issue.id}: {issue.display_title}")
+        typer.echo(t("issue.created", id=issue.id, title=issue.display_title))
         return
 
     # --- Resolve description from arg, stdin pipe, or interactive prompt ---
     try:
         description = _resolve_description(description_arg)
     except ValueError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"{t('cli.common.error')}: {e}", err=True)
         raise typer.Exit(1)
 
     if description is None:
-        typer.echo("Cancelled.", err=True)
+        typer.echo(t("issue.cancelled"), err=True)
         raise typer.Exit(1)
 
     # Parse tags
@@ -396,7 +402,7 @@ def create_cmd(
         type=issue_type,
         source="human",
     )
-    typer.echo(f"Created issue {issue.id}: {issue.display_title}")
+    typer.echo(t("issue.created", id=issue.id, title=issue.display_title))
 
 
 def _resolve_description(positional: Optional[str]) -> Optional[str]:
@@ -410,7 +416,7 @@ def _resolve_description(positional: Optional[str]) -> Optional[str]:
         stripped = positional.strip()
         if stripped:
             return stripped
-        raise ValueError("Issue description must not be empty.")
+        raise ValueError(t("issue.desc_empty"))
 
     # 2. Piped stdin (non-TTY): read all of stdin
     if not sys.stdin.isatty():
@@ -422,14 +428,14 @@ def _resolve_description(positional: Optional[str]) -> Optional[str]:
                     return stripped
         except (EOFError, KeyboardInterrupt):
             return None
-        raise ValueError("Issue description must not be empty.")
+        raise ValueError(t("issue.desc_empty"))
 
     # 3. Interactive TTY: single description prompt
     from ..cli import _read_multiline_input
 
     description = _read_multiline_input(
-        prompt_title="Description",
-        prompt_message="Enter issue description (Ctrl+D to submit, Ctrl+C to cancel):",
+        prompt_title=t("issue.create.prompt_title"),
+        prompt_message=t("issue.create.prompt_message"),
     )
     if description is None:
         return None  # user cancelled
@@ -448,23 +454,23 @@ def edit_cmd(
     issue = mgr.load(issue_id)
 
     if not issue:
-        typer.echo(f"Issue '{issue_id}' not found.", err=True)
+        typer.echo(t("issue.not_found", issue_id=issue_id), err=True)
         raise typer.Exit(1)
 
     template = _issue_to_editor_yaml(issue)
     try:
         edited = _open_editor_with_content(template)
     except EditorError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"{t('cli.common.error')}: {e}", err=True)
         raise typer.Exit(1)
     if edited is None:
-        typer.echo("Cancelled (editor exited with non-zero).", err=True)
+        typer.echo(t("issue.edit.cancelled"), err=True)
         raise typer.Exit(1)
 
     try:
         data = _parse_edited_issue_yaml(edited)
     except ValueError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"{t('cli.common.error')}: {e}", err=True)
         raise typer.Exit(1)
 
     # Apply changes via update_fields.
@@ -492,9 +498,9 @@ def edit_cmd(
             type=iss_type,
             tags=iss_tags,
         )
-        typer.echo(f"Updated issue {updated.id}: {updated.display_title}")
+        typer.echo(t("issue.updated", id=updated.id, title=updated.display_title))
     except ValueError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"{t('cli.common.error')}: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -509,9 +515,9 @@ def close_cmd(
 
     try:
         issue = mgr.close_issue(issue_id, reason=reason or "")
-        typer.echo(f"Closed issue {issue.id}: {issue.display_title}")
+        typer.echo(t("issue.closed", id=issue.id, title=issue.display_title))
     except ValueError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"{t('cli.common.error')}: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -525,9 +531,9 @@ def reset_cmd(
 
     try:
         issue = mgr.reset_to_open(issue_id)
-        typer.echo(f"Issue {issue.id} reset to open.")
+        typer.echo(t("issue.reset", id=issue.id))
     except ValueError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"{t('cli.common.error')}: {e}", err=True)
         raise typer.Exit(1)
 
 

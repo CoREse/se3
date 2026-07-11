@@ -9,6 +9,7 @@ from typing import Optional
 import typer
 
 from ..engine import charter as charter_mod
+from ..i18n import t
 
 # Note: This module exports the init function directly to be registered by cli.py
 # Not using app.command() here because cli.py registers it directly
@@ -577,46 +578,40 @@ def init_cmd(
     result = run_init(root, name, force)
 
     for path in result["created"]:
-        typer.echo(f"✓ Created {path}")
+        typer.echo(t("init.created", path=path))
     for msg in result["skipped"]:
-        typer.echo(f"⚠ {msg}")
+        typer.echo(t("init.warning_line", msg=msg))
 
     # Display VERSIONS.md status (tracked separately from created/skipped)
     if result.get("versions_md_created"):
-        typer.echo("✓ Created VERSIONS.md")
+        typer.echo(t("init.versions_created"))
     elif result.get("versions_md_already_existed"):
-        typer.echo("⚠ VERSIONS.md already exists (use --force to overwrite)")
+        typer.echo(t("init.versions_exists"))
 
     # Display git initialization status
     if result.get("git_initialized"):
-        typer.echo(f"✓ Initialized git repository")
+        typer.echo(t("init.git_initialized"))
     elif result.get("git_already_existed"):
-        typer.echo(f"⚠ Git repository already exists")
+        typer.echo(t("init.git_exists"))
 
     # Display .gitignore creation status
     if result.get("gitignore_created"):
-        typer.echo(f"✓ Created .gitignore")
+        typer.echo(t("init.gitignore_created"))
     elif result.get("gitignore_appended"):
-        typer.echo(f"✓ Appended {LOCAL_CONFIG_PATTERN} to .gitignore")
+        typer.echo(t("init.gitignore_appended", pattern=LOCAL_CONFIG_PATTERN))
     elif result.get("gitignore_negated"):
-        typer.echo(
-            f"⚠ .gitignore contains an explicit negation of {LOCAL_CONFIG_PATTERN} "
-            f"(!{LOCAL_CONFIG_PATTERN}); leaving it untouched. "
-            f"Remove the negation or delete {LOCAL_CONFIG_PATTERN} from tracking."
-        )
+        typer.echo(t("init.gitignore_negated", pattern=LOCAL_CONFIG_PATTERN))
     elif result.get("gitignore_error"):
-        typer.echo(f"⚠ {result.get('gitignore_message')}")
+        typer.echo(t("init.warning_line", msg=result.get("gitignore_message")))
     elif result.get("gitignore_already_existed"):
-        typer.echo(f"⚠ .gitignore already exists (use --force to overwrite)")
+        typer.echo(t("init.gitignore_exists"))
 
     # Warn when an existing se3.local.yaml will shadow the generated se3.yaml
     if result.get("local_overrides_yaml"):
-        typer.echo(
-            "⚠ se3.local.yaml exists — it will override se3.yaml at load time"
-        )
+        typer.echo(t("init.local_overrides"))
 
-    typer.echo(f"\n🎉 SE3 project initialized: {name}")
-    typer.echo(f"\nNext steps:")
-    typer.echo(f"  1. Edit se3.yaml to configure your project")
-    typer.echo(f"  2. Edit se3/charter.md to define project conventions")
-    typer.echo(f"  3. Run 'se3 run \"your task\"' to start developing")
+    typer.echo(t("init.success", name=name))
+    typer.echo(t("init.next_steps"))
+    typer.echo(t("init.next_step_1"))
+    typer.echo(t("init.next_step_2"))
+    typer.echo(t("init.next_step_3"))

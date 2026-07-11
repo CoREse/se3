@@ -39,6 +39,8 @@ from typing import Callable, Optional
 
 import typer
 
+from ..i18n import t
+
 app = typer.Typer(help="Navigate the code-index structure map (reads se3/code-index.md)")
 
 
@@ -55,12 +57,6 @@ def get_project_root() -> Path:
     return cwd
 
 
-_NOT_BUILT_HINT = (
-    "No code-index found (se3/code-index.md does not exist yet).\n"
-    "Build it first with: se3 code-index rebuild"
-)
-
-
 def _render_adaptive_map() -> None:
     """Render the code-index adaptive root view (budgeted zoomable tree).
 
@@ -74,7 +70,7 @@ def _render_adaptive_map() -> None:
     project_root = get_project_root()
     index = code_index_render.load_for_display(project_root)
     if index is None:
-        typer.echo(_NOT_BUILT_HINT, err=True)
+        typer.echo(t("code_index.not_built"), err=True)
         raise typer.Exit(code=1)
 
     cfg = load_code_index_config(project_root)
@@ -124,7 +120,7 @@ def index_cmd(
     project_root = get_project_root()
     index = code_index_render.load_for_display(project_root)
     if index is None:
-        typer.echo(_NOT_BUILT_HINT, err=True)
+        typer.echo(t("code_index.not_built"), err=True)
         raise typer.Exit(code=1)
 
     output = code_index_render.render_path(index, path or "")
@@ -152,7 +148,7 @@ def show_cmd(
     project_root = get_project_root()
     index = code_index_render.load_for_display(project_root)
     if index is None:
-        typer.echo(_NOT_BUILT_HINT, err=True)
+        typer.echo(t("code_index.not_built"), err=True)
         raise typer.Exit(code=1)
 
     output = code_index_render.render_path(index, path)
@@ -218,7 +214,7 @@ def search_cmd(
     project_root = get_project_root()
     index = code_index_render.load_for_display(project_root)
     if index is None:
-        typer.echo(_NOT_BUILT_HINT, err=True)
+        typer.echo(t("code_index.not_built"), err=True)
         raise typer.Exit(code=1)
 
     matcher = _build_matcher(pattern, ignore_case=ignore_case, fixed_strings=fixed_strings)
@@ -236,7 +232,7 @@ def search_cmd(
     if matches == 0:
         # grep's exit-code-1 "no matches" contract, so an agent can compose this
         # by exit status exactly as it would with grep.
-        typer.echo(f"No code-index item matched: {pattern}", err=True)
+        typer.echo(t("code_index.no_match", pattern=pattern), err=True)
         raise typer.Exit(code=1)
 
 
@@ -260,7 +256,7 @@ def _build_matcher(
     try:
         rx = re.compile(pattern, flags)
     except re.error as exc:
-        typer.echo(f"Invalid regular expression: {exc}", err=True)
+        typer.echo(t("code_index.invalid_regex", exc=exc), err=True)
         raise typer.Exit(code=2)
     return lambda line: rx.search(line) is not None
 
@@ -291,16 +287,22 @@ def rebuild_cmd(
     from ..engine import code_index
 
     project_root = get_project_root()
-    mode = "full rebuild (--force)" if force else "incremental rebuild"
-    typer.echo(f"Building code-index ({mode}) for {project_root} ...")
+    mode = (
+        t("code_index.mode_full") if force else t("code_index.mode_incremental")
+    )
+    typer.echo(t("code_index.building", mode=mode, project_root=project_root))
     index = code_index.load_or_build(project_root, force=force)
 
     file_count = len(index.files)
     symbol_count = sum(len(fe.symbols) for fe in index.files.values())
     md = code_index.md_path(project_root)
     typer.echo(
-        f"Done. Indexed {file_count} file(s), {symbol_count} symbol(s).\n"
-        f"  authoritative map: {md}"
+        t(
+            "code_index.rebuild_done",
+            file_count=file_count,
+            symbol_count=symbol_count,
+            md=md,
+        )
     )
 
 
@@ -317,7 +319,7 @@ def inspect_cmd():
     project_root = get_project_root()
     index = code_index_render.load_for_display(project_root)
     if index is None:
-        typer.echo(_NOT_BUILT_HINT, err=True)
+        typer.echo(t("code_index.not_built"), err=True)
         raise typer.Exit(code=1)
 
     file_count = len(index.files)
@@ -330,16 +332,16 @@ def inspect_cmd():
         by_kind[fe.kind] = by_kind.get(fe.kind, 0) + 1
 
     lines = [
-        f"Code Index — {project_root}",
-        f"  authoritative map: {code_index.md_path(project_root)}",
+        t("code_index.inspect_title", project_root=project_root),
+        t("code_index.authoritative_map", path=code_index.md_path(project_root)),
         "",
-        f"Files:    {file_count}",
-        f"Symbols:  {symbol_count}",
-        f"Degraded chunks: {degraded_count}",
+        t("code_index.inspect_files", file_count=file_count),
+        t("code_index.inspect_symbols", symbol_count=symbol_count),
+        t("code_index.inspect_degraded", degraded_count=degraded_count),
     ]
     if by_kind:
         lines.append("")
-        lines.append("Files by kind:")
+        lines.append(t("code_index.inspect_by_kind"))
         for kind in sorted(by_kind):
-            lines.append(f"  {kind}: {by_kind[kind]}")
+            lines.append(t("code_index.inspect_kind_row", kind=kind, count=by_kind[kind]))
     typer.echo("\n".join(lines))
