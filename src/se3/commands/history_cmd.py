@@ -23,6 +23,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ..i18n import t
+
 # Import necessary modules from the engine
 from ..engine.persistence import PersistenceManager
 from ..engine.chat_history import (
@@ -329,12 +331,12 @@ def _step_status_color(status: str) -> str:
 def _render_flows_table(flows: List[Dict[str, Any]], title: str) -> None:
     """Render a list of flows as a Rich table."""
     table = Table(title=title)
-    table.add_column("Flow ID", style="cyan", no_wrap=True)
-    table.add_column("Status")
-    table.add_column("Task Description", style="white")
-    table.add_column("Progress", justify="right")
-    table.add_column("Updated", style="dim")
-    table.add_column("Source", style="dim")
+    table.add_column(t("history.col.flow_id"), style="cyan", no_wrap=True)
+    table.add_column(t("history.col.status"))
+    table.add_column(t("history.col.task_description"), style="white")
+    table.add_column(t("history.col.progress"), justify="right")
+    table.add_column(t("history.col.updated"), style="dim")
+    table.add_column(t("history.col.source"), style="dim")
 
     status_colors = {
         "completed": "green",
@@ -366,7 +368,7 @@ def _render_flows_table(flows: List[Dict[str, Any]], title: str) -> None:
         )
 
     console.print(table)
-    typer.echo("\nUse 'se3 history show <flow_id>' to view details of a specific flow.")
+    typer.echo(t("history.list.show_hint"))
 
 
 # Default command - list flows
@@ -387,19 +389,22 @@ def default_cmd(
 
     if active_only:
         flows = [f for f in flows if f.get("source") == "active"]
-        title = "Active Flows"
+        title = t("history.title.active")
+        empty_msg = t("history.empty.active")
     elif archived_only:
         flows = [f for f in flows if f.get("source") == "archived"]
-        title = "Archived Flows"
+        title = t("history.title.archived")
+        empty_msg = t("history.empty.archived")
     else:
-        title = "All Flows"
+        title = t("history.title.all")
+        empty_msg = t("history.empty.all")
 
     if json_output:
         typer.echo(json.dumps(flows, indent=2, default=str))
         return
 
     if not flows:
-        typer.echo(f"No {title.lower()} found.")
+        typer.echo(empty_msg)
         return
 
     _render_flows_table(flows, title)
@@ -417,19 +422,22 @@ def list_cmd(
 
     if active_only:
         flows = [f for f in flows if f.get("source") == "active"]
-        title = "Active Flows"
+        title = t("history.title.active")
+        empty_msg = t("history.empty.active")
     elif archived_only:
         flows = [f for f in flows if f.get("source") == "archived"]
-        title = "Archived Flows"
+        title = t("history.title.archived")
+        empty_msg = t("history.empty.archived")
     else:
-        title = "All Flows"
+        title = t("history.title.all")
+        empty_msg = t("history.empty.all")
 
     if json_output:
         typer.echo(json.dumps(flows, indent=2, default=str))
         return
 
     if not flows:
-        typer.echo(f"No {title.lower()} found.")
+        typer.echo(empty_msg)
         return
 
     _render_flows_table(flows, title)
@@ -459,13 +467,13 @@ def show_cmd(
         if len(matches) == 1:
             detail = get_flow_detail(project_root, matches[0]["flow_id"])
         elif len(matches) > 1:
-            typer.echo(f"Multiple flows match '{flow_id}':")
+            typer.echo(t("history.multiple_match", flow_id=flow_id))
             for m in matches:
                 typer.echo(f"  - {m.get('flow_id', 'unknown')}")
             raise typer.Exit(1)
 
     if not detail:
-        typer.echo(f"Flow '{flow_id}' not found.", err=True)
+        typer.echo(t("history.not_found", flow_id=flow_id), err=True)
         raise typer.Exit(1)
 
     if json_output and not detailed:
@@ -477,37 +485,37 @@ def show_cmd(
         return
 
     # Display formatted details
-    console.print(f"\n[bold cyan]Flow Details: {detail['flow_id']}[/bold cyan]\n")
+    console.print(t("history.show.details_header", flow_id=detail['flow_id']))
 
     # Basic info table
     info_table = Table(show_header=False, box=None)
     info_table.add_column("Key", style="bold")
     info_table.add_column("Value")
 
-    info_table.add_row("Status", f"[{_status_color(detail['status'])}]{detail['status']}[/{_status_color(detail['status'])}]")
-    info_table.add_row("Task", detail['task_description'])
+    info_table.add_row(t("history.field.status"), f"[{_status_color(detail['status'])}]{detail['status']}[/{_status_color(detail['status'])}]")
+    info_table.add_row(t("history.field.task"), detail['task_description'])
     if detail.get('task_type'):
-        info_table.add_row("Type", detail['task_type'])
+        info_table.add_row(t("history.field.type"), detail['task_type'])
     if detail.get('change_name'):
-        info_table.add_row("Change", detail['change_name'])
-    info_table.add_row("Progress", f"{detail['progress']['completed']}/{detail['progress']['total']}")
-    info_table.add_row("Created", format_datetime(detail['created_at']))
-    info_table.add_row("Updated", format_datetime(detail['updated_at']))
+        info_table.add_row(t("history.field.change"), detail['change_name'])
+    info_table.add_row(t("history.field.progress"), f"{detail['progress']['completed']}/{detail['progress']['total']}")
+    info_table.add_row(t("history.field.created"), format_datetime(detail['created_at']))
+    info_table.add_row(t("history.field.updated"), format_datetime(detail['updated_at']))
     if detail.get('completed_at'):
-        info_table.add_row("Completed", format_datetime(detail['completed_at']))
-    info_table.add_row("Chat Sessions", str(detail['chat_sessions']))
+        info_table.add_row(t("history.field.completed"), format_datetime(detail['completed_at']))
+    info_table.add_row(t("history.field.chat_sessions"), str(detail['chat_sessions']))
 
     console.print(info_table)
 
     # Steps table
     if detail['steps']:
-        console.print(f"\n[bold]Steps:[/bold]")
+        console.print(t("history.show.steps_header"))
         steps_table = Table()
         steps_table.add_column("#", justify="right")
-        steps_table.add_column("Step Type")
-        steps_table.add_column("Status")
-        steps_table.add_column("Retries", justify="right")
-        steps_table.add_column("Error", style="red")
+        steps_table.add_column(t("history.col.step_type"))
+        steps_table.add_column(t("history.col.status"))
+        steps_table.add_column(t("history.col.retries"), justify="right")
+        steps_table.add_column(t("cli.common.error"), style="red")
 
         for i, step in enumerate(detail['steps'], 1):
             status_color = _step_status_color(step['status'])
@@ -537,7 +545,7 @@ def show_cmd(
     if detailed:
         _show_detailed_sessions(project_root, detail['flow_id'], verbose=verbose)
 
-    console.print(f"\n[dim]Use 'se3 history restore {detail['flow_id']}' to resume this flow.[/dim]\n")
+    console.print(t("history.show.restore_hint", flow_id=detail['flow_id']))
 
 
 def _show_detailed_sessions(
@@ -548,16 +556,16 @@ def _show_detailed_sessions(
 
     sessions = get_flow_history(project_root, flow_id)
     if not sessions:
-        console.print("\n[dim]No chat history available for this flow.[/dim]")
+        console.print(t("history.detail.no_chat_history"))
         return
 
     sessions = interleave_sessions_for_display(sessions)
 
-    console.print(f"\n[bold]LLM Call Details:[/bold]")
+    console.print(t("history.detail.llm_calls_header"))
 
     for session in sessions:
         console.print(Rule(
-            f"{session.step_type} (id: {session.step_id})",
+            t("history.detail.session_rule", step_type=session.step_type, step_id=session.step_id),
             style="cyan",
         ))
         renderables = render_session_detailed(session, verbose=verbose)
@@ -594,21 +602,21 @@ def restore_cmd(
         if len(matches) == 1:
             flow_id = matches[0]["flow_id"]
         elif len(matches) > 1:
-            typer.echo(f"Multiple flows match '{flow_id}':")
+            typer.echo(t("history.multiple_match", flow_id=flow_id))
             for m in matches:
                 typer.echo(f"  - {m.get('flow_id', 'unknown')}")
             raise typer.Exit(1)
         else:
-            typer.echo(f"Flow '{flow_id}' not found.", err=True)
+            typer.echo(t("history.not_found", flow_id=flow_id), err=True)
             raise typer.Exit(1)
 
     if dry_run:
-        typer.echo(f"Would restore flow: {flow_id}")
-        typer.echo(f"Command: se3 run --resume --flow-id {flow_id}")
+        typer.echo(t("history.restore.would_restore", flow_id=flow_id))
+        typer.echo(t("history.restore.command", flow_id=flow_id))
         return
 
     # Delegate to se3 run --resume
-    typer.echo(f"Restoring flow: {flow_id}")
+    typer.echo(t("history.restore.restoring", flow_id=flow_id))
     result = subprocess.run(
         ["se3", "run", "--resume", "--flow-id", flow_id],
         cwd=project_root,
@@ -630,14 +638,14 @@ def archived_cmd(
         return
 
     if not archived:
-        typer.echo("No archived flows found.")
+        typer.echo(t("history.empty.archived"))
         return
 
-    table = Table(title="Archived Flows")
-    table.add_column("Flow ID", style="cyan", no_wrap=True)
-    table.add_column("Status", style="green")
-    table.add_column("Task Description", style="white")
-    table.add_column("Archived At", style="dim")
+    table = Table(title=t("history.title.archived"))
+    table.add_column(t("history.col.flow_id"), style="cyan", no_wrap=True)
+    table.add_column(t("history.col.status"), style="green")
+    table.add_column(t("history.col.task_description"), style="white")
+    table.add_column(t("history.col.archived_at"), style="dim")
 
     for flow in archived:
         flow_id = flow["flow_id"]

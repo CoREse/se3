@@ -18,6 +18,7 @@ from . import __version__
 
 # Import display utilities early to ensure console is initialized
 from .engine.display import get_console, render_full, render_text
+from .i18n import t
 
 
 app = typer.Typer(
@@ -29,7 +30,7 @@ app = typer.Typer(
 def _version_callback(value: bool):
     """Handle --version flag."""
     if value:
-        typer.echo(f"se3 version {__version__}")
+        typer.echo(t("cli.version", version=__version__))
         raise typer.Exit()
 
 @app.callback()
@@ -60,8 +61,8 @@ def _init_display() -> None:
 
 
 def _read_multiline_input(
-    prompt_title: str = "Input",
-    prompt_message: str = "Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+    prompt_title: str = t("cli.input.title"),
+    prompt_message: str = t("cli.input.prompt"),
     history: Optional[any] = None,
     *,
     strip: bool = True,
@@ -130,12 +131,12 @@ def _read_multiline_input(
         if content:
             lines = content.split("\n")
             if len(lines) > 1:
-                render_full(content, title=f"{prompt_title} Content")
+                render_full(content, title=t("cli.input.content_title", title=prompt_title))
 
         return content
 
     except KeyboardInterrupt:
-        render_text("\nCancelled.", title="Cancelled")
+        render_text(t("cli.input.cancelled_message"), title=t("cli.common.cancelled"))
         return None
     except EOFError:
         # Safety fallback — Ctrl+D should no longer raise EOFError,
@@ -182,9 +183,8 @@ def run_cmd(
     output_format = (output_format or "cli").lower()
     if output_format not in ("cli", "json"):
         render_full(
-            f"Error: invalid --output-format '{output_format}'. "
-            "Choose 'cli' or 'json'.",
-            title="Error",
+            t("cli.run.invalid_output_format", output_format=output_format),
+            title=t("cli.common.error"),
         )
         raise typer.Exit(1)
 
@@ -218,28 +218,27 @@ def run_cmd(
 
         if ctx.get_parameter_source("type") == _cmdline:
             raise typer.BadParameter(
-                "--preset and --type are mutually exclusive; a preset carries "
-                "its own task type.",
+                t("cli.preset.mutually_exclusive"),
                 param_hint="--preset",
             )
 
         if preset == "list":
             presets = list_presets(project_root)
             if not presets:
-                render_full("No presets available.", title="Presets")
+                render_full(t("cli.preset.none_available"), title=t("cli.preset.title"))
             else:
-                lines = ["Available presets:", ""]
+                lines = [t("cli.preset.available_header"), ""]
                 for entry in presets:
                     lines.append(
-                        f"  {entry.name}  (type={entry.type}, source={entry.layer})"
+                        t("cli.preset.entry", name=entry.name, type=entry.type, layer=entry.layer)
                     )
-                render_full("\n".join(lines), title="Presets")
+                render_full("\n".join(lines), title=t("cli.preset.title"))
             raise typer.Exit(0)
 
         try:
             preset_type, preset_prompt, _layer = resolve(preset, project_root)
         except PresetError as exc:
-            render_full(f"Error: {exc}", title="Error")
+            render_full(t("cli.preset.resolve_error", error=exc), title=t("cli.common.error"))
             raise typer.Exit(1)
 
         # A preset is equivalent to `se3 run --type <preset.type>
@@ -262,25 +261,25 @@ def run_cmd(
         if not issue_id:
             open_issues = issue_mgr.list_issues(include_closed=False)
             if not open_issues:
-                render_text("No open issues found.", title="Issues")
+                render_text(t("cli.issue.none_open"), title=t("cli.issue.title"))
                 raise typer.Exit(1)
 
-            render_text("Open issues:", title="Select Issue")
+            render_text(t("cli.issue.open_header"), title=t("cli.issue.select_title"))
             for iss in open_issues:
                 prio = iss.priority if iss.priority else "-"
-                typer.echo(f"  [{iss.id}] {iss.display_title} ({prio})")
+                typer.echo(t("cli.issue.entry", id=iss.id, title=iss.display_title, priority=prio))
 
-            issue_id = typer.prompt("Enter issue ID")
+            issue_id = typer.prompt(t("cli.issue.enter_id"))
 
         issue = issue_mgr.load(issue_id)
         if not issue:
-            render_text(f"Issue '{issue_id}' not found.", title="Error")
+            render_text(t("cli.issue.not_found", issue_id=issue_id), title=t("cli.common.error"))
             raise typer.Exit(1)
 
         if issue.status == IssueStatus.IN_PROGRESS:
             render_text(
-                f"Issue '{issue_id}' is already in-progress. Use 'se3 issue reset {issue_id}' first.",
-                title="Error",
+                t("cli.issue.already_in_progress", issue_id=issue_id),
+                title=t("cli.common.error"),
             )
             raise typer.Exit(1)
 
@@ -288,7 +287,7 @@ def run_cmd(
         try:
             issue_mgr.update_status(issue.id, IssueStatus.IN_PROGRESS)
         except ValueError as e:
-            render_text(f"Error: {e}", title="Error")
+            render_text(t("cli.issue.status_error", error=e), title=t("cli.common.error"))
             raise typer.Exit(1)
 
         # Snapshot the flow_ids that ALREADY carry this source issue BEFORE
@@ -383,11 +382,8 @@ def run_cmd(
                 task = _read_multiline_input(history=prompt_history)
                 if not task:
                     render_full(
-                        "Error: Task description required for new flow\n\n"
-                        "Examples:\n"
-                        '  se3 run "Implement feature X"\n'
-                        "  se3 run --resume",
-                        title="Error"
+                        t("cli.run.task_required_new_flow"),
+                        title=t("cli.common.error")
                     )
                     raise typer.Exit(1)
 
@@ -397,11 +393,8 @@ def run_cmd(
         task = _read_multiline_input(history=prompt_history)
         if not task:
             render_full(
-                "Error: Task description required (or use --resume)\n\n"
-                "Examples:\n"
-                '  se3 run "Implement feature X"\n'
-                "  se3 run --resume",
-                title="Error"
+                t("cli.run.task_required"),
+                title=t("cli.common.error")
             )
             raise typer.Exit(1)
 
@@ -486,34 +479,34 @@ def _run_spec_size_guardrails(project_root: Optional[Path]) -> None:
     lines = [
         "",
         "=" * 60,
-        "SE 3.0 Spec Size Guardrails Check",
+        t("cli.guardrails.size_check_header"),
         "=" * 60,
         "",
-        f"Project: {root}",
-        f"Tier: {tier}",
+        t("cli.guardrails.project", root=root),
+        t("cli.guardrails.tier", tier=tier),
     ]
 
     if violations:
-        lines.append(f"\n⚠️  {len(violations)} size violation(s) found:")
+        lines.append(t("cli.guardrails.size_violations_found", count=len(violations)))
         for v in violations:
             ev = v.evidence or {}
             size_b = ev.get("size_bytes")
             limit_b = ev.get("limit_bytes")
-            detail = f" ({size_b} > {limit_b} bytes)" if size_b is not None and limit_b is not None else ""
+            detail = t("cli.guardrails.size_detail", size=size_b, limit=limit_b) if size_b is not None and limit_b is not None else ""
             lines.append(f"\n  [{v.violation_type}] {v.file_path}{detail}")
             lines.append(f"  {v.message}")
         lines.append(f"\n{'=' * 60}")
         if tier == "enforce":
-            lines.append("Tier is 'enforce' — failing the check.")
-            render_full("\n".join(lines), title="Spec Size Guardrails")
+            lines.append(t("cli.guardrails.tier_enforce_failing"))
+            render_full("\n".join(lines), title=t("cli.guardrails.size_title"))
             raise typer.Exit(code=1)
-        lines.append("Tier is 'warn' — reporting only, not blocking.")
-        render_full("\n".join(lines), title="Spec Size Guardrails")
+        lines.append(t("cli.guardrails.tier_warn_reporting"))
+        render_full("\n".join(lines), title=t("cli.guardrails.size_title"))
         raise typer.Exit(code=0)
 
-    lines.append("\n✓ All spec size guardrails passed - no violations found")
+    lines.append(t("cli.guardrails.size_all_passed"))
     lines.append(f"\n{'=' * 60}")
-    render_full("\n".join(lines), title="Spec Size Guardrails")
+    render_full("\n".join(lines), title=t("cli.guardrails.size_title"))
     raise typer.Exit(code=0)
 
 
@@ -530,11 +523,11 @@ def guardrails_cmd(
         return
 
     if spec_file is None:
-        typer.echo("Error: a spec file is required (or pass --sizes for project-wide size checks)", err=True)
+        typer.echo(t("cli.guardrails.spec_file_required"), err=True)
         raise typer.Exit(code=1)
 
     if not spec_file.exists():
-        typer.echo(f"Error: Spec file not found: {spec_file}", err=True)
+        typer.echo(t("cli.guardrails.spec_file_not_found", spec_file=spec_file), err=True)
         raise typer.Exit(code=1)
 
     new_content = spec_file.read_text()
@@ -551,7 +544,7 @@ def guardrails_cmd(
         if result.returncode == 0:
             original_content = result.stdout
         else:
-            typer.echo(f"Warning: Could not find original version in git history")
+            typer.echo(t("cli.guardrails.no_original_in_git"))
             original_content = new_content  # Compare with itself (no violations)
 
     from .engine.merge.guardrails import check_spec_diff, GuardrailViolation
@@ -583,43 +576,42 @@ def guardrails_cmd(
     lines = [
         "",
         "=" * 60,
-        "SE 3.0 Spec Guardrails Check",
+        t("cli.guardrails.check_header"),
         "=" * 60,
         "",
-        f"File: {spec_file}",
+        t("cli.guardrails.file", spec_file=spec_file),
     ]
 
     if violations:
-        lines.append(f"\n⚠️  {len(violations)} violation(s) found:")
+        lines.append(t("cli.guardrails.violations_found", count=len(violations)))
         for v in violations:
             lines.append(f"\n  [{v['type']}] {v['message']}")
-            lines.append(f"  Rule: {v['guardrail']}")
+            lines.append(t("cli.guardrails.rule", guardrail=v['guardrail']))
     else:
-        lines.append("\n✓ Content guardrails passed - no diff violations found")
+        lines.append(t("cli.guardrails.content_passed"))
 
     if size_violations:
         lines.append(
-            f"\n⚠️  {len(size_violations)} size violation(s) found "
-            f"(tier: {size_tier}):"
+            t("cli.guardrails.size_violations_found_tier", count=len(size_violations), tier=size_tier)
         )
         for v in size_violations:
             ev = v.evidence or {}
             size_b = ev.get("size_bytes")
             limit_b = ev.get("limit_bytes")
             detail = (
-                f" ({size_b} > {limit_b} bytes)"
+                t("cli.guardrails.size_detail", size=size_b, limit=limit_b)
                 if size_b is not None and limit_b is not None
                 else ""
             )
             lines.append(f"\n  [{v.violation_type}] {v.file_path}{detail}")
             lines.append(f"  {v.message}")
         if size_tier == "enforce":
-            lines.append("\n  Size tier is 'enforce' — failing the check.")
+            lines.append(t("cli.guardrails.size_tier_enforce_failing"))
         else:
-            lines.append("\n  Size tier is 'warn' — reporting only, not blocking.")
+            lines.append(t("cli.guardrails.size_tier_warn_reporting"))
 
     lines.append(f"\n{'=' * 60}")
-    render_full("\n".join(lines), title="Guardrails Check")
+    render_full("\n".join(lines), title=t("cli.guardrails.check_title"))
     if violations or size_blocks:
         raise typer.Exit(code=1)
     raise typer.Exit(code=0)
@@ -684,12 +676,8 @@ def _precheck_websockets(server_url: str) -> None:
         import websockets  # type: ignore  # noqa: F401
     except Exception:
         render_text(
-            "WARNING: the 'websockets' package is not installed.\n"
-            "The daemon will start in LOCAL-ONLY mode and will NOT connect to\n"
-            f"the central server ({server_url}); this machine will not appear\n"
-            "in the web dashboard's machine list.\n"
-            "Install it with: pip install 'se3[server]'",
-            title="Daemon",
+            t("cli.daemon.websockets_missing", server_url=server_url),
+            title=t("cli.daemon.title"),
             # Render via Rich Text so the '[server]' extra is not eaten as markup.
             style="default",
         )
@@ -738,20 +726,16 @@ def _report_connection_result(config, daemon_status_fn) -> None:
             last_error = status.get("last_error") or last_error
         time.sleep(0.3)
     if connected:
-        render_text("Connection: connected to the central server.", title="Daemon")
+        render_text(t("cli.daemon.connected"), title=t("cli.daemon.title"))
     elif last_error:
         render_text(
-            f"WARNING: the daemon could not connect to the central server: "
-            f"{last_error}.\n"
-            "This machine will not appear in the web dashboard's machine list "
-            "until it connects.",
-            title="Daemon",
+            t("cli.daemon.connect_failed", last_error=last_error),
+            title=t("cli.daemon.title"),
         )
     else:
         render_text(
-            "WARNING: the daemon has not connected to the central server yet.\n"
-            "Run 'se3 daemon status' to check the current connection state.",
-            title="Daemon",
+            t("cli.daemon.not_connected_yet"),
+            title=t("cli.daemon.title"),
         )
 
 
@@ -803,12 +787,12 @@ def daemon_start_cmd(
     try:
         result = start_daemon(config, foreground=foreground)
     except DaemonAlreadyRunning as exc:
-        render_text(str(exc), title="Daemon")
+        render_text(str(exc), title=t("cli.daemon.title"))
         raise typer.Exit(1)
     if not foreground:
         status = result.get("status")
         pid = result.get("pid")
-        render_text(f"Daemon {status} (pid={pid})", title="Daemon")
+        render_text(t("cli.daemon.started", status=status, pid=pid), title=t("cli.daemon.title"))
         # The detached daemon dials the server on its own; read the real
         # connection result back from the status file.
         if server_url:
@@ -824,15 +808,15 @@ def daemon_stop_cmd():
     result = stop_daemon(DaemonConfig())
     status = result.get("status")
     if status == "not_running":
-        render_text("Daemon is not running.", title="Daemon")
+        render_text(t("cli.daemon.not_running"), title=t("cli.daemon.title"))
         raise typer.Exit(0)
     if status == "stop_timeout":
         render_text(
-            f"Daemon (pid={result.get('pid')}) did not stop within the timeout.",
-            title="Daemon",
+            t("cli.daemon.stop_timeout", pid=result.get('pid')),
+            title=t("cli.daemon.title"),
         )
         raise typer.Exit(1)
-    render_text(f"Daemon stopped (pid={result.get('pid')}).", title="Daemon")
+    render_text(t("cli.daemon.stopped", pid=result.get('pid')), title=t("cli.daemon.title"))
     raise typer.Exit(0)
 
 
@@ -853,20 +837,20 @@ def daemon_status_cmd(
         raise typer.Exit(0)
 
     if not status.get("running"):
-        render_text("Daemon is not running.", title="Daemon Status")
+        render_text(t("cli.daemon.not_running"), title=t("cli.daemon.status_title"))
         raise typer.Exit(0)
 
     lines = [
-        f"Running: yes (pid={status.get('pid')})",
-        f"Machine: {status.get('machine_id')}",
-        f"Server:  {status.get('server_url') or '(not configured)'}",
+        t("cli.daemon.status_running", pid=status.get('pid')),
+        t("cli.daemon.status_machine", machine_id=status.get('machine_id')),
+        t("cli.daemon.status_server", server=status.get('server_url') or t("cli.daemon.not_configured")),
     ]
     # Real outbound-connection state, distinct from the configured-URL echo
     # above: a configured URL does not mean the daemon actually connected.
     if not status.get("server_url"):
-        lines.append("Connection: local-only (no server configured)")
+        lines.append(t("cli.daemon.status_conn_local"))
     elif status.get("connected"):
-        lines.append("Connection: connected")
+        lines.append(t("cli.daemon.status_conn_connected"))
     else:
         # Surface the real failure reason. Earlier this fell back to the literal
         # "not connected" when last_error was empty, rendering the useless
@@ -875,18 +859,15 @@ def daemon_status_cmd(
         # an information-free literal.
         reason = (status.get("last_error") or "").strip()
         if reason:
-            lines.append(f"Connection: not connected ({reason})")
+            lines.append(t("cli.daemon.status_conn_not_connected_reason", reason=reason))
         else:
-            lines.append(
-                "Connection: not connected "
-                "(reason unavailable — see daemon.log)"
-            )
+            lines.append(t("cli.daemon.status_conn_not_connected_no_reason"))
     tracked = status.get("tracked_flows") or []
-    lines.append(f"Tracked flows: {len(tracked)}")
+    lines.append(t("cli.daemon.status_tracked_flows", count=len(tracked)))
     for rec in tracked:
-        flow_id = rec.get("flow_id") or "(unknown)"
-        lines.append(f"  - pid={rec.get('pid')} flow={flow_id} ({rec.get('origin')})")
-    render_text("\n".join(lines), title="Daemon Status")
+        flow_id = rec.get("flow_id") or t("cli.daemon.flow_unknown")
+        lines.append(t("cli.daemon.status_flow_entry", pid=rec.get('pid'), flow_id=flow_id, origin=rec.get('origin')))
+    render_text("\n".join(lines), title=t("cli.daemon.status_title"))
     raise typer.Exit(0)
 
 
@@ -931,8 +912,7 @@ def merge_cmd(
     # the standard click-style error including --help hint.
     if not branches:
         raise typer.BadParameter(
-            "At least one branch name is required.\n"
-            "Usage: se3 merge <branch> [<branch> ...]",
+            t("cli.merge.branch_required"),
             param_hint="branches",
         )
 
@@ -1034,57 +1014,42 @@ def merge_unlock_cmd(
     status = outcome.status
 
     # Status report — always printed, including when there is no lock.
-    lines = [f"Merge lock file: {status.lock_file}"]
+    lines = [t("cli.merge_unlock.lock_file", lock_file=status.lock_file)]
     if not status.exists:
-        lines.append("Holder PID: (none — no lock file present)")
-        lines.append("State: no lock present")
+        lines.append(t("cli.merge_unlock.holder_none"))
+        lines.append(t("cli.merge_unlock.state_no_lock"))
     else:
         pid_str = (
             str(status.holder_pid)
             if status.holder_pid is not None
-            else "(none recorded)"
+            else t("cli.merge_unlock.pid_none_recorded")
         )
-        lines.append(f"Holder PID: {pid_str}")
+        lines.append(t("cli.merge_unlock.holder_pid", pid=pid_str))
         if status.corrupt:
-            lines.append("State: stale (PID record corrupt / unparseable)")
+            lines.append(t("cli.merge_unlock.state_stale_corrupt"))
         elif status.stale:
             if status.holder_pid is None:
-                lines.append("State: stale (no PID recorded)")
+                lines.append(t("cli.merge_unlock.state_stale_no_pid"))
             else:
-                lines.append("State: stale (holder process is not alive)")
+                lines.append(t("cli.merge_unlock.state_stale_dead"))
         else:
-            lines.append("State: alive (holder process is running)")
+            lines.append(t("cli.merge_unlock.state_alive"))
 
     if outcome.action == "no_lock":
-        lines.append("No merge lock to release.")
+        lines.append(t("cli.merge_unlock.no_lock_to_release"))
     elif outcome.action == "released_stale":
-        lines.append("Released stale merge lock (removed lock file).")
+        lines.append(t("cli.merge_unlock.released_stale"))
     elif outcome.action == "released_force":
-        lines.append(
-            "WARNING: force-released a merge lock held by a live process."
-        )
-        lines.append(
-            "This may break merge mutual exclusion — only do this when you "
-            "are certain no active merge is running."
-        )
+        lines.append(t("cli.merge_unlock.released_force"))
+        lines.append(t("cli.merge_unlock.released_force_warning"))
     elif outcome.action == "refused_alive":
-        lines.append("Refused: the lock holder process is still alive.")
-        lines.append(
-            "Re-run with --force (-f) to force-release if you are certain "
-            "no merge is active."
-        )
+        lines.append(t("cli.merge_unlock.refused_alive"))
+        lines.append(t("cli.merge_unlock.refused_alive_hint"))
     elif outcome.action == "failed_remove":
-        lines.append(
-            "ERROR: could not remove the lock file — it is still present on "
-            "disk."
-        )
-        lines.append(
-            "This is usually a permission problem (e.g. the lock file is "
-            "owned by another user or root). The merge lock was NOT released; "
-            "remove the file manually with sufficient privileges."
-        )
+        lines.append(t("cli.merge_unlock.failed_remove"))
+        lines.append(t("cli.merge_unlock.failed_remove_hint"))
 
-    render_text("\n".join(lines), title="Merge Unlock")
+    render_text("\n".join(lines), title=t("cli.merge_unlock.title"))
     raise typer.Exit(outcome.exit_code)
 
 

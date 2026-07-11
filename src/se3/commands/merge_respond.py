@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..engine.display import render_text
+from ..i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,10 @@ def process_merge_response(
 
     call_path = Path(call_file)
     if not call_path.exists():
-        render_text(f"Call file not found: {call_path}", title="SE3 Merge Error")
+        render_text(
+            t("merge_respond.call_file_not_found", call_path=call_path),
+            title=t("merge_respond.title.error"),
+        )
         return 1
 
     # Resolve the lock target back to the main repository so that a
@@ -262,21 +266,22 @@ def process_merge_response(
             )
     except MergeLockBusy as exc:
         render_text(
-            f"Another se3 merge process is currently running "
-            f"(holder pid={exc.holder_pid}). Wait for it to finish and "
-            f"retry.\nLock file: {exc.lock_file}",
-            title="SE3 Merge Error",
+            t(
+                "merge_respond.lock_busy",
+                holder_pid=exc.holder_pid,
+                lock_file=exc.lock_file,
+            ),
+            title=t("merge_respond.title.error"),
         )
         return 1
     except MergeLockStale as exc:
         if exc.holder_pid is None:
-            pid_msg = "(unparseable pid)"
+            pid_msg = t("merge_respond.stale_pid_unparseable")
         else:
-            pid_msg = f"(holder pid={exc.holder_pid} does not exist)"
+            pid_msg = t("merge_respond.stale_pid_missing", holder_pid=exc.holder_pid)
         render_text(
-            f"Merge lock appears stale {pid_msg}. If you are sure no other "
-            f"se3 merge is running, remove {exc.lock_file} and retry.",
-            title="SE3 Merge Error",
+            t("merge_respond.lock_stale", pid_msg=pid_msg, lock_file=exc.lock_file),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -303,16 +308,16 @@ def _verify_pending_guardrails(
         marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
     except Exception as exc:
         render_text(
-            f"Failed to parse pending-guardrails marker at {marker_path}: {exc}",
-            title="SE3 Merge Error",
+            t("merge_respond.marker_parse_failed", marker_path=marker_path, exc=exc),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
     pre_sha = marker_data.get("pre_sha", "")
     if not pre_sha:
         render_text(
-            f"Pending-guardrails marker {marker_path} is missing 'pre_sha'.",
-            title="SE3 Merge Error",
+            t("merge_respond.marker_missing_pre_sha", marker_path=marker_path),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -322,8 +327,8 @@ def _verify_pending_guardrails(
     )
     if head_result.returncode != 0:
         render_text(
-            f"Failed to read HEAD: {head_result.stderr.strip()}",
-            title="SE3 Merge Error",
+            t("merge_respond.read_head_failed", stderr=head_result.stderr.strip()),
+            title=t("merge_respond.title.error"),
         )
         return 1
     post_sha = head_result.stdout.strip()
@@ -332,10 +337,8 @@ def _verify_pending_guardrails(
     # to proceed and tell them to commit first.
     if post_sha == pre_sha:
         render_text(
-            "No new commit detected since the manual resolution was started. "
-            "Please complete the merge first (`git add . && git commit`), "
-            "then re-run this command to verify guardrails.",
-            title="SE3 Merge — Manual Resolution Pending",
+            t("merge_respond.no_new_commit"),
+            title=t("merge_respond.title.manual_resolution_pending"),
         )
         return 1
 
@@ -353,11 +356,12 @@ def _verify_pending_guardrails(
             commit_count = 0
         if commit_count > 1:
             render_text(
-                f"HEAD has advanced {commit_count} commits since the manual "
-                f"resolution was started. A hard reset would destroy those "
-                f"commits. Please resolve the guardrail violations manually "
-                f"and create a new commit, or reset to {pre_sha[:8]} yourself.",
-                title="SE3 Merge — Multi-Commit Advancement Detected",
+                t(
+                    "merge_respond.multi_commit_advancement",
+                    commit_count=commit_count,
+                    pre_sha_short=pre_sha[:8],
+                ),
+                title=t("merge_respond.title.multi_commit"),
             )
             return 1
 
@@ -368,8 +372,8 @@ def _verify_pending_guardrails(
         gr_report = guardrails.check_merge_result(pre_sha, post_sha)
     except Exception as exc:
         render_text(
-            f"Guardrails check failed after manual resolution: {exc}",
-            title="SE3 Merge Error",
+            t("merge_respond.guardrails_check_failed_manual", exc=exc),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -379,12 +383,10 @@ def _verify_pending_guardrails(
         except OSError:
             pass
         render_text(
-            "Manual resolution accepted: guardrails passed."
-            + (f"\nFeedback: {feedback}" if feedback else "")
-            + "\n\nNote: If you had uncommitted changes that were auto-stashed "
-            "during a previous guardrails failure, recover them with "
-            "`git stash pop`.",
-            title="SE3 Merge — Verified",
+            t("merge_respond.manual_accepted")
+            + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else "")
+            + t("merge_respond.stash_recover_note"),
+            title=t("merge_respond.title.verified"),
         )
         return 0
 
@@ -409,44 +411,39 @@ def _verify_pending_guardrails(
     )
     rollback_note = ""
     if rollback_result.returncode != 0:
-        rollback_note = (
-            f"\n\nWARNING: Rollback to {pre_sha[:8]} failed "
-            f"(rc={rollback_result.returncode}): "
-            f"{rollback_result.stderr.strip() or 'unknown'}. "
-            f"Working tree may still contain the guardrail-violating "
-            f"commit. Manual `git reset --hard {pre_sha[:8]}` is required."
+        rollback_note = t(
+            "merge_respond.rollback_failed",
+            pre_sha_short=pre_sha[:8],
+            rc=rollback_result.returncode,
+            stderr=rollback_result.stderr.strip() or "unknown",
         )
         if stash_attempted:
-            rollback_note += (
-                f"\n\nUncommitted changes were also stashed before the "
-                f"failed reset. After running the manual reset above, "
-                f"recover them with `git stash pop`."
-            )
+            rollback_note += t("merge_respond.rollback_failed_stash_note")
     else:
-        rollback_note = (
-            f"\n\nThe guardrail-violating commit was rolled back to "
-            f"{pre_sha[:8]}. Please fix the spec files and re-run."
+        rollback_note = t(
+            "merge_respond.rollback_success", pre_sha_short=pre_sha[:8]
         )
         if stash_attempted:
-            rollback_note += (
-                f"\nUncommitted changes were stashed before rollback; "
-                f"recover with `git stash pop` if needed."
-            )
+            rollback_note += t("merge_respond.rollback_success_stash_note")
         try:
             marker_path.unlink()
         except OSError:
             pass
 
     violations_lines = [
-        f"  [{v.violation_type}] {v.file_path}: {v.message}"
+        t(
+            "merge_respond.violation_line",
+            violation_type=v.violation_type,
+            file_path=v.file_path,
+            message=v.message,
+        )
         for v in gr_report.violations
     ]
     render_text(
-        "REFUSED: Guardrail violations were detected in spec files "
-        "after the manual resolution commit:\n\n"
+        t("merge_respond.refused_violations_manual")
         + "\n".join(violations_lines)
         + rollback_note,
-        title="SE3 Merge — Guardrail Violations (Rolled Back)",
+        title=t("merge_respond.title.violations_rolled_back"),
     )
     return 1
 
@@ -483,10 +480,8 @@ def _process_merge_response_locked(
     response_path = Path(str(call_path) + ".response")
     if not response_path.exists():
         render_text(
-            f"Response file not found: {response_path}\n"
-            "Create it with JSON: {\"choice\": \"accept|abort|manual\", "
-            "\"feedback\": \"optional notes\"}",
-            title="SE3 Merge Error",
+            t("merge_respond.response_file_not_found", response_path=response_path),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -494,8 +489,8 @@ def _process_merge_response_locked(
         call_data = json.loads(call_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         render_text(
-            f"Failed to parse call file: {exc}",
-            title="SE3 Merge Error",
+            t("merge_respond.call_file_parse_failed", exc=exc),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -503,8 +498,8 @@ def _process_merge_response_locked(
         response_data = json.loads(response_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         render_text(
-            f"Failed to parse response file: {exc}",
-            title="SE3 Merge Error",
+            t("merge_respond.response_file_parse_failed", exc=exc),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -513,8 +508,8 @@ def _process_merge_response_locked(
 
     if choice not in ("accept", "abort", "manual"):
         render_text(
-            f"Invalid choice '{choice}'. Must be one of: accept, abort, manual",
-            title="SE3 Merge Error",
+            t("merge_respond.invalid_choice", choice=choice),
+            title=t("merge_respond.title.error"),
         )
         return 1
 
@@ -546,17 +541,11 @@ def _process_merge_response_locked(
 
             if sentinel_files:
                 render_text(
-                    "REFUSED: The LLM resolution contains the strict-mode "
-                    "placeholder sentinel.\n\n"
-                    f"Affected file(s): {', '.join(sentinel_files)}\n\n"
-                    "This merge was created with --strategy=strict, which skips "
-                    "LLM resolution. You MUST manually edit the files to resolve "
-                    "conflicts before accepting.\n\n"
-                    "To proceed manually:\n"
-                    "  1. Edit the conflicting files to resolve conflicts\n"
-                    "  2. Run: git add . && git commit\n"
-                    "  3. Or update the .response file to 'manual' or 'abort'.",
-                    title="SE3 Merge — Strict Placeholder Detected",
+                    t(
+                        "merge_respond.strict_placeholder",
+                        affected_files=", ".join(sentinel_files),
+                    ),
+                    title=t("merge_respond.title.strict_placeholder"),
                 )
                 return 1
 
@@ -567,21 +556,19 @@ def _process_merge_response_locked(
             orphan_violations = call_data.get("orphan_guardrails_violations") or []
             if orphan_violations:
                 lines = [
-                    f"  [{v.get('violation_type', 'unknown')}] "
-                    f"{v.get('file_path', '<unknown>')}: "
-                    f"{v.get('message', '')}"
+                    t(
+                        "merge_respond.violation_line",
+                        violation_type=v.get("violation_type", "unknown"),
+                        file_path=v.get("file_path", "<unknown>"),
+                        message=v.get("message", ""),
+                    )
                     for v in orphan_violations
                 ]
                 render_text(
-                    "REFUSED: The call file contains LLM-proposed orphan "
-                    "spec resolutions that violate guardrails. Accepting "
-                    "would write guardrail-violating spec content.\n\n"
-                    "Recorded violations:\n"
+                    t("merge_respond.orphan_violations_header")
                     + "\n".join(lines)
-                    + "\n\n"
-                    "To proceed: choose 'manual', edit the spec files "
-                    "yourself, then `git add . && git commit`.",
-                    title="SE3 Merge — Orphan Guardrail Violations",
+                    + t("merge_respond.orphan_violations_footer"),
+                    title=t("merge_respond.title.orphan_violations"),
                 )
                 return 1
 
@@ -659,8 +646,8 @@ def _process_merge_response_locked(
                         )
             except Exception as exc:
                 render_text(
-                    f"Failed to write resolved content: {exc}",
-                    title="SE3 Merge Error",
+                    t("merge_respond.write_resolved_failed", exc=exc),
+                    title=t("merge_respond.title.error"),
                 )
                 return 1
 
@@ -674,8 +661,8 @@ def _process_merge_response_locked(
             )
             if commit_result.returncode != 0:
                 render_text(
-                    f"Merge commit failed: {commit_result.stderr.strip()}",
-                    title="SE3 Merge Error",
+                    t("merge_respond.commit_failed", stderr=commit_result.stderr.strip()),
+                    title=t("merge_respond.title.error"),
                 )
                 return 1
 
@@ -695,8 +682,8 @@ def _process_merge_response_locked(
                     assert_head_is_merge_commit(project_root, theirs_branch, timeout=15)
                 except PostConditionViolated as pc_exc:
                     render_text(
-                        f"Post-condition check failed after merge commit: {pc_exc}",
-                        title="SE3 Merge Error",
+                        t("merge_respond.postcondition_failed", detail=pc_exc),
+                        title=t("merge_respond.title.error"),
                     )
                     return 1
 
@@ -748,7 +735,12 @@ def _process_merge_response_locked(
 
                     if not gr_report.passed:
                         violations_lines = [
-                            f"  [{v.violation_type}] {v.file_path}: {v.message}"
+                            t(
+                                "merge_respond.violation_line",
+                                violation_type=v.violation_type,
+                                file_path=v.file_path,
+                                message=v.message,
+                            )
                             for v in gr_report.violations
                         ]
                         # Hard-roll back to pre_sha so the guardrail-
@@ -767,26 +759,22 @@ def _process_merge_response_locked(
                         )
                         rollback_note = ""
                         if rollback_result.returncode != 0:
-                            rollback_note = (
-                                f"\n\nWARNING: Rollback to {pre_sha[:8]} "
-                                f"failed (rc={rollback_result.returncode}): "
-                                f"{rollback_result.stderr.strip() or 'unknown'}. "
-                                f"Working tree may still contain the "
-                                f"guardrail-violating commit. Manual "
-                                f"`git reset --hard {pre_sha[:8]}` is required."
+                            rollback_note = t(
+                                "merge_respond.rollback_failed",
+                                pre_sha_short=pre_sha[:8],
+                                rc=rollback_result.returncode,
+                                stderr=rollback_result.stderr.strip() or "unknown",
                             )
                         else:
-                            rollback_note = (
-                                f"\n\nThe guardrail-violating commit was "
-                                f"rolled back to {pre_sha[:8]}. Please fix "
-                                f"the spec files and re-run the merge."
+                            rollback_note = t(
+                                "merge_respond.rollback_success_merge",
+                                pre_sha_short=pre_sha[:8],
                             )
                         render_text(
-                            "REFUSED: Guardrail violations were detected in "
-                            "spec files after the merge commit:\n\n"
+                            t("merge_respond.refused_violations_merge")
                             + "\n".join(violations_lines)
                             + rollback_note,
-                            title="SE3 Merge — Guardrail Violations (Rolled Back)",
+                            title=t("merge_respond.title.violations_rolled_back"),
                         )
                         return 1
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
@@ -795,10 +783,8 @@ def _process_merge_response_locked(
                         "Guardrails check failed after merge-respond: %s", exc
                     )
                     render_text(
-                        "The merge was accepted but the post-merge guardrails "
-                        "check could not complete. The guardrail-violating "
-                        "commit remains on HEAD — manual review is required.",
-                        title="SE3 Merge — Guardrails Check Failed",
+                        t("merge_respond.guardrails_incomplete"),
+                        title=t("merge_respond.title.guardrails_check_failed"),
                     )
                     return 1
 
@@ -823,25 +809,23 @@ def _process_merge_response_locked(
                     version_issue = _check_version_unchanged(project_root, pre_sha)
                     if version_issue:
                         render_text(
-                            f"Post-condition check failed after merge commit: "
-                            f"{version_issue}",
-                            title="SE3 Merge Error",
+                            t("merge_respond.postcondition_failed", detail=version_issue),
+                            title=t("merge_respond.title.error"),
                         )
                         return 1
 
             render_text(
-                "Merge conflict resolved and committed successfully."
-                + (f"\nFeedback: {feedback}" if feedback else ""),
-                title="SE3 Merge — Accepted",
+                t("merge_respond.accepted_committed")
+                + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
+                title=t("merge_respond.title.accepted"),
             )
             return 0
 
         # guardrail_violation type — no auto-write, user must fix manually
         render_text(
-            "Guardrail violations must be fixed manually. "
-            "Please edit the spec files and re-run the merge."
-            + (f"\nFeedback: {feedback}" if feedback else ""),
-            title="SE3 Merge — Accepted (Manual Fix Required)",
+            t("merge_respond.accept_manual_fix")
+            + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
+            title=t("merge_respond.title.accepted_manual_fix"),
         )
         return 0
 
@@ -851,9 +835,9 @@ def _process_merge_response_locked(
             # (git reset --hard). Attempting git merge --abort would fail
             # because no merge is in progress. Report clean success instead.
             render_text(
-                "Merge aborted. The rollback to pre-merge state is already complete."
-                + (f"\nFeedback: {feedback}" if feedback else ""),
-                title="SE3 Merge — Aborted",
+                t("merge_respond.aborted_already_rolledback")
+                + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
+                title=t("merge_respond.title.aborted"),
             )
             return 0
 
@@ -866,15 +850,15 @@ def _process_merge_response_locked(
         )
         if abort_result.returncode != 0:
             render_text(
-                f"git merge --abort failed: {abort_result.stderr.strip()}",
-                title="SE3 Merge Error",
+                t("merge_respond.abort_failed", stderr=abort_result.stderr.strip()),
+                title=t("merge_respond.title.error"),
             )
             return 1
 
         render_text(
-            "Merge aborted."
-            + (f"\nFeedback: {feedback}" if feedback else ""),
-            title="SE3 Merge — Aborted",
+            t("merge_respond.aborted")
+            + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
+            title=t("merge_respond.title.aborted"),
         )
         return 0
 
@@ -911,10 +895,8 @@ def _process_merge_response_locked(
 
         if not pre_sha:
             render_text(
-                "Cannot park manual resolution: pre-merge SHA is unknown "
-                "and HEAD has no parents. Please resolve manually and "
-                "run `se3 guardrails` on each spec file before re-merging.",
-                title="SE3 Merge Error",
+                t("merge_respond.cannot_park_manual"),
+                title=t("merge_respond.title.error"),
             )
             return 1
 
@@ -944,32 +926,31 @@ def _process_merge_response_locked(
             )
         except OSError as exc:
             render_text(
-                f"Failed to write pending-guardrails marker {marker_path}: "
-                f"{exc}.\nResolve manually and run `se3 guardrails` on "
-                f"each spec file: {', '.join(spec_paths_for_manual)}",
-                title="SE3 Merge Error",
+                t(
+                    "merge_respond.marker_write_failed",
+                    marker_path=marker_path,
+                    exc=exc,
+                    spec_paths=", ".join(spec_paths_for_manual),
+                ),
+                title=t("merge_respond.title.error"),
             )
             return 1
 
         render_text(
-            "This merge touches spec files:\n"
-            + "\n".join(f"  - {p}" for p in spec_paths_for_manual)
-            + "\n\nResolve manually, then commit:\n"
-            "  git add . && git commit\n\n"
-            f"After committing, RE-RUN this command to enforce the spec "
-            f"contract:\n"
-            f"  se3 merge-respond {call_path}\n\n"
-            "If guardrails detect a weakened requirement or deleted "
-            "scenario, the commit will be rolled back automatically."
-            + (f"\nFeedback: {feedback}" if feedback else ""),
-            title="SE3 Merge — Manual Resolution (Parked)",
+            t("merge_respond.manual_parked_header")
+            + "\n".join(
+                t("merge_respond.spec_path_line", path=p)
+                for p in spec_paths_for_manual
+            )
+            + t("merge_respond.manual_parked_footer", call_path=call_path)
+            + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
+            title=t("merge_respond.title.manual_parked"),
         )
         return 0
 
     render_text(
-        "Please resolve the conflicts manually, then run:\n"
-        "  git add . && git commit"
-        + (f"\nFeedback: {feedback}" if feedback else ""),
-        title="SE3 Merge — Manual Resolution",
+        t("merge_respond.manual_resolve")
+        + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
+        title=t("merge_respond.title.manual_resolution"),
     )
     return 0

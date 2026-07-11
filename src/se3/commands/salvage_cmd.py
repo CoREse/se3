@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from rich.console import Console
 from rich.table import Table
 
+from ..i18n import t
+
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -34,10 +36,7 @@ def salvage(project_root: Optional[Path] = None) -> int:
     if project_root is None:
         project_root = _find_project_root()
         if project_root is None:
-            console.print(
-                "[red]Could not find project root "
-                "(no .git, se3.yaml, se3.local.yaml, or se3.config.yaml found)[/red]"
-            )
+            console.print(t("salvage.no_project_root"))
             return 1
 
     project_root = Path(project_root)
@@ -49,11 +48,11 @@ def salvage(project_root: Optional[Path] = None) -> int:
     try:
         flow, warnings = _load_session(project_root)
         if flow:
-            results.append(("Read session", "OK", f"Flow {flow.flow_id}"))
+            results.append((t("salvage.step.read_session"), "OK", t("salvage.detail.flow", flow_id=flow.flow_id)))
         else:
-            results.append(("Read session", "SKIP", "No session found, using git diff"))
+            results.append((t("salvage.step.read_session"), "SKIP", t("salvage.detail.no_session_git_diff")))
     except Exception as e:
-        results.append(("Read session", "FAIL", str(e)[:80]))
+        results.append((t("salvage.step.read_session"), "FAIL", str(e)[:80]))
         logger.warning(f"Step 1 (read session) failed: {e}")
 
     for w in warnings:
@@ -65,11 +64,11 @@ def salvage(project_root: Optional[Path] = None) -> int:
         diff_info = _assess_git_diff(project_root)
         file_count = diff_info.get("changed_file_count", 0)
         if file_count > 0:
-            results.append(("Assess git diff", "OK", f"{file_count} files changed"))
+            results.append((t("salvage.step.assess_git_diff"), "OK", t("salvage.detail.files_changed", count=file_count)))
         else:
-            results.append(("Assess git diff", "OK", "No uncommitted changes"))
+            results.append((t("salvage.step.assess_git_diff"), "OK", t("salvage.detail.no_uncommitted_changes")))
     except Exception as e:
-        results.append(("Assess git diff", "FAIL", str(e)[:80]))
+        results.append((t("salvage.step.assess_git_diff"), "FAIL", str(e)[:80]))
         logger.warning(f"Step 2 (assess git diff) failed: {e}")
 
     # Step 3: Commit changes
@@ -77,11 +76,11 @@ def salvage(project_root: Optional[Path] = None) -> int:
     try:
         commit_hash = _commit_changes(project_root, flow, diff_info)
         if commit_hash:
-            results.append(("Commit changes", "OK", f"Committed: {commit_hash[:8]}"))
+            results.append((t("salvage.step.commit_changes"), "OK", t("salvage.detail.committed", hash=commit_hash[:8])))
         else:
-            results.append(("Commit changes", "SKIP", "Nothing to commit"))
+            results.append((t("salvage.step.commit_changes"), "SKIP", t("salvage.detail.nothing_to_commit")))
     except Exception as e:
-        results.append(("Commit changes", "FAIL", str(e)[:80]))
+        results.append((t("salvage.step.commit_changes"), "FAIL", str(e)[:80]))
         logger.warning(f"Step 3 (commit changes) failed: {e}")
 
     # Step 4: Create salvage issues
@@ -90,22 +89,22 @@ def salvage(project_root: Optional[Path] = None) -> int:
         created_issues = _create_salvage_issues(project_root, flow, diff_info)
         if created_issues:
             ids = ", ".join(i.id for i in created_issues)
-            results.append(("Create issues", "OK", f"Created: {ids}"))
+            results.append((t("salvage.step.create_issues"), "OK", t("salvage.detail.created", ids=ids)))
         else:
-            results.append(("Create issues", "SKIP", "No issues to create"))
+            results.append((t("salvage.step.create_issues"), "SKIP", t("salvage.detail.no_issues")))
     except Exception as e:
-        results.append(("Create issues", "FAIL", str(e)[:80]))
+        results.append((t("salvage.step.create_issues"), "FAIL", str(e)[:80]))
         logger.warning(f"Step 4 (create issues) failed: {e}")
 
     # Step 5: Archive session
     try:
         archived = _archive_session(project_root)
         if archived:
-            results.append(("Archive session", "OK", "Session archived"))
+            results.append((t("salvage.step.archive_session"), "OK", t("salvage.detail.session_archived")))
         else:
-            results.append(("Archive session", "SKIP", "No session to archive"))
+            results.append((t("salvage.step.archive_session"), "SKIP", t("salvage.detail.no_session_to_archive")))
     except Exception as e:
-        results.append(("Archive session", "FAIL", str(e)[:80]))
+        results.append((t("salvage.step.archive_session"), "FAIL", str(e)[:80]))
         logger.warning(f"Step 5 (archive session) failed: {e}")
 
     # Display results
@@ -370,15 +369,15 @@ def _display_results(results: List[Tuple[str, str, str]]) -> None:
     Args:
         results: List of (step_name, status, detail)
     """
-    table = Table(title="Salvage Results")
-    table.add_column("Step", style="cyan")
-    table.add_column("Status", style="bold")
-    table.add_column("Detail")
+    table = Table(title=t("salvage.table.title"))
+    table.add_column(t("salvage.table.col_step"), style="cyan")
+    table.add_column(t("salvage.table.col_status"), style="bold")
+    table.add_column(t("salvage.table.col_detail"))
 
     status_styles = {
-        "OK": "[green]OK[/green]",
-        "SKIP": "[yellow]SKIP[/yellow]",
-        "FAIL": "[red]FAIL[/red]",
+        "OK": t("salvage.status.ok"),
+        "SKIP": t("salvage.status.skip"),
+        "FAIL": t("salvage.status.fail"),
     }
 
     for step_name, status, detail in results:

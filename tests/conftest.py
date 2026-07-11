@@ -66,6 +66,28 @@ def _reset_config_warning_dedup_sets():
 
 
 @pytest.fixture(autouse=True)
+def _pin_ui_language_en():
+    """Pin CLI UI text to en-US so command-output assertions are deterministic.
+
+    ``se3.i18n.t()``'s active language is a process-wide singleton resolved from
+    ``Path.cwd()``; the se3 repo's own ``se3.yaml`` sets ``language: zh-CN``, so
+    without an explicit pin the language a test observes would depend on cwd and
+    on which test happened to trigger the first render. Pinning to en-US keeps
+    every existing English-substring assertion stable regardless of host locale
+    or project config. Tests that exercise language switching override this via
+    ``i18n.set_language("zh-CN")`` (or ``SE3_LANG`` + ``reset_language()``) in
+    their own body; this fixture resets the singleton afterwards so the override
+    never leaks. Intentionally does NOT touch ``SE3_LANG``/locale env vars so the
+    dedicated resolution-chain tests in ``test_i18n.py`` remain unaffected.
+    """
+    from se3 import i18n
+
+    i18n.set_language("en-US")
+    yield
+    i18n.reset_language()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_code_index_refresh(monkeypatch):
     """Neutralise the flow-step code-index freshness hook for every unit test.
 
