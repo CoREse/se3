@@ -679,3 +679,487 @@ class TestBenignNoop:
         # path performs no second reset (only rejected_positions + the already-done
         # baseline reset are its mechanical bookkeeping).
         assert ledger["period_baseline"] == baseline_at_insertion
+
+
+# --------------------------------------------------------------------------- #
+# 5. Homomorphic-surface sweep: one clause pair, two surfaces, ONE ruling
+# --------------------------------------------------------------------------- #
+#
+# Replays the 2026-07-04 flow that motivated the sweep: a single clause pair
+# (B2 "only rewrite changed cold artifacts" x B3 "blank out a corrupt one")
+# governed TWO sister surfaces by construction — the per-step cold files and the
+# flow's _context.json — and each surface was adjudicated separately, the second
+# ruling forced to mirror the first. The sweep makes ONE ruling draw a single
+# boundary clause over both surfaces, so the sister surface never re-triggers.
+#
+# The sister surface stops triggering through the *existing* mechanics, not a new
+# immunity: the ruling's boundary clause replaces the contradictory clause, so an
+# issue that re-quotes it at the sister surface is dropped by the source-pool
+# switch, never reaches the ledger, and therefore never oscillates. (No
+# position-level ledger immunity is introduced — see the "uncovered surface"
+# regression below, which relies on exactly that.)
+
+# The spec carries TWO independent contradictions:
+#   * cold-artifact pair (B2 x B3) — covers per-step cold files AND _context.json
+#     (the description itself defines both as "cold artifacts": the by-construction
+#     scope that makes them homomorphic surfaces of one contradiction);
+#   * engine.json pair (A1 x A4) — an unrelated stat-cache/freshness conflict, the
+#     "uncertain" surface a conservative sweep must leave alone.
+COLD_SPLIT_TASK = (
+    "Implement the hot/cold persistence split for the flow store. "
+    "Cold artifacts are the per-step files under steps/ and the flow's _context.json. "
+    "(B2) On every save, rewrite only the cold artifacts whose content changed, and "
+    "(B3) blank out any cold artifact whose content is corrupt. "
+    "(A1) The active engine.json may be served from the stat-keyed cache, and (A4) "
+    "every read of the active engine.json must observe the freshest content on disk."
+)
+# The contradictory clause pair, quoted verbatim by both surfaces' issues.
+COLD_CLAUSE = (
+    "rewrite only the cold artifacts whose content changed, and "
+    "(B3) blank out any cold artifact whose content is corrupt"
+)
+# The independent second contradiction, untouched by the cold-artifact ruling.
+CACHE_CLAUSE = (
+    "The active engine.json may be served from the stat-keyed cache, and (A4) "
+    "every read of the active engine.json must observe the freshest content on disk"
+)
+# The two homomorphic surfaces (the files whose code embodies each cold artifact).
+SURFACE_STEP_FILES = "src/se3/engine/persistence.py"
+SURFACE_CONTEXT_JSON = "src/se3/engine/context_store.py"
+SURFACE_ENGINE_JSON = "src/se3/engine/engine_state.py"
+
+# The swept ruling: ONE boundary clause whose exception is scoped to "every cold
+# artifact", i.e. to both surfaces at once. The old B2/B3 wording is gone, so no
+# issue can quote it at either surface any more.
+COLD_ADJUDICATED_TASK = (
+    "Implement the hot/cold persistence split for the flow store. "
+    "Cold artifacts are the per-step files under steps/ and the flow's _context.json. "
+    "(B2/B3-i) On every save, rewrite a cold artifact only when its content changed; "
+    "corruption is the single exception, and it applies identically to EVERY cold "
+    "artifact — the per-step files and _context.json alike — a corrupt artifact is "
+    "rewritten from the in-memory state, never blanked. "
+    "(A1) The active engine.json may be served from the stat-keyed cache, and (A4) "
+    "every read of the active engine.json must observe the freshest content on disk."
+)
+
+_PLAN_GROUPS = [
+    {
+        "group_id": "G1",
+        "name": "cold persistence",
+        "tasks": [
+            {
+                "id": 1,
+                "description": "Persist cold artifacts on save.",
+                "acceptance_criteria": [
+                    "Only cold artifacts whose content changed are rewritten; a "
+                    "corrupt cold artifact is blanked out.",
+                ],
+            }
+        ],
+    }
+]
+# The plan half of the SAME contradiction — patched in the same ruling ("rule in
+# full, in one go"), so no later ruling has to mirror today's decision into it.
+_ADJUDICATED_PLAN_GROUPS = [
+    {
+        "group_id": "G1",
+        "name": "cold persistence",
+        "tasks": [
+            {
+                "id": 1,
+                "description": "Persist cold artifacts on save.",
+                "acceptance_criteria": [
+                    "A cold artifact is rewritten only when its content changed; a "
+                    "corrupt cold artifact — per-step file or _context.json alike — "
+                    "is rewritten from the in-memory state.",
+                ],
+            }
+        ],
+    }
+]
+
+_SWEPT_RULING = {
+    "contradiction_type": "internal_contradiction",
+    "adjudicated_description": COLD_ADJUDICATED_TASK,
+    "adjudicated_plan": _ADJUDICATED_PLAN_GROUPS,
+    "adjudication_rationale": (
+        "B2 (rewrite only changed cold artifacts) and B3 (blank a corrupt one) "
+        "collide on any corrupt-but-unchanged cold artifact. One boundary clause "
+        "scoped to every cold artifact resolves both surfaces at once."
+    ),
+    "covered_surfaces": [
+        {
+            "surface": "per-step cold files under steps/",
+            "justification": (
+                "triggering surface: the oscillating issue was raised here; B2 and B3 "
+                "both name it as a cold artifact."
+            ),
+        },
+        {
+            "surface": "the flow's _context.json",
+            "justification": (
+                "by construction: the spec defines cold artifacts as the per-step "
+                "files AND _context.json, so B2's 'only rewrite changed' and B3's "
+                "'blank a corrupt one' both quantify over it — the same collision "
+                "holds here without any further evidence."
+            ),
+        },
+    ],
+    "candidate_verdicts": [
+        {"id": 0, "verdict": "contradiction", "reason": "B2 x B3 on a corrupt cold file"}
+    ],
+}
+
+# A ruling that leaves the (independent, still-uncertain) engine.json surface out
+# of covered_surfaces — the conservative "when in doubt, leave it out" outcome.
+_UNSWEPT_RULING = dict(
+    _SWEPT_RULING,
+    covered_surfaces=[_SWEPT_RULING["covered_surfaces"][0]],
+)
+
+
+def _make_cold_flow(tmp_path):
+    """A flow on COLD_SPLIT_TASK with a PLAN on record, parked before SELF_CHECK."""
+    flow = FlowInstance(
+        flow_id="adj-sweep-flow",
+        task_description=COLD_SPLIT_TASK,
+        task_type="feature",
+        status=FlowStatus.RUNNING,
+        change_path=tmp_path / "changes" / "c",
+    )
+    flow.state.selected_steps = [
+        StepType.IMPLEMENT,
+        StepType.TEST,
+        StepType.SELF_CHECK,
+        StepType.COMMIT,
+    ]
+    # PLAN is not in selected_steps (the flow is parked mid fix-loop); it only has
+    # to be in step_history for _build_step_inputs to pick up its task_groups —
+    # the plan surface the ruling also patches.
+    plan = Step(
+        step_type=StepType.PLAN,
+        status=StepStatus.COMPLETED,
+        outputs={"plan": {"proposal": {}, "design": {}}, "task_groups": _PLAN_GROUPS},
+    )
+    flow.state.add_step(plan)
+    implement = Step(
+        step_type=StepType.IMPLEMENT,
+        status=StepStatus.COMPLETED,
+        outputs={
+            "files_changed": [
+                {"path": SURFACE_STEP_FILES, "action": "modify"},
+                {"path": SURFACE_CONTEXT_JSON, "action": "modify"},
+                {"path": SURFACE_ENGINE_JSON, "action": "modify"},
+            ],
+            "summary": "hot/cold split",
+        },
+    )
+    flow.state.add_step(implement)
+    test = Step(
+        step_type=StepType.TEST,
+        status=StepStatus.COMPLETED,
+        outputs={"test_results": {"passed": True, "overall_passed": True}},
+    )
+    flow.state.add_step(test)
+    return flow, implement
+
+
+_ALL_SURFACE_FILES = [
+    {"path": SURFACE_STEP_FILES, "action": "modify"},
+    {"path": SURFACE_CONTEXT_JSON, "action": "modify"},
+    {"path": SURFACE_ENGINE_JSON, "action": "modify"},
+]
+
+
+def _new_cold_self_check(sm, flow):
+    """Fresh PENDING SELF_CHECK whose changed-set spans all three surfaces."""
+    inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+    inputs["changes_made"] = {"files_changed": list(_ALL_SURFACE_FILES)}
+    step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
+    flow.state.add_step(step)
+    flow.state.current_step_id = step.step_id
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+    return step
+
+
+def _complete_implement(step):
+    step.status = StepStatus.COMPLETED
+    step.outputs = {"files_changed": list(_ALL_SURFACE_FILES)}
+
+
+def _adjudicate_steps(flow):
+    return [s for s in flow.state.steps.values() if s.step_type == StepType.ADJUDICATE]
+
+
+class TestHomomorphicSurfaceSweep:
+    """One clause pair covering two surfaces is ruled ONCE, for both surfaces."""
+
+    def _oscillate_cold_surface(self, sm, flow):
+        """Two rounds flipping at the per-step-cold-file surface → ADJUDICATE."""
+        sc1 = _new_cold_self_check(sm, flow)
+        assert _run_self_check(
+            sc1,
+            flow,
+            [
+                _issue(
+                    expected="leave the corrupt cold step file untouched",
+                    quote=COLD_CLAUSE,
+                    path=SURFACE_STEP_FILES,
+                )
+            ],
+        ) == StepStatus.REVISION_NEEDED
+        _complete_implement(sm.transition_to_next(flow))
+
+        sc2 = _new_cold_self_check(sm, flow)
+        assert _run_self_check(
+            sc2,
+            flow,
+            [
+                _issue(
+                    expected="blank out the corrupt cold step file",
+                    quote=COLD_CLAUSE,
+                    path=SURFACE_STEP_FILES,
+                )
+            ],
+        ) == StepStatus.REVISION_NEEDED
+        adj = sm.transition_to_next(flow)
+        assert adj.step_type == StepType.ADJUDICATE
+        return adj
+
+    def test_one_ruling_covers_both_surfaces_and_sister_never_retriggers(self, tmp_path):
+        cfg = _cfg()
+        sm = _make_sm(tmp_path, cfg)
+        flow, implement = _make_cold_flow(tmp_path)
+
+        # --- The cold-step-file surface oscillates → exactly one ADJUDICATE. ---
+        adj = self._oscillate_cold_surface(sm, flow)
+        assert _run_adjudicate(adj, flow, _SWEPT_RULING) == StepStatus.COMPLETED
+
+        # --- Ruled in full, in ONE go: description AND plan patched together, so
+        #     no later ruling has to mirror this one into the plan. ---
+        assert adj.outputs["adjudicated_description"] == COLD_ADJUDICATED_TASK
+        assert adj.outputs["adjudicated_plan"] == _ADJUDICATED_PLAN_GROUPS
+
+        # --- The boundary clause's claimed reach is on the record (written
+        #     unconditionally — adjudication auto-passes by default, so outputs are
+        #     the only audit trail). Both surfaces, each with a justification. ---
+        covered = adj.outputs["covered_surfaces"]
+        assert len(covered) == 2
+        assert all(c["surface"].strip() and c["justification"].strip() for c in covered)
+        surfaces = [c["surface"] for c in covered]
+        assert any("steps/" in s for s in surfaces)          # the triggering surface
+        assert any("_context.json" in s for s in surfaces)   # the swept sister
+        # The triggering surface is listed as such, so a reviewer can tell which
+        # part of the reach was observed and which was argued by construction.
+        assert "triggering surface" in covered[0]["justification"]
+
+        # --- The ruling auto-passes (no confirmation entry) and reflows. ---
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            sc3 = sm.transition_to_next(flow)
+        assert sc3.step_type == StepType.SELF_CHECK
+        assert sc3.inputs["self_check_pass_index"] == 1
+        # Both halves of the patch are in force for the re-review.
+        assert sc3.inputs["adjudicated_description"] == COLD_ADJUDICATED_TASK
+        assert sc3.inputs["task_groups"] == _ADJUDICATED_PLAN_GROUPS
+
+        # --- The sister surface now speaks: TWO opposing issues on _context.json
+        #     in one round — grounded, they would be an in-round contradiction and
+        #     trip a SECOND adjudication (the real-world 62_adjudicate). Both quote
+        #     the clause pair the boundary clause replaced, so the source-pool
+        #     switch drops them: the sister surface is already ruled. ---
+        status = _run_self_check(
+            sc3,
+            flow,
+            [
+                _issue(
+                    expected="leave the corrupt _context.json untouched",
+                    quote=COLD_CLAUSE,
+                    path=SURFACE_CONTEXT_JSON,
+                ),
+                _issue(
+                    expected="blank out the corrupt _context.json",
+                    quote=COLD_CLAUSE,
+                    path=SURFACE_CONTEXT_JSON,
+                ),
+            ],
+        )
+        assert status == StepStatus.COMPLETED
+        assert sc3.outputs["issues"] == []
+        assert sc3.outputs["validation_stats"]["quote_not_in_source_count"] == 2
+        # Nothing from the sister surface ever reached the ledger, so it cannot
+        # become a candidate for an independent ruling.
+        ledger = flow.state.context[adjudication.LEDGER_KEY]
+        assert not any(
+            o.get("file") == SURFACE_CONTEXT_JSON for o in ledger["observations"]
+        )
+
+        # --- One ruling, both surfaces: the flow converges to COMMIT and no second
+        #     ADJUDICATE was ever inserted or executed. ---
+        nxt = sm.transition_to_next(flow)
+        assert nxt.step_type == StepType.COMMIT
+        assert flow.state.selected_steps.count(StepType.ADJUDICATE) == 0
+        assert len(_adjudicate_steps(flow)) == 1
+
+    def test_uncovered_surface_still_triggers_its_own_adjudication(self, tmp_path):
+        """Conservatism is safe because the miss is self-healing: a surface the
+        sweep did NOT claim (here the independent engine.json stat-cache/freshness
+        pair) keeps its ordinary trigger path — when its own evidence oscillates it
+        raises a SECOND, independent ADJUDICATE that lands through the unchanged
+        patch path. This is the property that lets rule 4 ("when in doubt, leave it
+        out") be cheap: no position-level ledger immunity is introduced, so nothing
+        the ruling did not cover is silenced."""
+        cfg = _cfg()
+        sm = _make_sm(tmp_path, cfg)
+        flow, implement = _make_cold_flow(tmp_path)
+
+        adj1 = TestHomomorphicSurfaceSweep()._oscillate_cold_surface(sm, flow)
+        # The ruling claims ONLY the triggering surface — the engine.json pair is a
+        # different clause pair, so the by-construction test fails for it.
+        assert _run_adjudicate(adj1, flow, _UNSWEPT_RULING) == StepStatus.COMPLETED
+        assert len(adj1.outputs["covered_surfaces"]) == 1
+
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            sc3 = sm.transition_to_next(flow)
+        assert sc3.step_type == StepType.SELF_CHECK
+        # The landed ruling stripped its ADJUDICATE slot — the second trigger must
+        # re-insert one from scratch.
+        assert flow.state.selected_steps.count(StepType.ADJUDICATE) == 0
+
+        # --- Round 3: the engine.json surface's own evidence arrives. Its clause
+        #     survived the ruling (still quotable), so the issue is grounded and
+        #     routes to the ordinary fix loop — one observation is not a flip. ---
+        assert _run_self_check(
+            sc3,
+            flow,
+            [
+                _issue(
+                    expected="serve the active engine.json from the stat-keyed cache",
+                    quote=CACHE_CLAUSE,
+                    path=SURFACE_ENGINE_JSON,
+                )
+            ],
+        ) == StepStatus.REVISION_NEEDED
+        assert len(sc3.outputs["issues"]) == 1
+        impl = sm.transition_to_next(flow)
+        assert impl.step_type == StepType.IMPLEMENT
+        _complete_implement(impl)
+
+        # --- Round 4: it flips at the same position → the trigger layer fires an
+        #     independent ADJUDICATE, exactly as it would have without any sweep. ---
+        sc4 = _new_cold_self_check(sm, flow)
+        assert _run_self_check(
+            sc4,
+            flow,
+            [
+                _issue(
+                    expected="re-read the active engine.json from disk on every read",
+                    quote=CACHE_CLAUSE,
+                    path=SURFACE_ENGINE_JSON,
+                )
+            ],
+        ) == StepStatus.REVISION_NEEDED
+        adj2 = sm.transition_to_next(flow)
+        assert adj2.step_type == StepType.ADJUDICATE
+        assert adj2.step_id != adj1.step_id
+        assert len(_adjudicate_steps(flow)) == 2
+
+        # --- And it is ruled through the unchanged patch path: a covering patch,
+        #     its own covered_surfaces, and the staged abolition landing on the
+        #     approval-free auto-pass. ---
+        second_ruling = {
+            "contradiction_type": "internal_contradiction",
+            "adjudicated_description": COLD_ADJUDICATED_TASK.replace(
+                "(A1) The active engine.json may be served from the stat-keyed cache, "
+                "and (A4) every read of the active engine.json must observe the "
+                "freshest content on disk.",
+                "(A1/A4-i) The active engine.json may be served from a CONTENT-keyed "
+                "cache, which never returns stale content.",
+            ),
+            "adjudicated_plan": None,
+            "adjudication_rationale": (
+                "A1's stat-keyed cache cannot guarantee A4's freshness; keying the "
+                "cache on content resolves the collision."
+            ),
+            "covered_surfaces": [
+                {
+                    "surface": "the active engine.json",
+                    "justification": "triggering surface: the only artifact A1 and A4 name.",
+                }
+            ],
+            "candidate_verdicts": [
+                {"id": 0, "verdict": "contradiction", "reason": "A1 x A4 on a stale read"}
+            ],
+        }
+        assert _run_adjudicate(adj2, flow, second_ruling) == StepStatus.COMPLETED
+        assert adj2.outputs["adjudicated_description"] != COLD_ADJUDICATED_TASK
+        assert len(adj2.outputs["covered_surfaces"]) == 1
+
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            sc5 = sm.transition_to_next(flow)
+        assert sc5.step_type == StepType.SELF_CHECK
+        assert adj2.outputs["ledger_effects_applied"] is True
+
+    def test_uncovered_surface_benign_ruling_passes_through(self, tmp_path):
+        """The other half of the self-healing path: when the un-swept surface's
+        own ruling turns out to be a review_divergence, the no-op pass-through is
+        also unchanged — the triggering round's fix_instructions flow straight into
+        IMPLEMENT and the position is merely recorded rejected."""
+        cfg = _cfg()
+        sm = _make_sm(tmp_path, cfg)
+        flow, implement = _make_cold_flow(tmp_path)
+
+        adj1 = TestHomomorphicSurfaceSweep()._oscillate_cold_surface(sm, flow)
+        _run_adjudicate(adj1, flow, _UNSWEPT_RULING)
+        with patch(
+            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+        ):
+            sc3 = sm.transition_to_next(flow)
+
+        _run_self_check(
+            sc3,
+            flow,
+            [
+                _issue(
+                    expected="serve the active engine.json from the stat-keyed cache",
+                    quote=CACHE_CLAUSE,
+                    path=SURFACE_ENGINE_JSON,
+                )
+            ],
+        )
+        _complete_implement(sm.transition_to_next(flow))
+
+        sc4 = _new_cold_self_check(sm, flow)
+        _run_self_check(
+            sc4,
+            flow,
+            [
+                _issue(
+                    expected="re-read the active engine.json from disk on every read",
+                    quote=CACHE_CLAUSE,
+                    path=SURFACE_ENGINE_JSON,
+                )
+            ],
+        )
+        adj2 = sm.transition_to_next(flow)
+        assert adj2.step_type == StepType.ADJUDICATE
+        pending_fix = sc4.outputs["fix_instructions"]
+
+        assert _run_adjudicate(adj2, flow, _BENIGN_RULING) == StepStatus.COMPLETED
+        assert adj2.outputs["adjudication_noop"] is True
+        # A no-op ruling wrote no boundary clause, so it claims no surfaces.
+        assert "covered_surfaces" not in adj2.outputs
+
+        impl = sm.transition_to_next(flow)
+        assert impl.step_type == StepType.IMPLEMENT
+        assert impl.inputs["fix_instructions"] == pending_fix
+        # The first ruling's own patch survives the second, no-op ruling.
+        assert impl.inputs["task_description"].startswith(
+            "Implement the hot/cold persistence split"
+        )
+        assert flow.state.context[adjudication.LEDGER_KEY]["rejected_positions"]
