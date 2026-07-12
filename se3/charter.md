@@ -74,6 +74,14 @@ queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式
 - CLI 命令用 Typer 注册：复杂命令用 sub-typer（`add_typer`）成组，带位置参数的
   简单命令用 `@app.command`。
 - 日志统一用 `logging` 模块，每个模块声明 `logger = logging.getLogger(__name__)`。
+- **用户可见文案经 i18n 渲染**：CLI 与 WebUI 面向用户的固定文案一律不得硬编码，须经
+  语言资源按 key 渲染；en-US 为基准语言包（持有 key 全集），所选语言缺失某 key 或语言码
+  不受支持时回落 en-US。面向开发者的 logging 输出、以及发给 LLM 的 prompt 指令本体不在
+  此约束内。
+- **两个语言设置的职责边界**：`language.language` 是统一的『人类语言』——同时决定 CLI 的
+  UI 文案语言与 LLM human-facing 步骤输出的语言；`language.spec_language` 则是『知识资产
+  语言』——charter 与 code-index 的书写语言。语言设置变更只影响此后新生成/更新的内容，
+  不回溯翻译既有知识资产。
 - 类型注解采用 `from __future__ import annotations` 风格。
 - 测试放在 `tests/` 目录，命名 `test_*.py`，使用 pytest。受控例外：
   `src/se3/engine/` 允许与引擎源码同位放置 pytest 测试模块，用于覆盖紧耦合的引擎

@@ -76,11 +76,13 @@ version:
 # Two independent language settings, merged project-over-global with
 # ~/.se3/config.yaml.
 language:
-  # Unified human language: drives BOTH the CLI/WebUI UI copy AND the
+  # Unified human language: drives BOTH the CLI's fixed UI copy AND the
   # LLM human-facing step outputs (summarize / discovery / confirmed steps).
+  # (The central WebUI console's interface language is a per-user browser /
+  #  localStorage preference and does NOT follow this project setting.)
   # CLI resolution precedence: SE3_LANG env > this key > ~/.se3/config.yaml >
   # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
-  # null = no LLM-output restriction (UI copy still resolves via the chain).
+  # null = no LLM-output restriction (CLI UI copy still resolves via the chain).
   language: zh-CN
   # Knowledge-asset language: the writing language of charter.md and the
   # code-index (injected into the charter_freshness and code-index summary

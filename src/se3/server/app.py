@@ -25,6 +25,7 @@ point and checks for the extra before importing this module.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -76,6 +77,40 @@ from .ws import (
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+#: Directory holding the frontend's per-language dictionaries (``<code>.json``).
+#: It is the WebUI language registry's single source of truth: the manifest
+#: endpoint below is derived from its contents, so adding a UI language is a pure
+#: data change (drop a new locale JSON) with no frontend code edit.
+UI_LOCALES_DIR = STATIC_DIR / "i18n"
+
+
+def _discover_ui_languages() -> list:
+    """List the UI languages the bundled frontend can serve.
+
+    Each entry carries the language code and its endonym (the language's own name
+    for itself, read from that dictionary's own ``lang.<code>`` key) so the
+    switcher can label an option even before its dictionary is fetched. An
+    unreadable / malformed locale file is skipped rather than failing the request
+    — a broken translation drop must never take the console down.
+    """
+    languages = []
+    if not UI_LOCALES_DIR.is_dir():
+        return languages
+    for path in sorted(UI_LOCALES_DIR.glob("*.json")):
+        code = path.stem
+        label = code
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                own = data.get(f"lang.{code}")
+                if isinstance(own, str) and own:
+                    label = own
+        except (OSError, ValueError):
+            logger.warning("Skipping unreadable UI locale file: %s", path)
+            continue
+        languages.append({"code": code, "label": label})
+    return languages
 
 #: Seconds a ``GET /api/history/{flow_id}`` cache-miss waits for the owning
 #: daemon to answer the on-demand ``MSG_HISTORY_REQUEST`` before giving up.
@@ -2105,6 +2140,14 @@ def create_app(
         )
 
     # -- frontend (static files) -------------------------------------------
+
+    # The language registry the frontend boots from. Unauthenticated like the
+    # static assets themselves: it is picked before the operator signs in, and it
+    # exposes nothing but the shipped locale codes.
+    @app.get("/i18n/index.json")
+    async def i18n_manifest() -> dict:
+        return {"languages": _discover_ui_languages()}
+
     # Mounted last so the API routes and WebSocket endpoints above take
     # precedence. ``html=True`` serves ``index.html`` for ``/`` and lets the
     # bundled ``style.css`` / ``app.js`` load from the same origin, so the

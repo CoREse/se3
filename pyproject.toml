@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "se3"
-version = "11.20.1"
+version = "11.21.0"
 description = "SE 3.0 framework - Pure CLI flow engine"
 requires-python = ">=3.8"
 dependencies = [
@@ -61,8 +61,14 @@ se3-server = "se3.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/se3"]
-# Ship the server's bundled static frontend assets in the wheel.
-artifacts = ["src/se3/server/static/**"]
+# Non-Python resources that must survive packaging: the server's bundled static
+# frontend assets, and the CLI locale catalogs — se3.i18n loads the latter via
+# importlib.resources, so a wheel without them degrades every t() call to raw
+# keys instead of localized text.
+artifacts = [
+    "src/se3/server/static/**",
+    "src/se3/i18n/locales/*.json",
+]
 
 [tool.pytest.ini_options]
 # Charter permits engine-colocated pytest modules under src/se3/engine/ (tightly

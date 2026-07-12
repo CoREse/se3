@@ -11,6 +11,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, Optional
 
+from ..i18n import t
 from .display import (
     get_console,
     render_design,
@@ -28,27 +29,45 @@ logger = logging.getLogger(__name__)
 # Human-readable display titles for every StepType
 # ---------------------------------------------------------------------------
 
-STEP_DISPLAY_TITLES: Dict[StepType, str] = {
-    StepType.DISCOVERY: "Discovery",
-    StepType.ANALYZE: "Analysis",
-    StepType.PROJECT_SUMMARY: "Project Summary",
-    StepType.PROPOSE: "Proposal",
-    StepType.DESIGN: "Design",
-    StepType.PLAN: "Planning",
-    StepType.PLAN_TASKS: "Task Planning",
-    StepType.CONFIRM: "Confirmation",
-    StepType.IMPLEMENT: "Implementation",
-    StepType.TEST: "Testing",
-    StepType.SELF_CHECK: "Self Check",
-    StepType.VERIFY_SPEC: "Spec Verification",
-    StepType.UPDATE_SPEC: "Spec Update",
-    StepType.SPEC_GATE: "Spec Gate",
-    StepType.VERSION_ANALYZE: "Version Analysis",
-    StepType.COMMIT: "Commit",
-    StepType.SUMMARIZE: "Work Summary",
-    StepType.MERGE_INTEGRATE: "Merge Integrate",
-    StepType.VERSION_RECONCILE: "Version Reconcile",
+# Per-StepType i18n key for the panel/report title. Resolved lazily through
+# ``t()`` at render time (not at import) so the active UI language wins even
+# though this map is built once at module load.
+STEP_TITLE_KEYS: Dict[StepType, str] = {
+    StepType.DISCOVERY: "cli.steprender.title.discovery",
+    StepType.ANALYZE: "cli.steprender.title.analyze",
+    StepType.PROJECT_SUMMARY: "cli.steprender.title.project_summary",
+    StepType.PROPOSE: "cli.steprender.title.propose",
+    StepType.DESIGN: "cli.steprender.title.design",
+    StepType.PLAN: "cli.steprender.title.plan",
+    StepType.PLAN_TASKS: "cli.steprender.title.plan_tasks",
+    StepType.CONFIRM: "cli.steprender.title.confirm",
+    StepType.IMPLEMENT: "cli.steprender.title.implement",
+    StepType.TEST: "cli.steprender.title.test",
+    StepType.SELF_CHECK: "cli.steprender.title.self_check",
+    StepType.VERIFY_SPEC: "cli.steprender.title.verify_spec",
+    StepType.UPDATE_SPEC: "cli.steprender.title.update_spec",
+    StepType.SPEC_GATE: "cli.steprender.title.spec_gate",
+    StepType.VERSION_ANALYZE: "cli.steprender.title.version_analyze",
+    StepType.COMMIT: "cli.steprender.title.commit",
+    StepType.SUMMARIZE: "cli.steprender.title.summarize",
+    StepType.MERGE_INTEGRATE: "cli.steprender.title.merge_integrate",
+    StepType.VERSION_RECONCILE: "cli.steprender.title.version_reconcile",
 }
+
+
+def step_display_title(step_type: StepType) -> str:
+    """Localized display title for *step_type*, falling back to its raw value.
+
+    Public so the ``se3 run`` console (which prints its own per-step Rule header,
+    not a renderer Panel) resolves step titles from the same map — one language
+    for every user-visible mention of a step.
+    """
+    key = STEP_TITLE_KEYS.get(step_type)
+    return t(key) if key else step_type.value
+
+
+# Internal alias kept for the renderers below, which all read as `_title_for`.
+_title_for = step_display_title
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +99,7 @@ def render_step_output(step: Step) -> None:
     Looks up a custom renderer in STEP_RENDERERS; falls back to
     _default_render when none is registered.
     """
-    title = STEP_DISPLAY_TITLES.get(step.step_type, step.step_type.value)
+    title = _title_for(step.step_type)
 
     renderer = STEP_RENDERERS.get(step.step_type)
     if renderer is not None:
@@ -120,7 +139,7 @@ def render_step_usage(step: Step) -> None:
     usage = (step.outputs or {}).get("token_usage")
     if not usage:
         return
-    render_usage_block(usage, title="Step Token Usage")
+    render_usage_block(usage, title=t("cli.steprender.usage.title"))
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +167,7 @@ def _default_render(step: Step, title: str) -> None:
 
     # Show non-completed status
     if step.status not in (StepStatus.COMPLETED, StepStatus.RUNNING):
-        lines.append(f"[bold]Status: {step.status.value}[/bold]")
+        lines.append(f"[bold]{t('cli.steprender.status', status=step.status.value)}[/bold]")
         lines.append("")
 
     if step.outputs:
@@ -157,14 +176,17 @@ def _default_render(step: Step, title: str) -> None:
             # For long text values show a preview + length
             if isinstance(value, str) and len(value) > 300:
                 preview = value[:200].replace("\n", " ")
-                lines.append(f"  [bold]{key}:[/bold] {preview}… ({len(value)} chars)")
+                lines.append(
+                    f"  [bold]{key}:[/bold] {preview}… "
+                    f"{t('cli.steprender.chars_suffix', count=len(value))}"
+                )
             else:
                 lines.append(f"  [bold]{key}:[/bold] {formatted}")
 
     if step.error_message:
         if lines:
             lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
     if lines:
         render_full("\n".join(lines), title=title)
@@ -181,11 +203,14 @@ def _render_remaining(step: Step, title: str, skip_keys: set[str]) -> None:
         formatted = _format_value(value)
         if isinstance(value, str) and len(value) > 300:
             preview = value[:200].replace("\n", " ")
-            lines.append(f"  [bold]{key}:[/bold] {preview}… ({len(value)} chars)")
+            lines.append(
+                f"  [bold]{key}:[/bold] {preview}… "
+                f"{t('cli.steprender.chars_suffix', count=len(value))}"
+            )
         else:
             lines.append(f"  [bold]{key}:[/bold] {formatted}")
     if lines:
-        render_full("\n".join(lines), title=f"{title} — Additional Details")
+        render_full("\n".join(lines), title=t("cli.steprender.remaining.suffix", title=title))
 
 
 # ---------------------------------------------------------------------------
@@ -211,22 +236,22 @@ def _render_version_analyze(step: Step) -> None:
     )
 
     # ── Sub-line: bump_type + confidence (auxiliary) ──────────────
-    lines.append(f"[dim]{bump_type} bump  │  confidence: {confidence}[/dim]")
+    lines.append(t("cli.steprender.version_analyze.subline", bump_type=bump_type, confidence=confidence))
 
     # ── Reasoning ──────────────────────────────────────────────────
     if reasoning:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append("[bold cyan]Reasoning[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.steprender.section.reasoning')}[/bold cyan]")
         lines.append(f"  {reasoning}")
 
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Version Analysis")
+    render_full("\n".join(lines), title=t("cli.steprender.title.version_analyze"))
 
 
 @register_renderer(StepType.MERGE_INTEGRATE)
@@ -239,19 +264,19 @@ def _render_merge_integrate(step: Step) -> None:
     lines: list[str] = []
     if merged:
         joined = ", ".join(str(b) for b in merged)
-        lines.append(f"Merged [bold cyan]{joined}[/bold cyan] into master")
+        lines.append(t("cli.steprender.merge.merged_into", joined=joined))
     else:
-        lines.append("No branches merged")
+        lines.append(t("cli.steprender.merge.none"))
 
     if result.get("pending_human"):
         lines.append("")
-        lines.append("[yellow]Merge escalated to a human (unresolved conflict).[/yellow]")
+        lines.append(t("cli.steprender.merge.escalated"))
 
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Merge Integrate")
+    render_full("\n".join(lines), title=t("cli.steprender.title.merge_integrate"))
 
 
 @register_renderer(StepType.VERSION_RECONCILE)
@@ -266,29 +291,29 @@ def _render_version_reconcile(step: Step) -> None:
     lines: list[str] = []
     if result.get("already_reconciled") and not final:
         # Nothing outstanding to reconcile — a clean no-op, not a fault.
-        lines.append(f"[bold]{base}[/bold] [dim](already reconciled — no bump)[/dim]")
+        lines.append(t("cli.steprender.reconcile.already", base=base))
     else:
         lines.append(
             f"[bold]{base}[/bold] → [bold cyan]{final or 'N/A'}[/bold cyan]"
         )
-    lines.append(f"[dim]channel: {channel}[/dim]")
+    lines.append(t("cli.steprender.reconcile.channel", channel=channel))
 
     commit = result.get("reconcile_commit")
     if commit:
-        lines.append(f"[dim]reconcile commit: {str(commit)[:12]}[/dim]")
+        lines.append(t("cli.steprender.reconcile.commit", commit=str(commit)[:12]))
 
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Version Reconcile")
+    render_full("\n".join(lines), title=t("cli.steprender.title.version_reconcile"))
 
 
 @register_renderer(StepType.SUMMARIZE)
 def _render_summarize(step: Step) -> None:
     summary = (step.outputs or {}).get("summary", "")
     if summary:
-        render_markdown(summary, title="Work Summary")
+        render_markdown(summary, title=t("cli.steprender.title.summarize"))
 
 
 def _build_test_summary_lines(test_results: Dict[str, Any]) -> list[str]:
@@ -299,16 +324,16 @@ def _build_test_summary_lines(test_results: Dict[str, Any]) -> list[str]:
     instead of dumping the raw pytest output.
     """
     overall_passed = test_results.get("overall_passed", test_results.get("passed", False))
-    status = "[bold green]PASSED[/bold green]" if overall_passed else "[bold red]FAILED[/bold red]"
+    status = t("cli.steprender.test.passed") if overall_passed else t("cli.steprender.test.failed")
 
-    lines = [f"[bold]Status:[/bold] {status}"]
+    lines = [t("cli.steprender.test.status", status=status)]
 
     # Count passed/failed phases
     phase_results = test_results.get("phases", [])
     if phase_results:
         passed_count = sum(1 for p in phase_results if p.get("passed", False))
         failed_count = len(phase_results) - passed_count
-        lines.append(f"[bold]Phases:[/bold] {passed_count} passed, {failed_count} failed")
+        lines.append(t("cli.steprender.test.phases", passed=passed_count, failed=failed_count))
         for phase in phase_results:
             name = phase.get("name", "?")
             p = phase.get("passed", False)
@@ -317,7 +342,7 @@ def _build_test_summary_lines(test_results: Dict[str, Any]) -> list[str]:
 
     command = test_results.get("command", "")
     if command:
-        lines.append(f"[bold]Command:[/bold] {command}")
+        lines.append(t("cli.steprender.test.command", command=command))
 
     return lines
 
@@ -327,11 +352,11 @@ def _render_test(step: Step) -> None:
     outputs = step.outputs or {}
     test_results = outputs.get("test_results")
     if not test_results or not isinstance(test_results, dict):
-        _default_render(step, "Testing")
+        _default_render(step, t("cli.steprender.title.test"))
         return
 
     lines = _build_test_summary_lines(test_results)
-    render_full("\n".join(lines), title="Testing")
+    render_full("\n".join(lines), title=t("cli.steprender.title.test"))
 
 
 @register_renderer(StepType.SPEC_GATE)
@@ -353,16 +378,16 @@ def _render_spec_gate(step: Step) -> None:
 
     # ── Gate conclusion ────────────────────────────────────────────
     if gate_skipped:
-        lines.append("[bold green]✓ PASSED[/bold green]  [dim](no spec change — gate skipped, no-op)[/dim]")
+        lines.append(t("cli.steprender.gate.skipped"))
     elif gate_passed:
-        lines.append("[bold green]✓ PASSED[/bold green]")
+        lines.append(t("cli.steprender.status.passed"))
     else:
-        lines.append("[bold red]✗ FAILED[/bold red]")
+        lines.append(t("cli.steprender.status.failed"))
 
     if gate_route == "update_spec":
-        lines.append("[bold yellow]Route:[/bold yellow] back to [bold]update_spec[/bold] (invalid spec artifact)")
+        lines.append(t("cli.steprender.gate.route_update_spec"))
     elif gate_route == "implement":
-        lines.append("[bold yellow]Route:[/bold yellow] to [bold]implement[/bold] (spec edit broke a test)")
+        lines.append(t("cli.steprender.gate.route_implement"))
 
     # ── Fix instructions (no raw test output) ──────────────────────
     fix_instructions = outputs.get("fix_instructions", "")
@@ -383,9 +408,9 @@ def _render_spec_gate(step: Step) -> None:
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Spec Gate")
+    render_full("\n".join(lines), title=t("cli.steprender.title.spec_gate"))
 
 
 @register_renderer(StepType.PROPOSE)
@@ -399,12 +424,12 @@ def _render_propose(step: Step) -> None:
             break
 
     if proposal_key is None:
-        _default_render(step, "Proposal")
+        _default_render(step, t("cli.steprender.title.propose"))
         return
 
     # Render remaining outputs that aren't the proposal dict or its extracted sub-keys
     _PROPOSE_DEFERRED = {proposal_key, "summary", "files_to_modify", "files_to_create"}
-    _render_remaining(step, "Proposal", _PROPOSE_DEFERRED)
+    _render_remaining(step, t("cli.steprender.title.propose"), _PROPOSE_DEFERRED)
 
 
 @register_renderer(StepType.DESIGN)
@@ -418,12 +443,12 @@ def _render_design(step: Step) -> None:
             break
 
     if design_key is None:
-        _default_render(step, "Design")
+        _default_render(step, t("cli.steprender.title.design"))
         return
 
     # Render remaining outputs that aren't the design dict or its extracted sub-keys
     _DESIGN_DEFERRED = {design_key, "decisions", "components", "implementation_plan"}
-    _render_remaining(step, "Design", _DESIGN_DEFERRED)
+    _render_remaining(step, t("cli.steprender.title.design"), _DESIGN_DEFERRED)
 
 
 @register_renderer(StepType.PLAN)
@@ -443,7 +468,7 @@ def _render_plan(step: Step) -> None:
         render_proposal(proposal)
         rendered_any = True
     elif isinstance(proposal, str) and proposal:
-        render_full(f"[bold]Proposal:[/bold] {proposal}", title="Planning — Proposal")
+        render_full(t("cli.steprender.plan.proposal_line", proposal=proposal), title=t("cli.steprender.plan.proposal_title"))
         rendered_any = True
 
     # Section 2: Design
@@ -451,7 +476,7 @@ def _render_plan(step: Step) -> None:
         render_design(design)
         rendered_any = True
     elif isinstance(design, str) and design:
-        render_full(f"[bold]Design:[/bold] {design}", title="Planning — Design")
+        render_full(t("cli.steprender.plan.design_line", design=design), title=t("cli.steprender.plan.design_title"))
         rendered_any = True
 
     # Section 3: Task Groups
@@ -468,21 +493,27 @@ def _render_plan(step: Step) -> None:
                 t.get("estimated_loc", 0) for t in tasks if isinstance(t, dict)
             ) if isinstance(tasks, list) else 0
             deps = group.get("depends_on", [])
-            dep_str = ", ".join(str(d) for d in deps) if deps else "none"
+            dep_str = ", ".join(str(d) for d in deps) if deps else t("cli.steprender.plan.deps_none")
             lines.append(
-                f"  [bold]{gid}[/bold] {name}  "
-                f"— {task_count} tasks, ~{total_loc} LOC, depends: {dep_str}"
+                t(
+                    "cli.steprender.plan.group_line",
+                    gid=gid,
+                    name=name,
+                    task_count=task_count,
+                    total_loc=total_loc,
+                    dep_str=dep_str,
+                )
             )
         if lines:
-            render_full("\n".join(lines), title="Planning — Task Groups")
+            render_full("\n".join(lines), title=t("cli.steprender.plan.task_groups_title"))
             rendered_any = True
 
     if not rendered_any:
-        _default_render(step, "Planning")
+        _default_render(step, t("cli.steprender.title.plan"))
         return
 
     # Render any remaining keys not already covered
-    _render_remaining(step, "Planning", {"plan", "task_groups", "total_complexity", "estimated_effort"})
+    _render_remaining(step, t("cli.steprender.title.plan"), {"plan", "task_groups", "total_complexity", "estimated_effort"})
 
 
 def _group_files_by_directory(files: list[str]) -> dict[str, list[str]]:
@@ -531,9 +562,9 @@ def _render_implement(step: Step) -> None:
         "failed": "[bold red]✗[/bold red]",
     }
     status_labels = {
-        "complete": "[green]Complete[/green]",
-        "partial": "[yellow]Partial[/yellow]",
-        "failed": "[red]Failed[/red]",
+        "complete": f"[green]{t('cli.steprender.implement.complete')}[/green]",
+        "partial": f"[yellow]{t('cli.steprender.implement.partial')}[/yellow]",
+        "failed": f"[red]{t('cli.steprender.implement.failed')}[/red]",
     }
     icon = status_icons.get(completion_status, "●")
     label = status_labels.get(completion_status, completion_status)
@@ -544,10 +575,10 @@ def _render_implement(step: Step) -> None:
 
     stats = [f"{icon} {label}"]
     if groups_count:
-        stats.append(f"[bold]{groups_count}[/bold] groups")
-    stats.append(f"[bold]{files_count}[/bold] files")
+        stats.append(t("cli.steprender.implement.groups", count=groups_count))
+    stats.append(t("cli.steprender.implement.files", count=files_count))
     if tests_count:
-        stats.append(f"[bold]{tests_count}[/bold] tests")
+        stats.append(t("cli.steprender.implement.tests", count=tests_count))
     lines.append("  │  ".join(stats))
 
     # ── Summary ─────────────────────────────────────────────────────
@@ -555,7 +586,7 @@ def _render_implement(step: Step) -> None:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append("[bold cyan]Summary[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.steprender.section.summary')}[/bold cyan]")
         parts = [s.strip() for s in summary.split(";") if s.strip()]
         if len(parts) == 1:
             lines.append(f"  {parts[0]}")
@@ -569,7 +600,7 @@ def _render_implement(step: Step) -> None:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append(f"[bold yellow]Files Changed[/bold yellow]  [dim]({files_count})[/dim]")
+        lines.append(t("cli.steprender.implement.files_changed", count=files_count))
         grouped = _group_files_by_directory(files_changed)
         for dir_prefix, filenames in grouped.items():
             lines.append(f"  [bold]{dir_prefix}[/bold] [dim]({len(filenames)})[/dim]")
@@ -581,16 +612,16 @@ def _render_implement(step: Step) -> None:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append(f"[bold green]Tests Added[/bold green]  [dim]({tests_count})[/dim]")
-        for t in tests_added:
-            lines.append(f"  [green]+[/green] {t}")
+        lines.append(t("cli.steprender.implement.tests_added", count=tests_count))
+        for test_path in tests_added:
+            lines.append(f"  [green]+[/green] {test_path}")
 
     # ── Incomplete Tasks ────────────────────────────────────────────
     if incomplete_tasks:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append(f"[bold red]Incomplete Tasks[/bold red]  [dim]({len(incomplete_tasks)})[/dim]")
+        lines.append(t("cli.steprender.implement.incomplete_tasks", count=len(incomplete_tasks)))
         for task in incomplete_tasks:
             if isinstance(task, dict):
                 tid = task.get("task_id", task.get("id", "?"))
@@ -603,9 +634,9 @@ def _render_implement(step: Step) -> None:
     if restricted_applied or restricted_failed:
         lines.append("")
         if restricted_applied:
-            lines.append(f"[dim]Restricted edits applied: {len(restricted_applied)}[/dim]")
+            lines.append(t("cli.steprender.implement.restricted_applied", count=len(restricted_applied)))
         if restricted_failed:
-            lines.append(f"[bold red]Restricted edits failed: {len(restricted_failed)}[/bold red]")
+            lines.append(t("cli.steprender.implement.restricted_failed", count=len(restricted_failed)))
             for edit in restricted_failed:
                 if isinstance(edit, dict):
                     lines.append(f"  • {edit.get('file', edit.get('path', str(edit)))}")
@@ -615,9 +646,9 @@ def _render_implement(step: Step) -> None:
     # ── Error ───────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Implementation")
+    render_full("\n".join(lines), title=t("cli.steprender.title.implement"))
 
 
 @register_renderer(StepType.ANALYZE)
@@ -639,7 +670,7 @@ def _render_analyze(step: Step) -> None:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append("[bold cyan]Reasoning[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.steprender.section.reasoning')}[/bold cyan]")
         lines.append(f"  {reasoning}")
 
     # ── Relevant Spec Items ────────────────────────────────────────
@@ -648,7 +679,7 @@ def _render_analyze(step: Step) -> None:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append("[bold yellow]Relevant Spec Items[/bold yellow]")
+        lines.append(f"[bold yellow]{t('cli.steprender.analyze.relevant_spec')}[/bold yellow]")
         for item in selected_items:
             if isinstance(item, dict):
                 spec = item.get("spec", "")
@@ -661,9 +692,9 @@ def _render_analyze(step: Step) -> None:
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Analysis")
+    render_full("\n".join(lines), title=t("cli.steprender.title.analyze"))
 
 
 @register_renderer(StepType.SELF_CHECK)
@@ -676,11 +707,11 @@ def _render_self_check(step: Step) -> None:
     actionable_count = outputs.get("actionable_count", 0)
     issues = outputs.get("issues", [])
     if step.status == StepStatus.FAILED:
-        lines.append("[bold red]✗ FAILED[/bold red]")
+        lines.append(t("cli.steprender.status.failed"))
     elif actionable_count == 0:
-        lines.append("[bold green]✓ PASSED[/bold green]")
+        lines.append(t("cli.steprender.status.passed"))
     else:
-        lines.append(f"[bold red]✗ {actionable_count} actionable issue(s)[/bold red]")
+        lines.append(t("cli.steprender.self_check.actionable", count=actionable_count))
 
     # ── Summary ───────────────────────────────────────────────────
     result = outputs.get("self_check_result", {})
@@ -711,7 +742,8 @@ def _render_self_check(step: Step) -> None:
             if not group:
                 continue
             _label, color = severity_styles.get(severity, ("[dim]?[/dim]", "[dim]"))
-            lines.append(f"{color}{severity}[/{color[1:-1]}]  [dim]({len(group)})[/dim]")
+            sev_label = t(f"cli.steprender.severity.{severity}")
+            lines.append(f"{color}{sev_label}[/{color[1:-1]}]  [dim]({len(group)})[/dim]")
             for issue in group:
                 # Schema-compat: new self_check schema vs legacy verify_spec.
                 _sev, desc, location = extract_issue_display_fields(issue)
@@ -727,9 +759,9 @@ def _render_self_check(step: Step) -> None:
     # ── Error ─────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Self Check")
+    render_full("\n".join(lines), title=t("cli.steprender.title.self_check"))
 
 
 @register_renderer(StepType.VERIFY_SPEC)
@@ -741,9 +773,9 @@ def _render_verify_spec(step: Step) -> None:
     # ── Verified status ────────────────────────────────────────────
     verified = outputs.get("verified", outputs.get("fix_needed") is not None and not outputs.get("fix_needed"))
     if verified:
-        lines.append("[bold green]✓ PASSED[/bold green]")
+        lines.append(t("cli.steprender.status.passed"))
     else:
-        lines.append("[bold red]✗ FAILED[/bold red]")
+        lines.append(t("cli.steprender.status.failed"))
 
     # ── Summary ────────────────────────────────────────────────────
     verification_result = outputs.get("verification_result", {})
@@ -773,7 +805,10 @@ def _render_verify_spec(step: Step) -> None:
             "low": ("[dim]low[/dim]", "[dim]"),
         }
 
-        for scope_label, scope_key in [("In-scope", "in_scope"), ("Out-of-scope", "out_of_scope")]:
+        for scope_label, scope_key in [
+            (t("cli.steprender.verify.in_scope"), "in_scope"),
+            (t("cli.steprender.verify.out_of_scope"), "out_of_scope"),
+        ]:
             group = scope_groups.get(scope_key, [])
             if not group:
                 continue
@@ -786,7 +821,8 @@ def _render_verify_spec(step: Step) -> None:
                 msg = issue.get("message", "") if isinstance(issue, dict) else str(issue)
                 prio = issue.get("priority", "medium").lower() if isinstance(issue, dict) else "medium"
                 _label, color = priority_styles.get(prio, ("[dim]medium[/dim]", "[dim]"))
-                lines.append(f"  {color}•[/{color[1:-1]}] [{prio}] {msg}")
+                prio_label = t(f"cli.steprender.severity.{prio}") if prio in priority_styles else prio
+                lines.append(f"  {color}•[/{color[1:-1]}] [{prio_label}] {msg}")
                 suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else ""
                 if suggestion:
                     lines.append(f"    [dim]→ {suggestion}[/dim]")
@@ -797,16 +833,16 @@ def _render_verify_spec(step: Step) -> None:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append("[bold cyan]Recommendations[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.steprender.section.recommendations')}[/bold cyan]")
         for rec in recommendations:
             lines.append(f"  • {rec}")
 
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Spec Verification")
+    render_full("\n".join(lines), title=t("cli.steprender.title.verify_spec"))
 
 
 @register_renderer(StepType.UPDATE_SPEC)
@@ -817,7 +853,7 @@ def _render_update_spec(step: Step) -> None:
     new_capabilities = outputs.get("new_capabilities", [])
 
     if not specs_updated and not new_capabilities:
-        render_full("[dim]No spec updates needed[/dim]", title="Spec Update")
+        render_full(t("cli.steprender.update_spec.none"), title=t("cli.steprender.title.update_spec"))
         return
 
     lines: list[str] = []
@@ -838,16 +874,16 @@ def _render_update_spec(step: Step) -> None:
             lines.append("")
             lines.append("[dim]" + "─" * 50 + "[/dim]")
             lines.append("")
-        lines.append("[bold cyan]New Capabilities[/bold cyan]")
+        lines.append(f"[bold cyan]{t('cli.steprender.update_spec.new_capabilities')}[/bold cyan]")
         for cap in new_capabilities:
             lines.append(f"  • {cap}")
 
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Spec Update")
+    render_full("\n".join(lines), title=t("cli.steprender.title.update_spec"))
 
 
 @register_renderer(StepType.COMMIT)
@@ -860,7 +896,7 @@ def _render_commit(step: Step) -> None:
     # diagnostic (e.g. a tag failure naming the tag and its target commit) behind
     # a misleading "No changes to commit".
     if not committed and not step.error_message:
-        render_full("[dim]No changes to commit[/dim]", title="Commit")
+        render_full(t("cli.steprender.commit.no_changes"), title=t("cli.steprender.title.commit"))
         return
 
     lines: list[str] = []
@@ -888,6 +924,6 @@ def _render_commit(step: Step) -> None:
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:
         lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
-    render_full("\n".join(lines), title="Commit")
+    render_full("\n".join(lines), title=t("cli.steprender.title.commit"))

@@ -33,23 +33,30 @@ from rich.table import Table
 
 from ..engine.display import render_block_footer, render_block_header
 from ..engine.issue_manager import KNOWN_TYPES, IssueManager, IssueStatus
-from ..i18n import t
+from ..i18n import t, t_status
 
-app = typer.Typer(help="Manage SE3 issues")
+app = typer.Typer(help=t("cli.help.issue"))
 console = Console()
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .git directory or an SE3 config file."""
+    """Find project root by looking for .git directory or an SE3 config file.
+
+    Binds the i18n language to the discovered root: the import-time help strings
+    resolve the language singleton from the cwd, which can sit below the project
+    root, so it must be re-resolved once the target project is known.
+    """
     from ..config import is_se3_project_root
+    from ..i18n import bind_project_root
 
     cwd = Path.cwd()
+    root = cwd
     for parent in [cwd] + list(cwd.parents):
-        if (parent / ".git").exists():
-            return parent
-        if is_se3_project_root(parent):
-            return parent
-    return cwd
+        if (parent / ".git").exists() or is_se3_project_root(parent):
+            root = parent
+            break
+    bind_project_root(root)
+    return root
 
 
 def _status_color(status: IssueStatus) -> str:
@@ -211,7 +218,7 @@ def _parse_edited_issue_yaml(text: str) -> dict:
 # Commands
 # ---------------------------------------------------------------------------
 
-@app.callback(invoke_without_command=True)
+@app.callback(invoke_without_command=True, help=t("cli.help.issue.default.desc"))
 def default_cmd(ctx: typer.Context):
     """List open issues (default command)."""
     if ctx.invoked_subcommand is not None:
@@ -219,11 +226,11 @@ def default_cmd(ctx: typer.Context):
     list_cmd(show_all=False, type_filter=None, source_filter=None)
 
 
-@app.command(name="list")
+@app.command(name="list", help=t("cli.help.issue.list.desc"))
 def list_cmd(
-    show_all: bool = typer.Option(False, "--all", "-a", help="Show all issues including closed"),
-    type_filter: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by issue type"),
-    source_filter: Optional[str] = typer.Option(None, "--source", help="Filter by source (human/system)"),
+    show_all: bool = typer.Option(False, "--all", "-a", help=t("cli.help.issue.list.all")),
+    type_filter: Optional[str] = typer.Option(None, "--type", "-t", help=t("cli.help.issue.list.type")),
+    source_filter: Optional[str] = typer.Option(None, "--source", help=t("cli.help.issue.list.source")),
 ):
     """List issues."""
     VALID_SOURCES = {"human", "system"}
@@ -269,7 +276,7 @@ def list_cmd(
             issue.id,
             title_str,
             f"[{tc}]{type_str}[/{tc}]",
-            f"[{sc}]{issue.status.value}[/{sc}]",
+            f"[{sc}]{t_status(issue.status)}[/{sc}]",
             f"[{pc}]{priority_str}[/{pc}]",
             issue.source,
             tags_str,
@@ -279,9 +286,9 @@ def list_cmd(
     console.print(table)
 
 
-@app.command(name="show")
+@app.command(name="show", help=t("cli.help.issue.show.desc"))
 def show_cmd(
-    issue_id: str = typer.Argument(..., help="Issue ID to show"),
+    issue_id: str = typer.Argument(..., help=t("cli.help.issue.show.issue_id")),
 ):
     """Show detailed information about an issue."""
     project_root = get_project_root()
@@ -295,7 +302,7 @@ def show_cmd(
     sc = _status_color(issue.status)
     pc = _priority_color(issue.priority)
     tc = _type_color(issue.type)
-    tags_str = ", ".join(issue.tags) if issue.tags else "none"
+    tags_str = ", ".join(issue.tags) if issue.tags else t("issue.show.tags_none")
     priority_str = issue.priority or "-"
     type_str = issue.type or "-"
 
@@ -305,7 +312,7 @@ def show_cmd(
         tc=tc,
         type=type_str,
         sc=sc,
-        status=issue.status.value,
+        status=t_status(issue.status),
         pc=pc,
         priority=priority_str,
         source=issue.source,
@@ -321,14 +328,14 @@ def show_cmd(
     render_block_footer("cyan")
 
 
-@app.command(name="create")
+@app.command(name="create", help=t("cli.help.issue.create.desc"))
 def create_cmd(
-    description_arg: Optional[str] = typer.Argument(None, help="Issue description (positional)"),
-    title: Optional[str] = typer.Option(None, "--title", help="Issue title (optional)"),
-    issue_type: Optional[str] = typer.Option(None, "--type", help="Issue type (optional)"),
-    priority: Optional[str] = typer.Option(None, "--priority", help="Issue priority (optional)"),
-    tags: Optional[str] = typer.Option(None, "--tags", help="Comma-separated tags"),
-    use_editor: bool = typer.Option(False, "--editor", help="Open external editor for full editing"),
+    description_arg: Optional[str] = typer.Argument(None, help=t("cli.help.issue.create.description")),
+    title: Optional[str] = typer.Option(None, "--title", help=t("cli.help.issue.create.title")),
+    issue_type: Optional[str] = typer.Option(None, "--type", help=t("cli.help.issue.create.type")),
+    priority: Optional[str] = typer.Option(None, "--priority", help=t("cli.help.issue.create.priority")),
+    tags: Optional[str] = typer.Option(None, "--tags", help=t("cli.help.issue.create.tags")),
+    use_editor: bool = typer.Option(False, "--editor", help=t("cli.help.issue.create.editor")),
 ):
     """Create a new issue.
 
@@ -444,9 +451,9 @@ def _resolve_description(positional: Optional[str]) -> Optional[str]:
     return description
 
 
-@app.command(name="edit")
+@app.command(name="edit", help=t("cli.help.issue.edit.desc"))
 def edit_cmd(
-    issue_id: str = typer.Argument(..., help="Issue ID to edit"),
+    issue_id: str = typer.Argument(..., help=t("cli.help.issue.edit.issue_id")),
 ):
     """Edit an issue in an external editor ($EDITOR, fallback vi)."""
     project_root = get_project_root()
@@ -504,10 +511,10 @@ def edit_cmd(
         raise typer.Exit(1)
 
 
-@app.command(name="close")
+@app.command(name="close", help=t("cli.help.issue.close.desc"))
 def close_cmd(
-    issue_id: str = typer.Argument(..., help="Issue ID to close"),
-    reason: Optional[str] = typer.Option(None, "--reason", help="Reason for closing"),
+    issue_id: str = typer.Argument(..., help=t("cli.help.issue.close.issue_id")),
+    reason: Optional[str] = typer.Option(None, "--reason", help=t("cli.help.issue.close.reason")),
 ):
     """Close an issue."""
     project_root = get_project_root()
@@ -521,9 +528,9 @@ def close_cmd(
         raise typer.Exit(1)
 
 
-@app.command(name="reset")
+@app.command(name="reset", help=t("cli.help.issue.reset.desc"))
 def reset_cmd(
-    issue_id: str = typer.Argument(..., help="Issue ID to reset"),
+    issue_id: str = typer.Argument(..., help=t("cli.help.issue.reset.issue_id")),
 ):
     """Reset an in-progress issue back to open."""
     project_root = get_project_root()

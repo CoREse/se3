@@ -23,7 +23,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from ..i18n import t
+from ..i18n import t, t_status
 
 # Import necessary modules from the engine
 from ..engine.persistence import PersistenceManager
@@ -35,21 +35,28 @@ from ..engine.chat_history import (
     render_session_detailed,
 )
 
-app = typer.Typer(help="View and manage session history")
+app = typer.Typer(help=t("cli.help.history"))
 console = Console()
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .git directory or an SE3 config file."""
+    """Find project root by looking for .git directory or an SE3 config file.
+
+    Binds the i18n language to the discovered root: the import-time help strings
+    resolve the language singleton from the cwd, which can sit below the project
+    root, so it must be re-resolved once the target project is known.
+    """
     from ..config import is_se3_project_root
+    from ..i18n import bind_project_root
 
     cwd = Path.cwd()
+    root = cwd
     for parent in [cwd] + list(cwd.parents):
-        if (parent / ".git").exists():
-            return parent
-        if is_se3_project_root(parent):
-            return parent
-    return cwd
+        if (parent / ".git").exists() or is_se3_project_root(parent):
+            root = parent
+            break
+    bind_project_root(root)
+    return root
 
 
 def format_datetime(iso_string: str) -> str:
@@ -125,7 +132,7 @@ def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
             archived.append({
                 "flow_id": data.get("flow_id", "unknown"),
                 "status": data.get("status", "unknown"),
-                "task_description": data.get("task_description", "No description")[:100],
+                "task_description": (data.get("task_description") or t("cli.common.no_description"))[:100],
                 "archived_at": dt.isoformat(),
                 "file": archive_file.name,
             })
@@ -350,7 +357,7 @@ def _render_flows_table(flows: List[Dict[str, Any]], title: str) -> None:
     for flow in flows:
         flow_id = flow.get("flow_id", "unknown")
         status = flow.get("status", "unknown")
-        desc = flow.get("task_description", "No description")
+        desc = flow.get("task_description") or t("cli.common.no_description")
         if len(desc) > 50:
             desc = desc[:50] + "..."
         progress = flow.get("progress", "-")
@@ -360,7 +367,7 @@ def _render_flows_table(flows: List[Dict[str, Any]], title: str) -> None:
         color = status_colors.get(status.lower(), "white")
         table.add_row(
             flow_id,
-            f"[{color}]{status}[/{color}]",
+            f"[{color}]{t_status(status)}[/{color}]",
             desc,
             progress,
             updated,
@@ -372,12 +379,12 @@ def _render_flows_table(flows: List[Dict[str, Any]], title: str) -> None:
 
 
 # Default command - list flows
-@app.callback(invoke_without_command=True)
+@app.callback(invoke_without_command=True, help=t("cli.help.history.list.desc"))
 def default_cmd(
     ctx: typer.Context,
-    active_only: bool = typer.Option(False, "--active-only", help="Show only the active flow"),
-    archived_only: bool = typer.Option(False, "--archived-only", "-a", help="Show only archived flows"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    active_only: bool = typer.Option(False, "--active-only", help=t("cli.help.history.active_only")),
+    archived_only: bool = typer.Option(False, "--archived-only", "-a", help=t("cli.help.history.archived_only")),
+    json_output: bool = typer.Option(False, "--json", "-j", help=t("cli.help.common.json_output")),
 ):
     """List all flows (active, archived, and history)."""
     # If a subcommand is being invoked, skip this
@@ -410,11 +417,11 @@ def default_cmd(
     _render_flows_table(flows, title)
 
 
-@app.command(name="list")
+@app.command(name="list", help=t("cli.help.history.list.desc"))
 def list_cmd(
-    active_only: bool = typer.Option(False, "--active-only", help="Show only the active flow"),
-    archived_only: bool = typer.Option(False, "--archived-only", "-a", help="Show only archived flows"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    active_only: bool = typer.Option(False, "--active-only", help=t("cli.help.history.active_only")),
+    archived_only: bool = typer.Option(False, "--archived-only", "-a", help=t("cli.help.history.archived_only")),
+    json_output: bool = typer.Option(False, "--json", "-j", help=t("cli.help.common.json_output")),
 ):
     """List all flows (active, archived, and history)."""
     project_root = get_project_root()
@@ -443,12 +450,12 @@ def list_cmd(
     _render_flows_table(flows, title)
 
 
-@app.command(name="show")
+@app.command(name="show", help=t("cli.help.history.show.desc"))
 def show_cmd(
-    flow_id: str = typer.Argument(..., help="Flow ID to show details for"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
-    detailed: bool = typer.Option(False, "--detailed", "-d", help="Show LLM call details for each step"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full response including tool calls (requires --detailed)"),
+    flow_id: str = typer.Argument(..., help=t("cli.help.history.show.flow_id")),
+    json_output: bool = typer.Option(False, "--json", "-j", help=t("cli.help.common.json_output")),
+    detailed: bool = typer.Option(False, "--detailed", "-d", help=t("cli.help.history.show.detailed")),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help=t("cli.help.history.show.verbose")),
 ):
     """Show detailed information about a specific flow."""
     # --verbose implies --detailed
@@ -469,7 +476,12 @@ def show_cmd(
         elif len(matches) > 1:
             typer.echo(t("history.multiple_match", flow_id=flow_id))
             for m in matches:
-                typer.echo(f"  - {m.get('flow_id', 'unknown')}")
+                typer.echo(
+                    t(
+                        "history.match_line",
+                        flow_id=m.get("flow_id") or t("history.flow_id_unknown"),
+                    )
+                )
             raise typer.Exit(1)
 
     if not detail:
@@ -492,7 +504,11 @@ def show_cmd(
     info_table.add_column("Key", style="bold")
     info_table.add_column("Value")
 
-    info_table.add_row(t("history.field.status"), f"[{_status_color(detail['status'])}]{detail['status']}[/{_status_color(detail['status'])}]")
+    status_color = _status_color(detail['status'])
+    info_table.add_row(
+        t("history.field.status"),
+        f"[{status_color}]{t_status(detail['status'])}[/{status_color}]",
+    )
     info_table.add_row(t("history.field.task"), detail['task_description'])
     if detail.get('task_type'):
         info_table.add_row(t("history.field.type"), detail['task_type'])
@@ -535,7 +551,7 @@ def show_cmd(
             steps_table.add_row(
                 str(i),
                 step_label,
-                f"[{status_color}]{step['status']}[/{status_color}]",
+                f"[{status_color}]{t_status(step['status'])}[/{status_color}]",
                 str(step.get('retry_count', 0)),
                 error_msg,
             )
@@ -580,10 +596,10 @@ def _show_detailed_json(project_root: Path, detail: dict) -> None:
     typer.echo(json.dumps(output, indent=2, default=str))
 
 
-@app.command(name="restore")
+@app.command(name="restore", help=t("cli.help.history.restore.desc"))
 def restore_cmd(
-    flow_id: str = typer.Argument(..., help="Flow ID to restore"),
-    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be done without executing"),
+    flow_id: str = typer.Argument(..., help=t("cli.help.history.restore.flow_id")),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help=t("cli.help.history.restore.dry_run")),
 ):
     """Restore a previous session by resuming the flow.
 
@@ -604,7 +620,12 @@ def restore_cmd(
         elif len(matches) > 1:
             typer.echo(t("history.multiple_match", flow_id=flow_id))
             for m in matches:
-                typer.echo(f"  - {m.get('flow_id', 'unknown')}")
+                typer.echo(
+                    t(
+                        "history.match_line",
+                        flow_id=m.get("flow_id") or t("history.flow_id_unknown"),
+                    )
+                )
             raise typer.Exit(1)
         else:
             typer.echo(t("history.not_found", flow_id=flow_id), err=True)
@@ -624,9 +645,9 @@ def restore_cmd(
     raise typer.Exit(result.returncode)
 
 
-@app.command(name="archived")
+@app.command(name="archived", help=t("cli.help.history.archived.desc"))
 def archived_cmd(
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    json_output: bool = typer.Option(False, "--json", "-j", help=t("cli.help.common.json_output")),
 ):
     """List all archived flows."""
     project_root = get_project_root()
@@ -663,7 +684,7 @@ def archived_cmd(
 
         table.add_row(
             flow_id,
-            f"[{status_style}]{status}[/{status_style}]",
+            f"[{status_style}]{t_status(status)}[/{status_style}]",
             desc,
             archived_at,
         )

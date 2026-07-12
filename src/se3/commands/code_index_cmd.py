@@ -41,20 +41,27 @@ import typer
 
 from ..i18n import t
 
-app = typer.Typer(help="Navigate the code-index structure map (reads se3/code-index.md)")
+app = typer.Typer(help=t("cli.help.code_index"))
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for a .git directory or an SE3 config file."""
+    """Find project root by looking for a .git directory or an SE3 config file.
+
+    Binds the i18n language to the discovered root: the import-time help strings
+    resolve the language singleton from the cwd, which can sit below the project
+    root, so it must be re-resolved once the target project is known.
+    """
     from ..config import is_se3_project_root
+    from ..i18n import bind_project_root
 
     cwd = Path.cwd()
+    root = cwd
     for parent in [cwd] + list(cwd.parents):
-        if (parent / ".git").exists():
-            return parent
-        if is_se3_project_root(parent):
-            return parent
-    return cwd
+        if (parent / ".git").exists() or is_se3_project_root(parent):
+            root = parent
+            break
+    bind_project_root(root)
+    return root
 
 
 def _render_adaptive_map() -> None:
@@ -82,7 +89,7 @@ def _render_adaptive_map() -> None:
     typer.echo(output, nl=False)
 
 
-@app.callback(invoke_without_command=True)
+@app.callback(invoke_without_command=True, help=t("cli.help.code_index.main"))
 def code_index_main(ctx: typer.Context):
     """Navigate the code-index structure map.
 
@@ -96,16 +103,11 @@ def code_index_main(ctx: typer.Context):
         _render_adaptive_map()
 
 
-@app.command(name="index")
+@app.command(name="index", help=t("cli.help.code_index.index.desc"))
 def index_cmd(
     path: Optional[str] = typer.Argument(
         None,
-        help=(
-            "Path to drill into — shows exactly ONE literal level. A directory "
-            "lists its immediate children (subdirs + files); a file lists its "
-            "functions/methods. Omit (or pass an empty path) for the literal "
-            "root level. For the budgeted zoomable map, run bare `se3 code-index`."
-        ),
+        help=t("cli.help.code_index.index.path"),
     ),
 ):
     """Render the literal drill-in view — exactly one level at *path*.
@@ -129,11 +131,11 @@ def index_cmd(
     typer.echo(output, nl=False)
 
 
-@app.command(name="show")
+@app.command(name="show", help=t("cli.help.code_index.show.desc"))
 def show_cmd(
     path: str = typer.Argument(
         ...,
-        help="Project-relative path of the file (or directory) to detail.",
+        help=t("cli.help.code_index.show.path"),
     ),
 ):
     """Print one file's full function/method detail from the code-index.
@@ -155,40 +157,32 @@ def show_cmd(
     typer.echo(output, nl=False)
 
 
-@app.command(name="search")
+@app.command(name="search", help=t("cli.help.code_index.search.desc"))
 def search_cmd(
     pattern: str = typer.Argument(
         ...,
-        help=(
-            "Pattern to match against each item's rendered line. A Python regex "
-            "by default (feels like `grep -E`), case-sensitive; use -F for a "
-            "literal substring."
-        ),
+        help=t("cli.help.code_index.search.pattern"),
     ),
     ignore_case: bool = typer.Option(
-        False, "-i", "--ignore-case", help="Case-insensitive matching (like grep -i)."
+        False, "-i", "--ignore-case", help=t("cli.help.code_index.search.ignore_case")
     ),
     fixed_strings: bool = typer.Option(
         False,
         "-F",
         "--fixed-strings",
-        help="Match *pattern* as a literal substring, not a regex (like grep -F).",
+        help=t("cli.help.code_index.search.fixed_strings"),
     ),
     max_count: Optional[int] = typer.Option(
         None,
         "-m",
         "--max-count",
-        help="Stop after N matches (like grep -m). Default: no limit.",
+        help=t("cli.help.code_index.search.max_count"),
     ),
     line_number: bool = typer.Option(
         False,
         "-n",
         "--line-number",
-        help=(
-            "Accepted for grep muscle-memory only; a no-op with no effect on "
-            "code-index (ignored — code-index item lines carry no source line "
-            "number, so nothing is prefixed)."
-        ),
+        help=t("cli.help.code_index.search.line_number"),
     ),
 ):
     """Grep the code-index item lines — a drop-in for `grep se3/code-index.md`.
@@ -261,18 +255,13 @@ def _build_matcher(
     return lambda line: rx.search(line) is not None
 
 
-@app.command(name="rebuild")
+@app.command(name="rebuild", help=t("cli.help.code_index.rebuild.desc"))
 def rebuild_cmd(
     force: bool = typer.Option(
         False,
         "--force",
         "-f",
-        help=(
-            "Re-summarise every node from scratch, ignoring the fingerprints "
-            "embedded in the existing md (including human corrections). Without "
-            "this flag the rebuild is incremental: only nodes whose content "
-            "fingerprint changed are re-summarised."
-        ),
+        help=t("cli.help.code_index.rebuild.force"),
     ),
 ):
     """(Re)build the code-index, writing the authoritative se3/code-index.md.
@@ -306,7 +295,7 @@ def rebuild_cmd(
     )
 
 
-@app.command(name="inspect")
+@app.command(name="inspect", help=t("cli.help.code_index.inspect.desc"))
 def inspect_cmd():
     """Show summary stats of the on-disk code-index map.
 

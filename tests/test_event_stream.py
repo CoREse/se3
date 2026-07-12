@@ -550,7 +550,8 @@ def test_cli_sink_confirm_renders_compact_footer(captured_console):
         step=step,
     ))
     out = captured_console.export_text()
-    assert "本轮 100 in / 50 out · 累计 100 in / 50 out" in out
+    # Footer chrome is i18n-rendered; conftest pins the UI language to en-US.
+    assert "This round 100 in / 50 out · Total 100 in / 50 out" in out
     assert "Step Token Usage" not in out
 
 
@@ -770,7 +771,7 @@ def test_cli_sink_confirm_step_output_renders_compact_footer(captured_console):
         new_event(EventType.STEP_OUTPUT, step_id="03_confirm", step_type="confirm", step=step)
     )
     out = captured_console.export_text()
-    assert "本轮 150 in / 60 out · 累计 150 in / 60 out" in out
+    assert "This round 150 in / 60 out · Total 150 in / 60 out" in out
     assert "Step Token Usage" not in out
 
 

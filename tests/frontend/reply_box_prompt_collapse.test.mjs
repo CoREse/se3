@@ -204,7 +204,7 @@ export function registerReplyBoxPromptCollapseTests(ctx) {
     assert.equal(wrap2.classList.contains("expanded"), true,
       "wrapper keeps expanded class after re-render");
     const toggle2 = findOne(reply, "flow-reply-prompt-toggle");
-    assert.equal(toggle2.textContent, "▾ 收起消息详情",
+    assert.equal(toggle2.textContent, "▾ Collapse message detail",
       "trigger text shows collapse label after re-render");
   });
 
@@ -315,7 +315,7 @@ export function registerReplyBoxPromptCollapseTests(ctx) {
       "body is visible when opts.expanded=true");
     assert.equal(wrap.classList.contains("expanded"), true,
       "wrapper has expanded class");
-    assert.equal(toggle.textContent, "▾ 收起消息详情",
+    assert.equal(toggle.textContent, "▾ Collapse message detail",
       "trigger text shows collapse label");
   });
 
@@ -340,7 +340,7 @@ export function registerReplyBoxPromptCollapseTests(ctx) {
       "default: collapsed");
     assert.equal(wrap.classList.contains("expanded"), false,
       "default: no expanded class");
-    assert.equal(toggle.textContent, "▸ 展开消息详情",
+    assert.equal(toggle.textContent, "▸ Expand message detail",
       "default: trigger shows expand label");
     // Click should still work without onToggle.
     toggle.dispatch("click");

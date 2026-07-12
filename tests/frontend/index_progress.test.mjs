@@ -9,7 +9,7 @@
  * The commit step rebuilds se3/code-index.md before staging, re-summarising
  * every touched source node; that rebuild emits one `type:'index_progress'`
  * NDJSON line per file/dir node (via chat_history.record_index_progress). The
- * web console renders these as a single live "更新 code-index：<path> (i/N)"
+ * web console renders these as a single live "Updating code-index: <path> (i/N)"
  * progress line that updates in place as the counts climb.
  *
  * Coverage:
@@ -78,17 +78,17 @@ export function registerIndexProgressTests(ctx) {
   check("G3 indexProgressLabel formats path with (done/total)", () => {
     assert.equal(
       app.indexProgressLabel("src/se3/cli.py", 3, 12),
-      "更新 code-index：src/se3/cli.py (3/12)",
+      "Updating code-index: src/se3/cli.py (3/12)",
     );
   });
 
   check("G3 indexProgressLabel drops the suffix when total is unknown", () => {
-    assert.equal(app.indexProgressLabel("a.py", 0, 0), "更新 code-index：a.py");
+    assert.equal(app.indexProgressLabel("a.py", 0, 0), "Updating code-index: a.py");
   });
 
   check("G3 indexProgressLabel degrades a missing path to an ellipsis", () => {
-    assert.equal(app.indexProgressLabel("", 1, 3), "更新 code-index：… (1/3)");
-    assert.equal(app.indexProgressLabel(null, 0, 0), "更新 code-index：…");
+    assert.equal(app.indexProgressLabel("", 1, 3), "Updating code-index: … (1/3)");
+    assert.equal(app.indexProgressLabel(null, 0, 0), "Updating code-index: …");
   });
 
   check("G3 indexProgressState flips to completed only when done>=total>0", () => {
@@ -108,7 +108,7 @@ export function registerIndexProgressTests(ctx) {
     assert.ok(marker.classList.contains("status-running"),
       "an in-progress marker should carry the .status-running class");
     const text = findOne(marker, "index-progress-text");
-    assert.ok(text && text.textContent === "更新 code-index：src/se3/cli.py (3/12)",
+    assert.ok(text && text.textContent === "Updating code-index: src/se3/cli.py (3/12)",
       `marker text should be the progress label, got ${text && text.textContent}`);
     // Affordance-free: no fold / raw / chip on the marker.
     assert.equal(findAll(marker, "msg-chip").length, 0,
@@ -133,7 +133,7 @@ export function registerIndexProgressTests(ctx) {
     // The three records of the SAME commit step fold to ONE line — the latest /
     // terminal state — instead of stacking three progress rows.
     const lines = findAll(container, "index-progress-text").map((n) => n.textContent);
-    assert.deepEqual(lines, ["更新 code-index：c.py (3/3)"]);
+    assert.deepEqual(lines, ["Updating code-index: c.py (3/3)"]);
     assert.equal(findAll(container, "index-progress-marker").length, 1);
     const marker = findOne(container, "index-progress-marker");
     assert.ok(marker.classList.contains("status-completed"),
@@ -150,7 +150,7 @@ export function registerIndexProgressTests(ctx) {
     ], false);
     assert.equal(findAll(container, "index-progress-marker").length, 1);
     const line = findOne(container, "index-progress-text");
-    assert.equal(line.textContent, "更新 code-index：c.py (3/3)",
+    assert.equal(line.textContent, "Updating code-index: c.py (3/3)",
       "the terminal (done>=total) marker must supersede the running ones");
   });
 
@@ -169,7 +169,7 @@ export function registerIndexProgressTests(ctx) {
     assert.equal(findAll(container, "index-progress-marker").length, 1);
     const marker = findOne(container, "index-progress-marker");
     const line = findOne(marker, "index-progress-text");
-    assert.equal(line.textContent, "更新 code-index：a.py (1/3)",
+    assert.equal(line.textContent, "Updating code-index: a.py (1/3)",
       "the newer rebuild's running record must supersede the earlier terminal one");
     assert.ok(marker.classList.contains("status-running"),
       "the line must reflect the second rebuild's in-progress state");
@@ -218,7 +218,7 @@ export function registerIndexProgressTests(ctx) {
     assert.equal(findAll(container, "index-progress-marker").length, 1,
       "after the live append the step still shows exactly one line");
     const line = findOne(container, "index-progress-text");
-    assert.equal(line.textContent, "更新 code-index：c.py (3/3)");
+    assert.equal(line.textContent, "Updating code-index: c.py (3/3)");
   });
 
   check("G3 a non-index_progress record renders unaffected alongside markers", () => {

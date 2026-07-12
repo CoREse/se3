@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- The tab title is user-visible chrome, so it localizes too: app.js's
+       initI18n()/setLang() write document.title from the `topbar.title` key.
+       The literal here is the pre-JS / fetch-failure fallback. -->
   <title>SE3 Control Plane</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -11,21 +14,26 @@
     <h1 data-i18n="topbar.title">SE3&nbsp;Control&nbsp;Plane</h1>
     <div class="topbar-right">
       <span id="se3-version" class="se3-version"></span>
-      <span id="conn-status" class="conn conn-connecting"
-            data-i18n="topbar.connecting">connecting&hellip;</span>
+      <!-- Deliberately NOT data-i18n: this badge shows LIVE connection state.
+           applyStaticTranslations() runs on every language switch and would
+           clobber the current status back to "connecting…". app.js owns it —
+           setConnStatus() paints it and repaintConnStatus() re-localizes the
+           current state after a switch. The literal is the pre-JS default. -->
+      <span id="conn-status" class="conn conn-connecting">connecting&hellip;</span>
       <!-- Per-user UI-language switch. Always visible (NOT auth-only) so the
            language can be chosen on the login gate too; the choice persists in
            localStorage and never reads any project's se3.yaml. Options are
            populated by initI18n() from I18N.SUPPORTED. -->
       <select id="lang-select" class="lang-select"
               data-i18n-title="lang.label" title="Language"
-              aria-label="Language"></select>
+              data-i18n-aria-label="lang.label" aria-label="Language"></select>
       <!-- Hamburger toggle for the mobile-portrait overflow menu. Hidden on
            desktop (@media min-width:601px) and while unauthenticated (auth-only);
            on a narrow screen it expands #nav-menu into a dropdown. No top-bar
            function is removed — every control still lives inside #nav-menu. -->
       <button id="nav-menu-toggle" type="button"
               class="nav-menu-toggle auth-only hidden"
+              data-i18n-aria-label="nav.menu"
               aria-label="Menu" aria-haspopup="true" aria-expanded="false"
               aria-controls="nav-menu">&#9776;</button>
       <!-- Overflow-menu container wrapping every functional control. On desktop
@@ -105,6 +113,7 @@
            (single-view panel switch). Hidden on desktop, where both panes show
            side by side. -->
       <button id="flows-back-btn" type="button" class="flows-back-btn"
+              data-i18n-aria-label="flows.backAria"
               aria-label="Back to machine list" data-i18n="flows.back">&larr; Machines</button>
       <h2 id="flows-heading" data-i18n="flows.title">Flows</h2>
       <div id="flow-list" class="flow-list">
@@ -135,6 +144,7 @@
              flows-back-btn). Hidden on desktop, where both panes show side by
              side. -->
         <button id="history-back-btn" type="button" class="history-back-btn"
+                data-i18n-aria-label="history.backAria"
                 aria-label="Back to session list" data-i18n="history.back">&larr; Sessions</button>
         <h4 id="history-detail-title" data-i18n="history.detailTitle">Session</h4>
         <!-- The full flow_id of the open session, shown as its own dedicated
@@ -190,6 +200,7 @@
       </aside>
       <section class="issues-detail-pane">
         <button id="issues-back-btn" type="button" class="issues-back-btn"
+                data-i18n-aria-label="issues.backAria"
                 aria-label="Back to issue list" data-i18n="issues.back">&larr; Issues</button>
         <h4 id="issues-detail-title" data-i18n="issues.detailTitle">Issue</h4>
         <div id="issues-detail" class="issues-detail">
@@ -238,21 +249,21 @@
             <label for="issue-type" data-i18n="issueModal.type">Type (optional)</label>
             <select id="issue-type">
               <option value="">-</option>
-              <option value="bug">bug</option>
-              <option value="feature">feature</option>
-              <option value="enhancement">enhancement</option>
-              <option value="idea">idea</option>
-              <option value="task">task</option>
+              <option value="bug" data-i18n="issueType.bug">bug</option>
+              <option value="feature" data-i18n="issueType.feature">feature</option>
+              <option value="enhancement" data-i18n="issueType.enhancement">enhancement</option>
+              <option value="idea" data-i18n="issueType.idea">idea</option>
+              <option value="task" data-i18n="issueType.task">task</option>
             </select>
           </div>
           <div class="form-col">
             <label for="issue-priority" data-i18n="issueModal.priority">Priority (optional)</label>
             <select id="issue-priority">
               <option value="">-</option>
-              <option value="critical">critical</option>
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
+              <option value="critical" data-i18n="issuePriority.critical">critical</option>
+              <option value="high" data-i18n="issuePriority.high">high</option>
+              <option value="medium" data-i18n="issuePriority.medium">medium</option>
+              <option value="low" data-i18n="issuePriority.low">low</option>
             </select>
           </div>
         </div>
@@ -429,7 +440,7 @@
                placeholder="/absolute/path/to/project"
                autocomplete="off"
                spellcheck="false" />
-        <p id="nt-project-manual-hint" class="form-hint hidden" data-i18n="newTask.projectManualHint">
+        <p id="nt-project-manual-hint" class="form-hint hidden" data-i18n-html="newTask.projectManualHint">
           Enter an absolute path. The daemon will run <code>se3 init</code>
           there first if the directory is not yet an SE3 project.
         </p>
@@ -437,11 +448,11 @@
         <label for="nt-type" data-i18n="newTask.type">Task type</label>
         <select id="nt-type">
           <option value="pending" data-i18n="newTask.typeAuto">auto</option>
-          <option value="feature">feature</option>
-          <option value="bugfix">bugfix</option>
-          <option value="review">review</option>
-          <option value="small">small</option>
-          <option value="directive">directive</option>
+          <option value="feature" data-i18n="taskType.feature">feature</option>
+          <option value="bugfix" data-i18n="taskType.bugfix">bugfix</option>
+          <option value="review" data-i18n="taskType.review">review</option>
+          <option value="small" data-i18n="taskType.small">small</option>
+          <option value="directive" data-i18n="taskType.directive">directive</option>
         </select>
 
         <label for="nt-task" data-i18n="newTask.task">Task description</label>
@@ -476,7 +487,7 @@
         <button id="keys-close" type="button" class="icon-btn">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="form-hint" data-i18n="keys.hint">
+        <p class="form-hint" data-i18n-html="keys.hint">
           A daemon authenticates to this server with a key bound to your owner
           account. The plaintext is shown <strong>only once</strong> at creation
           — copy it into the daemon's <code>--daemon-key</code> config.

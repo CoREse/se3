@@ -2609,6 +2609,48 @@ check("Q1 renderGenericOutputs: long string preview includes char count", () => 
     "the long value was previewed, not fully inlined");
 });
 
+// -- JS-generated chrome follows the selected UI language -------------------
+//
+// The char-count suffix and the grep/glob pattern/path header are
+// framework-authored chrome: under zh-CN they must not leak English labels into
+// an otherwise localized UI. The tool-call arguments themselves (pattern, path)
+// are data and pass through verbatim.
+function withZhDicts(dict, fn) {
+  const { I18N } = app;
+  const savedLang = I18N.lang;
+  const savedDicts = I18N.dicts;
+  try {
+    I18N.dicts = { "en-US": {}, "zh-CN": dict };
+    I18N.lang = "zh-CN";
+    fn();
+  } finally {
+    I18N.lang = savedLang;
+    I18N.dicts = savedDicts;
+  }
+}
+
+check("i18n renderGenericOutputs: char-count suffix follows the UI language", () => {
+  withZhDicts({ "common.size.chars": "{n} 字符" }, () => {
+    const valEl = findOne(app.renderGenericOutputs({ field: "x".repeat(450) }),
+      "step-report__kv-v");
+    assert.ok(valEl.textContent.includes("(450 字符)"), valEl.textContent);
+    assert.ok(!valEl.textContent.includes("chars"), "no English label leaks");
+    assert.equal(valEl.title, "450 字符");
+  });
+});
+
+check("i18n grep detail: pattern/path labels localize, values pass through", () => {
+  withZhDicts({ "tool.detail.patternPath": "模式={pattern} 路径={path}" }, () => {
+    for (const kind of ["grep_matches", "glob_matches"]) {
+      const panel = app.renderToolDetailPanel({
+        kind, pattern: "TODO", path: "src/", matches: [], files: [],
+      });
+      const head = findOne(panel, "tool-marker-diff-path");
+      assert.equal(head.textContent, "模式=TODO 路径=src/", kind);
+    }
+  });
+});
+
 check("Q1 renderGenericOutputs: nested dict expands one indented level", () => {
   const frag = app.renderGenericOutputs({
     top: "scalar",
@@ -3349,13 +3391,13 @@ check("user three layers: literal bubble default, 展开全部 prefix/suffix, �
   const wrap = findOne(row, "user-prompt-toggle-wrap");
   assert.ok(wrap, "Layer 2 展开全部 toggle present");
   const toggle = findOne(wrap, "process-toggle");
-  assert.ok(toggle.textContent.includes("展开全部"));
+  assert.ok(toggle.textContent.includes("Expand all"));
   const full = findOne(wrap, "process-full");
   assert.equal(full.classList.contains("hidden"), true, "prefix/suffix folded by default");
   toggle.dispatch("click");
   assert.equal(full.classList.contains("hidden"), false, "expands on click");
-  assert.ok(full.textContent.includes("模板前缀"), "template-prefix subsection labeled");
-  assert.ok(full.textContent.includes("框架后缀"), "framework-suffix subsection labeled");
+  assert.ok(full.textContent.includes("Template prefix"), "template-prefix subsection labeled");
+  assert.ok(full.textContent.includes("Framework suffix"), "framework-suffix subsection labeled");
   assert.ok(full.textContent.includes("Project Context"), "prefix body now visible");
   assert.ok(full.textContent.includes("Available Specs"), "suffix body now visible");
 
@@ -3513,8 +3555,8 @@ check("user two-segment marker degrades to a single collapsed chip (no bubble)",
   chip.dispatch("click");
   assert.equal(wrap.classList.contains("collapsed"), false, "expands on click");
   const detail = findOne(wrap, "msg-chip-detail");
-  assert.ok(detail.textContent.includes("模板前缀"));
-  assert.ok(detail.textContent.includes("框架后缀"));
+  assert.ok(detail.textContent.includes("Template prefix"));
+  assert.ok(detail.textContent.includes("Framework suffix"));
   assert.ok(detail.textContent.includes("framework tail"), "suffix body now visible");
 });
 
@@ -3655,7 +3697,7 @@ check("renderHistoryList: empty + loading shows the refreshing hint, not the emp
   assert.ok(findOne(list, "empty-loading-refresh"),
     "loading-refresh modifier class must be present");
   const texts = findAll(list, "empty").map((n) => n.textContent);
-  assert.ok(texts.some((t) => t.includes("正在刷新历史")),
+  assert.ok(texts.some((t) => t.includes("Refreshing history")),
     "loading hint must be shown");
   assert.ok(!texts.some((t) => t.includes("No history sessions reported.")),
     "empty state must NOT be shown while loading");
@@ -3671,7 +3713,7 @@ check("renderHistoryList: empty + not loading + unconfirmed shows the connecting
   assert.ok(findOne(list, "empty-loading-connect"),
     "loading-connect modifier class must be present");
   const texts = findAll(list, "empty").map((n) => n.textContent);
-  assert.ok(texts.some((t) => t.includes("正在连接") || t.includes("正在等待历史数据")),
+  assert.ok(texts.some((t) => t.includes("Connecting") || t.includes("waiting for history data")),
     "connecting/waiting hint must be shown");
   assert.ok(!texts.some((t) => t.includes("No history sessions reported.")),
     "empty state must NOT be shown before history is confirmed");
@@ -3689,7 +3731,7 @@ check("renderHistoryList: empty + connected + confirmed shows the confirmed empt
   const texts = findAll(list, "empty").map((n) => n.textContent);
   assert.ok(texts.some((t) => t.includes("No history sessions reported.")),
     "empty state must be shown once confirmed");
-  assert.ok(!texts.some((t) => t.includes("正在刷新历史") || t.includes("正在连接")),
+  assert.ok(!texts.some((t) => t.includes("Refreshing history") || t.includes("正在连接")),
     "no loading/connecting hint once confirmed");
 });
 
@@ -3703,7 +3745,7 @@ check("renderHistoryList: non-empty + loading prepends a refresh bar above the i
   const list = document.getElementById("history-list");
   assert.equal(findAll(list, "history-item").length, 2, "all sessions render");
   const bar = findOne(list, "history-refreshing");
-  assert.ok(bar && bar.textContent.includes("正在刷新历史"),
+  assert.ok(bar && bar.textContent.includes("Refreshing history"),
     "a lightweight refresh bar is prepended while loading");
 });
 
@@ -4333,7 +4375,7 @@ check("groupHistorySessionsByProjectRoot folds falsy project_root into UNKNOWN b
   ]);
   assert.equal(buckets.length, 1);
   assert.equal(buckets[0].project_root, app.UNKNOWN_PROJECT_ROOT);
-  assert.equal(buckets[0].label, "未知项目");
+  assert.equal(buckets[0].label, "Unknown project");
   assert.equal(buckets[0].sessions.length, 4);
 });
 
@@ -5500,7 +5542,7 @@ check("charter_freshness report renders the fresh (no-op) shape", () => {
 });
 
 check("charter_freshness has a report card title", () => {
-  assert.equal(app.reportCardTitle("charter_freshness"), "Charter Freshness · 结果");
+  assert.equal(app.reportCardTitle("charter_freshness"), "Charter Freshness · Result");
 });
 
 // -- Agent/model badge (G1) ---------------------------------------------------

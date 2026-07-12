@@ -35,10 +35,17 @@ PROGRAMMATIC_CONFIRM_SENTINEL = "__PROGRAMMATIC_CONFIRM__"
 # this value through the existing call/response channel.
 DISCOVERY_CONFIRM_VALUE = "1"
 
-# Human-facing fallback hint shown alongside the GUI confirm button on the web
-# console, mirroring the CLI's "输入 1 确认" affordance. The wording is
-# non-normative (see the spec); only the ``1`` confirm key is normative.
-DISCOVERY_CONFIRM_HINT = "输入 1 确认并继续，或回复其它内容继续完善需求。"
+
+def discovery_confirm_hint() -> str:
+    """Human-facing textual fallback shown alongside the GUI confirm button.
+
+    Rendered through i18n (it is framework UI copy, not LLM output), so the hint
+    follows the active UI language. The wording is non-normative (see the spec);
+    only the ``1`` confirm key is normative, so translating it is safe.
+    """
+    from ...i18n import t
+
+    return t("engine.discovery.confirm_hint", value=DISCOVERY_CONFIRM_VALUE)
 
 
 def discovery_confirm_metadata(refined_description: str) -> tuple[str, list]:
@@ -46,12 +53,16 @@ def discovery_confirm_metadata(refined_description: str) -> tuple[str, list]:
 
     Used when a non-interactive discovery step pauses at the programmatic
     confirmation gate. The returned *prompt* is a human-readable instruction
-    carrying the ``输入 1 确认`` textual fallback plus the proposed refined
+    carrying the "type 1 to confirm" textual fallback plus the proposed refined
     description; the single *option* encodes the GUI confirm action whose
     response value is the literal :data:`DISCOVERY_CONFIRM_VALUE` (``"1"``)
     that the gate's ``== "1"`` check expects. The web console renders the
     prompt as Markdown and the option as a one-click confirm button, so both
     affordances coexist.
+
+    All prompt/label copy is framework-authored UI text and therefore renders
+    through i18n; only the refined description (LLM output) is passed through
+    verbatim.
 
     Args:
         refined_description: The proposed refined task description.
@@ -60,13 +71,20 @@ def discovery_confirm_metadata(refined_description: str) -> tuple[str, list]:
         A ``(prompt, options)`` tuple. ``options`` is a list with one
         ``{"label", "value"}`` dict for the confirm action.
     """
+    from ...i18n import t
+
     refined = (refined_description or "").strip()
-    parts = ["Discovery 已生成精炼后的任务描述。" + DISCOVERY_CONFIRM_HINT]
+    parts = [t("engine.discovery.confirm_prompt") + discovery_confirm_hint()]
     if refined:
-        parts.extend(["", "Proposed task description:", refined])
+        parts.extend(["", t("engine.discovery.proposed_label"), refined])
     prompt = "\n".join(parts)
     options = [
-        {"label": f"确认并继续 (输入 {DISCOVERY_CONFIRM_VALUE})", "value": DISCOVERY_CONFIRM_VALUE}
+        {
+            "label": t(
+                "engine.discovery.confirm_option", value=DISCOVERY_CONFIRM_VALUE
+            ),
+            "value": DISCOVERY_CONFIRM_VALUE,
+        }
     ]
     return prompt, options
 
@@ -803,26 +821,23 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return StepStatus.PAUSED
 
     except LLMCallError as e:
+        from ...i18n import t
         from ..output import render_full
 
         error_msg = str(e)
         if "JSON extraction failed" in error_msg:
-            friendly_message = (
-                "LLM 未能返回有效的 JSON 结构化输出，"
-                "可能是模型生成了叙述性文本而非预期的 JSON 格式。\n\n"
-                "流程引擎将自动重试此步骤。"
-            )
+            friendly_message = t("engine.discovery.error_json_extraction")
             logger.warning(
                 "Discovery: LLM did not return valid JSON output. "
                 "The step will be retried automatically. Original error: %s",
                 error_msg,
             )
         else:
-            friendly_message = f"LLM 调用失败: {error_msg}"
+            friendly_message = t("engine.discovery.error_llm_call", error=error_msg)
             logger.warning("Discovery: LLM call failed: %s", error_msg)
 
         step.error_message = friendly_message
-        render_full(friendly_message, title="Discovery Error")
+        render_full(friendly_message, title=t("engine.discovery.error_title"))
         return StepStatus.FAILED
 
     except Exception as e:
@@ -1199,10 +1214,11 @@ def _proposed_description_block(refined_description: str) -> list:
     """
     from rich.markdown import Markdown
     from rich.text import Text
+    from ...i18n import t
     from ..display import _reverse_footer, _reverse_title
 
     return [
-        _reverse_title("Proposed Task Description / 最终任务描述", "cyan"),
+        _reverse_title(t("engine.discovery.proposed_block_title"), "cyan"),
         Text(""),
         Markdown(refined_description),
         Text(""),
@@ -1237,17 +1253,19 @@ def _display_discovery_message(
             rejected for being out of this discovery step's scope. ``None`` /
             empty renders nothing extra (the no-operation case).
         round_usage: This round's incremental token usage. When non-empty, a
-            compact dim footer (``本轮 … · 累计 …``) is appended at the tail of
+            compact dim footer (i18n-rendered "this round … · total …") is
+            appended at the tail of
             the Discovery block (inside it, before the closing blue footer). When
             ``None`` / empty (a round that issued no LLM call — empty-input
             redraw, ``--resume`` re-display), no footer is rendered.
         cumulative_usage: The cumulative token usage up to and including this
             round (carried prior total + ``round_usage``). Paired with
-            ``round_usage`` to render the ``累计 …`` portion of the footer.
+            ``round_usage`` to render the cumulative portion of the footer.
     """
     from rich.console import Group
     from rich.markdown import Markdown
     from rich.text import Text
+    from ...i18n import t
     from .. import display
     from ..display import get_console
     from ..token_usage import UsageTotals, format_round_usage_footer
@@ -1267,12 +1285,13 @@ def _display_discovery_message(
             renderables.append(Markdown(content))
             renderables.append(Text(""))
         renderables.extend(_proposed_description_block(refined_description))
-        # Non-normative hint: advertise the '1' confirmation affordance
+        # Non-normative hint: advertise the '1' confirmation affordance. Split
+        # into prefix/suffix keys so the confirm value keeps its own highlight
+        # style in the middle of the localized sentence.
         hint = Text()
-        hint.append("Type ", style="dim")
-        hint.append("1", style="bold green")
-        hint.append(" and press Enter to confirm and proceed,", style="dim")
-        hint.append("\nor type your questions/feedback to continue discovery.", style="dim")
+        hint.append(t("engine.discovery.confirm_hint_prefix"), style="dim")
+        hint.append(DISCOVERY_CONFIRM_VALUE, style="bold green")
+        hint.append(t("engine.discovery.confirm_hint_suffix"), style="dim")
         renderables.append(hint)
         renderables.append(Text(""))
     elif refined_description and questions:
@@ -1281,7 +1300,7 @@ def _display_discovery_message(
             renderables.append(Markdown(content))
             renderables.append(Text(""))
         renderables.extend(_proposed_description_block(refined_description))
-        renderables.append(Text("Questions:", style="bold yellow"))
+        renderables.append(Text(t("engine.discovery.questions_label"), style="bold yellow"))
         for i, q in enumerate(questions, 1):
             renderables.append(Text(f"  {i}. {q}"))
         renderables.append(Text(""))
@@ -1290,7 +1309,7 @@ def _display_discovery_message(
         if content:
             renderables.append(Markdown(content))
             renderables.append(Text(""))
-        renderables.append(Text("Questions:", style="bold yellow"))
+        renderables.append(Text(t("engine.discovery.questions_label"), style="bold yellow"))
         for i, q in enumerate(questions, 1):
             renderables.append(Text(f"  {i}. {q}"))
         renderables.append(Text(""))
@@ -1312,20 +1331,30 @@ def _display_discovery_message(
             if r.get("status") in ("rejected", "error", "skipped")
         ]
         if created or updated or deleted or rejected:
-            renderables.append(Text("Issue operations:", style="bold green"))
+            renderables.append(Text(t("engine.discovery.ops_label"), style="bold green"))
             if created:
-                renderables.append(Text(f"  created: {', '.join(str(i) for i in created)}"))
+                renderables.append(Text(t(
+                    "engine.discovery.ops_created",
+                    ids=", ".join(str(i) for i in created))))
             if updated:
-                renderables.append(Text(f"  updated: {', '.join(str(i) for i in updated)}"))
+                renderables.append(Text(t(
+                    "engine.discovery.ops_updated",
+                    ids=", ".join(str(i) for i in updated))))
             if deleted:
-                renderables.append(Text(f"  deleted: {', '.join(str(i) for i in deleted)}"))
+                renderables.append(Text(t(
+                    "engine.discovery.ops_deleted",
+                    ids=", ".join(str(i) for i in deleted))))
             for r in rejected:
                 rid = r.get("id")
+                # The status word stays raw: it is the executor's protocol value
+                # (rejected / error / skipped), not translatable copy.
                 id_part = f" {rid}" if rid is not None else ""
-                reason = r.get("reason", "")
-                renderables.append(
-                    Text(f"  {r.get('status')}{id_part}: {reason}", style="yellow")
-                )
+                renderables.append(Text(
+                    t("engine.discovery.ops_rejected",
+                      status=r.get("status"), target=id_part,
+                      reason=r.get("reason", "")),
+                    style="yellow",
+                ))
             renderables.append(Text(""))
 
     # Per-round token-usage footer: a single dim line tying off the message
@@ -1339,7 +1368,7 @@ def _display_discovery_message(
         renderables.append(Text(footer_text, style="dim"))
 
     console = get_console()
-    display.render_block_header("Discovery", "blue")
+    display.render_block_header(t("cli.steprender.title.discovery"), "blue")
     console.print(Group(*renderables))
     console.print("")
     display.render_block_footer("blue")

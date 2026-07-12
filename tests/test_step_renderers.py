@@ -607,10 +607,10 @@ class TestRenderSpecGate:
     @patch("se3.engine.step_renderers.render_full")
     def test_registered_in_registry(self, _mock_render_full):
         """SPEC_GATE has a registered renderer — render_step_output won't default-render."""
-        from se3.engine.step_renderers import STEP_RENDERERS, STEP_DISPLAY_TITLES
+        from se3.engine.step_renderers import STEP_RENDERERS, STEP_TITLE_KEYS
 
         assert StepType.SPEC_GATE in STEP_RENDERERS
-        assert StepType.SPEC_GATE in STEP_DISPLAY_TITLES
+        assert StepType.SPEC_GATE in STEP_TITLE_KEYS
 
     @patch("se3.engine.step_renderers.render_full")
     def test_gate_passed_clean(self, mock_render_full):
@@ -800,3 +800,85 @@ class TestStepUsageBlock:
         render_step_usage(step)
 
         mock_usage.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _render_implement
+# ---------------------------------------------------------------------------
+
+
+class TestRenderImplement:
+    """Regression coverage for the IMPLEMENT report card.
+
+    The i18n migration shadowed the imported ``t()`` helper with a ``for t in
+    tests_added`` loop variable, making every call in the function raise
+    UnboundLocalError. EventEmitter.emit swallows sink exceptions, so the report
+    card and the trailing token-usage block vanished from the console silently.
+    These tests pin the renderer's real end-to-end path (render_step_output, not
+    just the private function) so a raising renderer fails loudly here.
+    """
+
+    _OUTPUTS = {
+        "completion_status": "complete",
+        # Semicolons split the summary into numbered parts — keep one clause so
+        # the assertion below can match it contiguously.
+        "summary": "Add i18n loader and wire the CLI",
+        "files_changed": ["src/se3/cli.py", "src/se3/i18n/loader.py"],
+        "tests_added": ["tests/test_i18n.py"],
+        "implemented_groups": ["G1"],
+    }
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_renders_full_report_card(self, mock_render_full):
+        from se3.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, dict(self._OUTPUTS))
+        _render_implement(step)
+
+        mock_render_full.assert_called_once()
+        content = mock_render_full.call_args[0][0]
+
+        assert "Add i18n loader and wire the CLI" in content
+        assert "src/se3/cli.py" in content
+        # The tests-added loop must render its entries, not shadow t().
+        assert "tests/test_i18n.py" in content
+        # t() resolved, so no raw dotted key leaked into the output.
+        assert "cli.steprender." not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_tests_added_loop_does_not_shadow_translator(self, mock_render_full):
+        """The tests_added section is the exact site of the shadowing bug: with
+        a non-empty list, every later t() call must still be the i18n helper."""
+        from se3.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, {
+            "completion_status": "partial",
+            "files_changed": ["a.py"],
+            "tests_added": ["tests/test_a.py", "tests/test_b.py"],
+            # Sections rendered AFTER the loop — these were unreachable before.
+            "incomplete_tasks": [{"task_id": "T2", "reason": "blocked"}],
+        })
+        _render_implement(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "tests/test_a.py" in content
+        assert "tests/test_b.py" in content
+        assert "T2" in content and "blocked" in content
+
+    @patch("se3.engine.step_renderers.render_usage_block")
+    @patch("se3.engine.step_renderers.render_full")
+    def test_usage_block_follows_report(self, mock_render_full, mock_usage):
+        """render_step_output must reach the token-usage block: a renderer that
+        raises would drop it (the observed regression)."""
+        from se3.engine.step_renderers import render_step_output
+
+        usage = {"input_tokens": 10, "output_tokens": 20}
+        outputs = dict(self._OUTPUTS)
+        outputs["token_usage"] = usage
+        step = _make_step(StepType.IMPLEMENT, outputs)
+
+        render_step_output(step)
+
+        mock_render_full.assert_called_once()
+        mock_usage.assert_called_once()
+        assert mock_usage.call_args[0][0] == usage

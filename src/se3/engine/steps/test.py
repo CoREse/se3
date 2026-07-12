@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ...i18n import t
 from ..baseline_fix_memory import load_given_up, record_given_up
 from ..models import FlowInstance, Step, StepStatus
 from ..truncation import (
@@ -1145,7 +1146,7 @@ def _run_command(
         )
 
         # Show dot progress while waiting, enforce timeout
-        print(f"Running tests: {cmd_str}", end="", flush=True)
+        print(t("engine.test.running", command=cmd_str), end="", flush=True)
         dots = 0
         max_dots = 60
         elapsed = 0
@@ -1160,7 +1161,7 @@ def _run_command(
                     print(".", end="", flush=True)
                     dots += 1
                     if dots >= max_dots:
-                        print("\n  ... still running ...", flush=True)
+                        print("\n" + t("engine.test.still_running"), flush=True)
                         dots = 0
                     # Enforce overall timeout
                     if elapsed >= timeout:
@@ -1168,7 +1169,7 @@ def _run_command(
                         stdout, stderr = process.communicate()
                         print(flush=True)
                         logger.error(f"Test timed out after {timeout}s: {cmd_str}")
-                        print(f"[timeout after {timeout}s]", flush=True)
+                        print(t("engine.test.timeout", timeout=timeout), flush=True)
                         return {
                             "command": cmd_str,
                             "returncode": -1,
@@ -1200,7 +1201,7 @@ def _run_command(
             raise
     except Exception as e:
         logger.exception(f"Test execution failed: {command}")
-        print(f"\n[error: {e}]", flush=True)
+        print("\n" + t("engine.test.error", error=e), flush=True)
         # Use a DISTINCT sentinel returncode (-2) for the generic
         # subprocess-spawn failure path (e.g. command not found / OSError). The
         # timeout path uses -1, and ``_is_timeout_result`` recognizes -1 as a

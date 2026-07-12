@@ -40,6 +40,13 @@ def salvage(project_root: Optional[Path] = None) -> int:
             return 1
 
     project_root = Path(project_root)
+
+    # WHY: the root can sit above cwd (run from a subdirectory), and the caller
+    # bound the language before auto-detection could happen — re-bind now that
+    # the operating project is settled so output honours its language.language.
+    from ..i18n import bind_project_root
+
+    bind_project_root(project_root)
     results: List[Tuple[str, str, str]] = []  # (step_name, status, detail)
 
     # Step 1: Read session state (tolerant)

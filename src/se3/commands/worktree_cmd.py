@@ -48,31 +48,27 @@ def _format_bytes(num: int) -> str:
 
 worktree_app = typer.Typer(
     name="worktree",
-    help="Manage se3 run --worktree isolation worktrees",
+    help=t("cli.help.worktree"),
 )
 
 
-@worktree_app.command(name="gc")
+@worktree_app.command(name="gc", help=t("cli.help.worktree.gc.desc"))
 def gc_command(
     max_age_hours: float = typer.Option(
         24.0,
         "--max-age-hours",
-        help=(
-            "Only reclaim terminal worktree runs whose engine.json has been "
-            "idle at least this long (default: 24). Guards a just-completed run "
-            "still awaiting a human merge."
-        ),
+        help=t("cli.help.worktree.gc.max_age_hours"),
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Report what WOULD be reclaimed without touching disk or branches.",
+        help=t("cli.help.worktree.gc.dry_run"),
     ),
     project_root: Optional[str] = typer.Option(
         None,
         "--project-root",
         "-p",
-        help="Project root directory (default: auto-detect).",
+        help=t("cli.help.worktree.gc.project_root"),
     ),
 ) -> None:
     """Garbage-collect leaked terminal ``se3 run --worktree`` runs.
@@ -93,7 +89,12 @@ def gc_command(
         se3 worktree gc --max-age-hours 48
     """
     if project_root:
+        from ..i18n import bind_project_root
+
         root = Path(project_root)
+        # get_project_root() binds the UI language itself; an explicit
+        # --project-root bypasses it, so bind here too.
+        bind_project_root(root)
     else:
         from .run import get_project_root
 

@@ -1083,7 +1083,7 @@ def _make_llm_summarizer(
     spec_lang_instruction = get_language_instruction(
         load_language_config(project_root).spec_language,
         "code_index",
-        for_spec=True,
+        for_knowledge=True,
     )
 
     def _summarize_group(item: tuple[str, List[SummaryTarget]]) -> Dict[str, str]:

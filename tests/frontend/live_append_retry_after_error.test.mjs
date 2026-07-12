@@ -153,7 +153,7 @@ export function registerLiveAppendRetryAfterErrorTests(ctx) {
     const rows = statusRows(c);
     assert.equal(rows.length, 1, "exactly one live status anchor after the retry");
     assert.ok(rows[0].classList.contains("step-status-running"),
-      "the surviving anchor reads 进行中 (the re-run), not frozen on 重试中");
+      "the surviving anchor reads In progress (the re-run), not frozen on Retrying");
   });
 
   check("G1 retry: incremental append converges on the same result as a full reload", () => {
@@ -200,7 +200,7 @@ export function registerLiveAppendRetryAfterErrorTests(ctx) {
     let rows = statusRows(c);
     assert.equal(rows.length, 1);
     assert.ok(rows[0].classList.contains("step-status-retrying"),
-      "starts on the 重试中 anchor");
+      "starts on the Retrying anchor");
 
     // The first post-retry tick carries ONLY the resumed running anchor (the
     // re-run's output is still streaming). Pre-fix (status-blind key) this would
@@ -213,7 +213,7 @@ export function registerLiveAppendRetryAfterErrorTests(ctx) {
     rows = statusRows(c);
     assert.equal(rows.length, 1, "still one live status anchor");
     assert.ok(rows[0].classList.contains("step-status-running"),
-      "the running anchor alone un-freezes the 重试中 row on this very tick");
+      "the running anchor alone un-freezes the Retrying row on this very tick");
 
     // And the retry output keeps streaming afterward.
     app.applyHistoryData({

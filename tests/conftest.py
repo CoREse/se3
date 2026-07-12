@@ -42,6 +42,18 @@ def _wire_browser_test_libs() -> None:
 
 _wire_browser_test_libs()
 
+# Pin the UI language to en-US at conftest *import* time, before any test module
+# is collected. Typer freezes each command/option ``help=`` string when the
+# module defining it is imported (the value is a plain ``t(...)`` result bound
+# into the Option/command at decoration). Test modules import ``se3.cli`` during
+# collection — earlier than any autouse fixture can run — so under the repo's own
+# ``se3.yaml`` (``language: zh-CN``) the help text would freeze in Chinese and
+# every English help-text assertion would break. The per-test autouse fixtures
+# below re-pin en-US for runtime ``t()`` rendering; this line covers the one-shot
+# import-time freeze they cannot reach. Resolution-chain tests clear SE3_LANG via
+# their own ``monkeypatch.delenv`` and are unaffected.
+os.environ["SE3_LANG"] = "en-US"
+
 import se3.config as _cfg  # noqa: E402
 
 

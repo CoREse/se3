@@ -18,12 +18,12 @@ from . import __version__
 
 # Import display utilities early to ensure console is initialized
 from .engine.display import get_console, render_full, render_text
-from .i18n import t
+from .i18n import bind_project_root, t
 
 
 app = typer.Typer(
     name="se3",
-    help="SE 3.0 framework CLI tools",
+    help=t("cli.help.app"),
     invoke_without_command=True,
 )
 
@@ -33,11 +33,11 @@ def _version_callback(value: bool):
         typer.echo(t("cli.version", version=__version__))
         raise typer.Exit()
 
-@app.callback()
+@app.callback(help=t("cli.help.app"))
 def main(
     ctx: typer.Context,
     version: bool = typer.Option(
-        False, "--version", "-v", help="Show version information", callback=_version_callback, is_eager=True
+        False, "--version", "-v", help=t("cli.help.version"), callback=_version_callback, is_eager=True
     ),
 ):
     """SE 3.0 framework CLI tools."""
@@ -61,8 +61,8 @@ def _init_display() -> None:
 
 
 def _read_multiline_input(
-    prompt_title: str = t("cli.input.title"),
-    prompt_message: str = t("cli.input.prompt"),
+    prompt_title: Optional[str] = None,
+    prompt_message: Optional[str] = None,
     history: Optional[any] = None,
     *,
     strip: bool = True,
@@ -73,12 +73,23 @@ def _read_multiline_input(
     wide characters (e.g., Chinese) and multiline input.
 
     Args:
-        prompt_title: Title displayed above the input area.
-        prompt_message: Instruction text shown to the user.
+        prompt_title: Title displayed above the input area. ``None`` renders the
+            default title at call time.
+        prompt_message: Instruction text shown to the user. ``None`` renders the
+            default message at call time.
         strip: Whether to strip leading/trailing whitespace from input.
                Default True. Set False when strict character comparison is
                needed (e.g., discovery confirmation gate's == "1" check).
     """
+    # WHY: the default chrome is resolved here, not in the signature — signature
+    # defaults evaluate at import time, before the command binds the project root
+    # and its ``language.language`` takes effect, which would pin the prompt to
+    # the cwd-resolved language while the rest of the output follows the project.
+    if prompt_title is None:
+        prompt_title = t("cli.input.title")
+    if prompt_message is None:
+        prompt_message = t("cli.input.prompt")
+
     # Check if stdin is a tty (interactive terminal)
     if not sys.stdin.isatty():
         # Non-interactive mode (pipe/redirect): read all at once, show full content
@@ -144,19 +155,19 @@ def _read_multiline_input(
         return ""
 
 
-@app.command(name="run")
+@app.command(name="run", help=t("cli.help.run.desc"))
 def run_cmd(
     ctx: typer.Context,
-    task: Optional[str] = typer.Argument(None, help="Task description"),
-    resume: bool = typer.Option(False, "--resume", "-r", help="Resume interrupted flow"),
-    type: str = typer.Option("feature", "--type", "-t", help="Task type (feature, bugfix, refactor, etc.)"),
-    change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
-    flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
-    discover: bool = typer.Option(False, "--discover", "-d", help="Discovery mode - explore requirements with user before analyzing"),
-    from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection). Combine with --discover to start the issue-sourced flow from the discovery step."),
-    output_format: str = typer.Option("cli", "--output-format", help="Output sink: 'cli' (Rich rendering, default) or 'json' (structured NDJSON event stream)"),
-    preset: Optional[str] = typer.Option(None, "--preset", help="Run a preset prompt task by name (mutually exclusive with --type; the preset carries its own type). Use '--preset list' to list available presets."),
-    worktree: bool = typer.Option(False, "--worktree", help="Isolation mode: run the flow in a dedicated git worktree (concurrent with other --worktree runs), then auto-merge the result back into the current branch. Without this flag, the flow runs in place (synchronous mode)."),
+    task: Optional[str] = typer.Argument(None, help=t("cli.help.run.task")),
+    resume: bool = typer.Option(False, "--resume", "-r", help=t("cli.help.run.resume")),
+    type: str = typer.Option("feature", "--type", "-t", help=t("cli.help.run.type")),
+    change: Optional[str] = typer.Option(None, "--change", "-c", help=t("cli.help.run.change")),
+    flow_id: Optional[str] = typer.Option(None, "--flow-id", help=t("cli.help.run.flow_id")),
+    discover: bool = typer.Option(False, "--discover", "-d", help=t("cli.help.run.discover")),
+    from_issue: Optional[str] = typer.Option(None, "--from-issue", help=t("cli.help.run.from_issue")),
+    output_format: str = typer.Option("cli", "--output-format", help=t("cli.help.run.output_format")),
+    preset: Optional[str] = typer.Option(None, "--preset", help=t("cli.help.run.preset")),
+    worktree: bool = typer.Option(False, "--worktree", help=t("cli.help.run.worktree")),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -443,11 +454,11 @@ from .commands.migrate_cmd import migrate_app
 from .commands.worktree_cmd import worktree_app
 
 
-@app.command(name="init")
+@app.command(name="init", help=t("cli.help.init.desc"))
 def init_cmd(
-    project_root: str = typer.Option(".", "--project-root", "-p", help="Project root directory"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Project name"),
-    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help=t("cli.help.common.project_root")),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help=t("cli.help.init.name")),
+    force: bool = typer.Option(False, "--force", "-f", help=t("cli.help.init.force")),
 ):
     """Initialize a new SE3 project.
     
@@ -456,6 +467,7 @@ def init_cmd(
     - se3/specs/ - Specification directory
     - se3/specs/base/spec.md - Base project specification
     """
+    bind_project_root(Path(project_root))
     init_command(project_root=project_root, name=name, force=force)
 
 
@@ -468,6 +480,7 @@ def _run_spec_size_guardrails(project_root: Optional[Path]) -> None:
     violations are found the command always exits ``0``.
     """
     root = Path(project_root).resolve() if project_root else Path.cwd()
+    bind_project_root(root)
 
     from .config import load_spec_governance_config
     from .engine.merge.guardrails import check_spec_sizes
@@ -510,14 +523,18 @@ def _run_spec_size_guardrails(project_root: Optional[Path]) -> None:
     raise typer.Exit(code=0)
 
 
-@app.command(name="guardrails")
+@app.command(name="guardrails", help=t("cli.help.guardrails.desc"))
 def guardrails_cmd(
-    spec_file: Optional[Path] = typer.Argument(None, help="Path to spec file to check"),
-    original: Optional[Path] = typer.Option(None, "--original", "-o", help="Path to original spec file for comparison"),
-    sizes: bool = typer.Option(False, "--sizes", help="Run spec volume-governance size checks over the whole project (base/spec-file/Requirement byte limits) instead of a per-file diff check"),
-    project_root: Optional[Path] = typer.Option(None, "--project-root", "-p", help="Project root for --sizes (default: current directory)"),
+    spec_file: Optional[Path] = typer.Argument(None, help=t("cli.help.guardrails.spec_file")),
+    original: Optional[Path] = typer.Option(None, "--original", "-o", help=t("cli.help.guardrails.original")),
+    sizes: bool = typer.Option(False, "--sizes", help=t("cli.help.guardrails.sizes")),
+    project_root: Optional[Path] = typer.Option(None, "--project-root", "-p", help=t("cli.help.guardrails.project_root")),
 ):
     """Check spec file against SE3 Spec Guardrails."""
+    # Both branches render through t(); bind here so --project-root selects the
+    # target project's language for the spec-file check too, not just --sizes.
+    bind_project_root(Path(project_root) if project_root else None)
+
     if sizes:
         _run_spec_size_guardrails(project_root)
         return
@@ -632,10 +649,10 @@ def _project_root_for_spec(spec_file: Path) -> Path:
 
 
 # Register history command
-app.add_typer(history_app, name="history", help="View and manage session history")
+app.add_typer(history_app, name="history", help=t("cli.help.history"))
 
 # Register issue command
-app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
+app.add_typer(issue_app, name="issue", help=t("cli.help.issue"))
 
 # Register code-index command (structure map navigation: index / show / rebuild
 # / inspect). Named "code-index" — not the ambiguous "code" — and reads the
@@ -643,15 +660,15 @@ app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 app.add_typer(
     code_index_app,
     name="code-index",
-    help="Navigate the code-index structure map (reads se3/code-index.md)",
+    help=t("cli.help.code_index"),
 )
 
 # Register migrate command (registry-based version/format migration channel)
-app.add_typer(migrate_app, name="migrate", help="Run a registered version/format migration")
+app.add_typer(migrate_app, name="migrate", help=t("cli.help.migrate"))
 
 # Register worktree command (isolation-worktree operator surface; `se3 worktree
 # gc` reclaims leaked terminal --worktree runs stranded under se3/worktrees/)
-app.add_typer(worktree_app, name="worktree", help="Manage se3 run --worktree isolation worktrees")
+app.add_typer(worktree_app, name="worktree", help=t("cli.help.worktree"))
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +676,7 @@ app.add_typer(worktree_app, name="worktree", help="Manage se3 run --worktree iso
 # ---------------------------------------------------------------------------
 daemon_app = typer.Typer(
     name="daemon",
-    help="Resident control-plane daemon (supervises local flows, dials the server)",
+    help=t("cli.help.daemon.app"),
 )
 
 
@@ -739,32 +756,20 @@ def _report_connection_result(config, daemon_status_fn) -> None:
         )
 
 
-@daemon_app.command(name="start")
+@daemon_app.command(name="start", help=t("cli.help.daemon.start.desc"))
 def daemon_start_cmd(
     server_url: Optional[str] = typer.Option(
         None,
         "--server-url",
-        help=(
-            "Central server URL the daemon dials out to. An explicit port "
-            "(wss://host:9000) is always preserved; when the port is omitted it "
-            "is completed per the scheme — wss:// (and https://) default to 443, "
-            "ws:// (and http://) default to 8080 (the se3-server plaintext "
-            "default). So a bare wss://host dials :443, not :8080."
-        ),
+        help=t("cli.help.daemon.start.server_url"),
     ),
     daemon_key: Optional[str] = typer.Option(
         None,
         "--daemon-key",
-        help=(
-            "Secret daemon credential sent to the central server so it can "
-            "bind this machine to its owner. When omitted, the SE3_DAEMON_KEY "
-            "environment variable is used. The key is held only in memory and "
-            "is never written to logs or the daemon status file. Prefer the "
-            "environment variable so the secret does not land in shell history."
-        ),
+        help=t("cli.help.daemon.start.daemon_key"),
     ),
     foreground: bool = typer.Option(
-        False, "--foreground", help="Run the daemon in the foreground (do not detach)"
+        False, "--foreground", help=t("cli.help.daemon.start.foreground")
     ),
 ):
     """Start the SE3 daemon.
@@ -787,7 +792,12 @@ def daemon_start_cmd(
     try:
         result = start_daemon(config, foreground=foreground)
     except DaemonAlreadyRunning as exc:
-        render_text(str(exc), title=t("cli.daemon.title"))
+        # The exception body is an English f-string built in daemon.py; render
+        # the localized catalog entry from the pid it carries instead.
+        render_text(
+            t("cli.daemon.already_running", pid=exc.pid),
+            title=t("cli.daemon.title"),
+        )
         raise typer.Exit(1)
     if not foreground:
         status = result.get("status")
@@ -800,7 +810,7 @@ def daemon_start_cmd(
     raise typer.Exit(0)
 
 
-@daemon_app.command(name="stop")
+@daemon_app.command(name="stop", help=t("cli.help.daemon.stop.desc"))
 def daemon_stop_cmd():
     """Stop the running SE3 daemon."""
     from .daemon import DaemonConfig, stop_daemon
@@ -820,10 +830,10 @@ def daemon_stop_cmd():
     raise typer.Exit(0)
 
 
-@daemon_app.command(name="status")
+@daemon_app.command(name="status", help=t("cli.help.daemon.status.desc"))
 def daemon_status_cmd(
     json_output: bool = typer.Option(
-        False, "--json", "-j", help="Emit status as JSON"
+        False, "--json", "-j", help=t("cli.help.daemon.status.json")
     ),
 ):
     """Show the SE3 daemon's running state and tracked flows."""
@@ -871,15 +881,15 @@ def daemon_status_cmd(
     raise typer.Exit(0)
 
 
-app.add_typer(daemon_app, name="daemon", help="Manage the SE3 daemon")
+app.add_typer(daemon_app, name="daemon", help=t("cli.help.daemon"))
 
 
-@app.command(name="merge")
+@app.command(name="merge", help=t("cli.help.merge.desc"))
 def merge_cmd(
-    branches: list[str] = typer.Argument(None, help="Branches to merge into current branch (in order)"),
-    strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: fast (default), safe, or strict"),
-    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and archive their worktrees (default: enabled; use --no-delete-merged to disable)"),
-    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config and the new default-on behaviour)"),
+    branches: list[str] = typer.Argument(None, help=t("cli.help.merge.branches")),
+    strategy: str = typer.Option(None, "--strategy", "-s", help=t("cli.help.merge.strategy")),
+    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help=t("cli.help.merge.delete_merged")),
+    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help=t("cli.help.merge.no_delete_merged")),
 ):
     """Merge one or more branches sequentially into the current branch.
 
@@ -907,6 +917,13 @@ def merge_cmd(
     from .commands.run import get_project_root
     from .config import load_merge_config
 
+    # Resolve project root first so config is loaded from the correct location
+    # (not cwd, which may be a subdirectory of the project). This also binds the
+    # i18n language to the project, so it must precede every t()-rendered
+    # argument-validation error below — otherwise those errors alone would speak
+    # the cwd-resolved language while the rest of the output follows the project.
+    project_root = get_project_root()
+
     # Defect I1: empty branch list must be rejected at CLI input level so a
     # silent zero-iteration "success" is impossible. typer.BadParameter renders
     # the standard click-style error including --help hint.
@@ -925,9 +942,6 @@ def merge_cmd(
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="branches") from exc
 
-    # Resolve project root first so config is loaded from the correct location
-    # (not cwd, which may be a subdirectory of the project).
-    project_root = get_project_root()
     merge_cfg = load_merge_config(project_root)
     effective_strategy = strategy if strategy is not None else merge_cfg.strategy
     if no_delete_merged:
@@ -959,9 +973,9 @@ def merge_cmd(
     raise typer.Exit(exit_code)
 
 
-@app.command(name="merge-respond")
+@app.command(name="merge-respond", help=t("cli.help.merge_respond.desc"))
 def merge_respond_cmd(
-    call_file: Path = typer.Argument(..., help="Path to the merge call file"),
+    call_file: Path = typer.Argument(..., help=t("cli.help.merge_respond.call_file")),
 ):
     """Process an MCP call response file for merge conflicts.
 
@@ -977,18 +991,13 @@ def merge_respond_cmd(
     raise typer.Exit(exit_code)
 
 
-@app.command(name="merge-unlock")
+@app.command(name="merge-unlock", help=t("cli.help.merge_unlock.desc"))
 def merge_unlock_cmd(
     force: bool = typer.Option(
         False,
         "--force",
         "-f",
-        help=(
-            "Force-release a lock whose holder process is still alive. "
-            "This may break merge mutual exclusion — use only when you are "
-            "certain no active merge is running. A stale lock is cleaned up "
-            "without this flag."
-        ),
+        help=t("cli.help.merge_unlock.force"),
     ),
 ):
     """Manually release (and inspect) the current project's merge lock.
@@ -1053,9 +1062,9 @@ def merge_unlock_cmd(
     raise typer.Exit(outcome.exit_code)
 
 
-@app.command(name="salvage")
+@app.command(name="salvage", help=t("cli.help.salvage.desc"))
 def salvage_cmd(
-    project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),
+    project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help=t("cli.help.common.project_root")),
 ):
     """Salvage work from an abnormally terminated session.
 
@@ -1072,26 +1081,27 @@ def salvage_cmd(
     from .commands.salvage_cmd import salvage
 
     root = Path(project_root) if project_root else None
+    bind_project_root(root)
     exit_code = salvage(root)
     raise typer.Exit(exit_code)
 
 
-@app.command(name="end-session")
+@app.command(name="end-session", help=t("cli.help.end_session.desc"))
 def end_session_cmd(
     flow_id: Optional[str] = typer.Argument(
         None,
-        help="Flow id to end (default: the main project's active session).",
+        help=t("cli.help.end_session.flow_id"),
     ),
     project_root: Optional[str] = typer.Option(
-        None, "--project-root", "-p", help="Project root directory"
+        None, "--project-root", "-p", help=t("cli.help.common.project_root")
     ),
     pid: Optional[int] = typer.Option(
-        None, "--pid", help="Hint: pid of the live se3 run process to terminate."
+        None, "--pid", help=t("cli.help.end_session.pid")
     ),
     no_archive_worktree: bool = typer.Option(
         False,
         "--no-archive-worktree",
-        help="Terminate the process but leave the worktree in place (do not archive).",
+        help=t("cli.help.end_session.no_archive_worktree"),
     ),
 ):
     """End and archive a session (worktree is cleaned up; uncommitted work is NOT merged).
@@ -1106,6 +1116,7 @@ def end_session_cmd(
     from .commands.end_session_cmd import end_session
 
     root = Path(project_root) if project_root else None
+    bind_project_root(root)
     exit_code = end_session(
         project_root=root,
         flow_id=flow_id,

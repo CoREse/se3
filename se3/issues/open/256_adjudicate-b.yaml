@@ -50,11 +50,11 @@ description: '== 动机（2026-07-04 flow 20260704-003700_4055d799 实测数据�
   - covered_surfaces 中每项均有 justification，确认门可见。
 
   - 不确定表面未被纳入时，其后续独立触发路径不受影响（回归现有行为）。'
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-07-04T13:55:36.919952'
-updated_at: '2026-07-04T13:55:36.919952'
+updated_at: '2026-07-12T00:33:33.891592'
 title: adjudicate 同构清扫：裁决真矛盾时一次划全所有 by-construction 同构表面
 priority: medium
 type: feature

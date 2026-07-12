@@ -12,7 +12,7 @@
  *       status 'running', NO stepReport) whose stepId/stepType match the step.
  *   (b) A non-LLM step (TEST / COMMIT / SPEC_GATE) that has ONLY a step_started
  *       record still surfaces its visual step region (a step-header + a
- *       "进行中" status row) the instant it enters RUNNING.
+ *       "In progress" status row) the instant it enters RUNNING.
  *   (c) renderStepStartedRecord renders a text+icon status row with NO report
  *       card, NO fold / raw / chip affordance.
  *   (d) stepStatusDisplay maps every status to {icon, text} with fallbacks.
@@ -93,13 +93,13 @@ export function registerStepStartedRegionTests(ctx) {
       const title = findOne(headers[0], "history-step-title");
       assert.ok(title && title.textContent === app.stepHeaderLabel(stepType),
         `header should label the ${stepType} region`);
-      // A "进行中" status row is present.
+      // A "In progress" status row is present.
       const statusRow = findOne(container, "step-status-row");
       assert.ok(statusRow, "expected a step-status-row for the running step");
       assert.ok(statusRow.classList.contains("step-status-running"));
       const text = findOne(statusRow, "step-status-text");
-      assert.ok(text && text.textContent.includes("进行中"),
-        `status row should read 进行中, got ${text && text.textContent}`);
+      assert.ok(text && text.textContent.includes("In progress"),
+        `status row should read In progress, got ${text && text.textContent}`);
       void label;
     });
   }
@@ -133,11 +133,11 @@ export function registerStepStartedRegionTests(ctx) {
 
   // ---- (d) stepStatusDisplay ----------------------------------------------
   check("G2 stepStatusDisplay maps known statuses to icon + text", () => {
-    assert.equal(app.stepStatusDisplay("running").text, "进行中");
-    assert.equal(app.stepStatusDisplay("retrying").text, "重试中");
-    assert.equal(app.stepStatusDisplay("paused").text, "已暂停");
-    assert.equal(app.stepStatusDisplay("completed").text, "已完成");
-    assert.equal(app.stepStatusDisplay("failed").text, "失败");
+    assert.equal(app.stepStatusDisplay("running").text, "In progress");
+    assert.equal(app.stepStatusDisplay("retrying").text, "Retrying");
+    assert.equal(app.stepStatusDisplay("paused").text, "Paused");
+    assert.equal(app.stepStatusDisplay("completed").text, "Completed");
+    assert.equal(app.stepStatusDisplay("failed").text, "Failed");
     // Each has a non-empty icon.
     for (const s of ["running", "retrying", "paused", "completed", "failed"]) {
       assert.ok(app.stepStatusDisplay(s).icon, `${s} should have an icon`);
@@ -145,7 +145,7 @@ export function registerStepStartedRegionTests(ctx) {
   });
 
   check("G2 stepStatusDisplay is case-insensitive and falls back safely", () => {
-    assert.equal(app.stepStatusDisplay("RUNNING").text, "进行中");
+    assert.equal(app.stepStatusDisplay("RUNNING").text, "In progress");
     // Unknown status keeps its raw token rather than dropping it.
     const unknown = app.stepStatusDisplay("quiescing");
     assert.equal(unknown.text, "quiescing");

@@ -136,7 +136,7 @@ def test_interactive_confirm_pause_writes_discovery_confirm_call(tmp_path):
     assert step.inputs.get("programmatic_confirmed") is True
     data = captured["data"]
     assert data["kind"] == "discovery_confirm"
-    assert "输入 1 确认" in data["prompt"]
+    assert "Type 1 to confirm" in data["prompt"]
     assert "Build a CLI tool" in data["prompt"]
     assert len(data["options"]) == 1
     assert data["options"][0]["value"] == "1"

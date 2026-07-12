@@ -81,6 +81,12 @@ def end_session(
         if project_root is None:
             console.print(t("end_session.no_project_root"))
             return 1
+        # WHY: the root can sit above cwd (run from a subdirectory) or resolve to
+        # a worktree's main root, and the caller bound the language before that
+        # was known — re-bind now that the operating project is settled.
+        from ..i18n import bind_project_root
+
+        bind_project_root(project_root)
         results.append((t("end_session.step.resolve_root"), "OK", str(project_root)))
     except Exception as e:  # noqa: BLE001
         results.append((t("end_session.step.resolve_root"), "FAIL", str(e)[:80]))

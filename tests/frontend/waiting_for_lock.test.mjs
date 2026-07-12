@@ -43,7 +43,7 @@ export function registerWaitingForLockTests({ app, check, findOne, findAll }) {
     assert.ok(norm.content.includes("Waiting for the main-worktree lock"));
   });
 
-  check("G2 waiting_for_lock renders a 等待锁 status row, not an empty bubble", () => {
+  check("G2 waiting_for_lock renders a Waiting for lock status row, not an empty bubble", () => {
     const container = document.createElement("div");
     app.renderConversation(
       container, [lockRecord("01_analyze_ab", "analyze", 1)], false);
@@ -55,8 +55,8 @@ export function registerWaitingForLockTests({ app, check, findOne, findAll }) {
     assert.ok(row.classList.contains("step-status-waiting_for_lock"));
     assert.ok(row.classList.contains("kind-waiting_for_lock"));
     const text = findOne(row, "step-status-text");
-    assert.ok(text && text.textContent.includes("等待锁"),
-      `status row should read 等待锁, got ${text && text.textContent}`);
+    assert.ok(text && text.textContent.includes("Waiting for lock"),
+      `status row should read Waiting for lock, got ${text && text.textContent}`);
     // Affordance-free: no report card / fold chip / raw toggle.
     assert.equal(findAll(row, "step-report").length, 0);
     assert.equal(findAll(row, "msg-chip").length, 0);
@@ -77,13 +77,13 @@ export function registerWaitingForLockTests({ app, check, findOne, findAll }) {
     const rows = findAll(container, "step-status-row");
     assert.equal(rows.length, 1, "only the current status anchor should survive");
     const text = findOne(rows[0], "step-status-text");
-    assert.ok(text && text.textContent.includes("进行中"),
-      "the surviving anchor reads 进行中 once the lock is acquired");
+    assert.ok(text && text.textContent.includes("In progress"),
+      "the surviving anchor reads In progress once the lock is acquired");
   });
 
-  check("G2 stepStatusDisplay maps waiting_for_lock to icon + 等待锁", () => {
+  check("G2 stepStatusDisplay maps waiting_for_lock to icon + Waiting for lock", () => {
     const d = app.stepStatusDisplay("waiting_for_lock");
-    assert.equal(d.text, "等待锁");
+    assert.equal(d.text, "Waiting for lock");
     assert.ok(d.icon, "waiting_for_lock should carry an icon");
   });
 

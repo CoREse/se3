@@ -2368,6 +2368,7 @@ def get_language_instruction(
     context: str = "",
     *,
     for_spec: bool = False,
+    for_knowledge: bool = False,
 ) -> str:
     """Get a language instruction string for LLM prompts.
 
@@ -2378,11 +2379,16 @@ def get_language_instruction(
             path: it states that the configured spec language is authoritative
             for the written spec (prose + SHALL/MUST requirement statements).
             Used by ``update_spec`` and the ``sync_*`` write paths.
+        for_knowledge: When True, the instruction is tailored for the
+            knowledge-asset write paths (charter.md, code-index summaries):
+            it names the configured language as the authoritative writing
+            language for that asset, with no spec/SHALL wording — those assets
+            are plain prose, not requirement statements.
 
     Returns:
         Prompt instruction string when language is set, empty string when None.
         The contract that ``language is None``/empty returns ``""`` is
-        preserved regardless of ``for_spec``.
+        preserved regardless of ``for_spec``/``for_knowledge``.
     """
     if not language:
         return ""
@@ -2396,7 +2402,19 @@ def get_language_instruction(
         "NOT translate code identifiers, function/class names, command names, "
         "API names, file paths, or literal config keys/values."
     )
-    if for_spec:
+    if for_knowledge:
+        # Knowledge-asset context (charter.md / code-index): these are plain
+        # prose, so the spec variant's SHALL/MUST wording would bias the output
+        # toward requirement statements. State only that the configured
+        # language is the authoritative writing language for the asset, so the
+        # agent does not mirror the source code's incidental language.
+        parts.append(
+            f"This content is written into a project knowledge asset "
+            f"(charter.md / code-index summaries): the configured language "
+            f"({language}) is the authoritative writing language for it. Write "
+            f"all prose in {language}."
+        )
+    elif for_spec:
         # Spec-writing context: spec_language is the single authority for the
         # written spec body. Make that explicit so the agent does not mirror
         # the source code's incidental language.

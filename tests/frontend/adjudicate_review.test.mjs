@@ -116,7 +116,7 @@ export async function registerAdjudicateReviewTests(ctx) {
     assert.equal(findAll(node, "diff-add").length, 0, "no add lines for an unchanged description");
     const note = findOne(node, "flow-reply-adjudicate-note");
     assert.ok(note, "an explanatory note is shown instead of a diff");
-    assert.ok(String(note.textContent).includes("未修改"), `note explains nothing changed, got: ${note.textContent}`);
+    assert.ok(String(note.textContent).includes("did not modify"), `note explains nothing changed, got: ${note.textContent}`);
   });
 
   // ---- fully empty context renders nothing ---------------------------------

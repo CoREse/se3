@@ -1266,7 +1266,12 @@ class TestStepSequences:
 
 
 class TestFormatRoundUsageFooter:
-    """The shared compact per-round usage footer formatter (G1 task 1)."""
+    """The shared compact per-round usage footer formatter (G1 task 1).
+
+    The label chrome is i18n-rendered; the engine conftest pins the UI language
+    to en-US, so these assert the en-US catalog wording (zh-CN carries the
+    ``本轮 … · 累计 …`` translation of the same keys).
+    """
 
     def test_normal_values_render_round_and_cumulative(self):
         from .token_usage import UsageTotals, format_round_usage_footer
@@ -1275,7 +1280,7 @@ class TestFormatRoundUsageFooter:
             UsageTotals(input_tokens=1234, output_tokens=567),
             UsageTotals(input_tokens=12345, output_tokens=6789),
         )
-        assert footer == "本轮 1,234 in / 567 out · 累计 12,345 in / 6,789 out"
+        assert footer == "This round 1,234 in / 567 out · Total 12,345 in / 6,789 out"
 
     def test_uses_thousands_separators_not_abbreviation(self):
         from .token_usage import UsageTotals, format_round_usage_footer
@@ -1294,7 +1299,7 @@ class TestFormatRoundUsageFooter:
         from .token_usage import UsageTotals, format_round_usage_footer
 
         footer = format_round_usage_footer(UsageTotals(), UsageTotals())
-        assert footer == "本轮 0 in / 0 out · 累计 0 in / 0 out"
+        assert footer == "This round 0 in / 0 out · Total 0 in / 0 out"
 
     def test_none_inputs_degrade_to_zero(self):
         from .token_usage import format_round_usage_footer
@@ -1302,7 +1307,7 @@ class TestFormatRoundUsageFooter:
         # The function does not gate on emptiness itself — that is the caller's
         # job — but None must degrade to zeros rather than raise.
         assert format_round_usage_footer(None, None) == (
-            "本轮 0 in / 0 out · 累计 0 in / 0 out"
+            "This round 0 in / 0 out · Total 0 in / 0 out"
         )
 
     def test_only_input_output_shown(self):
@@ -1320,7 +1325,7 @@ class TestFormatRoundUsageFooter:
         )
         # Per the task copy format only input/output are surfaced — no cache
         # breakdown and no cost in the compact footer.
-        assert footer == "本轮 10 in / 20 out · 累计 30 in / 40 out"
+        assert footer == "This round 10 in / 20 out · Total 30 in / 40 out"
         assert "cache" not in footer
         assert "$" not in footer
 
@@ -1425,7 +1430,8 @@ class TestDiscoveryCarriedTokenUsage:
 class TestDiscoveryRoundUsageFooter:
     """Per-round CLI usage footer rendering and gating (G2 tasks 1-3).
 
-    The discovery message block appends a compact dim ``本轮 … · 累计 …`` footer
+    The discovery message block appends a compact dim ``This round … · Total …``
+    footer (i18n-rendered; en-US under the engine conftest's pinned language)
     only when this round actually invoked the LLM (a non-empty round usage); an
     empty / ``None`` round usage (empty-input redraw, ``--resume`` re-display)
     must render no footer.
@@ -1455,12 +1461,12 @@ class TestDiscoveryRoundUsageFooter:
             round_usage=UsageTotals(input_tokens=1234, output_tokens=567),
             cumulative_usage=UsageTotals(input_tokens=12345, output_tokens=6789),
         )
-        assert "本轮 1,234 in / 567 out · 累计 12,345 in / 6,789 out" in out
+        assert "This round 1,234 in / 567 out · Total 12,345 in / 6,789 out" in out
 
     def test_no_footer_when_round_usage_none(self):
         out = self._render_to_text()
-        assert "本轮" not in out
-        assert "累计" not in out
+        assert "This round" not in out
+        assert "Total" not in out
 
     def test_no_footer_when_round_usage_empty(self):
         from .token_usage import UsageTotals
@@ -1471,8 +1477,8 @@ class TestDiscoveryRoundUsageFooter:
         )
         # An empty round increment (no LLM call this round) suppresses the footer
         # even though a cumulative total exists.
-        assert "本轮" not in out
-        assert "累计" not in out
+        assert "This round" not in out
+        assert "Total" not in out
 
     def test_handler_passes_round_and_cumulative_usage(self):
         """discovery_handler computes round=current_step_usage(), cumulative=carried+round."""
@@ -1577,7 +1583,7 @@ class TestCliSinkUsageRendering:
 
         out = console.export_text()
         # Compact footer, round == cumulative (single LLM review per confirm step).
-        assert "本轮 1,234 in / 567 out · 累计 1,234 in / 567 out" in out
+        assert "This round 1,234 in / 567 out · Total 1,234 in / 567 out" in out
         # NOT the big reverse-color per-step block.
         assert "Step Token Usage" not in out
         big_block.assert_not_called()

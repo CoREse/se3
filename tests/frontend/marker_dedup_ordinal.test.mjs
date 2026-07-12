@@ -207,7 +207,7 @@ export function registerMarkerDedupOrdinalTests(ctx) {
     // The rebuild opens: line 0 marker (1/5). Exactly one live progress card.
     app.applyHistoryData({ flow_id: flowId, mode: "full", records: [ipMarker(0, "a.py", 1, 5, 1)] });
     assert.equal(findAll(c, "index-progress-marker").length, 1, "one progress card at the start of the refresh");
-    assert.equal(findOne(c, "index-progress-text").textContent, "更新 code-index：a.py (1/5)");
+    assert.equal(findOne(c, "index-progress-text").textContent, "Updating code-index: a.py (1/5)");
 
     // Each subsequent marker line arrives via the low-latency WS append path
     // (distinct ordinal → not deduped away), and the SINGLE card updates in
@@ -216,7 +216,7 @@ export function registerMarkerDedupOrdinalTests(ctx) {
       app.applyHistoryData({ flow_id: flowId, mode: "append", records: [ipMarker(ord, path, done, 5, ts)] });
       assert.equal(findAll(c, "index-progress-marker").length, 1,
         `still one card mid-refresh at ${done}/5 (in-place update, not a new bubble)`);
-      assert.equal(findOne(c, "index-progress-text").textContent, `更新 code-index：${path} (${done}/5)`,
+      assert.equal(findOne(c, "index-progress-text").textContent, `Updating code-index: ${path} (${done}/5)`,
         "the card tracks the latest count in place");
       assert.ok(findOne(c, "index-progress-marker").classList.contains("status-running"),
         "still running while done<total");
@@ -225,7 +225,7 @@ export function registerMarkerDedupOrdinalTests(ctx) {
     // The final marker (5/5) completes the rebuild.
     app.applyHistoryData({ flow_id: flowId, mode: "append", records: [ipMarker(4, "e.py", 5, 5, 5)] });
     assert.equal(findAll(c, "index-progress-marker").length, 1, "one card at completion — never stacked");
-    assert.equal(findOne(c, "index-progress-text").textContent, "更新 code-index：e.py (5/5)");
+    assert.equal(findOne(c, "index-progress-text").textContent, "Updating code-index: e.py (5/5)");
     assert.ok(findOne(c, "index-progress-marker").classList.contains("status-completed"),
       "the card flips to completed at 5/5");
     // No content bubbles were manufactured by the empty-content markers.

@@ -290,7 +290,8 @@ def test_confirm_compact_footer_not_regressed(captured_console):
     step = _make_step_with_usage("confirm", usage)
     _consume_completed(step)
     out = captured_console.export_text()
-    assert "本轮 100 in / 50 out · 累计 100 in / 50 out" in out
+    # Footer chrome is i18n-rendered; conftest pins the UI language to en-US.
+    assert "This round 100 in / 50 out · Total 100 in / 50 out" in out
     assert "Step Token Usage" not in out
 
 

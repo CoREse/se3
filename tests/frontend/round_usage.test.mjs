@@ -72,7 +72,7 @@ export function registerRoundUsageTests(ctx) {
     assert.ok(foot, "expected a footnote node");
     const text = findOne(foot, "round-usage__text");
     assert.ok(text, "expected a .round-usage__text span");
-    assert.equal(text.textContent, "本轮 1,000 in / 200 out · 累计 1,500 in / 250 out");
+    assert.equal(text.textContent, "This round 1,000 in / 200 out · Total 1,500 in / 250 out");
   });
 
   check("G5 buildRoundUsageFootnote returns null when the round consumed nothing", () => {
@@ -89,14 +89,14 @@ export function registerRoundUsageTests(ctx) {
     for (const cum of [undefined, null, {}]) {
       const foot = app.buildRoundUsageFootnote(USAGE(), cum);
       const text = findOne(foot, "round-usage__text").textContent;
-      assert.equal(text, "本轮 1,000 in / 200 out · 累计 1,000 in / 200 out");
+      assert.equal(text, "This round 1,000 in / 200 out · Total 1,000 in / 200 out");
     }
   });
 
   check("G5 buildRoundUsageFootnote never renders NaN on a partial round dict", () => {
     const foot = app.buildRoundUsageFootnote({ input_tokens: 5 }, undefined);
     const text = findOne(foot, "round-usage__text").textContent;
-    assert.equal(text, "本轮 5 in / 0 out · 累计 5 in / 0 out");
+    assert.equal(text, "This round 5 in / 0 out · Total 5 in / 0 out");
     assert.equal(text.includes("NaN"), false);
   });
 
@@ -178,7 +178,7 @@ export function registerRoundUsageTests(ctx) {
     wrap.appendChild(frag);
     const text = findOne(wrap, "round-usage__text");
     assert.ok(text, "expected a per-round footnote in the discovery bubble");
-    assert.equal(text.textContent, "本轮 1,000 in / 200 out · 累计 1,500 in / 250 out");
+    assert.equal(text.textContent, "This round 1,000 in / 200 out · Total 1,500 in / 250 out");
   });
 
   check("G5 discovery assistant bubble has NO footnote when the round carried no usage", () => {
@@ -206,7 +206,7 @@ export function registerRoundUsageTests(ctx) {
     wrap.appendChild(frag);
     const text = findOne(wrap, "round-usage__text");
     assert.ok(text, "expected a per-round footnote on the confirm bubble");
-    assert.equal(text.textContent, "本轮 400 in / 30 out · 累计 400 in / 30 out");
+    assert.equal(text.textContent, "This round 400 in / 30 out · Total 400 in / 30 out");
   });
 
   check("G5 no-result assistant bubble still shows the footnote when usage present", () => {
@@ -223,7 +223,7 @@ export function registerRoundUsageTests(ctx) {
     wrap.appendChild(frag);
     const text = findOne(wrap, "round-usage__text");
     assert.ok(text, "expected a footnote on the no-result inline path");
-    assert.equal(text.textContent, "本轮 700 in / 12 out · 累计 700 in / 12 out");
+    assert.equal(text.textContent, "This round 700 in / 12 out · Total 700 in / 12 out");
   });
 
   check("G5 assistant bubble with no usage renders no footnote on any path", () => {

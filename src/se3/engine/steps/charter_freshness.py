@@ -682,7 +682,7 @@ def charter_freshness_handler(step: Step, flow: FlowInstance) -> StepStatus:
     spec_lang_instruction = get_language_instruction(
         load_language_config(project_root).spec_language,
         "charter_freshness",
-        for_spec=True,
+        for_knowledge=True,
     )
 
     for attempt in range(MAX_GATE_ATTEMPTS):

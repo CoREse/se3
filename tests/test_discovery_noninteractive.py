@@ -75,10 +75,11 @@ def test_write_discovery_call_marks_confirmation(tmp_path):
     call_file = _write_discovery_call(flow, step, tmp_path)
     data = json.loads(call_file.read_text())
     # Confirmation pauses carry the dedicated discovery_confirm kind so the web
-    # console renders a GUI confirm button + the textual "输入 1 确认" hint.
+    # console renders a GUI confirm button + the textual confirm hint (i18n:
+    # "Type 1 to confirm" under the en-US test locale).
     assert data["kind"] == "discovery_confirm"
     assert "Build a CLI tool" in data["prompt"]
-    assert "输入 1 确认" in data["prompt"]
+    assert "Type 1 to confirm" in data["prompt"]
     # The confirm option encodes the literal "1" the gate's == "1" check wants.
     assert len(data["options"]) == 1
     assert data["options"][0]["value"] == "1"

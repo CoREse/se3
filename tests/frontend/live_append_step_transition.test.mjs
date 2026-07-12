@@ -201,7 +201,7 @@ export function registerLiveAppendStepTransitionTests(ctx) {
     assert.equal(rows.length, 1,
       "only the analyze running anchor remains; discovery's are superseded by its report");
     assert.ok(rows[0].classList.contains("step-status-running"),
-      "the surviving anchor is analyze's 进行中 anchor");
+      "the surviving anchor is analyze's In progress anchor");
     assert.equal(rows[0].__convStepType, "analyze",
       "the surviving status row belongs to the analyze region");
   });

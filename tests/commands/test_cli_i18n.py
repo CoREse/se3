@@ -106,18 +106,32 @@ def test_missing_zh_key_falls_back_to_en_per_key():
 @pytest.mark.parametrize(
     "args, en_substr, zh_substr",
     [
-        # cli.merge.branch_required (BadParameter path — no filesystem needed).
+        # cli.merge.branch_required (BadParameter path, raised after the merge
+        # command binds the project root).
         (["merge"], "At least one branch name is required", "至少需要提供一个分支名称"),
         # cli.version.
         (["--version"], "se3 version", "se3 版本"),
     ],
 )
-def test_command_output_switches_language(args, en_substr, zh_substr):
+def test_command_output_switches_language(args, en_substr, zh_substr, monkeypatch):
+    """Language is driven through SE3_LANG, not a bare ``set_language()``.
+
+    Commands that resolve a project root re-bind the language from the full
+    resolution chain (so a project's ``language.language`` reaches text emitted
+    after the bind). That re-bind discards a singleton pinned by ``set_language``,
+    so the env tier — which the bind honors — is what a command-level language
+    assertion must use.
+    """
     runner = CliRunner()
-    i18n.set_language("en-US")
+
+    monkeypatch.setenv("SE3_LANG", "en-US")
+    i18n.reset_language()
     en_out = runner.invoke(app, args).output
-    i18n.set_language("zh-CN")
+
+    monkeypatch.setenv("SE3_LANG", "zh-CN")
+    i18n.reset_language()
     zh_out = runner.invoke(app, args).output
+
     assert en_substr in en_out
     assert zh_substr in zh_out
     # The two renderings must actually differ (guards an un-migrated string).
@@ -132,3 +146,116 @@ def test_se3_lang_env_drives_cli_output(monkeypatch):
     out = CliRunner().invoke(app, ["merge"]).output
     assert "至少需要提供一个分支名称" in out
     i18n.reset_language()
+
+
+# ---------------------------------------------------------------------------
+# Late-bound interactive prompt chrome
+# ---------------------------------------------------------------------------
+
+
+def test_multiline_prompt_chrome_is_resolved_at_call_time(monkeypatch):
+    """``_read_multiline_input`` must translate its title/message when called,
+    not when the module is imported.
+
+    Signature defaults evaluate once at import — before a command resolves the
+    project root and re-binds the language — which pinned the task-input prompt
+    to the import-time language while the rest of the output followed the
+    project. The defaults are therefore ``None`` and resolved in the body.
+    """
+    import inspect
+    import io
+
+    from se3 import cli
+
+    sig = inspect.signature(cli._read_multiline_input)
+    assert sig.parameters["prompt_title"].default is None
+    assert sig.parameters["prompt_message"].default is None
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        cli, "render_full",
+        lambda content, title=None: captured.update(title=title),
+    )
+    # Non-interactive branch: reads stdin whole and renders it under the title.
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("a task\n"))
+
+    monkeypatch.setenv("SE3_LANG", "zh-CN")
+    i18n.reset_language()
+    cli._read_multiline_input()
+    zh_title = captured["title"]
+
+    monkeypatch.setenv("SE3_LANG", "en-US")
+    i18n.reset_language()
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("a task\n"))
+    cli._read_multiline_input()
+    en_title = captured["title"]
+
+    assert zh_title == loader.load_catalog("zh-CN")["cli.input.title"]
+    assert en_title == loader.load_catalog("en-US")["cli.input.title"]
+    assert zh_title != en_title
+
+
+# ---------------------------------------------------------------------------
+# Status *values* (not just their column labels) render through i18n
+# ---------------------------------------------------------------------------
+
+
+def _cell_texts(render) -> str:
+    """Render a Rich table/console callable into plain text for assertions."""
+    from rich.console import Console
+
+    console = Console(width=200, record=True)
+    render(console)
+    return console.export_text()
+
+
+def test_issue_list_and_show_localize_status_values(tmp_path, monkeypatch):
+    """A localized ``状态`` column over a raw ``open`` value is a half-migrated
+    table: the status token is user-facing text and must follow the UI language."""
+    from unittest.mock import patch
+
+    from se3.commands import issue_cmd
+    from se3.engine.issue_manager import IssueManager
+
+    (tmp_path / ".git").mkdir()
+    mgr = IssueManager(tmp_path)
+    mgr._ensure_dirs()
+    issue = mgr.create(title="a task", description="d", source="cli")
+
+    monkeypatch.setenv("SE3_LANG", "zh-CN")
+    i18n.reset_language()
+    runner = CliRunner()
+    with patch.object(issue_cmd, "get_project_root", return_value=tmp_path):
+        list_out = runner.invoke(issue_cmd.app, ["list"]).output
+        show_out = runner.invoke(issue_cmd.app, ["show", issue.id]).output
+
+    assert "待处理" in list_out
+    assert "open" not in list_out
+    assert "待处理" in show_out
+    assert "open" not in show_out
+
+
+def test_history_tables_localize_status_values(monkeypatch):
+    """Flow-list and step-detail tables render engine status tokens; under zh-CN
+    they must show translated text, not the raw enum value."""
+    from se3.commands import history_cmd
+
+    monkeypatch.setenv("SE3_LANG", "zh-CN")
+    i18n.reset_language()
+
+    flows = [
+        {
+            "flow_id": "f1",
+            "status": "completed",
+            "task_description": "t",
+            "progress": "3/3",
+            "updated_at": "",
+            "source": "state",
+        }
+    ]
+    out = _cell_texts(
+        lambda console: monkeypatch.setattr(history_cmd, "console", console)
+        or history_cmd._render_flows_table(flows, "T")
+    )
+    assert "已完成" in out
+    assert "completed" not in out

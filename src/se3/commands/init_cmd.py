@@ -69,8 +69,10 @@ version:
 # Language configuration (optional) — two independent settings, merged
 # project-over-global with ~/.se3/config.yaml.
 # language:
-#   # Unified human language: drives BOTH the CLI/WebUI UI copy AND the LLM
+#   # Unified human language: drives BOTH the CLI's fixed UI copy AND the LLM
 #   # human-facing step outputs (summarize / discovery / confirmed steps).
+#   # (The central WebUI console's interface language is a per-user browser /
+#   #  localStorage preference and does NOT follow this project setting.)
 #   # CLI resolution precedence: SE3_LANG env > this key > ~/.se3/config.yaml >
 #   # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
 #   language: en-US
@@ -349,12 +351,14 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
             gitignore_path.write_text(DEFAULT_GITIGNORE_TEMPLATE, encoding="utf-8")
             return "created", ".gitignore created"
         except Exception as e:
-            return "error", f"Failed to create .gitignore: {str(e)}"
+            # The message is echoed to the user (init.warning_line), so it is
+            # UI copy and renders through i18n; only the OS error text is raw.
+            return "error", t("init.gitignore_error_create", error=str(e))
 
     try:
         existing = gitignore_path.read_text(encoding="utf-8")
     except Exception as e:
-        return "error", f"Failed to read existing .gitignore: {str(e)}"
+        return "error", t("init.gitignore_error_read", error=str(e))
 
     # Negation check runs BEFORE the ignore-pattern check on purpose: a
     # file can contain both a broad ignore (e.g. ``*.yaml``) AND an
@@ -401,7 +405,7 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
     try:
         gitignore_path.write_text(new_content, encoding="utf-8")
     except Exception as e:
-        return "error", f"Failed to append to .gitignore: {str(e)}"
+        return "error", t("init.gitignore_error_append", error=str(e))
     return "appended", f"appended {LOCAL_CONFIG_PATTERN} to existing .gitignore"
 
 
@@ -486,7 +490,7 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         )
         created.append(str(se3_yaml.relative_to(root)))
     else:
-        skipped.append(f"{se3_yaml.relative_to(root)} already exists (use --force to overwrite)")
+        skipped.append(t("init.file_exists", path=str(se3_yaml.relative_to(root))))
 
     # Detect (but do not modify) an existing se3.local.yaml so the operator
     # knows it will shadow the just-generated se3.yaml at load time.
@@ -508,7 +512,7 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         charter_file.write_text(_get_charter_template(project_name), encoding="utf-8")
         created.append(str(charter_file.relative_to(root)))
     else:
-        skipped.append(f"{charter_file.relative_to(root)} already exists (use --force to overwrite)")
+        skipped.append(t("init.file_exists", path=str(charter_file.relative_to(root))))
 
     # Create initial VERSIONS.md from template (skip if it already exists,
     # unless --force). Tracked via dedicated flags rather than the
@@ -570,9 +574,9 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
 
 
 def init_cmd(
-    project_root: str = typer.Option(".", "--project-root", "-p", help="Project root directory"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Project name"),
-    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help=t("cli.help.common.project_root")),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help=t("cli.help.init.name")),
+    force: bool = typer.Option(False, "--force", "-f", help=t("cli.help.init.force")),
 ):
     """Initialize a new SE3 project.
 

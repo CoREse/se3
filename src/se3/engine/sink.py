@@ -93,8 +93,9 @@ class CliSink(Sink):
 
     * ``discovery`` — renders a cumulative usage line (``format_usage_line``)
       from ``step.outputs['token_usage']`` when non-empty. The per-round
-      inline ``本轮 … · 累计 …`` footer is rendered by the discovery handler
-      during each round, but the terminal cumulative showing the
+      inline footer (i18n-rendered, e.g. "this round … · total …") is rendered
+      by the discovery handler during each round, but the terminal cumulative
+      showing the
       whole-discovery total (across all rounds including the programmatic
       confirmation round that issues no LLM call) is rendered here.
     * ``confirm`` — renders a compact dim single-line footer (NOT the big
@@ -259,6 +260,7 @@ class CliSink(Sink):
         usage = (getattr(step, "outputs", None) or {}).get("token_usage")
         if not usage:
             return
+        from ..i18n import t
         from .token_usage import UsageTotals, format_usage_line
 
         totals = UsageTotals.from_dict(usage)
@@ -268,7 +270,7 @@ class CliSink(Sink):
 
         from .display import get_console
 
-        line = f"Discovery cumulative: {format_usage_line(totals)}"
+        line = t("engine.usage.discovery_cumulative", usage=format_usage_line(totals))
         get_console().print(Text(line, style="dim"))
 
 

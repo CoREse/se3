@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 import yaml
 
+from ...i18n import t
 from ..version_bumper import BumpType, Version
 from ..worktree import _run_git, get_conflicting_files, get_current_branch
 from .cleanup import CleanupManager, CleanupReport
@@ -2962,6 +2963,14 @@ class MergeOrchestrator:
                 # CleanupManager publishes its in-progress report on
                 # ``_current_report`` so an aborted run still tells the
                 # operator which branches were actually deleted.
+                # The synthetic entry surfaces as a bullet in the operator-facing
+                # merge report, so it is authored UI prose and goes through the
+                # catalog; only the exception itself is interpolated as data.
+                aborted_reason = t(
+                    "cli.merge.cleanup.aborted_reason",
+                    error_type=type(exc).__name__,
+                    error=exc,
+                )
                 partial = getattr(cleanup, "_current_report", None)
                 if partial is not None:
                     report.cleanup_report = partial
@@ -2974,20 +2983,16 @@ class MergeOrchestrator:
                     # explicitly recorded — without this, an operator who
                     # only inspects the deleted/skipped lists could miss
                     # that the cleanup ended on an exception.
-                    partial.skipped_unknown_state.append((
-                        "<cleanup-aborted>",
-                        f"Cleanup raised {type(exc).__name__}: {exc}",
-                    ))
+                    partial.skipped_unknown_state.append(
+                        ("<cleanup-aborted>", aborted_reason)
+                    )
                 else:
                     # Defensive: pre-loop failure (no report was published
                     # because the exception fired before delete_merged_branches
                     # entered its body).  Fall back to a synthetic report so
                     # downstream consumers always see a structured object.
                     report.cleanup_report = CleanupReport(
-                        skipped_not_merged=[(
-                            "<cleanup-aborted>",
-                            f"Cleanup raised {type(exc).__name__}: {exc}",
-                        )],
+                        skipped_not_merged=[("<cleanup-aborted>", aborted_reason)],
                     )
         else:
             if not self.delete_merged:

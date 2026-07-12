@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from ...commands.merge.secret_redact import redact_text
+from ...i18n import t
 from .conflict_context import ConflictContext, ConflictFile, ConflictHunk
 
 if TYPE_CHECKING:
@@ -232,25 +233,23 @@ class MergeStrategy(str, Enum):
         """
         if not isinstance(value, str):
             raise ValueError(
-                f"Merge strategy must be a string, got {type(value).__name__}={value!r}"
+                t(
+                    "merge.strategy.not_a_string",
+                    type=type(value).__name__,
+                    value=repr(value),
+                )
             )
         norm = value.strip().lower()
         if norm == "default":
-            raise ValueError(
-                "Merge strategy 'default' has been removed; use 'safe' instead "
-                "(LLM-resolves conflicts, falls back to human MCP call on failure)."
-            )
+            raise ValueError(t("merge.strategy.removed_default"))
         if norm == "robust":
-            raise ValueError(
-                "Merge strategy 'robust' has been removed; use 'fast' instead "
-                "(LLM-resolves conflicts, never falls back to take-theirs or human)."
-            )
+            raise ValueError(t("merge.strategy.removed_robust"))
         try:
             return cls(norm)
         except ValueError as exc:
             allowed = ", ".join(m.value for m in cls)
             raise ValueError(
-                f"Unknown merge strategy {value!r}; must be one of: {allowed}"
+                t("merge.strategy.unknown", value=repr(value), allowed=allowed)
             ) from exc
 
 

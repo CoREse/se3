@@ -8,8 +8,10 @@ language control.
 
 These tests pin the injection ROUTING (not the LLM itself, which is stubbed):
 
-* spec_language set  -> both prompts carry the spec-flavored language instruction
-  (including the "preserve technical symbols verbatim" clause);
+* spec_language set  -> both prompts carry the knowledge-asset language
+  instruction (including the "preserve technical symbols verbatim" clause, and
+  free of the spec-file/SHALL-MUST wording, which would bias plain charter and
+  code-index prose toward requirement statements);
 * spec_language unset -> zero injection, so the prompt is byte-for-byte what it
   was before this change (a regression guard against accidental always-on
   injection);
@@ -127,8 +129,13 @@ def test_charter_prompt_injects_spec_language_when_set(tmp_path, monkeypatch):
     # The shared "preserve technical symbols verbatim" clause must ride along so
     # code identifiers survive translation.
     assert "Preserve all technical symbols verbatim" in prompt
-    # for_spec framing: the knowledge asset's language is authoritative.
+    # Knowledge-asset framing: the asset's language is authoritative, and the
+    # spec-file / SHALL-MUST wording must NOT leak in (it would bias charter.md
+    # toward requirement statements).
+    assert "knowledge asset" in prompt
     assert "authoritative" in prompt
+    assert "spec file" not in prompt
+    assert "SHALL/MUST" not in prompt
 
 
 def test_charter_prompt_zero_injection_when_spec_language_unset(tmp_path, monkeypatch):
@@ -196,7 +203,10 @@ def test_code_index_prompt_injects_spec_language_when_set(tmp_path, monkeypatch)
     prompt = _code_index_prompt(tmp_path, monkeypatch, spec_language="zh-CN")
     assert "MUST respond in zh-CN" in prompt
     assert "Preserve all technical symbols verbatim" in prompt
+    assert "knowledge asset" in prompt
     assert "authoritative" in prompt
+    assert "spec file" not in prompt
+    assert "SHALL/MUST" not in prompt
 
 
 def test_code_index_prompt_zero_injection_when_spec_language_unset(tmp_path, monkeypatch):

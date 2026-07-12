@@ -26,6 +26,7 @@ from .models import (
     get_step_info,
 )
 from . import adjudication
+from ..i18n import t
 from .chat_history import _history_dir
 from .llm_caller import clear_phase1_cache
 from .token_usage import accumulate_step_usage, UsageTotals
@@ -1179,7 +1180,14 @@ class StateMachine:
                 logger.error(
                     f"Max fix iterations ({max_fix_iterations}) reached — stopping flow as FAILED"
                 )
-                print(f"\n❌  Fix loop exhausted after {max_fix_iterations} iterations. Flow stopped.\n")
+                print(
+                    "\n"
+                    + t(
+                        "engine.fixloop.exhausted",
+                        max_iterations=max_fix_iterations,
+                    )
+                    + "\n"
+                )
                 # A-class trigger: create issue for fix loop exhaustion
                 try:
                     discovery = self._get_issue_discovery(flow)
@@ -1416,11 +1424,15 @@ class StateMachine:
 
         self.persistence.save_flow(flow)
 
+        # The feedback body is reviewer-authored payload: passed through as data,
+        # only the surrounding chrome is translated.
+        shown_feedback = f"{feedback[:200]}..." if len(feedback) > 200 else feedback
+
         print(f"\n{'='*60}")
-        print(f"🔁 REVISION REQUESTED: {step_to_review.step_type.value.upper()}")
+        print(t("engine.revision.banner_title", step=step_to_review.step_type.value.upper()))
         print(f"{'='*60}")
-        print(f"Iteration: {iteration}")
-        print(f"Feedback: {feedback[:200]}..." if len(feedback) > 200 else f"Feedback: {feedback}")
+        print(t("engine.revision.iteration", iteration=iteration))
+        print(t("engine.revision.feedback", feedback=shown_feedback))
         print(f"{'='*60}\n")
 
         return step_to_review
@@ -1575,22 +1587,27 @@ class StateMachine:
         self.persistence.save_flow(flow)
 
         print(f"\n{'='*60}")
-        print(f"🔧 FIX LOOP: RETURNING TO IMPLEMENT STEP")
+        print(t("engine.fixloop.banner_title"))
         print(f"{'='*60}")
-        print(f"Iteration: {iteration}")
+        print(t("engine.fixloop.iteration", iteration=iteration))
         if fix_context.get("test_failed"):
-            print(f"Reason: Tests failed")
+            print(t("engine.fixloop.reason_tests_failed"))
         if trigger_step_type == "self_check":
-            print(f"Source: self_check (code review)")
+            print(t("engine.fixloop.source_self_check"))
         if trigger_step_type == "invariant_check":
-            print(f"Source: invariant_check (recorded-invariant audit)")
+            print(t("engine.fixloop.source_invariant_check"))
         if trigger_step_type == "verify_spec":
-            print(f"Source: verify_spec (spec compliance check)")
+            print(t("engine.fixloop.source_verify_spec"))
         if fix_context.get("reason") == "self_check":
-            print(f"Reason: Code review found actionable issues")
+            print(t("engine.fixloop.reason_self_check"))
         if fix_context.get("spec_issues"):
-            print(f"Reason: Spec compliance issues found")
-        print(f"Instructions: {fix_instructions[:200]}..." if len(fix_instructions) > 200 else f"Instructions: {fix_instructions}")
+            print(t("engine.fixloop.reason_spec_issues"))
+        shown = (
+            f"{fix_instructions[:200]}..."
+            if len(fix_instructions) > 200
+            else fix_instructions
+        )
+        print(t("engine.fixloop.instructions", instructions=shown))
         print(f"{'='*60}\n")
 
         return implement_step
@@ -1755,11 +1772,16 @@ class StateMachine:
         self.persistence.save_flow(flow)
 
         print(f"\n{'='*60}")
-        print("⚖️  ADJUDICATE: SPEC-CONTRADICTION RULING")
+        print(t("engine.adjudicate.banner_title"))
         print(f"{'='*60}")
-        print(f"Trigger reasons: {', '.join(decision.reasons) or '(none)'}")
-        print(f"Fix iteration: {current_iteration}")
-        print(f"Source: self_check (oscillation detected)")
+        print(
+            t(
+                "engine.adjudicate.trigger_reasons",
+                reasons=", ".join(decision.reasons) or t("engine.adjudicate.none"),
+            )
+        )
+        print(t("engine.adjudicate.fix_iteration", iteration=current_iteration))
+        print(t("engine.adjudicate.source_oscillation"))
         print(f"{'='*60}\n")
 
         return step
@@ -1879,9 +1901,9 @@ class StateMachine:
         self.persistence.save_flow(flow)
 
         print(f"\n{'='*60}")
-        print("🔎 ADJUDICATE CONFIRMATION REQUESTED")
+        print(t("engine.adjudicate.confirm_title"))
         print(f"{'='*60}")
-        print(f"Reviewer: {inputs.get('reviewer', 'human')}")
+        print(t("engine.adjudicate.reviewer", reviewer=inputs.get("reviewer", "human")))
         print(f"{'='*60}\n")
 
         return confirm_step
@@ -2016,12 +2038,12 @@ class StateMachine:
         self.persistence.save_flow(flow)
 
         print(f"\n{'='*60}")
-        print("♻️  ADJUDICATION LANDED: RE-RUNNING SELF_CHECK (pass #1)")
+        print(t("engine.adjudicate.landed_title"))
         print(f"{'='*60}")
-        print(f"Fix iteration: {iteration}")
-        print("Skipped: IMPLEMENT + TEST (ruling changed spec, not code)")
+        print(t("engine.adjudicate.fix_iteration", iteration=iteration))
+        print(t("engine.adjudicate.landed_skipped"))
         if adjudicate_step.outputs.get("fix_instructions_superseded"):
-            print("Superseded: pending fix_instructions dropped")
+            print(t("engine.adjudicate.landed_superseded"))
         print(f"{'='*60}\n")
 
         return self_check_step
@@ -2092,9 +2114,9 @@ class StateMachine:
         fix_step = self._transition_to_fix(flow, trigger_sc)
         if fix_step:
             print(f"\n{'='*60}")
-            print("➡️  ADJUDICATION NO-OP: PASS-THROUGH TO IMPLEMENT")
+            print(t("engine.adjudicate.noop_title"))
             print(f"{'='*60}")
-            print("No real contradiction — triggering fix_instructions applied unchanged")
+            print(t("engine.adjudicate.noop_detail"))
             print(f"{'='*60}\n")
             return fix_step
 

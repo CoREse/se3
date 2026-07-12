@@ -39,7 +39,8 @@ def _iter_locale_resources() -> Iterator[Tuple[str, object]]:
     """Yield ``(code, traversable)`` for every ``<code>.json`` in locales/.
 
     Uses ``importlib.resources.files`` (Python 3.9+) and falls back to a
-    filesystem scan next to this module on 3.8, so discovery works both when
+    filesystem scan next to this module on 3.8 — and on any interpreter where
+    ``files()`` cannot resolve the package — so discovery works both when
     installed as a wheel and from a source tree.
     """
     try:
@@ -48,17 +49,27 @@ def _iter_locale_resources() -> Iterator[Tuple[str, object]]:
         _files = None  # type: ignore[assignment]
 
     if _files is not None:
+        root = None
         try:
             root = _files(_LOCALES_PACKAGE)
-        except (ModuleNotFoundError, FileNotFoundError):
-            return
-        for entry in root.iterdir():
-            name = entry.name
-            if name.endswith(_JSON_SUFFIX):
-                yield name[: -len(_JSON_SUFFIX)], entry
-        return
+        except Exception as exc:  # pragma: no cover - depends on interpreter
+            # WHY blanket-catch: t() sits on every console output path and must
+            # never raise. files() has interpreter-dependent failure modes for a
+            # package it cannot resolve (ModuleNotFoundError, FileNotFoundError,
+            # and on 3.9 a TypeError/AttributeError for a namespace package), so
+            # we degrade to the filesystem scan below instead of enumerating them.
+            logger.debug("importlib.resources could not resolve locales: %s", exc)
+        if root is not None:
+            try:
+                for entry in root.iterdir():
+                    name = entry.name
+                    if name.endswith(_JSON_SUFFIX):
+                        yield name[: -len(_JSON_SUFFIX)], entry
+                return
+            except OSError as exc:
+                logger.debug("failed to iterate locale resources: %s", exc)
 
-    # pragma: no cover - Python 3.8 fallback
+    # Filesystem fallback: Python 3.8, or a files() lookup that failed above.
     from pathlib import Path
 
     locales_dir = Path(__file__).resolve().parent / "locales"
@@ -115,8 +126,13 @@ def normalize_language(code: Optional[str]) -> Optional[str]:
     subtag ``zh`` → ``zh-CN`` via prefix match. Returns ``None`` for an
     unknown/unsupported code so callers can fall through the resolution chain
     (and ultimately to :data:`BASE_LANGUAGE`).
+
+    Non-string inputs are rejected here rather than exploding on ``.strip()``:
+    YAML types an unquoted ``language: NO`` as the boolean ``False`` and a code
+    like ``language: 100`` as an int, and those reach us straight from config.
+    Returning ``None`` lets the caller treat them as "set but unsupported".
     """
-    if not code:
+    if not code or not isinstance(code, str):
         return None
     # Strip POSIX locale encoding / modifier suffixes: zh_CN.UTF-8@x -> zh_CN.
     raw = code.strip().split(".")[0].split("@")[0].replace("_", "-")

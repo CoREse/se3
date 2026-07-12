@@ -962,19 +962,20 @@ def _run_deferred_branch_cleanup(project_root: Path, report, branches: list[str]
         report.cleanup_skipped = False
     except Exception as exc:  # noqa: BLE001 - cleanup must not break the success path
         logger.warning("Deferred branch cleanup failed: %s", exc, exc_info=True)
+        # The synthetic entry is user-visible prose in the merge report, so it is
+        # rendered from the catalog with only the exception itself as data.
+        aborted_reason = t(
+            "cli.merge.cleanup.aborted_reason",
+            error_type=type(exc).__name__,
+            error=exc,
+        )
         partial = getattr(cleanup, "_current_report", None)
         if partial is not None:
             report.cleanup_report = partial
-            partial.skipped_unknown_state.append((
-                "<cleanup-aborted>",
-                f"Cleanup raised {type(exc).__name__}: {exc}",
-            ))
+            partial.skipped_unknown_state.append(("<cleanup-aborted>", aborted_reason))
         else:
             report.cleanup_report = CleanupReport(
-                skipped_not_merged=[(
-                    "<cleanup-aborted>",
-                    f"Cleanup raised {type(exc).__name__}: {exc}",
-                )],
+                skipped_not_merged=[("<cleanup-aborted>", aborted_reason)],
             )
 
 
@@ -1239,10 +1240,7 @@ def run_merge(
                     )
             except IntentReadError as exc:
                 intent_scope_unreadable = True
-                reconcile_error = (
-                    "could not determine the version-intent scope for the "
-                    f"merged branch(es): {exc}"
-                )
+                reconcile_error = t("cli.merge.intent_scope_unreadable", error=exc)
                 logger.error("version-intent scope determination failed: %s", exc)
 
             try:

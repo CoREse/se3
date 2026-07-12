@@ -105,14 +105,14 @@ export async function registerConfirmChipTests(ctx) {
     assert.ok(approve, "批准 button rendered");
     assert.ok(reject, "打回 button rendered");
     assert.ok(note, "note textarea rendered");
-    assert.equal(approve.textContent, "批准");
-    assert.equal(reject.textContent, "打回");
+    assert.equal(approve.textContent, "Approve");
+    assert.equal(reject.textContent, "Reject");
     assert.equal(note.tagName, "TEXTAREA");
     // The docked free-text box advertises the recognized approval/rejection
     // words for the fallback path.
     const input = document.getElementById("flow-reply-input");
     assert.ok(
-      String(input.placeholder).includes("批准") && String(input.placeholder).includes("修改请求"),
+      String(input.placeholder).includes("approve") && String(input.placeholder).includes("revision request"),
       `confirm placeholder must list usable words, got ${input.placeholder}`,
     );
     restoreGlobals();

@@ -118,6 +118,10 @@ class Migrator:
     """
 
     id: str
+    #: i18n key of the human-readable description. Resolved through ``t()`` at
+    #: render time (registration happens at import, before the UI language is
+    #: bound); a plain literal still works — ``t()`` returns an unknown key
+    #: verbatim.
     description: str
     run: Callable[..., "MigrationReport"]
 
@@ -273,10 +277,7 @@ def _make_llm_salvager(project_root: Path) -> SpecSalvager:
                 raise ValueError("empty charter body")
         except Exception as exc:  # noqa: BLE001 — never abort the migration
             logger.warning("migrate: charter LLM assembly failed: %s", exc)
-            notes.append(
-                "charter LLM assembly failed; wrote a review-flagged fallback "
-                "that preserves the base spec verbatim — review se3/charter.md"
-            )
+            notes.append(t("migrate.note.charter_llm_failed"))
             charter_body = _fallback_charter(inp)
 
         # --- Pass B: colocate code-bound why/intent ---------------------------
@@ -411,7 +412,7 @@ def _apply_colocations(
         rel = colo.file_path.replace("\\", "/").lstrip("/")
         target = project_root / rel
         if not target.is_file():
-            skipped.append(f"{rel}: file not found")
+            skipped.append(f"{rel}: {t('migrate.reason.file_not_found')}")
             continue
         try:
             _insert_why_comment(target, colo.why)
@@ -533,7 +534,7 @@ def _rewrite_gitignore(project_root: Path) -> List[str]:
     # Remove the retired specs whitelist.
     if _GITIGNORE_REMOVE in stripped:
         lines = [ln for ln in lines if ln.strip() != _GITIGNORE_REMOVE]
-        changes.append(f"removed {_GITIGNORE_REMOVE}")
+        changes.append(t("migrate.gitignore.removed", pattern=_GITIGNORE_REMOVE))
         stripped.discard(_GITIGNORE_REMOVE)
 
     # Find the `/se3/*` anchor to insert new whitelists right after it.
@@ -545,7 +546,7 @@ def _rewrite_gitignore(project_root: Path) -> List[str]:
                 lines.insert(anchor + 1 + offset, w)
         else:
             lines.extend(missing)
-        changes.extend(f"added {w}" for w in missing)
+        changes.extend(t("migrate.gitignore.added", pattern=w) for w in missing)
 
     # Introduce root default-deny (`/*`) with existence-protection. Skipped when
     # `/*` already present (idempotent) or when the tracked-path enumeration is
@@ -557,7 +558,7 @@ def _rewrite_gitignore(project_root: Path) -> List[str]:
             lines = block + lines
             stripped.add("/*")
             stripped.update(protected)
-            changes.append("added root /* default-deny with tracked-path whitelist")
+            changes.append(t("migrate.gitignore.root_deny"))
 
     if changes:
         new_text = "\n".join(lines)
@@ -617,16 +618,20 @@ def run_spec_to_new_system(
         _write_charter_once(project_root, salvage_result.charter_body)
         charter_ok = True
         report.notes.extend(salvage_result.notes)
-        report.add("Assemble charter", "OK", "wrote se3/charter.md (single write)")
+        report.add(
+            t("migrate.step.charter"), "OK", t("migrate.detail.charter_written")
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("migrate: charter assembly failed: %s", exc)
-        report.add("Assemble charter", "FAIL", str(exc)[:80])
+        report.add(t("migrate.step.charter"), "FAIL", str(exc)[:80])
 
     # --- Step 2: colocate code-bound why-comments -------------------------
     colocate_ok = False
     try:
         if salvage_result is None:
-            report.add("Colocate why-comments", "SKIP", "no salvage result")
+            report.add(
+                t("migrate.step.colocate"), "SKIP", t("migrate.detail.no_salvage")
+            )
         else:
             applied, skipped = _apply_colocations(
                 project_root, salvage_result.colocations
@@ -640,56 +645,68 @@ def run_spec_to_new_system(
             # confirms the salvage; any skip keeps colocate_ok False so specs
             # are preserved.
             colocate_ok = not skipped
-            detail = f"{applied} colocated"
+            detail = t("migrate.detail.colocated", count=applied)
             if skipped:
-                detail += (
-                    f", {len(skipped)} skipped — specs kept (salvage incomplete)"
+                detail += t("migrate.detail.colocate_skipped", count=len(skipped))
+                report.notes.extend(
+                    t("migrate.note.colocation_skipped", item=s) for s in skipped
                 )
-                report.notes.extend(f"colocation skipped: {s}" for s in skipped)
-            report.add("Colocate why-comments", "OK", detail)
+            report.add(t("migrate.step.colocate"), "OK", detail)
     except Exception as exc:  # noqa: BLE001
         logger.warning("migrate: colocation failed: %s", exc)
-        report.add("Colocate why-comments", "FAIL", str(exc)[:80])
+        report.add(t("migrate.step.colocate"), "FAIL", str(exc)[:80])
 
     # --- Step 3: code-index first build -----------------------------------
     try:
         code_index.build_index(project_root, summarizer=summarizer, force=True)
         report.add(
-            "Build code-index", "OK",
-            "wrote se3/code-index.md",
+            t("migrate.step.code_index"), "OK",
+            t("migrate.detail.code_index_written"),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("migrate: code-index build failed: %s", exc)
-        report.add("Build code-index", "FAIL", str(exc)[:80])
+        report.add(t("migrate.step.code_index"), "FAIL", str(exc)[:80])
 
     # --- Step 4: delete specs (ONLY after salvage confirmed) --------------
     try:
         if not specs_dir.exists():
-            report.add("Delete se3/specs", "SKIP", "no specs directory")
+            report.add(
+                t("migrate.step.delete_specs"), "SKIP",
+                t("migrate.detail.no_specs_dir"),
+            )
         elif not delete_specs:
-            report.add("Delete se3/specs", "SKIP", "delete_specs=False")
+            report.add(
+                t("migrate.step.delete_specs"), "SKIP",
+                t("migrate.detail.delete_disabled"),
+            )
         elif not (charter_ok and colocate_ok):
             report.add(
-                "Delete se3/specs", "SKIP",
-                "salvage incomplete — specs kept for safety",
+                t("migrate.step.delete_specs"), "SKIP",
+                t("migrate.detail.salvage_incomplete"),
             )
         else:
             shutil.rmtree(specs_dir)
-            report.add("Delete se3/specs", "OK", "removed spec corpus")
+            report.add(
+                t("migrate.step.delete_specs"), "OK",
+                t("migrate.detail.specs_removed"),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("migrate: delete specs failed: %s", exc)
-        report.add("Delete se3/specs", "FAIL", str(exc)[:80])
+        report.add(t("migrate.step.delete_specs"), "FAIL", str(exc)[:80])
 
     # --- Step 5: rewrite .gitignore ---------------------------------------
     try:
         changes = _rewrite_gitignore(project_root)
         if changes:
-            report.add("Rewrite .gitignore", "OK", "; ".join(changes))
+            report.add(t("migrate.step.gitignore"), "OK", "; ".join(changes))
         else:
-            report.add("Rewrite .gitignore", "OK", "already migrated")
+            report.add(
+                t("migrate.step.gitignore"), "OK",
+                t("migrate.detail.already_migrated"),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("migrate: gitignore rewrite failed: %s", exc)
-        report.add("Rewrite .gitignore", "FAIL", str(exc)[:80])
+        report.add(t("migrate.step.gitignore"), "FAIL", str(exc)[:80])
 
     return report
 
@@ -698,11 +715,7 @@ def run_spec_to_new_system(
 SPEC_TO_NEW_SYSTEM = register_migrator(
     Migrator(
         id="spec-to-new-system",
-        description=(
-            "Migrate the retired se3/specs corpus to the code-index + charter "
-            "+ why-comment system (salvage first, then delete; one reviewable "
-            "change)."
-        ),
+        description="migrate.migrator.spec_to_new_system.desc",
         run=run_spec_to_new_system,
     )
 )
@@ -740,11 +753,11 @@ def _display_report(report: MigrationReport, migrator_id: str) -> None:
 
 migrate_app = typer.Typer(
     name="migrate",
-    help="Run a registered version/format migration (list / run <id>).",
+    help=t("cli.help.migrate.app"),
 )
 
 
-@migrate_app.command(name="list")
+@migrate_app.command(name="list", help=t("cli.help.migrate.list.desc"))
 def list_command() -> None:
     """List the available migrations."""
     migrators = list_migrators()
@@ -755,37 +768,44 @@ def list_command() -> None:
     table.add_column(t("migrate.list.col_id"), style="cyan")
     table.add_column(t("migrate.list.col_description"))
     for m in migrators:
-        table.add_row(m.id, m.description)
+        table.add_row(m.id, t(m.description))
     console.print(table)
     raise typer.Exit(0)
 
 
-@migrate_app.command(name="run")
+@migrate_app.command(name="run", help=t("cli.help.migrate.run.desc"))
 def run_command(
-    migrator_id: str = typer.Argument(..., help="ID of the migration to run (see `se3 migrate list`)"),
+    migrator_id: str = typer.Argument(..., help=t("cli.help.migrate.run.migrator_id")),
     project_root: Optional[str] = typer.Option(
-        None, "--project-root", "-p", help="Project root directory (default: auto-detect)"
+        None, "--project-root", "-p", help=t("cli.help.migrate.run.project_root")
     ),
     no_delete_specs: bool = typer.Option(
         False, "--no-delete-specs",
-        help="Keep se3/specs/ in place (salvage + build only; for inspection).",
+        help=t("cli.help.migrate.run.no_delete_specs"),
     ),
 ) -> None:
     """Run the migration identified by *migrator_id*."""
-    migrator = get_migrator(migrator_id)
-    if migrator is None:
-        ids = ", ".join(m.id for m in list_migrators()) or "(none)"
-        console.print(
-            t("migrate.run.unknown", migrator_id=migrator_id, ids=ids)
-        )
-        raise typer.Exit(1)
-
+    # Resolve the root (and with it the UI language) before the first t() render,
+    # so even the unknown-migrator error speaks the target project's language.
     if project_root:
+        from ..i18n import bind_project_root
+
         root = Path(project_root)
+        # get_project_root() binds the UI language itself; an explicit
+        # --project-root bypasses it, so bind here too.
+        bind_project_root(root)
     else:
         from .run import get_project_root
 
         root = get_project_root()
+
+    migrator = get_migrator(migrator_id)
+    if migrator is None:
+        ids = ", ".join(m.id for m in list_migrators()) or t("migrate.run.no_migrators")
+        console.print(
+            t("migrate.run.unknown", migrator_id=migrator_id, ids=ids)
+        )
+        raise typer.Exit(1)
 
     report = migrator.run(root, delete_specs=not no_delete_specs)
     _display_report(report, migrator.id)

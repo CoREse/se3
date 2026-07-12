@@ -1,6 +1,6 @@
 # Code Index
 
-## `(root)` — The project root of SE3 (Software Engineering 3.0), a program-as-supervisor framework whose single `se3` Python package provides a Typer CLI, persistent state-machine flow engine, pluggable agent-runner adapters, and an optional daemon/central-server control plane, packaged with Hatchling and surrounded by framework specs (.claude/), bilingual docs and README, utility scripts, a broad pytest/Node test suite, and root configuration (se3.yaml, pyproject.toml). <!--#9dbff0f408c3d246|07a7c39b2681dbc7-->
+## `(root)` — The project root of SE3 (Software Engineering 3.0), a program-as-supervisor framework whose single `se3` Python package provides a Typer CLI, persistent state-machine flow engine, pluggable agent-runner adapters, and an optional daemon/central-server control plane, packaged with Hatchling and surrounded by framework specs (.claude/), bilingual docs and README, utility scripts, a broad pytest/Node test suite, and root configuration (se3.yaml, pyproject.toml). <!--#90df0ef6ff9ebc19|07a7c39b2681dbc7-->
 
 ### `.gitignore` (text) — Root ignore file using a deny-by-default policy (`/*`) that whitelists specific top-level project entries and SE3 committed artifacts (code-index, charter, issues, version-intents) while excluding runtime state, build/cache output, browser-test libs, and local config overrides. <!--#8be855da3c960c0a|e3b0c44298fc1c14-->
 
@@ -8,8 +8,8 @@
 
 ### `NOTICE` (text) — The project's attribution/copyright NOTICE file, declaring SE3 as copyright 2026 Zhendong Zhang (CRE) and crediting software developed by him. <!--#91852f8ef9e63e30|e3b0c44298fc1c14-->
 
-### `README.md` (markdown) — The project README presenting SE3 (Software Engineering 3.0) as a program-as-supervisor framework — a CLI engine plus persistent state machine and code-first knowledge system (code-index + charter + why-comments) that governs an AI coding agent across sessions and machines — covering its design philosophy, installation, quick-start, operating modes, full command reference, on-disk layout, and licensing. <!--#37c594a1d28ee368|c68bb328c3783ed6-->
-- `SE3 — Software Engineering 3.0 Framework` (heading) — Top-level introduction positioning SE3 as a project-level, cross-session framework (CLI engine + persistent state machine + code-first knowledge system) that supervises an AI coding agent across many sessions until a deliverable is finished, distinct from single-session prompting aids. <!--#f60736dd715a464e-->
+### `README.md` (markdown) — The project README presenting SE3 (Software Engineering 3.0) as a program-as-supervisor framework — a CLI engine plus persistent state machine and code-first knowledge system (code-index + charter + why-comments) that governs an AI coding agent across sessions and machines — covering its design philosophy, installation, quick-start, operating modes, full command reference, on-disk layout, and licensing. <!--#37e64db389ac75a9|c68bb328c3783ed6-->
+- `SE3 — Software Engineering 3.0 Framework` (heading) — Top-level README intro that pitches SE3 as a project-level, cross-session flow framework (CLI engine + persistent state machine + code-first knowledge system) in which the program, not the human, supervises an AI coding agent to completion, with badges and an English/Chinese language switch. <!--#d086b2c816da6592-->
   - `Design Philosophy` (heading) — Parent heading grouping the rationale behind SE3's program-as-supervisor paradigm. <!--#77e6f8f8921f18d9-->
     - `1. A different paradigm: program-as-supervisor, human out-of-the-loop` (heading) — Argues that SE3's unit of work is a multi-session project task supervised by the engine rather than a human-watched single turn, contrasted in a tool-class table. <!--#c9555f96a940c05d-->
     - `2. The real pain: attention is all you need` (heading) — Frames human attention as the true bottleneck and describes the ideal prompt → discover → fire-and-forget → pick-up session that minimizes it. <!--#44bce7dd4e3df92b-->
@@ -25,9 +25,9 @@
       - `Web console authentication` (heading) — Outlines the multi-tenant first-run auth flow: break-glass admin token, login, user creation, and daemon-key binding. <!--#04d11c5004095aab-->
   - `Command Reference` (heading) — Parent heading introducing the full CLI command catalog as of the documented version. <!--#572ee8f7044e277a-->
     - `Top-level commands` (heading) — A reference table of SE3's top-level CLI commands (run, init, code-index, migrate, guardrails, merge, merge-respond, salvage) with their purposes and key flags. <!--#25a76810e5ca6a53-->
-    - ``se3 history` — flow history` (heading) — Documents the `se3 history` command group for listing flows across active/archived/history-only locations, showing step-by-step flow details, restoring a flow by ID via `se3 run --resume`, and listing archived flows. <!--#3e81db08ca44209a-->
-    - ``se3 issue` — project issues` (heading) — Documents the `se3 issue` command group for listing, showing, interactively creating, and resetting project issues, with filters for closed issues and issue type. <!--#33de25e8833392bc-->
-    - ``se3 daemon` — resident control plane` (heading) — Documents the `se3 daemon` command group for starting (foreground, central-server registration, multi-tenant daemon key), stopping, and querying the status of the resident daemon that tracks flows on a machine. <!--#a5d50611985cec9b-->
+    - ``se3 history` — flow history` (heading) — Reference table for the `se3 history` command group, listing its list/show/restore/archived subcommands and flags for browsing, inspecting, and resuming past flows. <!--#3e81db08ca44209a-->
+    - ``se3 issue` — project issues` (heading) — Reference table for the `se3 issue` command group, covering listing, showing, interactively creating, and resetting project issues. <!--#33de25e8833392bc-->
+    - ``se3 daemon` — resident control plane` (heading) — Reference table for the `se3 daemon` command group, describing how to start (optionally attached to a central server), stop, and query the status of the resident daemon control plane. <!--#a5d50611985cec9b-->
   - `Directory Layout` (heading) — Documents the on-disk project layout under `se3/`, distinguishing git-tracked artifacts (code-index, charter, issues, prompts, version-rules) from gitignored runtime state and logs. <!--#7cf08ea68bc7e931-->
   - `Navigating the codebase` (heading) — Explains how to use the code-index as the primary navigation tool — drilling from the adaptive root map down to file-level symbols — and how it plus the charter are auto-injected into every flow step. <!--#2f772ef9c876139a-->
   - `Version & License` (heading) — States that the version lives in pyproject.toml and is engine-bumped, the Apache-2.0 license, and points to the changelog. <!--#999f2a2712e62082-->
@@ -49,15 +49,16 @@
       - `网页控制台鉴权` (heading) — Explains the central server's multi-tenant auth onboarding flow: bootstrap break-glass admin token, log in, create users, and issue per-owner daemon keys. <!--#dba033d164603542-->
   - `命令清单` (heading) — Heading introducing the command reference tables for version 10.8.1. <!--#09d18905dc6eff15-->
     - `顶层命令` (heading) — A reference table of SE3's top-level commands (run, init, code-index, migrate, guardrails, merge, merge-respond, salvage) with their purposes and key flags. <!--#6827bb3388ddba70-->
-    - ``se3 history` — flow 历史` (heading) — Documents the `se3 history` subcommands for listing active/archived/history-only flows, showing per-step flow detail, restoring (resuming) a flow by ID, and listing archived flows, with their key flags. <!--#bf47dd27483c9e01-->
-    - ``se3 issue` — 项目 issue` (heading) — Documents the `se3 issue` subcommands for listing, showing, interactively creating, and resetting project issues back to open. <!--#513bbae758ad378f-->
-    - ``se3 daemon` — 常驻控制面` (heading) — Documents the `se3 daemon` subcommands for starting (foreground, server registration, owner key binding), stopping, and checking the status of the resident daemon control plane. <!--#60ae88b4da414295-->
+    - ``se3 history` — flow 历史` (heading) — 中文 README 中介绍 `se3 history` 命令族的小节，用表格列出 list / show / restore / archived 四个子命令及其常用参数，用于查看、检视和续跑历史 flow。 <!--#bf47dd27483c9e01-->
+    - ``se3 issue` — 项目 issue` (heading) — 中文 README 中介绍 `se3 issue` 命令族的小节，用表格列出 list / show / create / reset 子命令，说明如何列出、查看、交互式创建和重置项目 issue。 <!--#513bbae758ad378f-->
+    - ``se3 daemon` — 常驻控制面` (heading) — 中文 README 中介绍 `se3 daemon` 常驻控制面的小节，用表格列出 start / stop / status 子命令及其参数（前台运行、向中心服务器注册、daemon-key 绑定、JSON 状态输出）。 <!--#60ae88b4da414295-->
   - `目录布局` (heading) — Shows the project directory layout under `se3/`, distinguishing version-controlled artifacts (code-index, charter, issues, prompts) from gitignored runtime data (state, history, logs, worktrees). <!--#7418ee087bfbe955-->
   - `在代码库里导航` (heading) — Explains how to navigate the codebase top-down via the code-index map, opening source files only for implementation details, and notes the same root map plus charter are injected into every flow step. <!--#097744bdf4edad85-->
   - `版本与许可证` (heading) — States that pyproject.toml is the sole version source (auto-bumped by the engine), the Apache-2.0 license, and points to VERSIONS.md for the changelog. <!--#36724c39513a1cb4-->
 
-### `VERSIONS.md` (markdown) — The SE3 framework's version-history changelog, listing dated release entries (11.x series, mid-2026) that document each version's features, fixes, and infrastructure changes across areas like worktree/merge flows, the daemon/WebUI chat and history pipeline, code-index tooling, versioning/tagging automation, and charter/why-comment guards. <!--#e4956a6fe7f28174|5f28274cc927e3a3-->
+### `VERSIONS.md` (markdown) — The SE3 framework's changelog, recording each release (currently down from 11.21.0) with dated entries summarizing features, fixes, and behavioral changes across the CLI, WebUI, daemon, merge, and code-index subsystems. <!--#0a6b97770c880055|668494a10ba7a8ea-->
 - `SE3 Framework Version History` (heading) — The top-level title of the SE3 framework's version history changelog, under which individual release entries are listed. <!--#bbd829c99d86a815-->
+  - `11.21.0 - 2026-07-12` (heading) — Changelog entry for release 11.21.0 introducing the extensible i18n framework (zh-CN + en-US locale packs with en-US fallback), localizing all CLI and WebUI user-visible text, defining the CLI/WebUI language resolution and persistence rules, and unifying `language.language` for UI/LLM output while repurposing `language.spec_language` for knowledge assets. <!--#661c629bb52c6a8a-->
   - `11.20.1 - 2026-07-11` (heading) — Patch release (2026-07-11) fixing multi-round worktree discovery chat history visibility by giving daemon history records globally unique stepId#ordinal identities across worktree/main/sidecar files, stabilizing physical-copy selection and server relay/self-heal, hardening WebUI console deduplication, and adding daemon-to-e2e regression tests. <!--#5bb7f9232bfd459e-->
   - `11.20.0 - 2026-07-11` (heading) — Changelog entry for v11.20.0 describing the shift to a self-closing charter_freshness step that proposes, gates, and atomically applies charter.md updates, guarded by anchored-patch checks and an admission gate, plus a new invariant_check hard guard against silent deletion/rewrite of WHY:/INVARIANT: why-comments with an advisory LLM loss channel, read-only flag flips for CHARTER_FRESHNESS, and surfacing of charter diffs and why-comment losses in the summarize step and WebUI. <!--#f31bb66f26b1e1b6-->
   - `11.19.0 - 2026-07-11` (heading) — Release notes for 11.19.0 (2026-07-11): merge_integrate now auto-commits dirty SE3 self-managed state before merging, resolves .next_id/code-index conflicts deterministically, adds a dirty_working_tree failure reason (with file listing and CLI rendering), and fixes _abort_merge to treat a missing MERGE_HEAD as success. <!--#0e71be3ebcfe3b34-->
@@ -333,10 +334,10 @@
 
 ### `progress.md` (markdown) — A reverse-chronological session log for the SE 3.0 project, recording per-session Done/Changes/Open Issues/Next Steps entries that track feature work such as loop branch and collab modes, requirement-capture intake, CLI toolization (se3 lint/sync/verify/status), spec cleanup, and versioned protocol updates. <!--#e1332e31ececfbc4|e3b0c44298fc1c14-->
 
-### `pyproject.toml` (text) — Package configuration for the se3 framework (v11.20.1, hatchling build): declares core CLI dependencies (typer, pyyaml, rich, prompt-toolkit, psutil, pexpect), optional [server] (fastapi/uvicorn/websockets/argon2) and [browser] (playwright) extras, the se3/se3-server entry points, wheel packaging of src/se3 with bundled static assets, and pytest defaults (testpaths, pythonpath, Chromium e2e deselect). <!--#203646d638531e83|e3b0c44298fc1c14-->
+### `pyproject.toml` (text) — Hatchling-based packaging manifest for the `se3` CLI/flow-engine package (v11.21.0), declaring its core runtime dependencies (typer, pyyaml, rich, prompt-toolkit, psutil, pexpect), optional `server`/`browser` extras, the `se3` and `se3-server` console scripts, packaged static/locale artifacts, and pytest configuration (testpaths, src pythonpath, and a deselect of the Chromium e2e test). <!--#24341ddcf2cf8566|e3b0c44298fc1c14-->
 
-### `se3.yaml` (yaml) — The root SE 3.0 framework configuration file that wires together the whole engine — the agent registry, per-step LLM caller and confirmation/review policies, human-call escalation, session bookkeeping, version bumping, language policy, e2e/critical-test verification, fix-loop workflow limits, and project preset prompts. <!--#d4a9d731fb9fc9e3|ee539914ac0fcae4-->
-- `human_call` (yaml-key) — Configures the human-call escalation channel — where call files live, their language, and how many days before a pending call times out. <!--#e0f1017dd95e7533-->
+### `se3.yaml` (yaml) — The root SE 3.0 framework configuration file that wires together the whole engine — the agent registry, per-step LLM caller and confirmation/review policies, human-call escalation, session bookkeeping, version bumping, language policy, e2e/critical-test verification, fix-loop workflow limits, and project preset prompts. <!--#6651ca5d6ed64ad8|ee539914ac0fcae4-->
+- `human_call` (yaml-key) — Configuration for the human-in-the-loop call mechanism, specifying that call files live under `se3/calls` and expire after a 7-day timeout. <!--#aabec566b81e7d19-->
 - `session` (yaml-key) — Session bookkeeping settings naming the progress log file and capping how many progress entries are retained. <!--#c067eb90db8bd1a7-->
 - `agents` (yaml-key) — Top-level agent registry mapping logical names (primary/backup/low) to claude-code commands and priorities, resolved by name everywhere else in the config. <!--#2f9b309d4148ee7b-->
 - `llm_caller` (yaml-key) — Defines the default agent caller chain plus hard per-step overrides for which agents run the implement and summarize steps. <!--#5e4a39a06783b3ed-->
@@ -453,9 +454,9 @@
 - `_extract_description` (function) — Collects body text under the Idea/Goal/Motivation section as the issue description, falling back to a default string. <!--#a6e466f1c2d9273a-->
 - `migrate` (function) — Main entry point that iterates backlog markdown files, creates a tagged issue for each, deletes the source file, and prints a migration report. <!--#ce12a1e953eb33a1-->
 
-## `src/` — The source root, holding the single `se3/` package: the entire SE 3.0 framework — its Typer CLI, state-machine flow engine, pluggable agent-runner adapters, shared config/core modules, optional daemon and central-server control plane, and project-scaffolding templates. <!--#8cf5e03288150cdd|5f64bb0e9d734a3d-->
+## `src/` — The source root, holding the single `se3/` package: the entire SE 3.0 framework — its Typer CLI, state-machine flow engine, pluggable agent-runner adapters, shared config/core modules, optional daemon and central-server control plane, and project-scaffolding templates. <!--#42833330a5f8d34c|5f64bb0e9d734a3d-->
 
-## `src/se3/` — The root package of the SE 3.0 framework: a Typer-based CLI (cli.py/`__main__`) fronting a state-machine flow engine, its `se3` subcommand layer, and pluggable agent-runner adapters (Claude CLI, interactive-Claude PTY, and Codex), backed by shared config/preset/utility/core modules and optional daemon and central-server control-plane packages, plus the project-scaffolding templates emitted by `se3 init`/`migrate`. <!--#4b89d508856ff928|d527c3124a744507-->
+## `src/se3/` — The root package of the SE 3.0 framework — a state-machine-driven, LLM-agent-orchestrating engineering CLI — bundling the Typer CLI entry point and command layer, the flow engine (steps, prompts, code-index, fix-loop, DAG scheduler, merge), pluggable agent-runner adapters (Claude CLI, interactive Claude PTY, OpenAI Codex), layered project configuration, i18n catalogs, project-scaffolding templates, and the optional daemon/server control plane with its bundled web UI. <!--#5044ac6653b3327d|7d45d2ea74ded979-->
 
 ### `src/se3/__init__.py` (python) — Package init for the SE 3.0 framework CLI that resolves and exposes the package version (via `__version__` / `SE3_FRAMEWORK_VERSION`) from installed metadata with a pyproject.toml fallback. <!--#9ea621a32fa204c4|52ccc8955ede7d6c-->
 - `_get_version` (function) — Helper that determines the package version, preferring installed package metadata and falling back to parsing the `version` field from pyproject.toml, returning 'unknown' if all attempts fail. <!--#ac46b5e4fb58631f-->
@@ -548,26 +549,26 @@
   - `MonitoredResult.success` (method) — Property returning True when the monitored run's return code is zero. <!--#787b46b245897e2b-->
 - `_SingleRunResult` (class) — Internal dataclass capturing the result of a single monitored command run (return code, output, success, should-retry, interrupted). <!--#3382b4f182bfe583-->
 
-### `src/se3/cli.py` (python) — The Typer-based SE3 CLI entry point that defines all top-level commands — run, init, guardrails, daemon start/stop/status, merge (plus merge-respond/merge-unlock), salvage, and end-session — wiring user input, display setup, and version handling to the underlying engine flows. <!--#7ea6289ae5731b35|5b9ccdf6646ee539-->
-- `_version_callback` (function) — Eager `--version` flag callback that prints the se3 version and exits. <!--#61477e86dd0c60ea-->
-- `main` (function) — Root Typer callback that initializes the display console and shows help when no subcommand is invoked. <!--#7d477aaadb07298b-->
+### `src/se3/cli.py` (python) — The Typer-based SE3 CLI entry point that defines all top-level commands — run, init, guardrails, daemon start/stop/status, merge (plus merge-respond/merge-unlock), salvage, and end-session — wiring user input, display setup, and version handling to the underlying engine flows. <!--#e35d4b48f8bbd8c4|5b9ccdf6646ee539-->
+- `_version_callback` (function) — Typer eager callback for `--version` that echoes the localized version string and exits immediately. <!--#1daa43ccf5bfdbde-->
+- `main` (function) — Root Typer callback that initializes the display console, wires the `--version` option, and prints help when no subcommand is given. <!--#b4f9f0eb2adc72b2-->
 - `_init_display` (function) — Initializes the global Rich console for consistent CLI output. <!--#bc1892294d2bdfda-->
-- `_read_multiline_input` (function) — Reads multiline user input (interactive prompt_toolkit session or piped stdin) with proper Unicode handling and cancel/accept semantics. <!--#498e1f327fad2edb-->
-- `run_cmd` (function) — The Typer command handler for `se3 run`, the unified flow-engine entry point that parses all run options (task, type, resume, discovery, preset, from-issue, worktree, output-format) and dispatches to the appropriate flow-execution path after validating inputs and preparing the se3 project directories. <!--#c41ef602c2c80a12-->
-- `init_cmd` (function) — The `se3 init` command that scaffolds a new SE3 project's standard directory structure and config. <!--#becd33a815f4e4ac-->
-- `_run_spec_size_guardrails` (function) — Helper that runs project-wide spec size-governance checks and exits warn (0) or enforce (1) per the configured tier. <!--#5de7bd67e20a8955-->
-- `guardrails_cmd` (function) — The `se3 guardrails` command that checks a spec file for weakening/deletion diff violations plus size-governance violations. <!--#2788715339155eca-->
+- `_read_multiline_input` (function) — Reads multiline user input from stdin, using prompt_toolkit (with Ctrl+D-to-accept bindings and history) when interactive and a plain read when piped, returning None on cancel. <!--#9941ab8d25f9a95a-->
+- `run_cmd` (function) — The `se3 run` command — the unified flow-engine entry point that resolves the project root, applies preset/discovery/--from-issue/--worktree modes, and dispatches to the run/resume flow handlers. <!--#104a3dd1304ca2a4-->
+- `init_cmd` (function) — The `se3 init` command that scaffolds a new SE3 project (se3.yaml plus the specs directory structure) at the given root. <!--#fe4af52f23d71113-->
+- `_run_spec_size_guardrails` (function) — Runs spec volume-governance size checks and renders a report, exiting 1 under the `enforce` tier and 0 under `warn` or when clean. <!--#c85d9f6026d5700e-->
+- `guardrails_cmd` (function) — The `se3 guardrails` command that checks a spec file's diff against its git/original version for weakening or deletion violations and also reports spec-size governance results, exiting non-zero on blocking violations. <!--#791dfb244a991b75-->
 - `_project_root_for_spec` (function) — Helper that walks up from a spec file to locate the owning SE3 project root for size governance. <!--#40c3c36bb5ef4490-->
-- `_precheck_websockets` (function) — Warns on the CLI front-end when the optional `websockets` dependency is missing and the daemon would fall back to local-only mode. <!--#e39a9a6afc9501e1-->
-- `_report_connection_result` (function) — Polls the daemon status file after a detached start to report the real central-server connection outcome, handling staleness and transient errors. <!--#a957641890a8ac7a-->
-- `daemon_start_cmd` (function) — The `se3 daemon start` command that launches the daemon (detached or foreground) with server URL/key config and reports connection status. <!--#e51a816a5efaa32f-->
-- `daemon_stop_cmd` (function) — The `se3 daemon stop` command that stops the running daemon and reports the outcome. <!--#b7a28c61b0dd75fd-->
-- `daemon_status_cmd` (function) — The `se3 daemon status` command that reports the daemon's running state, server connection, and tracked flows (text or JSON). <!--#8c710c27a529974b-->
-- `merge_cmd` (function) — Typer CLI command that validates and normalizes branch-merge arguments (rejecting empty/unsafe branch names, resolving strategy and delete-merged defaults from config) then delegates to run_merge to sequentially merge branches into the current branch, exiting with its return code. <!--#ef2bd6969e33bd5a-->
-- `merge_respond_cmd` (function) — The `se3 merge-respond` command that processes an MCP call response file to execute merge-conflict resolution decisions. <!--#2fd36eaa5b353e65-->
-- `merge_unlock_cmd` (function) — The `se3 merge-unlock` command that inspects and releases the project's merge lock, cleaning up stale locks or force-releasing live ones. <!--#7498497616a5d7be-->
-- `salvage_cmd` (function) — The `se3 salvage` command that performs best-effort recovery (commit changes, create issues, archive) from an abnormally terminated session. <!--#59b4b4c953d461fe-->
-- `end_session_cmd` (function) — The `se3 end-session` command that terminates a live run process and archives the session without merging uncommitted work. <!--#14e623e821083b59-->
+- `_precheck_websockets` (function) — Warns on the CLI when the `websockets` package is missing so the user knows a `--server-url` daemon would silently fall back to local-only mode. <!--#ce7c7d98cc33fa03-->
+- `_report_connection_result` (function) — Polls the daemon status file after a detached start and reports the real server-connection outcome, trusting only status written by the fresh daemon and treating early errors as transient. <!--#784e4427a440b106-->
+- `daemon_start_cmd` (function) — The `se3 daemon start` command that launches the daemon detached (or in the foreground), resolves the daemon key from flag or environment, and reports the resulting connection state. <!--#cd92a1f90509fdd6-->
+- `daemon_stop_cmd` (function) — The `se3 daemon stop` command that stops the running daemon and reports stopped / not-running / stop-timeout outcomes with matching exit codes. <!--#4579fb698e0918f4-->
+- `daemon_status_cmd` (function) — The `se3 daemon status` command that prints (or emits as JSON) the daemon's PID, machine, configured server, real connection state, and tracked flows. <!--#fe248f8d79b8de72-->
+- `merge_cmd` (function) — The `se3 merge` command — a thin adapter that validates branch names, resolves strategy/delete-merged from flags and config, and runs the merge integrate+reconcile pipeline, signalling failure via exit code. <!--#2222de51aead4c30-->
+- `merge_respond_cmd` (function) — The `se3 merge-respond` command that executes the conflict decisions recorded in an edited merge call-response file. <!--#cd592352d348f648-->
+- `merge_unlock_cmd` (function) — The `se3 merge-unlock` command that inspects and reports the project's merge lock, auto-clears stale locks, and refuses a live holder unless `--force`. <!--#b7fe019b6eccb1cc-->
+- `salvage_cmd` (function) — The `se3 salvage` command that best-effort recovers an abnormally terminated session by committing changes, filing issues for unfinished work, and archiving the session. <!--#ce1db9ff7cfef95f-->
+- `end_session_cmd` (function) — The `se3 end-session` command that terminates a live run process and archives its session (including worktree cleanup) without merging uncommitted work. <!--#bf6970dad2f6c55f-->
 
 ### `src/se3/codex_runner.py` (python) — OpenAI Codex CLI adapter that wraps a single `codex exec --json` command as an AgentRunner subclass, translating codex's JSONL events into Claude-compatible stream-json NDJSON (via CodexEventConverter) and running codex synchronously or under activity-based monitoring with stdin routing, stderr draining, timeout enforcement, and infrastructure-error classification. <!--#7368c158c96ec664|90b98d81ec878b0d-->
 - `_detect_shell_snapshot_failure` (function) — Module-level helper that returns True if the given stderr text contains any known shell-snapshot validation failure pattern. <!--#285b07575c27a81d-->
@@ -594,7 +595,7 @@
   - `MonitoredResult.success` (method) — Property returning True when the return code is zero. <!--#787b46b245897e2b-->
 - `_SingleRunResult` (class) — Internal dataclass capturing the result of a single monitored command run (return code, output, success, retry/interrupt flags, stderr tail). <!--#25c02f14463c799c-->
 
-### `src/se3/config.py` (python) — SE3's configuration management module: loads/merges project `se3.yaml` and `se3.local.yaml` settings into dataclass-backed config objects, and provides the cached git worktree/main-repo-root probe (`probe_main_repo_root`, `_resolve_main_repo_root`, `MainRepoProbeError`) used to decide where repo-level operations should run. <!--#45d6f1d2ff8f5035|e3b0c44298fc1c14-->
+### `src/se3/config.py` (python) — SE3's configuration management module, defining the project config filenames and layered config dataclasses/loading, plus a cached git probe (`probe_main_repo_root` / `_resolve_main_repo_root`) that resolves whether a project root is a linked worktree and where the main repository checkout lives. <!--#93a62575a22b6d61|e3b0c44298fc1c14-->
 
 ### `src/se3/preset_loader.py` (python) — Loads and resolves SE3 'preset prompts' from a dual-layer registry — built-in markdown templates plus project-local overrides from se3/prompts and se3.yaml — exposing listing and name-to-(task_type, prompt, layer) resolution with explicit errors for unknown presets or missing prompt files. <!--#6b084d3aa7add2b9|d2564ec60747f605-->
 - `PresetError` (class) — Base exception for any preset resolution failure (e.g. a declared prompt file that does not exist). <!--#6030b307aeecbc5f-->
@@ -623,23 +624,23 @@
 - `has_framework_file_changes` (function) — Checks git's staged files for changes to known framework source paths. <!--#dbfdb9481646fa39-->
 - `parse_status_md` (function) — Parses status.md into structured fields (active change, current task, status, blockers). <!--#2c4ec321050f973f-->
 
-## `src/se3/commands/` — The SE3 3.0 CLI command layer, housing the Typer command implementations that drive the tool's user-facing workflows — running/resuming flows (`run`), merging and conflict resolution (`merge`, `merge-respond`), session lifecycle (`end-session`, `salvage`, `history`, `worktree gc`), project setup and migration (`init`, `migrate`), issue and code-index management — over a shared merge-infrastructure subpackage that supplies locking, tracing, redaction, and typed result/failure models. <!--#94500e7e328c0cd8|107f5c7a6ed4f963-->
+## `src/se3/commands/` — The SE3 3.0 CLI command layer, housing the Typer command implementations that drive the tool's user-facing workflows — running/resuming flows (`run`), merging and conflict resolution (`merge`, `merge-respond`), session lifecycle (`end-session`, `salvage`, `history`, `worktree gc`), project setup and migration (`init`, `migrate`), issue and code-index management — over a shared merge-infrastructure subpackage that supplies locking, tracing, redaction, and typed result/failure models. <!--#dda4c902fbaf44a9|107f5c7a6ed4f963-->
 
 ### `src/se3/commands/__init__.py` (python) — Package initializer for the SE 3.0 CLI commands module, containing only a docstring and marking the directory as the namespace that holds the individual command implementations. <!--#7bf1513a2bce3e63|e3b0c44298fc1c14-->
 
-### `src/se3/commands/code_index_cmd.py` (python) — Defines the Typer `se3 code-index` command family that lets humans and the LLM navigate the project's structure map — the adaptive budgeted root view plus literal drill-in (`index`), single-file detail (`show`), regex/literal grep of item lines (`search`), incremental/full (re)build (`rebuild`), and on-disk health stats (`inspect`) — all reading render-only from the authoritative `se3/code-index.md` except `rebuild`, which writes it. <!--#f1a671608af38eeb|2fda5866aca58b78-->
-- `get_project_root` (function) — Locates the project root by walking up from the cwd to the first directory containing a .git folder or an SE3 config marker, falling back to cwd. <!--#05a0e596195334bb-->
-- `_render_adaptive_map` (function) — Renders the bare `se3 code-index` adaptive root view — the budgeted zoomable orientation tree built from the configured primary roots and byte budget, emitted exactly to stdout for LLM consumption. <!--#a5942a92675b9b78-->
+### `src/se3/commands/code_index_cmd.py` (python) — Defines the Typer `se3 code-index` command family that lets humans and the LLM navigate the project's structure map — the adaptive budgeted root view plus literal drill-in (`index`), single-file detail (`show`), regex/literal grep of item lines (`search`), incremental/full (re)build (`rebuild`), and on-disk health stats (`inspect`) — all reading render-only from the authoritative `se3/code-index.md` except `rebuild`, which writes it. <!--#22e6fe9d96f9b6da|2fda5866aca58b78-->
+- `get_project_root` (function) — Walks up from the cwd to find the project root (a `.git` dir or SE3 config), rebinding the i18n language to that root before returning it. <!--#6bb957ad4b0017c5-->
+- `_render_adaptive_map` (function) — Renders the bare `se3 code-index` adaptive root view — the budgeted, auto-expanding orientation map injected into every flow step — erroring out if the index has not been built. <!--#f75bc16ba26279c7-->
 - `code_index_main` (function) — Typer callback for the `code-index` command group that renders the adaptive root view when invoked with no subcommand and otherwise dispatches to its drill-in/rebuild/inspect subcommands. <!--#475c3ea7659eb429-->
-- `index_cmd` (function) — Implements `code-index index [<path>]`, rendering exactly one literal level at the given path (a directory's immediate children, a file's symbols, or the root level) without auto-expansion. <!--#3b6340171d8c0926-->
-- `show_cmd` (function) — CLI command that prints one file's full class/function/method detail (or a directory's file one-liners) by loading the authoritative se3/code-index.md render-only. <!--#f1874d87c89d2387-->
-- `search_cmd` (function) — A Typer CLI command that greps the rendered lines of the authoritative se3/code-index.md (render-only, never rebuilding) with grep-aligned flags (-i, -F, -m, and a no-op -n) and grep-style exit codes, emitting each matched directory/file/symbol line with its full owning path. <!--#c2931dfdd5b29ffe-->
-- `_build_matcher` (function) — Helper that compiles a search pattern into a per-line predicate honouring the `-F` literal-substring and `-i` case-insensitive flags, exiting 2 on an invalid regex to mirror grep's bad-pattern error. <!--#f69d9ead14a175cf-->
-- `rebuild_cmd` (function) — CLI command that (re)builds the authoritative se3/code-index.md via load_or_build, re-summarising only fingerprint-changed nodes incrementally or everything with --force, then reports file/symbol counts. <!--#dc6c44c51d070001-->
-- `inspect_cmd` (function) — Implements `code-index inspect`, printing summary health stats (file, symbol, degraded-chunk counts and a per-kind file breakdown) from the on-disk map. <!--#6730d9e2e9a202ff-->
+- `index_cmd` (function) — The `index` subcommand: prints the literal, non-expanding drill-in view of exactly one level at the given path (or the root level when no path is given). <!--#5e072ceec3fc46b9-->
+- `show_cmd` (function) — The `show` subcommand: prints one file's full summary plus every class/function/method from the code-index (or the file one-liners under a directory prefix). <!--#ab73eb6098443ac8-->
+- `search_cmd` (function) — The `search` subcommand: a grep drop-in over the code-index item lines, supporting -i/-F/-m (and a no-op -n) and mirroring grep's 0/1/2 exit codes. <!--#829b979add860e84-->
+- `_build_matcher` (function) — Compiles a search pattern into a per-line predicate — literal substring under `-F`, otherwise a regex — exiting 2 on an invalid regex. <!--#4894c9fafcd9565d-->
+- `rebuild_cmd` (function) — The `rebuild` subcommand: re-enumerates the tree and LLM-summarises changed nodes (or everything with `--force`), writing the authoritative `se3/code-index.md` and reporting the resulting counts. <!--#2c79962407cf9769-->
+- `inspect_cmd` (function) — The `inspect` subcommand: prints health-check stats of the on-disk index — file, symbol, and degraded counts plus a per-kind file breakdown — without dumping the map. <!--#fba429197e62b7e3-->
 
-### `src/se3/commands/end_session_cmd.py` (python) — Implements the `se3 end-session` command: terminates a running `se3 run` flow's live process tree and archives the session — reusing the merge-cleanup machinery for `--worktree` sessions (archive worktree, promote engine state, sync history, delete branch/worktree, clear snapshot) or simply clearing engine state for main-branch sessions — running each step as an independently fault-tolerant unit and rendering a Rich summary table with an aggregate exit code. <!--#366d8121af52f973|eb726bbf0fd6ee8a-->
-- `end_session` (function) — Top-level entry point that orchestrates the end-session pipeline: resolve root, find any worktree session, terminate the live process, archive (worktree or main-branch), and render a summary with an aggregate exit code. <!--#03d0f5d7c265dc0e-->
+### `src/se3/commands/end_session_cmd.py` (python) — Implements the `se3 end-session` command: terminates a running `se3 run` flow's live process tree and archives the session — reusing the merge-cleanup machinery for `--worktree` sessions (archive worktree, promote engine state, sync history, delete branch/worktree, clear snapshot) or simply clearing engine state for main-branch sessions — running each step as an independently fault-tolerant unit and rendering a Rich summary table with an aggregate exit code. <!--#cebfefe151a4927b|eb726bbf0fd6ee8a-->
+- `end_session` (function) — Top-level entry point for the `end-session` pipeline: resolves the main project root and flow id, finds any worktree session, kills the live `se3 run` process tree, archives the session (worktree or main-branch), prints a results table, and returns an aggregate exit code. <!--#af4089b15dfa3b59-->
 - `_find_project_root` (function) — Walks up from the current directory to locate the project root via a `.git` dir or an SE3 config file. <!--#3c8eb6032ea041a2-->
 - `_resolve_main_root` (function) — Resolves the main project root, normalizing a worktree-copy path back to its owning main root so archival writes land outside the worktree being deleted. <!--#62178ee8d8722eaf-->
 - `_read_main_flow_id` (function) — Best-effort reads the active `flow_id` from the main project's `se3/state/engine.json`. <!--#811a4a97d453d48b-->
@@ -647,112 +648,112 @@
 - `_proc_alive` (function) — Returns whether a pid names a live, non-zombie process (using psutil when available, else `os.kill(pid, 0)`). <!--#afc851908ba03f0c-->
 - `_collect_descendants` (function) — Returns the given pids plus all their live recursive descendants, captured up front so a whole process tree can be signalled before the parent is killed and children orphaned. <!--#ef2fff3b2e9e0231-->
 - `_any_alive` (function) — Returns whether any pid in the given collection is currently alive. <!--#325a42539d7156fa-->
-- `_terminate_one` (function) — Terminates a pid and its entire descendant tree via SIGTERM-grace-SIGKILL, returning (ok, detail) where ok is True only when every process is confirmed dead. <!--#9a8baaa37329a0f9-->
+- `_terminate_one` (function) — Kills a pid and its entire descendant tree with SIGTERM → grace period → SIGKILL, returning (ok, detail) where ok is True only when every process is confirmed dead, so callers can refuse destructive cleanup while a session is still running. <!--#b07a28e92b058f4c-->
 - `_read_run_pidfile` (function) — Reads the live-flow pid recorded in `<state_root>/se3/state/run.pid`, returning None if absent/unreadable/empty. <!--#0cb62ebd8d238460-->
 - `_pid_is_live_se3_run` (function) — Guards the run.pid marker against staleness by checking the pid is both alive and (via psutil cmdline) actually an `se3 run` process. <!--#b7281b12398e0885-->
 - `_proc_has_descendant_in_dir` (function) — Returns whether a process's tree is anchored inside a worktree path (a descendant cwd or any open file under it), used to identify a `--worktree` flow's parent that stays at the main root. <!--#5e59f4d695e1cf19-->
 - `_discover_pids_for_flow` (function) — Discovers live `se3 run` pids belonging to a flow via the run.pid marker, an `--flow-id` cmdline arg, matching cwd + on-disk flow_id, or a tree anchored in the worktree path. <!--#baf6b5daf9fa7b8e-->
-- `_terminate_session_process` (function) — Terminates the session's live process(es) — using a supplied pid or discovered candidates — returning (ok, summary) where ok gates the destructive archive path. <!--#ec0cc83d0cb971f5-->
-- `_archive_worktree_session` (function) — Archives a worktree session by reusing the merge-cleanup machinery (archive worktree, promote engine state, sync history, clear snapshot, delete branch/worktree), each sub-step independently fault-tolerant. <!--#a3256d422f075bc6-->
-- `_archive_main_session` (function) — Archives a main-branch session by clearing engine state and the resumable snapshot, but only clears state when the main engine.json positively belongs to the requested flow_id. <!--#f2058d8d2f43a35d-->
+- `_terminate_session_process` (function) — Resolves the session's target pid(s) — from the caller's hint or by discovering them from the flow id — terminates each via `_terminate_one`, and reports whether all were confirmed dead plus a joined per-pid detail summary. <!--#6086cdc5f12ecb3c-->
+- `_archive_worktree_session` (function) — Archives a worktree session by reusing merge-cleanup machinery: copies the worktree into the archive dir, promotes its engine state, syncs its history, clears the resumable snapshot, and deletes the isolation branch/worktree — each sub-step fault-tolerant, with the destructive branch/worktree removal skipped unless the archive copy succeeded. <!--#7dc967d2bd36d882-->
+- `_archive_main_session` (function) — Archives a main-branch (non-worktree) session by clearing the main engine state and the flow's resumable snapshot, refusing the destructive clear unless the main engine.json is positively confirmed to belong to the requested flow. <!--#c725b5b470852516-->
 - `_infer_worktree_branch` (function) — Infers the branch checked out at a worktree path by parsing `git worktree list --porcelain`, used when engine.json did not record a worktree_branch. <!--#c0d9e792ab67fa0a-->
 - `_sync_worktree_history` (function) — Copies a worktree's per-flow history files into the main project append-only, never overwriting (collisions become `.from-<branch>` sidecars) and skipping byte-identical files for idempotency. <!--#118816cd79f47b90-->
 - `_same_file` (function) — Fault-tolerantly returns whether two files have byte-identical content via filecmp. <!--#43129f0a76c9cfd1-->
 - `_resolve_history_target` (function) — Resolves where to copy a history file without overwriting, returning the primary path, a uniquified `.from-<branch>` sidecar, or None if an identical copy already exists. <!--#cd2db7cff1fe7516-->
 - `_clear_resumable` (function) — Clears the resumable snapshot for a flow_id within a worktree via PersistenceManager. <!--#46bde5cf369c8f72-->
-- `_display_results` (function) — Renders the collected (step, status, detail) results as a colored Rich summary table, mirroring the salvage command's output. <!--#050555613facd1c2-->
+- `_display_results` (function) — Renders the collected (step, status, detail) rows as a styled Rich table with localized headings and OK/SKIP/FAIL status styling. <!--#3d2b950c6b36e0a5-->
 
-### `src/se3/commands/history_cmd.py` (python) — Implements the `se3 history` Typer command group for viewing and managing past flow sessions — listing active/archived/history-only flows, showing detailed flow info (including per-step LLM sessions and JSON output), and restoring flows — with helper functions for datetime/duration formatting, Rich status coloring, and reconstructing flow details from persistence, archive files, and chat history. <!--#422d5ba536be4c87|a350823ac8891575-->
-- `get_project_root` (function) — Locates the project root by walking up from the cwd looking for a `.git` directory or an SE3 config marker. <!--#f92ddfc8dfa3425f-->
+### `src/se3/commands/history_cmd.py` (python) — Implements the `se3 history` Typer command group for viewing and managing past flow sessions — listing active/archived/history-only flows, showing detailed flow info (including per-step LLM sessions and JSON output), and restoring flows — with helper functions for datetime/duration formatting, Rich status coloring, and reconstructing flow details from persistence, archive files, and chat history. <!--#bf535102cc02a47a|a350823ac8891575-->
+- `get_project_root` (function) — Walks up from the cwd to find the enclosing project root (a `.git` dir or SE3 config) and rebinds the i18n language to that root before returning it. <!--#7f65c0c23bdaba9f-->
 - `format_datetime` (function) — Converts an ISO datetime string into a human-readable `YYYY-MM-DD HH:MM` format, falling back to the raw string on error. <!--#0f5d25170fb3009a-->
 - `format_duration` (function) — Computes and formats the elapsed duration between two ISO timestamps as minutes/hours/days. <!--#212868504b98e854-->
 - `list_all_flows` (function) — Returns all flows from every data source via the PersistenceManager. <!--#6ed7050a4e181cb1-->
-- `list_archived_flows_from_disk` (function) — Scans the se3/state/archive directory for engine_*.json snapshots and returns a listing of archived flows (id, status, description, archived timestamp, filename), parsing timestamps from filenames and using size-guarded header reads to avoid fully parsing huge legacy archives. <!--#0df4dd50fbacfe53-->
+- `list_archived_flows_from_disk` (function) — Scans `se3/state/archive/engine_*.json`, parsing each archive's timestamp (with mtime fallback) and reading only its header keys, to return a list of archived flow summary dicts, skipping malformed files. <!--#3b5c3967a9474f97-->
 - `_detail_from_flow` (function) — Builds a detailed info dict (metadata, progress, steps, chat session count) from a live FlowInstance object. <!--#eeccd00f334be5a5-->
 - `_load_archived_flow` (function) — Loads a full FlowInstance for a given flow_id from the archive by delegating to PersistenceManager's split-aware, size-guarded loader, resolving externalized cold step payloads and returning None when a legacy archive can only be read degraded so callers fall back to history-only detail. <!--#9bfb7cbac7889b19-->
 - `_detail_from_history` (function) — Builds a minimal flow-detail dict from history-only directory data, reconstructing timestamps and self_check pass numbering. <!--#d657d101098e50a4-->
 - `get_flow_detail` (function) — Retrieves a flow's detail dict by searching active, archived, then history-only data sources in order. <!--#f197f9de0c0a77c9-->
 - `_status_color` (function) — Maps a flow status string to a Rich display color. <!--#d24adeb7ceeee4ff-->
 - `_step_status_color` (function) — Maps a step status string to a Rich display color. <!--#8bb2cea2c4630c05-->
-- `_render_flows_table` (function) — Renders a list of flow dicts as a Rich table with status colors and a usage hint. <!--#879c364f24bcdb84-->
-- `default_cmd` (function) — Default `se3 history` callback that lists flows (with active/archived/JSON filters) unless a subcommand is invoked. <!--#ee56291e672fffd0-->
-- `list_cmd` (function) — `se3 history list` subcommand that lists all flows with active/archived/JSON filtering options. <!--#bc1cdce01f476992-->
-- `show_cmd` (function) — `se3 history show` subcommand that displays detailed flow info, with prefix matching and optional detailed/verbose LLM-call output. <!--#f2635fcfc804b8ea-->
-- `_show_detailed_sessions` (function) — Renders detailed per-step LLM call sessions for a flow using Rich rules and session renderers. <!--#f9b92401ed5c0945-->
+- `_render_flows_table` (function) — Prints a list of flow dicts as a colour-coded Rich table (id, status, truncated description, progress, updated time, source) plus a hint line. <!--#a4ac2cfcb1d583d9-->
+- `default_cmd` (function) — The `se3 history` callback that, when no subcommand is given, lists all flows with optional `--active-only`/`--archived-only` filtering and JSON or table output. <!--#83b1fb3853154c77-->
+- `list_cmd` (function) — The explicit `history list` subcommand: same as the default callback, listing all/active/archived flows as JSON or a Rich table. <!--#8e030e18e2d18738-->
+- `show_cmd` (function) — The `history show` subcommand that resolves a flow id (exact or unique prefix) and prints its details — info table, per-step table with self_check pass numbering, and optionally full LLM call sessions — as text or JSON. <!--#5a86c8bfad1035a0-->
+- `_show_detailed_sessions` (function) — Loads a flow's chat history, interleaves the sessions for display, and prints each one's rendered LLM call detail under a rule header. <!--#1e705327054f02e8-->
 - `_show_detailed_json` (function) — Outputs a flow's detail plus full chat history as JSON. <!--#3757b11347d645fd-->
-- `restore_cmd` (function) — `se3 history restore` subcommand that validates the flow and delegates to `se3 run --resume` to resume it. <!--#90d23da25a8bcfc9-->
-- `archived_cmd` (function) — `se3 history archived` subcommand that lists archived flows as a Rich table or JSON. <!--#60d2fcfc21462bd9-->
+- `restore_cmd` (function) — The `history restore` subcommand that validates/resolves a flow id then shells out to `se3 run --resume --flow-id <id>` (or just prints the command under `--dry-run`). <!--#4b8fb2f960cfdd80-->
+- `archived_cmd` (function) — The `history archived` subcommand that lists only on-disk archived flows as JSON or a Rich table with status colouring and archive timestamps. <!--#7f63e5d869ada8f7-->
 
-### `src/se3/commands/init_cmd.py` (python) — Implements the `se3 init` CLI command, providing the testable run_init routine and helpers that scaffold a new SE3 project's artifacts (charter, VERSIONS.md, spec templates), initialize a git repository, and manage the .gitignore rules for se3.local.yaml. <!--#a5e77db47ef3eb23|7949f85b71a6f43b-->
+### `src/se3/commands/init_cmd.py` (python) — Implements the `se3 init` CLI command, providing the testable run_init routine and helpers that scaffold a new SE3 project's artifacts (charter, VERSIONS.md, spec templates), initialize a git repository, and manage the .gitignore rules for se3.local.yaml. <!--#ac716f25919f11cb|7949f85b71a6f43b-->
 - `_render_template` (function) — Loads a named template file from TEMPLATES_DIR and substitutes `{key}` placeholders via literal string replacement (not str.format) to avoid choking on incidental braces. <!--#760a3c5ebb7fdbb8-->
 - `is_git_repository` (function) — Returns True if the given path lies inside an existing git repository by walking up parents looking for a .git directory. <!--#0d770de078464a79-->
 - `init_repository` (function) — Runs `git init` in the given directory and returns a (success, message) tuple, handling git-not-installed and command-failure cases. <!--#6268849a7cbf7dd5-->
 - `_normalize_gitignore_pattern` (function) — Strips gitignore anchor/recursive-glob/directory markers (`/`, `**/`, trailing `/`) from a pattern so it can be matched with fnmatch. <!--#a6b579bdc1df51ec-->
 - `_gitignore_has_local_pattern` (function) — Returns True when an existing .gitignore already ignores se3.local.yaml via a literal or covering glob line, skipping comments and negations. <!--#d075bf1a25d3b705-->
 - `_gitignore_has_local_negation` (function) — Returns True when .gitignore contains a narrow `!se3.local.yaml`-style negation that specifically un-ignores the file (but not se3.yaml), signalling a conflicting append should be refused. <!--#75d9f94ea11cafdf-->
-- `create_gitignore` (function) — Ensures .gitignore ignores se3.local.yaml, returning one of five statuses (created/appended/negated/unchanged/error) and writing/appending the ignore block as needed. <!--#53319e9f4a4b90a5-->
+- `create_gitignore` (function) — Ensures the project's .gitignore ignores se3.local.yaml, returning a (status, message) pair for one of five outcomes — created, appended, negated (an explicit `!se3.local.yaml` exists, so it refuses to add a conflicting rule), unchanged, or error. <!--#ceb7a4457a705dbc-->
 - `_get_charter_template` (function) — Builds the initial se3/charter.md content by delegating to charter.render_charter_template with placeholder fill-in prompts for a fresh project. <!--#6d0eb88f593c231f-->
 - `_get_versions_md_template` (function) — Renders the initial VERSIONS.md from the versions_md.md template, filling in project name and current date. <!--#80b454c638f9ac34-->
-- `run_init` (function) — Core, testable init routine that creates all project artifacts and git setup, returning a dict of created/skipped paths plus git and gitignore status flags. <!--#2371f759850888d6-->
-- `init_cmd` (function) — The typer CLI entrypoint for `se3 init` that resolves the project root/name, calls run_init, and prints status messages and next-step guidance. <!--#5025bcd3453b1dca-->
+- `run_init` (function) — Testable core of project initialization: scaffolds se3.yaml, the se3/ runtime dir, se3/charter.md and VERSIONS.md, initializes git if needed, updates .gitignore, and returns a dict of created/skipped paths plus git, gitignore, and se3.local.yaml-shadowing status flags. <!--#ebb27b46d1c6ebaa-->
+- `init_cmd` (function) — Typer CLI entry point for `se3 init` that resolves the project root and name, delegates to run_init, and echoes localized results (created/skipped files, VERSIONS.md, git, .gitignore, local-override warning, and next steps). <!--#7919084434aa7ab9-->
 
-### `src/se3/commands/issue_cmd.py` (python) — Defines the Typer CLI command group for issue management (list, show, create, edit, close, reset), backed by IssueManager, with helpers for project-root resolution, Rich color/datetime formatting, external-editor YAML round-tripping, and description resolution from args/stdin/prompt. <!--#5a28e5919377a43d|491264dd703bea1f-->
-- `get_project_root` (function) — Walks up from the current directory to locate the project root via a `.git` directory or SE3 config marker, falling back to cwd. <!--#f92ddfc8dfa3425f-->
+### `src/se3/commands/issue_cmd.py` (python) — Defines the Typer CLI command group for issue management (list, show, create, edit, close, reset), backed by IssueManager, with helpers for project-root resolution, Rich color/datetime formatting, external-editor YAML round-tripping, and description resolution from args/stdin/prompt. <!--#379f5cff9540fd3e|491264dd703bea1f-->
+- `get_project_root` (function) — Walks up from the cwd to find the project root (a `.git` dir or SE3 config) and rebinds the i18n language to that root before returning it. <!--#7f65c0c23bdaba9f-->
 - `_status_color` (function) — Maps an IssueStatus enum value to a Rich color string for table/detail rendering. <!--#440d3dc2ee8afeb2-->
 - `_priority_color` (function) — Maps a priority string (critical/high/medium/low) to a Rich color for display. <!--#decc56c974d7023c-->
 - `_type_color` (function) — Maps an issue type string (bug/feature/etc.) to a Rich color for display. <!--#bd6f4aa758834f96-->
 - `_format_datetime` (function) — Formats a datetime as `YYYY-MM-DD HH:MM`, falling back to its string form on error. <!--#622e5ed38538305d-->
 - `_get_editor` (function) — Resolves the editor command from $EDITOR, defaulting to `vi` when unset or malformed. <!--#6da17e089dc60c09-->
 - `EditorError` (class) — Exception raised when the external editor binary cannot be found or launched. <!--#5e3c13fe86988091-->
-- `_open_editor_with_content` (function) — Writes content to a temp file, opens it in the user's editor, and returns the edited text (None if cancelled, raising EditorError on launch failure). <!--#e47b567354907101-->
+- `_open_editor_with_content` (function) — Writes the given text to a temp YAML file, opens it in the user's `$EDITOR`, and returns the edited content (None if the editor exits non-zero, raising `EditorError` if it can't be launched). <!--#98c16e9f3627f5b0-->
 - `_issue_to_editor_yaml` (function) — Renders an existing Issue as a human-editable YAML template containing only editable fields plus a read-only id. <!--#b0abf28b8150969b-->
 - `_new_issue_editor_yaml` (function) — Generates a blank YAML template for creating a new issue via the external editor. <!--#f32e849fd690fa51-->
-- `_parse_edited_issue_yaml` (function) — Parses edited YAML text into a dict, validating it is a non-empty mapping with a non-blank description. <!--#466da3b0f72e14be-->
+- `_parse_edited_issue_yaml` (function) — Parses editor-returned YAML into a dict, raising `ValueError` if it is malformed, empty, or missing a non-blank description. <!--#b0bc2963e0175f06-->
 - `default_cmd` (function) — Default callback that lists open issues when no subcommand is invoked. <!--#78df7f33146891ba-->
-- `list_cmd` (function) — Lists issues in a Rich table with optional filtering by status (all/open), type, and source. <!--#53a4b2ce3e820410-->
-- `show_cmd` (function) — Displays detailed information for a single issue by ID in a formatted block, erroring if not found. <!--#0a4092ed73dcf0e8-->
-- `create_cmd` (function) — Creates a new issue from a positional/stdin/interactive description or a full YAML editor template, with optional title, type, priority, and tags. <!--#535ab76f334c4c39-->
-- `_resolve_description` (function) — Resolves an issue description from a positional argument, piped stdin, or an interactive prompt, returning None on cancel and raising on empty input. <!--#a600847d29781592-->
-- `edit_cmd` (function) — Opens an issue in the external editor and applies the edited YAML via update_fields, treating removed fields as cleared to defaults. <!--#ed70b17ee247e3a5-->
-- `close_cmd` (function) — Closes an issue by ID with an optional reason, reporting errors via IssueManager. <!--#5894a962b47cdaad-->
-- `reset_cmd` (function) — Resets an in-progress issue back to open status by ID. <!--#3c3ce4cfb105b529-->
+- `list_cmd` (function) — The `issue list` command: validates the `--source` filter, queries `IssueManager`, and renders matching issues as a colour-coded Rich table. <!--#069c51df462c5f38-->
+- `show_cmd` (function) — The `issue show` command: loads one issue by id and prints its full details in a colour-coded block, exiting 1 if not found. <!--#fa4bc9120a3d8a64-->
+- `create_cmd` (function) — The `issue create` command: builds a new human-sourced issue from a `--editor` YAML template or from a positional/stdin/interactive description plus metadata options. <!--#6533f3ebd5b4bf04-->
+- `_resolve_description` (function) — Resolves an issue description from (in priority order) the positional argument, piped stdin, or an interactive multiline prompt, returning None on cancellation and raising `ValueError` when empty. <!--#b14899d61ce9b0e5-->
+- `edit_cmd` (function) — The `issue edit` command: round-trips an existing issue through `$EDITOR` as YAML and applies every editable field back via `update_fields`, treating removed keys as cleared. <!--#84fcb082db8fcf51-->
+- `close_cmd` (function) — The `issue close` command: closes an issue by id with an optional `--reason`, exiting 1 on error. <!--#4befdf6b1706c9ed-->
+- `reset_cmd` (function) — The `issue reset` command: moves an in-progress issue back to open status, exiting 1 on error. <!--#d55b458abfe4d14a-->
 
-### `src/se3/commands/merge_cmd.py` (python) — The `se3 merge` CLI command module that validates branch names and a clean/idle working tree, drives the sequential integrate()→reconcile() flow to merge branches, reconcile the release version, and optionally stash/deferred-clean/backfill resolved source issues, with a suite of git and reporting helpers that surface partial-sync signals, human-escalation artifacts, and failure titles. <!--#fa4ca42efd1c11d8|6558dc9931761215-->
+### `src/se3/commands/merge_cmd.py` (python) — The `se3 merge` CLI command module that validates branch names and a clean/idle working tree, drives the sequential integrate()→reconcile() flow to merge branches, reconcile the release version, and optionally stash/deferred-clean/backfill resolved source issues, with a suite of git and reporting helpers that surface partial-sync signals, human-escalation artifacts, and failure titles. <!--#8c7f14dcc6fa5909|6558dc9931761215-->
 - `_run_git` (function) — Thin wrapper that runs a git subcommand in a given project root via subprocess, capturing output with configurable check/timeout. <!--#8bdb8c6f53ca2c0b-->
 - `_resolve_git_dir` (function) — Resolves the real git directory (handling linked worktrees where .git is a pointer file) via `git rev-parse --git-dir`, returning None if unavailable. <!--#39d970125e3b9d76-->
 - `_is_working_tree_clean` (function) — Returns whether the working tree has no uncommitted tracked changes and no in-progress git operation, ignoring untracked files. <!--#0b796ef88d8b0242-->
 - `_git_operation_in_progress` (function) — Detects whether git is mid-merge/cherry-pick/revert/rebase by checking for the corresponding marker files in the git directory. <!--#bfe6f2d49513bda6-->
 - `_branch_exists` (function) — Checks whether a local branch exists via `git show-ref`, failing closed (False) on any infrastructure error so indeterminate refs are refused. <!--#e9891f12d3b59534-->
-- `validate_branch_names` (function) — Validates user-supplied branch names before any git command runs, rejecting empties, dash-prefixes, shell metacharacters, glob chars, and git-ref-invalid patterns with a descriptive ValueError. <!--#526dc4e71b25599b-->
-- `_append_runtime_sync_lines` (function) — Helper that appends human-readable runtime-sync status lines (skipped branches/files, idempotent bypasses, discarded tier-B state, written and audit-only collisions, and committed issue renumbers) to a merge summary's output lines, called from every CLI branch so partial-sync signals stay visible even on failure paths. <!--#13d188d2b45dc678-->
-- `_append_human_call_lines` (function) — Renders the human-escalation recovery artifact for a failed merge, printing the real se3/calls/ file path in normal mode but a recorded-escalation payload plus a 'rerun se3 merge' recovery hint in suppress/library mode where no call file exists. <!--#9ebc8fee62af2c16-->
+- `validate_branch_names` (function) — Validates user-supplied branch names before any git command runs, rejecting empty/leading-dash/shell-metachar/git-ref-invalid names and raising a ValueError that lists each rejected name and the rule it broke. <!--#f281be8158f162ea-->
+- `_append_runtime_sync_lines` (function) — Renders all runtime-sync signals (skipped branches/files, idempotent bypasses, discarded tier-B, tier-A collisions) plus committed issue renumbers and ambiguous issue references into the merge summary lines, on both success and failure paths. <!--#d17adf52b3eb8264-->
+- `_append_human_call_lines` (function) — Renders the human-escalation recovery block for a failure report — the real se3/calls/ file path in normal mode, or the recorded escalation payload plus a 'rerun se3 merge' instruction in suppress/library mode where no call file exists. <!--#c847fdd1b88c9f6a-->
 - `_split_merged_buckets` (function) — Splits a merge report's merged branches into newly-merged versus already-an-ancestor buckets, with a git-ancestry fallback for legacy reports. <!--#85e42d3a5d245a8d-->
-- `_append_split_branch_lines` (function) — Appends the per-bucket 'Newly merged' and 'Already an ancestor' branch listings to a CLI output line list. <!--#46b7a0e52a8e54c2-->
+- `_append_split_branch_lines` (function) — Appends the per-bucket listings of newly-merged versus already-ancestor branches to the summary lines. <!--#b2b30c538c4b00fc-->
 - `_has_user_uncommitted_changes` (function) — Returns whether the user has genuine working-tree WIP (tracked or untracked), filtering out SE3's own runtime artifacts, to decide if a fast-strategy pre-stash is needed. <!--#bf31679b6ab5f671-->
-- `_fast_stash_dirty` (function) — Stashes dirty working-tree state (including untracked) before a fast-strategy merge, returning the stash label or None on clean tree/failure. <!--#27f8729d65270986-->
-- `_fast_stash_pop` (function) — Pops the fast-strategy pre-merge stash by its exact label via the shared no-data-loss `resolve_stashpop_safely` path — archiving conflicting content, optionally delegating real 3-way conflicts to an injected LLM resolver, and returning True (with an audit issue carrying the recovery manifest) when recovery did not finalize so the caller refuses to report a clean success. <!--#ec22bf3c8507f7d3-->
+- `_fast_stash_dirty` (function) — Stashes a dirty working tree under a labeled se3-pre-fast-merge stash before a fast-strategy merge, returning the stash label or None (best-effort; failures only warn). <!--#57aa3f6ed62d0ec4-->
+- `_fast_stash_pop` (function) — Pops the labeled pre-merge stash through the shared no-data-loss recovery path (archive-before-drop, LLM conflict resolution, audit issue on incomplete recovery), returning True when recovery did not finalize so the caller must not report clean success. <!--#6b38b8eb21612c0c-->
 - `_map_branches_to_source_issues` (function) — Captures a {branch: source_issue_id} mapping (via a lazy run.py worktree scanner) before the merge runs, so the link survives after --delete-merged removes each worktree's engine.json; best-effort, never raises. <!--#e2e3917a9c4cece0-->
 - `_backfill_resolved_source_issues` (function) — The single idempotent choke point that transitions the source issues of successfully-merged (newly-merged or already-ancestor) branches from IN_PROGRESS to RESOLVED, swallowing all errors so it can never alter the merge exit code. <!--#ba318c9bd4d86fe9-->
 - `_acquire_merge_lock_with_callbacks` (function) — Helper that acquires the main-worktree merge lock in blocking mode, optionally probing non-blocking first so it can fire 'waiting'/'acquired' callbacks only when the caller must genuinely queue behind a live holder (never for a free or stale lock), swallowing callback exceptions. <!--#7316d471e91dc742-->
-- `_run_deferred_branch_cleanup` (function) — Deletes the merged source branches only after both integrate() and reconcile() have settled, deferring cleanup out of integrate() so a reconcile fault leaves branches intact for a recoverable whole-command rerun, while mirroring the orchestrator's partial-failure reporting. <!--#fe6786ecfdc38e99-->
-- `run_merge` (function) — Entry point for the `se3 merge` command that validates branch names, working-tree cleanliness, and branch existence, then drives the integrate-then-reconcile sequence under the main-worktree merge lock, with options for strategy, branch deletion, runtime-sync strictness, lock-wait callbacks, and library-mode escalation handling. <!--#77fcdbf39923379c-->
-- `_failure_title_and_summary` (function) — Maps a merge failure-reason code (including prefixed compound reasons like fast_abort/merge_failed with diagnostic detail) to a human-readable (title, first-line summary) pair distinguishing conflicts, guardrail violations, fast-mode aborts, and human-review pauses. <!--#21b19d1fe15adab8-->
+- `_run_deferred_branch_cleanup` (function) — Deletes the merged source branches only after the reconcile half has settled, so a reconcile fault leaves branches intact and the whole command stays re-runnable. <!--#86d3e1b62769e143-->
+- `run_merge` (function) — Top-level entry point of the `se3 merge` command: validates branches and working-tree state, then drives the orchestrator's integrate() -> reconcile() sequence (merge invariants then version release), renders the summary, runs deferred cleanup, and returns the exit code. <!--#f61d726c7633e302-->
+- `_failure_title_and_summary` (function) — Maps a merge failure_reason code (including compound prefixes like `fast_abort: <stderr>`) to the localized (title, first summary line) pair so the operator sees which category of failure occurred. <!--#96819c5c2aad20e0-->
 
-### `src/se3/commands/merge_respond.py` (python) — The `se3 merge-respond` command module that processes MCP call/response files for paused merge conflicts, dispatching on the user's accept/abort/manual choice under a project-wide merge lock while enforcing spec guardrails, version-bump, and strict-placeholder checks. <!--#fb23f5ba961c1ef0|36ad4e88dda4d061-->
+### `src/se3/commands/merge_respond.py` (python) — The `se3 merge-respond` command module that processes MCP call/response files for paused merge conflicts, dispatching on the user's accept/abort/manual choice under a project-wide merge lock while enforcing spec guardrails, version-bump, and strict-placeholder checks. <!--#c497396171b2cff5|36ad4e88dda4d061-->
 - `_is_spec_path` (function) — Thin wrapper that delegates se3 spec-file path detection to the canonical implementation in `se3.engine.merge.guardrails` so the merge subsystem shares one detector. <!--#92631e060c96b704-->
 - `_first_parent_sha` (function) — Returns the first-parent SHA of HEAD via `git rev-list --parents`, treating octopus merges like 2-parent merges and raising RuntimeError on git failure or a parentless root commit. <!--#b8325d34356dfe2f-->
 - `_head_parent_count` (function) — Returns HEAD's parent count for octopus-merge detection, distinguishing a legitimate `0` (root commit) from `None` (undetermined due to a transient git failure). <!--#a7aa6eaf6327be38-->
 - `_extract_version_from_string` (function) — Parses a version string out of TOML (`pyproject.toml`) or JSON (`package.json`) content, returning None (and warning on TOML parse failure) when no version can be extracted. <!--#0322f245c4574684-->
-- `_check_version_unchanged` (function) — Compares the project version between a pre-merge SHA and HEAD, returning an error message when the version is unchanged or the post-merge version file is present but unparseable. <!--#3bc84fb050d1d860-->
-- `process_merge_response` (function) — Public entry point that validates the call file, resolves the main-worktree lock root, and runs the locked response-processing body under a blocking MergeLock, mapping lock-busy/stale errors to CLI exit codes. <!--#d70cfe2ee3a6e6b3-->
-- `_verify_pending_guardrails` (function) — Handles re-entry for a parked manual-resolution merge by reading the `.pending_guardrails` marker, running guardrails against the user's new commit, and either clearing the marker or rolling HEAD back to the pre-merge SHA (auto-stashing first). <!--#fe2c6a53bba0778b-->
-- `_process_merge_response_locked` (function) — Lock-protected core that dispatches on the user's choice (accept/abort/manual), handling pending-guardrails re-entry and refusing to accept strict-mode placeholder or orphan-guardrail-violating resolutions. <!--#627aaeb4cb7259b6-->
+- `_check_version_unchanged` (function) — Compares the version field in pyproject.toml/package.json between a pre-merge SHA and HEAD, returning a localized error message when the version was left unchanged or the version file became unparseable, and None otherwise. <!--#560120142d8ca4e5-->
+- `process_merge_response` (function) — Public entry point for `se3 merge-respond`: resolves the project root and the main-repo merge lock, acquires it in blocking mode, and delegates to the locked handler, rendering localized errors for a missing call file or lock busy/stale conditions. <!--#d4373784e32adc94-->
+- `_verify_pending_guardrails` (function) — Handles re-entry on a parked manual-resolution merge by reading the .pending_guardrails marker, checking the user actually made exactly one new commit, running MergeGuardrailsCheck against it, and either clearing the marker on success or stashing work and hard-resetting HEAD to the pre-merge SHA on violation. <!--#fc5ebfb99e551e6e-->
+- `_process_merge_response_locked` (function) — Under the merge lock, dispatches a merge-conflict response: routes pending-guardrails re-entries, parses and validates the call/.response files and the accept/abort/manual choice, refuses strict-mode placeholder or orphan-spec-violating content, and writes the resolved file contents back to the working tree. <!--#cf0cd5601f00a1db-->
 
-### `src/se3/commands/migrate_cmd.py` (python) — Implements the `se3 migrate` command as a registry-based, fault-tolerant migration channel whose shipped `spec-to-new-system` migrator runs a salvage-first pipeline that assembles a charter, colocates why/intent comments into source, builds the code-index, then deletes the retired `se3/specs/` tree and rewrites `.gitignore` — all as one uncommitted, git-revertable working-tree change. <!--#b9421c137eb5dcb1|89764abbafbff369-->
+### `src/se3/commands/migrate_cmd.py` (python) — Implements the `se3 migrate` command as a registry-based, fault-tolerant migration channel whose shipped `spec-to-new-system` migrator runs a salvage-first pipeline that assembles a charter, colocates why/intent comments into source, builds the code-index, then deletes the retired `se3/specs/` tree and rewrites `.gitignore` — all as one uncommitted, git-revertable working-tree change. <!--#f6158628771df1a0|89764abbafbff369-->
 - `ColocatedWhy` (class) — Dataclass pairing a project-relative source file path with a prose why/intent fragment to be inserted into that file as a comment. <!--#cfd51d5498faf0ca-->
 - `SalvageInput` (class) — Dataclass bundling everything the salvager needs (project root, base spec text, non-base spec corpus, admission standard, charter template, project name) so the salvager does no discovery of its own. <!--#a03d93eb1581a162-->
 - `SalvageResult` (class) — Dataclass holding the salvaged product: the full assembled charter body, the code-bound colocations, and advisory notes for the reviewer. <!--#a748fffc532da172-->
-- `Migrator` (class) — Dataclass describing one registered migration — its id, description, and a `run` callable returning a MigrationReport. <!--#39fc5673b8d53d52-->
+- `Migrator` (class) — A dataclass describing one registered migration: its id, an i18n key for its human-readable description, and the callable that runs it and returns a MigrationReport. <!--#0de3df9b26a5406a-->
 - `register_migrator` (function) — Registers a migrator under its unique id in the MIGRATORS registry, raising on duplicate ids. <!--#29ecb08e2108fe0e-->
 - `get_migrator` (function) — Looks up and returns a registered migrator by id, or None if not found. <!--#f654e0789ae24328-->
 - `list_migrators` (function) — Returns all registered migrators sorted by id. <!--#f112e419974b0265-->
@@ -763,36 +764,36 @@
   - `MigrationReport.exit_code` (method) — Property returning process exit code 0 on success, 1 on any failure. <!--#4299b082776eeaeb-->
 - `_load_spec_corpus` (function) — Tolerantly loads the spec corpus from a specs directory, returning the base spec text and a {name: text} map of non-base specs while skipping unreadable, hidden, and underscore-prefixed entries. <!--#1727d96aa1f76583-->
 - `_project_name_from_base` (function) — Best-effort extraction of the project name from the base spec's title line, with a fallback. <!--#4208a2781e9fec9b-->
-- `_make_llm_salvager` (function) — Builds the default LLM-backed salvager that assembles the charter (pass A) and extracts per-spec code-bound why/intent (pass B), each LLM call degrading defensively rather than aborting the migration. <!--#699d621938e9bb9a-->
+- `_make_llm_salvager` (function) — Builds the default LLM-backed salvager closure that assembles the charter from the base spec plus a digest of other specs (pass A) and extracts file-bound why/intent from each non-base spec (pass B), degrading gracefully on any LLM failure. <!--#9d88188a314e8079-->
 - `_strip_code_fence` (function) — Strips a single wrapping triple-backtick code fence from a text body if present. <!--#620f4e9b5e0d1c5d-->
 - `_fallback_charter` (function) — Produces a degraded but lossless charter — the rendered template plus the base spec verbatim under a loud review banner — when LLM assembly is unavailable. <!--#13cb999b7c39d7eb-->
 - `_comment_prefix` (function) — Returns the line-comment prefix for a file based on its extension, defaulting to `#`. <!--#edaf021548cf685e-->
 - `_render_why_comment` (function) — Renders a why/intent fragment into a list of commented lines prefixed by the WHY marker. <!--#4017fdd2f97275ce-->
 - `_insert_why_comment` (function) — Inserts a rendered why-comment block at a safe top-of-file location, preserving any leading shebang. <!--#0385c973b5aaea6c-->
-- `_apply_colocations` (function) — Inserts each colocation's why-comment into its target file, skipping (with recorded reasons) any missing or unreadable targets, and returns the applied count plus skip reasons. <!--#efcc27bd877d25f5-->
+- `_apply_colocations` (function) — Writes each salvaged why-comment into its target source file, returning how many were applied plus reasons for any skipped (missing or unreadable) targets instead of aborting. <!--#35856e640a3e605f-->
 - `_write_charter_once` (function) — Writes the fully-assembled charter body to se3/charter.md in a single atomic write with no overwrite window. <!--#5542c0bfe1b1099e-->
 - `_tracked_toplevel_whitelists` (function) — Helper that runs `git ls-files` to enumerate all tracked top-level paths and returns `!/<name>` whitelist lines (dirs with trailing slash, .gitignore first), or None if git is unavailable so callers won't add a root default-deny without existence protection. <!--#a1fd1234efe43966-->
-- `_rewrite_gitignore` (function) — Idempotently migrates a project's .gitignore by adding code-index/charter whitelists, removing the retired specs whitelist, and introducing a root `/*` default-deny guarded by existence-protected top-level whitelists, returning a human-readable list of the changes made. <!--#cb922b4e7207863e-->
-- `run_spec_to_new_system` (function) — Executes the one-shot, fault-tolerant spec→new-system migration pipeline: assembles the charter, colocates why-comments into source, builds the code-index, deletes the old se3/specs/ tree only after salvage is confirmed, and rewrites .gitignore — all as one uncommitted, git-revertable working-tree change. <!--#5966af45c4291bf7-->
-- `_display_report` (function) — Renders a migration report as a Rich table with color-coded step statuses plus any review notes. <!--#ba4c448f26e0b128-->
-- `list_command` (function) — Typer command that lists the available registered migrations in a table. <!--#3a65166c9e3f056d-->
-- `run_command` (function) — Typer command that resolves and runs a migration by id against the project root, displays the report, and exits with its exit code. <!--#cbe8e3ce48a6f38d-->
+- `_rewrite_gitignore` (function) — Idempotently rewrites the project's .gitignore to whitelist code-index/charter, drop the retired specs whitelist, and switch the root to default-deny (`/*`) guarded by explicit whitelists for every currently-tracked top-level path. <!--#f96317d5e262f4ad-->
+- `run_spec_to_new_system` (function) — Runs the one-shot spec→new-system migration pipeline (charter assembly, why-comment colocation, code-index build, spec deletion gated on confirmed salvage, .gitignore rewrite), each step tolerant, leaving all changes uncommitted in the working tree. <!--#9df84c42b1df1df3-->
+- `_display_report` (function) — Renders a MigrationReport as a Rich table of step/status/detail rows plus any accumulated notes. <!--#1d18b5d52d53ae61-->
+- `list_command` (function) — CLI subcommand that prints a table of the registered migrations (id and description), or a message when none exist. <!--#7d771de463846e0a-->
+- `run_command` (function) — CLI subcommand that resolves the project root (binding the UI language), looks up the named migrator, runs it with the --no-delete-specs flag, displays the report, and exits with the report's status code. <!--#8d1c2bf9d7e0fd75-->
 
-### `src/se3/commands/run.py` (python) — The `se3 run` CLI command — the unified SE3 3.0 entry point that creates or resumes a flow, drives the state machine through all step handlers, and manages interactive/web CONFIRM gates, interrupts (SIGINT), and confirmation-response handling. <!--#26fe6b155d5df331|e3b0c44298fc1c14-->
+### `src/se3/commands/run.py` (python) — Implements the unified `se3 run` CLI command — the single entry point that creates or resumes a flow, drives the state machine through its step handlers (including interactive CONFIRM gates, free-text approval interpretation, and Ctrl-C interrupt handling), and wires up project-root discovery, i18n binding, persistence, and CLI/history/JSON output sinks. <!--#c415d9b23f15a5fd|e3b0c44298fc1c14-->
 
-### `src/se3/commands/salvage_cmd.py` (python) — The SE3 `salvage` command that rescues work from abnormally terminated sessions by running a fault-tolerant pipeline — tolerantly loading session state, assessing the git diff, committing uncommitted changes, creating tracking issues for unfinished work, and archiving the session — then reports per-step outcomes in a Rich table. <!--#e70cd5d8e0d21072|c03e0c8fc18c4581-->
-- `salvage` (function) — Top-level entry point that runs the five salvage steps in sequence, each wrapped in its own error handling, then prints a results table and returns an exit code. <!--#31a7bc717491a9e6-->
+### `src/se3/commands/salvage_cmd.py` (python) — The SE3 `salvage` command that rescues work from abnormally terminated sessions by running a fault-tolerant pipeline — tolerantly loading session state, assessing the git diff, committing uncommitted changes, creating tracking issues for unfinished work, and archiving the session — then reports per-step outcomes in a Rich table. <!--#57ec66f0bd7c74e6|c03e0c8fc18c4581-->
+- `salvage` (function) — Entry point for the `salvage` command: locates the project root, re-binds the i18n language to it, then runs five independently error-guarded recovery steps (read session state, assess git diff, commit changes, create salvage issues, archive the session), prints a summary table, and returns 1 if any step failed. <!--#41f5d396f4efd5dd-->
 - `_find_project_root` (function) — Walks up from the current directory to locate the project root by finding a .git directory or an SE3 config file. <!--#3c8eb6032ea041a2-->
 - `_load_session` (function) — Tolerantly loads the persisted flow/session state via PersistenceManager, returning the FlowInstance (or None) plus any warnings. <!--#8c64b4dd4cc982ab-->
 - `_assess_git_diff` (function) — Runs git status/diff to collect a dict of uncommitted-change info (status lines, changed file count/list, diff stat, truncated diff summary). <!--#c6bf085dac297a44-->
 - `_commit_changes` (function) — Stages and commits all uncommitted changes with a generated `[salvage]` message, returning the new commit hash (or None if nothing to commit). <!--#2047b9ff2adde17e-->
 - `_create_salvage_issues` (function) — Creates tracking issues for unfinished work, summarizing flow step history, interruption point, and changed files (or just changed files when no session state exists). <!--#782c49e6c54a7315-->
 - `_archive_session` (function) — Clears the persisted session state and its per-flow resumable snapshot so the dispositioned flow is no longer resumable, returning whether anything was archived. <!--#1a0e70dd930dbfb2-->
-- `_display_results` (function) — Renders the per-step salvage outcomes (name, color-coded OK/SKIP/FAIL status, detail) as a Rich table to the console. <!--#979947d3b3746ba9-->
+- `_display_results` (function) — Renders the collected (step, status, detail) tuples from the salvage pipeline as a localized Rich table with colour-styled OK/SKIP/FAIL statuses. <!--#4c27b4a953753f03-->
 
-### `src/se3/commands/worktree_cmd.py` (python) — The `se3 worktree gc` CLI command group — a thin render/exit-code shell over the engine's worktree garbage collector that reclaims leaked terminal `se3 run --worktree` runs and prints a three-part Rich report (archived/reclaimed, retained-unmerged branches, skips/errors), with a byte-formatting helper. <!--#5370222fe9dc6832|0f35a4dcafa2f080-->
+### `src/se3/commands/worktree_cmd.py` (python) — The `se3 worktree gc` CLI command group — a thin render/exit-code shell over the engine's worktree garbage collector that reclaims leaked terminal `se3 run --worktree` runs and prints a three-part Rich report (archived/reclaimed, retained-unmerged branches, skips/errors), with a byte-formatting helper. <!--#c50c25387a0323d3|0f35a4dcafa2f080-->
 - `_format_bytes` (function) — Helper that formats a raw byte count into a compact human-readable size string using binary (1024-based) units from B up to TB. <!--#9cafc2a1079fcdba-->
-- `gc_command` (function) — Typer CLI command (`se3 worktree gc`) that garbage-collects terminal leaked worktree runs via `gc_worktree_runs`, then renders Rich tables reporting archived/reclaimed runs, retained unmerged branches, skips, and errors, exiting non-zero if any run errored. <!--#dc60dadb4f20bf3e-->
+- `gc_command` (function) — Typer CLI command `se3 worktree gc` that sweeps leaked terminal `run --worktree` runs (archiving them, reclaiming space, and deleting only provably-merged branches), renders the resulting report as localized Rich tables covering archived/retained-unmerged/skipped/errored runs, and exits non-zero when any run errored. <!--#f0090f983c63f8ea-->
 
 ## `src/se3/commands/merge/` — Foundation infrastructure package for the SE3 merge subsystem, bundling intentionally import-light building blocks — typed Result/report models, a typed failure-reason enum with legacy-string converters, an fcntl-based exclusive merge lock, an append-only JSONL LLM-call tracer, a secret redactor for logs/traces, and post-condition assertions — that the merge orchestrator, CLI entry points, and engine internals reuse. <!--#62f77092011b0a9b|57c639818844852a-->
 
@@ -1153,7 +1154,7 @@
   - `WireMetrics.snapshot` (method) — Returns a fresh point-in-time copy of per-type {bytes, count} counters plus a synthetic '__total__' roll-up, so callers can report both the breakdown and grand total without mutating internal state. <!--#0220956e757e3bf0-->
   - `WireMetrics.reset` (method) — Clears all byte and count counters under the lock, mainly for tests and per-window sampling. <!--#67395f01807f54d0-->
 
-## `src/se3/engine/` — The SE3 flow engine package — the state-machine-driven workflow core — bundling the per-step handlers (analyze, plan, discovery, implement, commit, merge, fix-loop guards), the LLM prompt/context assembly and JSON-response parsing layer, supporting subsystems for charter, chat history, code-index building/rendering, fix-loop adjudication and baseline-fix memory, a DAG scheduler for parallel task-group execution across worktrees, output formatters, and the LLM-assisted sequential branch-merge engine. <!--#a1d09392e256f4dd|eb3ee7f2ebf6bbf4-->
+## `src/se3/engine/` — The SE3 flow engine package — the state-machine-driven workflow core — bundling the per-step handlers (analyze, plan, discovery, implement, commit, merge, fix-loop guards), the LLM prompt/context assembly and JSON-response parsing layer, supporting subsystems for charter, chat history, code-index building/rendering, fix-loop adjudication and baseline-fix memory, a DAG scheduler for parallel task-group execution across worktrees, output formatters, and the LLM-assisted sequential branch-merge engine. <!--#004ab75d78c40667|eb3ee7f2ebf6bbf4-->
 
 ### `src/se3/engine/__init__.py` (python) — Package initializer for the SE3 flow engine — the state-machine-driven workflow core — that re-exports its public API (flow models, StateMachine, PersistenceManager, LLMCaller, schemas, structured logging, event stream, and sinks) and aliases EventEmitter as EventStream. <!--#bdee0c4d523b5958|e3b0c44298fc1c14-->
 
@@ -1203,7 +1204,7 @@
 
 ### `src/se3/engine/chat_history.py` (python) — Chat-history subsystem that records per-step LLM prompts and responses as JSONL ChatMessage records under se3/history/{flow_id}/{step_id}.jsonl, tracking token usage, agent/model metadata, and fix-loop iterations to support retry-context injection and human-readable conversation browsing. <!--#98495f7a54cb418b|e3b0c44298fc1c14-->
 
-### `src/se3/engine/code_index.py` (python) — The core module that builds the deterministic code-index structure map: it enumerates the project tree, extracts within-file symbols per language (Python AST, markdown/YAML/JSON keys, or degraded chunks) into Fingerprint/Symbol/FileEntry/CodeIndex dataclasses, computes recursive and mechanical 'list' fingerprints so only changed nodes are re-summarised while human corrections are preserved, and atomically renders/reparses the authoritative fingerprint-embedded `se3/code-index.md` under an advisory build lock. <!--#518d9bdd1ca88f43|0d15b6b6f30c1992-->
+### `src/se3/engine/code_index.py` (python) — The core module that builds the deterministic code-index structure map: it enumerates the project tree, extracts within-file symbols per language (Python AST, markdown/YAML/JSON keys, or degraded chunks) into Fingerprint/Symbol/FileEntry/CodeIndex dataclasses, computes recursive and mechanical 'list' fingerprints so only changed nodes are re-summarised while human corrections are preserved, and atomically renders/reparses the authoritative fingerprint-embedded `se3/code-index.md` under an advisory build lock. <!--#9a49282cc43765e6|0d15b6b6f30c1992-->
 - `Fingerprint` (class) — A dataclass holding one file's content fingerprint — cheap mtime/size signals plus the authoritative sha256 prefix used as the change signal. <!--#9451c48c84db3103-->
 - `Symbol` (class) — Dataclass for one within-file node (class/function/method, structural unit, or degraded chunk) carrying its id, kind, location, hash, summary, and optional verbatim content. <!--#a009f18727b02756-->
 - `FileEntry` (class) — Dataclass holding one enumerated file's path, kind, fingerprints (whole-file plus a direct-symbol-roster 'list' fingerprint that gates reuse without cascading on body edits), summary, and extracted child symbols. <!--#c08141b42a516794-->
@@ -1246,7 +1247,7 @@
 - `_parse_md_summaries` (function) — Convenience wrapper returning just the `{id: summary}` map from the parsed md. <!--#7b2c20ea52847695-->
 - `_flatten_summary` (function) — Collapses an LLM summary's whitespace (including newlines) to a single physical line so the one-node-per-line md format isn't corrupted. <!--#ab4fda75898c4eba-->
 - `_heuristic_summary` (function) — Produces a deterministic placeholder summary used when no LLM is available or a call fails, keeping builds from crashing. <!--#5e95c0cfd0580e7b-->
-- `_make_llm_summarizer` (function) — Factory that builds the default LLM-backed summariser, batching targets per owning path into one JSON-returning LLMCaller call each and running those per-path groups concurrently on a bounded ThreadPoolExecutor (each group owning its own caller for thread safety), firing on_node per group and degrading to heuristic summaries on any failure. <!--#6fcd40b66f4e1805-->
+- `_make_llm_summarizer` (function) — Factory that builds the default LLM-backed summariser for the code index, batching targets into one LLM call per owning path, running those per-path groups concurrently (each with its own LLMCaller instance for thread safety), firing an optional per-group progress callback, and falling back to heuristic summaries whenever a call fails. <!--#be8e06fa18f9393c-->
 - `_make_target` (function) — Builds the summary target for a symbol (using its own content or a line slice) or, as a fallback, a file node from its own source. <!--#3bcb90fc368a7d51-->
 - `_make_file_target` (function) — Builds a file's summary target bottom-up — from a digest of its symbols' one-line summaries, or its own source when it has no symbols. <!--#303ef86543b2fdf0-->
 - `_make_dir_target` (function) — Builds a directory's summary target bottom-up from its immediate child subdirectory and file summaries. <!--#0490470f87f95416-->
@@ -1268,10 +1269,11 @@
 - `iter_search_lines` (function) — Flattens the entire code index into a sorted list of one grep-able bullet line per item — each directory, file, and in-file symbol (with symbols carrying their owning file's full `relpath::local_id` path) — built from the structured index so lines carry no fingerprint comments. <!--#00c27601d73e1a21-->
 - `render_path` (function) — Renders the one-level drill-in view for a given path — root level, a file's full symbol tree, a directory's immediate children, or a not-found note. <!--#e9351a5830007db3-->
 
-### `src/se3/engine/conftest.py` (python) — Pytest conftest supplying autouse fixtures for the engine's co-located test modules (which live outside tests/ and miss its conftest guards), restoring two protections: redirecting chat-history writes aimed at the live repo into a per-test tmp dir, and no-op'ing the code-index freshness hook so analyze/commit steps never trigger a real flock-serialized LLM index rebuild against the working repo. <!--#74ed702c03620806|eae6ba8564ba85e2-->
+### `src/se3/engine/conftest.py` (python) — Pytest fixture module scoped to engine tests that sandboxes the live repo — redirecting chat-history writes into tmp dirs, stubbing out real LLM code-index refreshes, and pinning the UI language to en-US for deterministic assertions. <!--#d248b98832403512|1ec988100dc42efb-->
 - `_real_history_roots` (function) — Helper that returns the set of filesystem paths considered the live repo root (the package's top-level parent and the current working directory), used to detect when test writes would leak into the real repository. <!--#6f2232fb1afc6fc6-->
 - `_no_chat_history_leak_to_real_repo` (function) — Pytest fixture (twin of the one in tests/conftest.py) that monkeypatches chat_history's `_history_dir` resolver so any engine-test chat-history write targeting a real repo root is redirected into a per-test tmp dir, preventing fake history files from leaking into the committed se3/history/. <!--#9d7557010e9adf76-->
 - `_no_real_code_index_refresh` (function) — An autouse-style engine-test fixture that monkeypatches `context_builder.ensure_code_index_fresh` to a no-op, preventing analyze/commit flow steps from triggering a real, flock-serialized LLM code-index rebuild against the live repo during unit tests. <!--#a936702bb02dfe92-->
+- `_force_en_us_ui_language` (function) — A pytest fixture that pins the i18n UI language to en-US (via SE3_LANG plus singleton/cache resets, restored afterwards) so engine tests co-located with the source get stable English rendered strings instead of the repo's zh-CN default. <!--#1e1eda4fc59e2147-->
 
 ### `src/se3/engine/context.py` (python) — Defines the read-only Context wrapper around workflow State plus the pure effective_task_type resolver, centralizing the logic that surfaces a real task type (feature/bugfix) rather than a run mode like 'discovery' for commit-message, version, and UI display consumers. <!--#452bcd230af5840e|90feb89a44d2ba97-->
 - `effective_task_type` (function) — Pure resolver that returns the real task type (feature/bugfix/etc.) for commit-message and version consumers, preferring an explicit --type, then analyze's persisted type, then a sanitized flow fallback, never returning a run mode like 'discovery'. <!--#bcfd3dadd820ea37-->
@@ -1283,9 +1285,9 @@
   - `Context.is_type_pending` (method) — Returns whether the task type is still unresolved, delegating to State's method when available. <!--#a8174bd77d016406-->
   - `Context.__repr__` (method) — Debug string representation showing the task type and pending status. <!--#ac43d00ede6802c8-->
 
-### `src/se3/engine/context_builder.py` (python) — Central prompt-context assembly module that builds and injects the many per-step prompt fragments SE3 attaches to LLM calls — language instructions, runtime-environment and issue-discovery capabilities, spec/code-index/charter orientation, read-only and spec-write-protection constraints, and worktree runtime context — plus a ContextBuilder for spec loading and builders for review, plan-confirm, confirm-gate, and adjudicate-review prompts. <!--#b5870955dbae3e43|a5f5bd4146ddb9e7-->
+### `src/se3/engine/context_builder.py` (python) — Central prompt-context assembly module that builds and injects the many per-step prompt fragments SE3 attaches to LLM calls — language instructions, runtime-environment and issue-discovery capabilities, spec/code-index/charter orientation, read-only and spec-write-protection constraints, and worktree runtime context — plus a ContextBuilder for spec loading and builders for review, plan-confirm, confirm-gate, and adjudicate-review prompts. <!--#16a6a4d04f3ce761|a5f5bd4146ddb9e7-->
 - `get_step_language_instruction` (function) — Returns the language instruction to append to a run-engine step's prompt, routing spec steps to spec_language, human-facing/confirmed steps to the general language, and everything else to no injection. <!--#69f7354a76473892-->
-- `get_spec_language_instruction` (function) — Gives the sync_* modules (which write specs outside the run state machine) the same spec_language instruction that update_spec gets. <!--#49b519e028c50c1e-->
+- `get_spec_language_instruction` (function) — Returns the spec-flavored language instruction string derived from the project's configured `language.spec_language` (empty when unset), so non-state-machine knowledge-asset writers such as the sync_* modules can inject the same wording that the `update_spec` step gets. <!--#204d184923fe2a05-->
 - `_load_runtime_environment_markdown` (function) — Reads and process-caches runtime_environment.md, returning empty string with a one-time warning on read failure. <!--#c69d2cc539e7ddc0-->
 - `_reset_runtime_environment_cache` (function) — Test-only helper that clears the runtime_environment.md cache so reload paths can be exercised. <!--#8fcfcfa91ac8350c-->
 - `get_runtime_environment_injection` (function) — Returns the se3 runtime-environment capability markdown for whitelisted steps (default list overridable via se3.yaml, minus always-forbidden steps). <!--#e2ac12eb9ac7a402-->
@@ -1328,21 +1330,21 @@
   - `DAGScheduler.get_fallback_leaves` (method) — Returns completed groups whose downstream all failed or were skipped (excluding normal leaves), so their valid work can be merged back as fallback. <!--#516fb66a7a14bfae-->
   - `DAGScheduler.topological_merge_order` (method) — Returns groups in topological order to guide the sequence of branch merges back to the main branch. <!--#277ba115a8b5b1be-->
 
-### `src/se3/engine/display.py` (python) — Rich-based display utilities that render LLM outputs, specs, proposals, designs, code, diffs, markdown, and token-usage summaries as full-content (untruncated) styled terminal blocks via a shared Console singleton. <!--#9a57487a4d8def77|542b7c7ad2425872-->
+### `src/se3/engine/display.py` (python) — Rich-based display utilities that render LLM outputs, specs, proposals, designs, code, diffs, markdown, and token-usage summaries as full-content (untruncated) styled terminal blocks via a shared Console singleton. <!--#5ed270e1b794909e|542b7c7ad2425872-->
 - `get_console` (function) — Lazily creates and returns the module-global Rich Console singleton. <!--#34af9b63623b3216-->
 - `set_console` (function) — Overrides the module-global Console instance, mainly for testing. <!--#3c900a44fe46127f-->
 - `_reverse_title` (function) — Builds a reverse-color ` ## Title ` heading as a Rich Text object on a colored background. <!--#548f67b20e68a7ec-->
 - `_reverse_footer` (function) — Builds a fixed-width reverse-color whitespace block used as a block's bottom boundary marker. <!--#b3b374c4e5cfae09-->
 - `render_block_header` (function) — Public wrapper that prints a reverse-color block title followed by a blank line. <!--#6bc1573d1ddb863c-->
 - `render_block_footer` (function) — Public wrapper that prints the fixed-width reverse-color block footer followed by a blank line. <!--#b02ffd2b25f0e7e4-->
-- `render_usage_block` (function) — Renders a UsageTotals/dict/None as an aligned two-column token-and-cost summary in a cyan reverse-color block, printing nothing when usage is empty. <!--#f3feaa318bfa6c55-->
+- `render_usage_block` (function) — Renders a token/cost summary (input, output, cache, cost) as an aligned two-column reverse-color block, accepting a UsageTotals, its dict form, or None (printing nothing when empty). <!--#8b192ae6d60d9f61-->
 - `render_full` (function) — Prints arbitrary content in full without truncation, optionally wrapped in a blue title/footer block. <!--#cc2bafbda92f1b83-->
-- `render_proposal` (function) — Formats and renders a proposal dict (summary, files to modify/create, rationale, extra fields) as a styled block. <!--#002534cc42d11146-->
-- `render_design` (function) — Formats and renders a design-document dict (overview, components, interfaces, decisions, extras) with section headers. <!--#693dd10657726d53-->
-- `render_spec_content` (function) — Formats and renders a spec dict (metadata header, description, requirements, extra sections) as a styled block. <!--#6824d1fe5aa32281-->
+- `render_proposal` (function) — Formats a proposal dict — summary, files to modify/create with reasons, rationale, plus any extra fields — into styled markup and prints it via render_full. <!--#6d0f1e9bb416f3b6-->
+- `render_design` (function) — Formats a design-document dict — overview, components, interfaces, key decisions, and any additional sections — into section-headed styled text rendered via render_full. <!--#d062764c0cce5794-->
+- `render_spec_content` (function) — Formats a spec dict — title/version/type metadata header, description, requirements, and extra sections — into styled text rendered via render_full. <!--#bc18d620c9aa9fbd-->
 - `render_text` (function) — Renders plain text left-aligned with an optional title block and optional Rich style. <!--#02638b45c952b7be-->
 - `render_code` (function) — Renders code with syntax highlighting and line numbers under an optional green title block. <!--#5b51ac6cd6788d16-->
-- `render_diff` (function) — Renders a unified diff with red/green/cyan coloring and line numbers, truncating after max_lines. <!--#73c936866411a923-->
+- `render_diff` (function) — Prints a unified diff for a file with red/green/cyan coloring, gutter line numbers derived from hunk headers, and truncation past a max-line limit. <!--#034a49466dfa98af-->
 - `render_markdown` (function) — Renders markdown content via Rich's Markdown under an optional magenta title block. <!--#57673343920809b3-->
 
 ### `src/se3/engine/docs_updater.py` (python) — Module providing the DocumentationUpdater class (plus a small {{key}}-substituting Template helper and template-path resolvers) that updates a project's README.md version badge/header and inserts or idempotently merges VERSIONS.md changelog entries using configurable, template-driven placeholders. <!--#b4e48d19f90536e8|95d19a05a7460871-->
@@ -1485,7 +1487,7 @@
 - `JsonMode` (class) — Enum enumerating the available JSON extraction strategies (STRICT, EXTRACT, TWO_PHASE, OFF) used to control how an LLM call produces structured output. <!--#3c44b448f5440910-->
 - `get_json_mode` (function) — Resolves a JsonMode from a mix of explicit and legacy parameters (json_mode, two_phase_json, require_json), applying a fixed priority order for backward compatibility. <!--#45eacf3bde2932c4-->
 
-### `src/se3/engine/llm_caller.py` (python) — Drives LLM step execution by calling agent runners (Claude CLI and variants) with retry, agent rotation on infrastructure errors, three JSON-extraction modes, prompt injection/dedup safety-capping, and a StreamJSONTracker that renders and records real-time NDJSON stream progress, tool chips, and token/cost usage. <!--#91d46eb96fab2d3d|e3b0c44298fc1c14-->
+### `src/se3/engine/llm_caller.py` (python) — The engine's LLM invocation layer: an `LLMCaller` that builds prompts (with extra-prompt injection, retry-history context, dedup and a post-dedup size cap), runs Claude/agent CLI subprocesses in strict, extract, or two-phase JSON modes, retries with agent rotation on infrastructure errors, and a `StreamJSONTracker` that parses the stream-json NDJSON output to emit progress, capture token usage, and record touched files. <!--#70c601a124ebba0a|e3b0c44298fc1c14-->
 
 ### `src/se3/engine/logging_config.py` (python) — Defines the flow engine's structured logging subsystem — log-level and event-type enums, a serializable StructuredLogEntry value object, and a singleton StructuredLogger that writes JSON-lines daily log files with an in-memory buffer, console output, per-flow/step/LLM timing helpers, and log retrieval/export. <!--#2fb132f11a8b0f4c|7c79a7fcdeb5af16-->
 - `LogLevel` (class) — String enum defining the five severity levels (debug through critical) used for log entries and filtering. <!--#0afc90c8e31e38f7-->
@@ -1554,12 +1556,12 @@
 - `get_step_info` (function) — Looks up a step type's metadata entry from the STEP_POOL. <!--#9d66a58a6cd35598-->
 - `get_default_step_sequence` (function) — Returns the default ordered list of step types for a given task type (feature, bugfix, review, small, directive, discovery). <!--#79a8090f0e6cd94a-->
 
-### `src/se3/engine/output.py` (python) — A utility module providing helpers to format arbitrary data into strings, log messages at named levels, and format and render errors and success messages (with optional context/details) through the display module. <!--#ea4a9cc3154a0357|c0b1b9557353d0db-->
+### `src/se3/engine/output.py` (python) — A utility module providing helpers to format arbitrary data into strings, log messages at named levels, and format and render errors and success messages (with optional context/details) through the display module. <!--#b44eff3ec94fee91|c0b1b9557353d0db-->
 - `format_output` (function) — Converts any data type (string, dict/list as pretty JSON, else str) to a string representation without truncation, ignoring the deprecated truncate flag. <!--#1fb8dc97c460cf5b-->
 - `log_output` (function) — Logs a message at a named level via the module logger, used for internal logging output that bypasses the display module. <!--#bcd99a66853b242d-->
-- `format_error` (function) — Builds a formatted error string from an exception or message plus optional context dict, using rich markup for display. <!--#bde57deb611612c1-->
-- `display_error` (function) — Formats an error with optional context and renders it in full under an 'Error' title via the display module. <!--#133e319df0e4d82e-->
-- `display_success` (function) — Formats a success message with optional details and renders it in full under a 'Success' title via the display module. <!--#aaea6f8f9a0bdd98-->
+- `format_error` (function) — Builds a Rich-markup error string from an exception or message, with an optional context key/value block, using i18n-translated labels. <!--#0eb718e4817745ef-->
+- `display_error` (function) — Renders a formatted error message into a full-width error panel via `render_full`. <!--#0a0dbeaf6ce8adfd-->
+- `display_success` (function) — Renders a green success message plus optional key/value details into a full-width success panel. <!--#2d9bad1ac7706454-->
 
 ### `src/se3/engine/output_formatter.py` (python) — Module providing a name-keyed registry and factory for SE3 output formatters, exposing a lazily-created global FormatterRegistry singleton (seeded with the default 'tasks' TaskFormatter) plus module-level convenience functions to register, retrieve, and list formatters. <!--#4dcdfd93fddf90e8|eca8291d052da2a1-->
 - `FormatterRegistry` (class) — Class that maintains a name-to-formatter-class mapping and acts as a factory for instantiating formatters, seeded with default formatters on construction. <!--#059002186071d632-->
@@ -1675,16 +1677,16 @@
 - `_summarize_outputs` (function) — Helper that selects and truncates the key output fields per step type for inclusion in a context step summary. <!--#8d53669a401b3363-->
 - `_extract_key_outputs` (function) — Helper that extracts the most important output values for each step type into the context's key_outputs map. <!--#38f86a01943d8f20-->
 
-### `src/se3/engine/sink.py` (python) — Defines pluggable event-stream sinks that consume unified Event objects and render them as concrete output, with concrete CliSink (Rich CLI rendering), JsonSink (NDJSON for daemon mode), and HistorySink (per-step chat-history persistence for the web console). <!--#4ca8fb3bda5af1e5|c74fbe7a84cd7382-->
+### `src/se3/engine/sink.py` (python) — Defines pluggable event-stream sinks that consume unified Event objects and render them as concrete output, with concrete CliSink (Rich CLI rendering), JsonSink (NDJSON for daemon mode), and HistorySink (per-step chat-history persistence for the web console). <!--#b70fee1ecfa89a70|c74fbe7a84cd7382-->
 - `Sink` (class) — Abstract base class for an event-stream consumer that subscribes to an EventEmitter and receives every emitted event. <!--#056bd1888e33fe98-->
   - `Sink.consume` (method) — Abstract method each concrete sink overrides to perform its side effect on a single event. <!--#bb2390a15e6f138f-->
-- `CliSink` (class) — Sink for CLI mode that delegates to the existing Rich step renderers to keep `se3 run` output identical, applying per-step-type usage rules and treating flow-level events as no-ops. <!--#a09a1686239092b7-->
+- `CliSink` (class) — The CLI-mode event sink that renders step output by delegating to the existing `step_renderers` functions — rendering full reports for terminal step events, usage-only blocks for non-terminal STEP_OUTPUT events, and per-type compact usage footers for confirm/discovery/plan — while treating flow-level lifecycle events as no-ops since the `se3 run` orchestrator already prints those. <!--#a3ab74404c131662-->
   - `CliSink.__init__` (method) — Constructor that optionally installs a supplied Rich Console as the global display console for all delegated renderers. <!--#7670536357cf51e0-->
   - `CliSink.consume` (method) — Dispatches terminal step events to `_render_step` and STEP_OUTPUT events to `_render_step_usage`, ignoring all other event types. <!--#4fb42242ff9754f9-->
   - `CliSink._render_step` (method) — Routes a terminal step event to the step-output renderer, skipping full reports for confirm/discovery/plan but still surfacing their token usage via per-type renderers. <!--#c17bf533ba7cf189-->
   - `CliSink._render_step_usage` (method) — Renders per-step token usage for a non-terminal STEP_OUTPUT event, applying the same per-type (discovery/confirm/default) rules as the terminal path. <!--#02ac269cfbbc8c1d-->
   - `CliSink._render_confirm_usage_footer` (method) — Renders confirm's token usage as a compact dim single-line footer (round equals cumulative since confirm calls the LLM at most once), rendering nothing when usage is empty. <!--#d0d721be80846166-->
-  - `CliSink._render_discovery_cumulative_usage` (method) — Renders the whole-discovery cumulative token usage as a dim single-line via `format_usage_line`, rendering nothing when discovery made no LLM calls. <!--#ed61c7ee6fcebab5-->
+  - `CliSink._render_discovery_cumulative_usage` (method) — Renders the discovery step's whole-run cumulative token usage (read from `step.outputs['token_usage']`) as a single dim i18n line via `format_usage_line`, printing nothing when the usage is absent or empty. <!--#ddf32cf5f5ac2d47-->
 - `JsonSink` (class) — Sink for daemon mode that serializes each event to one line of JSON (NDJSON, or pretty-indented), degrading non-serializable payloads to their str() form. <!--#b3473271b7b32503-->
   - `JsonSink.__init__` (method) — Constructor selecting the destination text stream (default stdout) and compact-vs-pretty serialization mode. <!--#f494e6176cbf27cf-->
   - `JsonSink.consume` (method) — Serializes an event via `to_dict` and writes it as a newline-terminated JSON line, flushing while swallowing closed/unflushable-stream errors. <!--#620cbdd2cd131156-->
@@ -1760,32 +1762,33 @@
 - `llm_resolve_stashpop_conflicts` (function) — Reconciles case-a stash-pop conflicts by handing each marker-bearing file to the LLM-as-editor, writing and staging the result, and returns only the paths whose unmerged index entry is provably cleared (leaving everything else to the deterministic fallback). <!--#dec44c2d15334150-->
 - `make_llm_stashpop_resolver` (function) — Builds the `resolve_stashpop_safely` conflict-resolver callable that tries the LLM resolver first and falls back to the deterministic `take_ours_for_stashpop` for any unresolved files, leaving the working tree marker-free. <!--#60bd80d7d596bc9a-->
 
-### `src/se3/engine/state_machine.py` (python) — The flow engine's core StateMachine module, which drives step sequencing and transitions (discovery, adjudication, fix/revision loops, confirmation gates, worktree merge-side steps), resolves effective task description/plan overrides and step inputs, executes steps, tracks token usage, and persists flow state. <!--#834d37676687a7bf|e3b0c44298fc1c14-->
+### `src/se3/engine/state_machine.py` (python) — Core flow-engine state machine that drives step sequencing and execution — building each step's inputs (including adjudication overrides and effective task descriptions), performing transitions between discovery/fix/revision/merge phases, managing retry-counter semantics, persistence, and token-usage accumulation, and raising the module's StateMachineError family (StepExecutionError, TransitionError, MergeCheckoutResolutionError) when a step or transition cannot proceed. <!--#7d3b2724cecfcdb0|e3b0c44298fc1c14-->
 
-### `src/se3/engine/step_renderers.py` (python) — A registry-based rendering layer that maps each pipeline StepType to a custom (or default fallback) renderer, providing the render_step_output entry point plus per-step formatters for analyze, propose, design, plan, implement, test, spec_gate, self-check, verify/update-spec, commit, version-analyze/reconcile, merge-integrate, and summarize outputs along with token-usage blocks. <!--#3caef1a6f303008a|dd927fd9556d23c3-->
+### `src/se3/engine/step_renderers.py` (python) — Rich-based presentation layer for the SE3 engine: a StepType→renderer registry (with a generic fallback) plus per-step renderers that turn each completed step's outputs — analyze, propose, design, plan, implement, test, spec_gate, self_check, verify_spec, update_spec, summarize, commit, version_analyze/reconcile, merge_integrate — into localized console panels, tables and token-usage blocks. <!--#0b7d1a9506d769b6|5ad5983757ab833a-->
+- `step_display_title` (function) — Returns the localized display title for a StepType (falling back to its raw value), exposed publicly so the `se3 run` console and the renderers share one step-title vocabulary. <!--#8832c035e4d7282b-->
 - `register_renderer` (function) — Decorator factory that registers a function as the custom renderer for a given StepType in the STEP_RENDERERS registry. <!--#d32f2f04d911965a-->
-- `render_step_output` (function) — Public entry point that renders a completed step by dispatching to its registered renderer (or the default), then appends the step's token-usage block. <!--#f8c10e874f60ccb1-->
-- `render_step_usage` (function) — Renders the per-step token-usage block from outputs.token_usage when present, exposed so CliSink can show usage for steps whose full report it skips. <!--#9e174cc43cf6545a-->
+- `render_step_output` (function) — Main entry point that renders a completed step by dispatching to its registered custom renderer (or the generic fallback) and then appending the step's token-usage block. <!--#0cc6d9917694653b-->
+- `render_step_usage` (function) — Renders a step's per-step token-usage panel from `outputs.token_usage`, rendering nothing when the step made no LLM calls; public so CliSink can call it for the interactive steps whose reports it skips. <!--#a9368489b20686e5-->
 - `_format_value` (function) — Helper that formats an arbitrary output value into a display string, JSON-encoding dicts/lists and stringifying everything else. <!--#de91dc9da5c3e62f-->
-- `_default_render` (function) — Generic fallback renderer that iterates step.outputs printing each key/value (with previews for long strings), status, and any error message. <!--#3950ced25ad3c496-->
-- `_render_remaining` (function) — Helper that renders any step.outputs keys not already handled by a specialized renderer, under an 'Additional Details' panel. <!--#1e71813763f00346-->
-- `_render_version_analyze` (function) — Custom renderer for the version-analysis step showing the current→suggested version, bump type/confidence, and reasoning. <!--#116453776569f134-->
-- `_render_merge_integrate` (function) — Renderer that displays the merge_integrate step's result — which branch(es) landed on master, any human-escalation notice for unresolved conflicts, and error messages. <!--#86859a93227e8b0f-->
-- `_render_version_reconcile` (function) — Renderer that displays the version_reconcile step's outcome — the base-to-final version transition (or already-reconciled no-op), release channel, reconcile commit, and any error. <!--#506378f784b1b7f4-->
-- `_render_summarize` (function) — Custom renderer for the summarize step that renders the work-summary output as markdown. <!--#738ac7f62d030ce2-->
-- `_build_test_summary_lines` (function) — Helper that builds summary lines (overall status, per-phase pass/fail counts, command) from a test_results dict, shared by the test and spec_gate renderers. <!--#229b1bfa19c9b13f-->
-- `_render_test` (function) — Custom renderer for the test step that presents a summary-only view of test_results, falling back to default rendering when absent. <!--#637eb9831e26a9dc-->
-- `_render_spec_gate` (function) — Custom renderer for the spec_gate step showing the gate conclusion (passed/failed/skipped), fallback route, fix instructions, and re-test summary. <!--#bdf1eeb6ff95cd9e-->
-- `_render_propose` (function) — Custom renderer for the propose step that renders the structured proposal dict and any remaining outputs. <!--#52e3d565fe61294f-->
-- `_render_design` (function) — Custom renderer for the design step that renders the structured design document dict and any remaining outputs. <!--#8f2bf6445475b377-->
-- `_render_plan` (function) — Custom renderer for the plan step that renders its proposal, design, and task-group sections plus any remaining keys. <!--#5d7e000280fbba46-->
+- `_default_render` (function) — Generic fallback renderer that dumps a step's status, each output key/value (truncating long strings to a preview) and any error message into a panel. <!--#15af8e595c77305d-->
+- `_render_remaining` (function) — Helper that renders any step.outputs keys a specialized renderer didn't already cover, using the same generic key/value formatting under a "remaining" panel title. <!--#8d4380e5dfe48c4d-->
+- `_render_version_analyze` (function) — Renders the version_analyze step as a current→suggested version headline plus bump type, confidence, reasoning and any error. <!--#4460e5c62eda9db3-->
+- `_render_merge_integrate` (function) — Renders the merge_integrate step, listing which branches landed on master, flagging escalation to a human, and showing any error. <!--#cf26edeb58f59974-->
+- `_render_version_reconcile` (function) — Renders the version_reconcile step as the base→final version derived at merge, plus release channel, reconcile commit, and the clean already-reconciled no-op case. <!--#8e1bbb1b4148f135-->
+- `_render_summarize` (function) — Renders the summarize step's `summary` output as markdown. <!--#2d06117faf4f22a8-->
+- `_build_test_summary_lines` (function) — Shared helper that turns a `test_results` dict into summary-only lines (overall pass/fail, per-phase results, command) with no raw pytest output. <!--#2db7e1ac1b1d1f59-->
+- `_render_test` (function) — Renders the test step's summary lines from `test_results`, falling back to the generic renderer when no results dict is present. <!--#f65f736cef99d027-->
+- `_render_spec_gate` (function) — Renders the spec_gate step as a gate conclusion (passed/failed/skipped plus fallback route), fix instructions, and a reused summary-only test-results block. <!--#a0a7d43e41767694-->
+- `_render_propose` (function) — Renders the propose step via the shared proposal renderer when a proposal dict is present, then any uncovered outputs; otherwise falls back to the generic renderer. <!--#0f0edcb30f6edf74-->
+- `_render_design` (function) — Renders the design step via the shared design renderer when a design dict is present, then any uncovered outputs; otherwise falls back to the generic renderer. <!--#b3afb38e46c172e0-->
+- `_render_plan` (function) — Renders the plan step in three sections — proposal, design, and a task-group table (id, name, task count, estimated LOC, dependencies) — plus any remaining outputs. <!--#f2daf4e27212498c-->
 - `_group_files_by_directory` (function) — Helper that groups a list of file paths by their top-level directory into a sorted OrderedDict for display. <!--#f9bc34f5641dd2ca-->
-- `_render_implement` (function) — Custom renderer for the implement step showing a status bar, summary, files changed, tests added, incomplete tasks, restricted edits, and errors. <!--#6d5d0bca3552ff37-->
-- `_render_analyze` (function) — Custom renderer for the analyze step showing task type/complexity/scope, reasoning, and relevant spec items. <!--#5e2f32cab33f6a3e-->
-- `_render_self_check` (function) — Custom renderer for the self-check step showing pass/fail status, summary, and issues grouped by severity. <!--#4938c1b337cfbba8-->
-- `_render_verify_spec` (function) — Custom renderer for the verify-spec step showing verified status, summary, issues grouped by scope/priority, and recommendations. <!--#b4386901686444b9-->
-- `_render_update_spec` (function) — Custom renderer for the update-spec step listing updated specs and new capabilities, or a no-op message. <!--#ed67188a732c36d3-->
-- `_render_commit` (function) — Renders the commit step's result as a Rich panel — a short hash with optional version bump, the commit message, and any error message — falling back to a "No changes to commit" notice only when nothing was committed and no error occurred. <!--#531a0520ec025b91-->
+- `_render_implement` (function) — Renders the implement step as a status bar (complete/partial/failed with group/file/test counts) followed by summary, files changed grouped by directory, tests added, incomplete tasks, restricted-edit results and errors. <!--#a9f5caa827fe6807-->
+- `_render_analyze` (function) — Renders the analyze step as a task-type/complexity/scope status bar plus reasoning and the selected relevant spec items. <!--#dac29330f5fad146-->
+- `_render_self_check` (function) — Renders the self_check step's pass/fail/actionable-count status, summary, and issues grouped and colored by severity (with schema compatibility for legacy verify_spec issues). <!--#bf9dee1a5dd7c798-->
+- `_render_verify_spec` (function) — Renders the verify_spec step's verified status, summary, issues grouped by in/out-of-scope and colored by priority with suggestions, and recommendations. <!--#4cfa969f07fd1e3c-->
+- `_render_update_spec` (function) — Renders the update_spec step's list of updated specs and new capabilities, or a "nothing updated" panel when both are empty. <!--#af36182188d46fa3-->
+- `_render_commit` (function) — Renders the commit step as short hash plus optional bumped version and the commit message, showing the "no changes" shortcut only when there is also no error to report. <!--#94a60b13b0bfcd7d-->
 
 ### `src/se3/engine/task_description.py` (python) — Owns the canonical rendering of persisted user interjections into an '## Additional Instructions (added during run)' section appended to a step's base task description, shared by all call sites so immediate re-runs and downstream step propagation produce byte-identical output. <!--#5bfbec42e2f34e85|86c2c9cd1e02d20d-->
 - `compose_task_description_with_interjections` (function) — Renders a list of interjection dicts into a '## Additional Instructions' section appended to the base task description, skipping empty entries and returning the base unchanged when none are usable. <!--#0330964a0329ae3c-->
@@ -2092,7 +2095,7 @@
   - `TestRunStepTokenAggregation.test_non_terminal_then_terminal_usage_equals_sum_of_rounds` (method) — Confirms after a revision then a completion round the terminal token_usage and session total equal the sum of both rounds' increments. <!--#a6bfda3a51da181c-->
   - `TestRunStepTokenAggregation.test_session_usage_not_duplicated_by_combined_totals` (method) — Verifies the session total sums each round's per-round increment rather than combined carry totals, avoiding double-counting across re-entries. <!--#5fd1b8051bd165b1-->
 
-### `src/se3/engine/test_steps.py` (python) — Integration test suite (with mocked LLM/git/subprocess) for the flow engine's step handlers — analyze classification, pass/fail TEST runs, and commit — with heavy coverage of the de-versioning behaviour where worktree flows emit provisional VersionIntent files and bump-decorated messages while synchronous flows keep authoritative versions and Version: lines, plus a commit in-lock race guard that re-analyzes on concurrent version drift. <!--#6862ddde99100e54|be2ca97423c25743-->
+### `src/se3/engine/test_steps.py` (python) — Integration test suite (with mocked LLM/git/subprocess) for the flow engine's step handlers — analyze classification, pass/fail TEST runs, and commit — with heavy coverage of the de-versioning behaviour where worktree flows emit provisional VersionIntent files and bump-decorated messages while synchronous flows keep authoritative versions and Version: lines, plus a commit in-lock race guard that re-analyzes on concurrent version drift. <!--#99b3e6da37376ce3|be2ca97423c25743-->
 - `TestAnalyzeStep` (class) — Test suite for the analyze step handler's classification output and error handling. <!--#e870f470662e8935-->
   - `TestAnalyzeStep.test_analyze_success` (method) — Asserts a successful analyze produces task_type/scope/complexity classification plus empty retired spec-selection outputs and never the legacy selected_specs key. <!--#3c0c7d552674801d-->
   - `TestAnalyzeStep.test_analyze_invalid_json` (method) — Asserts analyze fails (with an error message) when the LLM returns unparseable JSON. <!--#da519831bd138dbe-->
@@ -2160,24 +2163,24 @@
   - `TestStepSequences.test_feature_sequence_starts_with_analyze` (method) — Asserts the feature sequence begins with ANALYZE. <!--#7baa3804a02016f6-->
   - `TestStepSequences.test_review_sequence_has_invariant_check` (method) — Asserts the review sequence is ANALYZE → INVARIANT_CHECK → SUMMARIZE. <!--#a723541e0ac9a651-->
   - `TestStepSequences.test_discovery_sequence_starts_with_discovery_then_analyze` (method) — Asserts the discovery sequence starts DISCOVERY → ANALYZE and omits PROJECT_SUMMARY. <!--#b8e88b7ac2ce4f20-->
-- `TestFormatRoundUsageFooter` (class) — Test suite for the compact per-round token-usage footer formatter. <!--#56f66ca5da86e2b3-->
-  - `TestFormatRoundUsageFooter.test_normal_values_render_round_and_cumulative` (method) — Asserts the footer renders round and cumulative in/out token totals in the expected format. <!--#cc0a7ba9b9e89962-->
+- `TestFormatRoundUsageFooter` (class) — Unit tests for `token_usage.format_round_usage_footer`, asserting the compact "This round … · Total …" string uses comma thousands separators, shows only input/output tokens (no cache or cost), renders zeros, and degrades `None` inputs to zeros instead of raising. <!--#4a5e4a0f4db5f27b-->
+  - `TestFormatRoundUsageFooter.test_normal_values_render_round_and_cumulative` (method) — Asserts the footer for typical round and cumulative usage renders as the exact en-US string with comma-separated in/out counts. <!--#9d86858d2639c8f9-->
   - `TestFormatRoundUsageFooter.test_uses_thousands_separators_not_abbreviation` (method) — Asserts the footer uses comma thousands separators rather than k-style abbreviations. <!--#015c5f5c39c96b80-->
-  - `TestFormatRoundUsageFooter.test_zero_values_render_zeros` (method) — Asserts zero usage renders explicit zero totals. <!--#359a9c9bf441e172-->
-  - `TestFormatRoundUsageFooter.test_none_inputs_degrade_to_zero` (method) — Asserts None inputs degrade to zero totals instead of raising. <!--#8a1b05c1b596a2d5-->
-  - `TestFormatRoundUsageFooter.test_only_input_output_shown` (method) — Asserts the footer surfaces only input/output tokens, omitting cache breakdown and cost. <!--#9c0c804fdd7f770b-->
+  - `TestFormatRoundUsageFooter.test_zero_values_render_zeros` (method) — Asserts empty `UsageTotals` for both round and cumulative render an all-zero footer rather than being suppressed. <!--#32b60f796a0c98dd-->
+  - `TestFormatRoundUsageFooter.test_none_inputs_degrade_to_zero` (method) — Asserts passing `None` for both usages degrades to a zero footer instead of raising, leaving emptiness-gating to the caller. <!--#bdac28e5f32f705f-->
+  - `TestFormatRoundUsageFooter.test_only_input_output_shown` (method) — Asserts cache-token and cost fields present in `UsageTotals` are omitted from the compact footer, which surfaces only input/output counts. <!--#03dc58495b317609-->
 - `TestDiscoveryCarriedTokenUsage` (class) — Regression test class ensuring discovery accumulates token usage across multiple rounds despite a mid-handler step.outputs.clear(). <!--#48a08bd2932562b3-->
   - `TestDiscoveryCarriedTokenUsage.test_carried_usage_accumulates_across_rounds_and_clear` (method) — Drives a multi-round discovery flow with faked rounds, asserting carried_token_usage survives the clear and the terminal token_usage and session total reflect the full cumulative usage. <!--#2e5beaade09691fc-->
-- `TestDiscoveryRoundUsageFooter` (class) — Test suite for per-round CLI usage footer rendering and its gating on non-empty round usage. <!--#9c460ab2260e73f2-->
+- `TestDiscoveryRoundUsageFooter` (class) — Tests that the discovery step's message block appends the per-round usage footer only when the round actually called the LLM, and that `discovery_handler` passes round usage plus carried-forward cumulative usage into the display (with the programmatic-confirm fast path rendering nothing). <!--#f4f93c77438052c6-->
   - `TestDiscoveryRoundUsageFooter._render_to_text` (method) — Helper that renders a discovery message to text via a recording Rich console. <!--#ed3b9e4c07ac2808-->
-  - `TestDiscoveryRoundUsageFooter.test_footer_rendered_when_round_usage_non_empty` (method) — Asserts the footer is rendered when this round has non-empty usage. <!--#db7450c9e896eb0c-->
-  - `TestDiscoveryRoundUsageFooter.test_no_footer_when_round_usage_none` (method) — Asserts no footer is rendered when round usage is None. <!--#65f511c5882dc2ca-->
-  - `TestDiscoveryRoundUsageFooter.test_no_footer_when_round_usage_empty` (method) — Asserts an empty round increment suppresses the footer even with a cumulative total. <!--#4808ee654384c93f-->
+  - `TestDiscoveryRoundUsageFooter.test_footer_rendered_when_round_usage_non_empty` (method) — Renders the discovery message to a captured Rich console and asserts the round/total footer appears when the round usage is non-empty. <!--#87680e8ab24f7406-->
+  - `TestDiscoveryRoundUsageFooter.test_no_footer_when_round_usage_none` (method) — Asserts no footer text is emitted when the discovery message is displayed without any round usage (e.g. redraw or `--resume`). <!--#5dab080d327e7dac-->
+  - `TestDiscoveryRoundUsageFooter.test_no_footer_when_round_usage_empty` (method) — Asserts an empty round increment suppresses the footer even when a non-zero cumulative total exists. <!--#ae0445fc1ca4f382-->
   - `TestDiscoveryRoundUsageFooter.test_handler_passes_round_and_cumulative_usage` (method) — Asserts discovery_handler passes this round's increment and carried+round cumulative to the display. <!--#4f0e14d900538cab-->
   - `TestDiscoveryRoundUsageFooter.test_programmatic_confirm_path_renders_no_footer` (method) — Asserts the programmatic-confirm fast path makes no LLM call and renders no message/footer. <!--#7de4d5662aae1c03-->
-- `TestCliSinkUsageRendering` (class) — Test class verifying CliSink routes per-step token-usage rendering correctly for discovery, confirm, plan, and other step types. <!--#d7b6db7b320d1490-->
+- `TestCliSinkUsageRendering` (class) — Tests `CliSink`'s per-step-type usage routing on STEP_COMPLETED events: confirm renders a compact dim footer (nothing when no/empty usage), discovery renders only a compact cumulative line, plan keeps the big "Step Token Usage" block, and other step types fall through to the full report renderer. <!--#8fcf77b2424e60f6-->
   - `TestCliSinkUsageRendering._completed_event` (method) — Helper building a STEP_COMPLETED event for a given step. <!--#b2f2f53c59ab3c37-->
-  - `TestCliSinkUsageRendering.test_confirm_renders_compact_dim_footer` (method) — Asserts a confirm step renders the compact dim usage footer, not the big block. <!--#998919ab41b11473-->
+  - `TestCliSinkUsageRendering.test_confirm_renders_compact_dim_footer` (method) — Asserts a completed confirm step with token usage renders the compact round==cumulative footer and never the big per-step usage block. <!--#1cac625c082e15a6-->
   - `TestCliSinkUsageRendering.test_confirm_human_mode_no_usage_renders_nothing` (method) — Asserts a human-reviewer confirm (no token_usage) renders nothing. <!--#47bce190c3d347de-->
   - `TestCliSinkUsageRendering.test_confirm_empty_usage_renders_nothing` (method) — Asserts a confirm step with zero usage renders nothing. <!--#a8602f9c792cb310-->
   - `TestCliSinkUsageRendering.test_discovery_renders_cumulative_usage` (method) — Verifies the discovery terminal event renders only a compact dim cumulative-usage line, never the big per-step block or full report. <!--#c6235a867cea691c-->
@@ -2289,7 +2292,7 @@
   - `TestReconcileCommitDetection.test_is_consumed_via_reconcile_commit` (method) — Asserts is_consumed reports True from a committed reconcile trailer alone, even when the on-disk consumed flag was never set. <!--#f862da3a5c85a809-->
   - `TestReconcileCommitDetection.test_reconcile_commit_exists_non_git_dir` (method) — Asserts reconcile_commit_exists returns False rather than raising when run outside a git repository. <!--#88172b190e07bcb5-->
 
-### `src/se3/engine/token_usage.py` (python) — The single source of truth for se3's token/cost accounting, defining the additive UsageTotals tally (field-wise merge, tolerant JSON round-tripping), a ContextVar-based step-scoped accumulator that best-effort folds each LLM call's usage into the in-scope step, and formatting helpers that render labelled usage/cost strings for the CLI and WebUI display ends. <!--#55569bbbe56edfd9|a60fafda9217ec4b-->
+### `src/se3/engine/token_usage.py` (python) — The single source of truth for se3's token/cost accounting, defining the additive UsageTotals tally (field-wise merge, tolerant JSON round-tripping), a ContextVar-based step-scoped accumulator that best-effort folds each LLM call's usage into the in-scope step, and formatting helpers that render labelled usage/cost strings for the CLI and WebUI display ends. <!--#deecb225fd093d50|a60fafda9217ec4b-->
 - `_coerce_int` (function) — Best-effort coerces any value to an int, returning 0 for None/missing/unparseable input so malformed usage payloads never raise. <!--#c97b0fddc8bb6dee-->
 - `_coerce_float` (function) — Best-effort coerces any value to a float, returning 0.0 for None/missing/bad input. <!--#9a7b6843df4c055e-->
 - `UsageTotals` (class) — Additive dataclass holding the four token counts plus USD cost for a step or session, with field-wise merging and tolerant JSON round-tripping. <!--#375cd06ef41c59d1-->
@@ -2304,8 +2307,8 @@
 - `add_call_usage` (function) — Best-effort folds one LLM call's usage (UsageTotals or raw dict) into the in-scope step accumulator under a lock, a safe no-op outside any scope and on any error. <!--#638e1c5fbd6b3f82-->
 - `format_cost` (function) — Renders a USD cost as a 4-decimal-place string (e.g. $0.0123), tolerant of None/non-numeric input. <!--#1d2dadbbbc3b7703-->
 - `_format_tokens` (function) — Renders a token count with thousands separators (e.g. 12,345). <!--#6ac1c2bfe7972253-->
-- `format_round_usage_footer` (function) — Renders a compact single-line per-round usage footer (this round's vs cumulative in/out tokens) for CLI interactive multi-round steps. <!--#cfbfdeb0753e1d42-->
-- `format_usage_line` (function) — Renders a compact single-line labelled usage summary (in/out/cache/cost), safe for None or empty input. <!--#9315ed6455ff9aa6-->
+- `format_round_usage_footer` (function) — Renders the compact one-line per-round token usage footer (this round's in/out plus the running cumulative in/out) used at the tail of interactive CLI step output, with localized labels and None inputs degrading to zeros. <!--#9084375cfda31011-->
+- `format_usage_line` (function) — Renders a compact single-line labelled usage summary (input, output, cache read/write tokens and cost) with localized labels, tolerating None/empty tallies by showing zeros. <!--#14ff2b3fc01f8d95-->
 
 ### `src/se3/engine/tool_formatters.py` (python) — A registry-based formatting module that renders tool_use and tool_result calls (Edit, Write, Read, Bash, Grep, Glob, plus generic fallbacks) into single-line previews, merged success/failure chip headers, unified diffs, and JSON-safe structured detail payloads for CLI stream output and web chip panels. <!--#c54dd61994655562|91e7162fb2ba2d74-->
 - `set_project_root` (function) — Sets the module-level project root used for relative-path truncation. <!--#dfcc75f6b64065c1-->
@@ -2531,7 +2534,7 @@
   - `TaskFormatter.format_dependencies` (method) — Renders a dependency map table listing each task's dependencies and computed dependents across all groups. <!--#a264942af6747829-->
 - `format_task_groups` (function) — Module-level convenience function combining task, summary, and dependency sections into a single renderable view. <!--#1a59b24466bca805-->
 
-## `src/se3/engine/merge/` — The SE3 sequential branch-merge engine package, orchestrating LLM-assisted `se3 merge` runs — driving per-branch git merges through deterministic-then-LLM conflict resolution (with three-way conflict-context building and safe/strict/fast strategy decisions), then applying spec-integrity guardrails and LLM guardrail-repair, human-call escalation, issue-ID renumbering, tier-A runtime sync, version aggregation/reconciliation, and merged-branch/leaked-worktree cleanup and GC. <!--#e366532ac1c1bda4|f2c42960375a3c6f-->
+## `src/se3/engine/merge/` — The SE3 sequential branch-merge engine package, orchestrating LLM-assisted `se3 merge` runs — driving per-branch git merges through deterministic-then-LLM conflict resolution (with three-way conflict-context building and safe/strict/fast strategy decisions), then applying spec-integrity guardrails and LLM guardrail-repair, human-call escalation, issue-ID renumbering, tier-A runtime sync, version aggregation/reconciliation, and merged-branch/leaked-worktree cleanup and GC. <!--#3a8019a83fc84b87|f2c42960375a3c6f-->
 
 ### `src/se3/engine/merge/__init__.py` (python) — Public API facade for the SE3 merge engine package, re-exporting the merge orchestrator, conflict-context/resolver, guardrails, issue-renumbering, runtime sync, reconcile, version aggregation, and worktree-GC/cleanup symbols for sequential LLM-assisted branch merging. <!--#5f18c25e6daa30f2|e3b0c44298fc1c14-->
 
@@ -2575,7 +2578,7 @@
 - `_build_conflict_file` (function) — Collects and assembles a complete `ConflictFile` for one path — fetching all four versions, classifying binary/spec, decoding text, and parsing hunks. <!--#73182d7958538926-->
 - `build` (function) — Public entry point that builds a full `ConflictContext` for an in-progress merge by resolving SHAs, logs, and per-file conflict data (read-only). <!--#6ebd8dd8afc3bc7e-->
 
-### `src/se3/engine/merge/conflict_resolver.py` (python) — Defines the ConflictResolver and its supporting dataclasses/enums (MergeStrategy, HunkResolution, FileResolution, LLMResolution, BatchResolveOutcome) plus conflict-marker detection helpers, resolving merge conflicts by iteratively prompting an LLM to edit working-tree files in place and rescanning for residual markers until resolved or a max-iterations cap forces escalation. <!--#b6598598bdbaf811|2b9ebe4a720c4c46-->
+### `src/se3/engine/merge/conflict_resolver.py` (python) — Defines the ConflictResolver and its supporting dataclasses/enums (MergeStrategy, HunkResolution, FileResolution, LLMResolution, BatchResolveOutcome) plus conflict-marker detection helpers, resolving merge conflicts by iteratively prompting an LLM to edit working-tree files in place and rescanning for residual markers until resolved or a max-iterations cap forces escalation. <!--#5c8d2e6e15042b4a|2b9ebe4a720c4c46-->
 - `_normalize_unicode_whitespace_for_marker_detection` (function) — Helper that maps a set of Unicode whitespace prefix characters (NBSP, zero-width, BOM, etc.) to ASCII spaces for marker detection only, so disguised conflict markers can't evade the regexes. <!--#b53f346f2ca1d839-->
 - `_has_conflict_markers` (function) — Returns whether a text blob still contains git conflict markers, tolerating up to 7 leading spaces/tabs and normalized Unicode whitespace, and also catching a stray ======= divider. <!--#917d39cfa8592ae6-->
 - `_has_any_conflict_marker` (function) — Reads the file at a path and reports whether it still has conflict markers, treating a missing file as resolved and a read error as unresolved. <!--#ff273679e9eaf157-->
@@ -2585,8 +2588,8 @@
 - `HunkValidationError` (class) — Exception raised when a HunkResolution payload (e.g. line numbers) is malformed. <!--#fdd34bd771c38197-->
 - `ResolvedContentTooLargeError` (class) — Exception raised when an LLM resolution's content exceeds the configured size cap. <!--#d03720d1f58c1128-->
 - `Confidence` (class) — String enum of resolution confidence levels (HIGH/MEDIUM/LOW). <!--#dc02a14650d6e871-->
-- `MergeStrategy` (class) — String enum of the three conflict-resolution strategies (fast/safe/strict) with a from_str classmethod that fails loudly on the removed default/robust names. <!--#57850004c153e35d-->
-  - `MergeStrategy.from_str` (method) — Parses a string into a MergeStrategy, raising migration-friendly errors for the removed 'default'/'robust' names and listing valid options otherwise. <!--#13accfbe29a410a4-->
+- `MergeStrategy` (class) — A string enum defining the three merge conflict-resolution tiers — `fast` (LLM-only, aborts on failure), `safe` (LLM with human-MCP fallback), and `strict` (always human) — plus a strict parser that rejects the removed legacy names. <!--#7d7496e6923c746d-->
+  - `MergeStrategy.from_str` (method) — Classmethod that parses a case-insensitive strategy name into a `MergeStrategy`, raising migration-friendly errors for the retired `default`/`robust` names and a list of allowed values for anything else unrecognized. <!--#75614be5e330bb36-->
 - `HunkResolution` (class) — Dataclass holding the resolution result for a single conflict hunk (validated 1-based line range, confidence, reasoning). <!--#b764faf99e100832-->
   - `HunkResolution.__post_init__` (method) — Validates the hunk's start/end line numbers and enforces end_line >= start_line, raising HunkValidationError on bad values. <!--#1014dae11a150b03-->
   - `HunkResolution._validate_line` (method) — Classmethod that coerces/validates a line-number field to a positive bounded int, rejecting None, bools, non-ASCII numerals, and out-of-range values. <!--#472cc527f6b2bbe5-->
@@ -2715,7 +2718,7 @@
 - `parse_renumber_traces` (function) — Extracts the recorded `(old, new)` renumber pairs from a description's trace lines so dedup can confirm that a digit change was an actual recorded renumber. <!--#9060d9f01f82ccb2-->
 - `mask_issue_references` (function) — Replaces every standalone `#<digits>` token with a fixed `#REF` placeholder to give a rewrite-invariant (but coarse) signature key for shortlisting dedup candidates. <!--#eeacb0031c213645-->
 
-### `src/se3/engine/merge/orchestrator.py` (python) — Defines MergeOrchestrator, the library-style engine that sequentially merges branches into the current branch — running dirty-worktree pre-flight (auto-committing self-managed paths like se3/issues/ and se3/code-index.md), invoking deterministic and LLM conflict resolvers, guardrail checks/repair, issue renumbering, runtime sync, version aggregation, and postcondition asserts — and returns a structured MergeReport to the caller. <!--#5ffcb5c55a7e946e|e3b0c44298fc1c14-->
+### `src/se3/engine/merge/orchestrator.py` (python) — MergeOrchestrator module that sequentially merges branches into the current branch — driving git merge per branch, handling clean/conflict/failure outcomes via deterministic and LLM conflict resolvers, strategy decisions, runtime sync, issue renumbering, version aggregation, guardrail checks/repair and human-call escalation — plus helpers for the self-managed dirty-path whitelist (se3/issues/, se3/code-index.md) used in the pre-flight sync commit and an atomic file-write utility, returning a structured MergeReport to callers. <!--#b7eaf367ae19b68c|e3b0c44298fc1c14-->
 
 ### `src/se3/engine/merge/reconcile.py` (python) — Merge-side version reconciliation core: collects the version intents emitted by worktree sessions and derives the final project version once at merge time against master's current version — via a deterministic max-bump channel, or an LLM channel when se3/version-rules.md exists — guarding against regressions/collisions, writing the changelog and reconcile commit, tagging, and marking intents consumed so re-entry never double-bumps. <!--#469dfbebdd7603d6|e3b0c44298fc1c14-->
 
@@ -2762,7 +2765,7 @@
 - `find_stale_worktree_runs` (function) — Enumerates terminal, over-age isolation-worktree runs eligible for GC by globbing worktree engine.json files and filtering on worktree-mode, terminal status, and mtime age. <!--#e13ded98fe332b32-->
 - `gc_worktree_runs` (function) — The main GC entry point that reclaims leaked terminal worktree runs — archiving each (a hard gate), promoting its engine state, removing the directory, and deleting only provably-merged branches — returning a WorktreeGCReport, with a no-op dry-run mode. <!--#2884a8581498d1ab-->
 
-## `src/se3/engine/steps/` — The flow-engine's step-handler package, which registers one handler per StepType (analyze, plan/plan_tasks, discovery, implement, commit, confirm, merge_integrate, project_summary, plus fix-loop guards adjudicate/invariant_check/charter_freshness) and their shared prompt/fix-context helpers, providing the concrete per-step logic — LLM prompt assembly, context injection, and COMPLETED/REVISION_NEEDED/PAUSED/FAILED routing — that drives a task from analysis through planning, implementation, review, and commit/merge. <!--#97b307389c899450|f3da4e825e3e8a9d-->
+## `src/se3/engine/steps/` — The flow-engine's step-handler package, which registers one handler per StepType (analyze, plan/plan_tasks, discovery, implement, commit, confirm, merge_integrate, project_summary, plus fix-loop guards adjudicate/invariant_check/charter_freshness) and their shared prompt/fix-context helpers, providing the concrete per-step logic — LLM prompt assembly, context injection, and COMPLETED/REVISION_NEEDED/PAUSED/FAILED routing — that drives a task from analysis through planning, implementation, review, and commit/merge. <!--#9b9d05055bd38f49|f3da4e825e3e8a9d-->
 
 ### `src/se3/engine/steps/__init__.py` (python) — The step-handlers package init that imports every flow-engine step handler, assembles the STEP_HANDLERS registry mapping each StepType to its handler, and defines backward-compatibility stubs that forward deprecated PROPOSE/DESIGN/PROJECT_SUMMARY step types to their unified replacements so old persisted flows can still resume. <!--#9862f33d3a1e7c74|4b179c6ca8599baf-->
 - `propose_stub_handler` (function) — Backward-compatibility stub for the deprecated PROPOSE step type that logs a warning and forwards to plan_handler so old persisted flows can resume. <!--#6fb89b174cba579c-->
@@ -2805,7 +2808,7 @@
 - `_collect_project_summary` (function) — Gathers structured project context (git status, active flows, backlog, specs) via ProjectContextCollector and formats it into a concise text block, replacing the former PROJECT_SUMMARY LLM step. <!--#b083896bf9f5f700-->
 - `_update_flow_steps` (function) — Rebuilds a flow's selected step sequence from the task type's default sequence, layering in configured optional steps, worktree merge steps, and confirmation steps so ANALYZE-time re-derivation preserves the full pipeline. <!--#c912381d1cdf7fa0-->
 
-### `src/se3/engine/steps/charter_freshness.py` (python) — A never-blocking flow-end step handler that detects whether a diff touched the charter's three content classes and, only after a COMPLETED invariant_check, runs a self-contained propose→gate→apply closed loop (mechanical anchored-patch validation plus an admission size/altitude LLM gate) to auto-write se3/charter.md via an atomic temp-file rename, degrading fail-safe to advisory-only (charter untouched) on any failure while also firing the human-amendment monitoring trigger. <!--#e0c1b3b15a0232fb|dd74b1d1d7f2a98f-->
+### `src/se3/engine/steps/charter_freshness.py` (python) — A never-blocking flow-end step handler that detects whether a diff touched the charter's three content classes and, only after a COMPLETED invariant_check, runs a self-contained propose→gate→apply closed loop (mechanical anchored-patch validation plus an admission size/altitude LLM gate) to auto-write se3/charter.md via an atomic temp-file rename, degrading fail-safe to advisory-only (charter untouched) on any failure while also firing the human-amendment monitoring trigger. <!--#8fec6c8bda8575e4|dd74b1d1d7f2a98f-->
 - `_changed_files` (function) — Helper that extracts a flat list of changed file paths from the `changes_made` payload, tolerating both string and dict `files_changed` entry shapes. <!--#8b6c4d2c442424e0-->
 - `_format_changes` (function) — Helper that renders the diff's changed-files list (with actions and explanations) into a human-readable string for the freshness prompt. <!--#63fed8bbe4faa206-->
 - `_resolve_edits` (function) — Resolves a validated anchored-patch op list into concrete (start, end, replacement) spans against the text, mapping insert_after to a zero-width span after the anchor and replace to the span covering the quoted old text. <!--#ebae0c706a3c4db2-->
@@ -2817,7 +2820,7 @@
 - `_run_admission_trigger` (function) — Runs the non-blocking human-amendment monitoring gate (admission size check) when the diff directly edited se3/charter.md, annotating step.outputs with any monitoring-light warning. <!--#cee62ee094a8618e-->
 - `_run_gate` (function) — Runs the two-part auto-update gate over the in-memory candidate — mechanical anchored-patch check, gating admission size red light, then the admission LLM gate for altitude/content-class and removal-weakening — returning (ok, candidate, verdicts, reason). <!--#153b3d3fa0568d07-->
 - `_record_advisory` (function) — Records the advisory freshness output fields (charter_update_needed, touched_classes, reason, suggested_update) on the step from the propose response, defaulting them when no proposal exists. <!--#bee2ecd9ee971400-->
-- `charter_freshness_handler` (function) — The charter_freshness step handler: always non-blocking, it fires the amendment monitoring trigger, cheap-passes on an empty diff, else runs the propose→gate→apply closed loop to auto-update the charter, degrading to advisory behavior (charter untouched) on any failure. <!--#ff95a69291e5047f-->
+- `charter_freshness_handler` (function) — Non-blocking step handler that checks whether a flow's code diff touches the charter's content classes and, when an invariant_check has certified the diff, runs an LLM propose → gate → apply loop to auto-patch se3/charter.md — degrading to advisory-only output (and always returning COMPLETED) on empty diffs, missing preconditions, gate rejection, or LLM/parse errors. <!--#6003e77949e49488-->
 
 ### `src/se3/engine/steps/commit.py` (python) — Implements the flow engine's commit step: it stages and commits the flow's changes with a generated message, strips se3 runtime-leak paths, and for release-point flows writes the authoritative version, README badge and VERSIONS.md entry under a race guard that detects concurrent version drift and its own replays, plus fallback summary generation. <!--#deab156397ccf508|f4ec726d2e8c6583-->
 - `_detect_runtime_leaks` (function) — Pure path-signature predicate that returns which staged paths carry an se3 runtime signature (a top-level `.se3/`, or a nested `se3`/`.se3` followed by a known runtime-subtree name) outside the legitimate top-level `se3/` root. <!--#c5e4e71e671d9029-->
@@ -2857,21 +2860,22 @@
 
 ### `src/se3/engine/steps/conftest.py` (python) — A pytest conftest that sets collect_ignore to exclude the step-handler implementation modules test.py and test_with_fail_loop.py, preventing pytest from mistaking their test-prefixed names for actual test modules/functions. <!--#93a55fa5e88f5424|e3b0c44298fc1c14-->
 
-### `src/se3/engine/steps/discovery.py` (python) — The discovery step handler implementing a multi-turn, PAUSED-driven conversational workflow that gathers project/recency context, sends per-round prompts to the LLM to clarify requirements and propose a refined task description, executes emitted issue operations, renders the turn to the console, and completes once the user confirms via the programmatic '1' confirmation gate. <!--#55285638342cd234|2588a26d50678246-->
-- `discovery_confirm_metadata` (function) — Builds the (prompt, options) display metadata — a Markdown instruction with the '输入 1 确认' fallback plus a one-click confirm button valued '1' — shown when a non-interactive discovery step pauses at the confirmation gate. <!--#7e3ff5e798341b2e-->
+### `src/se3/engine/steps/discovery.py` (python) — Implements the SE3 discovery step: a multi-turn, PAUSED-driven requirement-clarification conversation with the LLM that gathers project/recency context, asks clarifying questions, executes proposed issue operations, renders each round to the console, and ends at a programmatic confirmation gate (response "1") on the refined task description before the flow advances to analyze. <!--#d2497154d15a691c|796978823c2265e8-->
+- `discovery_confirm_hint` (function) — Returns the i18n-rendered textual fallback hint ("type 1 to confirm") that accompanies the GUI confirm button at the discovery confirmation gate. <!--#ac0801c43937e9ce-->
+- `discovery_confirm_metadata` (function) — Builds the (prompt, options) display metadata — a Markdown prompt carrying the proposed refined description plus a single one-click confirm option whose value is the normative "1" — for pausing a non-interactive discovery step at the programmatic confirmation gate. <!--#6cf5f054c946c924-->
 - `_gather_project_context` (function) — Detects and formats basic project context (project type/name, test framework, git remote and branch) from files in the project root for inclusion in the discovery prompt. <!--#2efc5e2fb07052a6-->
 - `_summary_recency_key` (function) — Computes a comparable epoch-float sort key for a `summary-*.md` file, parsing the filename's `YYYYMMDD-HHMMSS` timestamp as local time when present and otherwise falling back to file mtime so recency comparisons stay on a single numeric scale. <!--#cf902648d5769663-->
 - `_collect_session_summaries` (function) — Reads the most recent `se3/state/summary-*.md` files (recency-ordered) and returns up to `limit` compact, capped excerpts (Task line + first body paragraph) in a best-effort, read-only manner for discovery's round-0 context. <!--#5992735f893dee56-->
 - `_collect_recent_commits` (function) — Returns subject lines of the most recent non-merge git commits via `git log`, best-effort and read-only with a timeout, yielding an empty list on any failure. <!--#89f42ded4fd71f5c-->
 - `_gather_recency_context` (function) — Combines recent session summaries and recent commits into a single titled Markdown "Recent Activity Context" block for round-0 discovery, returning "" when both sources are empty. <!--#63d5bacc3853f06b-->
-- `discovery_handler` (function) — Main step entry point that drives one discovery round per call, manages multi-turn conversation state via PAUSED, executes any emitted issue operations, and returns COMPLETED once the user confirms. <!--#259e516927633f5b-->
+- `discovery_handler` (function) — The discovery step handler: drives the multi-turn requirement-clarification conversation with the LLM (pausing via PAUSED between user turns), tracks round/history state, executes any LLM-proposed issue operations, and completes once the refined description is confirmed. <!--#17a38e550e914169-->
 - `_run_discovery_round` (function) — Builds and sends one discovery-round prompt to the LLM (assembling history, round-0 recency, charter/code-index/language/runtime injections), then parses, validates against emptiness, and returns the structured result plus raw response text. <!--#4656dcdec2db4e27-->
 - `_format_conversation_history` (function) — Formats the accumulated conversation history list into a plain ROLE: content text block for prompt inclusion. <!--#ce6ad351fc217e64-->
 - `_format_issue_op_engine_note` (function) — Builds an engine note summarizing this round's executed issue operations and the current set of in-scope tracked issue IDs, to append to the conversation history for the LLM. <!--#15b7d36de96e91b3-->
 - `_generate_summary` (function) — Produces a short summary string counting assistant rounds and user inputs from the discovery conversation history. <!--#3e9395a1b38195a0-->
 - `_extract_narrative_from_raw` (function) — Strips fenced and bare JSON blocks out of the raw LLM result text to recover any surrounding narrative prose for display. <!--#951c0061d894ad35-->
-- `_proposed_description_block` (function) — Builds a nested cyan Rich reverse-color block that wraps the LLM's proposed refined task description with clear se3-rendered boundaries. <!--#9760a3663ed57bcc-->
-- `_display_discovery_message` (function) — Renders the discovery turn to the console — narrative, content, proposed description, questions, issue-operation summary, and a token-usage footer — across question/synthesis/confirmation modes. <!--#2adde47662411e5c-->
+- `_proposed_description_block` (function) — Wraps the LLM's proposed refined description in a nested cyan se3 reverse-color block (title, Markdown body, footer) so it has clear visual boundaries inside the Discovery output. <!--#fa9ca2df0d140335-->
+- `_display_discovery_message` (function) — Renders a discovery round to the console as a Rich group — narrative, content, proposed-description block, questions, issue-operation summary, and a token-usage footer — varying layout by question / synthesis / confirmation mode. <!--#7ca3c569c79fdd8e-->
 
 ### `src/se3/engine/steps/implement.py` (python) — The implement step handler that drives LLM-based (claude -p, TWO_PHASE JSON) code generation for task groups across a dependency DAG, handling worktree creation/merging, stash conflict resolution, disaster-recovery pruning of completed groups, and the test-verify-fix loop, subject to version-file and why-comment prompt guardrails. <!--#721f3e74bac0c3c6|e3b0c44298fc1c14-->
 
@@ -2954,7 +2958,7 @@
 - `_create_basic_summary_text` (function) — Constructs a deterministic fallback Markdown summary (status, changed files, incomplete tasks, testing status, handoff, and knowledge guards) used when LLM summary generation fails or returns empty, honoring the verification verdict so unverified work is not claimed complete. <!--#35166e333a1d36d3-->
 - `_save_summary` (function) — Writes the summary text to `se3/state/summary-{flow_id}.md` with header metadata, logging a warning on failure. <!--#c990539ad0295730-->
 
-### `src/se3/engine/steps/test.py` (python) — The non-LLM test step handler that auto-detects/runs the configured test command and phases, classifies results into new-test vs regression and inherited (baseline) vs introduced failures, applies critical-acceptance and dynamic-timeout gating with a bounded baseline fix loop, and returns a shared TestVerdict consumed identically by both the test step and the SPEC_GATE. <!--#c760a796c2734875|e04201ea4a2400cc-->
+### `src/se3/engine/steps/test.py` (python) — The non-LLM test step handler that auto-detects/runs the configured test command and phases, classifies results into new-test vs regression and inherited (baseline) vs introduced failures, applies critical-acceptance and dynamic-timeout gating with a bounded baseline fix loop, and returns a shared TestVerdict consumed identically by both the test step and the SPEC_GATE. <!--#9fa6638633d29442|e04201ea4a2400cc-->
 - `TestVerdict` (class) — Dataclass capturing the classified result of one test-suite run (results dict, pass flag, fix trigger, fix guidance/context, inherited failures), shared so the test step and SPEC_GATE consume one identical verdict. <!--#2fe28d757ce5a9dd-->
 - `_extract_failures_section` (function) — Extracts the pytest FAILURES/ERRORS diagnostic section from stdout, per-block-truncating it to fit a character budget while preserving assertions and traceback tails. <!--#48ac6719f45bd66e-->
 - `_parse_test_summary_counts` (function) — Best-effort parses aggregate passed/failed counts from a runner's summary line (pytest/cargo/jest) when per-test lines are unavailable, summing across multiple summary lines. <!--#268b30edce88f897-->
@@ -2968,7 +2972,7 @@
 - `_report_pre_existing_issues` (function) — Files inherited (pre-implement baseline) test failures as a single medium-priority A-class discovery issue, relying on the caller for the once-per-flow guard. <!--#11f4592b36f9fb6f-->
 - `_is_timeout_result` (function) — Classifies a command result as a timeout-class failure via the structured flag, stderr marker, or -1 returncode sentinel, short-circuiting to False for any passing run. <!--#5cf69f14034df1cf-->
 - `_run_command_with_timeout_retry` (function) — Runs a command and, on a timeout-class failure only, retries it once in place (without incrementing the fix iteration), returning the result and whether a retry occurred. <!--#118ae307f8169959-->
-- `_run_command` (function) — Spawns a test command via Popen with a dot progress indicator and enforced timeout, guarding against recursive invocation, and returns a structured result dict with distinct sentinel returncodes for timeout (-1) vs spawn error (-2). <!--#b08b8490246aadfd-->
+- `_run_command` (function) — Runs a test command as a subprocess in the given working directory with a live dot-progress indicator, guarding against recursive se3-invoked test runs via the SE3_TEST_RUNNING sentinel env var, and returns a result dict (command/returncode/stdout/stderr/passed/timed_out) using distinct sentinel return codes for timeout (-1) versus spawn failure (-2). <!--#daf630ebf436dcf0-->
 - `_classify_results` (function) — Splits parsed test ids into new_tests vs regression buckets (passed/failed) based on whether each id matches the implement step's added test files. <!--#1198d5758658cb17-->
 - `_parse_test_ids` (function) — Parses individual (test_id, passed) tuples from pytest/jest/go/cargo runner stdout, trying each format in turn. <!--#b0d7d24039c585c4-->
 - `_parse_skipped_test_ids` (function) — Parses deduplicated SKIPPED test ids from pytest verbose per-test output (ignoring the -rs short-summary form that lacks the file::test form). <!--#aff2a440b23db006-->
@@ -3096,12 +3100,1826 @@
 - `looks_like_json_object` (function) — Lenient predicate returning whether text parses as a JSON dict after the full repair chain, mirroring parse_json_response's dict-only semantics. <!--#5fa87d39d7511b7c-->
 - `looks_like_json` (function) — Lenient predicate returning whether text parses as any valid JSON value via the repair chain, with a strict fallback to distinguish literal `null` from failure. <!--#9155397a29d59ee8-->
 
-## `src/se3/server/` — The optional, separately-installed `se3[server]` central control-plane package: a fail-closed multi-tenant FastAPI server (app, ws, state, persistence, identity, crypto, bootstrap) that aggregates outbound daemon WebSocket connections and re-exposes their machines/flows/history over a REST/WebSocket API, plus the pluggable auth provider chain and the bundled single-page web UI static assets. <!--#f3d5c39801d79e1b|648c461bd923f6b5-->
+## `src/se3/i18n/` — The CLI's internationalization package: it resolves the active UI language via the SE3_LANG → config → system-locale → en-US precedence chain, exposes the `t()` translation helper (plus status-token key normalization), and backs it with a loader that discovers, caches, and fail-safe reads the flat dot-keyed JSON catalogs under `locales/`, so adding a language is a pure data drop-in. <!--#8277b054bb2744b0|cce6ea0a9790d67b-->
+
+### `src/se3/i18n/__init__.py` (python) — Public i18n entry point that resolves the active UI language through the SE3_LANG → config → system-locale → en-US precedence chain (with set/get/bind/reset seams) and exposes the `t` translation helper plus status-token key normalization and translation. <!--#fe265c61d8c9da27|d32ddf1b66a7afbb-->
+- `_decide_explicit` (function) — Resolves an explicitly-set se3 language request (env var or config value), returning None only when truly unset so resolution falls through, and en-US when set but unsupported. <!--#1f50cf093fb201f7-->
+- `_safe_cwd` (function) — Returns the process working directory, or None if it cannot be read (e.g. deleted worktree), so language resolution never raises. <!--#cae38b9c8441a6ba-->
+- `resolve_language` (function) — Resolves the effective UI language via the precedence chain SE3_LANG → project/global config → system locale → en-US. <!--#4394f4c329d94838-->
+- `set_language` (function) — Explicitly sets the active UI language (unknown/None falls back to en-US) and returns the effective code. <!--#d718115194fcaba5-->
+- `get_language` (function) — Returns the active UI language, lazily resolving it on first access. <!--#384ce0f141f206ed-->
+- `bind_project_root` (function) — Re-runs language resolution against a command's actual project root, correcting the language cached at import time from the cwd. <!--#44a90f6ef691f7ef-->
+- `reset_language` (function) — Test seam that clears the cached language so the next access re-resolves the chain. <!--#5373fe42094abcd5-->
+- `t` (function) — Translates a catalog key into the active language with kwargs formatting, falling back through en-US to the raw key and never raising. <!--#c4a5b1943393acaa-->
+- `status_key` (function) — Normalizes a status token or Enum into a canonical `status.<snake_case>` catalog key shared by issue, flow and step vocabularies. <!--#23076fd178cdec6f-->
+- `t_status` (function) — Translates a status token for display, falling back to the raw token (not the key) when no catalog entry exists. <!--#74736fec0b8d97f9-->
+
+### `src/se3/i18n/loader.py` (python) — Backing store for the i18n layer: discovers `<code>.json` locale catalogs in the sibling `locales/` directory via `importlib.resources` (with a filesystem fallback), loads/caches them fail-safe as flat `key -> str` maps, normalizes arbitrary config or system locale codes (`zh_CN.UTF-8`, bare `zh`, non-string YAML scalars) to a supported code, and defines `en-US` as the base fallback language — so adding a language is a pure data drop-in. <!--#a3c588a0551173ca|f2a438a9e2fc75d6-->
+- `_iter_locale_resources` (function) — Generator that discovers every `<code>.json` under the package's `locales/` directory, yielding `(code, traversable)` pairs via `importlib.resources.files` with a filesystem-glob fallback so it works from both a wheel and a source tree. <!--#152fd5ea9ae6ef8d-->
+- `supported_languages` (function) — Returns the sorted, deliberately uncached list of locale codes found in `locales/`, so dropping in a new language file takes effect without a restart. <!--#5e90534f30a2aa79-->
+- `load_catalog` (function) — Loads and caches the flat `key -> str` translation catalog for a locale code, returning `{}` (never raising) when the file is missing, unreadable, or not a JSON object. <!--#de53c8f88213788d-->
+- `normalize_language` (function) — Normalizes an arbitrary config or system locale value (e.g. `zh_CN.UTF-8`, `ZH-cn`, bare `zh`, or a non-string YAML scalar) to a supported locale code, or `None` if unsupported. <!--#b36db2217038eae3-->
+- `clear_caches` (function) — Test seam that clears the cached catalogs so locale-file mutations are picked up. <!--#7b1436e83f936825-->
+
+## `src/se3/i18n/locales/` — The CLI's translation catalog package, holding the flat dot-keyed JSON message catalogs for each supported locale (en-US as default, zh-CN as its mirror) plus an `__init__.py` package marker that lets the i18n loader read them via `importlib.resources`. <!--#a76e9505251e22e7|1c3428669e73e94f-->
+
+### `src/se3/i18n/locales/__init__.py` (python) — An intentionally empty-of-code package marker whose sole purpose is to make the locales directory a regular (non-namespace) package so that `importlib.resources.files("se3.i18n.locales")` can load the `<code>.json` CLI translation catalogs on Python 3.9. <!--#c2036bfd857ee105|e3b0c44298fc1c14-->
+
+### `src/se3/i18n/locales/en-US.json` (json) — The English (en-US) translation catalogue for the se3 CLI: a flat map of dot-namespaced message keys (cli.common.*, cli.run.*, confirmation/resume/interrupt/discovery prompts, errors, etc.) to their user-facing strings with interpolation placeholders, loaded by the i18n loader as the default locale and mirrored by zh-CN.json. <!--#281c739bd9d0ddb9|2f17b9bf163f3dca-->
+- `cli.common.done` (json-key) — Generic English label for a completed operation ("Done"). <!--#91828f63e876c4f2-->
+- `cli.common.cancelled` (json-key) — Generic English label shown when an operation is cancelled. <!--#a2947f257eb321ea-->
+- `cli.common.error` (json-key) — Generic English "Error" label used across CLI output. <!--#97c63b98f6b3757f-->
+- `cli.common.warning` (json-key) — Generic English "Warning" label used across CLI output. <!--#5de54721632ce1a2-->
+- `cli.common.yes` (json-key) — Affirmative answer word used in prompts and boolean rendering. <!--#1009a718d1d45cd5-->
+- `cli.common.no` (json-key) — Negative answer word used in prompts and boolean rendering. <!--#23c8f99a0e4f6343-->
+- `cli.run.starting` (json-key) — Banner shown when a run begins, interpolating the task description. <!--#df0ee805b0631d11-->
+- `cli.run.resume_hint` (json-key) — Hint telling the user how to resume an interrupted flow via `se3 run --resume`. <!--#81877cbc79361794-->
+- `cli.run.completed` (json-key) — Message reporting that a run finished, with its elapsed seconds. <!--#7296b17c3fccf3c0-->
+- `cli.error.not_a_project` (json-key) — Error emitted when the working directory has no se3.yaml and is therefore not an se3 project. <!--#7d42252e10086984-->
+- `cli.greeting` (json-key) — Sample/demo greeting string used to exercise the i18n interpolation machinery. <!--#c74ca3164cfcacac-->
+- `cli.run.choice.select` (json-key) — Prompt asking the user to type a number to select a menu option. <!--#8c043234fdc180ae-->
+- `cli.run.choice.enter_between` (json-key) — Validation message telling the user their selection must fall within the offered range. <!--#3a2156944335d9c4-->
+- `cli.run.choice.enter_valid` (json-key) — Validation message shown when the selection input is not a number. <!--#63417d735b681f0f-->
+- `cli.run.choice.non_interactive` (json-key) — Notice that, with no TTY, a menu option was auto-selected on the user's behalf. <!--#fef1b3890a3fd448-->
+- `cli.run.what_to_do` (json-key) — Heading for the top-level run menu asking the user what action to take. <!--#b6c4b1e1c6753ccb-->
+- `cli.run.start_new_flow` (json-key) — Menu option label for starting a brand-new flow. <!--#949d8602da8c6ee5-->
+- `cli.run.confirm.review_prompt` (json-key) — Prompt asking the user to review a step's output before deciding. <!--#e54461f07c88fe39-->
+- `cli.run.confirm.opt_approve` (json-key) — Confirmation-gate option label for approving the step and continuing. <!--#f4be7be64fddf41c-->
+- `cli.run.confirm.opt_request_changes` (json-key) — Confirmation-gate option label for requesting changes to the step output. <!--#051456bdd5dbe208-->
+- `cli.run.confirm.opt_exit` (json-key) — Confirmation-gate option label for exiting and pausing the flow. <!--#8b94b8a207574364-->
+- `cli.run.confirm.feedback_title` (json-key) — Panel title for the free-text feedback input at a confirmation gate. <!--#09017126d3527eb4-->
+- `cli.run.confirm.feedback_message` (json-key) — Instructions for entering multi-line change-request feedback, including the finish/cancel keys. <!--#6d010a96c285510e-->
+- `cli.run.confirm.approved` (json-key) — Result text shown when the user approves a confirmation gate. <!--#881215dfb3a790be-->
+- `cli.run.confirm.changes_requested` (json-key) — Result text echoing the user's change-request feedback. <!--#f469cfc9dcccc2e5-->
+- `cli.run.confirm.result_title` (json-key) — Panel title for the outcome of a confirmation gate. <!--#8ec8f60162d4ca56-->
+- `cli.run.confirm.found_existing` (json-key) — Dim notice that a previously recorded confirmation response was reused (e.g. from the web console). <!--#43e0a7ac6b99e48c-->
+- `cli.run.interjection_received` (json-key) — Dim notice that an interjection arrived from the web console mid-run. <!--#3656ab28b5f346a8-->
+- `cli.run.resume.no_flows` (json-key) — Notice that no prior flows exist, so a new one is started instead of resuming. <!--#83f110c191d0c6b7-->
+- `cli.run.resume.no_in_progress` (json-key) — Notice that no in-progress flows were found to resume. <!--#aca5fcf0cf040754-->
+- `cli.run.resume.found_completed` (json-key) — Notice reporting how many completed (non-resumable) flows were found. <!--#bf4df77c9559f9d2-->
+- `cli.run.resume.title` (json-key) — Panel title for the resume-a-flow prompt. <!--#84cc58bea4ad7c75-->
+- `cli.run.resume.label_failed` (json-key) — Word used to describe a resumable flow whose last state was a failure. <!--#31d21c2590d16dbd-->
+- `cli.run.resume.label_interrupted` (json-key) — Word used to describe a resumable flow that was interrupted rather than failed. <!--#7622db848e52e01d-->
+- `cli.run.resume.worktree_suffix` (json-key) — Parenthetical suffix marking a resumable flow as running in a git worktree. <!--#6ec93926985fa77b-->
+- `cli.run.resume.single_body` (json-key) — Body text describing the single resumable flow (id, description, current step). <!--#598199cf7c804690-->
+- `cli.run.resume.action_retry` (json-key) — Menu option label for retrying a failed flow. <!--#6ba87ca18a314efa-->
+- `cli.run.resume.action_resume` (json-key) — Menu option label for resuming the shown flow. <!--#37177932103fea7c-->
+- `cli.run.resume.multi_header` (json-key) — Header shown when several resumable flows are available to choose from. <!--#c17956587d71daf7-->
+- `cli.run.resume.tag_failed` (json-key) — Inline `[FAILED]` tag appended to a flow entry in the resume list. <!--#929f42c79bcb3b78-->
+- `cli.run.resume.tag_worktree` (json-key) — Inline `[worktree]` tag appended to a flow entry in the resume list. <!--#0b4c119665fbcb73-->
+- `cli.run.resume.flow_option` (json-key) — Template rendering one selectable flow line (description, step, worktree/status tags). <!--#8e615d6dc1497985-->
+- `cli.run.resume.which_flow` (json-key) — Prompt asking which of the listed flows to resume. <!--#d16eeceb414c3055-->
+- `cli.run.interrupt.title` (json-key) — Panel title for the Ctrl+C additional-instruction prompt. <!--#8a7dcf5691ee0ba4-->
+- `cli.run.interrupt.message` (json-key) — Instructions for typing an extra instruction on interrupt, or leaving it empty to retry as-is. <!--#84ae53fa508b0853-->
+- `cli.run.interrupt.exit_title` (json-key) — Panel title shown when the user exits from the interrupt prompt. <!--#96d6270060e3b1d4-->
+- `cli.run.interrupt.saved_body` (json-key) — Body confirming the flow state was saved on user interrupt and how to resume. <!--#43c64e8fe962b7b5-->
+- `cli.run.interrupt.recorded` (json-key) — Notice that the typed instruction was recorded and the step will retry with it injected. <!--#e7bcb1500bb0a436-->
+- `cli.run.interrupt.retry_as_is` (json-key) — Notice that the step is being retried unchanged after an empty interrupt input. <!--#4a6794238b1cbaf4-->
+- `cli.run.discovery.resume_notice` (json-key) — Notice that a paused discovery step is resuming and awaits the user's reply. <!--#08b04bd92cdabd5e-->
+- `cli.run.discovery.pause_title` (json-key) — Panel title for the discovery-step pause. <!--#7d978f0b18e78fc6-->
+- `cli.run.discovery.pause_body` (json-key) — Body explaining that discovery is exploring requirements and needs the user to answer its questions. <!--#0f0c030f26d56df7-->
+- `cli.run.discovery.response_title` (json-key) — Panel title for the discovery free-text response input. <!--#9ed9b98b64e18bdd-->
+- `cli.run.discovery.response_message` (json-key) — Instructions for entering a discovery response, including finish/cancel keys. <!--#3a0c07d8a0d43eb6-->
+- `cli.run.discovery.paused_title` (json-key) — Panel title shown when discovery is paused and the flow exits. <!--#d01d60370ee58961-->
+- `cli.run.discovery.paused_body` (json-key) — Body confirming discovery was paused with state saved, and how to resume. <!--#a6cf59ee978b7c08-->
+- `cli.run.discovery.provide_response` (json-key) — Warning nudging the user to type a response or Ctrl+C to exit discovery. <!--#ba0a40ada35d3913-->
+- `cli.run.discovery.confirm_title` (json-key) — Panel title for the discovery confirm-or-keep-refining gate. <!--#f5525939c0fccd24-->
+- `cli.run.discovery.confirm_message` (json-key) — Instructions to type 1 to confirm the discovered task, or reply with feedback to continue discovery. <!--#a06b35cc9fdbdb00-->
+- `cli.run.discovery.empty_round_prompt` (json-key) — Fallback prompt used when a discovery round produced no questions of its own. <!--#df772a06a53b7154-->
+- `cli.run.discovery.captured_input` (json-key) — Notice that the user's input was captured and discovery continues with it. <!--#348c44353810e596-->
+- `cli.run.error.flow_not_found` (json-key) — Error raised when the requested flow id does not exist. <!--#9b8015ff62740de1-->
+- `cli.run.error.flow_completed` (json-key) — Error raised when trying to resume a flow that is already completed. <!--#4a811e6fa5e61f57-->
+- `cli.run.error.task_required` (json-key) — Error raised when a new flow is started without a task description. <!--#b0d60259b41edb50-->
+- `cli.run.error.step_failed` (json-key) — Error text reporting that a step failed, with the underlying error. <!--#a1af2739bea35cbe-->
+- `cli.run.error.max_retries` (json-key) — Error reporting that a step exhausted its retry budget. <!--#e7e74c360c0d8769-->
+- `cli.run.error.flow_failed` (json-key) — Error text reporting an overall flow failure with its cause. <!--#87094d7452a2cebc-->
+- `cli.run.error.unknown` (json-key) — Placeholder text used when no error detail is available. <!--#8d4771b20ecbc303-->
+- `output.error.prefix` (json-key) — Prefix label prepended to error lines by the output layer. <!--#56013c9d9dffaa9a-->
+- `output.context.heading` (json-key) — Heading introducing the context block attached to an error. <!--#a3250625aeb45008-->
+- `output.panel.error` (json-key) — Default title for error panels rendered by the output layer. <!--#81216893b226fc66-->
+- `output.panel.success` (json-key) — Default title for success panels rendered by the output layer. <!--#6bf784085ef69bf6-->
+- `cli.run.flow_info.title` (json-key) — Panel title summarising the flow being resumed. <!--#7fe5f08262b3ded8-->
+- `cli.run.flow_info.body` (json-key) — Body listing the resumed flow's id, current step, and task. <!--#168868acd58defd2-->
+- `cli.run.new_flow.title` (json-key) — Panel title shown when a new flow is created. <!--#1c668dc8cd7218b2-->
+- `cli.run.new_flow.created` (json-key) — Line reporting the id of the newly created flow. <!--#13948b17732d2041-->
+- `cli.run.new_flow.task` (json-key) — Line echoing the new flow's task description. <!--#71bc75e259cbd87e-->
+- `cli.run.new_flow.type_user` (json-key) — Line reporting the task type when explicitly supplied by the user. <!--#7a2b9db867dd83af-->
+- `cli.run.new_flow.type_pending` (json-key) — Line reporting that the task type is pending and will be decided by the analyze step. <!--#dc9531bb59f8420a-->
+- `cli.run.new_flow.change` (json-key) — Line echoing the change name associated with the new flow. <!--#f1c326affab2f80b-->
+- `cli.run.no_current_step` (json-key) — Notice that the flow has no current step, so it is being marked complete. <!--#7175d5aea1429e72-->
+- `cli.run.revision_resuming` (json-key) — Warning that the resumed flow already had a pending revision request from a prior step. <!--#6d8dc4ef0ae35430-->
+- `cli.run.interrupted_waiting_lock` (json-key) — Warning that the run was interrupted while waiting for the main-worktree lock and is exiting. <!--#4be8e0ba3a7d56a8-->
+- `cli.run.pending_suffix` (json-key) — Dim `(pending)` suffix appended to a not-yet-determined value. <!--#345ffad5348af36a-->
+- `cli.run.revision_requested` (json-key) — Warning that a revision was requested and the flow is stepping back. <!--#2eb450f42924637f-->
+- `cli.run.step_completed` (json-key) — Per-step success line showing the step type and its duration. <!--#0bd261d50513165a-->
+- `cli.run.flow_completed` (json-key) — Message announcing that the whole flow finished successfully. <!--#793079f37740c91a-->
+- `cli.run.session_usage_title` (json-key) — Panel title for the whole-session token usage summary. <!--#3f42aea2b1728667-->
+- `cli.run.flow_ended_status` (json-key) — Dim line reporting the terminal status the flow ended with. <!--#56373f7e9b0595c7-->
+- `cli.run.failure.paused_non_interactive` (json-key) — Warning that a step failed with no TTY, so a retry_decision call was written and the flow paused. <!--#39013f0ad2070c32-->
+- `cli.run.failure.opt_retry` (json-key) — Failure-menu option label for retrying the failed step. <!--#b397f7a7ba47c9d2-->
+- `cli.run.failure.opt_skip` (json-key) — Failure-menu option label for skipping to the next step. <!--#ea1a56267a4f12bb-->
+- `cli.run.failure.opt_abort` (json-key) — Failure-menu option label for aborting the flow. <!--#656f0d24b6ec74a1-->
+- `cli.run.merge.unknown_target` (json-key) — Fallback phrase used when the merge target branch cannot be determined. <!--#4a18ac31af7d2907-->
+- `cli.run.merge.not_landed` (json-key) — Warning that a completed worktree flow never landed on the target branch, with manual merge instructions. <!--#ce7058fc60832bf6-->
+- `cli.run.merge.header` (json-key) — Header line for the in-flow worktree merge, naming the target branch. <!--#652c8bdaa111bfa1-->
+- `cli.run.merge.merged` (json-key) — Confirmation that the worktree branch was merged back into the target branch. <!--#9fb7e16119594b1f-->
+- `cli.run.merge.resolved_issue` (json-key) — Dim notice that the source issue was marked resolved after a successful merge. <!--#ebd0107e054ccff2-->
+- `cli.run.worktree.cannot_start` (json-key) — Error explaining why a `--worktree` run could not be started. <!--#4792cbcf8cc318de-->
+- `cli.run.worktree.create_failed` (json-key) — Error reporting that the isolation worktree could not be created. <!--#dd975c13ab2ec66d-->
+- `cli.run.worktree.title` (json-key) — Panel title for an isolated worktree run. <!--#662f6536b57fe696-->
+- `cli.run.worktree.started` (json-key) — Body reporting the started worktree run's branch, path, and merge-back target. <!--#16cd55ae1017dfb4-->
+- `cli.run.worktree.paused_title` (json-key) — Panel title shown when a worktree run pauses. <!--#46d4ca840e3a082e-->
+- `cli.run.worktree.did_not_complete` (json-key) — Body reporting a non-zero-exit worktree run whose state is preserved for resume. <!--#f03c70ef00c5a3a6-->
+- `cli.run.worktree.paused_no_merge` (json-key) — Body reporting a worktree run paused awaiting input, with no merge attempted. <!--#c1cc4e55b3c4e0fd-->
+- `cli.run.worktree.path_gone` (json-key) — Error stating the worktree directory is missing so the run cannot be resumed. <!--#b6dc1d57e947a8fe-->
+- `cli.run.worktree.did_not_complete_resume` (json-key) — Body reporting that a resumed worktree run again exited without completing. <!--#2de37ec95206c5e9-->
+- `cli.run.worktree.paused_again` (json-key) — Body reporting that a resumed worktree run paused again awaiting input. <!--#86944e3f652d0892-->
+- `cli.run.worktree.no_branch` (json-key) — Warning that no isolation branch was recorded, so the completed worktree run cannot be auto-merged. <!--#24f5c722b9132956-->
+- `cli.display.usage.title` (json-key) — Panel title for a token-usage table. <!--#9406c6208a7adf10-->
+- `cli.display.usage.input_tokens` (json-key) — Row label for input tokens in the usage table. <!--#cc84e08765c4fea5-->
+- `cli.display.usage.output_tokens` (json-key) — Row label for output tokens in the usage table. <!--#bc6e93d3a2146df2-->
+- `cli.display.usage.cache_read` (json-key) — Row label for cache-read tokens in the usage table. <!--#0ee4ab8cf6e4ed33-->
+- `cli.display.usage.cache_creation` (json-key) — Row label for cache-creation tokens in the usage table. <!--#402b1ebc47aef1ae-->
+- `cli.display.usage.cost` (json-key) — Row label for the monetary cost in the usage table. <!--#b2d5f5fab739fb69-->
+- `cli.display.proposal.title` (json-key) — Panel title for the rendered proposal artifact. <!--#7326c4abe9796233-->
+- `cli.display.proposal.summary` (json-key) — Section heading for the proposal's summary. <!--#091c74e969f4fe0a-->
+- `cli.display.proposal.files_to_modify` (json-key) — Section heading listing files the proposal will modify. <!--#2ba3572d83deec15-->
+- `cli.display.proposal.files_to_create` (json-key) — Section heading listing files the proposal will create. <!--#50ab45075b162f6c-->
+- `cli.display.proposal.rationale` (json-key) — Section heading for the proposal's rationale. <!--#5395aca4d98c0b8b-->
+- `cli.display.design.title` (json-key) — Panel title for the rendered design document. <!--#c75f944d9d1949b8-->
+- `cli.display.design.overview` (json-key) — Section heading for the design document's overview. <!--#c5b6d33d7d58518e-->
+- `cli.display.design.components` (json-key) — Section heading for the design document's components list. <!--#837d089531d39b80-->
+- `cli.display.design.interfaces` (json-key) — Section heading for the design document's interfaces list. <!--#8eb5bec979f4f9ab-->
+- `cli.display.design.key_decisions` (json-key) — Section heading for the design document's key decisions. <!--#ec15e407fccb4d6c-->
+- `cli.display.design.reason` (json-key) — Inline label prefixing the reason attached to a design decision. <!--#3d169aa147093e1b-->
+- `cli.display.spec.title` (json-key) — Panel title for rendered spec content. <!--#6b6f745b08db7b89-->
+- `cli.display.spec.field_title` (json-key) — Field label for a spec's title. <!--#35315b1e734d6365-->
+- `cli.display.spec.field_version` (json-key) — Field label for a spec's version. <!--#cbbfafb7dc42ef97-->
+- `cli.display.spec.field_type` (json-key) — Field label for a spec's type. <!--#62bf02395b586160-->
+- `cli.display.spec.description` (json-key) — Section heading for a spec's description. <!--#0ef8f81362b9446b-->
+- `cli.display.spec.requirements` (json-key) — Section heading for a spec's requirements list. <!--#d528165787c2ba16-->
+- `cli.display.diff.more_lines` (json-key) — Truncation marker reporting how many diff lines were elided. <!--#b6ab98e91cf8a852-->
+- `cli.display.diff.heading` (json-key) — Heading naming the file whose diff is being displayed. <!--#b48f2bba01a044b1-->
+- `cli.version` (json-key) — Version line printed by `se3 version`. <!--#81b5779868794e8c-->
+- `cli.input.title` (json-key) — Panel title for the generic multi-line input prompt. <!--#d1ca56773f6efbc2-->
+- `cli.input.prompt` (json-key) — Instructions for typing a task description, including finish/cancel keys. <!--#62b54cd4e7bb2e7f-->
+- `cli.input.content_title` (json-key) — Template for the panel title echoing captured input content. <!--#58ee1f288465dad2-->
+- `cli.input.cancelled_message` (json-key) — Message printed when the user cancels an input prompt. <!--#8d2c0bbd8c46ae32-->
+- `cli.run.invalid_output_format` (json-key) — Error rejecting an unrecognised `--output-format` value. <!--#5d5c88a9659f2f5c-->
+- `cli.preset.mutually_exclusive` (json-key) — Error stating that `--preset` and `--type` cannot be combined. <!--#00ef95fb6ba55083-->
+- `cli.preset.none_available` (json-key) — Message shown when no run presets are registered. <!--#05d46939c1523951-->
+- `cli.preset.title` (json-key) — Panel title for the preset listing. <!--#74c85ccd8d084803-->
+- `cli.preset.available_header` (json-key) — Header introducing the list of available presets. <!--#65c4cfcd37564c3a-->
+- `cli.preset.entry` (json-key) — Template rendering one preset row (name, type, config layer). <!--#476fa4caf545bf30-->
+- `cli.preset.resolve_error` (json-key) — Generic error wrapper for preset resolution failures. <!--#8cf5059ab6aebf44-->
+- `cli.issue.none_open` (json-key) — Message shown when the issue picker finds no open issues. <!--#09337fcfe4a5de1c-->
+- `cli.issue.title` (json-key) — Panel title for the issue listing shown during `run --from-issue`. <!--#08d60356aa67735b-->
+- `cli.issue.open_header` (json-key) — Header introducing the list of open issues. <!--#48ee17eed3644323-->
+- `cli.issue.select_title` (json-key) — Panel title for the interactive issue selection prompt. <!--#f1d65614256eceef-->
+- `cli.issue.entry` (json-key) — Template rendering one selectable issue row (id, title, priority). <!--#344d1e62c9e8b303-->
+- `cli.issue.enter_id` (json-key) — Prompt asking the user to type an issue ID. <!--#12260ef41558982c-->
+- `cli.issue.not_found` (json-key) — Error stating the requested issue ID does not exist. <!--#8576098f19845015-->
+- `cli.issue.already_in_progress` (json-key) — Error stating the issue is already in-progress and must be reset first. <!--#7320adedfd45a7f5-->
+- `cli.issue.status_error` (json-key) — Generic error wrapper for issue status-transition failures. <!--#f493a23603c702b8-->
+- `cli.run.task_required_new_flow` (json-key) — Usage error shown when a new flow is started with no task, including example invocations. <!--#0d00efd9182631e2-->
+- `cli.run.task_required` (json-key) — Usage error shown when `se3 run` is called with neither a task nor `--resume`. <!--#dd5a3feebfa29da5-->
+- `cli.guardrails.size_check_header` (json-key) — Header for the project-wide spec size guardrails check. <!--#fa7e73609c958a0a-->
+- `cli.guardrails.project` (json-key) — Line echoing the project root being checked by guardrails. <!--#107aeb98b9020ce6-->
+- `cli.guardrails.tier` (json-key) — Line reporting the guardrail enforcement tier in effect. <!--#2d413f435887c607-->
+- `cli.guardrails.size_violations_found` (json-key) — Header reporting the count of spec size violations found. <!--#b32983dedf3951c0-->
+- `cli.guardrails.size_detail` (json-key) — Inline detail showing a size violation's actual bytes versus its limit. <!--#def6e0c29e94e649-->
+- `cli.guardrails.tier_enforce_failing` (json-key) — Notice that the 'enforce' tier turns the violations into a hard failure. <!--#ff8b87a2c914f6a8-->
+- `cli.guardrails.tier_warn_reporting` (json-key) — Notice that the 'warn' tier only reports violations without blocking. <!--#93c546c06dfc540e-->
+- `cli.guardrails.size_title` (json-key) — Panel title for the spec size guardrails result. <!--#3a667cbe8622f640-->
+- `cli.guardrails.size_all_passed` (json-key) — Success message stating no spec size violations were found. <!--#f0e38af18287f4fa-->
+- `cli.guardrails.spec_file_required` (json-key) — Usage error requiring either a spec file argument or `--sizes`. <!--#1a51b00712d8128b-->
+- `cli.guardrails.spec_file_not_found` (json-key) — Error stating the given spec file path does not exist. <!--#e922e71982b6796d-->
+- `cli.guardrails.no_original_in_git` (json-key) — Warning that the spec's original git version could not be found for diffing. <!--#042f28340c070e10-->
+- `cli.guardrails.check_header` (json-key) — Header for the per-file spec content guardrails check. <!--#91e92c179ba226f5-->
+- `cli.guardrails.file` (json-key) — Line echoing the spec file being checked. <!--#79a070d1ce36840b-->
+- `cli.guardrails.violations_found` (json-key) — Header reporting the count of content guardrail violations found. <!--#2510538ec7da1d10-->
+- `cli.guardrails.rule` (json-key) — Line naming the specific guardrail rule a violation broke. <!--#8730e2b515a90be0-->
+- `cli.guardrails.content_passed` (json-key) — Success message stating the diff produced no content guardrail violations. <!--#fa24a243bbce8f00-->
+- `cli.guardrails.size_violations_found_tier` (json-key) — Header reporting size violations together with the tier in effect. <!--#d7dfb1104515e6e8-->
+- `cli.guardrails.size_tier_enforce_failing` (json-key) — Indented notice that the size tier is 'enforce', so the check fails. <!--#1d8658aa931e5403-->
+- `cli.guardrails.size_tier_warn_reporting` (json-key) — Indented notice that the size tier is 'warn', so violations are reported but not blocking. <!--#ff467861d2d1bf59-->
+- `cli.guardrails.check_title` (json-key) — Panel title for the guardrails check result. <!--#824981a67e2bd850-->
+- `cli.daemon.title` (json-key) — Panel title for daemon command output. <!--#fbfd3a64b0ec9426-->
+- `cli.daemon.websockets_missing` (json-key) — Warning that the optional `websockets` package is absent, so the daemon runs local-only. <!--#1e8657b8b50bb9a4-->
+- `cli.daemon.connected` (json-key) — Message confirming the daemon reached the central server. <!--#87a212dc524a6537-->
+- `cli.daemon.connect_failed` (json-key) — Warning that the daemon failed to connect to the central server, with the last error. <!--#96be65bc8369627b-->
+- `cli.daemon.not_connected_yet` (json-key) — Warning that the daemon has not yet connected, suggesting `se3 daemon status`. <!--#308266c146407c81-->
+- `cli.daemon.already_running` (json-key) — Message stating a daemon is already running under the given pid. <!--#6dce2047e8860268-->
+- `cli.daemon.started` (json-key) — Message reporting the daemon's start status and pid. <!--#39aabb85dd8e64ac-->
+- `cli.daemon.not_running` (json-key) — Message stating no daemon is currently running. <!--#76cd599d318f778c-->
+- `cli.daemon.stop_timeout` (json-key) — Message stating the daemon did not exit within the stop timeout. <!--#cbe3ff8a0bd5aa74-->
+- `cli.daemon.stopped` (json-key) — Message confirming the daemon was stopped. <!--#050c4f1258abe458-->
+- `cli.daemon.status_title` (json-key) — Panel title for `se3 daemon status`. <!--#9d4bde7acc8ae9e6-->
+- `cli.daemon.status_running` (json-key) — Status line confirming the daemon is running, with its pid. <!--#fb88bdf39eca6e59-->
+- `cli.daemon.status_machine` (json-key) — Status line showing the daemon's machine identifier. <!--#bb2d5f94ad8473bb-->
+- `cli.daemon.status_server` (json-key) — Status line showing the configured central server URL. <!--#b1ab040b875ae220-->
+- `cli.daemon.not_configured` (json-key) — Placeholder shown when no central server is configured. <!--#4fbdb0cfc5b5d4a6-->
+- `cli.daemon.status_conn_local` (json-key) — Status line stating the daemon is local-only because no server is configured. <!--#d29d36eadd6948e3-->
+- `cli.daemon.status_conn_connected` (json-key) — Status line stating the daemon is connected to the server. <!--#ad3cfdfe58f50f4f-->
+- `cli.daemon.status_conn_not_connected_reason` (json-key) — Status line stating the daemon is disconnected, with the reason. <!--#35cacd8e9323646a-->
+- `cli.daemon.status_conn_not_connected_no_reason` (json-key) — Status line stating the daemon is disconnected with no recorded reason, pointing at daemon.log. <!--#696d988c73edcd8c-->
+- `cli.daemon.status_tracked_flows` (json-key) — Status line reporting how many flows the daemon is tracking. <!--#48101cb9191d5978-->
+- `cli.daemon.flow_unknown` (json-key) — Placeholder used for a tracked flow whose origin is unknown. <!--#65392606576ed1e7-->
+- `cli.daemon.status_flow_entry` (json-key) — Template rendering one tracked-flow row (pid, flow id, origin). <!--#4aaaebbef8fe94be-->
+- `cli.merge.branch_required` (json-key) — Usage error requiring at least one branch argument to `se3 merge`. <!--#543ca0819741b116-->
+- `cli.merge_unlock.lock_file` (json-key) — Line echoing the path of the merge lock file. <!--#933616a26af4b6ea-->
+- `cli.merge_unlock.holder_none` (json-key) — Line stating there is no lock file and hence no holder pid. <!--#ef62b7bb85084930-->
+- `cli.merge_unlock.state_no_lock` (json-key) — Line stating no merge lock is currently present. <!--#c9ef8a18fd9d7c0a-->
+- `cli.merge_unlock.pid_none_recorded` (json-key) — Placeholder shown when the lock file records no pid. <!--#2ed2a47708fa2abf-->
+- `cli.merge_unlock.holder_pid` (json-key) — Line showing the pid recorded as the merge lock holder. <!--#545c5fd5c236c45b-->
+- `cli.merge_unlock.state_stale_corrupt` (json-key) — Line stating the lock is stale because its pid record is unparseable. <!--#0ead35dc11f6b13b-->
+- `cli.merge_unlock.state_stale_no_pid` (json-key) — Line stating the lock is stale because no pid was recorded. <!--#c4d331e05a6d8b7e-->
+- `cli.merge_unlock.state_stale_dead` (json-key) — Line stating the lock is stale because its holder process is dead. <!--#d06efc2757694e5c-->
+- `cli.merge_unlock.state_alive` (json-key) — Line stating the lock is live because its holder process is still running. <!--#d2552f85507b1a8e-->
+- `cli.merge_unlock.no_lock_to_release` (json-key) — Message stating there was no merge lock to release. <!--#2d8097719a433d34-->
+- `cli.merge_unlock.released_stale` (json-key) — Message confirming a stale merge lock was removed. <!--#3b417fb857126b7b-->
+- `cli.merge_unlock.released_force` (json-key) — Warning that a live-held merge lock was force-released. <!--#813e88b65eeb39c3-->
+- `cli.merge_unlock.released_force_warning` (json-key) — Follow-up warning that force-release may break merge mutual exclusion. <!--#a73922b474f00757-->
+- `cli.merge_unlock.refused_alive` (json-key) — Message refusing to release a lock whose holder is still alive. <!--#ea2bec8f21214d78-->
+- `cli.merge_unlock.refused_alive_hint` (json-key) — Hint suggesting `--force` to override the live-holder refusal. <!--#aaff36dd17af5d10-->
+- `cli.merge_unlock.failed_remove` (json-key) — Error stating the lock file could not be removed from disk. <!--#021aa6fa7943057e-->
+- `cli.merge_unlock.failed_remove_hint` (json-key) — Hint attributing the removal failure to permissions and asking for manual deletion. <!--#4af28bb2ef19556a-->
+- `cli.merge_unlock.title` (json-key) — Panel title for `se3 merge-unlock` output. <!--#85dc3de9b202ac1b-->
+- `end_session.no_project_root` (json-key) — Error emitted when `end-session` cannot locate a project root. <!--#163a759b71dd6ade-->
+- `end_session.step.resolve_root` (json-key) — Row label for the end-session step that resolves the project root. <!--#9c589b884f225b11-->
+- `end_session.step.find_worktree` (json-key) — Row label for the end-session step that locates the session's worktree. <!--#6ff5cc5b127032ec-->
+- `end_session.step.terminate_process` (json-key) — Row label for the end-session step that terminates the live run process. <!--#5182bb2806c45616-->
+- `end_session.step.archive_session` (json-key) — Row label for the end-session step that archives the session record. <!--#bbaa5c855ff503e4-->
+- `end_session.step.archive_worktree` (json-key) — Row label for the end-session step that archives the worktree. <!--#ca8d694c8c0455d5-->
+- `end_session.step.promote_state` (json-key) — Row label for the end-session step that promotes engine state to the main worktree. <!--#96a481de6b8f06b6-->
+- `end_session.step.sync_history` (json-key) — Row label for the end-session step that syncs history files back. <!--#9eacf40f1dc14197-->
+- `end_session.step.clear_resumable` (json-key) — Row label for the end-session step that clears the resumable-flow marker. <!--#7d7634e6cc543495-->
+- `end_session.step.cleanup_branch` (json-key) — Row label for the end-session step that deletes the session branch. <!--#d22cf7ca9e51ec40-->
+- `end_session.step.cleanup_worktree` (json-key) — Row label for the end-session step that removes the worktree directory. <!--#4ab25e8863215213-->
+- `end_session.detail.branch` (json-key) — Detail cell echoing the branch involved in an end-session step. <!--#5ad2d230c68f5f17-->
+- `end_session.detail.main_branch_session` (json-key) — Detail cell noting the session ran on the main branch rather than a worktree. <!--#287c379b6b9b368d-->
+- `end_session.detail.process_still_alive` (json-key) — Detail cell explaining archiving was skipped because the run process is still alive. <!--#b9d31edefb96dc2d-->
+- `end_session.detail.no_archive_worktree_given` (json-key) — Detail cell noting the worktree archive was skipped due to `--no-archive-worktree`. <!--#3179cb646c8e0b89-->
+- `end_session.detail.worktree_dir_gone` (json-key) — Detail cell noting the worktree directory was already removed. <!--#e9e2859e795f8c32-->
+- `end_session.detail.no_engine_json_to_promote` (json-key) — Detail cell noting there was no engine.json to promote. <!--#3c28a1f3a2a96d1b-->
+- `end_session.detail.files_synced` (json-key) — Detail cell reporting how many files were synced. <!--#da0931edc4c88551-->
+- `end_session.detail.unknown` (json-key) — Generic `(unknown)` placeholder for an end-session detail cell. <!--#c148f9280b630aad-->
+- `end_session.detail.archive_not_created` (json-key) — Detail cell noting the archive was not created, so worktree and branch are preserved. <!--#4d7a224da5035efe-->
+- `end_session.detail.inferred` (json-key) — Detail cell marking a branch name that was inferred rather than recorded. <!--#bfdcc1361ed10817-->
+- `end_session.detail.worktree_still_present` (json-key) — Detail cell reporting the worktree directory still exists after cleanup. <!--#f2f7752b80703837-->
+- `end_session.detail.removed_by_path` (json-key) — Detail cell reporting the worktree was removed by explicit path. <!--#4f552844ac3f3234-->
+- `end_session.detail.main_flow_mismatch` (json-key) — Detail cell explaining the main engine.json belongs to a different flow, so promotion was skipped. <!--#8fbd5d8bc5c86750-->
+- `end_session.detail.main_flow_unreadable` (json-key) — Detail cell explaining the main engine.json's flow_id could not be read to confirm the match. <!--#2ac5e51251f8a5e5-->
+- `end_session.detail.session_archived` (json-key) — Detail cell confirming the session was archived. <!--#44165187bfa39abb-->
+- `end_session.detail.no_session_to_archive` (json-key) — Detail cell noting there was no session to archive. <!--#291876464055ae14-->
+- `end_session.detail.no_flow_id` (json-key) — Detail cell noting no flow_id was available for the step. <!--#aee9242791bf7f55-->
+- `end_session.term.not_running` (json-key) — Termination detail stating the target pid was not running. <!--#096e8f0655efebcd-->
+- `end_session.term.sigterm_failed` (json-key) — Termination detail reporting that SIGTERM to the process tree failed. <!--#2f4fe03054c6bde0-->
+- `end_session.term.sigterm_ok` (json-key) — Termination detail confirming the process tree exited on SIGTERM. <!--#8feb84bf3db08b27-->
+- `end_session.term.sigkill_failed` (json-key) — Termination detail reporting that SIGKILL to the process tree failed. <!--#3db815b83f104754-->
+- `end_session.term.sigkill_ok` (json-key) — Termination detail confirming the process tree was killed with SIGKILL. <!--#18569948dfa58341-->
+- `end_session.term.still_alive` (json-key) — Termination detail warning that processes survived even SIGKILL. <!--#81e13fb5976ff704-->
+- `end_session.term.no_live_process` (json-key) — Termination detail stating no live process was found to terminate. <!--#fc35e190e1cca874-->
+- `end_session.table.title` (json-key) — Title of the end-session results table. <!--#447732fd540d6f62-->
+- `end_session.table.col_step` (json-key) — Column header for the step name in the end-session results table. <!--#6b4e14b74e22e9cf-->
+- `end_session.table.col_status` (json-key) — Column header for the status in the end-session results table. <!--#f5c6e61be4d07955-->
+- `end_session.table.col_detail` (json-key) — Column header for the detail text in the end-session results table. <!--#8319f046432b2216-->
+- `end_session.status.ok` (json-key) — Green OK status cell in the end-session results table. <!--#471709147bcc2c79-->
+- `end_session.status.skip` (json-key) — Yellow SKIP status cell in the end-session results table. <!--#f56f01b987f783bd-->
+- `end_session.status.fail` (json-key) — Red FAIL status cell in the end-session results table. <!--#d7c8bce1229c069c-->
+- `salvage.no_project_root` (json-key) — Error emitted when `salvage` cannot locate a project root. <!--#811594d7e2337586-->
+- `salvage.step.read_session` (json-key) — Row label for the salvage step that reads the abandoned session. <!--#197df3da59c2b485-->
+- `salvage.step.assess_git_diff` (json-key) — Row label for the salvage step that assesses the uncommitted git diff. <!--#4882792b5923f359-->
+- `salvage.step.commit_changes` (json-key) — Row label for the salvage step that commits recovered changes. <!--#4f58dee269236971-->
+- `salvage.step.create_issues` (json-key) — Row label for the salvage step that files follow-up issues. <!--#3b56b506d860d9dd-->
+- `salvage.step.archive_session` (json-key) — Row label for the salvage step that archives the session. <!--#0e65f18f25732f31-->
+- `salvage.detail.flow` (json-key) — Detail cell naming the flow being salvaged. <!--#1bd952f549ce4178-->
+- `salvage.detail.no_session_git_diff` (json-key) — Detail cell noting no session record was found, so the raw git diff is used instead. <!--#527ceb2bd720bcef-->
+- `salvage.detail.files_changed` (json-key) — Detail cell reporting how many files changed in the salvaged diff. <!--#e9b5775120931c5d-->
+- `salvage.detail.no_uncommitted_changes` (json-key) — Detail cell noting there were no uncommitted changes to salvage. <!--#b2305fe34ee4d3f7-->
+- `salvage.detail.committed` (json-key) — Detail cell reporting the hash of the salvage commit. <!--#34d4f1e43a14fa4e-->
+- `salvage.detail.nothing_to_commit` (json-key) — Detail cell noting there was nothing to commit. <!--#144d0fd6af9349b2-->
+- `salvage.detail.created` (json-key) — Detail cell listing the ids of issues created during salvage. <!--#9ff4d2b773609007-->
+- `salvage.detail.no_issues` (json-key) — Detail cell noting no issues needed creating. <!--#c71b405ebaaba335-->
+- `salvage.detail.session_archived` (json-key) — Detail cell confirming the salvaged session was archived. <!--#c77d8a7972f58ec9-->
+- `salvage.detail.no_session_to_archive` (json-key) — Detail cell noting there was no session to archive. <!--#b8e605c9a4e2a3e0-->
+- `salvage.table.title` (json-key) — Title of the salvage results table. <!--#9f00a703953f7b1b-->
+- `salvage.table.col_step` (json-key) — Column header for the step name in the salvage results table. <!--#95e36e91f06b5670-->
+- `salvage.table.col_status` (json-key) — Column header for the status in the salvage results table. <!--#6baf97b32418fd47-->
+- `salvage.table.col_detail` (json-key) — Column header for the detail text in the salvage results table. <!--#eba2ff659bf06abd-->
+- `salvage.status.ok` (json-key) — Green OK status cell in the salvage results table. <!--#cc049e649cd939b6-->
+- `salvage.status.skip` (json-key) — Yellow SKIP status cell in the salvage results table. <!--#55ce23f89f3725df-->
+- `salvage.status.fail` (json-key) — Red FAIL status cell in the salvage results table. <!--#80728ec0a57bebfb-->
+- `migrate.report.title` (json-key) — Title of the migration report panel, naming the migrator. <!--#06a69e03348ec700-->
+- `migrate.report.col_step` (json-key) — Column header for the step name in the migration report table. <!--#1ab242b5aa9d65aa-->
+- `migrate.report.col_status` (json-key) — Column header for the status in the migration report table. <!--#bebf602e970e0a54-->
+- `migrate.report.col_detail` (json-key) — Column header for the detail text in the migration report table. <!--#8983f9728f4e37a0-->
+- `migrate.report.status_ok` (json-key) — Green OK status cell in the migration report table. <!--#f59f45946378f8c0-->
+- `migrate.report.status_skip` (json-key) — Yellow SKIP status cell in the migration report table. <!--#f226f4cbf1749836-->
+- `migrate.report.status_fail` (json-key) — Red FAIL status cell in the migration report table. <!--#2d04f77fc467dd45-->
+- `migrate.report.notes_header` (json-key) — Header introducing the migration's review notes. <!--#bc257abd227b4844-->
+- `migrate.report.note_line` (json-key) — Template rendering one bulleted migration review note. <!--#6dfad6bd01127b59-->
+- `migrate.step.charter` (json-key) — Row label for the migration step that assembles se3/charter.md. <!--#a9f97ffd3369b6a5-->
+- `migrate.step.colocate` (json-key) — Row label for the migration step that colocates why-comments into the source. <!--#dd8e00ed2620fdc2-->
+- `migrate.step.code_index` (json-key) — Row label for the migration step that builds the code-index. <!--#b5231178fe1f6467-->
+- `migrate.step.delete_specs` (json-key) — Row label for the migration step that deletes the retired se3/specs corpus. <!--#d13233a48c166326-->
+- `migrate.step.gitignore` (json-key) — Row label for the migration step that rewrites .gitignore. <!--#1032f72740fba198-->
+- `migrate.detail.charter_written` (json-key) — Detail cell confirming se3/charter.md was written in a single pass. <!--#80c76ab79f65ac71-->
+- `migrate.detail.code_index_written` (json-key) — Detail cell confirming se3/code-index.md was written. <!--#eb35a7694a499419-->
+- `migrate.detail.no_salvage` (json-key) — Detail cell noting no salvage result was available to the migration step. <!--#d6084500dc1e8183-->
+- `migrate.detail.colocated` (json-key) — Detail cell reporting how many why-comments were colocated. <!--#a7fd2281b16ebc91-->
+- `migrate.detail.colocate_skipped` (json-key) — Detail suffix reporting skipped colocations and that specs were kept for safety. <!--#9d93cc2ebdc2274c-->
+- `migrate.detail.no_specs_dir` (json-key) — Detail cell noting there is no se3/specs directory to migrate. <!--#8d1d85cd34d3889a-->
+- `migrate.detail.delete_disabled` (json-key) — Detail cell noting spec deletion was disabled by flag. <!--#54727e7a051a872c-->
+- `migrate.detail.salvage_incomplete` (json-key) — Detail cell explaining specs were kept because salvage was incomplete. <!--#ca1f005b2506e412-->
+- `migrate.detail.specs_removed` (json-key) — Detail cell confirming the spec corpus was removed. <!--#dc7c0ac5d492ddd5-->
+- `migrate.detail.already_migrated` (json-key) — Detail cell noting the step was a no-op because migration already happened. <!--#dc919cbd4d72c050-->
+- `migrate.note.colocation_skipped` (json-key) — Review note recording a specific item whose colocation was skipped. <!--#44f4d9177b1ace57-->
+- `migrate.gitignore.removed` (json-key) — Detail reporting a pattern removed from .gitignore. <!--#9dccf89d30b6c98f-->
+- `migrate.gitignore.added` (json-key) — Detail reporting a pattern added to .gitignore. <!--#bd78523e3130df06-->
+- `migrate.gitignore.root_deny` (json-key) — Detail reporting that a root default-deny rule with a tracked-path whitelist was added to .gitignore. <!--#559db061b8946dce-->
+- `migrate.list.none` (json-key) — Message shown when no migrations are registered. <!--#060d5571fa1a2609-->
+- `migrate.list.title` (json-key) — Title of the available-migrations table. <!--#2c12fa694b5f0794-->
+- `migrate.list.col_id` (json-key) — Column header for the migration ID in the migrations table. <!--#bddbe231dc3bcedc-->
+- `migrate.list.col_description` (json-key) — Column header for the migration description in the migrations table. <!--#21f1e1b4f2e8de1b-->
+- `migrate.run.unknown` (json-key) — Error naming an unknown migration id and listing the available ones. <!--#6225ad605f9cc0f8-->
+- `migrate.run.no_migrators` (json-key) — Placeholder shown in the error when the migration registry is empty. <!--#90b2e77c62a4d26f-->
+- `migrate.migrator.spec_to_new_system.desc` (json-key) — Registry description of the spec→(code-index + charter + why-comment) migration. <!--#355f63975bbbe5f1-->
+- `merge_respond.version_unparseable` (json-key) — Refusal message stating the post-merge version file exists but its version field cannot be parsed. <!--#242b8141d6f1cd33-->
+- `merge_respond.version_unchanged` (json-key) — Message noting the version file is byte-identical pre- and post-merge. <!--#9e9fd28255ff640a-->
+- `merge_respond.title.error` (json-key) — Panel title for a merge-respond error. <!--#f7781cd2c23f90c6-->
+- `merge_respond.title.manual_resolution_pending` (json-key) — Panel title for a merge awaiting the user's manual conflict resolution. <!--#6a9d12df3677f129-->
+- `merge_respond.title.multi_commit` (json-key) — Panel title warning that HEAD advanced by several commits since the manual resolution began. <!--#ddc4331a223be2dc-->
+- `merge_respond.title.verified` (json-key) — Panel title for a merge whose post-merge guardrails passed. <!--#7f81eccc94f43138-->
+- `merge_respond.title.violations_rolled_back` (json-key) — Panel title for a merge rolled back due to guardrail violations. <!--#672c2045d54139cc-->
+- `merge_respond.title.strict_placeholder` (json-key) — Panel title for a strict-strategy merge whose resolution still contains the placeholder sentinel. <!--#1ce682b491451005-->
+- `merge_respond.title.orphan_violations` (json-key) — Panel title for LLM-proposed orphan spec resolutions that violate guardrails. <!--#49f5c06f586f73b7-->
+- `merge_respond.title.guardrails_check_failed` (json-key) — Panel title for a merge whose guardrails check itself crashed. <!--#12b6a26995e4e7f8-->
+- `merge_respond.title.accepted` (json-key) — Panel title for an accepted merge resolution. <!--#f314b6b4fdad0c01-->
+- `merge_respond.title.accepted_manual_fix` (json-key) — Panel title for an accepted merge that still needs a manual fix. <!--#1f7e1834772266c0-->
+- `merge_respond.title.aborted` (json-key) — Panel title for an aborted merge. <!--#415905b6df25a3cd-->
+- `merge_respond.title.manual_parked` (json-key) — Panel title for a manual resolution parked behind a pending-guardrails marker. <!--#c19ef0c7cdacffd1-->
+- `merge_respond.title.manual_resolution` (json-key) — Panel title for the plain manual-resolution instructions. <!--#6421d6c02d61191c-->
+- `merge_respond.call_file_not_found` (json-key) — Error stating the merge call file path does not exist. <!--#59d8603f3048df5c-->
+- `merge_respond.lock_busy` (json-key) — Error stating another se3 merge process holds the lock, with its pid and lock path. <!--#dec2ddc73c064d8d-->
+- `merge_respond.stale_pid_unparseable` (json-key) — Fragment describing a lock whose recorded pid could not be parsed. <!--#1902d46fb227c4bd-->
+- `merge_respond.stale_pid_missing` (json-key) — Fragment describing a lock whose holder pid no longer exists. <!--#fa8b2584b8ec2b1f-->
+- `merge_respond.lock_stale` (json-key) — Error describing an apparently stale merge lock and how to remove it. <!--#5502cbd7d5c751ea-->
+- `merge_respond.marker_parse_failed` (json-key) — Error stating the pending-guardrails marker file could not be parsed. <!--#5f7de6689ba7547b-->
+- `merge_respond.marker_missing_pre_sha` (json-key) — Error stating the pending-guardrails marker lacks the required `pre_sha` field. <!--#33ae45249a7b84dd-->
+- `merge_respond.read_head_failed` (json-key) — Error stating git HEAD could not be read. <!--#d20e0a0ece8a9b54-->
+- `merge_respond.no_new_commit` (json-key) — Message telling the user to finish and commit the manual merge before re-running verification. <!--#f6ebf82e39749068-->
+- `merge_respond.multi_commit_advancement` (json-key) — Refusal explaining that HEAD advanced multiple commits, so an automatic hard reset would destroy work. <!--#ad63cdf9b72f5808-->
+- `merge_respond.guardrails_check_failed_manual` (json-key) — Error stating the guardrails check crashed after the manual resolution. <!--#2ee46589f10d062e-->
+- `merge_respond.manual_accepted` (json-key) — Message confirming the manual resolution passed guardrails and was accepted. <!--#1d723bc227077097-->
+- `merge_respond.feedback_suffix` (json-key) — Suffix appending the user's free-text feedback to a merge-respond message. <!--#250a52733b39a963-->
+- `merge_respond.stash_recover_note` (json-key) — Note reminding the user to `git stash pop` auto-stashed changes from an earlier guardrails failure. <!--#a10e0691994f48bc-->
+- `merge_respond.rollback_failed` (json-key) — Warning that the rollback to the pre-merge SHA failed and a manual hard reset is required. <!--#8874df61fa9e84e7-->
+- `merge_respond.rollback_failed_stash_note` (json-key) — Note that stashed changes remain recoverable after the manual reset that the failed rollback requires. <!--#e086cc3dcf1fdccc-->
+- `merge_respond.rollback_success` (json-key) — Message confirming the guardrail-violating commit was rolled back and asking for spec fixes. <!--#ef924bc6dcda7581-->
+- `merge_respond.rollback_success_stash_note` (json-key) — Note that uncommitted changes were stashed before rollback and can be popped back. <!--#1641cb2c249f6986-->
+- `merge_respond.violation_line` (json-key) — Template rendering one guardrail violation (type, file, message). <!--#9fdf5dbf64c78040-->
+- `merge_respond.refused_violations_manual` (json-key) — Header for the refusal listing guardrail violations found after a manual resolution commit. <!--#451dd8dc9f55d2c4-->
+- `merge_respond.response_file_not_found` (json-key) — Error stating the response file is missing, with the JSON shape it must contain. <!--#f999ca88311d17a4-->
+- `merge_respond.call_file_parse_failed` (json-key) — Error stating the merge call file could not be parsed. <!--#b6d7f25497881eb4-->
+- `merge_respond.response_file_parse_failed` (json-key) — Error stating the merge response file could not be parsed. <!--#5e6321e6461babbd-->
+- `merge_respond.invalid_choice` (json-key) — Error rejecting a response `choice` outside accept/abort/manual. <!--#aec29a1cb38839cb-->
+- `merge_respond.strict_placeholder` (json-key) — Refusal explaining that a strict-mode merge left placeholder sentinels that must be resolved by hand. <!--#fecf401bf3b1f754-->
+- `merge_respond.orphan_violations_header` (json-key) — Header for the refusal to accept LLM-proposed orphan spec resolutions that break guardrails. <!--#842a3996946a0054-->
+- `merge_respond.orphan_violations_footer` (json-key) — Footer telling the user to choose 'manual' and edit the spec files themselves. <!--#42d2e77158d265c3-->
+- `merge_respond.write_resolved_failed` (json-key) — Error stating the resolved file content could not be written. <!--#8791c2392b17ab13-->
+- `merge_respond.commit_failed` (json-key) — Error stating the merge commit failed, with git's stderr. <!--#ff2769021a2143c6-->
+- `merge_respond.postcondition_failed` (json-key) — Error stating a post-condition check failed after the merge commit. <!--#fa8871c63ac444b2-->
+- `merge_respond.rollback_success_merge` (json-key) — Message confirming the guardrail-violating merge commit was rolled back and the merge should be re-run. <!--#42f835b6a26460af-->
+- `merge_respond.refused_violations_merge` (json-key) — Header for the refusal listing guardrail violations found after the merge commit. <!--#b58d6fcf76edfaea-->
+- `merge_respond.guardrails_incomplete` (json-key) — Warning that the post-merge guardrails check could not complete, leaving the commit on HEAD for review. <!--#7bfacffbd20da0f0-->
+- `merge_respond.accepted_committed` (json-key) — Message confirming the conflict was resolved and committed. <!--#ba1ad64a87f557b6-->
+- `merge_respond.accept_manual_fix` (json-key) — Message stating guardrail violations must be fixed by hand before re-running the merge. <!--#716aa458401377ed-->
+- `merge_respond.aborted_already_rolledback` (json-key) — Message confirming the merge was aborted and the rollback was already complete. <!--#f56bc80dd34b02fb-->
+- `merge_respond.abort_failed` (json-key) — Error stating `git merge --abort` failed, with git's stderr. <!--#95e29d77f0d8b6c4-->
+- `merge_respond.aborted` (json-key) — Message confirming the merge was aborted. <!--#51634a4ccce55a3f-->
+- `merge_respond.cannot_park_manual` (json-key) — Error stating manual resolution cannot be parked because no pre-merge SHA is known. <!--#2f11d3b5f75e0f15-->
+- `merge_respond.marker_write_failed` (json-key) — Error stating the pending-guardrails marker could not be written, with manual guardrail instructions. <!--#c0d30636d537c87f-->
+- `merge_respond.spec_path_line` (json-key) — Template rendering one bulleted spec file path. <!--#b122af4a0176d664-->
+- `merge_respond.manual_parked_header` (json-key) — Header listing that this merge touches spec files requiring guardrail enforcement. <!--#4b9ee6027f6b321c-->
+- `merge_respond.manual_parked_footer` (json-key) — Footer instructing the user to commit the manual resolution and re-run merge-respond to enforce the spec contract. <!--#10c410faaf135638-->
+- `merge_respond.manual_resolve` (json-key) — Plain instructions to resolve conflicts by hand and commit. <!--#9939e6989bbf07cf-->
+- `cli.merge.validate.no_branches` (json-key) — Validation error stating at least one branch name is required. <!--#9342ee585e4f3dc6-->
+- `cli.merge.validate.not_a_string` (json-key) — Validation error stating a branch argument was not a string. <!--#ed00a511a3daacc5-->
+- `cli.merge.validate.empty_string` (json-key) — Validation error rejecting an empty branch name. <!--#84f424ae10764d9f-->
+- `cli.merge.validate.leading_dash` (json-key) — Validation error rejecting a branch name starting with '-' (could be read as a CLI flag). <!--#2a887c46dcdd7b5e-->
+- `cli.merge.validate.reserved_pseudoref` (json-key) — Validation error rejecting a reserved git pseudo-ref as a branch name. <!--#de5f68da3a7d67f6-->
+- `cli.merge.validate.shell_metachar` (json-key) — Validation error rejecting a branch name containing shell metacharacters. <!--#8ae6108656e25048-->
+- `cli.merge.validate.git_ref_glob` (json-key) — Validation error rejecting glob characters that git ref-format forbids in branch names. <!--#4f315a82e667a7cd-->
+- `cli.merge.validate.control_char` (json-key) — Validation error rejecting a branch name containing ASCII control characters. <!--#91ede20f81e9183b-->
+- `cli.merge.validate.spaces` (json-key) — Validation error rejecting a branch name containing spaces. <!--#12ee8655213e2f28-->
+- `cli.merge.validate.ref_format` (json-key) — Validation error rejecting a branch name that violates git check-ref-format rules. <!--#67b4774794c77a14-->
+- `cli.merge.validate.invalid_header` (json-key) — Header listing all rejected branch names from validation. <!--#8de1a6ec8f148030-->
+- `cli.merge.runtime_sync.skipped_branches_header` (json-key) — Warning header listing branches whose runtime data was not synced for lack of a bound worktree. <!--#821e2c75305094e1-->
+- `cli.merge.runtime_sync.skipped_files_header` (json-key) — Warning header listing runtime-sync files that were skipped and the possible data-loss causes. <!--#0b46ae06bea6c3aa-->
+- `cli.merge.runtime_sync.idempotent_bypasses_header` (json-key) — Header listing sidecars that already matched source content, possibly masking a real collision. <!--#defd62673c81eec3-->
+- `cli.merge.runtime_sync.branch_file_count` (json-key) — Template rendering one branch's runtime-sync file count. <!--#0246e593475d6c05-->
+- `cli.merge.runtime_sync.discarded_header` (json-key) — Header listing tier-B runtime state discarded in favour of the current branch's copy. <!--#68ea237ad7e4bfcd-->
+- `cli.merge.runtime_sync.collisions_sidecar_header` (json-key) — Header listing runtime-sync collisions that were bypassed by writing a sidecar file. <!--#e2b8977cd16fa3d3-->
+- `cli.merge.runtime_sync.collisions_audit_header` (json-key) — Header listing audit-only runtime-sync collisions whose source data is not recoverable from disk. <!--#bb1d87ffaf3dfb29-->
+- `cli.merge.runtime_sync.committed_renumbers_header` (json-key) — Header listing merged issues that were renumbered because their IDs collided, with references rewritten. <!--#9f62a259f9945206-->
+- `cli.merge.runtime_sync.ambiguous_refs_header` (json-key) — Header listing #id references that could not be repointed because several merged issues shared one old ID. <!--#886bf387517f3155-->
+- `cli.merge.runtime_sync.ambiguous_ref_line` (json-key) — Template rendering one ambiguous issue reference with its candidate targets. <!--#b9ccd7b65614a7f0-->
+- `cli.merge.human_call.call_file` (json-key) — Line echoing the path of the human-review merge call file. <!--#44ce6684cc13a6ad-->
+- `cli.merge.human_call.escalated` (json-key) — Message stating the merge escalated to human review with no call file, since `se3 merge` has no confirmation gate. <!--#83a29b5cae5b42af-->
+- `cli.merge.human_call.violation_line` (json-key) — Template rendering one violation line inside the human-call escalation output. <!--#2b577a3c60be71c9-->
+- `cli.merge.human_call.recovery` (json-key) — Recovery hint telling the user to fix the issue and rerun `se3 merge`. <!--#150b2f851de0eab7-->
+- `cli.merge.fast_stash.prestash_msg` (json-key) — Message reporting that the fast strategy auto-stashed a dirty working tree. <!--#48681291e81c81fd-->
+- `cli.merge.fast_stash.prestash_title` (json-key) — Panel title for the fast-merge pre-stash step. <!--#0fe71c85b71bac15-->
+- `cli.merge.fast_stash.pop_incomplete` (json-key) — Message reporting that the fast stash-pop did not finalize and the stash was kept for manual recovery. <!--#8800dc25148d5dfc-->
+- `cli.merge.fast_stash.pop_incomplete_unmerged` (json-key) — Suffix reporting how many paths remain unmerged after an incomplete stash-pop. <!--#bf52253fd66a11cf-->
+- `cli.merge.fast_stash.pop_incomplete_title` (json-key) — Panel title for an incomplete fast-merge stash-pop recovery. <!--#e0413bb6097ab8d2-->
+- `cli.merge.fast_stash.pop_recovered` (json-key) — Message reporting a successful fast stash-pop with tracked/untracked/archived counts. <!--#cd2a0b947a001e6b-->
+- `cli.merge.fast_stash.pop_recovered_title` (json-key) — Panel title for a successful fast-merge stash-pop recovery. <!--#9a1b028f72bb265b-->
+- `cli.merge.newly_merged_header` (json-key) — Header introducing the list of branches merged in this run. <!--#7406800886b0d48c-->
+- `cli.merge.already_ancestor_header` (json-key) — Header introducing branches that were already ancestors of HEAD and produced no commit. <!--#f45eaadff255a039-->
+- `cli.merge.error_title` (json-key) — Panel title for a generic merge error. <!--#52e816adfa15553b-->
+- `cli.merge.working_tree_not_clean` (json-key) — Error requiring a clean working tree before merging, or `--strategy=fast` to auto-stash. <!--#535698e7a0a2ed1c-->
+- `cli.merge.git_operation_in_progress` (json-key) — Error stating another git merge/cherry-pick/rebase is already in progress. <!--#a8e6f0d98e05cfd7-->
+- `cli.merge.detached_head` (json-key) — Error stating merges cannot run while HEAD is detached. <!--#16059ffaf8c47c9d-->
+- `cli.merge.cannot_merge_self` (json-key) — Error rejecting an attempt to merge the current branch into itself. <!--#373eec2d382ea8f8-->
+- `cli.merge.cannot_merge_protected` (json-key) — Error rejecting an attempt to merge a protected base branch. <!--#419d72f467dd778a-->
+- `cli.merge.branch_not_exist` (json-key) — Error stating the named branch does not exist. <!--#39b623d676176ce1-->
+- `cli.merge.lock_busy` (json-key) — Error stating another `se3 merge` holds the lock, with pid and lock path. <!--#97b453a2eeaa620e-->
+- `cli.merge.lock_busy_title` (json-key) — Panel title shown when a merge is already in progress. <!--#4c5cb07a8526d537-->
+- `cli.merge.lock_stale.pid_unparseable` (json-key) — Fragment describing a merge lock whose pid record is unparseable. <!--#d90a6b394188ab26-->
+- `cli.merge.lock_stale.pid_gone` (json-key) — Fragment describing a merge lock whose holder pid no longer exists. <!--#c9f1b70db9a6b136-->
+- `cli.merge.lock_stale` (json-key) — Error describing a stale merge lock and the `rm` command to clear it. <!--#d8079d81db92707a-->
+- `cli.merge.lock_stale_title` (json-key) — Panel title for a stale merge lock. <!--#ce8a1cb832c27b76-->
+- `cli.merge.stash_pop_incomplete.body` (json-key) — Body explaining that post-merge stash-pop recovery did not finalize, with inspection and recovery commands. <!--#199ec85972739429-->
+- `cli.merge.stash_pop_incomplete.title` (json-key) — Panel title for an incomplete post-merge stash-pop recovery. <!--#2a42a35095444edd-->
+- `cli.merge.resolved_source_issue` (json-key) — Line reporting that the merge resolved the source issue. <!--#5d03dd10b659c80e-->
+- `cli.merge.reconcile_failed.summary` (json-key) — Summary stating branches merged but the version reconcile failed to land. <!--#52dca08dd7495e17-->
+- `cli.merge.reconcile_failed.recovery` (json-key) — Recovery hint telling the user to fix the cause and rerun `se3 merge` to retry the reconcile. <!--#3509cb57b4bf9348-->
+- `cli.merge.reconcile_failed.tag_note` (json-key) — Note warning that a reconcile commit may exist without its annotated git tag, which must be repaired. <!--#1123784757a20299-->
+- `cli.merge.reconcile_failed.title` (json-key) — Panel title for a failed version reconcile after merge. <!--#19031b4729939e89-->
+- `cli.merge.reason` (json-key) — Generic line echoing the reason for a merge outcome. <!--#4601a5361d477460-->
+- `cli.merge.intent_scope_unreadable` (json-key) — Error fragment stating the version-intent scope of the merged branches could not be determined. <!--#4bbd9e579f056f71-->
+- `cli.merge.log_file` (json-key) — Line echoing the merge log file path. <!--#59c066b14eb264df-->
+- `cli.merge.success.summary` (json-key) — Summary reporting how many branches were successfully merged. <!--#a53810d4fc3c4b34-->
+- `cli.merge.version_line` (json-key) — Line showing the version transition from base to final after merge. <!--#0276e8baaf490543-->
+- `cli.merge.version_head_note` (json-key) — Note that HEAD already carried the target version from earlier merges. <!--#b991a73eec116fd8-->
+- `cli.merge.version_higher_warning` (json-key) — Warning that the on-disk version exceeds the aggregated target, hinting at a manual bump. <!--#e7e6e47ade961024-->
+- `cli.merge.version_aggregation_failed` (json-key) — Warning that version aggregation across the merged branches failed. <!--#cb7fc57756da71db-->
+- `cli.merge.cleanup.archived_header` (json-key) — Header listing worktrees archived before their branches were deleted. <!--#529e84cccdbf05d3-->
+- `cli.merge.cleanup.deleted` (json-key) — Line listing branches deleted during post-merge cleanup. <!--#9749cef26c2af794-->
+- `cli.merge.cleanup.skipped_dirty_header` (json-key) — Header listing cleanups skipped because the worktree was dirty. <!--#5148846657f02da1-->
+- `cli.merge.cleanup.skipped_archive_failed_header` (json-key) — Header listing cleanups skipped because archiving failed, preserving worktree and branch. <!--#ea85da7749d7a9f1-->
+- `cli.merge.cleanup.skipped_protected` (json-key) — Line listing branches skipped during cleanup because they are protected. <!--#4ae65d94b3c40d15-->
+- `cli.merge.cleanup.skipped_unknown_header` (json-key) — Header listing cleanups skipped due to an unknown worktree state. <!--#c45e77d715825143-->
+- `cli.merge.cleanup.skipped_worktree_remove_header` (json-key) — Header listing cleanups skipped because worktree removal failed. <!--#3f0141c131da35e8-->
+- `cli.merge.cleanup.skipped_not_merged_header` (json-key) — Header listing branches skipped during cleanup because they are not fully merged. <!--#e73b83d9c999a3e6-->
+- `cli.merge.cleanup.aborted_reason` (json-key) — Line reporting the exception type and message that aborted post-merge cleanup. <!--#2f8aad7dea15c3b8-->
+- `cli.merge.complete_title` (json-key) — Panel title for a successfully completed merge. <!--#658079a509b7248f-->
+- `cli.merge.unknown` (json-key) — Generic "unknown" placeholder used in merge output. <!--#8948794093491b7d-->
+- `cli.merge.rollback_failed.summary` (json-key) — Critical summary stating the git rollback failed, with the reason. <!--#bc08b20b2927e389-->
+- `cli.merge.rollback_failed.body` (json-key) — Body warning the working tree is inconsistent and listing manual git recovery commands. <!--#a8ceffacbd1cd606-->
+- `cli.merge.failed_branch` (json-key) — Line naming the branch whose merge failed. <!--#92e2d6edbf0369d7-->
+- `cli.merge.branches_already_merged` (json-key) — Line listing branches that were already merged before the failure. <!--#df32a2d4911add18-->
+- `cli.merge.rollback_failed.title` (json-key) — Panel title warning the repository may be corrupted after a failed rollback. <!--#87a55ff850ba4504-->
+- `cli.merge.branches_merged_before_pause` (json-key) — Header listing branches merged before the merge paused for human review. <!--#fee9882e95f887e8-->
+- `cli.merge.unattempted_branches_count` (json-key) — Header reporting how many branches were never attempted. <!--#efff4ec97c94572a-->
+- `cli.merge.unattempted_branches_list` (json-key) — Line listing the branches that were never attempted. <!--#fb7e2a5338c6c23c-->
+- `cli.merge.colliding_path` (json-key) — Line naming the se3/ path that collided during runtime sync. <!--#f2c1b63e20f7581a-->
+- `cli.merge.title.aborted` (json-key) — Panel title for an aborted merge. <!--#aa511fd0c49a2995-->
+- `cli.merge.title.failed` (json-key) — Panel title for a failed merge. <!--#e39fdd6799a4908f-->
+- `cli.merge.title.not_started` (json-key) — Panel title for a merge that never started (precondition unmet). <!--#22c6950225c7003e-->
+- `cli.merge.title.paused` (json-key) — Panel title for a merge paused pending human review. <!--#2506ea4c1ea7dc16-->
+- `cli.merge.failure.fast_failure` (json-key) — Failure reason: the fast-strategy merge failed outright. <!--#24ed8f5c634bbf82-->
+- `cli.merge.failure.fast_abort` (json-key) — Failure reason: the fast strategy could not resolve the conflict and aborted. <!--#96c664b0d67424f7-->
+- `cli.merge.failure.merge_failed` (json-key) — Failure reason: the underlying `git merge` operation failed. <!--#f20f261e9c141b62-->
+- `cli.merge.failure.detail_suffix` (json-key) — Suffix appending a free-form detail to a merge failure reason. <!--#9a95af40fdaea968-->
+- `cli.merge.failure.merge_conflict` (json-key) — Failure reason: an unresolvable git merge conflict. <!--#e175ba7556972034-->
+- `cli.merge.failure.guardrail_violation` (json-key) — Failure reason: post-merge guardrails were violated. <!--#fa656681a861ccd6-->
+- `cli.merge.failure.guardrail_violation_no_rollback` (json-key) — Failure reason: guardrails were violated and the rollback did not happen, so the commit may remain on HEAD. <!--#c9b1e86ecf529974-->
+- `cli.merge.failure.merge_abort_failed` (json-key) — Failure reason: `git merge --abort` itself failed, leaving the tree possibly mid-merge. <!--#668800710c03ec40-->
+- `cli.merge.failure.dirty_working_tree` (json-key) — Failure reason: the main working tree has uncommitted tracked changes outside SE3-managed paths. <!--#842dc1a837df62ce-->
+- `cli.merge.failure.guardrail_violation_call_failed` (json-key) — Failure reason: guardrails were violated and the human call file could not be written. <!--#b5b77bbfd4dab958-->
+- `cli.merge.failure.guardrail_repair_stalled_call_failed` (json-key) — Failure reason: guardrail auto-repair stalled and the call file could not be written. <!--#a5f4e9214248ae22-->
+- `cli.merge.failure.guardrail_repair_exhausted_call_failed` (json-key) — Failure reason: guardrail auto-repair exhausted its attempts and the call file could not be written. <!--#67287924b393062c-->
+- `cli.merge.failure.guardrail_repair_stalled` (json-key) — Failure reason: the fast strategy's guardrail auto-repair stalled, pausing the merge. <!--#f12e357efca5b682-->
+- `cli.merge.failure.guardrail_repair_exhausted` (json-key) — Failure reason: the fast strategy's guardrail auto-repair exhausted its attempts, pausing the merge. <!--#fb4949ae0b5e21cc-->
+- `cli.merge.failure.human_call_write_failed` (json-key) — Failure reason: human review was needed but the call file could not be written. <!--#fe9a95cb534aa4a8-->
+- `cli.merge.failure.incomplete_resolution_call_failed` (json-key) — Failure reason: the LLM resolution was incomplete and the call file could not be written. <!--#2f5d4076ed8c4c24-->
+- `cli.merge.failure.guardrail_check_failed` (json-key) — Failure reason: the guardrails check itself failed, aborting the merge. <!--#2a80a71e8af116a1-->
+- `cli.merge.failure.guardrail_check_failed_and_rollback_failed` (json-key) — Failure reason: the guardrails check crashed and the rollback also failed, leaving an inconsistent tree. <!--#5f6a91092f77d195-->
+- `cli.merge.failure.guardrail_repair_failed` (json-key) — Failure reason: the fast strategy could not auto-repair the guardrails violation. <!--#f248ff16d62c78e4-->
+- `cli.merge.failure.conflict_context_failed_pending` (json-key) — Failure reason: building the conflict context failed, so the merge paused for human review. <!--#1b287e9f6dc52c41-->
+- `cli.merge.failure.conflict_context_failed` (json-key) — Failure reason: the conflict context needed for resolution could not be built. <!--#8e3a2acbdf7ee23a-->
+- `cli.merge.failure.conflict_context_failed_call_file_write_failed` (json-key) — Failure reason: conflict-context construction failed and the human call file could not be written. <!--#ab7385177b48df18-->
+- `cli.merge.failure.llm_resolution_failed` (json-key) — Failure reason: the fast strategy's LLM conflict resolution failed. <!--#982a2b3e309c986b-->
+- `cli.merge.failure.incomplete_resolution` (json-key) — Failure reason: the fast strategy's LLM resolution was incomplete. <!--#9e265296e3a7ab93-->
+- `cli.merge.failure.resolution_rejected` (json-key) — Failure reason: the fast strategy rejected the LLM's proposed resolution. <!--#55af3e6f7a358446-->
+- `cli.merge.failure.binary_file_conflict_fast_abort` (json-key) — Failure reason: the fast strategy cannot auto-resolve a binary file conflict. <!--#e5b0b92bc255ab10-->
+- `cli.merge.failure.binary_file_conflict` (json-key) — Failure reason: a binary file conflict requires human review. <!--#963d7d1ccf3cbeca-->
+- `cli.merge.failure.resolution_validation_failed` (json-key) — Failure reason: the resolved content failed post-resolution validation. <!--#1572c5e56a5957a2-->
+- `cli.merge.failure.resolution_write_failed` (json-key) — Failure reason: the resolved files could not be written or staged. <!--#3410ab9870c4b2de-->
+- `cli.merge.failure.resolution_commit_failed` (json-key) — Failure reason: the merge commit failed after conflicts were resolved. <!--#1f06b6578736c620-->
+- `cli.merge.failure.resolution_commit_timeout` (json-key) — Failure reason: resolution succeeded but the git commit timed out. <!--#6821b8904cd5189b-->
+- `cli.merge.failure.merge_timed_out` (json-key) — Failure reason: the `git merge` invocation timed out. <!--#feb0c054d6546b77-->
+- `cli.merge.failure.rollback_failed` (json-key) — Failure reason: the git rollback after a guardrail violation failed. <!--#ac4f4102a21abcc2-->
+- `cli.merge.failure.guardrail_missing_post_sha` (json-key) — Failure reason: the guardrails check could not run because the post-merge SHA was unavailable. <!--#672af461b8e74fbb-->
+- `cli.merge.failure.guardrail_missing_pre_sha` (json-key) — Failure reason: the guardrails check could not run because the pre-merge SHA was unavailable. <!--#be3c76f35ebbb862-->
+- `cli.merge.failure.guardrail_missing_pre_and_post_sha` (json-key) — Failure reason: neither the pre- nor post-merge SHA was available to the guardrails check. <!--#baafe5750db0d156-->
+- `cli.merge.failure.pending_human` (json-key) — Failure reason: the merge is paused awaiting the human's conflict-resolution decision. <!--#07406b0afad1798e-->
+- `cli.merge.failure.runtime_sync_collision` (json-key) — Failure reason: a tier-A runtime-sync file already exists in se3/ and must be resolved by hand. <!--#ef9960aeb82de422-->
+- `cli.merge.failure.version_higher_than_target` (json-key) — Failure reason: the on-disk version exceeds the aggregated target version. <!--#69449a744662e557-->
+- `cli.merge.failure.runtime_sync_os_error` (json-key) — Failure reason: runtime sync hit an OS error (permissions or disk space). <!--#587541bb2a4c5584-->
+- `cli.merge.failure.runtime_sync_timeout` (json-key) — Failure reason: runtime sync timed out, possibly because the bound worktree is unreachable. <!--#26ba81d46dc22d52-->
+- `cli.merge.failure.generic` (json-key) — Fallback failure line interpolating an arbitrary failure reason. <!--#ddfcb1ba229a9892-->
+- `cli.merge.failure.no_reason` (json-key) — Fallback failure line used when no reason is available at all. <!--#8e4befa5dd82d9ce-->
+- `status.open` (json-key) — Display label for the `open` issue status. <!--#566afe977ec3158b-->
+- `status.in_progress` (json-key) — Display label for the `in-progress` issue status. <!--#ab17f999d5be9ab1-->
+- `status.resolved` (json-key) — Display label for the `resolved` issue status. <!--#f94406768fe814bc-->
+- `status.wont_fix` (json-key) — Display label for the `won't-fix` issue status. <!--#7a2a95b722128786-->
+- `status.closed` (json-key) — Display label for the `closed` issue status. <!--#0c2dbbc359a5f325-->
+- `status.init` (json-key) — Display label for the `init` flow/step status. <!--#c4f9aee9cbc557b3-->
+- `status.running` (json-key) — Display label for the `running` flow/step status. <!--#bbd6f341c8e826a9-->
+- `status.paused` (json-key) — Display label for the `paused` flow status. <!--#7f0801dc58e0df62-->
+- `status.completed` (json-key) — Display label for the `completed` flow/step status. <!--#5cd7184e740aa18f-->
+- `status.failed` (json-key) — Display label for the `failed` flow/step status. <!--#b81cc4213b5303cd-->
+- `status.recovering` (json-key) — Display label for the `recovering` flow status. <!--#0d61b8a4f37a8c58-->
+- `status.pending` (json-key) — Display label for the `pending` status. <!--#86a444b317d725e1-->
+- `status.partial` (json-key) — Display label for the `partial` status. <!--#5e93183839b6e6c4-->
+- `status.retrying` (json-key) — Display label for the `retrying` step status. <!--#8dd1348b4574607c-->
+- `status.revision_needed` (json-key) — Display label for the `revision-needed` step status. <!--#7ebf12321c8db2da-->
+- `status.skipped` (json-key) — Display label for the `skipped` step status. <!--#4b93d5760eb3b1cb-->
+- `status.history` (json-key) — Display label for the `history` flow status (archived to history). <!--#6ecdef804f59e82c-->
+- `status.unknown` (json-key) — Display label for an unrecognised status value. <!--#27ca41e25eda8dbc-->
+- `history.list.show_hint` (json-key) — Hint pointing at `se3 history show <flow_id>` for per-flow detail. <!--#a3c443dd480ec20f-->
+- `history.col.flow_id` (json-key) — Column header for the flow ID in history tables. <!--#a504998181071113-->
+- `history.col.status` (json-key) — Column header for the status in history tables. <!--#e488f6785c5c60a6-->
+- `history.col.task_description` (json-key) — Column header for the task description in history tables. <!--#fdb82aef4463f73b-->
+- `history.col.progress` (json-key) — Column header for step progress in history tables. <!--#838781ffd2645839-->
+- `history.col.updated` (json-key) — Column header for the last-updated timestamp in history tables. <!--#54846e305ec2291e-->
+- `history.col.source` (json-key) — Column header for the flow's source in history tables. <!--#9d22f314e7855b98-->
+- `history.col.step_type` (json-key) — Column header for the step type in the per-flow step table. <!--#e78fb9c8b4faf031-->
+- `history.col.retries` (json-key) — Column header for the retry count in the per-flow step table. <!--#d2428e3be3e3c6b4-->
+- `history.col.archived_at` (json-key) — Column header for the archive timestamp in the archived-flows table. <!--#1e67282cfe5fd5fc-->
+- `history.title.active` (json-key) — Table title for the active-flows listing. <!--#d41cfb8e61b2fcbd-->
+- `history.title.archived` (json-key) — Table title for the archived-flows listing. <!--#a74a50a92ed3db2b-->
+- `history.title.all` (json-key) — Table title for the combined all-flows listing. <!--#ca747028a3dc4e1f-->
+- `history.empty.active` (json-key) — Empty-state message when no active flows exist. <!--#4e80f5fc18311789-->
+- `history.empty.archived` (json-key) — Empty-state message when no archived flows exist. <!--#1b257dd6f939c1ed-->
+- `history.empty.all` (json-key) — Empty-state message when no flows of any kind exist. <!--#55e9e5fa94896cd8-->
+- `history.multiple_match` (json-key) — Message reporting that a flow-id prefix matched several flows. <!--#0fd06ef376f4b436-->
+- `history.match_line` (json-key) — Template rendering one ambiguous flow-id match. <!--#fca788473404239b-->
+- `history.flow_id_unknown` (json-key) — Placeholder for a flow whose id is unknown. <!--#98bbe3bd7068446a-->
+- `history.not_found` (json-key) — Error stating the requested flow was not found in history. <!--#105fed3e50bb3f43-->
+- `history.show.details_header` (json-key) — Header for the `history show` flow-detail view. <!--#e9cf79f9fffa205c-->
+- `history.field.status` (json-key) — Field label for a flow's status in the detail view. <!--#9ed99e1cbef4309b-->
+- `history.field.task` (json-key) — Field label for a flow's task in the detail view. <!--#a4bd7540d23b3fc2-->
+- `history.field.type` (json-key) — Field label for a flow's task type in the detail view. <!--#e046a9e330dddaaf-->
+- `history.field.change` (json-key) — Field label for a flow's change name in the detail view. <!--#322b3f34c33faf23-->
+- `history.field.progress` (json-key) — Field label for a flow's step progress in the detail view. <!--#938c55fb67651e30-->
+- `history.field.created` (json-key) — Field label for a flow's creation timestamp. <!--#6400dc1953af0e02-->
+- `history.field.updated` (json-key) — Field label for a flow's last-updated timestamp. <!--#77cf66691a1c437a-->
+- `history.field.completed` (json-key) — Field label for a flow's completion timestamp. <!--#44bfc6868cb2fc77-->
+- `history.field.chat_sessions` (json-key) — Field label for the number of chat sessions attached to a flow. <!--#3b11f89a63a4adc6-->
+- `history.show.steps_header` (json-key) — Header introducing the step list in the flow-detail view. <!--#dea321f9c3d67546-->
+- `history.show.restore_hint` (json-key) — Hint pointing at `se3 history restore <flow_id>` to resume the shown flow. <!--#0bce442c3f780cf4-->
+- `history.detail.no_chat_history` (json-key) — Message stating no chat history is available for the flow. <!--#5f30e74d1d9c8405-->
+- `history.detail.llm_calls_header` (json-key) — Header introducing the per-step LLM call details in `--detailed` mode. <!--#2c956147f063d73a-->
+- `history.detail.session_rule` (json-key) — Rule/separator label naming a chat session's step type and id. <!--#8045958d224d4e2b-->
+- `history.restore.would_restore` (json-key) — Dry-run message naming the flow that would be restored. <!--#0761316db7fe3a6d-->
+- `history.restore.command` (json-key) — Dry-run line showing the equivalent `se3 run --resume` command. <!--#027a0d5424972f86-->
+- `history.restore.restoring` (json-key) — Message announcing that the named flow is being restored. <!--#d057274cf7c972ac-->
+- `issue.list.invalid_source` (json-key) — Validation error rejecting a `--source` filter outside human/system. <!--#182bb163cdaa1ad1-->
+- `issue.list.none_open` (json-key) — Empty-state message when there are no open issues. <!--#ae35cf44a990fdd6-->
+- `issue.list.none_all` (json-key) — Empty-state message when there are no issues at all. <!--#af66ed9ef8ff339d-->
+- `issue.list.title_all` (json-key) — Table title for the all-issues listing. <!--#17e45650dad49456-->
+- `issue.list.title_open` (json-key) — Table title for the open-issues listing. <!--#b5714f36ab643fa1-->
+- `issue.col.id` (json-key) — Column header for the issue ID. <!--#8f84501f8c9cff85-->
+- `issue.col.title` (json-key) — Column header for the issue title. <!--#2d661d8c63508ba0-->
+- `issue.col.type` (json-key) — Column header for the issue type. <!--#a80355264631cde2-->
+- `issue.col.status` (json-key) — Column header for the issue status. <!--#530da77c985b5881-->
+- `issue.col.priority` (json-key) — Column header for the issue priority. <!--#6befc2641c7870ec-->
+- `issue.col.source` (json-key) — Column header for the issue source (human/system). <!--#d7d3ea1eb7e274c3-->
+- `issue.col.tags` (json-key) — Column header for the issue tags. <!--#c5ab84ac45d3c1e9-->
+- `issue.col.created` (json-key) — Column header for the issue creation timestamp. <!--#baa5e36c2957770d-->
+- `issue.not_found` (json-key) — Error stating the requested issue was not found. <!--#82e48864879ba594-->
+- `issue.show.detail` (json-key) — Multi-field template rendering an issue's full detail panel with colour-coded type/status/priority. <!--#8ad56736c3058115-->
+- `issue.show.tags_none` (json-key) — Placeholder shown when an issue has no tags. <!--#110b2e644fdc1631-->
+- `issue.show.header` (json-key) — Panel title naming the issue being shown. <!--#3ba52ba4e041d89f-->
+- `issue.cancelled` (json-key) — Message shown when an issue command is cancelled by the user. <!--#14a90b64a0a4b49d-->
+- `issue.edit.cancelled` (json-key) — Message shown when the external editor exited non-zero, cancelling the edit. <!--#b64a54423324ff09-->
+- `issue.created` (json-key) — Confirmation that an issue was created, with its id and title. <!--#5e0d667c38442930-->
+- `issue.updated` (json-key) — Confirmation that an issue was updated, with its id and title. <!--#dac0b39691e2ab14-->
+- `issue.closed` (json-key) — Confirmation that an issue was closed, with its id and title. <!--#e754458c11eb8d8a-->
+- `issue.reset` (json-key) — Confirmation that an in-progress issue was reset back to open. <!--#ddb6bd6c72a7b178-->
+- `issue.create.prompt_title` (json-key) — Panel title for the issue-description input prompt. <!--#7c94d220107d07e4-->
+- `issue.create.prompt_message` (json-key) — Instructions for typing an issue description, with submit/cancel keys. <!--#9a464ab73dab181c-->
+- `issue.desc_empty` (json-key) — Validation error rejecting an empty issue description at the prompt. <!--#c41c1b3b39864ec8-->
+- `issue.desc_empty_yaml` (json-key) — Validation error rejecting an empty issue description in the YAML editor path. <!--#0e664bd0661b762a-->
+- `issue.invalid_yaml` (json-key) — Error reporting that the edited issue YAML failed to parse. <!--#1daf92b5387b7a85-->
+- `issue.invalid_yaml_empty` (json-key) — Error reporting that the edited issue YAML is empty or not a mapping. <!--#74bee88e7f0a9ce6-->
+- `issue.editor_not_found` (json-key) — Error stating the configured $EDITOR command does not exist. <!--#89f756104008505c-->
+- `issue.editor_launch_failed` (json-key) — Error stating the external editor could not be launched. <!--#1e0cc33b365c9bc9-->
+- `init.created` (json-key) — Success line reporting a file that `se3 init` created. <!--#ea73abd749ccd93e-->
+- `init.warning_line` (json-key) — Template rendering a warning line during `se3 init`. <!--#f41fe944e887eb09-->
+- `init.gitignore_error_create` (json-key) — Error reporting that .gitignore could not be created. <!--#3ed126408e82eeec-->
+- `init.gitignore_error_read` (json-key) — Error reporting that an existing .gitignore could not be read. <!--#c0d0c1af932f399c-->
+- `init.gitignore_error_append` (json-key) — Error reporting that patterns could not be appended to .gitignore. <!--#81f017ecdcc3027e-->
+- `init.versions_created` (json-key) — Success line reporting that VERSIONS.md was created. <!--#47c27146aac7666f-->
+- `init.versions_exists` (json-key) — Warning that VERSIONS.md already exists and was left alone without `--force`. <!--#b58143d6731d3d4a-->
+- `init.git_initialized` (json-key) — Success line reporting that a git repository was initialized. <!--#315ad730b831145b-->
+- `init.git_exists` (json-key) — Warning that a git repository already exists. <!--#28fdd273196fe06a-->
+- `init.gitignore_created` (json-key) — Success line reporting that .gitignore was created. <!--#13a05d81aab432dd-->
+- `init.gitignore_appended` (json-key) — Success line reporting that a pattern was appended to .gitignore. <!--#7e93dc8dad2f8867-->
+- `init.gitignore_negated` (json-key) — Warning that .gitignore explicitly negates the needed pattern, so it was left untouched. <!--#052f976ed967cf75-->
+- `init.gitignore_exists` (json-key) — Warning that .gitignore already exists and was left alone without `--force`. <!--#e1324670941a1951-->
+- `init.local_overrides` (json-key) — Warning that an existing se3.local.yaml will override se3.yaml at load time. <!--#71509589543ae2d0-->
+- `init.success` (json-key) — Celebration line announcing that the SE3 project was initialized. <!--#972c486ba711b1c7-->
+- `init.next_steps` (json-key) — Header introducing the post-init next-steps list. <!--#13480f8c9128ac5e-->
+- `init.next_step_1` (json-key) — Post-init step telling the user to edit se3.yaml. <!--#b073d68e603db758-->
+- `init.next_step_2` (json-key) — Post-init step telling the user to edit se3/charter.md. <!--#a87b64a1388541a8-->
+- `init.next_step_3` (json-key) — Post-init step telling the user to run `se3 run "your task"`. <!--#154c43c7591fa56c-->
+- `code_index.not_built` (json-key) — Error stating no se3/code-index.md exists yet, with the rebuild command. <!--#d0f4b36fcdc901f5-->
+- `code_index.no_match` (json-key) — Message stating no code-index item matched the search pattern. <!--#866300151da9b0c2-->
+- `code_index.invalid_regex` (json-key) — Error reporting an invalid regular expression passed to code-index search. <!--#df8c29d8cef41b03-->
+- `code_index.mode_full` (json-key) — Mode label for a forced full code-index rebuild. <!--#7b57dd383f6176e5-->
+- `code_index.mode_incremental` (json-key) — Mode label for an incremental (fingerprint-driven) code-index rebuild. <!--#ce11a2d6720ad44e-->
+- `code_index.building` (json-key) — Progress line announcing the code-index build, with its mode and project root. <!--#aba63625a7764f5a-->
+- `code_index.rebuild_done` (json-key) — Completion line reporting indexed file/symbol counts and the map path. <!--#3b683c0dca2d6e7b-->
+- `code_index.inspect_title` (json-key) — Panel title for `se3 code-index inspect`. <!--#9812770721c4ec25-->
+- `code_index.authoritative_map` (json-key) — Line echoing the path of the authoritative code-index map. <!--#91322a4331723388-->
+- `code_index.inspect_files` (json-key) — Stat line reporting the number of indexed files. <!--#f20623af2ff61709-->
+- `code_index.inspect_symbols` (json-key) — Stat line reporting the number of indexed symbols. <!--#9192fa36685d29c0-->
+- `code_index.inspect_degraded` (json-key) — Stat line reporting how many chunks were indexed in degraded mode. <!--#257bd6fecea665f5-->
+- `code_index.inspect_by_kind` (json-key) — Header introducing the per-kind file breakdown. <!--#4bfda70072eeb870-->
+- `code_index.inspect_kind_row` (json-key) — Template rendering one file-kind count row. <!--#51bb9e66d729df59-->
+- `worktree.gc.dry_run_prefix` (json-key) — Prefix marking worktree GC output as a dry run. <!--#dc11c4743a6248a8-->
+- `worktree.gc.header` (json-key) — Header for worktree GC, naming the project root and max-age threshold. <!--#12c99c2f4d024cf0-->
+- `worktree.gc.archived_title_dry` (json-key) — Table title for worktrees that a dry-run GC would archive. <!--#98f3aebf6ec12f08-->
+- `worktree.gc.archived_title` (json-key) — Table title for worktrees the GC actually archived. <!--#2e645f9199dc0f35-->
+- `worktree.gc.col_worktree` (json-key) — Column header for the worktree path in GC tables. <!--#a5d280d41bb4bf90-->
+- `worktree.gc.col_archive_path` (json-key) — Column header for the archive destination path in GC tables. <!--#d853fa1314af3ead-->
+- `worktree.gc.col_size` (json-key) — Column header for the reclaimed size in GC tables. <!--#c021bb22f93f44fa-->
+- `worktree.gc.cell_dry_run` (json-key) — Placeholder cell used in dry-run GC rows where no real action occurred. <!--#4520a27397039f8c-->
+- `worktree.gc.no_matches` (json-key) — Message stating no worktree runs matched the GC criteria. <!--#c4939454e2f4aee9-->
+- `worktree.gc.reclaimed` (json-key) — Line reporting the total disk space reclaimed by GC. <!--#b1b533a56ec09c02-->
+- `worktree.gc.projected` (json-key) — Suffix marking the reclaimed size as projected rather than actual (dry run). <!--#3ba11da486fdb2fd-->
+- `worktree.gc.retained_warning` (json-key) — Warning that some completed worktree branches were kept because they are unmerged. <!--#4807d8d3e30a7371-->
+- `worktree.gc.retained_detail` (json-key) — Detail explaining the unmerged refs were preserved and must be merged or deleted manually. <!--#3120ea3203a31b57-->
+- `worktree.gc.retained_title` (json-key) — Table title for retained unmerged branches. <!--#2b4c8645fba79afd-->
+- `worktree.gc.col_branch` (json-key) — Column header for the branch name in GC tables. <!--#97749487342adb40-->
+- `worktree.gc.col_original_branch` (json-key) — Column header for the original (merge-back target) branch in GC tables. <!--#e28464326e40e423-->
+- `worktree.gc.col_reason` (json-key) — Column header for the retain/skip reason in GC tables. <!--#6bd9f892abf12a8a-->
+- `worktree.gc.cell_unknown` (json-key) — Generic `(unknown)` placeholder cell in GC tables. <!--#3ddbc4817a39c90a-->
+- `worktree.gc.skipped_title` (json-key) — Table title for worktrees the GC skipped. <!--#921d6da76ebea425-->
+- `worktree.gc.errors_title` (json-key) — Table title for errors encountered during worktree GC. <!--#9fb2f689418aa20c-->
+- `engine.llm.stream.tool_error` (json-key) — Streamed-output line reporting a tool error, with a truncated preview. <!--#a39e23aac23e79ca-->
+- `engine.llm.stream.error` (json-key) — Streamed-output line reporting an LLM error, with a truncated preview. <!--#cb8a4cd5c7cf57a2-->
+- `engine.llm.stream.complete` (json-key) — Summary line closing an LLM stream with message, tool-call, char, and duration counts. <!--#b90e719f81d420d8-->
+- `engine.llm.extract.start` (json-key) — Progress line announcing JSON extraction from the LLM output in extract mode. <!--#748d041f888d64dc-->
+- `engine.llm.extract.complete` (json-key) — Progress line confirming JSON extraction completed. <!--#6bef39437a861d50-->
+- `engine.llm.phase1.cached` (json-key) — Notice that the two-phase call skipped phase 1 by reusing a cached result. <!--#5fedae975fe58f27-->
+- `engine.llm.phase1.valid_json` (json-key) — Notice that phase 1 already produced valid JSON, so phase 2 was skipped. <!--#848fe59aa49ba61e-->
+- `engine.llm.phase1.missing_keys` (json-key) — Warning that phase 1's JSON lacked required keys, so phase 2 runs as a fallback. <!--#3959b8c28b8ba798-->
+- `engine.llm.phase2.start` (json-key) — Progress line announcing phase-2 JSON extraction from the phase-1 output. <!--#35801bc8e66ba17d-->
+- `engine.llm.json_retry` (json-key) — Warning that the response was not valid JSON, triggering a JSON-format retry. <!--#fd2bce8976220913-->
+- `engine.usage.round_footer` (json-key) — Footer line showing this round's and cumulative input/output token counts. <!--#cb233f596598e178-->
+- `engine.usage.discovery_cumulative` (json-key) — Line reporting cumulative token usage across discovery rounds. <!--#d99b62d685942812-->
+- `engine.usage.line` (json-key) — Compact one-line token-usage summary (input, output, cache read/write, cost). <!--#f8fd5ac926917ea6-->
+- `engine.discovery.confirm_prompt` (json-key) — Lead-in sentence stating discovery produced a refined task description. <!--#318bd94715f0f887-->
+- `engine.discovery.confirm_hint` (json-key) — Hint explaining how to confirm the discovered task or keep refining it. <!--#97fc72e61becf32b-->
+- `engine.discovery.proposed_label` (json-key) — Label introducing discovery's proposed task description. <!--#2570d7a153ec88b3-->
+- `engine.discovery.confirm_option` (json-key) — Menu option label for confirming the discovered task description. <!--#be5eefedc43c45b7-->
+- `engine.discovery.proposed_block_title` (json-key) — Panel title for the proposed task description block. <!--#e453742066874e2c-->
+- `engine.discovery.confirm_hint_prefix` (json-key) — Leading fragment of the discovery confirm hint, before the interpolated key. <!--#4ee189bd578e34f7-->
+- `engine.discovery.confirm_hint_suffix` (json-key) — Trailing fragment of the discovery confirm hint, after the interpolated key. <!--#b8df26b1c1efecdb-->
+- `engine.discovery.questions_label` (json-key) — Label introducing the questions discovery is asking the user. <!--#efa651acf28091be-->
+- `engine.discovery.ops_label` (json-key) — Label introducing the issue operations discovery performed. <!--#9edae7adc4eec69e-->
+- `engine.discovery.ops_created` (json-key) — Line listing issue ids created by discovery. <!--#282c8495c68aa00d-->
+- `engine.discovery.ops_updated` (json-key) — Line listing issue ids updated by discovery. <!--#02a1122ad2f21b17-->
+- `engine.discovery.ops_deleted` (json-key) — Line listing issue ids deleted by discovery. <!--#cb5ae0cb95ffb624-->
+- `engine.discovery.ops_rejected` (json-key) — Line reporting a rejected issue operation with its status, target, and reason. <!--#b3bdcee25de50d43-->
+- `engine.discovery.error_title` (json-key) — Panel title for a discovery-step error. <!--#e6ae89fd3305508c-->
+- `engine.discovery.error_json_extraction` (json-key) — Error body explaining the LLM returned narrative instead of structured JSON, and the step will auto-retry. <!--#bde17526f83fef33-->
+- `engine.discovery.error_llm_call` (json-key) — Error body reporting an LLM call failure during discovery. <!--#694b981ba626bec3-->
+- `engine.fixloop.exhausted` (json-key) — Message stating the fix loop hit its iteration cap and the flow stopped. <!--#5ccdde7f01747ec0-->
+- `engine.fixloop.banner_title` (json-key) — Banner title announcing the fix loop is routing back to the implement step. <!--#0a163a19926fc0bf-->
+- `engine.fixloop.iteration` (json-key) — Banner line reporting the current fix-loop iteration number. <!--#2d2a0e2c344294e9-->
+- `engine.fixloop.reason_tests_failed` (json-key) — Fix-loop reason line: the test step failed. <!--#bc231e0139cdf61d-->
+- `engine.fixloop.reason_self_check` (json-key) — Fix-loop reason line: code review found actionable issues. <!--#46b747193d528e80-->
+- `engine.fixloop.reason_spec_issues` (json-key) — Fix-loop reason line: spec compliance issues were found. <!--#f18307ee436d8a23-->
+- `engine.fixloop.source_self_check` (json-key) — Fix-loop source line attributing the trigger to the self_check step. <!--#428c62d64afafc0a-->
+- `engine.fixloop.source_invariant_check` (json-key) — Fix-loop source line attributing the trigger to the invariant_check step. <!--#25c99b140d929a71-->
+- `engine.fixloop.source_verify_spec` (json-key) — Fix-loop source line attributing the trigger to the verify_spec step. <!--#c29baff393a58238-->
+- `engine.fixloop.instructions` (json-key) — Banner line echoing the fix instructions handed back to implement. <!--#3870f5f9dea06da8-->
+- `engine.revision.banner_title` (json-key) — Banner title announcing a human-requested revision of a named step. <!--#64a5dfa02a76f9e5-->
+- `engine.revision.iteration` (json-key) — Banner line reporting the current revision iteration number. <!--#155f878acff1c6a7-->
+- `engine.revision.feedback` (json-key) — Banner line echoing the user's revision feedback. <!--#3ac9590b43809406-->
+- `engine.adjudicate.banner_title` (json-key) — Banner title for an adjudicate step ruling on a spec contradiction. <!--#6e104afd87ba73f9-->
+- `engine.adjudicate.confirm_title` (json-key) — Banner title for an adjudicate confirmation request. <!--#aff16693a67f7f37-->
+- `engine.adjudicate.reviewer` (json-key) — Banner line naming the reviewer that triggered adjudication. <!--#aa9df4833736bb35-->
+- `engine.adjudicate.trigger_reasons` (json-key) — Banner line listing the reasons adjudication was triggered. <!--#67a16a267151a988-->
+- `engine.adjudicate.none` (json-key) — Generic `(none)` placeholder used in adjudicate output. <!--#3fa8ad5aacd5c5f5-->
+- `engine.adjudicate.fix_iteration` (json-key) — Banner line reporting the fix-loop iteration at which adjudication fired. <!--#ad70f31032089a68-->
+- `engine.adjudicate.source_oscillation` (json-key) — Banner line attributing adjudication to detected self_check oscillation. <!--#5887577831775244-->
+- `engine.adjudicate.landed_title` (json-key) — Banner title announcing the adjudication landed and self_check is re-running. <!--#5bd66cceab666e50-->
+- `engine.adjudicate.landed_skipped` (json-key) — Banner line noting implement and test were skipped because the ruling changed the spec, not code. <!--#ab7e46b76d00ed25-->
+- `engine.adjudicate.landed_superseded` (json-key) — Banner line noting the pending fix_instructions were superseded by the ruling. <!--#7b2da78b127ac5a0-->
+- `engine.adjudicate.noop_title` (json-key) — Banner title for an adjudication that found no contradiction and passes through to implement. <!--#211bbbc3414eef09-->
+- `engine.adjudicate.noop_detail` (json-key) — Banner detail stating the triggering fix_instructions were applied unchanged. <!--#d09681863c123686-->
+- `engine.test.running` (json-key) — Progress line echoing the test command being run. <!--#fb3b8ac018f34dad-->
+- `engine.test.still_running` (json-key) — Heartbeat line printed while a long test run is still in progress. <!--#13ad3f9ac829b243-->
+- `engine.test.timeout` (json-key) — Marker inserted into test output when the run exceeded its timeout. <!--#04de1207e6e6381f-->
+- `engine.test.error` (json-key) — Marker inserted into test output when the run raised an error. <!--#373e6b9bfe6672be-->
+- `cli.common.no_description` (json-key) — Placeholder used where a description is missing. <!--#609da5e4e146ccc2-->
+- `cli.help.app` (json-key) — Top-level help text for the se3 CLI application. <!--#3a5e716888de21f4-->
+- `cli.help.code_index` (json-key) — Help text for the `code-index` command group. <!--#d9d50c100773c419-->
+- `cli.help.code_index.index.desc` (json-key) — Help text for the code-index literal one-level drill-in view. <!--#c82bc7ba8660633b-->
+- `cli.help.code_index.index.path` (json-key) — Help text for the drill-in `path` argument, explaining directory vs file vs root behaviour. <!--#b8976f9788ea666e-->
+- `cli.help.code_index.inspect.desc` (json-key) — Help text for `code-index inspect`, which shows on-disk map stats. <!--#b447319a1aa4eb66-->
+- `cli.help.code_index.main` (json-key) — Help text for the bare `code-index` command. <!--#1d6400a17d30a5b9-->
+- `cli.help.code_index.rebuild.desc` (json-key) — Help text for `code-index rebuild`, which writes se3/code-index.md. <!--#cbb996018eaae2bb-->
+- `cli.help.code_index.rebuild.force` (json-key) — Help text for `--force`, explaining it re-summarises every node and discards human corrections. <!--#2e3a31a9523166b3-->
+- `cli.help.code_index.search.desc` (json-key) — Help text for `code-index search`, a grep-alike over index item lines. <!--#143192e032af8b74-->
+- `cli.help.code_index.search.fixed_strings` (json-key) — Help text for the `-F` literal-substring search flag. <!--#d5e879b13fda2d23-->
+- `cli.help.code_index.search.ignore_case` (json-key) — Help text for the `-i` case-insensitive search flag. <!--#9dff3847d170f604-->
+- `cli.help.code_index.search.line_number` (json-key) — Help text noting `-n` exists only for grep muscle-memory and is a no-op here. <!--#bd4ae47d50f000ea-->
+- `cli.help.code_index.search.max_count` (json-key) — Help text for the `-m` match-limit flag. <!--#52b8c051c2049bc0-->
+- `cli.help.code_index.search.pattern` (json-key) — Help text for the search pattern argument, which is a regex by default. <!--#50d1d86271e483b5-->
+- `cli.help.code_index.show.desc` (json-key) — Help text for `code-index show`, which prints one file's full symbol detail. <!--#50249555808d3210-->
+- `cli.help.code_index.show.path` (json-key) — Help text for the show command's project-relative path argument. <!--#742919a4db14d234-->
+- `cli.help.common.json_output` (json-key) — Shared help text for the `--json` output flag. <!--#84ffeeeb7c71463e-->
+- `cli.help.common.project_root` (json-key) — Shared help text for the `--project-root` option. <!--#6c833d5f3ee69c6c-->
+- `cli.help.daemon` (json-key) — Help text for the `daemon` command group. <!--#b34879ff9b5b6058-->
+- `cli.help.daemon.app` (json-key) — Help text describing the resident control-plane daemon. <!--#10661e662e500f78-->
+- `cli.help.daemon.start.daemon_key` (json-key) — Help text for the daemon credential option, recommending the SE3_DAEMON_KEY env var. <!--#62385dc758867659-->
+- `cli.help.daemon.start.desc` (json-key) — Help text for `daemon start`. <!--#5d28b12ecb0f98ec-->
+- `cli.help.daemon.start.foreground` (json-key) — Help text for the `--foreground` flag that keeps the daemon attached. <!--#2ed45dd9b52d4804-->
+- `cli.help.daemon.start.server_url` (json-key) — Help text for `--server-url`, documenting the per-scheme default port completion. <!--#d4e444dc48c8d874-->
+- `cli.help.daemon.status.desc` (json-key) — Help text for `daemon status`. <!--#b926d9f4216a59b6-->
+- `cli.help.daemon.status.json` (json-key) — Help text for emitting daemon status as JSON. <!--#176541c2cf608554-->
+- `cli.help.daemon.stop.desc` (json-key) — Help text for `daemon stop`. <!--#feeea4be7510ec56-->
+- `cli.help.end_session.desc` (json-key) — Help text for `end-session`, warning that uncommitted work is not merged. <!--#cb48dfd8de5527a5-->
+- `cli.help.end_session.flow_id` (json-key) — Help text for the end-session `--flow-id` option. <!--#c98457c41b9d5bed-->
+- `cli.help.end_session.no_archive_worktree` (json-key) — Help text for the flag that leaves the worktree in place instead of archiving it. <!--#4426a116c4204b27-->
+- `cli.help.end_session.pid` (json-key) — Help text for the `--pid` hint identifying the live run process to terminate. <!--#f84f424e35553bdd-->
+- `cli.help.guardrails.desc` (json-key) — Help text for the `guardrails` command. <!--#f9d53c1331894c60-->
+- `cli.help.guardrails.original` (json-key) — Help text for the `--original` option supplying a baseline spec to diff against. <!--#d07d47d9806e2bd1-->
+- `cli.help.guardrails.project_root` (json-key) — Help text for the guardrails `--project-root` option used with `--sizes`. <!--#c5233912d45580b9-->
+- `cli.help.guardrails.sizes` (json-key) — Help text for `--sizes`, which runs project-wide spec volume-governance checks. <!--#793f39efeec019e9-->
+- `cli.help.guardrails.spec_file` (json-key) — Help text for the spec file argument to guardrails. <!--#1eca646d495276b3-->
+- `cli.help.history` (json-key) — Help text for the `history` command group. <!--#f0ab2103baa63372-->
+- `cli.help.history.active_only` (json-key) — Help text for the flag limiting history to the active flow. <!--#687df16805084869-->
+- `cli.help.history.archived.desc` (json-key) — Help text for `history archived`. <!--#14629dd92e4090e6-->
+- `cli.help.history.archived_only` (json-key) — Help text for the flag limiting history to archived flows. <!--#d49cb5aa337a6573-->
+- `cli.help.history.list.desc` (json-key) — Help text for `history list`, covering active, archived, and history flows. <!--#46ffae21256607f2-->
+- `cli.help.history.restore.desc` (json-key) — Help text for `history restore`, which resumes a previous flow. <!--#3fbcf5c7c196aab4-->
+- `cli.help.history.restore.dry_run` (json-key) — Help text for the restore `--dry-run` flag. <!--#f422d9fee89d0d88-->
+- `cli.help.history.restore.flow_id` (json-key) — Help text for the flow-id argument to `history restore`. <!--#ea04315b3c408fd8-->
+- `cli.help.history.show.desc` (json-key) — Help text for `history show`. <!--#769ba5ed9abad6d4-->
+- `cli.help.history.show.detailed` (json-key) — Help text for the `--detailed` flag that adds per-step LLM call details. <!--#ef1c27f76bd82927-->
+- `cli.help.history.show.flow_id` (json-key) — Help text for the flow-id argument to `history show`. <!--#a6e6a97ec7f8e9f1-->
+- `cli.help.history.show.verbose` (json-key) — Help text for the `--verbose` flag that includes tool calls (requires `--detailed`). <!--#9fc6ba005fc2f90b-->
+- `cli.help.init.desc` (json-key) — Help text for `se3 init`. <!--#1a5c303c98b43008-->
+- `cli.help.init.force` (json-key) — Help text for the init `--force` overwrite flag. <!--#f28f3156f31f379e-->
+- `cli.help.init.name` (json-key) — Help text for the init project-name option. <!--#5751ee3702119ef3-->
+- `cli.help.issue` (json-key) — Help text for the `issue` command group. <!--#ab3c5127f64a5ffb-->
+- `cli.help.issue.close.desc` (json-key) — Help text for `issue close`. <!--#6f5a2bef2c0d22d2-->
+- `cli.help.issue.close.issue_id` (json-key) — Help text for the issue-id argument to `issue close`. <!--#2eb9535244db476f-->
+- `cli.help.issue.close.reason` (json-key) — Help text for the `--reason` option on `issue close`. <!--#b363a5fcd472e068-->
+- `cli.help.issue.create.desc` (json-key) — Help text for `issue create`. <!--#82090712e6c81457-->
+- `cli.help.issue.create.description` (json-key) — Help text for the positional issue-description argument. <!--#898e2a80b592c4f5-->
+- `cli.help.issue.create.editor` (json-key) — Help text for the flag that opens an external editor for full issue editing. <!--#01768f392c7be94f-->
+- `cli.help.issue.create.priority` (json-key) — Help text for the optional issue-priority option. <!--#4fb5d03bab310f15-->
+- `cli.help.issue.create.tags` (json-key) — Help text for the comma-separated tags option. <!--#43ba3cba2af0be97-->
+- `cli.help.issue.create.title` (json-key) — Help text for the optional issue-title option. <!--#83f49c4a0842f25b-->
+- `cli.help.issue.create.type` (json-key) — Help text for the optional issue-type option. <!--#5fe673caff191520-->
+- `cli.help.issue.default.desc` (json-key) — Help text for the default `issue` command, which lists open issues. <!--#175a5c5bcb3bd2f9-->
+- `cli.help.issue.edit.desc` (json-key) — Help text for `issue edit`, which opens $EDITOR (falling back to vi). <!--#04e18c42bb7eef76-->
+- `cli.help.issue.edit.issue_id` (json-key) — Help text for the issue-id argument to `issue edit`. <!--#6e6a99474ff8ca31-->
+- `cli.help.issue.list.all` (json-key) — Help text for the `--all` flag that includes closed issues. <!--#4214c7dcf12c1aca-->
+- `cli.help.issue.list.desc` (json-key) — Help text for `issue list`. <!--#ba3c30c44e4cd73d-->
+- `cli.help.issue.list.source` (json-key) — Help text for the `--source` human/system filter. <!--#cfb786114cafb4e8-->
+- `cli.help.issue.list.type` (json-key) — Help text for the `--type` issue-type filter. <!--#cc89fd99c060683e-->
+- `cli.help.issue.reset.desc` (json-key) — Help text for `issue reset`, which returns an in-progress issue to open. <!--#bc8eca8c51a61c31-->
+- `cli.help.issue.reset.issue_id` (json-key) — Help text for the issue-id argument to `issue reset`. <!--#b4f94f41ec5e0588-->
+- `cli.help.issue.show.desc` (json-key) — Help text for `issue show`. <!--#060573af1bf76573-->
+- `cli.help.issue.show.issue_id` (json-key) — Help text for the issue-id argument to `issue show`. <!--#e0c3e1fa62c85342-->
+- `cli.help.merge.branches` (json-key) — Help text for the ordered list of branches to merge. <!--#e938a11faed76da3-->
+- `cli.help.merge.delete_merged` (json-key) — Help text for `--delete-merged`, which deletes merged branches and archives their worktrees. <!--#d8aeab3580cccba4-->
+- `cli.help.merge.desc` (json-key) — Help text for `se3 merge`, which merges branches sequentially into the current one. <!--#5a03b7b2cd0bf5b2-->
+- `cli.help.merge.no_delete_merged` (json-key) — Help text for `--no-delete-merged`, which overrides the default-on cleanup. <!--#89f38624e685661e-->
+- `cli.help.merge.strategy` (json-key) — Help text listing the fast/safe/strict conflict-resolution strategies. <!--#d85c9394c07a294e-->
+- `cli.help.merge_respond.call_file` (json-key) — Help text for the merge call-file path argument. <!--#6ec129f8c577964c-->
+- `cli.help.merge_respond.desc` (json-key) — Help text for `merge-respond`, which processes an MCP response file for merge conflicts. <!--#8878a48a09a48aac-->
+- `cli.help.merge_unlock.desc` (json-key) — Help text for `merge-unlock`, which inspects and releases the project's merge lock. <!--#0a8a3d5243ca6875-->
+- `cli.help.merge_unlock.force` (json-key) — Help text for `--force`, warning it breaks merge mutual exclusion on a live-held lock. <!--#64f0b4c4199bbb61-->
+- `cli.help.migrate` (json-key) — Help text for the `migrate` command group. <!--#297028250a2f4640-->
+- `cli.help.migrate.app` (json-key) — Help text describing the migrate app's list/run subcommands. <!--#151c4f45a8134e58-->
+- `cli.help.migrate.list.desc` (json-key) — Help text for `migrate list`. <!--#5527fa7dbd291576-->
+- `cli.help.migrate.run.desc` (json-key) — Help text for `migrate run <id>`. <!--#d95dde111d727a0a-->
+- `cli.help.migrate.run.migrator_id` (json-key) — Help text for the migrator-id argument to `migrate run`. <!--#3fc51dda48257666-->
+- `cli.help.migrate.run.no_delete_specs` (json-key) — Help text for the flag that keeps se3/specs in place for inspection. <!--#3aa1f046b7ba7db3-->
+- `cli.help.migrate.run.project_root` (json-key) — Help text for the migrate `--project-root` option. <!--#7586862a97406836-->
+- `cli.help.run.change` (json-key) — Help text for the `--change` option naming the change for this task. <!--#12115e8d960583c8-->
+- `cli.help.run.desc` (json-key) — Help text for `se3 run`, the unified flow-engine entry point. <!--#543d7eebbedda495-->
+- `cli.help.run.discover` (json-key) — Help text for `--discover`, which explores requirements before analyzing. <!--#bbcfc247c3ef6340-->
+- `cli.help.run.flow_id` (json-key) — Help text for the `--flow-id` option selecting which flow to resume. <!--#93623e696b26cd45-->
+- `cli.help.run.from_issue` (json-key) — Help text for `--from-issue`, which starts a flow from an existing issue. <!--#57979c1e7ad11af7-->
+- `cli.help.run.output_format` (json-key) — Help text for `--output-format`, choosing between Rich CLI and NDJSON event output. <!--#050bf388a5b790bd-->
+- `cli.help.run.preset` (json-key) — Help text for `--preset`, which runs a named preset prompt task. <!--#070500d4b754ee4b-->
+- `cli.help.run.resume` (json-key) — Help text for the `--resume` flag. <!--#7196d52595762efe-->
+- `cli.help.run.task` (json-key) — Help text for the positional task-description argument. <!--#8eb64a81e856bd99-->
+- `cli.help.run.type` (json-key) — Help text for the `--type` task-type option. <!--#61e94c1fd042e493-->
+- `cli.help.run.worktree` (json-key) — Help text for `--worktree`, which isolates the flow in a git worktree and auto-merges it back. <!--#78c9522bca961483-->
+- `cli.help.salvage.desc` (json-key) — Help text for `salvage`, which recovers work from an abnormally terminated session. <!--#4a925a11b5b787ce-->
+- `cli.help.version` (json-key) — Help text for the `version` command. <!--#305a17021444c487-->
+- `cli.help.worktree` (json-key) — Help text for the `worktree` command group managing isolation worktrees. <!--#93b3c41786b5fc95-->
+- `cli.help.worktree.gc.desc` (json-key) — Help text for `worktree gc`, which reclaims leaked terminal worktree runs. <!--#a8da9cdbd9366eae-->
+- `cli.help.worktree.gc.dry_run` (json-key) — Help text for the GC `--dry-run` flag. <!--#b0e432f3ef8b80ea-->
+- `cli.help.worktree.gc.max_age_hours` (json-key) — Help text for the GC idle-age threshold that guards just-completed runs awaiting merge. <!--#953a9b52d7f63899-->
+- `cli.help.worktree.gc.project_root` (json-key) — Help text for the GC `--project-root` option. <!--#e019587af449b69d-->
+- `init.file_exists` (json-key) — Warning that a file already exists during init and `--force` is needed to overwrite. <!--#98b18afdb1ce07f2-->
+- `cli.steprender.analyze.relevant_spec` (json-key) — Section heading listing spec items the analyze step found relevant. <!--#080c014628fd6268-->
+- `cli.steprender.chars_suffix` (json-key) — Suffix showing a character count for truncated rendered content. <!--#f02238245793d9dc-->
+- `cli.steprender.commit.no_changes` (json-key) — Commit-step line noting there was nothing to commit. <!--#fce28004dc7c51eb-->
+- `cli.steprender.error` (json-key) — Generic "Error:" label used by step renderers. <!--#29819e658468b2bc-->
+- `cli.steprender.gate.route_implement` (json-key) — Spec-gate line reporting a route back to implement because a spec edit broke a test. <!--#3cf9af54d8198122-->
+- `cli.steprender.gate.route_update_spec` (json-key) — Spec-gate line reporting a route back to update_spec because the spec artifact was invalid. <!--#0defc49f2c5eb3ae-->
+- `cli.steprender.gate.skipped` (json-key) — Spec-gate line reporting a no-op pass because no spec change occurred. <!--#31286c1c73f16146-->
+- `cli.steprender.implement.complete` (json-key) — Implement-step status word for a fully complete implementation. <!--#0d2316ea1ea5697c-->
+- `cli.steprender.implement.failed` (json-key) — Implement-step status word for a failed implementation. <!--#48c7507b39ec7f54-->
+- `cli.steprender.implement.files` (json-key) — Implement-step stat rendering a file count. <!--#20e132445bc93a22-->
+- `cli.steprender.implement.files_changed` (json-key) — Section heading for the files the implement step changed. <!--#70163d694b5e76b6-->
+- `cli.steprender.implement.groups` (json-key) — Implement-step stat rendering a task-group count. <!--#b24501c766a9af41-->
+- `cli.steprender.implement.incomplete_tasks` (json-key) — Section heading listing tasks the implement step left incomplete. <!--#b3dc8d3ef171935f-->
+- `cli.steprender.implement.partial` (json-key) — Implement-step status word for a partially complete implementation. <!--#05c0ff83ff7ce078-->
+- `cli.steprender.implement.restricted_applied` (json-key) — Line reporting how many restricted (guard-limited) edits were applied. <!--#eac2504219d30a56-->
+- `cli.steprender.implement.restricted_failed` (json-key) — Line reporting how many restricted edits failed to apply. <!--#f181799bbaeeaa68-->
+- `cli.steprender.implement.tests` (json-key) — Implement-step stat rendering a test count. <!--#8947ac9f95d2d44a-->
+- `cli.steprender.implement.tests_added` (json-key) — Section heading for the tests the implement step added. <!--#2461fa476727daf6-->
+- `cli.steprender.merge.escalated` (json-key) — Merge-step line reporting that an unresolved conflict escalated to a human. <!--#0732a6c98ce7034e-->
+- `cli.steprender.merge.merged_into` (json-key) — Merge-step line naming the branches merged into master. <!--#1e1337fc4077f35b-->
+- `cli.steprender.merge.none` (json-key) — Merge-step line reporting that no branches were merged. <!--#60853f6b18da050a-->
+- `cli.steprender.plan.deps_none` (json-key) — Placeholder shown when a task group has no dependencies. <!--#617ef85c64973f88-->
+- `cli.steprender.plan.design_line` (json-key) — Plan-step line echoing the chosen design. <!--#d1c4ab669dc0f02c-->
+- `cli.steprender.plan.design_title` (json-key) — Panel title for the planning step's design section. <!--#ad5f2e052ccbe89c-->
+- `cli.steprender.plan.group_line` (json-key) — Template rendering one task group (id, name, task count, LOC, dependencies). <!--#8ef317ca12aef5ef-->
+- `cli.steprender.plan.proposal_line` (json-key) — Plan-step line echoing the proposal. <!--#bf21c4b9d3592e1d-->
+- `cli.steprender.plan.proposal_title` (json-key) — Panel title for the planning step's proposal section. <!--#9674407bb1a18371-->
+- `cli.steprender.plan.task_groups_title` (json-key) — Panel title for the planning step's task-groups section. <!--#992aabd63cc341a2-->
+- `cli.steprender.reconcile.already` (json-key) — Version-reconcile line noting the version was already reconciled, so no bump occurred. <!--#a97b3bf549e9da73-->
+- `cli.steprender.reconcile.channel` (json-key) — Version-reconcile line showing the release channel. <!--#3f6b6de7795128af-->
+- `cli.steprender.reconcile.commit` (json-key) — Version-reconcile line showing the reconcile commit hash. <!--#14a5653acb9b1072-->
+- `cli.steprender.remaining.suffix` (json-key) — Panel title template for a step's overflow "Additional Details" section. <!--#25602361807f2d45-->
+- `cli.steprender.section.reasoning` (json-key) — Generic section heading for a step's reasoning. <!--#9a0a71097ce2501f-->
+- `cli.steprender.section.recommendations` (json-key) — Generic section heading for a step's recommendations. <!--#2445b51389c6d653-->
+- `cli.steprender.section.summary` (json-key) — Generic section heading for a step's summary. <!--#5272c6b7e91626b1-->
+- `cli.steprender.self_check.actionable` (json-key) — Self-check line reporting the count of actionable issues found. <!--#3bc36937635f4895-->
+- `cli.steprender.status` (json-key) — Generic "Status: {status}" line used by step renderers. <!--#b6e4a23b55bdb2ee-->
+- `cli.steprender.status.failed` (json-key) — Red FAILED status badge used by step renderers. <!--#05a3ea1f8a5c75f7-->
+- `cli.steprender.status.passed` (json-key) — Green PASSED status badge used by step renderers. <!--#30bc918896a0b778-->
+- `cli.steprender.test.command` (json-key) — Test-step line echoing the command that was run. <!--#343e3046d15a5c3c-->
+- `cli.steprender.test.failed` (json-key) — Red FAILED badge used in the test step's status line. <!--#253bcecd0bb74282-->
+- `cli.steprender.test.passed` (json-key) — Green PASSED badge used in the test step's status line. <!--#0a9699968b1ff6e8-->
+- `cli.steprender.test.phases` (json-key) — Test-step line reporting how many test phases passed and failed. <!--#3f1e5051da2872d0-->
+- `cli.steprender.test.status` (json-key) — Test-step line wrapping the pass/fail badge. <!--#8e813ceb967ab9fa-->
+- `cli.steprender.title.analyze` (json-key) — Panel title for the analyze step. <!--#af5165ece6b5f36c-->
+- `cli.steprender.title.commit` (json-key) — Panel title for the commit step. <!--#679a974ad46fde41-->
+- `cli.steprender.title.design` (json-key) — Panel title for the design step. <!--#79b9398963dc2e38-->
+- `cli.steprender.title.implement` (json-key) — Panel title for the implement step. <!--#6cdada08951ff96a-->
+- `cli.steprender.title.merge_integrate` (json-key) — Panel title for the merge-integrate step. <!--#1d5d58964d16996a-->
+- `cli.steprender.title.plan` (json-key) — Panel title for the plan step. <!--#cd28cc1ce391643d-->
+- `cli.steprender.title.propose` (json-key) — Panel title for the propose step. <!--#c79c3d8363ed7567-->
+- `cli.steprender.title.self_check` (json-key) — Panel title for the self-check step. <!--#9c188d3f272b4bb7-->
+- `cli.steprender.title.spec_gate` (json-key) — Panel title for the spec-gate step. <!--#1e2cf7dd277fa588-->
+- `cli.steprender.title.summarize` (json-key) — Panel title for the summarize (work summary) step. <!--#933d78d8fc278b69-->
+- `cli.steprender.title.test` (json-key) — Panel title for the test step. <!--#c16e73050d37e952-->
+- `cli.steprender.title.update_spec` (json-key) — Panel title for the update-spec step. <!--#8b58de004ed18de5-->
+- `cli.steprender.title.verify_spec` (json-key) — Panel title for the verify-spec step. <!--#459c053f627a927d-->
+- `cli.steprender.title.version_analyze` (json-key) — Panel title for the version-analyze step. <!--#d5201984adb37ca6-->
+- `cli.steprender.title.version_reconcile` (json-key) — Panel title for the version-reconcile step. <!--#dcabe3f14bf0b55a-->
+- `cli.steprender.update_spec.new_capabilities` (json-key) — Section heading listing new capabilities recorded by the update-spec step. <!--#4d336a296b4aa8dd-->
+- `cli.steprender.update_spec.none` (json-key) — Update-spec line noting no spec updates were needed. <!--#f4f4bb7ffadc3ab2-->
+- `cli.steprender.usage.title` (json-key) — Panel title for a single step's token usage. <!--#62754f4681af90f0-->
+- `cli.steprender.verify.in_scope` (json-key) — Label for in-scope findings in the verify-spec step. <!--#e35a99f5ce1b44c2-->
+- `cli.steprender.verify.out_of_scope` (json-key) — Label for out-of-scope findings in the verify-spec step. <!--#0424ae6d31978b5a-->
+- `cli.steprender.version_analyze.subline` (json-key) — Sub-line showing the proposed version bump type and the model's confidence. <!--#069c24eaf24d4ffd-->
+- `cli.steprender.title.discovery` (json-key) — Panel title for the discovery step. <!--#76953a701777527f-->
+- `cli.steprender.title.project_summary` (json-key) — Panel title for the project-summary step. <!--#b540b698053cbd5e-->
+- `cli.steprender.title.plan_tasks` (json-key) — Panel title for the task-planning step. <!--#1968d5cfab05c699-->
+- `cli.steprender.title.confirm` (json-key) — Panel title for the confirmation step. <!--#ee308f71a3c11167-->
+- `cli.steprender.severity.critical` (json-key) — Severity label for critical findings. <!--#422d1e3b65394f2d-->
+- `cli.steprender.severity.high` (json-key) — Severity label for high findings. <!--#a52cc578d3c87283-->
+- `cli.steprender.severity.medium` (json-key) — Severity label for medium findings. <!--#db3a4c30e066e50f-->
+- `cli.steprender.severity.low` (json-key) — Severity label for low findings. <!--#de9860e52f4c7866-->
+- `merge.strategy.not_a_string` (json-key) — Config validation error stating the merge strategy value was not a string. <!--#5eadfd91b9b4fb95-->
+- `merge.strategy.removed_default` (json-key) — Migration error stating the 'default' merge strategy was removed in favour of 'safe'. <!--#6eaf502ce9afaacc-->
+- `merge.strategy.removed_robust` (json-key) — Migration error stating the 'robust' merge strategy was removed in favour of 'fast'. <!--#57544ac444f6fc34-->
+- `merge.strategy.unknown` (json-key) — Config validation error rejecting an unrecognised merge strategy, listing the allowed values. <!--#b0a0d95bd02ee76f-->
+- `migrate.note.charter_llm_failed` (json-key) — Review note stating charter LLM assembly failed and a verbatim-preserving fallback was written instead. <!--#ee5a7c845deb8a45-->
+- `migrate.reason.file_not_found` (json-key) — Reason fragment used when a migration input file is missing. <!--#d730ffb7fa0139a1-->
+
+### `src/se3/i18n/locales/zh-CN.json` (json) — Simplified-Chinese (zh-CN) locale catalogue for the se3 CLI: a flat map of dotted message keys (cli.common.*, cli.run.*, cli.error.*, and the confirm/resume/interrupt/discovery prompt families) to their translated strings, including interpolation placeholders and Rich markup. <!--#4bbd570428626837|0031c63160356a7c-->
+- `cli.common.done` (json-key) — Shared CLI label for the word "done" (完成). <!--#493dc211a2941efa-->
+- `cli.common.cancelled` (json-key) — Shared CLI label for a cancelled action (已取消). <!--#9199f6d2dd14865b-->
+- `cli.common.error` (json-key) — Shared CLI label for the word "error" (错误). <!--#fdd635d7c5cbb2fb-->
+- `cli.common.warning` (json-key) — Shared CLI label for the word "warning" (警告). <!--#0759a42085198ea4-->
+- `cli.common.yes` (json-key) — Shared CLI label for an affirmative answer (是). <!--#54735afd6c0386ef-->
+- `cli.common.no` (json-key) — Shared CLI label for a negative answer (否). <!--#3e844d96300ac538-->
+- `cli.run.starting` (json-key) — Message announcing the start of a run, interpolating the task description. <!--#48afa1831398d3e0-->
+- `cli.run.completed` (json-key) — Message announcing a completed run with its elapsed seconds. <!--#6f7fe5a9cb666c9b-->
+- `cli.error.not_a_project` (json-key) — Error shown when the current directory has no se3.yaml and so is not an se3 project. <!--#4ee3361f226b8487-->
+- `cli.greeting` (json-key) — Simple greeting string interpolating a name (demo/sample message key). <!--#f5d9d877e884fcf1-->
+- `cli.run.choice.select` (json-key) — Prompt asking the user to pick a numbered choice. <!--#93da4979ed4e3c96-->
+- `cli.run.choice.enter_between` (json-key) — Validation message telling the user to enter a number within the allowed range. <!--#5c51345f2077d4cc-->
+- `cli.run.choice.enter_valid` (json-key) — Validation message telling the user to enter a valid number. <!--#0475dd67d92847f1-->
+- `cli.run.choice.non_interactive` (json-key) — Notice that a choice was auto-selected because no interactive terminal is attached. <!--#5f7852b0d8398880-->
+- `cli.run.what_to_do` (json-key) — Top-level prompt asking the user which action to perform. <!--#d8254486c1859b05-->
+- `cli.run.start_new_flow` (json-key) — Menu option label for starting a new flow. <!--#2e7640ef0c2c20e3-->
+- `cli.run.confirm.review_prompt` (json-key) — Prompt asking the user to review the output of a given step type. <!--#c7b4924e6e1d2d0e-->
+- `cli.run.confirm.opt_approve` (json-key) — Confirmation-gate option label for approving and continuing. <!--#75f1fbbd18d866dd-->
+- `cli.run.confirm.opt_request_changes` (json-key) — Confirmation-gate option label for requesting changes. <!--#e54a9d6742dff116-->
+- `cli.run.confirm.opt_exit` (json-key) — Confirmation-gate option label for exiting and pausing the flow. <!--#e9aca57e7c417970-->
+- `cli.run.confirm.feedback_title` (json-key) — Panel title for the revision-feedback input prompt. <!--#6449484dd130129e-->
+- `cli.run.confirm.feedback_message` (json-key) — Instruction text for entering revision feedback, listing the submit/cancel key bindings. <!--#d1b72fb958833629-->
+- `cli.run.confirm.approved` (json-key) — Confirmation result text shown when the step was approved. <!--#274cc6ed267309a9-->
+- `cli.run.confirm.changes_requested` (json-key) — Confirmation result text echoing the user's requested changes. <!--#a03e5b373c03a62a-->
+- `cli.run.confirm.result_title` (json-key) — Panel title for the confirmation result. <!--#2610437c1a0648e6-->
+- `cli.run.confirm.found_existing` (json-key) — Dim notice that a pre-existing confirmation response was found and reused. <!--#4066c8270502b927-->
+- `cli.run.interjection_received` (json-key) — Dim notice that an interjection arrived from the web console. <!--#2f97a7bfc4485eb2-->
+- `cli.run.resume.no_flows` (json-key) — Dim notice that no existing flows were found, so a new flow starts. <!--#df7aacda7dfc230e-->
+- `cli.run.resume.no_in_progress` (json-key) — Dim notice that no in-progress flows were found to resume. <!--#7cff6e53e7e14fa6-->
+- `cli.run.resume.found_completed` (json-key) — Dim notice reporting how many completed flows were found. <!--#b67787a0d5294fa3-->
+- `cli.run.resume.title` (json-key) — Panel title for the resume-flow prompt. <!--#b250a41414a719cb-->
+- `cli.run.resume.label_failed` (json-key) — Adjective label used when describing a failed flow in resume prompts. <!--#4212f2700145d73f-->
+- `cli.run.resume.label_interrupted` (json-key) — Adjective label used when describing an interrupted flow in resume prompts. <!--#ec1dcdb12175a0af-->
+- `cli.run.resume.worktree_suffix` (json-key) — Parenthetical suffix marking a resumable flow as running in a worktree. <!--#5fa86378daef51b6-->
+- `cli.run.resume.single_body` (json-key) — Body text describing the single resumable flow found (id, description, current step). <!--#e1303b3369e7facc-->
+- `cli.run.resume.action_retry` (json-key) — Menu option label for retrying a failed flow. <!--#12da3835ab138440-->
+- `cli.run.resume.action_resume` (json-key) — Menu option label for resuming an interrupted flow. <!--#fe2fed40dc25ab75-->
+- `cli.run.resume.multi_header` (json-key) — Header listing how many resumable flows were found. <!--#1e2eee72dba35aae-->
+- `cli.run.resume.tag_failed` (json-key) — Inline tag marking a listed flow as failed. <!--#dd0dbc33d492c625-->
+- `cli.run.resume.tag_worktree` (json-key) — Inline tag marking a listed flow as worktree-based. <!--#0b4c119665fbcb73-->
+- `cli.run.resume.flow_option` (json-key) — Row template for one selectable flow in the resume list (description, step, tags). <!--#16c965ac26aaf8f3-->
+- `cli.run.resume.which_flow` (json-key) — Prompt asking which of several flows to resume. <!--#1efb1f7059cf1f64-->
+- `cli.run.interrupt.title` (json-key) — Panel title for the Ctrl+C interjection (append-instruction) prompt. <!--#4d694380bb933cdb-->
+- `cli.run.interrupt.message` (json-key) — Instruction text for typing an appended instruction on interrupt, with key bindings and empty-means-retry note. <!--#391cea03c599deab-->
+- `cli.run.interrupt.exit_title` (json-key) — Panel title shown when the user exits via interrupt. <!--#57b33171168f823e-->
+- `cli.run.interrupt.saved_body` (json-key) — Body text confirming the flow state was saved on interrupt and how to resume it. <!--#23f36e16fb69fcbd-->
+- `cli.run.interrupt.recorded` (json-key) — Dim notice that the appended instruction was recorded and the step will retry with it. <!--#9d271f43b6bca2dd-->
+- `cli.run.interrupt.retry_as_is` (json-key) — Dim notice that the step is being retried unchanged. <!--#efb74677a6c28968-->
+- `cli.run.discovery.resume_notice` (json-key) — Dim notice that discovery is resuming and awaits the user's reply. <!--#71a688c8436a2cb2-->
+- `cli.run.discovery.pause_title` (json-key) — Panel title shown when discovery pauses for user input. <!--#35b8e674ee2cf960-->
+- `cli.run.discovery.pause_body` (json-key) — Body text explaining that discovery is clarifying requirements and asking the user to answer above. <!--#c484b595223a42d8-->
+- `cli.run.discovery.response_title` (json-key) — Panel title for the discovery reply input prompt. <!--#935186b86b3aa596-->
+- `cli.run.discovery.response_message` (json-key) — Instruction text for typing a discovery reply, with submit/cancel key bindings. <!--#0dfe1d5f1992ed57-->
+- `cli.run.discovery.paused_title` (json-key) — Panel title shown when discovery has been paused. <!--#fea2f8b333e3d97b-->
+- `cli.run.discovery.paused_body` (json-key) — Body text confirming discovery was paused, state saved, and how to resume. <!--#f4fccc8cff907b9f-->
+- `cli.run.discovery.provide_response` (json-key) — Yellow warning asking the user to provide a response or press Ctrl+C to exit. <!--#7359845a9b2e381c-->
+- `cli.run.discovery.confirm_title` (json-key) — Panel title for the discovery confirmation prompt. <!--#0cd8db65216a1f6a-->
+- `cli.run.discovery.confirm_message` (json-key) — Instruction text for the discovery confirm gate: enter 1 to accept or type feedback to keep exploring. <!--#47629962e061f033-->
+- `cli.run.discovery.empty_round_prompt` (json-key) — Fallback prompt used when a discovery round produced no questions, asking the user for more detail. <!--#ea1d9a3e67b0680c-->
+- `cli.run.discovery.captured_input` (json-key) — Dim notice that the user's input was captured and discovery will continue with it. <!--#a9ace470acd67881-->
+- `cli.run.error.flow_not_found` (json-key) — Error message for a flow id that does not exist. <!--#d8bbee90ab70b6e1-->
+- `cli.run.error.flow_completed` (json-key) — Error message stating a completed flow cannot be resumed. <!--#64e5da282cf611d5-->
+- `cli.run.error.task_required` (json-key) — Error message stating a new flow requires a task description. <!--#25a2d360a134f72c-->
+- `cli.run.error.step_failed` (json-key) — Error message reporting that a step failed, with the error text. <!--#9508ebc939725a35-->
+- `cli.run.error.max_retries` (json-key) — Error message stating a step hit its maximum retry count. <!--#bb72b27845027193-->
+- `cli.run.error.flow_failed` (json-key) — Error message reporting that the whole flow failed, with the error text. <!--#8c0b95351a0c58f0-->
+- `cli.run.error.unknown` (json-key) — Placeholder text for an unknown error. <!--#19d912ec577089a9-->
+- `output.error.prefix` (json-key) — Prefix prepended to error output lines (错误：). <!--#86e21c75b39ada12-->
+- `output.context.heading` (json-key) — Heading introducing the context section of an error/output block. <!--#985ebbc0dc72726e-->
+- `output.panel.error` (json-key) — Default title for an error panel. <!--#3174744d0e521af6-->
+- `output.panel.success` (json-key) — Default title for a success panel. <!--#8b5873abd6dd377e-->
+- `cli.run.flow_info.title` (json-key) — Panel title for the resumed-flow info block. <!--#d37e42f53ce9c715-->
+- `cli.run.flow_info.body` (json-key) — Body text of the resumed-flow info block (flow id, current step, task). <!--#c4e71f3a7f152539-->
+- `cli.run.new_flow.title` (json-key) — Panel title for the new-flow info block. <!--#17aeaa88e010f28e-->
+- `cli.run.new_flow.created` (json-key) — Line reporting the id of the newly created flow. <!--#039c7ca70d11c610-->
+- `cli.run.new_flow.task` (json-key) — Line showing the new flow's task description. <!--#a308d3b3448829fd-->
+- `cli.run.new_flow.type_user` (json-key) — Line showing the new flow's task type when explicitly given by the user. <!--#b8e74f1d9d7b8c1c-->
+- `cli.run.new_flow.type_pending` (json-key) — Line stating the task type is pending and will be decided by the analyze step. <!--#868954c62537e0fe-->
+- `cli.run.new_flow.change` (json-key) — Line showing the change name attached to the new flow. <!--#c06eb313d0c7452f-->
+- `cli.run.no_current_step` (json-key) — Dim notice that there is no current step, so the flow is marked complete. <!--#bf39205bc7bea4a5-->
+- `cli.run.revision_resuming` (json-key) — Yellow notice that a step is resuming because changes were previously requested on it. <!--#139638d81eca18ca-->
+- `cli.run.interrupted_waiting_lock` (json-key) — Yellow notice that the run was interrupted while waiting for the main worktree lock. <!--#798ef04fda9d5cd6-->
+- `cli.run.pending_suffix` (json-key) — Dim "(pending)" suffix appended to a step/type label. <!--#345ffad5348af36a-->
+- `cli.run.revision_requested` (json-key) — Yellow notice that changes were requested, so the flow returns to the previous step. <!--#e0d459a85cfd84d9-->
+- `cli.run.step_completed` (json-key) — Green checkmark line reporting a completed step and its duration. <!--#e100e3ebf9f162bd-->
+- `cli.run.flow_completed` (json-key) — Message announcing the flow completed successfully. <!--#cfad56f333850ea7-->
+- `cli.run.session_usage_title` (json-key) — Panel title for the session-level token usage summary. <!--#6d70798024fb1bb6-->
+- `cli.run.flow_ended_status` (json-key) — Dim line reporting the terminal status the flow ended with. <!--#fc5b0c29ca748bd5-->
+- `cli.run.failure.paused_non_interactive` (json-key) — Yellow notice that a step failed with no TTY, so a retry_decision call was written and the flow paused. <!--#ff2652dc88f995ef-->
+- `cli.run.failure.opt_retry` (json-key) — Step-failure menu option label for retrying the step. <!--#37f5a9f1012d2682-->
+- `cli.run.failure.opt_skip` (json-key) — Step-failure menu option label for skipping to the next step. <!--#c857aea55e1b1a7a-->
+- `cli.run.failure.opt_abort` (json-key) — Step-failure menu option label for aborting the flow. <!--#48ecb0a3b42a3934-->
+- `cli.run.merge.not_landed` (json-key) — Warning that a completed worktree flow's branch was never merged, with manual merge instructions. <!--#f2d38c37403a2728-->
+- `cli.run.merge.unknown_target` (json-key) — Fallback label for an unknown merge target branch ("original branch"). <!--#32fa17dc17ef1afd-->
+- `cli.run.merge.header` (json-key) — Header line for the in-flow worktree merge, showing the target branch. <!--#46eb7d9d69bed3cc-->
+- `cli.run.merge.merged` (json-key) — Message confirming a branch was merged back into its target. <!--#4069665d6ac300a2-->
+- `cli.run.merge.resolved_issue` (json-key) — Dim notice that the source issue was resolved by the merge. <!--#910f2e55eb1f7cc9-->
+- `cli.run.worktree.cannot_start` (json-key) — Error stating a --worktree run could not be started. <!--#74b5f458ecff8e56-->
+- `cli.run.worktree.create_failed` (json-key) — Error stating creation of the isolated worktree failed. <!--#ea9bcf34a29496e6-->
+- `cli.run.worktree.title` (json-key) — Panel title for a worktree run. <!--#397afb4dd518386b-->
+- `cli.run.worktree.started` (json-key) — Body text reporting the started worktree run's branch, path, and merge-back target. <!--#0a7b67630c7d65ca-->
+- `cli.run.worktree.paused_title` (json-key) — Panel title shown when a worktree run pauses. <!--#0f41f26da7b127b8-->
+- `cli.run.worktree.did_not_complete` (json-key) — Message that the worktree run exited without completing, where state is kept, and how to resume. <!--#c67fecb1e4218e0f-->
+- `cli.run.worktree.paused_no_merge` (json-key) — Message that the worktree run paused awaiting input, so no merge was attempted. <!--#837e673f6f34c889-->
+- `cli.run.worktree.path_gone` (json-key) — Error stating the worktree path no longer exists so the run cannot be resumed. <!--#4b0b0f5426d54104-->
+- `cli.run.worktree.did_not_complete_resume` (json-key) — Message that a resumed worktree run again exited without completing, with resume instructions. <!--#5303140bff63933c-->
+- `cli.run.worktree.paused_again` (json-key) — Message that a resumed worktree run paused again awaiting input, with no merge attempted. <!--#e901139807e7c905-->
+- `cli.run.worktree.no_branch` (json-key) — Warning that a completed worktree run recorded no branch, so it cannot be auto-merged. <!--#370260cac144824d-->
+- `cli.display.usage.title` (json-key) — Title for the token-usage display block. <!--#6d8aaf48ba4fe069-->
+- `cli.display.usage.input_tokens` (json-key) — Label for the input-tokens field in the usage display. <!--#1c8f0a38c6236b9b-->
+- `cli.display.usage.output_tokens` (json-key) — Label for the output-tokens field in the usage display. <!--#eec32120ca2da5b4-->
+- `cli.display.usage.cache_read` (json-key) — Label for the cache-read tokens field in the usage display. <!--#c7ec88acf4147130-->
+- `cli.display.usage.cache_creation` (json-key) — Label for the cache-creation tokens field in the usage display. <!--#082dddd9dcdd347d-->
+- `cli.display.usage.cost` (json-key) — Label for the cost field in the usage display. <!--#f3483078aee7c8fe-->
+- `cli.display.proposal.title` (json-key) — Title for the proposal display block. <!--#8dd9168e80d3c683-->
+- `cli.display.proposal.summary` (json-key) — Label for the summary section of a proposal. <!--#4dd19eabc3cc7571-->
+- `cli.display.proposal.files_to_modify` (json-key) — Label for the list of files a proposal will modify. <!--#5f13883b9c163820-->
+- `cli.display.proposal.files_to_create` (json-key) — Label for the list of files a proposal will create. <!--#cfc1c3f7e738dcca-->
+- `cli.display.proposal.rationale` (json-key) — Label for the rationale section of a proposal. <!--#6043f3bf4c5f30fa-->
+- `cli.display.design.title` (json-key) — Title for the design-document display block. <!--#444b70d8097118a8-->
+- `cli.display.design.overview` (json-key) — Section heading for the design overview. <!--#908a200c203b7505-->
+- `cli.display.design.components` (json-key) — Section heading for the design's components list. <!--#58241e7812ed8098-->
+- `cli.display.design.interfaces` (json-key) — Section heading for the design's interfaces list. <!--#a91677a8b836f369-->
+- `cli.display.design.key_decisions` (json-key) — Section heading for the design's key decisions. <!--#adfa8c342725fa98-->
+- `cli.display.design.reason` (json-key) — Label prefixing the reason behind a design decision. <!--#f65f6b0bd9b9887a-->
+- `cli.display.spec.title` (json-key) — Title for the spec-content display block. <!--#08fc98ed1f5ab11d-->
+- `cli.display.spec.field_title` (json-key) — Label for a spec's title field. <!--#b5f6e46041b71e16-->
+- `cli.display.spec.field_version` (json-key) — Label for a spec's version field. <!--#e86f1829f76ba5c7-->
+- `cli.display.spec.field_type` (json-key) — Label for a spec's type field. <!--#3f216e8b45c752d8-->
+- `cli.display.spec.description` (json-key) — Section heading for a spec's description. <!--#0381215f2e94d256-->
+- `cli.display.spec.requirements` (json-key) — Section heading for a spec's requirements. <!--#09d7c7e09e29bbaa-->
+- `cli.display.diff.more_lines` (json-key) — Truncation notice showing how many diff lines were omitted. <!--#8b872161206029e8-->
+- `cli.display.diff.heading` (json-key) — Heading for a rendered diff of a given file path. <!--#3dc5de83766a049a-->
+- `cli.version` (json-key) — Version line printed by the version command. <!--#529b6af10819da28-->
+- `cli.input.title` (json-key) — Panel title for the generic task-input prompt. <!--#166c200578db9581-->
+- `cli.input.prompt` (json-key) — Instruction text for entering a task description, with submit/cancel key bindings. <!--#ec18ca91c1672052-->
+- `cli.input.content_title` (json-key) — Panel title template for showing the captured content of a titled input. <!--#2f04edb0f9e09179-->
+- `cli.input.cancelled_message` (json-key) — Message printed when the user cancels an input prompt. <!--#1fe28c2bb44263d4-->
+- `cli.run.invalid_output_format` (json-key) — Error stating the --output-format value is invalid and listing the allowed values. <!--#098fa37e58a27c9f-->
+- `cli.preset.mutually_exclusive` (json-key) — Error stating --preset and --type cannot be used together. <!--#5acdefc77a92fc9c-->
+- `cli.preset.none_available` (json-key) — Message stating no presets are available. <!--#32d3069da8983f65-->
+- `cli.preset.title` (json-key) — Panel title for the preset listing. <!--#77990d228162b0bd-->
+- `cli.preset.available_header` (json-key) — Header introducing the list of available presets. <!--#6eaac5afff1c5bef-->
+- `cli.preset.entry` (json-key) — Row template for one preset entry (name, type, source layer). <!--#476fa4caf545bf30-->
+- `cli.preset.resolve_error` (json-key) — Generic error line for a preset resolution failure. <!--#3ad9229088067aca-->
+- `cli.issue.none_open` (json-key) — Message stating no open issues were found (run --from-issue path). <!--#b335945b798cc5e6-->
+- `cli.issue.title` (json-key) — Panel title for the issue block in the run command. <!--#d805f50ad9331b91-->
+- `cli.issue.open_header` (json-key) — Header introducing the list of open issues. <!--#e6fc8b6a5f7a4fae-->
+- `cli.issue.select_title` (json-key) — Panel title for the interactive issue selection prompt. <!--#30b48492d747c42f-->
+- `cli.issue.entry` (json-key) — Row template for one issue in the selection list (id, title, priority). <!--#344d1e62c9e8b303-->
+- `cli.issue.enter_id` (json-key) — Prompt asking the user to type an issue id. <!--#3db5e7ce8f443054-->
+- `cli.issue.not_found` (json-key) — Error stating the given issue id was not found (run command). <!--#aeff5d273e1fa9a0-->
+- `cli.issue.already_in_progress` (json-key) — Error stating the issue is already in progress and must be reset first. <!--#47971e4552370c46-->
+- `cli.issue.status_error` (json-key) — Generic error line for an issue status transition failure. <!--#8082720979750226-->
+- `cli.run.task_required_new_flow` (json-key) — Usage error stating a new flow needs a task description, with example commands. <!--#ff5f4d8dd71aa031-->
+- `cli.run.task_required` (json-key) — Usage error stating a task description (or --resume) is required, with example commands. <!--#6a9dc31aeb52c0f7-->
+- `cli.guardrails.size_check_header` (json-key) — Header for the project-wide spec size guardrail check. <!--#3f3b1fa188870b82-->
+- `cli.guardrails.project` (json-key) — Line showing the project root being checked by guardrails. <!--#2a653bd51319afd2-->
+- `cli.guardrails.tier` (json-key) — Line showing the guardrail enforcement tier. <!--#0a94a9dfa1efb466-->
+- `cli.guardrails.size_violations_found` (json-key) — Warning header reporting how many size violations were found. <!--#39c52b7da856fa3e-->
+- `cli.guardrails.size_detail` (json-key) — Inline detail showing a size violation's actual bytes versus its limit. <!--#269f6ce8b5a1177e-->
+- `cli.guardrails.tier_enforce_failing` (json-key) — Message stating the tier is 'enforce', so the check fails. <!--#3fd458a71b05aca6-->
+- `cli.guardrails.tier_warn_reporting` (json-key) — Message stating the tier is 'warn', so violations are only reported. <!--#94e5c1623df53de0-->
+- `cli.guardrails.size_title` (json-key) — Panel title for the spec size guardrail results. <!--#0535b6cec3d3a1b0-->
+- `cli.guardrails.size_all_passed` (json-key) — Success message stating all spec size guardrails passed. <!--#38e2e148c5fa1df7-->
+- `cli.guardrails.spec_file_required` (json-key) — Error stating a spec file argument (or --sizes) is required. <!--#020361121e68220f-->
+- `cli.guardrails.spec_file_not_found` (json-key) — Error stating the given spec file could not be found. <!--#2ea689dbf2029a27-->
+- `cli.guardrails.no_original_in_git` (json-key) — Warning that the original version of the spec could not be found in git history. <!--#5bd9c69603286f4e-->
+- `cli.guardrails.check_header` (json-key) — Header for the per-file spec guardrail (diff) check. <!--#87486f66e0ecd881-->
+- `cli.guardrails.file` (json-key) — Line showing which spec file is being checked. <!--#3423315bbe71236d-->
+- `cli.guardrails.violations_found` (json-key) — Warning header reporting how many diff violations were found. <!--#1d464cede5892f48-->
+- `cli.guardrails.rule` (json-key) — Line naming the guardrail rule a violation broke. <!--#e0cd8979bf9012c2-->
+- `cli.guardrails.content_passed` (json-key) — Success message stating the content guardrails found no diff violations. <!--#5dc704bd82a1bb52-->
+- `cli.guardrails.size_violations_found_tier` (json-key) — Warning header reporting size violations along with the enforcement tier. <!--#2901d2ad2922b58e-->
+- `cli.guardrails.size_tier_enforce_failing` (json-key) — Indented message stating the size tier is 'enforce', so the check fails. <!--#f55bc826d69b02dc-->
+- `cli.guardrails.size_tier_warn_reporting` (json-key) — Indented message stating the size tier is 'warn', so violations are only reported. <!--#33ec6df02374bc45-->
+- `cli.guardrails.check_title` (json-key) — Panel title for the guardrail check results. <!--#f3816779302472e9-->
+- `cli.daemon.title` (json-key) — Panel title for daemon command output. <!--#0f9db36ac29e6b9e-->
+- `cli.daemon.websockets_missing` (json-key) — Warning that the 'websockets' package is missing, so the daemon runs local-only. <!--#42ec036a3b93ba4b-->
+- `cli.daemon.connected` (json-key) — Message confirming the daemon connected to the central server. <!--#f0a35d9b2c9ba8df-->
+- `cli.daemon.connect_failed` (json-key) — Warning that the daemon failed to connect to the central server, with the last error. <!--#22382380438313c6-->
+- `cli.daemon.not_connected_yet` (json-key) — Warning that the daemon has not yet connected, pointing to `se3 daemon status`. <!--#cc8374527fe96449-->
+- `cli.daemon.already_running` (json-key) — Message stating the daemon is already running, with its pid. <!--#ecb22c6bcbd30f27-->
+- `cli.daemon.started` (json-key) — Message reporting the daemon's start status and pid. <!--#404a6e4b732c82ca-->
+- `cli.daemon.not_running` (json-key) — Message stating the daemon is not running. <!--#4b675f80862c1be8-->
+- `cli.daemon.stop_timeout` (json-key) — Message stating the daemon did not stop within the timeout. <!--#5e3756f4ddb83e95-->
+- `cli.daemon.stopped` (json-key) — Message confirming the daemon was stopped, with its pid. <!--#b0b9ef1f354c4d69-->
+- `cli.daemon.status_title` (json-key) — Panel title for the daemon status report. <!--#ae5c01cc043f89e0-->
+- `cli.daemon.status_running` (json-key) — Status line stating the daemon is running, with its pid. <!--#e8de2e35802e200f-->
+- `cli.daemon.status_machine` (json-key) — Status line showing the daemon's machine id. <!--#6e284fa77beaefd7-->
+- `cli.daemon.status_server` (json-key) — Status line showing the configured central server. <!--#b3caa71e4f47c0ad-->
+- `cli.daemon.not_configured` (json-key) — Placeholder shown when the daemon's server is not configured. <!--#137a2e74f5de8a53-->
+- `cli.daemon.status_conn_local` (json-key) — Status line stating the daemon is local-only because no server is configured. <!--#d7650a45ed0e2a1f-->
+- `cli.daemon.status_conn_connected` (json-key) — Status line stating the daemon is connected. <!--#cede1d1c95804376-->
+- `cli.daemon.status_conn_not_connected_reason` (json-key) — Status line stating the daemon is not connected, with the reason. <!--#17dee85fb372b47c-->
+- `cli.daemon.status_conn_not_connected_no_reason` (json-key) — Status line stating the daemon is not connected with no reason available, pointing to daemon.log. <!--#b4507274de15c155-->
+- `cli.daemon.status_tracked_flows` (json-key) — Status line reporting how many flows the daemon is tracking. <!--#692ab116c14ddd36-->
+- `cli.daemon.flow_unknown` (json-key) — Placeholder for an unknown flow in the daemon status listing. <!--#4587dbe34b17ff5a-->
+- `cli.daemon.status_flow_entry` (json-key) — Row template for one tracked flow in daemon status (pid, flow id, origin). <!--#4aaaebbef8fe94be-->
+- `cli.merge.branch_required` (json-key) — Error stating `se3 merge` needs at least one branch name, with usage. <!--#f34258be8add9f7f-->
+- `cli.merge_unlock.lock_file` (json-key) — Line showing the path of the merge lock file. <!--#b54686ef464bd1ab-->
+- `cli.merge_unlock.holder_none` (json-key) — Line stating there is no lock holder because no lock file exists. <!--#ed9a71fb5341381e-->
+- `cli.merge_unlock.state_no_lock` (json-key) — State line stating no merge lock exists. <!--#a74f8c86c4b30e72-->
+- `cli.merge_unlock.pid_none_recorded` (json-key) — Placeholder for a lock file with no recorded pid. <!--#91408929d0be7f24-->
+- `cli.merge_unlock.holder_pid` (json-key) — Line showing the pid recorded as the lock holder. <!--#dccabb3037dcc7ce-->
+- `cli.merge_unlock.state_stale_corrupt` (json-key) — State line stating the lock is stale because its pid record is corrupt/unparseable. <!--#a10eebd05de24e1e-->
+- `cli.merge_unlock.state_stale_no_pid` (json-key) — State line stating the lock is stale because no pid was recorded. <!--#972eba697019d3b3-->
+- `cli.merge_unlock.state_stale_dead` (json-key) — State line stating the lock is stale because the holder process is gone. <!--#8067ddf4f0701465-->
+- `cli.merge_unlock.state_alive` (json-key) — State line stating the lock is live because the holder process is still running. <!--#9c519bf2a91f0912-->
+- `cli.merge_unlock.no_lock_to_release` (json-key) — Message stating there is no merge lock to release. <!--#36d20bb2e5a3b994-->
+- `cli.merge_unlock.released_stale` (json-key) — Message confirming a stale merge lock was released. <!--#e213b0e31e155104-->
+- `cli.merge_unlock.released_force` (json-key) — Warning that a live-held merge lock was force-released. <!--#7cd9df341544ca83-->
+- `cli.merge_unlock.released_force_warning` (json-key) — Follow-up warning that force-releasing may break merge mutual exclusion. <!--#724ed8a6185ac21f-->
+- `cli.merge_unlock.refused_alive` (json-key) — Message refusing to release the lock because its holder is still alive. <!--#4af4e6371f8dc46e-->
+- `cli.merge_unlock.refused_alive_hint` (json-key) — Hint telling the user to re-run with --force if no merge is actually running. <!--#25680520a8d5cdcf-->
+- `cli.merge_unlock.failed_remove` (json-key) — Error stating the lock file could not be removed and still exists on disk. <!--#a500ab08b2f565de-->
+- `cli.merge_unlock.failed_remove_hint` (json-key) — Hint explaining the removal failure is usually a permissions issue needing manual deletion. <!--#8ba7867be7d0ab6f-->
+- `cli.merge_unlock.title` (json-key) — Panel title for the merge-unlock command output. <!--#961e772e076a5c9e-->
+- `end_session.no_project_root` (json-key) — Error stating no project root could be found for end-session. <!--#4e40f4524bc08627-->
+- `end_session.step.resolve_root` (json-key) — Step label: resolving the project root. <!--#696734d72fd2a73d-->
+- `end_session.step.find_worktree` (json-key) — Step label: locating the session's worktree. <!--#b1cd17186a71d4e9-->
+- `end_session.step.terminate_process` (json-key) — Step label: terminating the session's process. <!--#c7524870d94b15ba-->
+- `end_session.step.archive_session` (json-key) — Step label: archiving the session. <!--#1fbc5484e95154a4-->
+- `end_session.step.archive_worktree` (json-key) — Step label: archiving the worktree. <!--#db2bda5ad31eef3e-->
+- `end_session.step.promote_state` (json-key) — Step label: promoting engine state to the main project. <!--#c7a19cdc0dd18c41-->
+- `end_session.step.sync_history` (json-key) — Step label: syncing history files. <!--#126d1991e8da9c08-->
+- `end_session.step.clear_resumable` (json-key) — Step label: clearing the resumable snapshot. <!--#510fa597b71bec8b-->
+- `end_session.step.cleanup_branch` (json-key) — Step label: cleaning up the session branch. <!--#cb8841da3d2272f7-->
+- `end_session.step.cleanup_worktree` (json-key) — Step label: cleaning up the worktree directory. <!--#0f00fc42b1dd3441-->
+- `end_session.detail.branch` (json-key) — Detail cell showing the branch name. <!--#7bafb5838648a934-->
+- `end_session.detail.main_branch_session` (json-key) — Detail cell noting the session ran on the main branch (no worktree). <!--#30ad6d4390386c2e-->
+- `end_session.detail.process_still_alive` (json-key) — Detail cell explaining archiving was skipped because the process is still alive. <!--#631ce546187e27fc-->
+- `end_session.detail.no_archive_worktree_given` (json-key) — Detail cell noting --no-archive-worktree was passed. <!--#5d1acdcd8ebe9312-->
+- `end_session.detail.worktree_dir_gone` (json-key) — Detail cell noting the worktree directory no longer exists. <!--#f4f95f0a60df5d99-->
+- `end_session.detail.no_engine_json_to_promote` (json-key) — Detail cell noting there was no engine.json to promote. <!--#84f13774e1df0448-->
+- `end_session.detail.files_synced` (json-key) — Detail cell reporting how many files were synced. <!--#5ca078e8bb3a96f2-->
+- `end_session.detail.unknown` (json-key) — Generic "(unknown)" placeholder used in end-session detail cells. <!--#5b8b2dd60e9313f5-->
+- `end_session.detail.archive_not_created` (json-key) — Detail cell noting no archive was created, so worktree/branch were retained. <!--#34199317892b56dd-->
+- `end_session.detail.inferred` (json-key) — Detail cell marking a branch name as inferred rather than recorded. <!--#402c7d82b9c06d61-->
+- `end_session.detail.worktree_still_present` (json-key) — Detail cell noting the worktree directory is still present at the given path. <!--#80caa2bde286978b-->
+- `end_session.detail.removed_by_path` (json-key) — Detail cell noting the worktree was removed by path. <!--#a6caee9ab23b7b80-->
+- `end_session.detail.main_flow_mismatch` (json-key) — Detail cell explaining the main engine.json belongs to a different flow, so promotion was skipped. <!--#1f259128648b79b3-->
+- `end_session.detail.main_flow_unreadable` (json-key) — Detail cell explaining the main engine.json's flow_id is missing/unreadable so ownership can't be confirmed. <!--#08f84c15d253b656-->
+- `end_session.detail.session_archived` (json-key) — Detail cell confirming the session was archived. <!--#901cdb6da1d5ddc9-->
+- `end_session.detail.no_session_to_archive` (json-key) — Detail cell noting there was no session to archive. <!--#d9a31ef364003e7b-->
+- `end_session.detail.no_flow_id` (json-key) — Detail cell noting no flow_id was available. <!--#80dd88f8ad813f08-->
+- `end_session.term.not_running` (json-key) — Termination detail: the given pid is not running. <!--#574e1be60ff881d6-->
+- `end_session.term.sigterm_failed` (json-key) — Termination detail: SIGTERM to the pid failed, with the exception. <!--#771d97a7e5d31730-->
+- `end_session.term.sigterm_ok` (json-key) — Termination detail: the process tree was terminated via SIGTERM, with the process count. <!--#2b42c52ce97c6a94-->
+- `end_session.term.sigkill_failed` (json-key) — Termination detail: SIGKILL to the pid failed, with the exception. <!--#fa264cf67f1133e7-->
+- `end_session.term.sigkill_ok` (json-key) — Termination detail: the process tree was force-killed via SIGKILL, with the process count. <!--#515cab8595b84a66-->
+- `end_session.term.still_alive` (json-key) — Termination detail: parts of the process tree survived SIGKILL. <!--#0f86197bbb76f263-->
+- `end_session.term.no_live_process` (json-key) — Termination detail: no live process was found to terminate. <!--#08f171aaaa79d877-->
+- `end_session.table.title` (json-key) — Title of the end-session results table. <!--#7ec456604aee1be0-->
+- `end_session.table.col_step` (json-key) — End-session table column header: Step. <!--#ca4bffe68912b581-->
+- `end_session.table.col_status` (json-key) — End-session table column header: Status. <!--#898ffcefda00e413-->
+- `end_session.table.col_detail` (json-key) — End-session table column header: Detail. <!--#580106fe5e3dcc74-->
+- `end_session.status.ok` (json-key) — End-session status cell for a successful step (green). <!--#1e60e02667c99b9a-->
+- `end_session.status.skip` (json-key) — End-session status cell for a skipped step (yellow). <!--#4741af63b95f1f9b-->
+- `end_session.status.fail` (json-key) — End-session status cell for a failed step (red). <!--#eb8d1739f1337c4d-->
+- `salvage.no_project_root` (json-key) — Error stating no project root could be found for salvage. <!--#dcbc0044a9f77952-->
+- `salvage.step.read_session` (json-key) — Salvage step label: reading the session state. <!--#6c32e7312b8799c7-->
+- `salvage.step.assess_git_diff` (json-key) — Salvage step label: assessing the git diff. <!--#bbc3eb37e5a2566e-->
+- `salvage.step.commit_changes` (json-key) — Salvage step label: committing the changes. <!--#49a2b48feda67b2b-->
+- `salvage.step.create_issues` (json-key) — Salvage step label: creating issues for unfinished work. <!--#f1beb4891b6a5ecd-->
+- `salvage.step.archive_session` (json-key) — Salvage step label: archiving the session. <!--#88c69e1ce2e5da64-->
+- `salvage.detail.flow` (json-key) — Salvage detail cell naming the flow that was read. <!--#71ffe31520828b3c-->
+- `salvage.detail.no_session_git_diff` (json-key) — Salvage detail: no session found, so git diff was used instead. <!--#c03b4392d17bc69c-->
+- `salvage.detail.files_changed` (json-key) — Salvage detail reporting how many files changed. <!--#58aa3cd8f48d2ee5-->
+- `salvage.detail.no_uncommitted_changes` (json-key) — Salvage detail: there were no uncommitted changes. <!--#c4068d9f732ffcaa-->
+- `salvage.detail.committed` (json-key) — Salvage detail reporting the hash of the salvage commit. <!--#c6ed148fa058eab8-->
+- `salvage.detail.nothing_to_commit` (json-key) — Salvage detail: nothing to commit. <!--#32975b61eee762b8-->
+- `salvage.detail.created` (json-key) — Salvage detail listing the ids of issues created. <!--#76f5b22586006669-->
+- `salvage.detail.no_issues` (json-key) — Salvage detail: no issues needed to be created. <!--#7e6007bb9e702de6-->
+- `salvage.detail.session_archived` (json-key) — Salvage detail confirming the session was archived. <!--#69cd3e2066b2b2ee-->
+- `salvage.detail.no_session_to_archive` (json-key) — Salvage detail: there was no session to archive. <!--#bb767edef6d56d8e-->
+- `salvage.table.title` (json-key) — Title of the salvage results table. <!--#6af808828fa36578-->
+- `salvage.table.col_step` (json-key) — Salvage table column header: Step. <!--#c37334b3470664e3-->
+- `salvage.table.col_status` (json-key) — Salvage table column header: Status. <!--#5a9ebfaeed1c0d05-->
+- `salvage.table.col_detail` (json-key) — Salvage table column header: Detail. <!--#8f6fff34486d1bef-->
+- `salvage.status.ok` (json-key) — Salvage status cell for a successful step (green). <!--#7e397ead1302e0ee-->
+- `salvage.status.skip` (json-key) — Salvage status cell for a skipped step (yellow). <!--#2b1ebd459ac30eeb-->
+- `salvage.status.fail` (json-key) — Salvage status cell for a failed step (red). <!--#23c4e1d9d46f5c3b-->
+- `migrate.report.title` (json-key) — Title of the migration report table, naming the migrator id. <!--#74b8ae7d3acbe933-->
+- `migrate.report.col_step` (json-key) — Migration report column header: Step. <!--#78dbd0115127f5f9-->
+- `migrate.report.col_status` (json-key) — Migration report column header: Status. <!--#b2943b1d94ce641e-->
+- `migrate.report.col_detail` (json-key) — Migration report column header: Detail. <!--#6089f8dfa23522d1-->
+- `migrate.report.status_ok` (json-key) — Migration report status cell for a successful step (green). <!--#366a7da2f7c3d784-->
+- `migrate.report.status_skip` (json-key) — Migration report status cell for a skipped step (yellow). <!--#5924af86108fb3ca-->
+- `migrate.report.status_fail` (json-key) — Migration report status cell for a failed step (red). <!--#26518d88ef63d1eb-->
+- `migrate.report.notes_header` (json-key) — Header introducing migration notes that need human review. <!--#61c9bda9903e5572-->
+- `migrate.report.note_line` (json-key) — Bullet template for a single migration note. <!--#6dfad6bd01127b59-->
+- `migrate.step.charter` (json-key) — Migration step label: assembling the charter. <!--#cf746d97a4f43160-->
+- `migrate.step.colocate` (json-key) — Migration step label: colocating why-comments into the source. <!--#dd539a5066cb004b-->
+- `migrate.step.code_index` (json-key) — Migration step label: building the code-index. <!--#c541ed1e89807089-->
+- `migrate.step.delete_specs` (json-key) — Migration step label: deleting the se3/specs corpus. <!--#ed6ee99b2b0f6f55-->
+- `migrate.step.gitignore` (json-key) — Migration step label: rewriting .gitignore. <!--#daa749ba6983e68a-->
+- `migrate.detail.charter_written` (json-key) — Migration detail confirming se3/charter.md was written. <!--#fa4f4d8f6d9c6159-->
+- `migrate.detail.code_index_written` (json-key) — Migration detail confirming se3/code-index.md was written. <!--#e2461c87c987c780-->
+- `migrate.detail.no_salvage` (json-key) — Migration detail: no salvage result was available. <!--#a901c87313e79926-->
+- `migrate.detail.colocated` (json-key) — Migration detail reporting how many why-comments were colocated. <!--#e20ab0ae638245fa-->
+- `migrate.detail.colocate_skipped` (json-key) — Migration detail suffix reporting skipped colocations, so specs are retained. <!--#eb13ebf694ee5bac-->
+- `migrate.detail.no_specs_dir` (json-key) — Migration detail: there is no specs directory. <!--#8cd2fe177dd646f1-->
+- `migrate.detail.delete_disabled` (json-key) — Migration detail: spec deletion was disabled by flag. <!--#54727e7a051a872c-->
+- `migrate.detail.salvage_incomplete` (json-key) — Migration detail: salvage was incomplete, so specs are kept for safety. <!--#caad39864eb1d5b7-->
+- `migrate.detail.specs_removed` (json-key) — Migration detail confirming the spec corpus was removed. <!--#d5d04ca6546ab019-->
+- `migrate.detail.already_migrated` (json-key) — Migration detail: the project was already migrated. <!--#7aaf3e830ce2963e-->
+- `migrate.note.colocation_skipped` (json-key) — Migration note recording a specific colocation that was skipped. <!--#93a7c4f702004834-->
+- `migrate.gitignore.removed` (json-key) — Migration detail noting a pattern was removed from .gitignore. <!--#3ba2f613c123f31a-->
+- `migrate.gitignore.added` (json-key) — Migration detail noting a pattern was added to .gitignore. <!--#405ad2ca63f13910-->
+- `migrate.gitignore.root_deny` (json-key) — Migration detail noting a root-level deny-all rule plus tracked-path allowlist was added to .gitignore. <!--#f33a3948517f8abe-->
+- `migrate.list.none` (json-key) — Message stating no migrations are registered. <!--#2de78e8a50d8eb08-->
+- `migrate.list.title` (json-key) — Title of the available-migrations table. <!--#520956ffc43f312c-->
+- `migrate.list.col_id` (json-key) — Migration list column header: ID. <!--#bddbe231dc3bcedc-->
+- `migrate.list.col_description` (json-key) — Migration list column header: Description. <!--#3ae28d0e9ea81287-->
+- `migrate.run.unknown` (json-key) — Error stating the requested migrator id is unknown, listing available ids. <!--#002ae2d9343178a6-->
+- `migrate.run.no_migrators` (json-key) — Placeholder "(none)" used when listing available migrators and there are none. <!--#5071bbd9d7867e71-->
+- `migrate.migrator.spec_to_new_system.desc` (json-key) — Description of the spec→code-index/charter/why-comment migrator. <!--#e299397e96b43eb9-->
+- `merge_respond.title.error` (json-key) — Panel title for a merge-respond error. <!--#6f26c83d6125e3c1-->
+- `merge_respond.version_unparseable` (json-key) — Error stating the merged version file exists but its version field is unparseable, so no-change is refused. <!--#18e994b629216714-->
+- `merge_respond.version_unchanged` (json-key) — Detail stating the version in the file is unchanged between pre-merge and HEAD. <!--#10808e1af6c791ec-->
+- `merge_respond.title.manual_resolution_pending` (json-key) — Panel title: merge is awaiting manual resolution. <!--#59ae487e8f690bf6-->
+- `merge_respond.title.multi_commit` (json-key) — Panel title: multiple commits were detected since manual resolution began. <!--#4769f287d5834f7e-->
+- `merge_respond.title.verified` (json-key) — Panel title: the merge was verified. <!--#5a481bef6f5f0ef3-->
+- `merge_respond.title.violations_rolled_back` (json-key) — Panel title: guardrail violations were found and the commit was rolled back. <!--#7b674ef5b071ae8e-->
+- `merge_respond.title.strict_placeholder` (json-key) — Panel title: strict-mode placeholder sentinels were detected. <!--#71e5d1c3a00b7eaa-->
+- `merge_respond.title.orphan_violations` (json-key) — Panel title: orphan-spec guardrail violations were found. <!--#244f1dd6d304aba8-->
+- `merge_respond.title.guardrails_check_failed` (json-key) — Panel title: the guardrail check itself failed. <!--#b99ded1314059f7c-->
+- `merge_respond.title.accepted` (json-key) — Panel title: the merge resolution was accepted. <!--#a78ff231073e1381-->
+- `merge_respond.title.accepted_manual_fix` (json-key) — Panel title: the merge was accepted but needs a manual fix. <!--#d317b5fe7994a867-->
+- `merge_respond.title.aborted` (json-key) — Panel title: the merge was aborted. <!--#963e16b1b5486f67-->
+- `merge_respond.title.manual_parked` (json-key) — Panel title: manual resolution was parked pending a human commit. <!--#020e9764b492dd9d-->
+- `merge_respond.title.manual_resolution` (json-key) — Panel title for the manual-resolution instructions. <!--#824b43b2295304d5-->
+- `merge_respond.call_file_not_found` (json-key) — Error stating the merge call file could not be found at the given path. <!--#a93f2833a37fc0a9-->
+- `merge_respond.lock_busy` (json-key) — Error stating another se3 merge holds the lock, with the holder pid and lock path. <!--#1ecc000a79e4935d-->
+- `merge_respond.stale_pid_unparseable` (json-key) — Parenthetical fragment for a stale lock whose pid could not be parsed. <!--#d21749061b5f0825-->
+- `merge_respond.stale_pid_missing` (json-key) — Parenthetical fragment for a stale lock whose holder pid no longer exists. <!--#e68e073536e40329-->
+- `merge_respond.lock_stale` (json-key) — Error stating the merge lock appears stale and how to remove it. <!--#c6e83aadb50605dc-->
+- `merge_respond.marker_parse_failed` (json-key) — Error stating the pending-guardrail marker file could not be parsed. <!--#5b5ba39dbda41f28-->
+- `merge_respond.marker_missing_pre_sha` (json-key) — Error stating the pending-guardrail marker file lacks its 'pre_sha' field. <!--#a52ba79231db6af6-->
+- `merge_respond.read_head_failed` (json-key) — Error stating git HEAD could not be read. <!--#0b8e11093f44b95c-->
+- `merge_respond.no_new_commit` (json-key) — Message stating no new commit was made since manual resolution began, with commit instructions. <!--#af878ee0c14e46bf-->
+- `merge_respond.multi_commit_advancement` (json-key) — Message stating HEAD advanced by several commits, so a hard reset is refused. <!--#1be82a1b8c62feaf-->
+- `merge_respond.guardrails_check_failed_manual` (json-key) — Error stating the guardrail check failed after manual resolution. <!--#c15a3fb0e8b0ce80-->
+- `merge_respond.manual_accepted` (json-key) — Message confirming the manual resolution passed guardrails and was accepted. <!--#68b6e7f145b2f5c2-->
+- `merge_respond.feedback_suffix` (json-key) — Suffix appending the user's feedback text to a merge-respond message. <!--#08ad398bdd8f6251-->
+- `merge_respond.stash_recover_note` (json-key) — Note telling the user to `git stash pop` changes auto-stashed during a guardrail failure. <!--#a71bf532a80c1d1a-->
+- `merge_respond.rollback_failed` (json-key) — Warning that the rollback to the pre-merge SHA failed, with a manual reset command. <!--#11453bbb8360cf96-->
+- `merge_respond.rollback_failed_stash_note` (json-key) — Note that changes were stashed before the failed reset and should be popped after a manual reset. <!--#60a296b7b3b740f7-->
+- `merge_respond.rollback_success` (json-key) — Message confirming the violating commit was rolled back and asking the user to fix the specs. <!--#58cf143543c95847-->
+- `merge_respond.rollback_success_stash_note` (json-key) — Note that pre-rollback uncommitted changes were stashed and can be popped. <!--#da577bad82df8e21-->
+- `merge_respond.violation_line` (json-key) — Row template for one guardrail violation (type, file, message). <!--#98e522befe5bd212-->
+- `merge_respond.refused_violations_manual` (json-key) — Header refusing the manual-resolution commit because guardrail violations were detected in spec files. <!--#2ae799ba2a8d7475-->
+- `merge_respond.response_file_not_found` (json-key) — Error stating the response file is missing, showing the JSON shape to create. <!--#17d916b11b90e4b1-->
+- `merge_respond.call_file_parse_failed` (json-key) — Error stating the merge call file could not be parsed. <!--#5714cfabb3da5bab-->
+- `merge_respond.response_file_parse_failed` (json-key) — Error stating the response file could not be parsed. <!--#12c9f9ba2daf4fdf-->
+- `merge_respond.invalid_choice` (json-key) — Error stating the response 'choice' value is invalid, listing accept/abort/manual. <!--#4446bb328020dc51-->
+- `merge_respond.strict_placeholder` (json-key) — Refusal explaining the LLM resolution contains strict-mode placeholder sentinels, with manual steps. <!--#cd277f00d4abc237-->
+- `merge_respond.orphan_violations_header` (json-key) — Refusal header explaining the call file's proposed orphan-spec resolutions violate guardrails. <!--#943a72ad95a53e8b-->
+- `merge_respond.orphan_violations_footer` (json-key) — Footer telling the user to choose 'manual' and edit the specs themselves. <!--#ebe5f244540a4586-->
+- `merge_respond.write_resolved_failed` (json-key) — Error stating the resolved content could not be written. <!--#c47cde5949c55a7d-->
+- `merge_respond.commit_failed` (json-key) — Error stating the merge commit failed, with git stderr. <!--#c10ecae47279b4ef-->
+- `merge_respond.postcondition_failed` (json-key) — Error stating the post-merge-commit postcondition check failed. <!--#bbe0e91fc5d8f0b2-->
+- `merge_respond.rollback_success_merge` (json-key) — Message confirming the violating merge commit was rolled back and asking the user to fix specs and re-run. <!--#4eff81765613b3e0-->
+- `merge_respond.refused_violations_merge` (json-key) — Header refusing the merge commit because guardrail violations were detected in spec files. <!--#f4bf5b90f60d5a45-->
+- `merge_respond.guardrails_incomplete` (json-key) — Warning that the merge was accepted but post-merge guardrails could not complete, needing human review. <!--#b8e1283739f15127-->
+- `merge_respond.accepted_committed` (json-key) — Message confirming the merge conflict was resolved and committed. <!--#d1fae059214278b8-->
+- `merge_respond.accept_manual_fix` (json-key) — Message stating guardrail violations must be fixed manually before re-running the merge. <!--#dac5a2eeefe35475-->
+- `merge_respond.aborted_already_rolledback` (json-key) — Message stating the merge was aborted and rollback to pre-merge state had already happened. <!--#a763f1556b18d73d-->
+- `merge_respond.abort_failed` (json-key) — Error stating `git merge --abort` failed, with git stderr. <!--#db2a0cc5e21f6290-->
+- `merge_respond.aborted` (json-key) — Message confirming the merge was aborted. <!--#a18e76ccfd2549af-->
+- `merge_respond.cannot_park_manual` (json-key) — Error stating manual resolution cannot be parked because the pre-merge SHA is unknown, with fallback guidance. <!--#d86cc60237bf8cd6-->
+- `merge_respond.marker_write_failed` (json-key) — Error stating the pending-guardrail marker file could not be written, with manual guardrail instructions. <!--#0212e07ce395bc71-->
+- `merge_respond.spec_path_line` (json-key) — Bullet template for one spec file path in a merge-respond listing. <!--#b122af4a0176d664-->
+- `merge_respond.manual_parked_header` (json-key) — Header stating this merge touches spec files, before listing them. <!--#cd127bd1e1285acf-->
+- `merge_respond.manual_parked_footer` (json-key) — Footer with manual-resolve-then-commit instructions and a warning that violating commits are auto-rolled-back. <!--#91f8dc71a8f59ee6-->
+- `merge_respond.manual_resolve` (json-key) — Short instructions to resolve conflicts manually and then git add/commit. <!--#5b8c27b217958672-->
+- `cli.merge.validate.no_branches` (json-key) — Branch-name validation error: at least one branch is required. <!--#54762fdc61a2cd00-->
+- `cli.merge.validate.not_a_string` (json-key) — Branch-name validation error: the value is not a string. <!--#e8ba8d016fb3d9fc-->
+- `cli.merge.validate.empty_string` (json-key) — Branch-name validation error: the branch name is an empty string. <!--#5d24ac7d6c2915d2-->
+- `cli.merge.validate.leading_dash` (json-key) — Branch-name validation error: names cannot start with '-' (would look like a CLI flag). <!--#6db51cc0675edc34-->
+- `cli.merge.validate.reserved_pseudoref` (json-key) — Branch-name validation error: the name is a reserved git pseudo-ref. <!--#b453ebb62ad5a09b-->
+- `cli.merge.validate.shell_metachar` (json-key) — Branch-name validation error: the name contains shell metacharacters. <!--#3c549123574e8d58-->
+- `cli.merge.validate.git_ref_glob` (json-key) — Branch-name validation error: the name contains glob characters illegal in git refs. <!--#d8c4008493ffe4cb-->
+- `cli.merge.validate.control_char` (json-key) — Branch-name validation error: the name contains control characters. <!--#1ce8f5e0a89c5982-->
+- `cli.merge.validate.spaces` (json-key) — Branch-name validation error: the name contains spaces. <!--#26b79154754744c3-->
+- `cli.merge.validate.ref_format` (json-key) — Branch-name validation error: the name violates git check-ref-format rules. <!--#048d60d84d425e4c-->
+- `cli.merge.validate.invalid_header` (json-key) — Header listing the rejected branch names from validation. <!--#c7e0d1e94f477fb5-->
+- `cli.merge.runtime_sync.skipped_branches_header` (json-key) — Warning header listing branches whose runtime data was not synced (no bound worktree found). <!--#ef80de9cd5b9447d-->
+- `cli.merge.runtime_sync.skipped_files_header` (json-key) — Warning header listing files runtime sync skipped, enumerating the possible causes. <!--#76209fd11ca0a20d-->
+- `cli.merge.runtime_sync.idempotent_bypasses_header` (json-key) — Header listing runtime-sync idempotent bypasses where a sidecar already matched the source content. <!--#8094f3ccbc9bcb7a-->
+- `cli.merge.runtime_sync.branch_file_count` (json-key) — Row template showing a branch and its affected file count in runtime-sync reports. <!--#f42fd27bcc1dc33b-->
+- `cli.merge.runtime_sync.discarded_header` (json-key) — Header listing runtime-sync entries discarded because the current branch's tier-B state wins. <!--#fba6f61ba8866d92-->
+- `cli.merge.runtime_sync.collisions_sidecar_header` (json-key) — Header listing runtime-sync collisions that were bypassed by writing a sidecar file. <!--#659571c463cae8ef-->
+- `cli.merge.runtime_sync.collisions_audit_header` (json-key) — Header listing audit-only runtime-sync collisions where no sidecar could be written. <!--#b88e460827cda23c-->
+- `cli.merge.runtime_sync.committed_renumbers_header` (json-key) — Header listing issues renumbered on merge because their numeric ids collided. <!--#89009e4b30eb4003-->
+- `cli.merge.runtime_sync.ambiguous_refs_header` (json-key) — Header listing issue references that could not be repointed because several merged issues shared the old id. <!--#42f2a47e2bf52128-->
+- `cli.merge.runtime_sync.ambiguous_ref_line` (json-key) — Row template for one ambiguous issue reference (file, old id, candidate ids). <!--#f504c6f31d182c72-->
+- `cli.merge.human_call.call_file` (json-key) — Line showing the path of the human-review call file. <!--#6a4dcc3bcdfb337d-->
+- `cli.merge.human_call.escalated` (json-key) — Message stating the merge was escalated to human review with no call file (no confirmation gate). <!--#419bc697e3f40f14-->
+- `cli.merge.human_call.violation_line` (json-key) — Indented row template for one violation inside a human-call report. <!--#97c87400f8b96e5a-->
+- `cli.merge.human_call.recovery` (json-key) — Recovery hint telling the user to fix the reported issues and re-run `se3 merge`. <!--#c25095fed9562f24-->
+- `cli.merge.fast_stash.prestash_msg` (json-key) — Message confirming the dirty working tree was auto-stashed before a fast-strategy merge. <!--#5035de78fcca1353-->
+- `cli.merge.fast_stash.prestash_title` (json-key) — Panel title for the fast-merge pre-stash notice. <!--#e7088fadff372e5e-->
+- `cli.merge.fast_stash.pop_incomplete` (json-key) — Message stating the fast stash-pop did not fully restore, so the live stash was kept. <!--#b675bce1d3e51bda-->
+- `cli.merge.fast_stash.pop_incomplete_unmerged` (json-key) — Fragment appended when unmerged paths remain after an incomplete fast stash-pop. <!--#40fd98dd18fe5044-->
+- `cli.merge.fast_stash.pop_incomplete_title` (json-key) — Panel title for an incomplete fast-merge stash-pop recovery. <!--#c5261c56de1355c9-->
+- `cli.merge.fast_stash.pop_recovered` (json-key) — Message reporting a safely recovered fast stash-pop with conflict/archive counts. <!--#43d623373e1ee603-->
+- `cli.merge.fast_stash.pop_recovered_title` (json-key) — Panel title for a recovered fast-merge stash-pop. <!--#5fa9d6e01b79c5a8-->
+- `cli.merge.newly_merged_header` (json-key) — Header introducing the list of newly merged branches. <!--#829b4796334a2933-->
+- `cli.merge.already_ancestor_header` (json-key) — Header introducing branches already ancestors of HEAD (nothing new to merge). <!--#966ec8c780f87dac-->
+- `cli.merge.error_title` (json-key) — Panel title for a merge error. <!--#cc64fea19cf0a9e1-->
+- `cli.merge.working_tree_not_clean` (json-key) — Error stating the working tree is dirty and must be committed/stashed (or use --strategy=fast). <!--#a6f7c575316c07ef-->
+- `cli.merge.git_operation_in_progress` (json-key) — Error stating another git operation (merge/cherry-pick/rebase) is already in progress. <!--#721a929be8234d30-->
+- `cli.merge.detached_head` (json-key) — Error stating merging is impossible in detached HEAD state. <!--#9f1b0dd853179178-->
+- `cli.merge.cannot_merge_self` (json-key) — Error stating the current branch cannot be merged into itself. <!--#fb8c118205ff58a2-->
+- `cli.merge.cannot_merge_protected` (json-key) — Error stating a protected base branch cannot be merged. <!--#6623196abf88148e-->
+- `cli.merge.branch_not_exist` (json-key) — Error stating the named branch does not exist. <!--#80f75f2e0ccc94b2-->
+- `cli.merge.lock_busy` (json-key) — Error stating another `se3 merge` holds the lock, with holder pid and lock path. <!--#28c6b7a95afd317f-->
+- `cli.merge.lock_busy_title` (json-key) — Panel title stating a merge is already in progress. <!--#20789f789889386e-->
+- `cli.merge.lock_stale.pid_unparseable` (json-key) — Parenthetical fragment for a stale merge lock with an unparseable pid. <!--#1151cabf0d9abc9e-->
+- `cli.merge.lock_stale.pid_gone` (json-key) — Parenthetical fragment for a stale merge lock whose holder pid is gone. <!--#61ed9c234ed982a7-->
+- `cli.merge.lock_stale` (json-key) — Error stating the merge lock appears stale, with the rm command to clear it. <!--#d20794ff4cf66073-->
+- `cli.merge.lock_stale_title` (json-key) — Panel title stating the merge lock is stale. <!--#040f62190a6ed528-->
+- `cli.merge.stash_pop_incomplete.body` (json-key) — Body text explaining an incomplete post-merge stash-pop and the git commands to inspect and recover. <!--#751f6dd8ffab0fe3-->
+- `cli.merge.stash_pop_incomplete.title` (json-key) — Panel title for an incomplete post-merge stash-pop recovery. <!--#a632302625873d66-->
+- `cli.merge.resolved_source_issue` (json-key) — Message noting the source issue was resolved by the merge. <!--#b106bbdcb8568041-->
+- `cli.merge.reconcile_failed.summary` (json-key) — Summary stating branches integrated but version reconciliation failed, so no final version landed. <!--#2d12182c07b7306c-->
+- `cli.merge.reconcile_failed.recovery` (json-key) — Recovery hint telling the user to fix the cause and re-run `se3 merge` to retry reconciliation. <!--#5c220e6c132d1b0f-->
+- `cli.merge.reconcile_failed.tag_note` (json-key) — Note warning that a reconcile commit may exist without its git tag, requiring manual tag repair. <!--#cc2639af628a257c-->
+- `cli.merge.reconcile_failed.title` (json-key) — Panel title for a failed version reconciliation during merge. <!--#8b1990cb2c3733b8-->
+- `cli.merge.reason` (json-key) — Generic line prefixing a reason string in merge output. <!--#995b1be1cb9dac7d-->
+- `cli.merge.intent_scope_unreadable` (json-key) — Error stating the version-intent scope of the merged branches could not be determined. <!--#ad0ed2e8d6c358e3-->
+- `cli.merge.log_file` (json-key) — Line showing the path of the merge log file. <!--#2a9c0b285ce6f81b-->
+- `cli.merge.success.summary` (json-key) — Summary line reporting how many branches were merged successfully. <!--#569b466f280e09b2-->
+- `cli.merge.version_line` (json-key) — Line showing the version transition from base to final after a merge. <!--#e2e495988e0811bf-->
+- `cli.merge.version_head_note` (json-key) — Note that HEAD was already at the given version due to an earlier merge. <!--#5728e47929e42c63-->
+- `cli.merge.version_higher_warning` (json-key) — Warning that the on-disk version exceeds the aggregated target version. <!--#45a719879d9ee071-->
+- `cli.merge.version_aggregation_failed` (json-key) — Warning that version aggregation failed, with the error. <!--#6b12796bd3384614-->
+- `cli.merge.cleanup.archived_header` (json-key) — Header introducing worktrees archived before deletion during merge cleanup. <!--#d45931090480b783-->
+- `cli.merge.cleanup.deleted` (json-key) — Line listing the branches deleted during merge cleanup. <!--#61d872ae2ba1b7e1-->
+- `cli.merge.cleanup.skipped_dirty_header` (json-key) — Header listing cleanup targets skipped because their worktree was dirty. <!--#a88d64ff161d9acf-->
+- `cli.merge.cleanup.skipped_archive_failed_header` (json-key) — Header listing cleanup targets skipped because archiving failed, so worktree and branch were kept. <!--#2f96512e16686ea8-->
+- `cli.merge.cleanup.skipped_protected` (json-key) — Line listing branches skipped during cleanup because they are protected. <!--#43a2c7410dae2070-->
+- `cli.merge.cleanup.skipped_unknown_header` (json-key) — Header listing cleanup targets skipped for unknown-state reasons. <!--#7865f97189ec4296-->
+- `cli.merge.cleanup.skipped_worktree_remove_header` (json-key) — Header listing cleanup targets skipped because worktree removal failed. <!--#f4697b5bbb855f13-->
+- `cli.merge.cleanup.skipped_not_merged_header` (json-key) — Header listing cleanup targets skipped because they were not fully merged. <!--#02f6bc575d89ca2d-->
+- `cli.merge.cleanup.aborted_reason` (json-key) — Line reporting the exception type and message that aborted merge cleanup. <!--#f89e0cad1c15b816-->
+- `cli.merge.complete_title` (json-key) — Panel title for a completed merge. <!--#b16a38fb20e19f91-->
+- `cli.merge.unknown` (json-key) — Generic "unknown" placeholder used in merge output. <!--#0596ba631317c6f0-->
+- `cli.merge.rollback_failed.summary` (json-key) — Critical summary stating the git rollback failed, with the reason. <!--#0f1a9d18b7cad2ce-->
+- `cli.merge.rollback_failed.body` (json-key) — Body text explaining the worktree is inconsistent after a failed rollback, with git recovery commands. <!--#730a9688dc68fb85-->
+- `cli.merge.failed_branch` (json-key) — Line naming the branch whose merge failed. <!--#c955adcd619a037b-->
+- `cli.merge.branches_already_merged` (json-key) — Line listing branches that were already merged before the failure. <!--#ffd3ed0de02802cd-->
+- `cli.merge.rollback_failed.title` (json-key) — Panel title warning that merge rollback failed and the repo may be corrupted. <!--#c6ca9dd7ecf9ed82-->
+- `cli.merge.branches_merged_before_pause` (json-key) — Header listing branches merged before the merge paused. <!--#50acaf957c6be7e1-->
+- `cli.merge.unattempted_branches_count` (json-key) — Header reporting how many branches were never attempted. <!--#00ce0e6661909b49-->
+- `cli.merge.unattempted_branches_list` (json-key) — Line listing the branches that were never attempted. <!--#fb2fe85374db9962-->
+- `cli.merge.colliding_path` (json-key) — Line showing the colliding path under se3/ during merge. <!--#ae63abb1429bd393-->
+- `cli.merge.title.aborted` (json-key) — Panel title: the merge was aborted. <!--#4cdf5ab4f512e048-->
+- `cli.merge.title.failed` (json-key) — Panel title: the merge failed. <!--#7efd99c209fe05a3-->
+- `cli.merge.title.not_started` (json-key) — Panel title: the merge never started. <!--#aff866ef2e6192e7-->
+- `cli.merge.title.paused` (json-key) — Panel title: the merge paused for human review. <!--#96447334a4e4ce46-->
+- `cli.merge.failure.fast_failure` (json-key) — Merge failure reason: the fast-strategy merge failed. <!--#997ebfe15535047f-->
+- `cli.merge.failure.fast_abort` (json-key) — Merge failure reason: the fast strategy could not resolve the conflicts. <!--#80a01b6501eb9d9e-->
+- `cli.merge.failure.merge_failed` (json-key) — Merge failure reason: the underlying `git merge` operation failed. <!--#fd49008c7a548f23-->
+- `cli.merge.failure.detail_suffix` (json-key) — Suffix appending a detail string to a merge failure reason. <!--#c9b53d67633cbad4-->
+- `cli.merge.failure.merge_conflict` (json-key) — Merge failure reason: an unresolvable git merge conflict. <!--#9a3f031238dd199a-->
+- `cli.merge.failure.guardrail_violation` (json-key) — Merge failure reason: post-merge guardrail violations. <!--#8e0912fe5407dc3f-->
+- `cli.merge.failure.guardrail_violation_no_rollback` (json-key) — Merge failure reason: guardrail violations that could not be rolled back, so the commit may remain on HEAD. <!--#81a6e167fbd6a1b9-->
+- `cli.merge.failure.merge_abort_failed` (json-key) — Merge failure reason: `git merge --abort` failed, leaving the worktree possibly mid-merge. <!--#bab8375e6cfa12d1-->
+- `cli.merge.failure.dirty_working_tree` (json-key) — Merge failure reason: the main worktree has uncommitted tracked changes outside SE3-managed paths. <!--#e9a4f5160af8db29-->
+- `cli.merge.failure.guardrail_violation_call_failed` (json-key) — Merge failure reason: guardrail violations plus failure to write the human call file. <!--#015472b75b0749ef-->
+- `cli.merge.failure.guardrail_repair_stalled_call_failed` (json-key) — Merge failure reason: guardrail repair stalled and the call file could not be written. <!--#1d13f1b447bcd8e6-->
+- `cli.merge.failure.guardrail_repair_exhausted_call_failed` (json-key) — Merge failure reason: guardrail repair attempts were exhausted and the call file could not be written. <!--#fc4e1db9f8c83968-->
+- `cli.merge.failure.guardrail_repair_stalled` (json-key) — Merge pause reason: the fast strategy's guardrail auto-repair stalled. <!--#7cd94fd5a82835ea-->
+- `cli.merge.failure.guardrail_repair_exhausted` (json-key) — Merge pause reason: the fast strategy's guardrail auto-repair attempts were exhausted. <!--#04bdb536a5a5f250-->
+- `cli.merge.failure.human_call_write_failed` (json-key) — Merge failure reason: human review was needed but the call file could not be written. <!--#a55558ae8d30403e-->
+- `cli.merge.failure.incomplete_resolution_call_failed` (json-key) — Merge failure reason: the LLM resolution was incomplete and the call file could not be written. <!--#d3e9fe004606824b-->
+- `cli.merge.failure.guardrail_check_failed` (json-key) — Merge abort reason: the guardrail check itself failed. <!--#09dc96ba42917bdc-->
+- `cli.merge.failure.guardrail_check_failed_and_rollback_failed` (json-key) — Merge abort reason: the guardrail check crashed and the rollback also failed. <!--#f71c859d93df748e-->
+- `cli.merge.failure.guardrail_repair_failed` (json-key) — Merge abort reason: the fast strategy could not auto-repair the guardrail violations. <!--#b578b74e3b8ba496-->
+- `cli.merge.failure.conflict_context_failed_pending` (json-key) — Merge failure reason: building the conflict context failed, so the merge paused for human review. <!--#5fc04761e10e9a0e-->
+- `cli.merge.failure.conflict_context_failed` (json-key) — Merge abort reason: building the conflict context for resolution failed. <!--#ee577f0a6f665f54-->
+- `cli.merge.failure.conflict_context_failed_call_file_write_failed` (json-key) — Merge failure reason: conflict-context building failed and the human call file could not be written. <!--#73ad3eda51d3ae65-->
+- `cli.merge.failure.llm_resolution_failed` (json-key) — Merge abort reason: the fast strategy's LLM conflict resolution failed. <!--#70180a3c4da6fd4b-->
+- `cli.merge.failure.incomplete_resolution` (json-key) — Merge abort reason: the fast strategy's LLM resolution was incomplete. <!--#291d29f0cf9e02bf-->
+- `cli.merge.failure.resolution_rejected` (json-key) — Merge abort reason: the fast strategy rejected the LLM's resolution. <!--#3fdfaebb3f01adf4-->
+- `cli.merge.failure.binary_file_conflict_fast_abort` (json-key) — Merge abort reason: a binary-file conflict the fast strategy cannot auto-resolve. <!--#72330c5607304a4e-->
+- `cli.merge.failure.binary_file_conflict` (json-key) — Merge abort reason: a binary-file conflict requiring human review. <!--#ba735583bdcc89fb-->
+- `cli.merge.failure.resolution_validation_failed` (json-key) — Merge abort reason: the resolved content failed validation. <!--#1fa68b8eb720755a-->
+- `cli.merge.failure.resolution_write_failed` (json-key) — Merge abort reason: the resolved files could not be written or staged. <!--#bc59d03e10d0811d-->
+- `cli.merge.failure.resolution_commit_failed` (json-key) — Merge abort reason: the post-resolution merge commit failed. <!--#91cc601d1c47e364-->
+- `cli.merge.failure.resolution_commit_timeout` (json-key) — Merge abort reason: conflicts resolved but the git commit timed out. <!--#8f2d145fefbd2bcd-->
+- `cli.merge.failure.merge_timed_out` (json-key) — Merge abort reason: the `git merge` call timed out. <!--#6989c6e5c8ebd829-->
+- `cli.merge.failure.rollback_failed` (json-key) — Merge failure reason: the git rollback after guardrail violations failed. <!--#f0bbe82ee27ad847-->
+- `cli.merge.failure.guardrail_missing_post_sha` (json-key) — Merge abort reason: guardrails could not verify the merge because the post-merge SHA is unavailable. <!--#36e495d0dd937b11-->
+- `cli.merge.failure.guardrail_missing_pre_sha` (json-key) — Merge abort reason: guardrails could not verify the merge because the pre-merge SHA is unavailable. <!--#a007ac1267521302-->
+- `cli.merge.failure.guardrail_missing_pre_and_post_sha` (json-key) — Merge abort reason: guardrails could not verify the merge because both pre- and post-merge SHAs are unavailable. <!--#44d077a8db5d5eaa-->
+- `cli.merge.failure.pending_human` (json-key) — Merge pause reason: conflict resolution needs the user's decision. <!--#8c8ce1c41b22dbb5-->
+- `cli.merge.failure.runtime_sync_collision` (json-key) — Merge failure reason: a runtime-sync collision with an existing tier-A file under se3/. <!--#091827cba1814211-->
+- `cli.merge.failure.version_higher_than_target` (json-key) — Merge failure reason: the on-disk version is higher than the aggregated target version. <!--#8a5a298cd293693c-->
+- `cli.merge.failure.runtime_sync_os_error` (json-key) — Merge failure reason: runtime sync hit an OS error (permissions or disk space). <!--#4b3b22bd0a98324c-->
+- `cli.merge.failure.runtime_sync_timeout` (json-key) — Merge failure reason: runtime sync timed out, possibly due to an unreachable bound worktree. <!--#80d055fec59dae92-->
+- `cli.merge.failure.generic` (json-key) — Generic merge failure line interpolating an arbitrary failure reason. <!--#b55cdd40906f00d1-->
+- `cli.merge.failure.no_reason` (json-key) — Fallback merge failure line when no reason is available. <!--#8510dd223cae1bca-->
+- `status.open` (json-key) — Localized label for the 'open' issue status. <!--#7c79f6200df90f01-->
+- `status.in_progress` (json-key) — Localized label for the 'in_progress' status. <!--#35cd9e6e06af5f06-->
+- `status.resolved` (json-key) — Localized label for the 'resolved' issue status. <!--#2d2a328a3cbdc370-->
+- `status.wont_fix` (json-key) — Localized label for the "won't fix" issue status. <!--#cead8c732fac1bf2-->
+- `status.closed` (json-key) — Localized label for the 'closed' issue status. <!--#ba21d808c22ee338-->
+- `status.init` (json-key) — Localized label for the flow 'init' status. <!--#b4e315922d075a4d-->
+- `status.running` (json-key) — Localized label for the 'running' status. <!--#55d020bd568869f3-->
+- `status.paused` (json-key) — Localized label for the 'paused' status. <!--#15252e0104dbabe9-->
+- `status.completed` (json-key) — Localized label for the 'completed' status. <!--#c99691f5efda51a4-->
+- `status.failed` (json-key) — Localized label for the 'failed' status. <!--#ba31979a66b5f38a-->
+- `status.recovering` (json-key) — Localized label for the 'recovering' status. <!--#abf47ecf3766d9ce-->
+- `status.pending` (json-key) — Localized label for the 'pending' step status. <!--#bc733e44c9d0b54d-->
+- `status.partial` (json-key) — Localized label for the 'partial' step status. <!--#2c0cf3a4a1b7c509-->
+- `status.retrying` (json-key) — Localized label for the 'retrying' step status. <!--#b4c7907510350313-->
+- `status.revision_needed` (json-key) — Localized label for the 'revision_needed' step status. <!--#1a4db5272cdbd71c-->
+- `status.skipped` (json-key) — Localized label for the 'skipped' step status. <!--#125e42d752d9356f-->
+- `status.history` (json-key) — Localized label for the 'history' flow status. <!--#09c21e01eed2de57-->
+- `status.unknown` (json-key) — Localized label for an unknown status. <!--#1e3a274e47c83c67-->
+- `history.list.show_hint` (json-key) — Hint telling the user to run `se3 history show <flow_id>` for details. <!--#6de7305ef7766da6-->
+- `history.col.flow_id` (json-key) — History table column header: Flow ID. <!--#ea960105fc215131-->
+- `history.col.status` (json-key) — History table column header: Status. <!--#07c82a6a7b372d6f-->
+- `history.col.task_description` (json-key) — History table column header: Task description. <!--#28e22f69e27c8d93-->
+- `history.col.progress` (json-key) — History table column header: Progress. <!--#6557c7348df6a076-->
+- `history.col.updated` (json-key) — History table column header: Updated-at time. <!--#4e6331f12ca3a9c4-->
+- `history.col.source` (json-key) — History table column header: Source. <!--#7576a12bf3f92551-->
+- `history.col.step_type` (json-key) — History table column header: Step type. <!--#f9f5a7756e7f4a5a-->
+- `history.col.retries` (json-key) — History table column header: Retry count. <!--#24cb3246416cd0ba-->
+- `history.col.archived_at` (json-key) — History table column header: Archived-at time. <!--#210497d2f6913de7-->
+- `history.title.active` (json-key) — Title for the active-flows history table. <!--#3e90f3b9aac6aca3-->
+- `history.title.archived` (json-key) — Title for the archived-flows history table. <!--#f30625d048c228da-->
+- `history.title.all` (json-key) — Title for the all-flows history table. <!--#db8417d7af99fb05-->
+- `history.empty.active` (json-key) — Message stating no active flows were found. <!--#cc6a2623e3817939-->
+- `history.empty.archived` (json-key) — Message stating no archived flows were found. <!--#2e9adda19795c120-->
+- `history.empty.all` (json-key) — Message stating no flows were found at all. <!--#eec6ffcaef714340-->
+- `history.multiple_match` (json-key) — Message stating the given flow-id prefix matched multiple flows. <!--#ea8c1831e038eaae-->
+- `history.match_line` (json-key) — Bullet template for one matching flow id. <!--#fca788473404239b-->
+- `history.flow_id_unknown` (json-key) — Placeholder for an unknown flow id in history output. <!--#9f7fd7d0d9c779b2-->
+- `history.not_found` (json-key) — Error stating the given flow was not found in history. <!--#84a099b72a97d722-->
+- `history.show.details_header` (json-key) — Header for the detailed view of a single flow. <!--#9b9ea96612aca22a-->
+- `history.field.status` (json-key) — History detail field label: Status. <!--#bafa40e61650ed80-->
+- `history.field.task` (json-key) — History detail field label: Task. <!--#4ad7d1c3d8f84596-->
+- `history.field.type` (json-key) — History detail field label: Type. <!--#8f4271390b414507-->
+- `history.field.change` (json-key) — History detail field label: Change name. <!--#a490d3a6be453fba-->
+- `history.field.progress` (json-key) — History detail field label: Progress. <!--#c98344b573a400ff-->
+- `history.field.created` (json-key) — History detail field label: Created-at. <!--#fdf2a7c6fac5ccfa-->
+- `history.field.updated` (json-key) — History detail field label: Updated-at. <!--#7e4482dd472b655c-->
+- `history.field.completed` (json-key) — History detail field label: Completed-at. <!--#264215671c3ab271-->
+- `history.field.chat_sessions` (json-key) — History detail field label: Chat sessions count. <!--#1b07eba8b3e8b053-->
+- `history.show.steps_header` (json-key) — Header introducing the step list in a flow's detail view. <!--#34c379a0876726e6-->
+- `history.show.restore_hint` (json-key) — Dim hint telling the user how to restore the shown flow. <!--#6671c47b6ba134bd-->
+- `history.detail.no_chat_history` (json-key) — Dim message stating the flow has no chat history available. <!--#913e492a5e4105f0-->
+- `history.detail.llm_calls_header` (json-key) — Header introducing the per-step LLM call details. <!--#83cd110a0e8a672a-->
+- `history.detail.session_rule` (json-key) — Rule/separator label for one chat session, showing step type and id. <!--#8045958d224d4e2b-->
+- `history.restore.would_restore` (json-key) — Dry-run message stating which flow would be restored. <!--#f3372c89d9171e3f-->
+- `history.restore.command` (json-key) — Line showing the equivalent `se3 run --resume` command for a restore. <!--#2210dbfabac5757e-->
+- `history.restore.restoring` (json-key) — Message stating the flow is being restored. <!--#84e8d58490212cb4-->
+- `issue.list.invalid_source` (json-key) — Error stating the --source filter value is invalid (must be human or system). <!--#ad522bb4ff6261f1-->
+- `issue.list.none_open` (json-key) — Message stating no open issues were found. <!--#10958b027b71aa53-->
+- `issue.list.none_all` (json-key) — Message stating no issues exist at all. <!--#8e0eb1cf3b8740a4-->
+- `issue.list.title_all` (json-key) — Title for the all-issues table. <!--#26cd22e426745a9c-->
+- `issue.list.title_open` (json-key) — Title for the open-issues table. <!--#ffb04918bfce94ac-->
+- `issue.col.id` (json-key) — Issue table column header: ID. <!--#8f84501f8c9cff85-->
+- `issue.col.title` (json-key) — Issue table column header: Title. <!--#09a07612426d17f6-->
+- `issue.col.type` (json-key) — Issue table column header: Type. <!--#2702ab3a60fc7afc-->
+- `issue.col.status` (json-key) — Issue table column header: Status. <!--#90b045af3dc6ff2c-->
+- `issue.col.priority` (json-key) — Issue table column header: Priority. <!--#cc6a1b77590d8484-->
+- `issue.col.source` (json-key) — Issue table column header: Source. <!--#cb3d257e5e7fac33-->
+- `issue.col.tags` (json-key) — Issue table column header: Tags. <!--#87061a252fc11790-->
+- `issue.col.created` (json-key) — Issue table column header: Created-at. <!--#74d5e0e478dbb64c-->
+- `issue.not_found` (json-key) — Error stating the given issue id was not found. <!--#1a3ba83ad4ee9927-->
+- `issue.show.detail` (json-key) — Multi-line template rendering an issue's full detail (title, type, status, priority, source, tags, timestamps, description). <!--#197d70264ac2e72a-->
+- `issue.show.tags_none` (json-key) — Placeholder shown when an issue has no tags. <!--#8a62bbac99df693d-->
+- `issue.show.header` (json-key) — Panel header for a single issue, showing its id. <!--#0a8b1e66a0bd78e4-->
+- `issue.cancelled` (json-key) — Message stating the issue operation was cancelled. <!--#e2ebc2924a180c72-->
+- `issue.edit.cancelled` (json-key) — Message stating the edit was cancelled because the editor exited non-zero. <!--#bc2be5a16e5efba5-->
+- `issue.created` (json-key) — Message confirming an issue was created, with its id and title. <!--#38e32a52933bb2b3-->
+- `issue.updated` (json-key) — Message confirming an issue was updated, with its id and title. <!--#e3c36ec62328cf38-->
+- `issue.closed` (json-key) — Message confirming an issue was closed, with its id and title. <!--#8618241bb19039a6-->
+- `issue.reset` (json-key) — Message confirming an issue was reset back to open. <!--#b61243d6eaf5267a-->
+- `issue.create.prompt_title` (json-key) — Panel title for the issue-description input prompt. <!--#17b116900de60e62-->
+- `issue.create.prompt_message` (json-key) — Instruction text for entering an issue description, with submit/cancel key bindings. <!--#31a431adf7134c50-->
+- `issue.desc_empty` (json-key) — Error stating the issue description cannot be empty (interactive path). <!--#35d1de74e1a3ecbc-->
+- `issue.desc_empty_yaml` (json-key) — Error stating the issue description cannot be empty (YAML editor path). <!--#22402e3b73a83813-->
+- `issue.invalid_yaml` (json-key) — Error stating the edited issue YAML is invalid, with the parse error. <!--#7442cb5a63792889-->
+- `issue.invalid_yaml_empty` (json-key) — Error stating the edited issue YAML is empty or not a mapping. <!--#869c572b780fcac8-->
+- `issue.editor_not_found` (json-key) — Error stating the configured $EDITOR could not be found. <!--#0454ee4107f552b4-->
+- `issue.editor_launch_failed` (json-key) — Error stating the editor failed to launch. <!--#2d5e2e4b9046b0d4-->
+- `init.created` (json-key) — Success line confirming a file/directory was created during init. <!--#98d5f0bd517ed9b3-->
+- `init.warning_line` (json-key) — Warning-prefixed line template used in init output. <!--#f41fe944e887eb09-->
+- `init.gitignore_error_create` (json-key) — Error stating .gitignore could not be created. <!--#38cc0d7ddefd103c-->
+- `init.gitignore_error_read` (json-key) — Error stating an existing .gitignore could not be read. <!--#8c9446740a6f3c18-->
+- `init.gitignore_error_append` (json-key) — Error stating appending to .gitignore failed. <!--#4d29ecdfb7c34df6-->
+- `init.versions_created` (json-key) — Success line confirming VERSIONS.md was created. <!--#00a12f9158c4ea8c-->
+- `init.versions_exists` (json-key) — Warning that VERSIONS.md already exists (use --force to overwrite). <!--#bbcf213a23918350-->
+- `init.git_initialized` (json-key) — Success line confirming a git repository was initialized. <!--#cc7e47b1f70d014e-->
+- `init.git_exists` (json-key) — Warning that a git repository already exists. <!--#0a2a908560d11fc2-->
+- `init.gitignore_created` (json-key) — Success line confirming .gitignore was created. <!--#8861151698726624-->
+- `init.gitignore_appended` (json-key) — Success line confirming a pattern was appended to .gitignore. <!--#d2d023544f632ee5-->
+- `init.gitignore_negated` (json-key) — Warning that .gitignore explicitly un-ignores the pattern, so it was left alone. <!--#0192f372e6a8d4ab-->
+- `init.gitignore_exists` (json-key) — Warning that .gitignore already exists (use --force to overwrite). <!--#aca27d51a362e083-->
+- `init.local_overrides` (json-key) — Warning that an existing se3.local.yaml will override se3.yaml at load time. <!--#74abcbea5ac7b8ed-->
+- `init.success` (json-key) — Celebratory message confirming the SE3 project was initialized. <!--#f25d084bfe22dea9-->
+- `init.next_steps` (json-key) — Header introducing the post-init next steps. <!--#b1dda6102f3d5917-->
+- `init.next_step_1` (json-key) — Next-step line: edit se3.yaml to configure the project. <!--#46c97093fae029f2-->
+- `init.next_step_2` (json-key) — Next-step line: edit se3/charter.md to define project conventions. <!--#f2e5ebbdc454813a-->
+- `init.next_step_3` (json-key) — Next-step line: run `se3 run "your task"` to begin development. <!--#9e6cb990a0931a35-->
+- `code_index.not_built` (json-key) — Error stating se3/code-index.md does not exist yet, with the rebuild command. <!--#aed9be8ddf609aaf-->
+- `code_index.no_match` (json-key) — Message stating no code-index entries matched the search pattern. <!--#550398802677c7fa-->
+- `code_index.invalid_regex` (json-key) — Error stating the search pattern is an invalid regular expression. <!--#142ae4ef7e9d3188-->
+- `code_index.mode_full` (json-key) — Label for the full (--force) code-index rebuild mode. <!--#1f6868bb97df96f2-->
+- `code_index.mode_incremental` (json-key) — Label for the incremental code-index rebuild mode. <!--#4520116a689a13fc-->
+- `code_index.building` (json-key) — Progress message stating the code-index is being built, with mode and project root. <!--#f6ca302ca5189468-->
+- `code_index.rebuild_done` (json-key) — Completion message reporting indexed file/symbol counts and the authoritative map path. <!--#c1fd092209c29b7a-->
+- `code_index.inspect_title` (json-key) — Title of the code-index inspect summary, naming the project root. <!--#9812770721c4ec25-->
+- `code_index.authoritative_map` (json-key) — Line showing the path of the authoritative code-index map. <!--#0f8fed10700a70dc-->
+- `code_index.inspect_files` (json-key) — Inspect stat line: number of indexed files. <!--#efdd228d30adc0c9-->
+- `code_index.inspect_symbols` (json-key) — Inspect stat line: number of indexed symbols. <!--#325936f71865a32c-->
+- `code_index.inspect_degraded` (json-key) — Inspect stat line: number of degraded (unsummarized/fallback) chunks. <!--#a6bc4ff4e7b9e6b2-->
+- `code_index.inspect_by_kind` (json-key) — Header introducing the per-kind file count breakdown. <!--#c47784c1e59aaeba-->
+- `code_index.inspect_kind_row` (json-key) — Row template for one kind and its file count in the inspect breakdown. <!--#51bb9e66d729df59-->
+- `worktree.gc.dry_run_prefix` (json-key) — Prefix marking worktree GC output as a dry run. <!--#dc11c4743a6248a8-->
+- `worktree.gc.header` (json-key) — Header for the worktree GC run, showing mode, root, and max age. <!--#84ddba73d944bd95-->
+- `worktree.gc.archived_title_dry` (json-key) — Title of the archived-worktrees table in dry-run mode (would archive). <!--#b1ada42ccefe25d8-->
+- `worktree.gc.archived_title` (json-key) — Title of the archived-worktrees table. <!--#918389630fb4a40a-->
+- `worktree.gc.col_worktree` (json-key) — Worktree GC table column header: Worktree. <!--#9d81dfd07e9c96f1-->
+- `worktree.gc.col_archive_path` (json-key) — Worktree GC table column header: Archive path. <!--#eaf106b111b7a00d-->
+- `worktree.gc.col_size` (json-key) — Worktree GC table column header: Size. <!--#72353b5bf76c4320-->
+- `worktree.gc.cell_dry_run` (json-key) — Cell placeholder marking a dry-run value in the worktree GC table. <!--#fbc212bb5349566e-->
+- `worktree.gc.no_matches` (json-key) — Message stating no reclaimable worktree runs matched. <!--#a01ce3420b087605-->
+- `worktree.gc.reclaimed` (json-key) — Line reporting how much disk space worktree GC reclaimed. <!--#ba48608e538c8ee7-->
+- `worktree.gc.projected` (json-key) — Suffix marking a reclaimed-space figure as projected (dry run). <!--#5865e95a445854a0-->
+- `worktree.gc.retained_warning` (json-key) — Warning that some completed worktree branches were retained because they are unmerged. <!--#b126a642e631275c-->
+- `worktree.gc.retained_detail` (json-key) — Detail explaining retained refs preserve unmerged work and must be merged or deleted by hand. <!--#93223d69c2f81b03-->
+- `worktree.gc.retained_title` (json-key) — Title of the retained-unmerged-branches table. <!--#2642990b112d6483-->
+- `worktree.gc.col_branch` (json-key) — Worktree GC table column header: Branch. <!--#456c6972aa6ada42-->
+- `worktree.gc.col_original_branch` (json-key) — Worktree GC table column header: Original branch. <!--#2cc58ffc3d7d024d-->
+- `worktree.gc.col_reason` (json-key) — Worktree GC table column header: Reason. <!--#77bd692a1e7c1541-->
+- `worktree.gc.cell_unknown` (json-key) — Cell placeholder for an unknown value in the worktree GC table. <!--#291582a203e5f5a3-->
+- `worktree.gc.skipped_title` (json-key) — Title of the skipped-entries table in worktree GC. <!--#adf77825adefbd26-->
+- `worktree.gc.errors_title` (json-key) — Title of the errors table in worktree GC. <!--#880a98d037160630-->
+- `engine.llm.stream.tool_error` (json-key) — Streaming log line reporting a tool error, with a preview of the message. <!--#a41acbd3f3a68e79-->
+- `engine.llm.stream.error` (json-key) — Streaming log line reporting an error, with a preview of the message. <!--#73396ea86a8a62f3-->
+- `engine.llm.stream.complete` (json-key) — Streaming log line summarizing the finished stream (messages, tool calls, chars, duration). <!--#e652dba437386c0d-->
+- `engine.llm.extract.start` (json-key) — Log line announcing JSON extraction from the LLM output has started. <!--#0b298d5c70baff86-->
+- `engine.llm.extract.complete` (json-key) — Log line announcing JSON extraction completed. <!--#3163e9fc827dadde-->
+- `engine.llm.phase1.cached` (json-key) — Log line noting Phase 1 was skipped because the previous attempt's result was cached. <!--#fe9f68bbfa0ad7b3-->
+- `engine.llm.phase1.valid_json` (json-key) — Log line noting Phase 1's output already held valid JSON, so Phase 2 was skipped. <!--#b9cceadd15603166-->
+- `engine.llm.phase1.missing_keys` (json-key) — Log line noting Phase 1's JSON lacked required keys, so it falls back to Phase 2. <!--#a3c1f0947d3ed484-->
+- `engine.llm.phase2.start` (json-key) — Log line announcing Phase 2 JSON extraction has started. <!--#3d547a6c20905cb4-->
+- `engine.llm.json_retry` (json-key) — Log line noting the response was not valid JSON and a JSON-format retry is being issued. <!--#2e4b579852035432-->
+- `engine.usage.round_footer` (json-key) — Footer line showing this round's and cumulative input/output token counts. <!--#cea0a89f6c8bdeeb-->
+- `engine.usage.discovery_cumulative` (json-key) — Line reporting cumulative discovery token usage. <!--#2af750d8174b6862-->
+- `engine.usage.line` (json-key) — One-line usage summary (input, output, cache read/write, cost). <!--#eaf0e3e62e0269de-->
+- `engine.discovery.confirm_prompt` (json-key) — Prompt stating discovery produced a refined task description. <!--#37548613e50c0be9-->
+- `engine.discovery.confirm_hint` (json-key) — Hint explaining how to confirm the refined description or keep refining. <!--#89b0c42fa0914345-->
+- `engine.discovery.proposed_label` (json-key) — Label introducing the refined task description. <!--#4d71fabd303e9e81-->
+- `engine.discovery.confirm_option` (json-key) — Option label for confirming the refined description and continuing. <!--#163673631d1249c9-->
+- `engine.discovery.proposed_block_title` (json-key) — Panel title for the final proposed task description. <!--#28f7de7c810e1070-->
+- `engine.discovery.confirm_hint_prefix` (json-key) — Leading fragment of the discovery confirm hint (before the sentinel value). <!--#601be0bfd0e362b8-->
+- `engine.discovery.confirm_hint_suffix` (json-key) — Trailing fragment of the discovery confirm hint (after the sentinel value). <!--#e0678d44da185b8e-->
+- `engine.discovery.questions_label` (json-key) — Label introducing the discovery round's questions. <!--#fca4b5a9d7f0fcad-->
+- `engine.discovery.ops_label` (json-key) — Label introducing the discovery round's issue operations. <!--#b16368c3f1b8c8a9-->
+- `engine.discovery.ops_created` (json-key) — Line listing the ids of issues discovery created. <!--#fa72dbd48841a75b-->
+- `engine.discovery.ops_updated` (json-key) — Line listing the ids of issues discovery updated. <!--#262c16da3c05dea7-->
+- `engine.discovery.ops_deleted` (json-key) — Line listing the ids of issues discovery deleted. <!--#f05728d61b76a2b4-->
+- `engine.discovery.ops_rejected` (json-key) — Row template for a rejected issue operation (status, target, reason). <!--#b3bdcee25de50d43-->
+- `engine.discovery.error_title` (json-key) — Panel title for a discovery error. <!--#91ffcfebcf55a769-->
+- `engine.discovery.error_json_extraction` (json-key) — Error text explaining the LLM returned narrative text instead of valid JSON, and the step will auto-retry. <!--#bd14e8b1de77565a-->
+- `engine.discovery.error_llm_call` (json-key) — Error text reporting the discovery LLM call failed. <!--#42b6bc783dff7fe0-->
+- `engine.fixloop.exhausted` (json-key) — Message stating the fix loop hit its iteration cap and the flow stops. <!--#2c232d5dcd7625e6-->
+- `engine.fixloop.banner_title` (json-key) — Banner title announcing the fix loop is routing back to the IMPLEMENT step. <!--#c0d52fc6bacf5034-->
+- `engine.fixloop.iteration` (json-key) — Banner line showing the current fix-loop iteration number. <!--#708e49eddfa01e2d-->
+- `engine.fixloop.reason_tests_failed` (json-key) — Fix-loop reason line: tests failed. <!--#3a80d498ae32ac08-->
+- `engine.fixloop.reason_self_check` (json-key) — Fix-loop reason line: code review found actionable issues. <!--#10bcf30a59f118c3-->
+- `engine.fixloop.reason_spec_issues` (json-key) — Fix-loop reason line: spec compliance issues were found. <!--#d6505ad0d59cfc61-->
+- `engine.fixloop.source_self_check` (json-key) — Fix-loop source line: the self_check (code review) step. <!--#9379d2422867310b-->
+- `engine.fixloop.source_invariant_check` (json-key) — Fix-loop source line: the invariant_check (invariant audit) step. <!--#66f3b96908664de9-->
+- `engine.fixloop.source_verify_spec` (json-key) — Fix-loop source line: the verify_spec (spec compliance) step. <!--#83f319e6270aca21-->
+- `engine.fixloop.instructions` (json-key) — Fix-loop line carrying the fix instructions passed back to IMPLEMENT. <!--#9f12e569630a6f22-->
+- `engine.revision.banner_title` (json-key) — Banner title announcing a user-requested revision of a given step. <!--#e4ffcc473eb5f652-->
+- `engine.revision.iteration` (json-key) — Revision banner line showing the iteration number. <!--#fa414b2c5691599d-->
+- `engine.revision.feedback` (json-key) — Revision banner line carrying the user's feedback text. <!--#5d8c0eb386d19b71-->
+- `engine.adjudicate.banner_title` (json-key) — Banner title announcing the adjudicate step resolving a spec contradiction. <!--#af2a59e85207ef77-->
+- `engine.adjudicate.confirm_title` (json-key) — Panel title for the adjudication confirmation request. <!--#e8da12fcf061db5b-->
+- `engine.adjudicate.reviewer` (json-key) — Adjudicate banner line naming the reviewer. <!--#0adff8c703933b7d-->
+- `engine.adjudicate.trigger_reasons` (json-key) — Adjudicate banner line listing what triggered adjudication. <!--#1feaa11a905be329-->
+- `engine.adjudicate.none` (json-key) — Placeholder "(none)" used in adjudicate banners. <!--#3c7f72a862e0e987-->
+- `engine.adjudicate.fix_iteration` (json-key) — Adjudicate banner line showing the fix-loop iteration that triggered it. <!--#b61f133c718daff1-->
+- `engine.adjudicate.source_oscillation` (json-key) — Adjudicate source line: self_check detected oscillation between rounds. <!--#2f60d7543d41f8d9-->
+- `engine.adjudicate.landed_title` (json-key) — Banner title announcing the adjudication landed and SELF_CHECK will re-run from pass 1. <!--#3c4104a786ca896c-->
+- `engine.adjudicate.landed_skipped` (json-key) — Line noting IMPLEMENT and TEST were skipped because adjudication changed the spec, not the code. <!--#f4f60bf3b8c3b7f6-->
+- `engine.adjudicate.landed_superseded` (json-key) — Line noting the pending fix_instructions were superseded and discarded. <!--#01dd5f2c31d58a9d-->
+- `engine.adjudicate.noop_title` (json-key) — Banner title announcing adjudication was a no-op and flow passes straight to IMPLEMENT. <!--#b979ec9e0dd5b9e4-->
+- `engine.adjudicate.noop_detail` (json-key) — Detail explaining no real contradiction existed, so the triggering round's fix_instructions apply as-is. <!--#eab6c442630d0144-->
+- `engine.test.running` (json-key) — Line announcing the test command being run. <!--#a670fd080ab7ddc0-->
+- `engine.test.still_running` (json-key) — Heartbeat line printed while a long test run is still going. <!--#82832dd7fa8fdc1b-->
+- `engine.test.timeout` (json-key) — Bracketed marker reporting the test run timed out after N seconds. <!--#f4ad13fd8d2287ce-->
+- `engine.test.error` (json-key) — Bracketed marker reporting an error raised while running tests. <!--#74d1fded9330e4e4-->
+- `cli.common.no_description` (json-key) — Placeholder text used when an item has no description. <!--#ff8d3c2cbe782bf6-->
+- `cli.help.app` (json-key) — Help text for the top-level se3 CLI app. <!--#2de45a5bd9df8a61-->
+- `cli.help.code_index` (json-key) — Help text for the `code-index` command group. <!--#3a6548e158f2722b-->
+- `cli.help.code_index.index.desc` (json-key) — Help text for `code-index index`, the one-level drill-down view. <!--#f482a927afc5e86c-->
+- `cli.help.code_index.index.path` (json-key) — Help text for the *path* argument of `code-index index`, explaining single-level expansion. <!--#4c6d6a5489f7f18c-->
+- `cli.help.code_index.inspect.desc` (json-key) — Help text for `code-index inspect`, which prints on-disk index statistics. <!--#7c4bee337bf96e8a-->
+- `cli.help.code_index.main` (json-key) — Help text for the code-index command's main callback. <!--#193e7ec214976109-->
+- `cli.help.code_index.rebuild.desc` (json-key) — Help text for `code-index rebuild`, which writes the authoritative se3/code-index.md. <!--#321f53c444cc13df-->
+- `cli.help.code_index.rebuild.force` (json-key) — Help text for `--force`, explaining full re-summarisation versus fingerprint-based incremental rebuild. <!--#cb20bf62fe7239e5-->
+- `cli.help.code_index.search.desc` (json-key) — Help text for `code-index search`, a grep replacement over the index entries. <!--#10ae029a55411630-->
+- `cli.help.code_index.search.fixed_strings` (json-key) — Help text for the search `-F` flag (literal substring matching). <!--#0b3d814c072e7d4c-->
+- `cli.help.code_index.search.ignore_case` (json-key) — Help text for the search `-i` flag (case-insensitive matching). <!--#2730a0a60adc92ba-->
+- `cli.help.code_index.search.line_number` (json-key) — Help text for the search `-n` flag, noting it is accepted for grep familiarity but is a no-op. <!--#40eb63ee65c25dcc-->
+- `cli.help.code_index.search.max_count` (json-key) — Help text for the search `-m` flag (stop after N matches). <!--#6b5d35009df9b820-->
+- `cli.help.code_index.search.pattern` (json-key) — Help text for the search *pattern* argument (regex by default, case-sensitive). <!--#a9092f20b87da1e7-->
+- `cli.help.code_index.show.desc` (json-key) — Help text for `code-index show`, which prints a file's full function/method detail. <!--#ee28d13c68b54196-->
+- `cli.help.code_index.show.path` (json-key) — Help text for the *path* argument of `code-index show`. <!--#f691255c6f282041-->
+- `cli.help.common.json_output` (json-key) — Shared help text for the --json output flag. <!--#438e0828cee3061d-->
+- `cli.help.common.project_root` (json-key) — Shared help text for the --project-root option. <!--#bf799b9a018c0d45-->
+- `cli.help.daemon` (json-key) — Help text for the `daemon` command group. <!--#1dedd7f5a2c2ca77-->
+- `cli.help.daemon.app` (json-key) — Help text for the daemon sub-app describing the long-lived control-plane daemon. <!--#b997f715f5547b68-->
+- `cli.help.daemon.start.daemon_key` (json-key) — Help text for `--daemon-key`, noting it is memory-only and best supplied via SE3_DAEMON_KEY. <!--#7bbfaef9916c007f-->
+- `cli.help.daemon.start.desc` (json-key) — Help text for `daemon start`. <!--#2613ddf1b08fd9bf-->
+- `cli.help.daemon.start.foreground` (json-key) — Help text for `--foreground`, which keeps the daemon attached to the terminal. <!--#0aeffa2913d81304-->
+- `cli.help.daemon.start.server_url` (json-key) — Help text for `--server-url`, explaining the scheme-based default port rules. <!--#fa73c0746d5e7280-->
+- `cli.help.daemon.status.desc` (json-key) — Help text for `daemon status`. <!--#fce4c0af685211ad-->
+- `cli.help.daemon.status.json` (json-key) — Help text for the daemon status --json flag. <!--#b5c7f28d74fe9e25-->
+- `cli.help.daemon.stop.desc` (json-key) — Help text for `daemon stop`. <!--#cf8eaa316d897a4a-->
+- `cli.help.end_session.desc` (json-key) — Help text for `end-session`, noting worktrees are cleaned up and uncommitted work is not merged. <!--#4a9524d361cd285d-->
+- `cli.help.end_session.flow_id` (json-key) — Help text for the end-session --flow-id option. <!--#dbd107aa9c95eb59-->
+- `cli.help.end_session.no_archive_worktree` (json-key) — Help text for `--no-archive-worktree`, which kills the process but keeps the worktree. <!--#4ebc10764125b66e-->
+- `cli.help.end_session.pid` (json-key) — Help text for the end-session --pid hint option. <!--#bba40a50a7a50e41-->
+- `cli.help.guardrails.desc` (json-key) — Help text for the `guardrails` command. <!--#b999197fac5c3fe9-->
+- `cli.help.guardrails.original` (json-key) — Help text for the guardrails --original option (baseline spec to diff against). <!--#bdf7b40208702743-->
+- `cli.help.guardrails.project_root` (json-key) — Help text for the guardrails --project-root option used with --sizes. <!--#d4eb96b6e4ebc762-->
+- `cli.help.guardrails.sizes` (json-key) — Help text for `--sizes`, which runs project-wide spec size checks instead of a per-file diff check. <!--#d04539062de493a8-->
+- `cli.help.guardrails.spec_file` (json-key) — Help text for the guardrails spec-file argument. <!--#4361ff4e27e838bb-->
+- `cli.help.history` (json-key) — Help text for the `history` command group. <!--#70937a4d5eeb1ca4-->
+- `cli.help.history.active_only` (json-key) — Help text for the history --active-only flag. <!--#b9dda6fe0972c1f9-->
+- `cli.help.history.archived.desc` (json-key) — Help text for `history archived`. <!--#4ed7c552280ab59f-->
+- `cli.help.history.archived_only` (json-key) — Help text for the history --archived-only flag. <!--#7b280d991ad4925a-->
+- `cli.help.history.list.desc` (json-key) — Help text for `history list`. <!--#110548050e32471d-->
+- `cli.help.history.restore.desc` (json-key) — Help text for `history restore`. <!--#a85b9b6ede93413d-->
+- `cli.help.history.restore.dry_run` (json-key) — Help text for the history restore --dry-run flag. <!--#46f6d1a294f0267d-->
+- `cli.help.history.restore.flow_id` (json-key) — Help text for the history restore flow-id argument. <!--#29e26011d4cb06e4-->
+- `cli.help.history.show.desc` (json-key) — Help text for `history show`. <!--#25e3897bcea46190-->
+- `cli.help.history.show.detailed` (json-key) — Help text for the history show --detailed flag (per-step LLM call details). <!--#59d695d50f6317e5-->
+- `cli.help.history.show.flow_id` (json-key) — Help text for the history show flow-id argument. <!--#76c5c43a5c97265d-->
+- `cli.help.history.show.verbose` (json-key) — Help text for the history show --verbose flag (full responses including tool calls). <!--#bb22a14122920aae-->
+- `cli.help.init.desc` (json-key) — Help text for the `init` command. <!--#75b34df7f886eb93-->
+- `cli.help.init.force` (json-key) — Help text for the init --force flag (overwrite existing files). <!--#95e17386bbf17efc-->
+- `cli.help.init.name` (json-key) — Help text for the init --name option (project name). <!--#da49f7eeb3f396e5-->
+- `cli.help.issue` (json-key) — Help text for the `issue` command group. <!--#2668b18366ffec53-->
+- `cli.help.issue.close.desc` (json-key) — Help text for `issue close`. <!--#37fff43d2aaa0a90-->
+- `cli.help.issue.close.issue_id` (json-key) — Help text for the issue close id argument. <!--#e0cd85ee182cad21-->
+- `cli.help.issue.close.reason` (json-key) — Help text for the issue close --reason option. <!--#033bb5f30b1d5ed4-->
+- `cli.help.issue.create.desc` (json-key) — Help text for `issue create`. <!--#477058ce96c7e082-->
+- `cli.help.issue.create.description` (json-key) — Help text for the issue create description positional argument. <!--#07d22082baecb156-->
+- `cli.help.issue.create.editor` (json-key) — Help text for the issue create --editor flag (open an external editor). <!--#d445896b22e95995-->
+- `cli.help.issue.create.priority` (json-key) — Help text for the issue create --priority option. <!--#ad0891fd8445f5f9-->
+- `cli.help.issue.create.tags` (json-key) — Help text for the issue create --tags option (comma-separated). <!--#85853024e1d1175d-->
+- `cli.help.issue.create.title` (json-key) — Help text for the issue create --title option. <!--#0ebb87fe293e6a03-->
+- `cli.help.issue.create.type` (json-key) — Help text for the issue create --type option. <!--#268b6f98153ed463-->
+- `cli.help.issue.default.desc` (json-key) — Help text for the issue group's default command (list open issues). <!--#22721aa932431a4c-->
+- `cli.help.issue.edit.desc` (json-key) — Help text for `issue edit`, which opens $EDITOR (falling back to vi). <!--#99c2ba5c6d420bdd-->
+- `cli.help.issue.edit.issue_id` (json-key) — Help text for the issue edit id argument. <!--#b3986b66ec86ec47-->
+- `cli.help.issue.list.all` (json-key) — Help text for the issue list --all flag (include closed issues). <!--#495916369eccba78-->
+- `cli.help.issue.list.desc` (json-key) — Help text for `issue list`. <!--#653680be462081bd-->
+- `cli.help.issue.list.source` (json-key) — Help text for the issue list --source filter (human/system). <!--#00a6563528e3f19f-->
+- `cli.help.issue.list.type` (json-key) — Help text for the issue list --type filter. <!--#21b6dfab8ce05b39-->
+- `cli.help.issue.reset.desc` (json-key) — Help text for `issue reset`, which returns an in-progress issue to open. <!--#8c407fd122bb0560-->
+- `cli.help.issue.reset.issue_id` (json-key) — Help text for the issue reset id argument. <!--#2cbbef5719a2d756-->
+- `cli.help.issue.show.desc` (json-key) — Help text for `issue show`. <!--#1c122521ebb7250c-->
+- `cli.help.issue.show.issue_id` (json-key) — Help text for the issue show id argument. <!--#29565ac8b0cc2b8b-->
+- `cli.help.merge.branches` (json-key) — Help text for the merge command's branch-list argument. <!--#b55fe76bfab77e5e-->
+- `cli.help.merge.delete_merged` (json-key) — Help text for --delete-merged, which deletes merged branches and archives their worktrees (on by default). <!--#912ccecd35587416-->
+- `cli.help.merge.desc` (json-key) — Help text for the `merge` command. <!--#52af6fd1dd051336-->
+- `cli.help.merge.no_delete_merged` (json-key) — Help text for --no-delete-merged, which keeps merged branches. <!--#b659b6d81ca281d9-->
+- `cli.help.merge.strategy` (json-key) — Help text for the merge --strategy option (fast/safe/strict). <!--#5df4c6c9dd399d34-->
+- `cli.help.merge_respond.call_file` (json-key) — Help text for the merge-respond call-file argument. <!--#0c2007fa2f8e2742-->
+- `cli.help.merge_respond.desc` (json-key) — Help text for the `merge-respond` command. <!--#6bc1ce1850c1343f-->
+- `cli.help.merge_unlock.desc` (json-key) — Help text for `merge-unlock`, which inspects and releases the project's merge lock. <!--#046852f5bf00296f-->
+- `cli.help.merge_unlock.force` (json-key) — Help text for the merge-unlock --force flag and its risk to merge mutual exclusion. <!--#39482f5583968378-->
+- `cli.help.migrate` (json-key) — Help text for the `migrate` command group. <!--#d3c9d22527ef1d16-->
+- `cli.help.migrate.app` (json-key) — Help text for the migrate sub-app (list / run <id>). <!--#8383aa2a826b3c91-->
+- `cli.help.migrate.list.desc` (json-key) — Help text for `migrate list`. <!--#24b694b3bcf0ba37-->
+- `cli.help.migrate.run.desc` (json-key) — Help text for `migrate run <migrator_id>`. <!--#90531f7cb496b6aa-->
+- `cli.help.migrate.run.migrator_id` (json-key) — Help text for the migrate run migrator-id argument. <!--#5628c087961e9464-->
+- `cli.help.migrate.run.no_delete_specs` (json-key) — Help text for --no-delete-specs, which keeps se3/specs/ for inspection. <!--#0285f47a43534cf5-->
+- `cli.help.migrate.run.project_root` (json-key) — Help text for the migrate run --project-root option. <!--#d7ce40d06a441614-->
+- `cli.help.run.change` (json-key) — Help text for the run --change option (change name for the task). <!--#9da0ea4ad18b6fbf-->
+- `cli.help.run.desc` (json-key) — Help text for `se3 run`, the flow engine's unified entry point. <!--#8d3856a9dac4574f-->
+- `cli.help.run.discover` (json-key) — Help text for the run --discover flag (clarify requirements before analyze). <!--#c04076143fe9d604-->
+- `cli.help.run.flow_id` (json-key) — Help text for the run --flow-id option (which flow to resume). <!--#d31200407910ccc9-->
+- `cli.help.run.from_issue` (json-key) — Help text for --from-issue, which starts a flow from an existing issue (id or interactive pick). <!--#fd25889ba45f6012-->
+- `cli.help.run.output_format` (json-key) — Help text for --output-format, choosing Rich CLI rendering or structured NDJSON events. <!--#8cefb8c32cfa8c01-->
+- `cli.help.run.preset` (json-key) — Help text for --preset, which runs a named preset prompt task (mutually exclusive with --type). <!--#38e89ff762128260-->
+- `cli.help.run.resume` (json-key) — Help text for the run --resume flag. <!--#042fe896463e7841-->
+- `cli.help.run.task` (json-key) — Help text for the run task-description argument. <!--#f3ea54142f20e700-->
+- `cli.help.run.type` (json-key) — Help text for the run --type option (feature, bugfix, refactor, …). <!--#dbda8c27298c4f13-->
+- `cli.help.run.worktree` (json-key) — Help text for --worktree, which runs the flow in an isolated git worktree and auto-merges back. <!--#30480136b0ab55f8-->
+- `cli.help.salvage.desc` (json-key) — Help text for the `salvage` command (recover work from an abnormally terminated session). <!--#6ec2bb80dfbada50-->
+- `cli.help.version` (json-key) — Help text for the `version` command. <!--#e54a27b0b678d927-->
+- `cli.help.worktree` (json-key) — Help text for the `worktree` command group. <!--#b54bb6c8db180e6f-->
+- `cli.help.worktree.gc.desc` (json-key) — Help text for `worktree gc`, which reclaims leaked dead --worktree runs. <!--#8aa5e55f24d2cb37-->
+- `cli.help.worktree.gc.dry_run` (json-key) — Help text for the worktree gc --dry-run flag. <!--#557ceb7a2ee88fd5-->
+- `cli.help.worktree.gc.max_age_hours` (json-key) — Help text for --max-age-hours, which protects recently-idle worktree runs from GC. <!--#b95af9d48ccb82db-->
+- `cli.help.worktree.gc.project_root` (json-key) — Help text for the worktree gc --project-root option. <!--#960879aa07b5c97f-->
+- `init.file_exists` (json-key) — Warning that a given file already exists during init (use --force to overwrite). <!--#efbcd2aca249c84c-->
+- `cli.steprender.analyze.relevant_spec` (json-key) — Section label for the analyze step's relevant spec entries. <!--#fe198d6a4275539e-->
+- `cli.steprender.chars_suffix` (json-key) — Parenthetical suffix showing a character count in step renderers. <!--#05be17399633d86b-->
+- `cli.steprender.commit.no_changes` (json-key) — Dim message stating the commit step had no changes to commit. <!--#6a0301aef87e0dcd-->
+- `cli.steprender.error` (json-key) — Error label used by step renderers. <!--#034e5f138fa14e8d-->
+- `cli.steprender.gate.route_implement` (json-key) — Spec-gate routing line: proceed to implement because spec changes broke tests. <!--#6bad9ebe55a7764e-->
+- `cli.steprender.gate.route_update_spec` (json-key) — Spec-gate routing line: go back to update_spec because the spec artifact is invalid. <!--#db8be3a2f889cf0d-->
+- `cli.steprender.gate.skipped` (json-key) — Spec-gate pass line noting the gate was skipped as a no-op because the spec was unchanged. <!--#d75e09128302b69a-->
+- `cli.steprender.implement.complete` (json-key) — Implement-step status label: complete. <!--#9d07424293bd06f6-->
+- `cli.steprender.implement.failed` (json-key) — Implement-step status label: failed. <!--#5f737e9df240cdc0-->
+- `cli.steprender.implement.files` (json-key) — Implement-step summary fragment showing a file count. <!--#1753b75c024cb314-->
+- `cli.steprender.implement.files_changed` (json-key) — Section header for the implement step's changed-files list, with a count. <!--#00eeb38ff2e92410-->
+- `cli.steprender.implement.groups` (json-key) — Implement-step summary fragment showing a task-group count. <!--#b5a6ba3dd7bb512a-->
+- `cli.steprender.implement.incomplete_tasks` (json-key) — Section header for the implement step's incomplete tasks, with a count. <!--#bce8d0937daef3e1-->
+- `cli.steprender.implement.partial` (json-key) — Implement-step status label: partially complete. <!--#d0427e3474c902fe-->
+- `cli.steprender.implement.restricted_applied` (json-key) — Dim line reporting how many restricted edits were applied. <!--#0eda6bbac1dcee37-->
+- `cli.steprender.implement.restricted_failed` (json-key) — Red line reporting how many restricted edits failed. <!--#b305e64b05a93bbb-->
+- `cli.steprender.implement.tests` (json-key) — Implement-step summary fragment showing a test count. <!--#79eae25bc724235a-->
+- `cli.steprender.implement.tests_added` (json-key) — Section header for the implement step's newly added tests, with a count. <!--#b63915a653d8998a-->
+- `cli.steprender.merge.escalated` (json-key) — Yellow line stating the merge was escalated to a human due to unresolved conflicts. <!--#0df8b7b6d3a4440a-->
+- `cli.steprender.merge.merged_into` (json-key) — Line stating which branches were merged into master. <!--#bc9cc2f97af4f3fd-->
+- `cli.steprender.merge.none` (json-key) — Line stating no branches were merged. <!--#c3dec9e4db3ad4a3-->
+- `cli.steprender.plan.deps_none` (json-key) — Placeholder "none" for a task group with no dependencies. <!--#f62fd727379f6b1d-->
+- `cli.steprender.plan.design_line` (json-key) — Plan renderer line showing the design text. <!--#4ac76e3807313af8-->
+- `cli.steprender.plan.design_title` (json-key) — Panel title for the plan step's design section. <!--#9295d7df528bf288-->
+- `cli.steprender.plan.group_line` (json-key) — Row template for one task group (id, name, task count, LOC estimate, deps). <!--#991646c48ec9e8f2-->
+- `cli.steprender.plan.proposal_line` (json-key) — Plan renderer line showing the proposal text. <!--#7b4010a3bdf2b187-->
+- `cli.steprender.plan.proposal_title` (json-key) — Panel title for the plan step's proposal section. <!--#1da2b6ee9541e5ee-->
+- `cli.steprender.plan.task_groups_title` (json-key) — Panel title for the plan step's task-groups section. <!--#6435d2af89e3193c-->
+- `cli.steprender.reconcile.already` (json-key) — Version-reconcile line stating the version was already reconciled and needs no bump. <!--#a1c436dedeeee8f6-->
+- `cli.steprender.reconcile.channel` (json-key) — Dim line showing the release channel used by version reconcile. <!--#d58162ac9bad8f6f-->
+- `cli.steprender.reconcile.commit` (json-key) — Dim line showing the version-reconcile commit hash. <!--#7601ab1ae000fe45-->
+- `cli.steprender.remaining.suffix` (json-key) — Panel title template for a step's overflow/extra-detail section. <!--#044d23b57be55851-->
+- `cli.steprender.section.reasoning` (json-key) — Generic step-renderer section heading: Reasoning. <!--#768d407d125bd33f-->
+- `cli.steprender.section.recommendations` (json-key) — Generic step-renderer section heading: Recommendations. <!--#138337ed03f3fa31-->
+- `cli.steprender.section.summary` (json-key) — Generic step-renderer section heading: Summary. <!--#dbf530c22c9d6cb4-->
+- `cli.steprender.self_check.actionable` (json-key) — Self-check line reporting the count of actionable issues found (red). <!--#1787819434731f0f-->
+- `cli.steprender.status` (json-key) — Generic step-renderer line showing a status value. <!--#af4d7598390617f5-->
+- `cli.steprender.status.failed` (json-key) — Step-renderer status value: failed (red ✗). <!--#2bc5279af6f06e53-->
+- `cli.steprender.status.passed` (json-key) — Step-renderer status value: passed (green ✓). <!--#3648db6627821c83-->
+- `cli.steprender.test.command` (json-key) — Test-step line showing the command that was run. <!--#21e07ea2d9979904-->
+- `cli.steprender.test.failed` (json-key) — Test-step status value: failed. <!--#bd0566b2716af576-->
+- `cli.steprender.test.passed` (json-key) — Test-step status value: passed. <!--#518d6b8a9df368cd-->
+- `cli.steprender.test.phases` (json-key) — Test-step line reporting how many phases passed and failed. <!--#0800e11fd4c88707-->
+- `cli.steprender.test.status` (json-key) — Test-step line showing the overall status. <!--#71990e7ae31ab58d-->
+- `cli.steprender.title.analyze` (json-key) — Step-renderer panel title: Analyze. <!--#ea697894dfc21326-->
+- `cli.steprender.title.commit` (json-key) — Step-renderer panel title: Commit. <!--#98d3e5a34bc17977-->
+- `cli.steprender.title.design` (json-key) — Step-renderer panel title: Design. <!--#94be06f95c8f4c1d-->
+- `cli.steprender.title.implement` (json-key) — Step-renderer panel title: Implement. <!--#2cfd8e716e7b9c88-->
+- `cli.steprender.title.merge_integrate` (json-key) — Step-renderer panel title: Merge/Integrate. <!--#14ee8fc58e5fd46f-->
+- `cli.steprender.title.plan` (json-key) — Step-renderer panel title: Plan. <!--#bbae266db6e06a10-->
+- `cli.steprender.title.propose` (json-key) — Step-renderer panel title: Propose. <!--#32e93b2fda8eae41-->
+- `cli.steprender.title.self_check` (json-key) — Step-renderer panel title: Self-check. <!--#78320be7c83400ab-->
+- `cli.steprender.title.spec_gate` (json-key) — Step-renderer panel title: Spec gate. <!--#938e55cdfb4c6bd3-->
+- `cli.steprender.title.summarize` (json-key) — Step-renderer panel title: Summarize. <!--#2d527a23c30dbbd5-->
+- `cli.steprender.title.test` (json-key) — Step-renderer panel title: Test. <!--#9f7df68720ef2853-->
+- `cli.steprender.title.update_spec` (json-key) — Step-renderer panel title: Update spec. <!--#fb0fd9887d31c42f-->
+- `cli.steprender.title.verify_spec` (json-key) — Step-renderer panel title: Verify spec. <!--#9cfd7c3188cf0afd-->
+- `cli.steprender.title.version_analyze` (json-key) — Step-renderer panel title: Version analyze. <!--#fe3cefe5398c9bf5-->
+- `cli.steprender.title.version_reconcile` (json-key) — Step-renderer panel title: Version reconcile. <!--#b153bfe391e16321-->
+- `cli.steprender.update_spec.new_capabilities` (json-key) — Section label for new capabilities introduced by the update_spec step. <!--#00891ebec0ea3d8a-->
+- `cli.steprender.update_spec.none` (json-key) — Dim message stating no spec update was needed. <!--#ad0ae37411ea8489-->
+- `cli.steprender.usage.title` (json-key) — Title for the per-step token usage block. <!--#24e45bdbbce7f326-->
+- `cli.steprender.verify.in_scope` (json-key) — Verify-step label marking a finding as in scope. <!--#9cd2942b89783928-->
+- `cli.steprender.verify.out_of_scope` (json-key) — Verify-step label marking a finding as out of scope. <!--#571bf2664fa45125-->
+- `cli.steprender.version_analyze.subline` (json-key) — Dim subline showing the proposed version bump type and confidence. <!--#ccbc659e8556b7eb-->
+- `cli.steprender.title.discovery` (json-key) — Step-renderer panel title: Discovery. <!--#a6007721294a4042-->
+- `cli.steprender.title.project_summary` (json-key) — Step-renderer panel title: Project summary. <!--#2583d4a7f207314a-->
+- `cli.steprender.title.plan_tasks` (json-key) — Step-renderer panel title: Plan tasks. <!--#86be14cbe9682a98-->
+- `cli.steprender.title.confirm` (json-key) — Step-renderer panel title: Confirm. <!--#4df89c373539a58d-->
+- `cli.steprender.severity.critical` (json-key) — Severity label: critical. <!--#5073bbf0263302a9-->
+- `cli.steprender.severity.high` (json-key) — Severity label: high. <!--#df48ca149a85f28b-->
+- `cli.steprender.severity.medium` (json-key) — Severity label: medium. <!--#a48a7df682075f77-->
+- `cli.steprender.severity.low` (json-key) — Severity label: low. <!--#6cb6fca2bbaded20-->
+- `merge.strategy.not_a_string` (json-key) — Config validation error: the merge strategy value is not a string. <!--#5e0c95ed0c06dbdf-->
+- `merge.strategy.removed_default` (json-key) — Config error stating the 'default' merge strategy was removed in favour of 'safe'. <!--#9b5415bf00105f9e-->
+- `merge.strategy.removed_robust` (json-key) — Config error stating the 'robust' merge strategy was removed in favour of 'fast'. <!--#2607b2883cf3935a-->
+- `merge.strategy.unknown` (json-key) — Config error stating the merge strategy is unknown, listing the allowed values. <!--#f4278d071918c949-->
+- `migrate.note.charter_llm_failed` (json-key) — Migration note stating charter LLM assembly failed and a review-marked fallback charter was written. <!--#afd42b8decfe44fd-->
+- `migrate.reason.file_not_found` (json-key) — Migration reason label: the file was not found. <!--#cd14243b6c442237-->
+
+## `src/se3/server/` — The optional, separately-installed `se3[server]` central control-plane package: a fail-closed multi-tenant FastAPI server (app, ws, state, persistence, identity, crypto, bootstrap) that aggregates outbound daemon WebSocket connections and re-exposes their machines/flows/history over a REST/WebSocket API, plus the pluggable auth provider chain and the bundled single-page web UI static assets. <!--#a322fc567b719259|648c461bd923f6b5-->
 
 ### `src/se3/server/__init__.py` (python) — The `se3-server` console-script entry point and package docstring for the separate, optional-extra server package, whose `main` intercepts `--version` and `bootstrap-token` on the lightweight path, then verifies the FastAPI/uvicorn `server` extra is installed (printing an install hint and exiting non-zero otherwise) before delegating to `se3.server.app.main`. <!--#100d9dbc5eb7b9e6|f583c61a40c09d3b-->
 - `main` (function) — The `se3-server` console-script entry point that handles `--version` and `bootstrap-token` on the lightweight path, then verifies the FastAPI/uvicorn `server` extra is installed (printing an install hint and exiting non-zero if not) before delegating to `se3.server.app.main`. <!--#e7924e3140aae035-->
 
-### `src/se3/server/app.py` (python) — Assembles the SE3 central-server FastAPI application, wiring the daemon/UI WebSocket endpoints, REST API routes (machines, flows, history, issues, auth), owner authentication, and the bundled static web frontend, kept behind the optional se3[server] extra so the core CLI never imports FastAPI. <!--#85690e3deb7a2a2d|e3b0c44298fc1c14-->
+### `src/se3/server/app.py` (python) — FastAPI application factory for the SE3 central server, wiring the daemon/UI WebSocket endpoints, authentication and session layers, and the REST API for machines, flows, issues, history and the bundled multi-language web frontend. <!--#9e201c8fa07a6de0|e3b0c44298fc1c14-->
 
 ### `src/se3/server/bootstrap.py` (python) — A deliberately dependency-light module providing the `se3-server bootstrap-token` CLI subcommand that mints the one-time break-glass admin escape-hatch token, persisting only its SHA-256 hash while revealing the plaintext to the console exactly once. <!--#117c67460bfbfc86|aa87810d05a4dd59-->
 - `issue_breakglass_token` (function) — Mints a break-glass token against a given store, persisting only its hash and returning the (plaintext, token_id) pair with an optional TTL. <!--#43a92d1a8aa0f88a-->
@@ -3368,100 +5186,1112 @@
   - `SessionAuthProvider.resolve_owner` (method) — Reads the session cookie, resolves it to a session and owner, and returns an OwnerIdentity (failing closed and dropping the session if the owner is gone). <!--#a647ecb75f2dd934-->
   - `SessionAuthProvider.logout` (method) — Idempotently destroys the session referenced by the request's cookie. <!--#41bf329b337e43e8-->
 
-## `src/se3/server/static/` — The static asset bundle for the SE3 control-plane web UI, containing the single-page HTML shell (index.html), its vanilla-JS single-page app (app.js) that speaks the `/ws/ui` WebSocket and REST API to render machines/flows/history/issues dashboards with realtime chat and human-intervention reply boxes, and the dark CLI-flavored stylesheet (style.css) that themes the whole two-pane console. <!--#9e55e00a73d4c80d|83ecea4f17394980-->
+## `src/se3/server/static/` — The browser-side asset bundle for the SE3 WebUI control plane — an index.html shell (topbar, login gate, machines/flows layout), the app.js single-page runtime that drives i18n, WebSocket/polling updates, list rendering and the running-flow chat with human-in-the-loop intervention, a dark-theme style.css covering every view down to a mobile breakpoint, and an i18n/ directory of per-locale translation catalogues. <!--#e32e181b2cf2e8ef|85d537f24b85a342-->
 
-### `src/se3/server/static/app.js` (text) — Single-file vanilla-JS SPA for the SE3 realtime dashboard: it maintains a global state object and WebSocket-plus-polling sync (with diff-aware render signatures, epoch guards, and reconnect/self-heal paths) to render machine/flow/issue lists, a full-screen running-flow chat view with incremental conversation loading and scroll preservation, and the interjection/reply/intervention UI including pending-Send settlement, CONFIRM approval gating, optimistic echoes, and history-index reconciliation. <!--#b703d684792c89b7|bbb08905bff9ca9a-->
+### `src/se3/server/static/app.js` (text) — The entire client-side JavaScript for the SE3 WebUI single-page app: it holds the global UI state, an i18n runtime, a reconnecting WebSocket plus polling layer, diff-aware signature-gated renderers for the machine/flow/issue lists, and the full-screen running-flow chat view with its conversation loading, scroll anchoring, and human-in-the-loop intervention (reply / interject / CONFIRM decision) handling. <!--#92bdc96e92aed0eb|9a9e71652411f54e-->
 - `chunk:1` (chunk) [degraded:chunk] — File header and the opening of the global `state` object, documenting the SPA's purpose (realtime dashboard + full-screen flow chat view) and the auth/identity, machine/flow-selection, and running-flow conversation progress/signature/epoch/follow-bottom state fields. <!--#7985ffdf5c623fc5-->
 - `chunk:2` (chunk) [degraded:chunk] — Continuation of the `state` object: pending-Send settle bookkeeping, interjection lifecycle tracking (phases, local synthetic interjections, consumed afterimages), reply-context expand/scroll/full-prompt UI caches, diff-aware render-signature cache, and issue-management filter/state fields. <!--#11cc7111bcb620d9-->
-- `chunk:3` (chunk) [degraded:chunk] — Pure DOM-free render-signature helpers (`machinesSignature`, `flowsSignature`, `interventionsSignature`) that serialize each panel's visible-dependency subset so unchanged ws/poll pushes skip DOM rebuilds, plus module-level ws/reconnect/poll-timer declarations. <!--#efce30246258eea1-->
-- `chunk:4` (chunk) [degraded:chunk] — Owner-scoped visibility and row-view-model helpers (`visibleMachinesForOwner`, `daemonKeyRowModel`, `userRowModel`) plus small DOM/status utilities (`el`, `statusClass`) and pure flow-status predicates (`isWaitingForLock`, `flowStatusLabel`, `isActiveFlow`, `isTerminalFlow`). <!--#9bcaa0443423b188-->
-- `chunk:5` (chunk) [degraded:chunk] — Toast notifications (`showToast`), connection-status/stale banners, authed fetch wrapper with 401 handling, and the WebSocket client with exponential-backoff reconnect that dispatches snapshot/history/interjection/spawn-failed messages. <!--#5e84525c33b0d041-->
-- `chunk:6` (chunk) [degraded:chunk] — Handlers for ws `interjection_event` (phase recording, local-entry bind/consume, dedup toasts, consumed afterimages, pending-Send settling) and `spawn_failed`, plus the pending-Send settlement helpers (`settlePendingSend`, `maybeSettleViaPendingCallsDiff`). <!--#19a24196167f8ec3-->
-- `chunk:7` (chunk) [degraded:chunk] — Mobile single-view panel-switch state helpers for the main list and history views (`listPanelState`/`historyPanelState` + DOM appliers), plus pure issue-management helpers (`issueDisplayTitle`, `issueSlug`, `filterIssues`, `issueTypes`, `issueProjectRoots`, default-project picker). <!--#97e999eaee49556f-->
-- `chunk:8` (chunk) [degraded:chunk] — Pure issue helpers for status/priority CSS classes, machine-id/composite-key resolution, and REST body builders (`buildIssueCreateBody`/`EditBody`/`ActionBody`/`FlowBody`, `buildNewFlowBody`), plus the issue-launchability gate (`issueLaunchModel`). <!--#fb43bc1b96a6ef09-->
-- `chunk:9` (chunk) [degraded:chunk] — Machine/flow list renderers (`renderFlows`, `renderFlowCard`) guarded by their diff-aware signatures, and the start of the running-flow chat view including step icons and `openFlowView`'s per-flow state reset. <!--#a65c070b772a7d2f-->
-- `chunk:10` (chunk) [degraded:chunk] — Flow-view lifecycle: `openFlowView`'s conversation load + 3s poll setup, `doCloseFlowView`/`closeFlowView` cleanup, the mobile off-canvas sidebar drawer helpers, and the WeChat-style auto-grow reply-textarea clamp (`replyTextareaHeight`). <!--#02a23535a7fbdebe-->
-- `chunk:11` (chunk) [degraded:chunk] — `loadFlowConversation` — the running-flow conversation loader documenting its first-open / incremental-reconnect / silent-self-heal modes, epoch guarding, and progress-token/signature echoing for delta vs not-modified vs full delivery. <!--#22e1c17ea2054d16-->
-- `chunk:12` (chunk) [degraded:chunk] — Tail of `loadFlowConversation` (delta vs full-rebuild rendering, scroll stick/anchor restore, error handling) plus element-anchored scroll-preservation helpers (`scrollFlowConversationToBottom`, `captureScrollAnchor`, `restoreScrollAnchor`) for the silent rebuild. <!--#12e88ee45e70ef78-->
-- `chunk:13` (chunk) [degraded:chunk] — The progression-grace self-re-arming timer and `maybeRefreshConversationOnProgression` — the WS-failure safety net that detects a step-switch/retry advance and silently rebuilds the open conversation only if the WS push path stayed silent. <!--#4ebefdc8b2a701d8-->
-- `chunk:14` (chunk) [degraded:chunk] — `refreshFlowDetail` — the single converging flow-detail fetch (race-guarded) that triggers progression refresh, settles pending Sends, and re-renders sidebar/interventions, plus `flowSidebarSignature` and the start of `renderFlowSidebar` (Overview/Steps). <!--#8a9d768f7b929f51-->
-- `chunk:15` (chunk) [degraded:chunk] — Resume-flow dispatch (`resumeFlow`, `makeResumeButton`) and the end-session feature: worktree-path/endability pure gates (`isWorktreeSessionPath`, `isFlowEndable`) and the confirm-modal + `endFlow` request flow. <!--#846848a107488798-->
-- `chunk:16` (chunk) [degraded:chunk] — Intervention model: the `KIND_META` table of human-facing labels/icons per pending-call kind, `normalizeKind`, and `computeInterventions` which derives the ordered chip entries (local synthetic + real pending calls with lifecycle phases). <!--#641741f29beced98-->
-- `chunk:17` (chunk) [degraded:chunk] — `renderInterventions` (diff-aware chip-bar rebuild + reply-box sync), the Interject-button click/sync logic, and `renderInterventionChip` which builds each chip with kind icon/label and pending/consumed visual state. <!--#c563d89fecb2fa58-->
-- `chunk:18` (chunk) [degraded:chunk] — `buildCollapsiblePrompt` (expand/collapse prompt body with lazy full-text fetch and scroll restore) and `renderAdjudicateReview` (the adjudicate-approval rationale + baseline→adjudicated diff panel), plus the start of `updateReplyBox`. <!--#d65c1b122e6ae914-->
-- `chunk:19` (chunk) [degraded:chunk] — `updateReplyBox` reply-context rendering — header, collapsible prompt with cached full-text, suppressed context block, adjudicate review, and the CONFIRM approval gate's 批准/打回 buttons with structured decision dispatch. <!--#ccad4d476ae0e157-->
-- `chunk:20` (chunk) [degraded:chunk] — CONFIRM free-text interpretation mirroring the backend (`CONFIRM_APPROVE/REJECT_TOKENS`, `interpretConfirmAnswer`, `confirmRevisionIntent`), and the reply-submission entry `submitReply` plus the shared pending-Send arming helper `armPendingSend`. <!--#a6c463df8c3d772a-->
-- `chunk:21` (chunk) [degraded:chunk] — `sendReply` — the reply/interjection POST path whose success is decided solely by `resp.ok` (the #193 fix) with optimistic echo splicing, and the start of `appendLocalReply`'s echo-rank computation. <!--#92548a86f3a991ec-->
-- `chunk:22` (chunk) [degraded:chunk] — History-detail cleanup and index fetching: `fetchHistoryIndex`, the authoritative `applyHistoryIndex` baseline push, the differential `applyHistoryIndexDelta` merge-by-flow_id, and the start of `applyHistoryData`'s ws-push record handling. <!--#10b50560397a1ffe-->
-- `chunk:23` (chunk) [degraded:chunk] — Tail of `applyHistoryData` (full-push epoch/signature invalidation, echo reconciliation, render + scroll), plus `isNearBottom`, `formatTime`, `daemonConnected`, `historyListEmptyState`, and `groupHistorySessionsByProjectRoot`. <!--#94f4c2dd7b03015e-->
-- `chunk:24` (chunk) [degraded:chunk] — History-list rendering (per-project-bucket session cards with badges/resume buttons) and `openHistorySession` — the first-open vs incremental-reconnect history-detail loader with resume-bar injection. <!--#94b66a64dbf1a319-->
-- `chunk:25` (chunk) [degraded:chunk] — Issues view open/close, `collectAllIssues`, and the `fetchIssues` request-coalescing machinery (`fetchIssuesCoalesceDecision`/`fetchIssuesFinallyDecision` pure helpers + the async fetch that guards against stale/starved responses). <!--#2a0d6099088df603-->
-- `chunk:26` (chunk) [degraded:chunk] — Issue-filter dropdown population (`selectTypeDropdownOptions`, `refreshIssueTypeFilter`, `refreshIssueProjectFilter`), `renderIssuesList` card rendering, and the `DESC_CLIP`/`descriptionLikelyTruncated` clipped-preview detection. <!--#2d48d4eee97e3b9d-->
-- `chunk:27` (chunk) [degraded:chunk] — On-demand full-text fetchers (`fetchCallFullPrompt`) and issue detail rendering (`openIssueDetail`, `renderIssueDetail` fields/description/actions), plus tag parse/format helpers and issue create/edit modal machine/project population. <!--#980524385a611a59-->
-- `chunk:28` (chunk) [degraded:chunk] — Issue description-lock helper (`_setIssueDescriptionLock`) and the create/edit modals (`openIssueCreateModal`, `openIssueEditModal`) with on-demand untruncated-description loading that disables the textarea to prevent saving the preview, plus `submitIssueForm` start. <!--#42d116da321f34f4-->
-- `chunk:29` (chunk) [degraded:chunk] — Tail of `submitIssueForm` and the issue close/reopen action modal (`openIssueActionModal`, `confirmIssueAction`) that POSTs close/reopen with reason, plus the start of the start-flow-from-issue feature (`makeIssueLaunchButton`, `openIssueLaunchModal`). <!--#2dcad107b5e0f157-->
-- `chunk:30` (chunk) [degraded:chunk] — Tail of issue-launch flow dispatch (`confirmIssueLaunch` POST /api/flows) and the record-normalization section: the assistant-text recovery walker `extractAssistantText` that collects readable text from parsed NDJSON `raw_json` stream shapes. <!--#baf5b717edc43360-->
-- `chunk:31` (chunk) [degraded:chunk] — The step-event branches of `normalizeRecord`: normalizing `step_completed`/`step_failed`/`step_output` into report records and `step_started`/`step_status`/`waiting_for_lock`/`merging` into affordance-free lifecycle anchors, plus the start of the `group_status` branch. <!--#bbd6f7e48e2cd5e1-->
-- `chunk:32` (chunk) [degraded:chunk] — Completes record normalization (recovering content, tool-chip fields, per-call token usage, agent/model metadata, and the raw envelope) and defines `recordOrdinal` / `legacyKeyFromNorm`, the stable-identity and legacy content-signature keys used for record deduplication. <!--#4a94dd0113aec2a2-->
-- `chunk:33` (chunk) [degraded:chunk] — Snapshot/live-append reconciliation helpers: merges live WS appends into an HTTP snapshot (newer-rewrite-wins), detects in-place rewrites of stable stepId#ordinal lines, and dedupes append batches against a bounded tail window plus the idempotent reconcile of append batches. <!--#81cb5ad8d353ef38-->
-- `chunk:34` (chunk) [degraded:chunk] — Defensive discovery-record dedup for merged snapshots, the `GET /api/history` URL builder with progress token/signature params, record sort-timestamp extraction, and the stable timestamp merge that interleaves REST delta records with baseline and mid-request WS records. <!--#4841cb15e2da4490-->
-- `chunk:35` (chunk) [degraded:chunk] — The core `mergeHistoryResponse` decision logic — delta tail-append vs stable merge vs full-snapshot fallback that preserves live appends, in-place rewrites, and optimistic local echoes — plus `comparableUserText` and the start of local-echo reconciliation. <!--#d3a39a31c4a0fdc9-->
-- `chunk:36` (chunk) [degraded:chunk] — User-prompt marker splitting (`splitUserPromptByMarker` with the TEMPLATE/USER_CONTENT sentinels) and the start of conversation rendering: step keys, per-step bubble type tagging, and the uppercase step-header title table. <!--#4da29d84b38a20d3-->
-- `chunk:37` (chunk) [degraded:chunk] — Code-index progress label/state helpers, step-header label resolution, and `renderConversation` / `addConversationRecords` — the incremental strict-chronological renderer that appends only new tail records while preserving expanded fold/chip state. <!--#61b828939b0d572a-->
-- `chunk:38` (chunk) [degraded:chunk] — Tags group_status and index_progress bubbles with composite identity keys and reconciles them so each group/step keeps a single in-place-updating card, including `removeSupersededIndexProgressRows` (latest-wins per step). <!--#04aef55eb2464865-->
-- `chunk:39` (chunk) [degraded:chunk] — Status-row supersede logic per execution segment, plus the pure partial-stream discriminators: `progressTurnKey`, `markSupersededProgress` (positional final-supersedes-earlier-partials), `partialSegments` (per-round segment keys), and `removeSupersededProgress`. <!--#de8a4f957d28d097-->
-- `chunk:40` (chunk) [degraded:chunk] — Live partial-bubble maintenance — agent/model badge refresh, applying stream fragments via the tool_use_id chip state machine or legacy marker fallback, sorted bubble insertion, and stateless step-header separator rebuilding. <!--#5402d5d363ecfbda-->
-- `chunk:41` (chunk) [degraded:chunk] — Pure sticky floating step-header math (`computeStickyStep` with reveal-band mutual exclusion, scroll targets, header offset measurement) and smooth-scroll/hide helpers for the viewport-tracking step banner. <!--#8895d81858288a1e-->
-- `chunk:42` (chunk) [degraded:chunk] — Sticky-header mounting with scroll/resize wiring (including follow-the-bottom intent capture for the flow view), plus the start of the dependency-free Markdown rendering engine (emphasis, inline code, block parsing). <!--#f23f16161ef415a7-->
-- `chunk:43` (chunk) [degraded:chunk] — Finishes the lightweight Markdown renderer, defines the `[Tool: …]` bracket-marker grammar and parser, and implements the three-state tool chip machine (in-flight/success/failure) with header rebuild and detail-panel attachment. <!--#9333dd88ac9151dd-->
-- `chunk:44` (chunk) [degraded:chunk] — Tool detail-panel renderers for the built-in payload kinds: unified diffs with gutters, line-numbered text, bash output, grep/glob match lists, and plain text, plus the intro to the JS mirrors of the Python tool formatters. <!--#2617b0c599133a3b-->
-- `chunk:45` (chunk) [degraded:chunk] — Per-tool chip header formatters (in-flight/success/failure bodies for Read/Edit/Write/Bash/Grep/Glob mirroring tool_formatters.py) and an LCS-based unified-diff generator for the final raw_json rendering path. <!--#170e1cb8401b4757-->
-- `chunk:46` (chunk) [degraded:chunk] — Builds structured tool detail payloads from raw data and implements `extractAssistantChipEvents` (pairing tool_use/tool_result blocks from raw_json into ordered text/chip events) plus `renderChipEvents` to turn them into DOM nodes. <!--#fb0f3b7e93c43aed-->
-- `chunk:47` (chunk) [degraded:chunk] — The per-step assistant renderer registry and the multi-region structured-JSON extraction layer: lenient JSON parsing, fenced/trailing-bare extraction, and the compat `extractStructuredJson` wrapper for separating result JSON from narrative. <!--#245e4507c3d55d0e-->
-- `chunk:48` (chunk) [degraded:chunk] — `collectJsonRegions` — the JSON-string-aware brace-balanced scanner that finds every top-level JSON region in assistant text, with fence absorption and the block-start/substantive-object guards that keep tool markers and prose fragments intact. <!--#595de928af5029ff-->
-- `chunk:49` (chunk) [degraded:chunk] — The discovery assistant renderer (content markdown, Proposed Task Description card, numbered questions) and `makeStructuredAssistantRenderer`, which reuses step report renderers to render any step's result JSON with narrative above. <!--#845dcacf155d2a59-->
-- `chunk:50` (chunk) [degraded:chunk] — Fold/raw-disclosure controls: `makeFoldable` for long text, raw payload resolution and formatting, the shared nullable `makeRawToggle`, and the assistant-side always-available `makeAssistantRawToggle` with content-literal fallback. <!--#bd62a365ede56b33-->
-- `chunk:51` (chunk) [degraded:chunk] — The user turn's three-layer progressive disclosure (`appendPromptSubsections` for 模板前缀/框架后缀, `makeUserPromptToggle` nesting the raw layer) and documentation of the assistant's simpler two-layer model with the shared narrative renderer. <!--#aec1407ae2fcbcdf-->
-- `chunk:52` (chunk) [degraded:chunk] — Agent/model badge helpers and `renderAssistantBubble` — dispatching to registered structured renderers, a generic outputs fallback for unregistered steps, or the inline thinking-process view, each with usage footnote and raw toggle — plus the start of `renderConversationRecord`'s role-based dispatch. <!--#df587d39d9bba796-->
-- `chunk:53` (chunk) [degraded:chunk] — The collapsed one-line chip path for template-style user/system prompts, the assistant/other expanded-bubble path with its raw-toggle rules, and the affordance-free per-group DAG status marker renderer with agent badge. <!--#f3c357bddd35a578-->
-- `chunk:54` (chunk) [degraded:chunk] — Step-event rows: the collapsible raw-event chip plus default-expanded report card for terminal events, and `renderStepOutputUsageRecord` — the lightweight usage-only chip for non-terminal steps that consumed tokens. <!--#1d16cc0da8219709-->
-- `chunk:55` (chunk) [degraded:chunk] — Step report-card scaffolding: the title table with the `· 结果/总结` suffix convention, and the pure token-usage display helpers (empty detection, count/cost formatting, the compact usage line mirroring the CLI grammar). <!--#9d10bc79425e12cd-->
-- `chunk:56` (chunk) [degraded:chunk] — Session token-usage accumulation (terminal records deduped by recordKey plus last step_output for non-terminal steps), the per-step usage footnote builder, and the per-round cumulative-usage computation grouped by step_id (G5). <!--#9ceaa1aa7d11fc3c-->
-- `chunk:57` (chunk) [degraded:chunk] — Flow/history usage-badge updates, the default-open collapsible report-card factory, the `renderStepReport` dispatch entry point, shared card building blocks (status bar, sections, lists), and the generic key/value outputs renderer. <!--#79c94cca4b1d388d-->
-- `chunk:58` (chunk) [degraded:chunk] — Analyze-report tail plus the field-by-field proposal renderer (summary, files to modify/create, rationale) and design renderer (overview, components, interfaces, decisions), each routing leftover keys through the generic fallback. <!--#80a224c067ddde99-->
-- `chunk:59` (chunk) [degraded:chunk] — The plan report renderer (proposal/design/task-groups sections), the raw structured-JSON block helper, and the implement report renderer with status bar, per-directory grouped file lists, and tests-added/summary sections. <!--#ed7fc4654042b3c6-->
-- `chunk:60` (chunk) [degraded:chunk] — Report renderers for test phases, self-check (severity-grouped issues with the actionable-count-vs-raw-issues distinction), and verify_spec (pass/fail bar, in/out-of-scope issues, recommendations). <!--#fc0cad84db6449c3-->
-- `chunk:61` (chunk) [degraded:chunk] — Report renderers for commit, version_analyze, summarize, discovery (mode/round/conversation history), spec_gate (route explanation and re-test reuse), and the start of the charter_freshness card. <!--#416d670cff9a861f-->
-- `chunk:62` (chunk) [degraded:chunk] — The STEP_REPORT_RENDERERS registry tail, record head rendering, history scroll-container helpers, and the new-task modal's machine/project selection logic including the manual 'Other path…' sentinel and `populateProjectSelect`. <!--#21ad4fa2e1be8ab5-->
-- `chunk:63` (chunk) [degraded:chunk] — New-task form submission via POST /api/flows, the mobile topbar overflow-menu state helpers, and the auth flow — `applyAuthState` projection (auth-only/admin-only gating), session bootstrap, and password login handling. <!--#beeb7bb78b8abc1b-->
-- `chunk:64` (chunk) [degraded:chunk] — Logout/break-glass handling with full client-state reset, and the daemon-key management panel: listing, creating (one-time plaintext reveal), and revoking daemon keys, plus the start of the admin user-management panel. <!--#688cb5745fd1fa12-->
-- `chunk:65` (chunk) [degraded:chunk] — Admin user-management CRUD actions — rendering user rows with action buttons, creating users, deleting, resetting passwords (via prompt), and toggling admin status — followed by the start of the `init()` event-wiring section. <!--#4ac36a0c6ea7c8af-->
-- `chunk:66` (chunk) [degraded:chunk] — The bulk of `init()` — wiring issues, modals, history/nav panels, auth forms, key/user panels, the reply form with Ctrl+Enter submit and auto-grow, popstate flow-view close, and version fetch — plus the start of the module.exports test-surface block. <!--#cf75bd56fcd3e8c4-->
-- `chunk:67` (chunk) [degraded:chunk] — Continues the Node test export list, exposing the assistant/report renderers, JSON extraction, chip state machine, conversation reconciliation, sticky header, reply/confirm send paths, history merge, auth, and issue-management pure helpers. <!--#cda389a375c32522-->
-- `chunk:68` (chunk) [degraded:chunk] — Closes the test export block with the remaining pure helpers — panel/sidebar state, textarea clamp, agent badge, diff-aware render signatures, list renderers, and the shared `state` object. <!--#8f3d4584004c6389-->
+- `chunk:3` (chunk) [degraded:chunk] — Defines DOM-free render-signature builders (machinesSignature, flowsSignature, interventionsSignature) that serialize only the visible dependencies of the machine list, flow list, and docked reply/chip region so unchanged snapshots skip a DOM rebuild, plus the WebSocket/poll-timer module state. <!--#8a5dbc6b02595ca8-->
+- `chunk:4` (chunk) [degraded:chunk] — Owner-scoped machine visibility and daemon-key / user-management row view models, the `el()` DOM helper, and the start of the client-side I18N subsystem (per-user localStorage language, en-US baseline with per-key fallback and a server-fetched locale manifest). <!--#620d2a3256708db1-->
+- `chunk:5` (chunk) [degraded:chunk] — I18N runtime: parse/adopt the server locale manifest, lazily fetch and cache per-language dictionaries (never rejecting), apply data-i18n/-html/-placeholder/-title/-aria-label attributes across a DOM scope, and switch the active language with a repaint hook. <!--#d11b936df5040657-->
+- `chunk:6` (chunk) [degraded:chunk] — Flow-state predicates (isActiveFlow / isTerminalFlow / isFlowResumable, findFlow, flow-scoped pendingCalls / hasPendingCall), the toast notification helper, and the connection-status badge state remembered as an i18n key so it can be repainted on a language switch. <!--#fdd36e0134105442-->
+- `chunk:7` (chunk) [degraded:chunk] — WebSocket client — connect with exponential-backoff reconnect, re-sync open views on reconnect, and dispatch incoming frames (machine snapshots, full/differential history index, history_data, interjection_event, spawn_failed) plus the local-interjection call_id bind/consume bookkeeping. <!--#d8537533f19db6a2-->
+- `chunk:8` (chunk) [degraded:chunk] — Handlers that apply pushed state: interjection-event phase transitions, spawn_failed error toasts, pending-Send settlement via pending_calls diffing, owner-narrowed applyMachines re-render, and the mobile single-panel (machines ↔ flows) switch helpers. <!--#b786fafb20b4e8d4-->
+- `chunk:9` (chunk) [degraded:chunk] — Pure issue-list helpers — display title, slug, filtering by status/source/type, deriving the type and project-root option universes, default project selection, the issues list↔detail panel switch, and status badge class/localized text. <!--#405eb0ed01058190-->
+- `chunk:10` (chunk) [degraded:chunk] — Pure issue identity and request-body builders — machine id, composite (machine::project::id) key, create/edit/close-reopen POST-PATCH bodies, the launch-from-issue gate (issueLaunchModel with localized disable reasons), and the New Task / issue flow bodies. <!--#7a2588ad997ce358-->
+- `chunk:11` (chunk) [degraded:chunk] — Renders the flow list and per-flow cards (status, project label, waiting-for-lock / needs-response badges, progress bar, Resume/End buttons) behind the diff-aware signature, and opens the full-screen running-flow chat view with all its per-flow state reset. <!--#7846719b92763f97-->
+- `chunk:12` (chunk) [degraded:chunk] — Flow-view lifecycle — the 3s detail poll, history-aware close (popstate as the single cleanup path) that tears down every per-flow state field, the mobile sidebar drawer, and the pure auto-grow reply-textarea height clamp. <!--#02a23535a7fbdebe-->
+- `chunk:13` (chunk) [degraded:chunk] — loadFlowConversation — the running flow's conversation loader with three modes (first-open full, reconnect incremental delta via the progress token, and the silent no-flash progression self-heal), guarded by an epoch so stale responses never overwrite newer data. <!--#c1dadb87855e90a1-->
+- `chunk:14` (chunk) [degraded:chunk] — Commits the fetched conversation (delta append vs full rebuild), and implements element-anchored scroll preservation (captureScrollAnchor / restoreScrollAnchor) so a silent full rebuild re-pins the reader's bubble instead of jumping. <!--#199c682655899d47-->
+- `chunk:15` (chunk) [degraded:chunk] — The progression-grace fallback: on a detected flow advance (step change, index change, or a retry/resume status transition) it arms a self-re-arming timer that silently re-pulls the conversation only when the WebSocket push path stayed silent. <!--#4ebefdc8b2a701d8-->
+- `chunk:16` (chunk) [degraded:chunk] — refreshFlowDetail — the single converging point for every flow-detail update (fetch, race guards, progression check, pending-Send settlement) plus the flow sidebar's diff-aware signature and its Overview/Steps/Machine rendering. <!--#25e03ecdacfa1eeb-->
+- `chunk:17` (chunk) [degraded:chunk] — Resume dispatch with its toasts and button, and the End-session feature — the pure worktree-path / endability predicates mirroring the server's checks, plus the confirmation modal. <!--#ac8f892e69e5e09e-->
+- `chunk:18` (chunk) [degraded:chunk] — The intervention model: KIND_META for the five human-in-the-loop kinds (call / interjection / retry_decision / cli_confirm / discovery_confirm / confirm), kind normalization, and computeInterventions which merges local synthetic interjections with the flow's real pending calls. <!--#34e1675f3d21ed9d-->
+- `chunk:19` (chunk) [degraded:chunk] — renderInterventions — reconciles the reply target, skips on an unchanged signature (the textarea-jank fix), rebuilds the chip bar, and wires the inline Interject toggle button. <!--#9f698f92a05ffebe-->
+- `chunk:20` (chunk) [degraded:chunk] — buildCollapsiblePrompt (collapsed prompt body with on-demand full-text fetch and scroll restore) and renderAdjudicateReview, which surfaces an adjudicate CONFIRM gate's rationale plus a baseline→adjudicated before/after diff. <!--#4ff4f21131f32754-->
+- `chunk:21` (chunk) [degraded:chunk] — updateReplyBox — builds the docked reply-context panel for the selected intervention: header, collapsible (lazily upgraded) prompt body, the adjudicate review block, and the CONFIRM approve/reject decision controls with kind-specific placeholders. <!--#7cc0f92f75f5c400-->
+- `chunk:22` (chunk) [degraded:chunk] — The CONFIRM free-text interpreter (approve/reject token sets mirroring the backend, with a second-guess dialog for unrecognized replies) and submitReply, which routes a CONFIRM to a structured decision and everything else to the plain reply path, plus the pending-Send arming helper. <!--#c54d0182f0069791-->
+- `chunk:23` (chunk) [degraded:chunk] — sendConfirmDecision / sendReply — POST the reply or interjection, decide success solely on resp.ok before the best-effort optimistic echo, and settle the Send lock on failure; appendLocalReply splices the just-sent reply into the conversation. <!--#037c9c60f76b6ae1-->
+- `chunk:24` (chunk) [degraded:chunk] — The history view's open/close lifecycle and index handling — the /api/history fetch with its loading state, the authoritative full history_index push, and the differential history_index_delta merge (upsert/remove by flow_id, re-sorted by updated_at). <!--#d4b6584694060aaf-->
+- `chunk:25` (chunk) [degraded:chunk] — applyHistoryData's running-flow branch (dedup, append-vs-full render, append-sequence bookkeeping), plus scroll/time/daemon-connection helpers and the pure history-list empty-state classifier and project-root bucketing. <!--#52055b5fe32ee182-->
+- `chunk:26` (chunk) [degraded:chunk] — renderHistoryList (project dropdown, refreshing bar, session cards with status/live/resume affordances) and openHistorySession, which loads or incrementally refreshes a history session's detail. <!--#0855facc26a0b0c6-->
+- `chunk:27` (chunk) [degraded:chunk] — Finishes the history-detail load, then opens the Issues view — its open/close lifecycle and the pure request-coalescing / sequence-guard decisions behind fetchIssues, so overlapping STATUS_UPDATE-driven fetches never starve the list. <!--#431b7e856efca2a9-->
+- `chunk:28` (chunk) [degraded:chunk] — fetchAllIssueTypes (unfiltered type/project universes with a stale-response guard), the type and project filter dropdown rebuilds, and renderIssuesList's filtered, newest-first issue cards. <!--#2872ea8857323871-->
+- `chunk:29` (chunk) [degraded:chunk] — On-demand full-text loaders (issue description and a pending call's untruncated prompt via /api/calls/{id}/detail) and renderIssueDetail — header badges, field rows, description with truncation upgrade, and the launch/edit/close/reopen actions. <!--#ca62af269ea73293-->
+- `chunk:30` (chunk) [degraded:chunk] — The issue create/edit modal — machine/project selectors, the dirty-field tracker, and the description lock that disables the textarea while the untruncated body is fetched so an edit can never save back the clipped preview. <!--#ee3884bb71101559-->
+- `chunk:31` (chunk) [degraded:chunk] — Issue form submission (POST create / PATCH edit), the close/reopen confirmation modal, and the start of the launch-flow-from-issue affordance (debounce set + the always-visible, conditionally-disabled Launch button). <!--#61cf1c55ddf38c60-->
+- `chunk:32` (chunk) [degraded:chunk] — confirmIssueLaunch (POST /api/flows from an issue with discover/worktree options), followed by record normalization's assistant-text recovery — walking a record's raw NDJSON to reconstruct readable turn text and tool markers. <!--#b3e786585768a4ef-->
+- `chunk:33` (chunk) [degraded:chunk] — normalizeRecord's structured-event branches — step_completed / step_failed / step_output into step-report records, and the affordance-free lifecycle anchors (step_started / step_status / waiting_for_lock, plus the legacy merging row). <!--#59caf7f68e178f55-->
+- `chunk:34` (chunk) [degraded:chunk] — normalizeRecord's generic branch — index-progress and stream-progress (partial) records, role/content recovery, tool-chip state fields, per-call token usage, agent/model metadata, the .jsonl envelope for the raw view, and the record's stable ordinal. <!--#d3466a17c9600d94-->
+- `chunk:35` (chunk) [degraded:chunk] — The snapshot/live-append merge machinery — folding live WS records into an authoritative REST snapshot only when strictly newer (mergeSnapshotWithLiveAppends), surfacing in-place ordinal rewrites, and tail-window-bounded append dedup. <!--#96910a262ef561f0-->
+- `chunk:36` (chunk) [degraded:chunk] — reconcileAppendRecords' result shape, the defensive duplicate-discovery dedup for merged worktree+main snapshots, the `?after=`/`?sig=` snapshot URL builder, and the stable timestamp-ordered merge of held vs delta records. <!--#c0cc820ef3d06c7c-->
+- `chunk:37` (chunk) [degraded:chunk] — mergeHistoryResponse — decides noop / delta-append / full-rebuild for a history response, preserving live appends, in-place rewrites and pending optimistic echoes across a generation-replacing full snapshot. <!--#0229f514d1a03a5a-->
+- `chunk:38` (chunk) [degraded:chunk] — Collapsible-role chips, and the user-prompt marker split (SE3 TEMPLATE_END / USER_CONTENT sentinels) that separates the engine's boilerplate prefix and framework suffix from the user's literal input. <!--#0d25d26a7a1e84ba-->
+- `chunk:39` (chunk) [degraded:chunk] — Step status/group-status/index-progress label helpers and renderConversation — the shared strict-chronological chat-stream renderer with incremental (append-only) reconciliation so expanded folds survive live updates. <!--#5fa982f393ba9160-->
+- `chunk:40` (chunk) [degraded:chunk] — The conversation render loop's per-bubble tagging (timestamp, index, step key/type, partial, status/terminal/group-status/index-progress markers) and the supersede passes plus step-header rebuild that follow each batch. <!--#c39b32695a676e35-->
+- `chunk:41` (chunk) [degraded:chunk] — removeSupersededGroupStatusRows / removeSupersededStatusRows — collapse each step region's lifecycle anchors to one truthful current status (per execution segment, terminal report wins) — and markSupersededProgress for partial stream fragments. <!--#f11a4000e63c119b-->
+- `chunk:42` (chunk) [degraded:chunk] — The accumulating partial (stream_progress) bubble — built once per turn segment, with an in-place agent·model badge and a tool_use_id-keyed chip registry so an in-flight chip upgrades to success/failure rather than spawning a duplicate. <!--#96d202c3886562f3-->
+- `chunk:43` (chunk) [degraded:chunk] — rebuildStepHeaders (one separator per contiguous step run) and the viewport-driven sticky floating step header's pure core — computeStickyStep and stickyScrollTarget. <!--#31e56e45f803faba-->
+- `chunk:44` (chunk) [degraded:chunk] — The sticky step header's DOM side — measure/refresh offsets, build and mount the float with scroll/resize listeners and click-to-locate, for both the flow and history scrollers — and the start of the shared conversation rendering engine. <!--#f8008d78d53c2d03-->
+- `chunk:45` (chunk) [degraded:chunk] — The dependency-free Markdown renderer (fences, headings, lists, quotes, paragraphs), the inline `[Tool: …]` marker grammar/parser, and the tool-chip state machine (in-flight → success/failure) with header rebuilding. <!--#11b04651804d5adc-->
+- `chunk:46` (chunk) [degraded:chunk] — The chip detail-panel infrastructure and per-kind renderers — line-numbered unified diffs, full file content, read text, bash command/stdout/stderr — mirroring the CLI's tool-detail palette. <!--#8ffeb87b84ad830f-->
+- `chunk:47` (chunk) [degraded:chunk] — The remaining detail renderers (grep/glob matches, plain text) plus the JS mirror of tool_formatters.py — per-tool in-flight and success chip header bodies computed from a tool's input and result. <!--#b5eb82cc28196718-->
+- `chunk:48` (chunk) [degraded:chunk] — The LCS unified-diff generator, per-tool structured detail payload builder, and extractAssistantChipEvents — pairing tool_use with tool_result by id in stream order so the final assistant bubble reproduces the live chips. <!--#6ee3481d9721827e-->
+- `chunk:49` (chunk) [degraded:chunk] — renderChipEvents / renderToolBlock / renderToolMarkers (chip and prose interleaving), the per-step assistant renderer registry, and the lenient, JSON-string-aware structured-JSON extraction used to find a turn's result payload. <!--#37a356b2da16d733-->
+- `chunk:50` (chunk) [degraded:chunk] — STEP_RESULT_FIELDS and the balanced-brace scanner (findBalancedJsonEnd / collectJsonRegions) that identify whether an assistant turn's JSON is a real step result rather than an intermediate tool call. <!--#d81fb877a90c4a68-->
+- `chunk:51` (chunk) [degraded:chunk] — extractResultJson (pick the result region, excise every JSON region from the narrative) and the dedicated discovery assistant renderer — narrative, markdown content, the Proposed Task Description card, and the questions list. <!--#2f969c9974084613-->
+- `chunk:52` (chunk) [degraded:chunk] — The generic structured assistant renderer factory registered for every step type with a report renderer, the long-content lazy fold (makeFoldable), and the raw-payload resolution behind the "view raw" toggles. <!--#c2e37bd29b97eaea-->
+- `chunk:53` (chunk) [degraded:chunk] — The assistant and user raw toggles (the user side always falling back to the .jsonl envelope) and the user prompt's Layer-2 "expand all" toggle exposing the template-prefix / framework-suffix subsections with Layer-3 raw nested inside. <!--#92d26c18469f03e1-->
+- `chunk:54` (chunk) [degraded:chunk] — renderNarrativeNodes (chips reconstructed from raw_json) and renderAssistantBubble — the two-layer assistant view: structured result or generic outputs card, else the full inline thinking process, plus the agent·model badge. <!--#5bd208ccc49d3b64-->
+- `chunk:55` (chunk) [degraded:chunk] — renderConversationRecord — the per-record dispatch to step-event / step_output / group-status / index-progress / user-marker renderers, and the default role-tagged bubble with its collapsible-chip or expanded form. <!--#94565d6c8e121de2-->
+- `chunk:56` (chunk) [degraded:chunk] — Renders the lightweight lifecycle status row (step_started / step_status / waiting_for_lock), the step_completed / step_failed row (raw event chip plus default-expanded report card), and the usage-only step_output chip. <!--#cda7ae1ec7d03197-->
+- `chunk:57` (chunk) [degraded:chunk] — renderUserMarkerRecord — the user turn's three-layer progressive disclosure (literal input bubble, expand-all boilerplate, nested raw) — and the step-report card title tables. <!--#a56b02476b517c5e-->
+- `chunk:58` (chunk) [degraded:chunk] — Token-usage formatting and accumulateSessionUsage — summing per-step usage into the session total with dedup by record key and terminal-over-step_output preference so multi-round steps are never double-counted. <!--#5a0ea0dc8ae9699b-->
+- `chunk:59` (chunk) [degraded:chunk] — Per-step cumulative round-usage accumulation, the per-round usage footnote, the shared session-usage badge renderer for both the flow and history views, and the collapsible report-card shell. <!--#1ed0f43a8d450557-->
+- `chunk:60` (chunk) [degraded:chunk] — Report-card building blocks (status bar, section, list) plus the generic outputs key/value renderer, the default fallback report, and the analyze report — all mirroring step_renderers.py. <!--#d7453257500d5451-->
+- `chunk:61` (chunk) [degraded:chunk] — The proposal / design field renderers (components, interfaces, decisions) and the plan report card that composes proposal, design, and task groups. <!--#6c69c2b116080824-->
+- `chunk:62` (chunk) [degraded:chunk] — The implement report card (status bar, summary, grouped changed files, tests added, incomplete tasks, restricted edits) and the start of the test report card. <!--#520c2c8835666df4-->
+- `chunk:63` (chunk) [degraded:chunk] — The self_check, verify_spec, update_spec and commit report cards — severity/scope-grouped issue lists, recommendations, and updated-spec summaries. <!--#a32370b07bab875e-->
+- `chunk:64` (chunk) [degraded:chunk] — The summarize, discovery, spec_gate and charter_freshness report cards — including the gate's route/skip conclusion reusing the test summary, and the charter auto-update diff. <!--#cdb3e2fe208c2e8f-->
+- `chunk:65` (chunk) [degraded:chunk] — The record head/timestamp row, history scroll-container helpers, and the New Task form — machine and project-root selects with the "Other path…" manual-entry sentinel and absolute-path validation. <!--#d06a0bcc2ee28ae3-->
+- `chunk:66` (chunk) [degraded:chunk] — New Task submission, the mobile topbar overflow menu, and the auth flow — the login gate projection (auth-only / admin-only gating), session bootstrap via /api/auth/me, and login handling. <!--#4fb5e9b074642318-->
+- `chunk:67` (chunk) [degraded:chunk] — Logout/state reset, the daemon-key management panel (list, create-with-one-time-reveal, revoke), and the admin user-management panel's load/render. <!--#331a882a18cdab26-->
+- `chunk:68` (chunk) [degraded:chunk] — Admin user actions (create, delete, password reset, admin toggle) and the start of the wiring section — the language-switch repaint of every visible dynamic surface. <!--#6bfa5bc45419ea5a-->
+- `chunk:69` (chunk) [degraded:chunk] — repaintOpenModals (re-localizing the dynamically-composed modal titles/messages a static pass cannot own) and initI18n — manifest, language resolution, switcher wiring, dictionary load, and the post-load repaint. <!--#816bd6f2f38b0404-->
+- `chunk:70` (chunk) [degraded:chunk] — init() — the DOM event wiring for every modal, panel, menu, reply box and popstate handler, the version-label fetch, and the auth bootstrap that starts the app. <!--#8cf2cd4e7d651693-->
+- `chunk:71` (chunk) [degraded:chunk] — The CommonJS export block (continued) exposing the pure and DOM-stub-testable helpers — conversation reconciliation, sticky header, reply/send, history merge, resume/end-session, issue and auth helpers — to the Node frontend tests. <!--#1a5b25aee43ef452-->
+- `chunk:72` (chunk) [degraded:chunk] — The tail of the export block — render-signature infrastructure, project-label helpers, the I18N object and live-chrome repaint functions, plus the shared mutable `state` — closing the module. <!--#a316659ab5e555ed-->
 
-### `src/se3/server/static/index.html` (text) — The single-page HTML shell for the SE3 Control Plane web UI, defining the top bar with an auth-gated overflow/hamburger nav, a login gate (password + break-glass admin token), the main Machines/Flows two-pane layout, and a History view — all with responsive single-view panel switching and auth/admin-only visibility hooks driven by app.js. <!--#325d9df1c1ad1f83|e3b0c44298fc1c14-->
+### `src/se3/server/static/index.html` (text) — The single-page HTML shell for the SE3 WebUI control plane, declaring the localized topbar (version badge, live connection status, language selector, hamburger overflow menu with auth-only/admin-only nav buttons), the login gate with password and break-glass admin token forms, and the main machines/flows layout that app.js hydrates at runtime. <!--#c2d7b1097493be46|e3b0c44298fc1c14-->
 
-### `src/se3/server/static/style.css` (text) — The complete stylesheet for the SE3 web dashboard, defining :root design tokens and styling every view — top bar, machine/flow lists, running-flow chat with reply dock and intervention chips, the Issues and History views, structured step-report and per-step-type color grouping, conversation bubbles with markdown/tool-call/diff rendering, admin login/key/user panels, and a comprehensive mobile-portrait (≤600px) responsive layer. <!--#f633f4b548b7d7ea|45cdccc3701e678c-->
-- `chunk:1` (chunk) [degraded:chunk] — Opening chunk declaring the :root design tokens (background/foreground/accent colors plus per-StepType grouping hues) and base styling for the top bar, connection badge, buttons, the two-pane layout grid, and the machine list. <!--#4dbf649142d75cf7-->
-- `chunk:2` (chunk) [degraded:chunk] — Styles for flow cards (running-flow list items) and their heads/project labels, the status/call/waiting-lock badges, Resume/End buttons, progress bar, and the full-screen running-flow chat view scaffolding (header, sidebar, conversation scroller). <!--#fa97c8a324434327-->
-- `chunk:3` (chunk) [degraded:chunk] — Styles the session token/cost usage badge, agent/model badge, mobile flow-view grid collapse, the intervention chip-bar (kinds, selection, pending/consumed lifecycle animations), and the top of the docked reply box. <!--#f0d8f399ff4c0d1a-->
-- `chunk:4` (chunk) [degraded:chunk] — Styles the docked reply box internals: reply head/kind/callid, collapsible prompt body, context blocks, option buttons, and the CONFIRM approval-gate and ADJUDICATE approval-review panels. <!--#b1167689ac44f6fb-->
-- `chunk:5` (chunk) [degraded:chunk] — Styles the reply input row (textarea + Interject/Send icon buttons), collapsed prompt chips, detail sections and step rows, key/value pairs, and the modal dialog (card, head, body, form fields, actions, hints) plus ghost buttons. <!--#0f7cfc1c7102f7c2-->
-- `chunk:6` (chunk) [degraded:chunk] — Styles for the full-screen Issues view: its fixed header, two-pane (list/detail) body grid with a mobile single-column fallback, the filter/create toolbar, issue cards with source/status/priority badges and color-coded left stripes, and the issue detail pane's fields, description block, and actions. <!--#f4ee170fce7c1175-->
-- `chunk:7` (chunk) [degraded:chunk] — Continues the Issues view (per-row 'launch flow' action, side-by-side form rows, small-modal variant, desktop back-button hiding) and opens the History view: its fixed header, two-pane body grid, project-select dropdown, refreshing bar, session list items with ellipsis-truncated flow-id and live badge, and the start of the history detail/step styling. <!--#5907b524541a83b1-->
-- `chunk:8` (chunk) [degraded:chunk] — History-detail step styling: step titles, the viewport-driven sticky floating step header (G5), role-tagged history records, and the shared conversation-bubble system that aligns user/assistant/system/other roles with distinct tints, plus the start of markdown-element styling inside bubbles. <!--#b6e36e7de123a344-->
-- `chunk:9` (chunk) [degraded:chunk] — Markdown rendering inside conversation bubbles (headings, lists, quotes, code blocks, inline code, emphasis) and the inline tool-call marker chips with in-flight/success/failure state variants, a collapsible details panel, and diff/line-numbered content coloring. <!--#d54ac6a9894d0600-->
-- `chunk:10` (chunk) [degraded:chunk] — Tool-marker bash output (stdout/stderr/command) and match styling, long-content folding with a fade mask, the raw-data JSON toggle, empty-state variants, and the assistant/user three-layer progressive-disclosure controls (structured result → full process → raw NDJSON). <!--#d01b85212b0f60f4-->
-- `chunk:11` (chunk) [degraded:chunk] — Conversation record variants: the user-prompt marker's layered content bubble/toggle/chip, the raw step-event chip (completed/failed), the per-group DAG group_status pill (queued/running/completed/failed/skipped), the code-index index_progress pill, and the per-step step_started RUNNING status row with its status color states. <!--#4e22336a5258edb4-->
-- `chunk:12` (chunk) [degraded:chunk] — Per-step-type visual grouping (G4): color-coded left borders and faint background 'lane' tints per pipeline step type (discovery/analyze/plan/…/commit/summarize), scoped to .history-detail, with a z-index:-1 ::before underlay that overflows ±7px so same-step records form one continuous band, plus stacking-context and boundary-suppression rules. <!--#ff76dc43c7a6d9c6-->
-- `chunk:13` (chunk) [degraded:chunk] — Structured step-report card styling: title, status bar with ok/warn/fail/muted icons and labels, sections, key-value rows (including nested dicts), group id/name/meta, error/empty blocks, and the per-step and per-round token-usage footnotes, plus the touched-files listing. <!--#190816ed8f361799-->
-- `chunk:14` (chunk) [degraded:chunk] — Desktop styles for step-report bodies (raw JSON, unified charter diff, rendered markdown, priority labels, conversation turns) plus toast notifications, the stale-connection banner, the login gate/break-glass view, the top-bar owner label, and the start of the daemon-key admin panel. <!--#f9665905e13cd855-->
-- `chunk:15` (chunk) [degraded:chunk] — Remaining desktop daemon-key list rows and the user-management admin panel (create form, rows, provider/admin badges, self-row callout, actions), then the opening of the mobile-portrait `@media (max-width: 600px)` baseline (G1) with its rationale, horizontal-scroll guard, unified touch targets, and iOS-safe 16px form fonts. <!--#b634de960f08b6a9-->
-- `chunk:16` (chunk) [degraded:chunk] — Mobile (600px) rules for the top-bar overflow nav menu and single-view panel switching (Machines↔Flows, Sessions↔Detail) with back buttons, plus History-view overflow hardening via container shrink (`min-width:0`, `overflow-x:hidden`) and long-content wrapping. <!--#e70a2f5103c6e95f-->
-- `chunk:17` (chunk) [degraded:chunk] — Mobile (600px) flow-view rules: the off-canvas flow sidebar drawer with backdrop, the docked reply area's touch-optimised stacked controls (auto-grow textarea, Interject/Send buttons), full-width chat bubbles reclaiming whitespace, and the tool-call chip's single-line detail truncation. <!--#874d4bde1ac48374-->
-- `chunk:18` (chunk) [degraded:chunk] — Mobile (600px) fixes for per-step grouping containment and wrapping status text, a shrunken idle-reply placeholder, and reflowing the docked reply meta/chip bar into shared wrapping rows, including discovery_confirm dock de-duplication tweaks. <!--#44fa45796eca2815-->
-- `chunk:19` (chunk) [degraded:chunk] — Closing mobile (600px) rules: scrollable modal head/body layout, vertically-stacked in-modal create forms, wrapping per-user/key action rows, the Issues-view List↔Detail panel switch with overflow hardening, and full-width login-card/break-glass sizing. <!--#45259c82a9207bfe-->
+### `src/se3/server/static/style.css` (text) — The WebUI's single stylesheet: defines the dark-theme design tokens and per-StepType accent palette, then styles every view (top bar, machines/flows panes, running-flow chat with its step-grouped conversation bubbles, tool-call markers, step-report cards, docked reply/intervention panels, sidebar, Issues and History views, modals, toasts, login gate and admin panels) and closes with a ≤600px mobile-portrait breakpoint that converts the layouts into single-view panel switching, drawers, and full-screen modals. <!--#2b12d7b911e26943|3970fc4e06fa5d35-->
+- `chunk:1` (chunk) [degraded:chunk] — Defines the WebUI's dark-theme design tokens (background/foreground/status colours plus a per-StepType accent palette) and styles the global page shell — body typography, top bar with connection/version/language controls, buttons, the two-pane machines/flows grid layout, and the desktop-only rules that hide the mobile overflow-menu and back-button affordances. <!--#2feb147feead79df-->
+- `chunk:2` (chunk) [degraded:chunk] — Styles the machine list rows (online/offline dots, name/count) and the flow cards (task/project label, status badges including waiting-lock, resume/end buttons, progress bar, meta row), then opens the full-screen running-flow chat view with its head, sidebar/main grid, and scrollable conversation column. <!--#8e86957de2005fee-->
+- `chunk:3` (chunk) [degraded:chunk] — Styles the running-flow conversation scroller (child shrink pinning, the docked session token/cost usage badge, the agent/model badge on assistant bubbles) and the pending-intervention chip bar with its per-kind colours and pending/consumed lifecycle animations. <!--#a3fca3b40e99498a-->
+- `chunk:4` (chunk) [degraded:chunk] — Styles the docked reply panel: the reply-context head (kind/call-id), the collapsible prompt body with capped height, context blocks, option buttons, the CONFIRM approve/reject note+button pair, and the ADJUDICATE ruling-review frame (rationale + diff). <!--#b8c5feb254185e24-->
+- `chunk:5` (chunk) [degraded:chunk] — Styles the reply input row (textarea, Send and Interject icon buttons), collapsible message chips for template-style prompts, the sidebar step-row/kv detail sections, and the shared modal shell with its form controls, errors, and hints. <!--#f157523779fc3b7d-->
+- `chunk:6` (chunk) [degraded:chunk] — Styles the Issues view — its full-screen shell, list/detail two-pane grid, toolbar filters, issue cards with source/status/priority badges, and the issue detail header, fields, and description block. <!--#cd47c1a0cd5ff70d-->
+- `chunk:7` (chunk) [degraded:chunk] — Finishes the issue detail actions/launch button and small-modal form rows, then styles the History view shell: head, list/detail grid, project selector, refreshing bar, and session list items with their meta and flow-id truncation. <!--#bfdc38a10e4def22-->
+- `chunk:8` (chunk) [degraded:chunk] — Styles the history detail step cards, the viewport-driven sticky floating step header shared by both conversation views, per-role history records, and the role-tagged conversation bubbles (user right/accent, assistant left/green, system full-width) including dimmed in-progress partial bubbles. <!--#ad9eff627090faa9-->
+- `chunk:9` (chunk) [degraded:chunk] — Styles rendered markdown inside conversation bubbles (headings, lists, quotes, code) and the inline tool-call markers — name/detail/glyph chips with in-flight/success/failure states, collapsible detail panels, and the diff/line-numbered content palette matching the CLI renderer. <!--#ed522d9c94468791-->
+- `chunk:10` (chunk) [degraded:chunk] — Styles tool-marker diff/bash/text detail bodies, the long-content fold summary/toggle, the raw-JSON toggle panel, empty/hidden helpers, and the assistant three-layer progressive disclosure (structured result → full process → raw NDJSON). <!--#84516b064592d096-->
+- `chunk:11` (chunk) [degraded:chunk] — Styles the user-prompt three-layer marker bubble, the step-event chip, and the affordance-free inline status pills — per-group DAG group_status, code-index index_progress, and the per-step RUNNING step-status row — each with queued/running/completed/failed colour variants. <!--#76aa99670e1547d8-->
+- `chunk:12` (chunk) [degraded:chunk] — Implements the per-step-type visual grouping inside the conversation: recolours each record's left rail to its StepType accent and paints a faint continuous background "lane" via a negative-z ::before underlay (with an isolation stacking-context fix), excluding the status/DAG markers. <!--#b23915f8ce79e90d-->
+- `chunk:13` (chunk) [degraded:chunk] — Styles the step-report card — collapsible head, status bar with ok/warn/fail icons and labels, sections, lists, key-value rows (including nested dicts), group/error/empty states — plus the per-step and per-round token-usage footnotes. <!--#bf4e73476a3d6f93-->
+- `chunk:14` (chunk) [degraded:chunk] — Finishes the step-report card (file groups, JSON/diff blocks, markdown, priority tags), then styles the toast notification stack, the stale-connection banner, the login gate with its break-glass link, the top-bar owner label, and the daemon-key panel. <!--#4ac07739325cc5bb-->
+- `chunk:15` (chunk) [degraded:chunk] — Styles the user-management admin panel rows (identity, provider, admin badge, actions), then opens the mobile-portrait ≤600px breakpoint with its rationale and baseline: a horizontal-scroll guard, 40px touch targets, and iOS-safe form font sizes. <!--#33d6d8914cbaa189-->
+- `chunk:16` (chunk) [degraded:chunk] — Continues the mobile breakpoint: the collapsible top-bar overflow menu, and single-view panel switching (with back buttons) for the Machines↔Flows layout and the History sessions↔detail panes, plus History overflow/wrapping hardening. <!--#1981973908c46bac-->
+- `chunk:17` (chunk) [degraded:chunk] — Continues the mobile breakpoint: turns the flow-view sidebar into an off-canvas drawer with backdrop, enlarges and restacks the docked reply controls (auto-grow textarea, full-width Send/Interject), reclaims chat horizontal space by dropping record rails/padding, and compresses tool-call chips to one line. <!--#8e37d2e6a7f49e6c-->
+- `chunk:18` (chunk) [degraded:chunk] — Continues the mobile breakpoint: flattens the tool-marker toggle and chip padding, contains the per-step grouping lanes and status rows within the viewport, shrinks the reply placeholder, and retiles the docked reply head/prompt-toggle and intervention chip bar into shared wrapping rows. <!--#f725b6599c5738c8-->
+- `chunk:19` (chunk) [degraded:chunk] — Closes the mobile breakpoint: makes all modals full-screen with a pinned head and scrolling body, stacks in-modal create forms and admin row actions vertically, adds the Issues list↔detail panel switch with back button and overflow wrapping, and widens/top-aligns the login card. <!--#c544a58451dfbe5a-->
+
+## `src/se3/server/static/i18n/` — Directory holding the WebUI's front-end translation bundles — one flat JSON catalogue per locale (en-US, zh-CN) mapping dot-namespaced UI keys (nav, login, machines, flows, history, issues, modals, common) to localized labels, placeholders and messages, loaded at runtime by the browser i18n layer. <!--#d325253c5e28d58f|28c83650b99af4c6-->
+
+### `src/se3/server/static/i18n/en-US.json` (json) — The English (en-US) translation catalogue for the WebUI, a flat map of dot-namespaced keys to display strings covering the language switcher, top bar and navigation, login and break-glass auth, machine/flow lists, history and issue views, issue creation and action dialogs, session-end and flow-launch prompts, and shared common labels. <!--#ef6663a32574a33f|7e987758ef254f1e-->
+- `lang.label` (json-key) — Label for the WebUI language switcher control. <!--#cfdb297315288d0e-->
+- `lang.en-US` (json-key) — Display name of the English locale option in the language switcher. <!--#e8a7ce3e9fdcfb0b-->
+- `lang.zh-CN` (json-key) — Display name of the Chinese locale option in the language switcher. <!--#c94870359c8bf8dd-->
+- `topbar.title` (json-key) — Application title shown in the WebUI top bar. <!--#28c5be3e603e42cd-->
+- `nav.history` (json-key) — Navigation label for the History view. <!--#82f0f033c33c604f-->
+- `nav.issues` (json-key) — Navigation label for the Issues view. <!--#4a61822e6b557571-->
+- `nav.keys` (json-key) — Navigation label for the daemon-keys management view. <!--#3939231f224dead3-->
+- `nav.users` (json-key) — Navigation label for the user-management view. <!--#c48c980a722a73ef-->
+- `nav.newTask` (json-key) — Navigation button label for publishing a new task. <!--#a33c9f2e71fdeddd-->
+- `nav.logout` (json-key) — Navigation label for signing out. <!--#c0e832ee564270f0-->
+- `nav.menu` (json-key) — Accessible label for the mobile navigation menu toggle. <!--#93e8f5db704ac136-->
+- `login.title` (json-key) — Heading of the sign-in screen. <!--#d0fc670060e50941-->
+- `login.subtitle` (json-key) — Subtitle explaining why the user must authenticate. <!--#52424c530534cdc1-->
+- `login.username` (json-key) — Label for the username field on the login form. <!--#5cdac7213286c03c-->
+- `login.password` (json-key) — Label for the password field on the login form. <!--#a5360688c36c3430-->
+- `login.submit` (json-key) — Label of the login form's submit button. <!--#d045775880057f43-->
+- `login.breakglassToggle` (json-key) — Link text that switches the login form to break-glass token mode. <!--#6847cc4dac13b783-->
+- `login.breakglassLabel` (json-key) — Label for the break-glass admin token input. <!--#2c03f7613e9cec6b-->
+- `login.breakglassSubmit` (json-key) — Submit button label for break-glass admin login. <!--#ae5bb3246e07d4ed-->
+- `machines.title` (json-key) — Heading of the connected-machines list panel. <!--#278d9e01dac5846a-->
+- `machines.empty` (json-key) — Empty-state text shown when no daemon machines are connected. <!--#cdc28d95eea37eb3-->
+- `flows.back` (json-key) — Back-link text returning from the flow list to the machine list. <!--#6395cbad6b316d29-->
+- `flows.backAria` (json-key) — Accessible label for the back-to-machines link. <!--#01f66c83f73612e7-->
+- `flows.title` (json-key) — Default heading of the flow list panel. <!--#db20ab4d7be67e35-->
+- `flows.empty` (json-key) — Placeholder prompting the user to pick a machine before flows can be listed. <!--#9df6896f970886b0-->
+- `common.cancel` (json-key) — Generic Cancel button label reused across dialogs. <!--#b079b6f2f5db661f-->
+- `common.size.chars` (json-key) — Character-count size annotation template. <!--#c7b77dab119b55be-->
+- `common.staleBanner` (json-key) — Warning banner shown when the WebSocket connection drops and data may be stale. <!--#21e89a1b5a674989-->
+- `common.absolutePathPlaceholder` (json-key) — Placeholder text for manual absolute project-path inputs. <!--#8a66a0825fa7843d-->
+- `common.worktreeOption` (json-key) — Checkbox label for running a flow in isolated worktree mode with auto-merge. <!--#55cc57f8a50611bc-->
+- `history.title` (json-key) — Heading of the History view. <!--#c1c787f865f77e92-->
+- `history.sessions` (json-key) — Heading of the history session list. <!--#7411ea66fffdd5f2-->
+- `history.loading` (json-key) — Loading message shown while the history list is fetched. <!--#4182a434dec3252e-->
+- `history.back` (json-key) — Back-link text returning from a session detail to the session list. <!--#18621c04b99ceb2a-->
+- `history.backAria` (json-key) — Accessible label for the back-to-sessions link. <!--#2c3682b2f36fe0e0-->
+- `history.detailTitle` (json-key) — Heading of the history session detail pane. <!--#c11e7e61b4184f4d-->
+- `history.detailEmpty` (json-key) — Placeholder prompting the user to select a session to view its step records. <!--#baf6ac3389c24ba7-->
+- `history.usageTitle` (json-key) — Tooltip explaining the session-level token/cost usage figure. <!--#322e5a39d74023b6-->
+- `issues.title` (json-key) — Heading of the Issues view. <!--#ed473d631b95f45f-->
+- `issues.showClosed` (json-key) — Toggle label for including closed issues in the list. <!--#e18d4dcd5e5db7fb-->
+- `issues.sourceAll` (json-key) — Issue-list filter option matching every issue source. <!--#36596e4eaa76821e-->
+- `issues.sourceHuman` (json-key) — Issue-list filter option for human-reported issues. <!--#555f66e9caf64bc4-->
+- `issues.sourceSystem` (json-key) — Issue-list filter option for system-generated issues. <!--#a3f156cb55422d2c-->
+- `issues.projectAll` (json-key) — Issue-list filter option matching every project. <!--#93f401546cc23854-->
+- `issues.typeAll` (json-key) — Issue-list filter option matching every issue type. <!--#f84a4ec8d2273c61-->
+- `issues.create` (json-key) — Button label for opening the new-issue modal. <!--#e409dcfd89110e95-->
+- `issues.loading` (json-key) — Loading message shown while the issue list is fetched. <!--#ba23f647e78bee2e-->
+- `issues.back` (json-key) — Back-link text returning from an issue detail to the issue list. <!--#8a65d7cfaf75690d-->
+- `issues.backAria` (json-key) — Accessible label for the back-to-issues link. <!--#f15fec0dae0c77e5-->
+- `issues.detailTitle` (json-key) — Heading of the issue detail pane. <!--#a3f43fbfad047aec-->
+- `issues.detailEmpty` (json-key) — Placeholder prompting the user to select an issue to view its details. <!--#7ab799dc0c0201a1-->
+- `issueModal.title` (json-key) — Heading of the create-issue modal. <!--#338d4896fc7376af-->
+- `issueModal.machine` (json-key) — Machine selector label in the issue modal. <!--#86d1394eabe50724-->
+- `issueModal.project` (json-key) — Project selector label in the issue modal. <!--#deb6cf6bbfc0b688-->
+- `issueModal.description` (json-key) — Description field label in the issue modal. <!--#c8ef84cfe9f073be-->
+- `issueModal.descriptionPlaceholder` (json-key) — Placeholder for the issue description textarea. <!--#135dd39d9c0e3999-->
+- `issueModal.titleLabel` (json-key) — Optional-title field label in the issue modal. <!--#3bf00af754e66bdd-->
+- `issueModal.titlePlaceholder` (json-key) — Placeholder noting the title is derived from the description if left blank. <!--#84f4cbe2e3c24e58-->
+- `issueModal.type` (json-key) — Optional issue-type selector label in the issue modal. <!--#3c23a93b5cd7f76d-->
+- `issueModal.priority` (json-key) — Optional priority selector label in the issue modal. <!--#90025f60bf29efef-->
+- `issueModal.tags` (json-key) — Optional comma-separated tags field label in the issue modal. <!--#9b198a63f3029932-->
+- `issueModal.tagsPlaceholder` (json-key) — Example placeholder for the issue tags input. <!--#dadec835c68cc91d-->
+- `issueModal.submit` (json-key) — Submit button label for creating an issue. <!--#db62097301a5943d-->
+- `issueAction.title` (json-key) — Default heading of the issue action confirmation dialog. <!--#7eb772eba79771ca-->
+- `issueAction.reasonLabel` (json-key) — Label for the optional close-reason field in the issue action dialog. <!--#adb0c1bb3a8005f8-->
+- `issueAction.reasonPlaceholder` (json-key) — Placeholder for the issue close-reason input. <!--#356e27c69e44ba94-->
+- `issueAction.confirm` (json-key) — Confirm button label in the issue action dialog. <!--#609d8423117d1223-->
+- `endSession.title` (json-key) — Heading of the end-session confirmation dialog. <!--#31e3b851a17d2aca-->
+- `endSession.message` (json-key) — Warning text describing what ending and archiving a session does to worktrees and uncommitted work. <!--#62aa72ceaa96e9f4-->
+- `endSession.confirm` (json-key) — Confirm button label for ending and archiving a session. <!--#24c28c0848b1ef3b-->
+- `issueLaunch.title` (json-key) — Heading of the dialog for launching a flow from an issue. <!--#5aadec0af1c7c8db-->
+- `issueLaunch.discover` (json-key) — Checkbox label for starting the issue-launched flow at the discovery step. <!--#401702bb13573e41-->
+- `issueLaunch.confirm` (json-key) — Confirm button label for launching a flow from an issue. <!--#50d79d4a78e37567-->
+- `flow.sidebarToggleTitle` (json-key) — Tooltip for the button that shows or hides the flow detail sidebar. <!--#79aa764994944931-->
+- `flow.title` (json-key) — Default heading of the flow detail view. <!--#ab5a89fbe6e73a3a-->
+- `flow.sidebarLoading` (json-key) — Loading message shown while flow sidebar details are fetched. <!--#99621595f41c83bc-->
+- `flow.conversationEmpty` (json-key) — Placeholder prompting the user to select a flow to view its conversation. <!--#07411151b1caa3af-->
+- `flow.usageTitle` (json-key) — Tooltip explaining the flow-level token/cost usage figure. <!--#2aa751c25fd647ee-->
+- `flow.replyContext` (json-key) — Context line shown above the reply box when no interaction is pending. <!--#4b2c1defeff188ee-->
+- `flow.interjectTitle` (json-key) — Tooltip for the button that interjects an instruction into a running flow. <!--#afa0bfe2fe04047d-->
+- `flow.replyPlaceholder` (json-key) — Default reply-box placeholder used when nothing is pending. <!--#7b22b708cb34fc95-->
+- `flow.replySubmit` (json-key) — Send button label of the flow reply box. <!--#40f901f0c710a608-->
+- `newTask.title` (json-key) — Heading of the publish-new-task modal. <!--#0c933f11f058411a-->
+- `newTask.machine` (json-key) — Target-machine selector label in the new-task modal. <!--#39be7ee0169ad709-->
+- `newTask.project` (json-key) — Project selector label in the new-task modal. <!--#53fa67435dcf154e-->
+- `newTask.projectEmpty` (json-key) — Hint shown when the daemon has no registered project roots, pointing to manual path entry. <!--#7acada55fa1369a4-->
+- `newTask.projectManualHint` (json-key) — Hint explaining that a manually entered path will be `se3 init`-ed if not yet an SE3 project. <!--#0f49a2c168c660fd-->
+- `newTask.type` (json-key) — Task-type selector label in the new-task modal. <!--#dab4e36be4c624af-->
+- `newTask.typeAuto` (json-key) — Task-type option letting the system infer the type automatically. <!--#1f919b67679be651-->
+- `taskType.feature` (json-key) — Display name of the 'feature' task type. <!--#bca576f83bbac7ee-->
+- `taskType.bugfix` (json-key) — Display name of the 'bugfix' task type. <!--#0f9a39cb9d898b60-->
+- `taskType.review` (json-key) — Display name of the 'review' task type. <!--#1316902eb481474b-->
+- `taskType.small` (json-key) — Display name of the 'small' task type. <!--#b1a7246222220460-->
+- `taskType.directive` (json-key) — Display name of the 'directive' task type. <!--#a11eb7ec8940bf87-->
+- `issueType.bug` (json-key) — Display name of the 'bug' issue type. <!--#a770b4f734246c66-->
+- `issueType.feature` (json-key) — Display name of the 'feature' issue type. <!--#487b746ea65481d8-->
+- `issueType.enhancement` (json-key) — Display name of the 'enhancement' issue type. <!--#19b5cad12510ee86-->
+- `issueType.idea` (json-key) — Display name of the 'idea' issue type. <!--#1ea749caa81360e7-->
+- `issueType.task` (json-key) — Display name of the 'task' issue type. <!--#8d72cc4b4860752f-->
+- `issuePriority.critical` (json-key) — Display name of the 'critical' issue priority. <!--#f70555bb5a039263-->
+- `issuePriority.high` (json-key) — Display name of the 'high' issue priority. <!--#9a19289b9ff1c829-->
+- `issuePriority.medium` (json-key) — Display name of the 'medium' issue priority. <!--#ffd679e3f858307f-->
+- `issuePriority.low` (json-key) — Display name of the 'low' issue priority. <!--#a27330ab6f710912-->
+- `issueSource.human` (json-key) — Display name of the 'human' issue source. <!--#7c916e0ddd9a894b-->
+- `issueSource.system` (json-key) — Display name of the 'system' issue source. <!--#d698771d708a28e5-->
+- `newTask.task` (json-key) — Task-description field label in the new-task modal. <!--#d53d102f285659f7-->
+- `newTask.taskPlaceholder` (json-key) — Placeholder for the new-task description textarea. <!--#6df22e17c184747b-->
+- `newTask.discover` (json-key) — Checkbox label for starting the new task at the discovery step. <!--#bb5bacc5f5cb2980-->
+- `newTask.submit` (json-key) — Submit button label for publishing a new task. <!--#9329e775fa640381-->
+- `keys.title` (json-key) — Heading of the daemon-keys management view. <!--#c7fb1b18f871ba44-->
+- `keys.hint` (json-key) — Explanatory hint that a daemon key is owner-bound and its plaintext is shown only once at creation. <!--#d98d41832b20f742-->
+- `keys.labelPlaceholder` (json-key) — Placeholder for the optional daemon-key label input. <!--#83c6ebb82d3e5a94-->
+- `keys.create` (json-key) — Button label for creating a daemon key. <!--#e2eabba9727e4fb8-->
+- `keys.revealNote` (json-key) — Warning shown alongside a newly revealed daemon key that it will not be shown again. <!--#1a52328044d54375-->
+- `keys.loading` (json-key) — Loading message shown while daemon keys are fetched. <!--#f57076c66d38d3df-->
+- `users.title` (json-key) — Heading of the user-management view. <!--#1f9d4991f602e30a-->
+- `users.hint` (json-key) — Explanatory hint describing user-management capabilities and the server-side guards against self/last-admin/break-glass changes. <!--#ea935c23469b4541-->
+- `users.usernamePlaceholder` (json-key) — Placeholder for the new-user username input. <!--#2bee902c7a10f583-->
+- `users.passwordPlaceholder` (json-key) — Placeholder for the new-user password input. <!--#d64ad85829b81089-->
+- `users.displayNamePlaceholder` (json-key) — Placeholder for the optional new-user display-name input. <!--#0d7cb8409fafc0fb-->
+- `users.isAdmin` (json-key) — Label of the admin-flag checkbox in the user-creation form. <!--#5c88df7ba8b9c0fc-->
+- `users.create` (json-key) — Button label for creating a user. <!--#5efb7814d8add751-->
+- `users.loading` (json-key) — Loading message shown while the user list is fetched. <!--#855bb22cc7aa8f97-->
+- `status.step.running` (json-key) — Display label for a step in the running state. <!--#dc17780071b49034-->
+- `status.step.retrying` (json-key) — Display label for a step in the retrying state. <!--#0947032a616f6de2-->
+- `status.step.paused` (json-key) — Display label for a step in the paused state. <!--#962168f033c69bcb-->
+- `status.step.completed` (json-key) — Display label for a step in the completed state. <!--#f8ead50a1ae9296b-->
+- `status.step.failed` (json-key) — Display label for a step in the failed state. <!--#7b0caf867f3626e7-->
+- `status.step.partial` (json-key) — Display label for a partially completed step. <!--#055afed7c34e0a43-->
+- `status.step.waiting_for_lock` (json-key) — Display label for a step blocked waiting on a lock. <!--#869f094fb520fcf2-->
+- `status.group.queued` (json-key) — Display label for an implementation group that is queued. <!--#49c65205c1c8adad-->
+- `status.group.running` (json-key) — Display label for a group currently being implemented in a worktree. <!--#822dd55ef8ccb75c-->
+- `status.group.completed` (json-key) — Display label for a completed implementation group. <!--#b3023da04bc93ad4-->
+- `status.group.failed` (json-key) — Display label for a failed implementation group. <!--#0da2e804580cf821-->
+- `status.group.skipped` (json-key) — Display label for a skipped implementation group. <!--#c0a24afcb3dc0916-->
+- `status.flow.running` (json-key) — Display label for a flow in the running state. <!--#053567e69fb1dce0-->
+- `status.flow.completed` (json-key) — Display label for a flow in the completed state. <!--#559ba2abb31b960b-->
+- `status.flow.failed` (json-key) — Display label for a flow in the failed state. <!--#f6a99dff95974f52-->
+- `status.flow.paused` (json-key) — Display label for a flow in the paused state. <!--#f24689c0b989a2ad-->
+- `status.flow.init` (json-key) — Display label for a flow in the init state. <!--#3962889297904a81-->
+- `status.flow.recovering` (json-key) — Display label for a flow in the recovering state. <!--#f6fc8e26e788fc6b-->
+- `status.flow.unknown` (json-key) — Fallback display label for an unrecognised flow state. <!--#7a0a437885cf3f6c-->
+- `status.issue.open` (json-key) — Display label for an open issue. <!--#5ac1704887730bd3-->
+- `status.issue.inProgress` (json-key) — Display label for an in-progress issue. <!--#67f3bd02c61dd6f1-->
+- `status.issue.resolved` (json-key) — Display label for a resolved issue. <!--#ef2c64e605309aa4-->
+- `status.issue.wontFix` (json-key) — Display label for a won't-fix issue. <!--#16d3cca628776400-->
+- `status.issue.closed` (json-key) — Display label for a closed issue. <!--#e842e9328a6fe34f-->
+- `indexProgress.withTotal` (json-key) — Code-index progress line template including a done/total counter. <!--#b3ecfdc4c500ca19-->
+- `indexProgress.noTotal` (json-key) — Code-index progress line template used when no total is known. <!--#e122323ba190d529-->
+- `toast.interjectionDelivered` (json-key) — Toast confirming an interjection was delivered and awaits consumption by the flow. <!--#47092e0410adb487-->
+- `toast.interjectionConsumed` (json-key) — Toast confirming the running flow consumed the interjection. <!--#c43d266867a2ad5f-->
+- `toast.taskLaunchFailed` (json-key) — Toast template for a failed task launch, with location and reason. <!--#03ba363258256323-->
+- `toast.unknownError` (json-key) — Fallback error text substituted when no reason is available. <!--#d508b11d675ac9e8-->
+- `toast.resumeDispatched` (json-key) — Toast confirming a resume command was dispatched for a flow. <!--#4293984371f73f2a-->
+- `toast.resumeNotFound` (json-key) — Toast shown when the flow to resume is missing or not resumable. <!--#c4772ce958772cfc-->
+- `toast.resumeStillRunning` (json-key) — Toast shown when resume is rejected because the flow is still running. <!--#80b64312f677fef2-->
+- `toast.resumeFailed` (json-key) — Toast template for a resume request that failed with an HTTP status. <!--#0d33f68761bc7f8c-->
+- `toast.resumeNetworkError` (json-key) — Toast shown when a resume request fails due to a network error. <!--#d490a0b2f843ea02-->
+- `toast.endDispatched` (json-key) — Toast confirming an end-session command was dispatched for a flow. <!--#4b343fc7fdc7015f-->
+- `toast.flowNotFound` (json-key) — Toast shown when the targeted flow does not exist. <!--#2c6bff96b22651d5-->
+- `toast.endAlreadyEnded` (json-key) — Toast shown when ending a session that has already ended. <!--#a2b0a90887a979b3-->
+- `toast.endMachineOffline` (json-key) — Toast shown when the end command cannot be dispatched because the machine is offline. <!--#9fcd638b83779abb-->
+- `toast.endFailed` (json-key) — Toast template for an end-session request that failed with an HTTP status. <!--#6e48f9498c923977-->
+- `toast.endNetworkError` (json-key) — Toast shown when an end-session request fails due to a network error. <!--#fb63396bdecb104f-->
+- `toast.noInteractionSelected` (json-key) — Toast shown when submitting a response with no interaction selected. <!--#9e5b7f77743b8936-->
+- `toast.responseEmpty` (json-key) — Validation toast requiring a non-empty response. <!--#9ffe7e6aaa3844bf-->
+- `toast.wsDelayed` (json-key) — Toast shown when the WebSocket connection is delayed but retryable. <!--#0c0ddb5d07f0be9c-->
+- `toast.approved` (json-key) — Toast confirming an approval was submitted. <!--#417102736ed9e456-->
+- `toast.rejected` (json-key) — Toast confirming a rejection was submitted. <!--#5d6d8d5645336760-->
+- `toast.interjectionSent` (json-key) — Toast confirming an interjection was sent. <!--#e635540005820e26-->
+- `toast.responseSent` (json-key) — Toast confirming a reply was sent. <!--#82549720eeaa72f8-->
+- `toast.couldNotSend` (json-key) — Toast template for a send failure carrying the server message. <!--#de581023c0c86c93-->
+- `toast.sendNetworkError` (json-key) — Toast shown when a send fails due to a network error. <!--#b5eb21e3defbe0a9-->
+- `toast.issueCreated` (json-key) — Toast confirming an issue was created. <!--#2d463e8a01a2e70b-->
+- `toast.issueUpdated` (json-key) — Toast confirming an issue was updated. <!--#6308c518ca177bda-->
+- `toast.issueClosed` (json-key) — Toast confirming an issue was closed. <!--#9f09335a95366e4b-->
+- `toast.issueReopened` (json-key) — Toast confirming an issue was reopened. <!--#e3507ff90114dbf0-->
+- `toast.issueFlowDispatched` (json-key) — Toast confirming a flow was dispatched from an issue. <!--#1809d97875fc1cd2-->
+- `toast.flowLaunchFailed` (json-key) — Toast template for a failed flow launch carrying the server message. <!--#e9cdc7e1ec380a02-->
+- `toast.flowLaunchNetworkError` (json-key) — Toast shown when a flow launch fails due to a network error. <!--#4e3a0fc4b3e9b76e-->
+- `toast.taskPublished` (json-key) — Toast confirming a task was published. <!--#efc574ab002628a0-->
+- `toast.taskPublishFailed` (json-key) — Toast template for a failed task publish carrying the server message. <!--#ff73e2b5e6b4ccbc-->
+- `toast.taskPublishNetworkError` (json-key) — Toast shown when publishing a task fails due to a network error. <!--#7e3bffb07c784aa2-->
+- `toast.keyCreated` (json-key) — Toast confirming a daemon key was created and prompting the user to copy it. <!--#ec72edb6ece3b804-->
+- `toast.keyRevoked` (json-key) — Toast confirming a daemon key was revoked. <!--#67558b212fed1541-->
+- `toast.userCreated` (json-key) — Toast confirming a user was created. <!--#211a42107edd30e7-->
+- `toast.userDeleted` (json-key) — Toast template confirming deletion of a named user. <!--#d665cf89f78d149d-->
+- `toast.passwordReset` (json-key) — Toast template confirming a password reset for a named user. <!--#56c21802a0ec7ba7-->
+- `toast.adminGranted` (json-key) — Toast confirming the admin flag was granted. <!--#178a35d1288b9e32-->
+- `toast.adminRevoked` (json-key) — Toast confirming the admin flag was removed. <!--#9c5528d939f948f2-->
+- `flow.resume` (json-key) — Label of the flow Resume button. <!--#4e44c8ea3567585f-->
+- `flow.resuming` (json-key) — In-flight label shown on the Resume button while resuming. <!--#08128969512a562c-->
+- `flow.resumeTitle` (json-key) — Tooltip for the flow Resume button. <!--#dbf079a342e6641e-->
+- `flow.end` (json-key) — Label of the flow End button. <!--#e5f341d49ac1438a-->
+- `flow.ending` (json-key) — In-flight label shown on the End button while ending. <!--#5ea5c27c44e36bea-->
+- `flow.endTitle` (json-key) — Tooltip for the flow End button explaining it ends and archives the session. <!--#f275bf2bd9cace27-->
+- `flow.loadingConversation` (json-key) — Loading message shown while a flow's conversation is fetched. <!--#50040ccdabe5262f-->
+- `flow.loadError` (json-key) — Error template shown when a flow's conversation fails to load with an HTTP status. <!--#65e98bdeb33d4a85-->
+- `flow.networkError` (json-key) — Error shown when loading a flow conversation fails due to a network error. <!--#5af3e9c937af5e72-->
+- `flow.detailLoadError` (json-key) — Error template shown when flow details fail to load with an HTTP status. <!--#348571ebeafad24d-->
+- `flow.detailNotAvailable` (json-key) — Message shown when the flow is not yet known to the server. <!--#9c869bc80cc578b7-->
+- `flow.detailNetworkError` (json-key) — Error shown when loading flow details fails due to a network error. <!--#8b90f210985b5964-->
+- `flow.detailRetrying` (json-key) — Template appending a retry notice to a flow-detail error message. <!--#47c529dcd4ea86c3-->
+- `flow.noStepHistory` (json-key) — Empty-state text for a flow that reported no step history. <!--#00b7544d3fa83875-->
+- `flow.noConversationRecords` (json-key) — Empty-state text for a session with no conversation records. <!--#d711fb472f25d2fd-->
+- `endSession.confirmMessage` (json-key) — End-session confirmation prompt template including the flow id and worktree/uncommitted-work warning. <!--#a5c6122c8ff7053f-->
+- `flows.titleWith` (json-key) — Flow-list heading template naming the selected machine. <!--#f5b057cf09ea5031-->
+- `flows.emptyMachine` (json-key) — Empty-state text shown when the selected machine has no flows. <!--#c63f8872e736e461-->
+- `flowSidebar.overview` (json-key) — Section heading for the flow sidebar overview block. <!--#f7b00dc0002b5557-->
+- `flowSidebar.status` (json-key) — Sidebar field label for the flow status. <!--#bbc6e43a98b1af8a-->
+- `flowSidebar.type` (json-key) — Sidebar field label for the flow task type. <!--#b30ed490600e3e90-->
+- `flowSidebar.project` (json-key) — Sidebar field label for the flow's project. <!--#94b48a39f0b50836-->
+- `flowSidebar.progress` (json-key) — Sidebar field label for the flow's progress. <!--#37876d3fe698ab73-->
+- `flowSidebar.currentStep` (json-key) — Sidebar field label for the flow's current step. <!--#dfbac7b36c2ea153-->
+- `flowSidebar.updated` (json-key) — Sidebar field label for the flow's last-updated time. <!--#01356ee2616cb2fa-->
+- `flowSidebar.steps` (json-key) — Section heading for the flow sidebar's step list. <!--#6b944bf6977e5bb2-->
+- `flowSidebar.machineSection` (json-key) — Section heading for the flow sidebar's machine block. <!--#3b9970bb4b228be4-->
+- `flowSidebar.machine` (json-key) — Sidebar field label for the machine running the flow. <!--#b9ccfe3909f9cc36-->
+- `flowSidebar.flowId` (json-key) — Sidebar field label for the flow's identifier. <!--#3aba00f3b636cba3-->
+- `intervention.call.label` (json-key) — Badge label for an intervention where the flow awaits a reply. <!--#dfc3101689795e45-->
+- `intervention.call.hint` (json-key) — Hint text explaining that the running flow is waiting for the user's reply. <!--#c062d2aa99b9d3b2-->
+- `intervention.interjection.label` (json-key) — Badge label for the interjection intervention type. <!--#995311b446b7f478-->
+- `intervention.interjection.hint` (json-key) — Hint text explaining that an interjection adds an extra instruction to the running flow. <!--#40beb04c29b89ce5-->
+- `intervention.retryDecision.label` (json-key) — Badge label for an intervention requiring a retry/skip/abort decision. <!--#424e9baeae6d46dd-->
+- `intervention.retryDecision.hint` (json-key) — Hint text explaining that a failed step needs a continuation decision. <!--#44e87bf71f5fa33a-->
+- `intervention.cliConfirm.label` (json-key) — Badge label for an intervention where a CLI subprocess needs confirmation. <!--#e0ba97466f3818e3-->
+- `intervention.cliConfirm.hint` (json-key) — Hint text explaining that a subprocess awaits confirmation. <!--#b027c877dcbe356a-->
+- `intervention.discoveryConfirm.label` (json-key) — Badge label for the discovery task-description confirmation intervention. <!--#c37795058bb37a2d-->
+- `intervention.discoveryConfirm.hint` (json-key) — Hint explaining that entering 1 confirms the refined discovery description while other replies keep refining. <!--#d70cfd1aa81967dc-->
+- `intervention.confirm.label` (json-key) — Badge label for an approval-needed intervention. <!--#1764f24e1807cc30-->
+- `intervention.confirm.hint` (json-key) — Hint explaining the Approve/Reject choice for a pending approval. <!--#b1a082da0c7b19ac-->
+- `interject.cancelTitle` (json-key) — Tooltip for the button cancelling interjection mode. <!--#dc2bf1127e25d5c2-->
+- `interject.title` (json-key) — Header text shown while composing an interjection. <!--#5c2a072632ae781b-->
+- `reply.empty.canDraftMobile` (json-key) — Mobile reply-box placeholder inviting a draft reply or an interjection. <!--#6410b85bf176cd7e-->
+- `reply.empty.canDraft` (json-key) — Desktop reply-box placeholder inviting a draft reply or an interjection when nothing is pending. <!--#581180d740969b2d-->
+- `reply.empty.active` (json-key) — Message shown when an active flow has no pending interaction to reply to. <!--#8e1645bd89de75c8-->
+- `reply.empty.ended` (json-key) — Message shown when a flow has ended and no further interaction is possible. <!--#23e1b07cffb919c4-->
+- `reply.placeholder.interject` (json-key) — Reply-box placeholder while in interjection mode. <!--#6fc87110b983d695-->
+- `reply.placeholder.confirm` (json-key) — Reply-box placeholder explaining the accepted approve/reject keywords and revision-request fallback. <!--#4fdc29e98dd7a3d1-->
+- `reply.placeholder.reply` (json-key) — Default reply-box placeholder for a plain reply. <!--#2bdd14893c660414-->
+- `reply.replyingTo` (json-key) — Label prefixing the interaction the reply box is targeting. <!--#2e5ffc84b3c0eb9c-->
+- `reply.confirmNotePlaceholder` (json-key) — Placeholder for the optional note accompanying an approve/reject decision. <!--#11a27b3e24abc750-->
+- `reply.approve` (json-key) — Label of the Approve button on a confirm interaction. <!--#fcd4730cde0d982b-->
+- `reply.reject` (json-key) — Label of the Reject button on a confirm interaction. <!--#480f49efbb4aef1e-->
+- `reply.confirmContinue` (json-key) — Label of the button confirming a discovery description by sending '1'. <!--#e8e7f27acf2ec581-->
+- `reply.revisionConfirm` (json-key) — Confirmation prompt warning that the typed reply will be treated as a revision request. <!--#856f59d81583d069-->
+- `reply.echo.approveNote` (json-key) — Echo template rendering an approval with its note. <!--#3b66a4cd9ccc8320-->
+- `reply.echo.rejectNote` (json-key) — Echo template rendering a rejection with its note. <!--#6a39ed514afcd40f-->
+- `adjudicate.title` (json-key) — Heading of the adjudication approval view. <!--#54e7921d00c5153b-->
+- `adjudicate.rationaleLabel` (json-key) — Label for the adjudication rationale section. <!--#71ab6600ebb836bd-->
+- `adjudicate.taskDescLabel` (json-key) — Label for the adjudicated task-description section. <!--#760f0d389c328527-->
+- `adjudicate.noChange` (json-key) — Note shown when an adjudication left the task description unchanged. <!--#f60ef94437caa470-->
+- `adjudicate.sameAsBaseline` (json-key) — Note shown when the adjudicated task description equals the baseline. <!--#343847f6f22dd9e5-->
+- `prompt.expandDetail` (json-key) — Toggle label for expanding a prompt message's detail. <!--#24f6638ec7247b17-->
+- `prompt.collapseDetail` (json-key) — Toggle label for collapsing a prompt message's detail. <!--#7bf6e6620fd6ebf1-->
+- `prompt.templatePrefix` (json-key) — Section label for the template prefix portion of a prompt. <!--#9aa21dee9c66102d-->
+- `prompt.frameworkSuffix` (json-key) — Section label for the framework suffix portion of a prompt. <!--#1a5a84351d72be12-->
+- `prompt.chipLabel` (json-key) — Prompt chip label template combining role and context. <!--#7f1540e8d00b9250-->
+- `prompt.chipLabelNoCtx` (json-key) — Prompt chip label template used when no context is available. <!--#d3b53c6e4c7fa52d-->
+- `fold.expandAll` (json-key) — Fold toggle label for expanding all content, showing its size. <!--#3eb1c43900ba163e-->
+- `fold.collapse` (json-key) — Fold toggle label for collapsing content. <!--#0686b86d1faee889-->
+- `fold.expandAllSimple` (json-key) — Fold toggle label for expanding all content without a size hint. <!--#cb01afb696a5405c-->
+- `fold.collapseAll` (json-key) — Fold toggle label for collapsing all content. <!--#eac5d3eef2965e55-->
+- `raw.view` (json-key) — Toggle label for revealing a record's raw payload. <!--#798665699a442172-->
+- `raw.hide` (json-key) — Toggle label template for hiding a record's raw payload of a given kind. <!--#e8506788253ec2c8-->
+- `error.serverReturned` (json-key) — Generic error template reporting an HTTP status returned by the server. <!--#fcfd4619792b18af-->
+- `error.networkReach` (json-key) — Generic error message for being unable to reach the server. <!--#b1c0607f55c5e225-->
+- `history.projectLabel` (json-key) — Field label for a history session's project. <!--#c405025fcee0d02a-->
+- `history.unknownProject` (json-key) — Fallback text for a history session with no known project. <!--#ae30e95a74edeb9f-->
+- `history.refreshing` (json-key) — Status message shown while the history list refreshes. <!--#af20acb92b95b578-->
+- `history.connecting` (json-key) — Status message shown while connecting or awaiting history data. <!--#31155861a472c462-->
+- `history.emptyConfirmed` (json-key) — Empty-state text confirming no history sessions were reported. <!--#dee5f9ea6a6444f9-->
+- `history.loadingRecords` (json-key) — Loading message shown while a session's records are fetched. <!--#6fdf71ee0e6542fc-->
+- `history.loadError` (json-key) — Error template shown when a session's history fails to load with an HTTP status. <!--#f71c7fce34d21317-->
+- `history.networkError` (json-key) — Error shown when loading session history fails due to a network error. <!--#9bed85dc86bafa26-->
+- `issueLaunch.reason.inProgress` (json-key) — Reason text explaining a flow cannot be relaunched for an in-progress issue. <!--#11849d3d133d4e4d-->
+- `issueLaunch.reason.resolved` (json-key) — Reason text explaining no flow is needed for a resolved issue. <!--#542d9094979195d2-->
+- `issueLaunch.reason.wontFix` (json-key) — Reason text explaining the issue is marked won't-fix. <!--#53393a34354a8b9c-->
+- `issueLaunch.reason.closed` (json-key) — Reason text explaining the issue is closed. <!--#8fcd01c9515f76b2-->
+- `issueLaunch.reason.invalid` (json-key) — Reason text for an invalid issue that cannot launch a flow. <!--#c0df526b325450a8-->
+- `issueLaunch.reason.unknownStatus` (json-key) — Reason template for an unrecognised issue status blocking flow launch. <!--#629f1a67e9781292-->
+- `issueLaunch.button` (json-key) — Label of the button that launches a flow from an issue. <!--#80a9f4ca408f1405-->
+- `issueLaunch.buttonTitle` (json-key) — Tooltip for the launch-flow-from-issue button. <!--#d8f05d19b832eb38-->
+- `issueLaunch.dispatching` (json-key) — In-flight label shown while the issue-launched flow is dispatched. <!--#faf4f6c4e578a34a-->
+- `issueLaunch.message` (json-key) — Confirmation message template naming the issue a flow will be launched from. <!--#803eb49279919458-->
+- `issues.empty` (json-key) — Empty-state text shown when no issues exist. <!--#71c3bb573db0ce53-->
+- `issueDetail.notFound` (json-key) — Message shown when the requested issue does not exist. <!--#acc96d8794548a27-->
+- `issueDetail.field.type` (json-key) — Issue detail field label for the type. <!--#fe52aa6bd2997058-->
+- `issueDetail.field.priority` (json-key) — Issue detail field label for the priority. <!--#9b0e5be005ee4189-->
+- `issueDetail.field.source` (json-key) — Issue detail field label for the source. <!--#40a6678686a49489-->
+- `issueDetail.field.createdAt` (json-key) — Issue detail field label for the creation time. <!--#a2db2b525c2a64e7-->
+- `issueDetail.field.updatedAt` (json-key) — Issue detail field label for the last-updated time. <!--#7d2e68702e0ce45d-->
+- `issueDetail.field.tags` (json-key) — Issue detail field label for the tags. <!--#a8d6fe047eddc951-->
+- `issueDetail.field.project` (json-key) — Issue detail field label for the project. <!--#11fe618e1f06dd84-->
+- `issueDetail.descLoadFailed` (json-key) — Error shown when an issue's full description could not be loaded in the detail pane. <!--#c48bdd8f7acf0ca2-->
+- `issueDetail.edit` (json-key) — Label of the issue detail Edit button. <!--#b53f556fca646ddc-->
+- `issueDetail.reopen` (json-key) — Label of the issue detail Reopen button. <!--#e2eea294de483d42-->
+- `issueDetail.close` (json-key) — Label of the issue detail Close button. <!--#298c18ae03cd54e6-->
+- `issueModal.noMachines` (json-key) — Placeholder option shown when no machines are connected in the issue modal. <!--#d3a6c16b4874fbc4-->
+- `issueModal.noProjects` (json-key) — Placeholder option shown when the selected machine has no registered projects. <!--#60d494e52e39efdc-->
+- `issueModal.selectProject` (json-key) — Prompt option asking the user to select a project. <!--#0172c673264c565b-->
+- `issueModal.editTitle` (json-key) — Heading template for the edit-issue modal including the issue id. <!--#e02995274b898d01-->
+- `issueModal.save` (json-key) — Submit button label for saving an edited issue. <!--#1cb41735c2b840ef-->
+- `issueModal.descLoading` (json-key) — Loading message shown while the issue's full description is fetched for editing. <!--#d5b83853c120188e-->
+- `issueModal.descLoadFailed` (json-key) — Error explaining the description is temporarily uneditable after a load failure while other fields remain editable. <!--#ea75cd73f3f9bc9a-->
+- `issueModal.errDescRequired` (json-key) — Validation error requiring a non-empty issue description. <!--#1e25c6a2bdf4219f-->
+- `issueModal.errNoMachine` (json-key) — Validation error shown when no online machine is available for the issue. <!--#17e8589f0fe5eade-->
+- `issueModal.errInvalidPath` (json-key) — Validation error requiring a valid project path in the issue modal. <!--#2562fd9603e37b22-->
+- `issueAction.closeTitle` (json-key) — Heading of the close-issue confirmation dialog. <!--#d4ab0ea139528ae4-->
+- `issueAction.closeMessage` (json-key) — Confirmation message template for closing an issue by id. <!--#7875a7f9542062b7-->
+- `issueAction.reopenTitle` (json-key) — Heading of the reopen-issue confirmation dialog. <!--#efa6ee9204128443-->
+- `issueAction.reopenMessage` (json-key) — Confirmation message template for reopening an issue by id. <!--#3a2ca206bd399ccd-->
+- `stepHeader.discovery` (json-key) — Conversation header text for the discovery step. <!--#0fa58f0a8f793e83-->
+- `stepHeader.analyze` (json-key) — Conversation header text for the analyze step. <!--#d632b354887e549e-->
+- `stepHeader.project_summary` (json-key) — Conversation header text for the project-summary step. <!--#96ea66a082015010-->
+- `stepHeader.propose` (json-key) — Conversation header text for the propose step. <!--#d7ebf14c8749c5f8-->
+- `stepHeader.design` (json-key) — Conversation header text for the design step. <!--#2cabddc7607b4b65-->
+- `stepHeader.plan` (json-key) — Conversation header text for the plan step. <!--#2e199ea2f1f84ffa-->
+- `stepHeader.plan_tasks` (json-key) — Conversation header text for the plan-tasks step. <!--#6c6f061bcca592d6-->
+- `stepHeader.confirm` (json-key) — Conversation header text for the confirm step. <!--#87c8108ba6808524-->
+- `stepHeader.implement` (json-key) — Conversation header text for the implement step. <!--#7471d0488b74d5d2-->
+- `stepHeader.test` (json-key) — Conversation header text for the test step. <!--#5032b0970d424850-->
+- `stepHeader.self_check` (json-key) — Conversation header text for the self-check step. <!--#4ad78033e4b21436-->
+- `stepHeader.verify_spec` (json-key) — Conversation header text for the verify-spec step. <!--#0c5c1f74a427613a-->
+- `stepHeader.update_spec` (json-key) — Conversation header text for the update-spec step. <!--#fcbd727cb1165528-->
+- `stepHeader.spec_gate` (json-key) — Conversation header text for the spec-gate step. <!--#36cefe999b2942ef-->
+- `stepHeader.version_analyze` (json-key) — Conversation header text for the version-analyze step. <!--#38c2f2570d3ab030-->
+- `stepHeader.commit` (json-key) — Conversation header text for the commit step. <!--#3940aa5e5d286007-->
+- `stepHeader.merge_integrate` (json-key) — Conversation header text for the merge-integrate step. <!--#17f379bed437ff93-->
+- `stepHeader.version_reconcile` (json-key) — Conversation header text for the version-reconcile step. <!--#76706ba4226911b3-->
+- `stepHeader.summarize` (json-key) — Conversation header text for the summarize step. <!--#6f6793f237750fff-->
+- `stepReport.discovery` (json-key) — Report card title for the discovery step. <!--#90b410968584de1b-->
+- `stepReport.analyze` (json-key) — Report card title for the analyze step. <!--#a0665debc6c0b1e1-->
+- `stepReport.project_summary` (json-key) — Report card title for the project-summary step. <!--#773329f28fd01c90-->
+- `stepReport.propose` (json-key) — Report card title for the propose step. <!--#0821bbf1d8b1aa6e-->
+- `stepReport.design` (json-key) — Report card title for the design step. <!--#72628b5a28c9ea97-->
+- `stepReport.plan` (json-key) — Report card title for the plan step. <!--#b6318de64cbd6a26-->
+- `stepReport.plan_tasks` (json-key) — Report card title for the plan-tasks step. <!--#bc71911183c631aa-->
+- `stepReport.confirm` (json-key) — Report card title for the confirm step. <!--#b55d815baa0adcce-->
+- `stepReport.implement` (json-key) — Report card title for the implement step. <!--#dde271e4327a57fb-->
+- `stepReport.test` (json-key) — Report card title for the test step. <!--#3aa51f548f124ab4-->
+- `stepReport.self_check` (json-key) — Report card title for the self-check step. <!--#acb88b9492987d6d-->
+- `stepReport.verify_spec` (json-key) — Report card title for the verify-spec step. <!--#d9563ec547fcd6d6-->
+- `stepReport.update_spec` (json-key) — Report card title for the update-spec step. <!--#8c2ced25444bd2d2-->
+- `stepReport.spec_gate` (json-key) — Report card title for the spec-gate step. <!--#1d089782b02f3443-->
+- `stepReport.version_analyze` (json-key) — Report card title for the version-analyze step. <!--#9498e4621d0dfa74-->
+- `stepReport.charter_freshness` (json-key) — Report card title for the charter-freshness step. <!--#457b4a0f13ed5314-->
+- `stepReport.commit` (json-key) — Report card title for the commit step. <!--#fa5ef99490d5baa0-->
+- `stepReport.merge_integrate` (json-key) — Report card title for the merge-integrate step. <!--#587cb3f91758b85f-->
+- `stepReport.version_reconcile` (json-key) — Report card title for the version-reconcile step. <!--#94b0f06e15c083cf-->
+- `stepReport.summarize` (json-key) — Report card title for the summarize step. <!--#281130a527894b2e-->
+- `stepReport.usageLabel` (json-key) — Unit label used on step-report token usage figures. <!--#19a44def95a6c3fe-->
+- `stepReport.errorPrefix` (json-key) — Prefix prepended to an error message in a step report. <!--#dd544957d59a0fb4-->
+- `stepReportSuffix.summarize` (json-key) — Report-body suffix label used for the summarize step. <!--#11904830d51ddccb-->
+- `stepReportSuffix.default` (json-key) — Default report-body suffix label used for other steps. <!--#38bdda23a46807d3-->
+- `usage.roundFootnote` (json-key) — Footnote template showing this round's and cumulative input/output token counts. <!--#0ff517b4b7cde7c3-->
+- `usage.sessionLabel` (json-key) — Label marking a session-scoped usage figure. <!--#fc3f149f23735245-->
+- `newTask.otherPath` (json-key) — Project-selector option for entering a project path manually. <!--#840927cdec1ebefe-->
+- `newTask.errSelectMachine` (json-key) — Validation error requiring a target machine to be selected. <!--#d6fe3fc58d959103-->
+- `newTask.errTaskEmpty` (json-key) — Validation error requiring a non-empty task description. <!--#c070e3f69a3d967e-->
+- `newTask.errSelectProject` (json-key) — Validation error requiring a project root to be selected. <!--#9a6f02a1bc101eeb-->
+- `newTask.errEnterPath` (json-key) — Validation error requiring an absolute path to be entered. <!--#def7decefd080a34-->
+- `newTask.errPathAbsolute` (json-key) — Validation error requiring the project path to start with a slash. <!--#9eebb89535dba9da-->
+- `login.errUsername` (json-key) — Validation error requiring a username on login. <!--#d66da59f0fb76da0-->
+- `login.errPassword` (json-key) — Validation error requiring a password on login. <!--#6756b9f12832926f-->
+- `login.errTooMany` (json-key) — Login error shown when the attempt rate limit is hit. <!--#560235951d6a7f47-->
+- `login.errNotEnabled` (json-key) — Login error shown when password login is disabled on the server. <!--#3f0b223a018bef62-->
+- `login.errInvalid` (json-key) — Login error shown for invalid credentials. <!--#aff02349fdf663e4-->
+- `login.errPasteToken` (json-key) — Validation error requiring a break-glass token to be pasted. <!--#3c25c41ee5bc5446-->
+- `login.errInvalidToken` (json-key) — Login error shown for an invalid or expired break-glass token. <!--#2aa183fbd99fdcf9-->
+- `keys.empty` (json-key) — Empty-state text shown when no daemon keys exist. <!--#1612495dcbfca594-->
+- `keys.revoke` (json-key) — Label of the daemon-key revoke button. <!--#0b7acc66e24f246b-->
+- `keys.statusActive` (json-key) — Status label for an active daemon key. <!--#1d31cda6fb9dd8bd-->
+- `keys.statusRevoked` (json-key) — Status label for a revoked daemon key. <!--#5b684d1aa28b08d8-->
+- `keys.errCreateNetwork` (json-key) — Network error message for a failed daemon-key creation. <!--#75852e5332d49c18-->
+- `keys.errRevokeNetwork` (json-key) — Network error message for a failed daemon-key revocation. <!--#a162e76169b368d7-->
+- `users.empty` (json-key) — Empty-state text shown when there are no manageable users. <!--#7f94d04a29cea9cd-->
+- `users.self` (json-key) — Marker appended to the row representing the current user. <!--#828725449f77d66e-->
+- `users.roleAdmin` (json-key) — Role label for an admin user. <!--#726f29726240f4a3-->
+- `users.roleUser` (json-key) — Role label for a non-admin user. <!--#85e1134f05960aa8-->
+- `users.setAdmin` (json-key) — Action label for granting the admin flag. <!--#b03ea04cb978461b-->
+- `users.unsetAdmin` (json-key) — Action label for removing the admin flag. <!--#f8bc5d9152990a22-->
+- `users.resetPassword` (json-key) — Action label for resetting a user's password. <!--#c5ac5802632d420a-->
+- `users.delete` (json-key) — Action label for deleting a user. <!--#52d40706e740b09f-->
+- `users.errUsername` (json-key) — Validation error requiring a non-empty username. <!--#835fd54de45bcb43-->
+- `users.errPassword` (json-key) — Validation error requiring a non-empty password. <!--#3ab5da8d82a4befc-->
+- `users.errNewPassword` (json-key) — Validation error requiring a non-empty new password on reset. <!--#070d69bcf6839a6c-->
+- `users.resetPrompt` (json-key) — Prompt template asking for a new password for a named user. <!--#127eab4b904a6bfe-->
+- `users.errCreateNetwork` (json-key) — Network error message for a failed user creation. <!--#89c28bbde9f1a536-->
+- `users.errDeleteNetwork` (json-key) — Network error message for a failed user deletion. <!--#4b99ccb015e779e3-->
+- `users.errResetNetwork` (json-key) — Network error message for a failed password reset. <!--#a5649504673913e0-->
+- `users.errAdminNetwork` (json-key) — Network error message for a failed admin-status change. <!--#c491404ce343ab20-->
+- `flow.badge.waitingLock` (json-key) — Flow card badge indicating the flow is waiting for a lock. <!--#37b7dcff0e9a83a8-->
+- `flow.badge.needsResponse` (json-key) — Flow card badge indicating the flow needs a user response. <!--#1c013bb01e019413-->
+- `flow.stepType.response` (json-key) — Template labelling a record as a response to a given step. <!--#39a18de9238d1e1b-->
+- `flow.statusWaitingLock` (json-key) — Inline status text for a flow waiting on a lock. <!--#f42546b3fdced803-->
+- `keys.unlabeled` (json-key) — Fallback display text for a daemon key with no label. <!--#7f6253e547f4090d-->
+- `history.badge.live` (json-key) — Badge marking a history session that is currently live. <!--#c4aa75e7e70324e7-->
+- `discovery.proposedTaskDescription` (json-key) — Section heading for the task description proposed by the discovery step. <!--#b5c874460636373c-->
+- `discovery.questions` (json-key) — Section heading for the discovery step's clarifying questions. <!--#82c769bae4a62f51-->
+- `stepReport.section.reasoning` (json-key) — Step-report section heading for reasoning content. <!--#df618fd97af5b4f4-->
+- `stepReport.section.summary` (json-key) — Step-report section heading for summary content. <!--#dcce740975269e58-->
+- `stepReport.section.rationale` (json-key) — Step-report section heading for rationale content. <!--#077a119700349375-->
+- `stepReport.section.otherFields` (json-key) — Step-report section heading for otherwise unrendered fields. <!--#b6b730fb8bc02d28-->
+- `stepReport.empty.noOutputs` (json-key) — Placeholder shown when a step produced no outputs. <!--#16143bd32f92ec66-->
+- `stepReport.empty.noSpecUpdates` (json-key) — Placeholder shown when the update-spec step needed no changes. <!--#fc2b45f734880201-->
+- `stepReport.empty.noChangesToCommit` (json-key) — Placeholder shown when the commit step found nothing to commit. <!--#59e405e8b9ddacd7-->
+- `stepReport.empty.noSummary` (json-key) — Placeholder shown when a step report has no summary. <!--#996c5412efc79638-->
+- `stepReport.status` (json-key) — Template rendering a step report's status line. <!--#2651c0914bfc67ee-->
+- `stepOutput.inProgress` (json-key) — Template marking a step output label as still in progress. <!--#86235d7a2ebb8743-->
+- `conn.connecting` (json-key) — Connection-indicator text while connecting. <!--#44e97efa05080502-->
+- `conn.reconnecting` (json-key) — Connection-indicator text while reconnecting. <!--#d17b5c617a2fb13a-->
+- `conn.connected` (json-key) — Connection-indicator text when connected. <!--#59c172d6e1879184-->
+- `conn.disconnected` (json-key) — Connection-indicator text when disconnected. <!--#8f5a27a61ca50e1d-->
+- `stepReport.chip.completed` (json-key) — Chip label marking a step as completed. <!--#8a235d22a8104a91-->
+- `stepReport.chip.failed` (json-key) — Chip label marking a step as failed. <!--#dcd60ae69e9afb5a-->
+- `stepReport.label.task` (json-key) — Inline field label for the task in a step report. <!--#a0ca80f032d23e43-->
+- `stepReport.label.complexity` (json-key) — Inline field label for complexity in a step report. <!--#b02b8091f63e5235-->
+- `stepReport.label.scope` (json-key) — Inline field label for scope in a step report. <!--#4c52661ad27c50e0-->
+- `stepReport.versionAnalyze.subline` (json-key) — Subline template for the version-analyze report showing bump type and confidence. <!--#5aa4d74758b5a964-->
+- `stepReport.count.relevantSpecItems` (json-key) — Counted section heading for relevant spec items. <!--#870f99e45d21d166-->
+- `stepReport.count.filesToModify` (json-key) — Counted section heading for files to modify. <!--#7b31455a43344aa7-->
+- `stepReport.count.filesToCreate` (json-key) — Counted section heading for files to create. <!--#8b553e2fff989c2e-->
+- `stepReport.count.filesChanged` (json-key) — Counted section heading for files changed. <!--#2b636448b6ce117b-->
+- `stepReport.count.testsAdded` (json-key) — Counted section heading for tests added. <!--#801a398930284f4f-->
+- `stepReport.count.incompleteTasks` (json-key) — Counted section heading for incomplete tasks. <!--#4fa8a5f5b72ecefc-->
+- `stepReport.count.updatedSpecs` (json-key) — Counted section heading for updated specs. <!--#62771ac5fcf517db-->
+- `stepReport.count.components` (json-key) — Counted section heading for design components. <!--#79fb190a18530c55-->
+- `stepReport.count.interfaces` (json-key) — Counted section heading for design interfaces. <!--#222874c3ba51bb90-->
+- `stepReport.count.keyDecisions` (json-key) — Counted section heading for key decisions. <!--#c0bfe149f4b95276-->
+- `stepReport.count.taskGroups` (json-key) — Counted section heading for planned task groups. <!--#29c8d7160f509cae-->
+- `stepReport.restricted.applied` (json-key) — Line template reporting how many restricted edits were applied. <!--#194c4b25e1e7e53d-->
+- `stepReport.restricted.failed` (json-key) — Line template reporting how many restricted edits failed. <!--#395637de870c9850-->
+- `stepReport.section.overview` (json-key) — Step-report section heading for the overview. <!--#97d9b858ab8ff58c-->
+- `stepReport.section.proposal` (json-key) — Step-report section heading for the proposal. <!--#dfada5939b771e41-->
+- `stepReport.section.design` (json-key) — Step-report section heading for the design. <!--#fa91713e3995eae4-->
+- `stepReport.section.restrictedEdits` (json-key) — Step-report section heading for restricted edits. <!--#8655b36cc0aebde5-->
+- `stepReport.section.phases` (json-key) — Step-report section heading for test phases. <!--#b0c765482d0205a6-->
+- `stepReport.section.command` (json-key) — Step-report section heading for the executed command. <!--#a871482ea4fe187c-->
+- `stepReport.section.recommendations` (json-key) — Step-report section heading for recommendations. <!--#4177ab9068e802c1-->
+- `stepReport.section.newCapabilities` (json-key) — Step-report section heading for newly added capabilities. <!--#d98cfef5719147d3-->
+- `stepReport.section.commitMessage` (json-key) — Step-report section heading for the commit message. <!--#6903c1fbb0a557c9-->
+- `stepReport.section.refinedDescription` (json-key) — Step-report section heading for the refined task description. <!--#34fe5757969616cc-->
+- `stepReport.section.mode` (json-key) — Step-report section heading for the execution mode. <!--#4148c8077585b241-->
+- `stepReport.section.fixInstructions` (json-key) — Step-report section heading for fix instructions. <!--#576fd1f2aa66c907-->
+- `stepReport.section.reTest` (json-key) — Step-report section heading for re-test information. <!--#1d6e0f35fb2be3d3-->
+- `stepReport.section.charterDiff` (json-key) — Step-report section heading for the old-to-new charter diff. <!--#21761afffb650e58-->
+- `stepReport.section.suggestedUpdate` (json-key) — Step-report section heading for a suggested charter update. <!--#1f113b080aa2787f-->
+- `stepReport.section.notAutoApplied` (json-key) — Template explaining why a suggested update was not auto-applied. <!--#3338f5bebc014739-->
+- `stepReport.section.charterAdmission` (json-key) — Step-report section heading for the charter admission decision. <!--#0cca897751e42354-->
+- `stepReport.status.passed` (json-key) — Status word rendered when a step or check passed. <!--#01eb998c337c92a0-->
+- `stepReport.status.failed` (json-key) — Status word rendered when a step or check failed. <!--#7d78cce57310a045-->
+- `stepReport.status.unknown` (json-key) — Placeholder rendered when a step's status is unknown. <!--#a5bc45f01a70cdeb-->
+- `stepReport.selfCheck.actionableIssues` (json-key) — Self-check summary template counting actionable issues. <!--#dbff43bd06d17d45-->
+- `stepReport.selfCheck.issues` (json-key) — Self-check summary template counting all issues. <!--#f3fc73a8eb21a5ab-->
+- `stepReport.test.phaseCount` (json-key) — Test-report template showing passed-versus-total phases. <!--#967ad6f559f2f6a0-->
+- `stepReport.specGate.skipped` (json-key) — Spec-gate report text for a no-op skip when no spec changed. <!--#ab19b063527a0b0e-->
+- `stepReport.specGate.routeUpdateSpec` (json-key) — Spec-gate report text for routing back to update_spec on an invalid artifact. <!--#fec816d8105b1d9d-->
+- `stepReport.specGate.routeImplement` (json-key) — Spec-gate report text for routing to implement when a spec edit broke a test. <!--#e36a7599fd8df6dc-->
+- `stepReport.charter.autoUpdated` (json-key) — Charter-freshness status text for an auto-updated charter. <!--#a8e2da2ef4174fd0-->
+- `stepReport.charter.updateAdvised` (json-key) — Charter-freshness status text advising a charter update. <!--#b15298be58dcf442-->
+- `stepReport.charter.fresh` (json-key) — Charter-freshness status text for an up-to-date charter. <!--#8ac540824362df3b-->
+- `stepReport.charter.touched` (json-key) — Template listing the charter sections touched. <!--#6d2a2176fdb3c9c1-->
+- `stepReport.charter.autoUpdatedNote` (json-key) — Note explaining that se3/charter.md was auto-updated for the reviewed change. <!--#717297fcdf60c1e8-->
+- `stepReport.design.reasonPrefix` (json-key) — Prefix for a reason line in the design report. <!--#e10680f3820d8bcd-->
+- `stepReport.plan.groupMeta` (json-key) — Template summarising a task group's task count, LOC estimate, and dependencies. <!--#862862e8c8271398-->
+- `stepReport.plan.dependsNone` (json-key) — Text substituted when a task group has no dependencies. <!--#658cb7c2873fc717-->
+- `stepReport.implement.groups` (json-key) — Implement-report template counting task groups. <!--#602499012fc7e276-->
+- `stepReport.implement.files` (json-key) — Implement-report template counting changed files. <!--#ca3d88be4a846fa7-->
+- `stepReport.implement.tests` (json-key) — Implement-report template counting tests. <!--#fa93f9c605824313-->
+- `stepReport.implement.status.complete` (json-key) — Implement-report status word for a complete implementation. <!--#05eced0a500bcf97-->
+- `stepReport.implement.status.partial` (json-key) — Implement-report status word for a partial implementation. <!--#abe72f8ee7ae2594-->
+- `stepReport.implement.status.failed` (json-key) — Implement-report status word for a failed implementation. <!--#397de70affb5d978-->
+- `stepReport.implement.status.unknown` (json-key) — Implement-report status word for an unknown implementation state. <!--#93d175050c370e1b-->
+- `stepReport.groupHeader` (json-key) — Generic template rendering a group heading with its item count. <!--#d3607098bbc60045-->
+- `stepReport.severity.critical` (json-key) — Severity label for critical findings. <!--#777934ae7a36b569-->
+- `stepReport.severity.high` (json-key) — Severity label for high findings. <!--#e5305899f660db0b-->
+- `stepReport.severity.medium` (json-key) — Severity label for medium findings. <!--#20bdf161d1b40398-->
+- `stepReport.severity.low` (json-key) — Severity label for low findings. <!--#e1bde4883940158d-->
+- `stepReport.scope.inScope` (json-key) — Label marking a finding as in-scope. <!--#1f5b44ded01bdb68-->
+- `stepReport.scope.outOfScope` (json-key) — Label marking a finding as out-of-scope. <!--#01c74c4d3bf17a22-->
+- `tool.detail.empty` (json-key) — Placeholder shown when a tool call has no detail to display. <!--#7ec72fa77048018b-->
+- `tool.detail.truncated` (json-key) — Marker appended when tool output was truncated. <!--#6b7b8574037a193a-->
+- `tool.detail.stderr` (json-key) — Label for the stderr portion of tool output. <!--#fe3f3a3e1d4395f7-->
+- `tool.detail.noMatches` (json-key) — Placeholder shown when a search tool returned no matches. <!--#31512d2dbfd0eec1-->
+- `tool.detail.noFiles` (json-key) — Placeholder shown when a file-listing tool returned nothing. <!--#3e68a46cc34ef3d1-->
+- `tool.detail.patternPath` (json-key) — Template summarising a search tool's pattern and path arguments. <!--#1fd6f9e0dfd9d875-->
+- `tool.detail.toggleShow` (json-key) — Toggle label for showing tool-call details. <!--#e1426ee0a7fffdca-->
+- `tool.detail.toggleHide` (json-key) — Toggle label for hiding tool-call details. <!--#c1387a954c9b05af-->
+- `topbar.ownerAdmin` (json-key) — Top-bar template marking the signed-in owner as an admin. <!--#dcd8ba4ebc6cf27a-->
+- `machines.flowCount` (json-key) — Singular template for a machine's flow count. <!--#a5604c96f26b57d6-->
+- `machines.flowCountPlural` (json-key) — Plural template for a machine's flow count. <!--#7fa80bb18db90628-->
+- `conv.recordUnrenderable` (json-key) — Placeholder shown when a conversation record cannot be rendered. <!--#3849b7f6555975ea-->
+- `conv.recordEmpty` (json-key) — Placeholder shown when a conversation record has no readable content. <!--#8609792f99ecb22b-->
+- `stepReport.empty` (json-key) — Placeholder shown when a step report has no fields at all. <!--#ac6674e95dae89ae-->
+- `record.attempt` (json-key) — Template labelling a record's retry attempt number. <!--#d9c87646a5ffef6f-->
+- `usage.valueLine` (json-key) — Template rendering a usage line with input, output, cache read/write, and cost. <!--#58967816d2d8fdf6-->
+- `issue.untitled` (json-key) — Fallback display text for an issue with no title. <!--#a16db2f606c30446-->
+- `flow.untitled` (json-key) — Fallback display text for a flow with no title. <!--#75303f31b2090bc9-->
+- `flow.card.currentStep` (json-key) — Flow card template showing the current step. <!--#cdede616df5a9b72-->
+- `history.untitledSession` (json-key) — Fallback display text for a history session with no title. <!--#1de8fe57756da6ab-->
+
+### `src/se3/server/static/i18n/zh-CN.json` (json) — Simplified-Chinese locale bundle for the SE3 Web UI, mapping dotted UI keys (nav, login, machines, flows, history, issues, issue/end-session/launch modals, flow view and shared common strings) to their translated labels, placeholders, empty states and confirmation messages. <!--#450755e373130f22|7e987758ef254f1e-->
+- `lang.label` (json-key) — Label for the language selector control. <!--#180b2dd456e4af14-->
+- `lang.en-US` (json-key) — Display name of the English locale in the language switcher. <!--#e8a7ce3e9fdcfb0b-->
+- `lang.zh-CN` (json-key) — Display name of the Chinese locale in the language switcher. <!--#c94870359c8bf8dd-->
+- `topbar.title` (json-key) — Application title shown in the top bar. <!--#ba5eb02f18c538d9-->
+- `nav.history` (json-key) — Navigation label for the history view. <!--#3f429ade01015693-->
+- `nav.issues` (json-key) — Navigation label for the issues view. <!--#4a61822e6b557571-->
+- `nav.keys` (json-key) — Navigation label for the daemon-keys view. <!--#2be5866e78684e93-->
+- `nav.users` (json-key) — Navigation label for the user-management view. <!--#4bcab53738120f19-->
+- `nav.newTask` (json-key) — Navigation button label for creating a new task. <!--#d608ebd9bd1b3237-->
+- `nav.logout` (json-key) — Navigation label for logging out. <!--#6bfff3dcfb965147-->
+- `nav.menu` (json-key) — Label/aria text for the mobile navigation menu toggle. <!--#395d0b28e541f38a-->
+- `login.title` (json-key) — Heading of the login screen. <!--#844b9090d1e6210b-->
+- `login.subtitle` (json-key) — Subtitle explaining that logging in gives access to the user's daemons. <!--#9bf6f94fcd6c7d4e-->
+- `login.username` (json-key) — Label for the login username field. <!--#d2978b70a3701a4a-->
+- `login.password` (json-key) — Label for the login password field. <!--#8a959ac34ebc8745-->
+- `login.submit` (json-key) — Label of the login submit button. <!--#e1159d105e3bb760-->
+- `login.breakglassToggle` (json-key) — Toggle label for switching the login form to break-glass admin token mode. <!--#e4ae8cfd322a5eb1-->
+- `login.breakglassLabel` (json-key) — Label for the break-glass token input field. <!--#c8815655d59a27df-->
+- `login.breakglassSubmit` (json-key) — Submit button label for entering as admin via break-glass token. <!--#6443fd20c9bed246-->
+- `machines.title` (json-key) — Heading of the connected-machines list. <!--#073964b794c70395-->
+- `machines.empty` (json-key) — Empty-state text shown when no machines are connected. <!--#142e1074f5eef270-->
+- `flows.back` (json-key) — Back link label returning from flows to the machines list. <!--#efb88a853f9fb25b-->
+- `flows.backAria` (json-key) — Accessible label for the back-to-machines link. <!--#a4c0cd528e3e86cb-->
+- `flows.title` (json-key) — Heading of the flows list. <!--#db20ab4d7be67e35-->
+- `flows.empty` (json-key) — Empty-state prompt asking the user to pick a machine to see its flows. <!--#50882edb57863d7b-->
+- `common.cancel` (json-key) — Shared label for cancel buttons. <!--#5b9a70adeb54b2ec-->
+- `common.size.chars` (json-key) — Shared character-count format string used for content size hints. <!--#cfb8735a0844fcbc-->
+- `common.staleBanner` (json-key) — Banner warning that the connection dropped and displayed data may be stale. <!--#99e2f3b24afb0ff8-->
+- `common.absolutePathPlaceholder` (json-key) — Placeholder text for absolute project-path inputs. <!--#8a66a0825fa7843d-->
+- `common.worktreeOption` (json-key) — Checkbox label describing isolated worktree execution with automatic merge-back. <!--#98d52ff1ab871853-->
+- `history.title` (json-key) — Heading of the history view. <!--#b1f15333267cb7ca-->
+- `history.sessions` (json-key) — Heading of the sessions list within history. <!--#aa9dc7499c551a65-->
+- `history.loading` (json-key) — Loading placeholder for the history list. <!--#333c3d3144573217-->
+- `history.back` (json-key) — Back link label returning to the session list. <!--#850fa70c0425745a-->
+- `history.backAria` (json-key) — Accessible label for the back-to-sessions link. <!--#d2bbb52cc928dad8-->
+- `history.detailTitle` (json-key) — Heading of the session detail pane. <!--#ba78ac0d907117c6-->
+- `history.detailEmpty` (json-key) — Empty-state prompt asking the user to pick a session to view its steps. <!--#90ca1b29e57e29f8-->
+- `history.usageTitle` (json-key) — Tooltip describing the session's aggregate token and cost usage. <!--#f690403e99c095cf-->
+- `issues.title` (json-key) — Heading of the issues view. <!--#ed473d631b95f45f-->
+- `issues.showClosed` (json-key) — Toggle label for including closed issues in the list. <!--#f5bddc8f9db52a41-->
+- `issues.sourceAll` (json-key) — Issue filter option matching all sources. <!--#d3be331fa58e0dfa-->
+- `issues.sourceHuman` (json-key) — Issue filter option for human-created issues. <!--#851c228dfe49ddfc-->
+- `issues.sourceSystem` (json-key) — Issue filter option for system-created issues. <!--#54c52bf2c62b77d4-->
+- `issues.projectAll` (json-key) — Issue filter option matching all projects. <!--#36e53e0c111851b3-->
+- `issues.typeAll` (json-key) — Issue filter option matching all issue types. <!--#09047737dd3a6c9e-->
+- `issues.create` (json-key) — Button label for creating a new issue. <!--#86b36c90289e0bbe-->
+- `issues.loading` (json-key) — Loading placeholder for the issues list. <!--#2c28dc8f54920ee3-->
+- `issues.back` (json-key) — Back link label returning to the issue list. <!--#0c4865c56a554e4c-->
+- `issues.backAria` (json-key) — Accessible label for the back-to-issues link. <!--#02b259b562ed3140-->
+- `issues.detailTitle` (json-key) — Heading of the issue detail pane. <!--#a3f43fbfad047aec-->
+- `issues.detailEmpty` (json-key) — Empty-state prompt asking the user to pick an issue to view details. <!--#57ffa19ff32994d4-->
+- `issueModal.title` (json-key) — Heading of the create-issue modal. <!--#c6ef1caea4b1e463-->
+- `issueModal.machine` (json-key) — Machine field label in the issue modal. <!--#0918229d38767ba5-->
+- `issueModal.project` (json-key) — Project field label in the issue modal. <!--#54d11b2d73a9ae56-->
+- `issueModal.description` (json-key) — Description field label in the issue modal. <!--#76f47c2681eb201f-->
+- `issueModal.descriptionPlaceholder` (json-key) — Placeholder prompting the user to describe the problem or suggestion. <!--#3d5bda7372822ea1-->
+- `issueModal.titleLabel` (json-key) — Optional-title field label in the issue modal. <!--#cc87c7f0a1421d75-->
+- `issueModal.titlePlaceholder` (json-key) — Placeholder noting the title is auto-derived from the description if left blank. <!--#6e0f87fa566c0594-->
+- `issueModal.type` (json-key) — Optional issue-type field label in the issue modal. <!--#8bb54e2918a287ab-->
+- `issueModal.priority` (json-key) — Optional priority field label in the issue modal. <!--#fd4b551b554f0032-->
+- `issueModal.tags` (json-key) — Optional comma-separated tags field label in the issue modal. <!--#167168e80160d1df-->
+- `issueModal.tagsPlaceholder` (json-key) — Example placeholder for the issue tags input. <!--#e1d8158885a8da46-->
+- `issueModal.submit` (json-key) — Submit button label for creating the issue. <!--#84603f6073f57fb1-->
+- `issueAction.title` (json-key) — Generic heading of the issue action confirmation dialog. <!--#40d539f616371883-->
+- `issueAction.reasonLabel` (json-key) — Label for the optional close-reason field in the issue action dialog. <!--#a51e7dba9d14a3a1-->
+- `issueAction.reasonPlaceholder` (json-key) — Placeholder for the issue close-reason input. <!--#f795de6136b2ecfc-->
+- `issueAction.confirm` (json-key) — Confirm button label in the issue action dialog. <!--#9253a1f81bd08e10-->
+- `endSession.title` (json-key) — Heading of the end-session confirmation dialog. <!--#0426d8188f3fbf69-->
+- `endSession.message` (json-key) — Warning that ending archives the session and discards uncommitted worktree work. <!--#155635d6bdebe126-->
+- `endSession.confirm` (json-key) — Confirm button label for ending and archiving the session. <!--#91d8f22aabf62233-->
+- `issueLaunch.title` (json-key) — Heading of the launch-flow-from-issue dialog. <!--#cc5721eff7313c91-->
+- `issueLaunch.discover` (json-key) — Checkbox label for starting the issue flow with the discovery step. <!--#53a98b06faa51cc0-->
+- `issueLaunch.confirm` (json-key) — Confirm button label for launching a flow from an issue. <!--#5d3da963164c3f12-->
+- `flow.sidebarToggleTitle` (json-key) — Tooltip for the button that shows or hides the flow detail sidebar. <!--#662bef8cbfba7a37-->
+- `flow.title` (json-key) — Heading of the flow detail pane. <!--#ab5a89fbe6e73a3a-->
+- `flow.sidebarLoading` (json-key) — Loading placeholder for the flow detail sidebar. <!--#343032975acc55fb-->
+- `flow.conversationEmpty` (json-key) — Empty-state prompt asking the user to pick a flow to view its conversation. <!--#cbcbeda7617c42c4-->
+- `flow.usageTitle` (json-key) — Tooltip describing the flow's aggregate token and cost usage. <!--#ae317a73f1ae6e1a-->
+- `flow.replyContext` (json-key) — Text shown in the reply bar when no interaction is pending. <!--#ed0fbfb0e4fb7747-->
+- `flow.interjectTitle` (json-key) — Tooltip for the button that interjects into a running flow. <!--#2a2df5e8ab47e374-->
+- `flow.replyPlaceholder` (json-key) — Reply-input placeholder used when there is nothing pending. <!--#910f9560440f89b4-->
+- `flow.replySubmit` (json-key) — Send button label for the reply composer. <!--#5aa0ed8e871fd4b3-->
+- `newTask.title` (json-key) — Heading of the new-task publish form. <!--#2c8846fa4e2785d3-->
+- `newTask.machine` (json-key) — Target-machine field label in the new-task form. <!--#94e5a0a284f6dc34-->
+- `newTask.project` (json-key) — Project field label in the new-task form. <!--#468bc5317eeded03-->
+- `newTask.projectEmpty` (json-key) — Hint shown when a daemon has no registered project roots, suggesting a manual path. <!--#efb503e36d4b6e26-->
+- `newTask.projectManualHint` (json-key) — Hint that a manually entered path will be initialized with se3 init if needed. <!--#8248902268a56795-->
+- `newTask.type` (json-key) — Task-type field label in the new-task form. <!--#a12f4b57895ef032-->
+- `newTask.typeAuto` (json-key) — Task-type option letting the system pick the type automatically. <!--#50fec2c698326598-->
+- `taskType.feature` (json-key) — Display name of the feature task type. <!--#7ce6c5a6ebc72cac-->
+- `taskType.bugfix` (json-key) — Display name of the bugfix task type. <!--#f3e2f8bd1f7a3178-->
+- `taskType.review` (json-key) — Display name of the review task type. <!--#126a873a6946dfba-->
+- `taskType.small` (json-key) — Display name of the small-change task type. <!--#1861006446f94fda-->
+- `taskType.directive` (json-key) — Display name of the directive task type. <!--#3a990d25615d929e-->
+- `issueType.bug` (json-key) — Display name of the bug issue type. <!--#763b6eb4015c4d78-->
+- `issueType.feature` (json-key) — Display name of the feature issue type. <!--#d46015fc9d53a23f-->
+- `issueType.enhancement` (json-key) — Display name of the enhancement issue type. <!--#e5442df3ecad10b4-->
+- `issueType.idea` (json-key) — Display name of the idea issue type. <!--#6477a7c3d44af48b-->
+- `issueType.task` (json-key) — Display name of the task issue type. <!--#b948f73cd3fb815a-->
+- `issuePriority.critical` (json-key) — Display name of the critical issue priority. <!--#3fc97a1fbd0146db-->
+- `issuePriority.high` (json-key) — Display name of the high issue priority. <!--#0cead19326e990ee-->
+- `issuePriority.medium` (json-key) — Display name of the medium issue priority. <!--#29012667c7f4b225-->
+- `issuePriority.low` (json-key) — Display name of the low issue priority. <!--#62d0f48fdf0f9c8f-->
+- `issueSource.human` (json-key) — Display name of the human issue source. <!--#ecb6072945d421fe-->
+- `issueSource.system` (json-key) — Display name of the system issue source. <!--#a4bc3119056ad0aa-->
+- `newTask.task` (json-key) — Task-description field label in the new-task form. <!--#2170b5e91baa1712-->
+- `newTask.taskPlaceholder` (json-key) — Placeholder prompting the user to describe the task to run. <!--#a81809f8c3ccc9b8-->
+- `newTask.discover` (json-key) — Checkbox label for starting the new task at the discovery step. <!--#1d963cb4c99ae9de-->
+- `newTask.submit` (json-key) — Publish button label for the new-task form. <!--#f470be7048497cdc-->
+- `keys.title` (json-key) — Heading of the daemon-keys view. <!--#4da888071ccf3829-->
+- `keys.hint` (json-key) — Explanation that daemon keys authenticate daemons and the plaintext is shown only once. <!--#10536a03879ee7cf-->
+- `keys.labelPlaceholder` (json-key) — Placeholder for the optional daemon-key label input. <!--#da862a6b7f5ab6ec-->
+- `keys.create` (json-key) — Button label for creating a daemon key. <!--#647c45465da574a9-->
+- `keys.revealNote` (json-key) — Warning to copy the newly created key now because it won't be shown again. <!--#58a648d797b42a11-->
+- `keys.loading` (json-key) — Loading placeholder for the daemon-keys list. <!--#6e6d84c6434dac22-->
+- `users.title` (json-key) — Heading of the user-management view. <!--#bd076e67140437b9-->
+- `users.hint` (json-key) — Explanation of user-management capabilities and the server-enforced safety limits. <!--#1c2394551b8ba58f-->
+- `users.usernamePlaceholder` (json-key) — Placeholder for the new-user username input. <!--#329c9b54ab11ee07-->
+- `users.passwordPlaceholder` (json-key) — Placeholder for the new-user password input. <!--#b9479f0449b2272e-->
+- `users.displayNamePlaceholder` (json-key) — Placeholder for the optional display-name input. <!--#23a1c67f9a25607c-->
+- `users.isAdmin` (json-key) — Label for the admin checkbox in the user-creation form. <!--#a532f66e3e056425-->
+- `users.create` (json-key) — Button label for creating a new user. <!--#0fb60bf924a3249a-->
+- `users.loading` (json-key) — Loading placeholder for the users list. <!--#46f97d05730430ab-->
+- `status.step.running` (json-key) — Step status label for a running step. <!--#cdb5b5c6401c411d-->
+- `status.step.retrying` (json-key) — Step status label for a retrying step. <!--#0bb9b4ad024e008f-->
+- `status.step.paused` (json-key) — Step status label for a paused step. <!--#8e844775cf45813c-->
+- `status.step.completed` (json-key) — Step status label for a completed step. <!--#f33b6615eb620865-->
+- `status.step.failed` (json-key) — Step status label for a failed step. <!--#7366b0cae96be541-->
+- `status.step.partial` (json-key) — Step status label for a partially completed step. <!--#eaafe455ce843bd8-->
+- `status.step.waiting_for_lock` (json-key) — Step status label for a step blocked waiting on a lock. <!--#b2f98c73c1b60a0c-->
+- `status.group.queued` (json-key) — Implementation-group status label for a queued group. <!--#e67b89e526d064c7-->
+- `status.group.running` (json-key) — Implementation-group status label for a group being implemented in a worktree. <!--#914ec1dfe4820fa7-->
+- `status.group.completed` (json-key) — Implementation-group status label for a completed group. <!--#14e3547762dc80b4-->
+- `status.group.failed` (json-key) — Implementation-group status label for a failed group. <!--#042c6bc938e430c1-->
+- `status.group.skipped` (json-key) — Implementation-group status label for a skipped group. <!--#fbb6d442be3f67c4-->
+- `status.flow.running` (json-key) — Flow status label for a running flow. <!--#401cf558db98de9d-->
+- `status.flow.completed` (json-key) — Flow status label for a completed flow. <!--#4a8bd75e19ce0b6b-->
+- `status.flow.failed` (json-key) — Flow status label for a failed flow. <!--#04bd24d01944ac04-->
+- `status.flow.paused` (json-key) — Flow status label for a paused flow. <!--#9ed5f8500f999dee-->
+- `status.flow.init` (json-key) — Flow status label for a flow in initialization. <!--#82bb37b1c0ce6e31-->
+- `status.flow.recovering` (json-key) — Flow status label for a recovering flow. <!--#e9cc2d76a62054e9-->
+- `status.flow.unknown` (json-key) — Flow status label used when the status is unknown. <!--#c042d767e5f391cc-->
+- `status.issue.open` (json-key) — Issue status label for an open issue. <!--#a9ea262ab7b3e789-->
+- `status.issue.inProgress` (json-key) — Issue status label for an in-progress issue. <!--#2406866487a141fa-->
+- `status.issue.resolved` (json-key) — Issue status label for a resolved issue. <!--#01c17e38cc171219-->
+- `status.issue.wontFix` (json-key) — Issue status label for a won't-fix issue. <!--#d7a7c9fc71aed6ad-->
+- `status.issue.closed` (json-key) — Issue status label for a closed issue. <!--#d0d9aa06ea847128-->
+- `indexProgress.withTotal` (json-key) — Code-index progress message including the current path and done/total counts. <!--#f64f93a3607e1eb0-->
+- `indexProgress.noTotal` (json-key) — Code-index progress message showing only the current path when no total is known. <!--#bd8af6db00dfd473-->
+- `toast.interjectionDelivered` (json-key) — Toast confirming an interjection was delivered and awaits consumption by the flow. <!--#569e0fd2f84f41d7-->
+- `toast.interjectionConsumed` (json-key) — Toast confirming the interjection was consumed by the flow. <!--#f91298aef9ac0e76-->
+- `toast.taskLaunchFailed` (json-key) — Toast reporting a task launch failure with location and reason. <!--#676ec013e687ab1d-->
+- `toast.unknownError` (json-key) — Fallback error text used when no error reason is available. <!--#98ce230051f33b12-->
+- `toast.resumeDispatched` (json-key) — Toast confirming a resume command was dispatched for a flow id. <!--#f891739c28b2b78d-->
+- `toast.resumeNotFound` (json-key) — Toast reporting the flow does not exist or cannot be resumed. <!--#8047b3936e2fc4a8-->
+- `toast.resumeStillRunning` (json-key) — Toast reporting resume is rejected because the flow is still running. <!--#a99cc08b054fe353-->
+- `toast.resumeFailed` (json-key) — Toast reporting a resume failure with the HTTP status. <!--#1a889997704174b4-->
+- `toast.resumeNetworkError` (json-key) — Toast reporting a network error while dispatching resume. <!--#5197a9ae94b110a5-->
+- `toast.endDispatched` (json-key) — Toast confirming an end-session command was dispatched for a flow id. <!--#5bec3d29a9b627ad-->
+- `toast.flowNotFound` (json-key) — Toast reporting the flow does not exist. <!--#725de9453900300c-->
+- `toast.endAlreadyEnded` (json-key) — Toast reporting the session has already ended and cannot be ended again. <!--#d4aa75606b24fff5-->
+- `toast.endMachineOffline` (json-key) — Toast reporting the end command cannot be dispatched because the machine is offline. <!--#f1e0af3f6aeea2c1-->
+- `toast.endFailed` (json-key) — Toast reporting an end-session failure with the HTTP status. <!--#e46d13db5eff5b31-->
+- `toast.endNetworkError` (json-key) — Toast reporting a network error while dispatching end-session. <!--#f13eefccb79b8db8-->
+- `toast.noInteractionSelected` (json-key) — Toast reporting no interaction is selected to reply to. <!--#0b493f12aea84f1e-->
+- `toast.responseEmpty` (json-key) — Toast reporting that a reply cannot be empty. <!--#f36f0cd717cf54e2-->
+- `toast.wsDelayed` (json-key) — Toast reporting the websocket connection is delayed and the action can be retried. <!--#3021d7eaa7fded0e-->
+- `toast.approved` (json-key) — Toast confirming an approval was submitted. <!--#ab351c247a9e7253-->
+- `toast.rejected` (json-key) — Toast confirming a rejection was submitted. <!--#1975b03d865ffb24-->
+- `toast.interjectionSent` (json-key) — Toast confirming an interjection was sent. <!--#891ab28df476fcd8-->
+- `toast.responseSent` (json-key) — Toast confirming a reply was sent. <!--#29f04bd35bd8aac8-->
+- `toast.couldNotSend` (json-key) — Toast reporting a send failure with the server message. <!--#042215d6c1de8a71-->
+- `toast.sendNetworkError` (json-key) — Toast reporting a network error while sending to the server. <!--#e5364b487481eb42-->
+- `toast.issueCreated` (json-key) — Toast confirming an issue was created. <!--#4d117e0a27290fbd-->
+- `toast.issueUpdated` (json-key) — Toast confirming an issue was updated. <!--#1db179f8bd5f14a4-->
+- `toast.issueClosed` (json-key) — Toast confirming an issue was closed. <!--#4a6398764d73141f-->
+- `toast.issueReopened` (json-key) — Toast confirming an issue was reopened. <!--#98e616d44a446791-->
+- `toast.issueFlowDispatched` (json-key) — Toast confirming a flow was dispatched from an issue. <!--#52fb6ed0fcaf580e-->
+- `toast.flowLaunchFailed` (json-key) — Toast reporting a flow launch failure with the server message. <!--#058d65ce009b445b-->
+- `toast.flowLaunchNetworkError` (json-key) — Toast reporting a network error while launching a flow. <!--#54162bd0fba6294b-->
+- `toast.taskPublished` (json-key) — Toast confirming a task was published. <!--#fa4eb491ee8064ea-->
+- `toast.taskPublishFailed` (json-key) — Toast reporting a task publish failure with the server message. <!--#42f30fa13a76a692-->
+- `toast.taskPublishNetworkError` (json-key) — Toast reporting a network error while publishing a task. <!--#0053d02f85d664ce-->
+- `toast.keyCreated` (json-key) — Toast confirming a daemon key was created and prompting the user to copy it now. <!--#7011e20f3b57f374-->
+- `toast.keyRevoked` (json-key) — Toast confirming a daemon key was revoked. <!--#46542964c179b77c-->
+- `toast.userCreated` (json-key) — Toast confirming a user was created. <!--#4b4aaa1310970651-->
+- `toast.userDeleted` (json-key) — Toast confirming the named user was deleted. <!--#11e093fc25a3c992-->
+- `toast.passwordReset` (json-key) — Toast confirming the named user's password was reset. <!--#c38488f1f35ca12f-->
+- `toast.adminGranted` (json-key) — Toast confirming admin rights were granted. <!--#e55d1bad6b262c5b-->
+- `toast.adminRevoked` (json-key) — Toast confirming admin rights were revoked. <!--#a8f008934c8b80c5-->
+- `flow.resume` (json-key) — Label of the flow resume button. <!--#20dd510dc1012f7b-->
+- `flow.resuming` (json-key) — In-progress label shown while a flow resume is being dispatched. <!--#835d95acc4337098-->
+- `flow.resumeTitle` (json-key) — Tooltip for the flow resume button. <!--#a6c1b61266187ee4-->
+- `flow.end` (json-key) — Label of the end-session button. <!--#4431cc5d936a6d2e-->
+- `flow.ending` (json-key) — In-progress label shown while an end-session is being dispatched. <!--#3c3039f7981493a9-->
+- `flow.endTitle` (json-key) — Tooltip for the end-and-archive session button. <!--#0b93eaa8104d9531-->
+- `flow.loadingConversation` (json-key) — Loading placeholder for the flow conversation pane. <!--#149b6b874e79f33f-->
+- `flow.loadError` (json-key) — Error message shown when the flow conversation fails to load with an HTTP status. <!--#b8c3a845092020a8-->
+- `flow.networkError` (json-key) — Error message shown on network failure while loading the conversation. <!--#7ffae34ca074501b-->
+- `flow.detailLoadError` (json-key) — Error message shown when flow details fail to load with an HTTP status. <!--#109a6671ccb74bb0-->
+- `flow.detailNotAvailable` (json-key) — Message shown when the flow is not yet available on the server. <!--#e9ef34293ab1b066-->
+- `flow.detailNetworkError` (json-key) — Error message shown on network failure while loading flow details. <!--#dda9bc6045596905-->
+- `flow.detailRetrying` (json-key) — Suffix appended to a flow-detail error message while a retry is pending. <!--#68eb460350edb182-->
+- `flow.noStepHistory` (json-key) — Empty-state text shown when a flow reports no step history. <!--#3dcc29b5272e893e-->
+- `flow.noConversationRecords` (json-key) — Empty-state text shown when a session has no conversation records. <!--#8a175623921e5a1c-->
+- `endSession.confirmMessage` (json-key) — End-session confirmation prompt naming the session id and warning about uncommitted worktree work. <!--#5c1d8eb96895e0bb-->
+- `flows.titleWith` (json-key) — Flows heading parameterized with the selected machine name. <!--#f5b057cf09ea5031-->
+- `flows.emptyMachine` (json-key) — Empty-state text shown when the selected machine has no flows. <!--#a2e6fc279422afc4-->
+- `flowSidebar.overview` (json-key) — Section heading for the flow sidebar overview block. <!--#df7047b34fbd4ffb-->
+- `flowSidebar.status` (json-key) — Flow sidebar field label for status. <!--#146669b5bc88ba32-->
+- `flowSidebar.type` (json-key) — Flow sidebar field label for flow type. <!--#9bc28a512811964e-->
+- `flowSidebar.project` (json-key) — Flow sidebar field label for the project. <!--#a2260c57fa8679f7-->
+- `flowSidebar.progress` (json-key) — Flow sidebar field label for progress. <!--#0c86fe16c52495a7-->
+- `flowSidebar.currentStep` (json-key) — Flow sidebar field label for the current step. <!--#0fa1f8894a6993f9-->
+- `flowSidebar.updated` (json-key) — Flow sidebar field label for the last-updated time. <!--#a9562bb454ed5243-->
+- `flowSidebar.steps` (json-key) — Section heading for the flow sidebar step list. <!--#1c06943b320d5e1c-->
+- `flowSidebar.machineSection` (json-key) — Section heading for the flow sidebar machine block. <!--#25f8e58de51f3123-->
+- `flowSidebar.machine` (json-key) — Flow sidebar field label for the machine name. <!--#ee007059563b1e84-->
+- `flowSidebar.flowId` (json-key) — Flow sidebar field label for the flow id. <!--#3aba00f3b636cba3-->
+- `intervention.call.label` (json-key) — Badge label for a pending call-type intervention awaiting a reply. <!--#8190aa4e407ed820-->
+- `intervention.call.hint` (json-key) — Hint explaining the running flow is waiting for the user's reply. <!--#204c6e8291a15914-->
+- `intervention.interjection.label` (json-key) — Badge label for an interjection intervention. <!--#6aace7fbc35ed12d-->
+- `intervention.interjection.hint` (json-key) — Hint explaining an interjection adds an extra instruction to the running flow. <!--#5de62a2babbb3527-->
+- `intervention.retryDecision.label` (json-key) — Badge label for a retry-decision intervention. <!--#2216010bf4132986-->
+- `intervention.retryDecision.hint` (json-key) — Hint explaining a step failed and the user must choose retry/skip/abort. <!--#7bc77f4b16714125-->
+- `intervention.cliConfirm.label` (json-key) — Badge label for a CLI confirmation intervention. <!--#d765073c0624fc9f-->
+- `intervention.cliConfirm.hint` (json-key) — Hint explaining a subprocess is waiting for a confirmation. <!--#b7fba8e2703d8cf7-->
+- `intervention.discoveryConfirm.label` (json-key) — Badge label for the discovery task-description confirmation intervention. <!--#99c9eda8972a2d5f-->
+- `intervention.discoveryConfirm.hint` (json-key) — Hint explaining the user types 1 to accept the refined task description or replies to refine further. <!--#a362ae782ea9a670-->
+- `intervention.confirm.label` (json-key) — Badge label for an approval-required intervention. <!--#cbcffa1aa4b02d74-->
+- `intervention.confirm.hint` (json-key) — Hint explaining the flow awaits approval or a rejection with requested changes. <!--#3889704e88e35b55-->
+- `interject.cancelTitle` (json-key) — Tooltip for the button that cancels interjection mode. <!--#afaa4e54fd3c94be-->
+- `interject.title` (json-key) — Header text of the interjection composer. <!--#d40ce7156a05b4c7-->
+- `reply.empty.canDraftMobile` (json-key) — Mobile placeholder telling the user they may draft a reply or interject. <!--#ae5e3b4431252d24-->
+- `reply.empty.canDraft` (json-key) — Desktop placeholder telling the user they may draft a reply or interject while nothing is pending. <!--#d001d880ac6f5509-->
+- `reply.empty.active` (json-key) — Placeholder explaining there is no pending interaction to reply to. <!--#aa0b9ba133d50b55-->
+- `reply.empty.ended` (json-key) — Placeholder explaining the flow has ended and can no longer be interacted with. <!--#dcd2dc195ba7f38c-->
+- `reply.placeholder.interject` (json-key) — Reply-input placeholder used in interjection mode. <!--#e7464e0c01d761a0-->
+- `reply.placeholder.confirm` (json-key) — Reply-input placeholder explaining approve/reject keywords and free-text change requests. <!--#479d2f76f67e8cba-->
+- `reply.placeholder.reply` (json-key) — Generic reply-input placeholder. <!--#944b3e8426ffb9e8-->
+- `reply.replyingTo` (json-key) — Label prefixing the interaction currently being replied to. <!--#2ab7b5de6b5159c5-->
+- `reply.confirmNotePlaceholder` (json-key) — Placeholder for the optional note attached to an approve/reject decision. <!--#7d513296035d0b1f-->
+- `reply.approve` (json-key) — Label of the approve button. <!--#f7e0b228e2cdfd67-->
+- `reply.reject` (json-key) — Label of the reject button. <!--#e88afce862adbbdc-->
+- `reply.confirmContinue` (json-key) — Label of the discovery confirm-and-continue button. <!--#33d9ee7d6778aa82-->
+- `reply.revisionConfirm` (json-key) — Confirmation prompt warning that the reply will be treated as a revision request. <!--#6b015203a014b09c-->
+- `reply.echo.approveNote` (json-key) — Echo format for an approval with an attached note. <!--#d5dccc945a9f89dc-->
+- `reply.echo.rejectNote` (json-key) — Echo format for a rejection with an attached note. <!--#27d1f053fc16b978-->
+- `adjudicate.title` (json-key) — Heading of the adjudication approval card. <!--#f99053e34fe048bd-->
+- `adjudicate.rationaleLabel` (json-key) — Label for the adjudication rationale section. <!--#0d8aff973fede917-->
+- `adjudicate.taskDescLabel` (json-key) — Label for the adjudicated task-description section. <!--#27c2d4fdf9180068-->
+- `adjudicate.noChange` (json-key) — Note shown when adjudication left the task description unchanged. <!--#3ae9a3f5e3594eb8-->
+- `adjudicate.sameAsBaseline` (json-key) — Note shown when the task description matches the baseline with no diff. <!--#6838bab5dedef0cf-->
+- `prompt.expandDetail` (json-key) — Toggle label for expanding a message's prompt detail. <!--#cc59055a500e1207-->
+- `prompt.collapseDetail` (json-key) — Toggle label for collapsing a message's prompt detail. <!--#f5e1083aff7eed6b-->
+- `prompt.templatePrefix` (json-key) — Section label for the template prefix portion of a rendered prompt. <!--#151b298953cf4a33-->
+- `prompt.frameworkSuffix` (json-key) — Section label for the framework suffix portion of a rendered prompt. <!--#6518023ba511fd2f-->
+- `prompt.chipLabel` (json-key) — Prompt chip label combining the role and context. <!--#54db8ede487748db-->
+- `prompt.chipLabelNoCtx` (json-key) — Prompt chip label used when no context is available. <!--#4c719c876ff38b73-->
+- `fold.expandAll` (json-key) — Expand-all toggle label including the collapsed item count. <!--#ffe6a5ea3ee4cacf-->
+- `fold.collapse` (json-key) — Collapse toggle label for a folded block. <!--#005a0599e642c4bd-->
+- `fold.expandAllSimple` (json-key) — Expand-all toggle label without a count. <!--#8438ab35807d9a74-->
+- `fold.collapseAll` (json-key) — Collapse-all toggle label. <!--#066b2d1db1a99fce-->
+- `raw.view` (json-key) — Toggle label for viewing a record's raw payload. <!--#238bfd72cc22c1e7-->
+- `raw.hide` (json-key) — Toggle label for hiding a record's raw payload of the given kind. <!--#b7b87a6b8a8e775d-->
+- `error.serverReturned` (json-key) — Generic error message reporting the server's HTTP status. <!--#207514ed5bf9c83f-->
+- `error.networkReach` (json-key) — Generic error message reporting the server could not be reached. <!--#c527a9dff1583f0c-->
+- `history.projectLabel` (json-key) — Field label for the project shown on a history entry. <!--#42a8ace1b3633f98-->
+- `history.unknownProject` (json-key) — Fallback text for a history entry with no known project. <!--#a02b4f9c83ce9eda-->
+- `history.refreshing` (json-key) — Status text shown while the history list is refreshing. <!--#7744d178bd3dd9b4-->
+- `history.connecting` (json-key) — Status text shown while connecting or awaiting history data. <!--#82977383317e83de-->
+- `history.emptyConfirmed` (json-key) — Empty-state text confirming no historical sessions were reported. <!--#4709bed873682556-->
+- `history.loadingRecords` (json-key) — Loading placeholder for a session's history records. <!--#9c211f13fac82220-->
+- `history.loadError` (json-key) — Error message shown when a session's history fails to load with an HTTP status. <!--#0c93508e5c7354c3-->
+- `history.networkError` (json-key) — Error message shown on network failure while loading session history. <!--#f1257820371203d1-->
+- `issueLaunch.reason.inProgress` (json-key) — Reason text disabling flow launch because the issue is already in progress. <!--#a5832949cc122909-->
+- `issueLaunch.reason.resolved` (json-key) — Reason text disabling flow launch because the issue is resolved. <!--#fd449ee723d3cd29-->
+- `issueLaunch.reason.wontFix` (json-key) — Reason text disabling flow launch because the issue is marked won't-fix. <!--#ff68220c58d48113-->
+- `issueLaunch.reason.closed` (json-key) — Reason text disabling flow launch because the issue is closed. <!--#6a8daebe2ad91161-->
+- `issueLaunch.reason.invalid` (json-key) — Reason text disabling flow launch because the issue is invalid. <!--#de0816a79bf95fcd-->
+- `issueLaunch.reason.unknownStatus` (json-key) — Reason text disabling flow launch for an unrecognized issue status. <!--#e1196ebb29360415-->
+- `issueLaunch.button` (json-key) — Label of the launch-flow button on an issue. <!--#28b233cae711fb55-->
+- `issueLaunch.buttonTitle` (json-key) — Tooltip for the launch-flow-from-issue button. <!--#012d889327135d61-->
+- `issueLaunch.dispatching` (json-key) — In-progress label shown while the issue flow is being dispatched. <!--#9fe7bbc2c790bb8d-->
+- `issueLaunch.message` (json-key) — Confirmation message naming the issue id and title a flow will be launched from. <!--#f15cb21b8c44c9bc-->
+- `issues.empty` (json-key) — Empty-state text shown when there are no issues. <!--#ef3f13fdfebf088f-->
+- `issueDetail.notFound` (json-key) — Message shown when the requested issue cannot be found. <!--#9d4e40eb231a36a2-->
+- `issueDetail.field.type` (json-key) — Issue detail field label for type. <!--#48f7b3c580401150-->
+- `issueDetail.field.priority` (json-key) — Issue detail field label for priority. <!--#62456ae79eca1e1f-->
+- `issueDetail.field.source` (json-key) — Issue detail field label for source. <!--#4f229895ae8bb91e-->
+- `issueDetail.field.createdAt` (json-key) — Issue detail field label for creation time. <!--#5654bed0d1df24ce-->
+- `issueDetail.field.updatedAt` (json-key) — Issue detail field label for last-update time. <!--#ff1276f8c3d3d062-->
+- `issueDetail.field.tags` (json-key) — Issue detail field label for tags. <!--#7bba8c41c6af9376-->
+- `issueDetail.field.project` (json-key) — Issue detail field label for the project. <!--#0ffc7686bcd49a34-->
+- `issueDetail.descLoadFailed` (json-key) — Message shown when the issue's full description fails to load. <!--#c66581e019f08639-->
+- `issueDetail.edit` (json-key) — Label of the edit-issue button. <!--#1373b5d76c771d32-->
+- `issueDetail.reopen` (json-key) — Label of the reopen-issue button. <!--#ac1cd1d7e6852c1d-->
+- `issueDetail.close` (json-key) — Label of the close-issue button. <!--#8b8d22d4759b466f-->
+- `issueModal.noMachines` (json-key) — Select-option text shown when no machines are connected. <!--#8b8f6206c7f70cd3-->
+- `issueModal.noProjects` (json-key) — Select-option text shown when the machine has no registered projects. <!--#9e58e1974feffcdf-->
+- `issueModal.selectProject` (json-key) — Placeholder select-option prompting the user to choose a project. <!--#377fd387b7f77c97-->
+- `issueModal.editTitle` (json-key) — Heading of the edit-issue modal, parameterized with the issue id. <!--#3fc559d8b5c6159f-->
+- `issueModal.save` (json-key) — Save button label in the edit-issue modal. <!--#edcf86169481481e-->
+- `issueModal.descLoading` (json-key) — Placeholder shown while the issue's full description loads in the edit modal. <!--#121fa16ffb3cd4f3-->
+- `issueModal.descLoadFailed` (json-key) — Warning that the description could not be loaded so only other fields are editable. <!--#7486ff3b5a99de48-->
+- `issueModal.errDescRequired` (json-key) — Validation error requiring a non-empty issue description. <!--#3cdf30f1bce9bca8-->
+- `issueModal.errNoMachine` (json-key) — Validation error reporting no online machine is available. <!--#4a31fb3a80f824f1-->
+- `issueModal.errInvalidPath` (json-key) — Validation error requiring a valid project path. <!--#561bcc5d39c09bd6-->
+- `issueAction.closeTitle` (json-key) — Heading of the close-issue confirmation dialog. <!--#008c41f622fbefb4-->
+- `issueAction.closeMessage` (json-key) — Close-issue confirmation prompt naming the issue id. <!--#f4713a3269675ffc-->
+- `issueAction.reopenTitle` (json-key) — Heading of the reopen-issue confirmation dialog. <!--#bb14b11f0fa003ce-->
+- `issueAction.reopenMessage` (json-key) — Reopen-issue confirmation prompt naming the issue id. <!--#985070a1134aeee0-->
+- `stepHeader.discovery` (json-key) — Header title for the discovery step. <!--#b360b1068c8dd5d0-->
+- `stepHeader.analyze` (json-key) — Header title for the analyze step. <!--#940306d271c3e7fd-->
+- `stepHeader.project_summary` (json-key) — Header title for the project-summary step. <!--#8aa3784b334f3fa7-->
+- `stepHeader.propose` (json-key) — Header title for the propose step. <!--#89213941b4720d19-->
+- `stepHeader.design` (json-key) — Header title for the design step. <!--#f815ba7fc3aa9a42-->
+- `stepHeader.plan` (json-key) — Header title for the plan step. <!--#bcd0c6b7cd0663df-->
+- `stepHeader.plan_tasks` (json-key) — Header title for the plan-tasks step. <!--#97f86f925ebae117-->
+- `stepHeader.confirm` (json-key) — Header title for the confirm step. <!--#07be47213fecf55d-->
+- `stepHeader.implement` (json-key) — Header title for the implement step. <!--#e4ba8ef71798160b-->
+- `stepHeader.test` (json-key) — Header title for the test step. <!--#e80bdcf9d4325ec9-->
+- `stepHeader.self_check` (json-key) — Header title for the self-check step. <!--#bd12f33e27235241-->
+- `stepHeader.verify_spec` (json-key) — Header title for the verify-spec step. <!--#374f98877832d8ff-->
+- `stepHeader.update_spec` (json-key) — Header title for the update-spec step. <!--#be9680a54ab6c307-->
+- `stepHeader.spec_gate` (json-key) — Header title for the spec-gate step. <!--#056ec0553a9a3c66-->
+- `stepHeader.version_analyze` (json-key) — Header title for the version-analyze step. <!--#2cd86dee571e39d8-->
+- `stepHeader.commit` (json-key) — Header title for the commit step. <!--#4756edacac383ca0-->
+- `stepHeader.merge_integrate` (json-key) — Header title for the merge-integrate step. <!--#f8eefec8616bb588-->
+- `stepHeader.version_reconcile` (json-key) — Header title for the version-reconcile step. <!--#a975e62c64ac962b-->
+- `stepHeader.summarize` (json-key) — Header title for the summarize step. <!--#d6a6d8837b6bb620-->
+- `stepReport.discovery` (json-key) — Report card title for the discovery step. <!--#7c2e01d54234336f-->
+- `stepReport.analyze` (json-key) — Report card title for the analyze step. <!--#86dea14033757d4f-->
+- `stepReport.project_summary` (json-key) — Report card title for the project-summary step. <!--#467be6f46fb6e06b-->
+- `stepReport.propose` (json-key) — Report card title for the propose step. <!--#67d503e01c5bbba8-->
+- `stepReport.design` (json-key) — Report card title for the design step. <!--#10e224c1401090e1-->
+- `stepReport.plan` (json-key) — Report card title for the plan step. <!--#60b2959fd0c0912e-->
+- `stepReport.plan_tasks` (json-key) — Report card title for the plan-tasks step. <!--#5328eb28f679cf40-->
+- `stepReport.confirm` (json-key) — Report card title for the confirm step. <!--#25bdd06b4232604f-->
+- `stepReport.implement` (json-key) — Report card title for the implement step. <!--#45a23ccfdad1bbd5-->
+- `stepReport.test` (json-key) — Report card title for the test step. <!--#fca01e8d47d1b497-->
+- `stepReport.self_check` (json-key) — Report card title for the self-check step. <!--#7275a5aca7a00c8b-->
+- `stepReport.verify_spec` (json-key) — Report card title for the verify-spec step. <!--#3b80c8810f09714a-->
+- `stepReport.update_spec` (json-key) — Report card title for the update-spec step. <!--#2bea388b0ec4b931-->
+- `stepReport.spec_gate` (json-key) — Report card title for the spec-gate step. <!--#499e49f5bf19176f-->
+- `stepReport.version_analyze` (json-key) — Report card title for the version-analyze step. <!--#49d141f3e4451c34-->
+- `stepReport.charter_freshness` (json-key) — Report card title for the charter-freshness step. <!--#4abb4fc04c7fa266-->
+- `stepReport.commit` (json-key) — Report card title for the commit step. <!--#91a8ce4458acfae6-->
+- `stepReport.merge_integrate` (json-key) — Report card title for the merge-integrate step. <!--#b31cce7bb7025231-->
+- `stepReport.version_reconcile` (json-key) — Report card title for the version-reconcile step. <!--#ac1ff9915ad00250-->
+- `stepReport.summarize` (json-key) — Report card title for the summarize step. <!--#38dc72f09030dbc8-->
+- `stepReport.usageLabel` (json-key) — Label for the token-usage figure on a step report. <!--#19a44def95a6c3fe-->
+- `stepReport.errorPrefix` (json-key) — Prefix used before an error message in a step report. <!--#fce6ef435ac7add6-->
+- `stepReportSuffix.summarize` (json-key) — Report-title suffix used for the summarize step. <!--#f036f8d65ec23c1b-->
+- `stepReportSuffix.default` (json-key) — Default report-title suffix used for other steps. <!--#715ab232901b01d5-->
+- `usage.roundFootnote` (json-key) — Footnote formatting this round's and the cumulative input/output token counts. <!--#770ab84db3e0f196-->
+- `usage.sessionLabel` (json-key) — Label identifying session-level token usage. <!--#079587b9abc4c462-->
+- `newTask.otherPath` (json-key) — Project select-option for entering a custom path. <!--#6cd74e0665d47984-->
+- `newTask.errSelectMachine` (json-key) — Validation error requiring a target machine. <!--#19c085a6e76e41d6-->
+- `newTask.errTaskEmpty` (json-key) — Validation error requiring a non-empty task description. <!--#7631abb3784e9076-->
+- `newTask.errSelectProject` (json-key) — Validation error requiring a project root for the task. <!--#bd44f925ea6810b5-->
+- `newTask.errEnterPath` (json-key) — Validation error requiring an absolute project path to be entered. <!--#8c7bd1d55c06fb61-->
+- `newTask.errPathAbsolute` (json-key) — Validation error requiring the project path to start with a slash. <!--#d25ed15b55c8bbad-->
+- `login.errUsername` (json-key) — Login validation error requiring a username. <!--#05edc771176304e6-->
+- `login.errPassword` (json-key) — Login validation error requiring a password. <!--#c1003e06503718c3-->
+- `login.errTooMany` (json-key) — Login error reporting too many attempts and asking the user to wait. <!--#21468fbc43525865-->
+- `login.errNotEnabled` (json-key) — Login error reporting password login is disabled on this server. <!--#9da3f10170ea047f-->
+- `login.errInvalid` (json-key) — Login error reporting invalid credentials. <!--#2acad14e583d7d85-->
+- `login.errPasteToken` (json-key) — Validation error asking the user to paste a break-glass token. <!--#40c4ab9c5b4648ca-->
+- `login.errInvalidToken` (json-key) — Login error reporting the break-glass token is invalid or expired. <!--#f2dc7c914520e2cd-->
+- `keys.empty` (json-key) — Empty-state text shown when there are no daemon keys. <!--#24b2c8b0bb62f533-->
+- `keys.revoke` (json-key) — Label of the revoke-key button. <!--#7d3a5f8ee68b0585-->
+- `keys.statusActive` (json-key) — Status label for an active daemon key. <!--#508aa9d6030c8e5d-->
+- `keys.statusRevoked` (json-key) — Status label for a revoked daemon key. <!--#c586fe98a7284e08-->
+- `keys.errCreateNetwork` (json-key) — Error reporting a network failure while creating a daemon key. <!--#4fdc08606deb4aee-->
+- `keys.errRevokeNetwork` (json-key) — Error reporting a network failure while revoking a daemon key. <!--#7e161516ab8988c7-->
+- `users.empty` (json-key) — Empty-state text shown when there are no manageable users. <!--#6978a53b24781f54-->
+- `users.self` (json-key) — Marker appended to the row representing the current user. <!--#f7e4277b936ed5a5-->
+- `users.roleAdmin` (json-key) — Role label for an admin user. <!--#dd7d00f21f471347-->
+- `users.roleUser` (json-key) — Role label for a non-admin user. <!--#d8bd0fea6ebb3aec-->
+- `users.setAdmin` (json-key) — Label of the button granting admin rights. <!--#45b8ecb43d2f4431-->
+- `users.unsetAdmin` (json-key) — Label of the button revoking admin rights. <!--#39274118d7d2a1ee-->
+- `users.resetPassword` (json-key) — Label of the reset-password button. <!--#d2dfb6788fee172c-->
+- `users.delete` (json-key) — Label of the delete-user button. <!--#210c1060326e5d2e-->
+- `users.errUsername` (json-key) — Validation error requiring a non-empty username. <!--#16d17742d8cd4769-->
+- `users.errPassword` (json-key) — Validation error requiring a non-empty password. <!--#f24935852f2cebc4-->
+- `users.errNewPassword` (json-key) — Validation error requiring a non-empty new password. <!--#5869c0ec9dd655b5-->
+- `users.resetPrompt` (json-key) — Prompt asking for a new password for the named user. <!--#75fcaeeb8f42b7ea-->
+- `users.errCreateNetwork` (json-key) — Error reporting a network failure while creating a user. <!--#2c067daea08ff547-->
+- `users.errDeleteNetwork` (json-key) — Error reporting a network failure while deleting a user. <!--#59d2eab0235afc63-->
+- `users.errResetNetwork` (json-key) — Error reporting a network failure while resetting a password. <!--#37ee17f1e3ca0ea7-->
+- `users.errAdminNetwork` (json-key) — Error reporting a network failure while changing a user's admin status. <!--#c9cfa957e4872b4f-->
+- `flow.badge.waitingLock` (json-key) — Flow card badge indicating the flow is waiting for a lock. <!--#8d13c389f88d590c-->
+- `flow.badge.needsResponse` (json-key) — Flow card badge indicating the flow needs a user response. <!--#7e4a4821531a0f77-->
+- `flow.stepType.response` (json-key) — Format for labeling a user response to a given interaction type. <!--#e174984cd668b7bf-->
+- `flow.statusWaitingLock` (json-key) — Flow status text for waiting on a lock. <!--#8bdfa5846e57cb3b-->
+- `keys.unlabeled` (json-key) — Fallback display text for a daemon key with no label. <!--#c018f6d871406299-->
+- `history.badge.live` (json-key) — Badge marking a history session as live/streaming. <!--#c5aa8b3367d76653-->
+- `discovery.proposedTaskDescription` (json-key) — Section heading for the task description proposed by discovery. <!--#a338719da5ef40ea-->
+- `discovery.questions` (json-key) — Section heading for the clarifying questions raised by discovery. <!--#3f8f1f7fd67abe68-->
+- `stepReport.section.reasoning` (json-key) — Step-report section heading for reasoning. <!--#5d54987ef44145be-->
+- `stepReport.section.summary` (json-key) — Step-report section heading for the summary. <!--#c15c7c0378be68fc-->
+- `stepReport.section.rationale` (json-key) — Step-report section heading for the rationale. <!--#52057ac276ddb300-->
+- `stepReport.section.otherFields` (json-key) — Step-report section heading for unclassified extra fields. <!--#a9b24b652acfa4b1-->
+- `stepReport.empty.noOutputs` (json-key) — Placeholder shown when a step produced no outputs. <!--#04839aaa5a22d78f-->
+- `stepReport.empty.noSpecUpdates` (json-key) — Placeholder shown when no spec updates were needed. <!--#7011af768623cc78-->
+- `stepReport.empty.noChangesToCommit` (json-key) — Placeholder shown when the commit step found nothing to commit. <!--#48f735e771a8ac17-->
+- `stepReport.empty.noSummary` (json-key) — Placeholder shown when the summarize step produced no summary. <!--#4693c7404ec3cf15-->
+- `stepReport.status` (json-key) — Format string rendering a step report's status line. <!--#e21c542581d45cb8-->
+- `stepOutput.inProgress` (json-key) — Format marking a step output as still in progress. <!--#07ff24c77c164df5-->
+- `conn.connecting` (json-key) — Connection indicator text for the connecting state. <!--#bd8dc565de61cb29-->
+- `conn.reconnecting` (json-key) — Connection indicator text for the reconnecting state. <!--#b0740112fd08e6c6-->
+- `conn.connected` (json-key) — Connection indicator text for the connected state. <!--#d99ff23b3a7ec377-->
+- `conn.disconnected` (json-key) — Connection indicator text for the disconnected state. <!--#5cacf4088e229dfd-->
+- `stepReport.chip.completed` (json-key) — Chip text marking a step as completed. <!--#5f9b05d65c08cb5a-->
+- `stepReport.chip.failed` (json-key) — Chip text marking a step as failed. <!--#09c05549399605d0-->
+- `stepReport.label.task` (json-key) — Step-report field label for the task. <!--#4fa3873bceddca37-->
+- `stepReport.label.complexity` (json-key) — Step-report field label for complexity. <!--#6f5d608dbe5e79d0-->
+- `stepReport.label.scope` (json-key) — Step-report field label for scope. <!--#27892c665701f12b-->
+- `stepReport.versionAnalyze.subline` (json-key) — Version-analyze subline formatting the bump type and confidence. <!--#528580339cb51db9-->
+- `stepReport.count.relevantSpecItems` (json-key) — Counted section heading for relevant spec items. <!--#49338caa69be75dc-->
+- `stepReport.count.filesToModify` (json-key) — Counted section heading for files to modify. <!--#83a283969b355a8b-->
+- `stepReport.count.filesToCreate` (json-key) — Counted section heading for files to create. <!--#aedc35aa2e48051c-->
+- `stepReport.count.filesChanged` (json-key) — Counted section heading for changed files. <!--#2abcbd46b372c75d-->
+- `stepReport.count.testsAdded` (json-key) — Counted section heading for added tests. <!--#9ce46bf119ce9e78-->
+- `stepReport.count.incompleteTasks` (json-key) — Counted section heading for incomplete tasks. <!--#5583e272e1a7afe2-->
+- `stepReport.count.updatedSpecs` (json-key) — Counted section heading for updated specs. <!--#8259e26b8389fb1a-->
+- `stepReport.count.components` (json-key) — Counted section heading for design components. <!--#a863bc9bf8810caa-->
+- `stepReport.count.interfaces` (json-key) — Counted section heading for design interfaces. <!--#c69bfbebbdf677c7-->
+- `stepReport.count.keyDecisions` (json-key) — Counted section heading for key decisions. <!--#04d4dfa21e960b8b-->
+- `stepReport.count.taskGroups` (json-key) — Counted section heading for task groups. <!--#d6ba3c037d23f064-->
+- `stepReport.restricted.applied` (json-key) — Line reporting how many restricted edits were applied. <!--#f0d19e96980842e6-->
+- `stepReport.restricted.failed` (json-key) — Line reporting how many restricted edits failed. <!--#78b742d61cb2f5ed-->
+- `stepReport.section.overview` (json-key) — Step-report section heading for the overview. <!--#b10546b21d56ad8c-->
+- `stepReport.section.proposal` (json-key) — Step-report section heading for the proposal. <!--#a8f813a526cec52d-->
+- `stepReport.section.design` (json-key) — Step-report section heading for the design. <!--#c2e789391a45329b-->
+- `stepReport.section.restrictedEdits` (json-key) — Step-report section heading for restricted edits. <!--#39210fa8790c7e9d-->
+- `stepReport.section.phases` (json-key) — Step-report section heading for test phases. <!--#9830a401a342fc1b-->
+- `stepReport.section.command` (json-key) — Step-report section heading for the executed command. <!--#d6985cae295ef352-->
+- `stepReport.section.recommendations` (json-key) — Step-report section heading for recommendations. <!--#b04b4adc2b263215-->
+- `stepReport.section.newCapabilities` (json-key) — Step-report section heading for newly added capabilities. <!--#4edd6ddd87a2da3f-->
+- `stepReport.section.commitMessage` (json-key) — Step-report section heading for the commit message. <!--#813b3360a01214ad-->
+- `stepReport.section.refinedDescription` (json-key) — Step-report section heading for the refined task description. <!--#96537a9e1b8b494f-->
+- `stepReport.section.mode` (json-key) — Step-report section heading for the execution mode. <!--#5cfce4045befdd90-->
+- `stepReport.section.fixInstructions` (json-key) — Step-report section heading for fix instructions. <!--#58c0eeef2eb6e365-->
+- `stepReport.section.reTest` (json-key) — Step-report section heading for the re-test decision. <!--#b805a3e6f105f3be-->
+- `stepReport.section.charterDiff` (json-key) — Step-report section heading for the old-to-new charter diff. <!--#0f8b0cfb0c1348d5-->
+- `stepReport.section.suggestedUpdate` (json-key) — Step-report section heading for a suggested charter update. <!--#00534c8bc8106ce5-->
+- `stepReport.section.notAutoApplied` (json-key) — Line explaining why a suggested update was not auto-applied. <!--#c76f16a55e4f0acc-->
+- `stepReport.section.charterAdmission` (json-key) — Step-report section heading for charter admission. <!--#e67563cc7eba7c0f-->
+- `stepReport.status.passed` (json-key) — Short status word for a passing check. <!--#7f71744bd0533e8e-->
+- `stepReport.status.failed` (json-key) — Short status word for a failing check. <!--#c98ade5316824c47-->
+- `stepReport.status.unknown` (json-key) — Short status placeholder for an unknown check result. <!--#3e963993f1de5fde-->
+- `stepReport.selfCheck.actionableIssues` (json-key) — Self-check summary line counting actionable issues. <!--#ae99142e9409190c-->
+- `stepReport.selfCheck.issues` (json-key) — Self-check summary line counting total issues. <!--#79dc5039d40c38e9-->
+- `stepReport.test.phaseCount` (json-key) — Test summary line showing passed versus total phases. <!--#214860df34f517ed-->
+- `stepReport.specGate.skipped` (json-key) — Spec-gate line reporting the gate was skipped because no specs changed. <!--#d0808e6e9bdbb62d-->
+- `stepReport.specGate.routeUpdateSpec` (json-key) — Spec-gate line reporting a route back to update_spec due to invalid spec artifacts. <!--#ba9729d699ead53f-->
+- `stepReport.specGate.routeImplement` (json-key) — Spec-gate line reporting a route to implement because spec changes broke tests. <!--#bb293239195ff5e3-->
+- `stepReport.charter.autoUpdated` (json-key) — Charter-freshness verdict that the charter was auto-updated. <!--#440555d809357e63-->
+- `stepReport.charter.updateAdvised` (json-key) — Charter-freshness verdict advising a charter update. <!--#41be2eed795b8a9d-->
+- `stepReport.charter.fresh` (json-key) — Charter-freshness verdict that no charter update is needed. <!--#652baf1662531ecf-->
+- `stepReport.charter.touched` (json-key) — Line listing the charter areas touched by the change. <!--#7e5236a8a587bc06-->
+- `stepReport.charter.autoUpdatedNote` (json-key) — Note explaining se3/charter.md was updated to describe the reviewed change. <!--#3c091a1bd57e6192-->
+- `stepReport.design.reasonPrefix` (json-key) — Prefix used before a design decision's reason. <!--#b88408d59feb5874-->
+- `stepReport.plan.groupMeta` (json-key) — Plan group metadata line formatting task count, estimated LOC, and dependencies. <!--#b24984fc36dcfaec-->
+- `stepReport.plan.dependsNone` (json-key) — Placeholder used when a plan group has no dependencies. <!--#e022e6741cf17204-->
+- `stepReport.implement.groups` (json-key) — Implement summary fragment counting groups. <!--#d650ed145f5a08ba-->
+- `stepReport.implement.files` (json-key) — Implement summary fragment counting files. <!--#6e8f7a6016e10491-->
+- `stepReport.implement.tests` (json-key) — Implement summary fragment counting tests. <!--#2ba6323a8657cb92-->
+- `stepReport.implement.status.complete` (json-key) — Implement group status label for completion. <!--#fa366519e71283c7-->
+- `stepReport.implement.status.partial` (json-key) — Implement group status label for partial completion. <!--#df1969526d968027-->
+- `stepReport.implement.status.failed` (json-key) — Implement group status label for failure. <!--#d74d09228b8d6922-->
+- `stepReport.implement.status.unknown` (json-key) — Implement group status label for an unknown outcome. <!--#12638dfd71c91adc-->
+- `stepReport.groupHeader` (json-key) — Generic counted group header format combining a label and item count. <!--#d3607098bbc60045-->
+- `stepReport.severity.critical` (json-key) — Severity label for critical findings. <!--#330da9412c55969f-->
+- `stepReport.severity.high` (json-key) — Severity label for high findings. <!--#9fbe90580365052b-->
+- `stepReport.severity.medium` (json-key) — Severity label for medium findings. <!--#7daf02b95121121a-->
+- `stepReport.severity.low` (json-key) — Severity label for low findings. <!--#24064435cb608315-->
+- `stepReport.scope.inScope` (json-key) — Label marking a finding as in scope. <!--#f5dded568da59f34-->
+- `stepReport.scope.outOfScope` (json-key) — Label marking a finding as out of scope. <!--#3ea07317b092393e-->
+- `tool.detail.empty` (json-key) — Placeholder shown when a tool call has no detail to display. <!--#5793652b5f645cf0-->
+- `tool.detail.truncated` (json-key) — Marker indicating tool output was truncated. <!--#27c294a645903f7f-->
+- `tool.detail.stderr` (json-key) — Label for the stderr portion of a tool's output. <!--#634fde3e5f2d5499-->
+- `tool.detail.noMatches` (json-key) — Placeholder shown when a search tool returned no matches. <!--#81a639698a02ade5-->
+- `tool.detail.noFiles` (json-key) — Placeholder shown when a file-listing tool returned no files. <!--#26ba342a1338f3b4-->
+- `tool.detail.patternPath` (json-key) — Format summarizing a glob/grep tool's pattern and path arguments. <!--#f4defb2707ae6b5e-->
+- `tool.detail.toggleShow` (json-key) — Toggle label for showing tool-call details. <!--#dd2df62e5391c087-->
+- `tool.detail.toggleHide` (json-key) — Toggle label for hiding tool-call details. <!--#408b5a839c51da3a-->
+- `topbar.ownerAdmin` (json-key) — Top-bar format marking the signed-in owner as an admin. <!--#b75aff9cdac38485-->
+- `machines.flowCount` (json-key) — Singular flow-count format on a machine card. <!--#e05746be681177f8-->
+- `machines.flowCountPlural` (json-key) — Plural flow-count format on a machine card. <!--#24765f02e6f88c83-->
+- `conv.recordUnrenderable` (json-key) — Placeholder shown when a conversation record cannot be rendered. <!--#4ee79eba9429e657-->
+- `conv.recordEmpty` (json-key) — Placeholder shown when a conversation record has no readable content. <!--#4ca1564408f5f7a3-->
+- `stepReport.empty` (json-key) — Placeholder shown when a step report has no fields. <!--#e79de9c4e6522edb-->
+- `record.attempt` (json-key) — Format labeling the nth attempt of a retried record. <!--#7c67df1a238c4130-->
+- `usage.valueLine` (json-key) — Usage line formatting input, output, cache read/write tokens, and cost. <!--#578877709b63b003-->
+- `issue.untitled` (json-key) — Fallback display title for an issue without a title. <!--#3a1dd97c5efe9b15-->
+- `flow.untitled` (json-key) — Fallback display title for a flow without a title. <!--#0e3a7d3d71da14f7-->
+- `flow.card.currentStep` (json-key) — Flow card line showing the current step name. <!--#c7d9994461f52fd5-->
+- `history.untitledSession` (json-key) — Fallback display title for a history session without a title. <!--#9d56c3a92faee353-->
 
 ## `src/se3/templates/` — SE3's template collection housing the project-scaffolding assets emitted by `se3 init`/`se3 migrate` — the charter, base-spec, README, VERSIONS, and standalone version-management CLI templates plus the `CHARTER_TEMPLATE` constant exported from `__init__.py` — alongside a `prompts/` subdirectory of step prompt templates (e.g. the doc-sync consistency pass), together codifying project identity, conventions, and SemVer-based version management. <!--#8160cf3e132b8065|2231a8ebe8aa0d05-->
 
@@ -3514,7 +6344,7 @@
   - `Localized documentation alignment` (heading) — Requires language variants of a document to stay structurally parallel and faithfully translated, following the dotted BCP 47 naming convention (e.g. README.zh.md). <!--#9b42e96a14a53f00-->
   - `Constraints (scope discipline)` (heading) — Lists scope guardrails: edit only documentation, never bump the version or create new doc files, and preserve existing rationale prose unless factually wrong. <!--#c209a5d5196bb9cb-->
 
-## `tests/` — Top-level pytest suite for the SE3 project — organized into commands/, core/, engine/, frontend/, and server/ subpackages plus dozens of root-level test modules and shared fixtures (conftest.py, _authsrv.py) — covering the engine state machine, agent/config loading, the daemon/history/live-push layer, the web-console frontend and server endpoints, and standalone diagnosis docs and a repro harness for the issue #209/#260/#278 WebUI freeze bugs. <!--#41ab6e3745b9045e|31c00519d84688e6-->
+## `tests/` — The repository's full pytest/Node test suite for SE3, spanning CLI commands, engine internals (state machine, LLM caller, prompts, steps, merge, worktrees), config/agent registry, the web console server and its DOM-stubbed frontend, plus shared fixtures (`conftest.py`, `_authsrv.py`), standalone repro harnesses, and diagnosis/verification write-ups for past WebUI freeze bugs. <!--#1c1880470e5f1327|cf04663d0da7afd1-->
 
 ### `tests/DISCOVERY_ANALYZE_BOUNDARY_VERIFICATION.md` (markdown) — Verification write-up documenting two fixed WebUI live-chat delivery bugs — the issue #260 discovery→analyze WebSocket freeze (stale daemon cache read) and the issue #278 worktree multi-round discovery chat loss (daemon read-path identity collision) — each with reproduced symptom, root cause, layered daemon/server/frontend fixes, automated acceptance and full-suite results, and manual browser checklists. <!--#03c1be9b951a9f81|e8b4a5b2189b8ada-->
 - `Discovery→Analyze WS-Freeze — Root Cause, Fix & Verification (issue #260)` (heading) — Top-level verification write-up for issue #260 documenting the reproduced discovery→analyze WebSocket freeze, its confirmed root cause, the daemon/server/frontend fixes that landed, and the acceptance/manual-check results (status: FIXED). <!--#af46afb9cee62cab-->
@@ -3548,9 +6378,11 @@
 - `login` (function) — Logs a TestClient in as the seeded admin via the login endpoint, persisting the session cookie in the client's jar. <!--#98934d9f117043f0-->
 - `authed_hello` (function) — Constructs an authenticated daemon HELLO message carrying the app's issued daemon key as JSON. <!--#3e0b56b990c9a04f-->
 
-### `tests/conftest.py` (python) — Root pytest conftest providing suite-wide autouse fixtures that isolate tests from the live environment—wiring browser libs, clearing config warning-dedup sets, stubbing out the real code-index refresh, redirecting chat-history writes and the daemon SE3 home away from the real repo, and adding src/ to sys.path. <!--#7731fce9de6c9a32|cb9a2ebf3f712e25-->
+### `tests/conftest.py` (python) — Root pytest configuration for the test suite, providing autouse fixtures that isolate tests from the real environment — pinning the UI language to en-US, clearing config warning dedup state, stubbing out code-index refreshes, redirecting chat-history writes and the daemon home to temp dirs — plus browser-library path wiring for the headless-browser test. <!--#3d2e0180761c44f8|23b804b5a1e9546a-->
 - `_wire_browser_test_libs` (function) — Prepends the gitignored `.browser-libs/lib` directory to `LD_LIBRARY_PATH` (when present) so a child Chromium process can find userspace-installed system libraries during the headless-browser test. <!--#2fe4dfbf7269486e-->
+- `_force_en_us_ui_language` (function) — Autouse pytest fixture that pins the i18n UI language to en-US (via SE3_LANG plus a singleton/cache reset before and after each test) so rendered text assertions stay deterministic despite the repo's zh-CN se3.yaml. <!--#1e40da6e79a87579-->
 - `_reset_config_warning_dedup_sets` (function) — Autouse fixture that dynamically clears all `_warned_*_for` dedup sets in `se3.config` before and after each test so warning-related caplog assertions stay order-independent. <!--#56a91681465d8a59-->
+- `_pin_ui_language_en` (function) — Pytest fixture that sets the process-wide i18n language singleton to en-US for the test and resets it afterwards, keeping CLI output assertions stable without touching SE3_LANG/locale env vars. <!--#7b69cf84e5dd148a-->
 - `_no_real_code_index_refresh` (function) — An autouse pytest fixture that monkeypatches `ensure_code_index_fresh` to a no-op so unit tests never trigger a real, flock-taking, LLM-spawning code-index rebuild against the live repo (which previously hung the suite). <!--#dcbaa1968a2bf2b9-->
 - `_real_history_roots` (function) — Returns the set of real repository/CWD root paths that chat-history writes must never leak into, used as the reroute trigger for the history guard. <!--#ab53de7897d04069-->
 - `_install_chat_history_guard` (function) — Monkeypatches chat_history._history_dir (and state_machine's import-bound copy) so any history write whose resolved project_root matches a real repo root is redirected into a per-test tmp dir, preventing committed se3/history/ leaks across all record_* writers. <!--#bd39968b3f2a9dae-->
@@ -5362,7 +8194,14 @@
 - `_build_large_worktree_engine` (function) — Like `_build_large_engine` but produces a `--worktree`-mode `engine.json` with worktree tail keys trailing the giant steps table. <!--#f6625d89c059e4bd-->
 - `test_worktree_engine_middle_rewrite_fresh_and_tail_keys_preserved` (function) — Worktree non-regression test verifying the whole-content freshness hash catches a middle rewrite while still surfacing the worktree tail keys on the live read. <!--#9573777a0b903b45-->
 
-### `tests/test_discovery_interactive_pause.py` (python) — Test module exercising the interactive discovery-pause dual-path wait in se3.commands.run, verifying that terminal question/confirm pauses mirror themselves to se3/calls/ call files answerable from the web console, that whichever of the terminal or web response answers first drives the same live process forward while keeping the flow RUNNING (or persists PAUSED on cancel) with correct file cleanup, and that the DaemonAggregator deduplicates multiple call files per (flow, step). <!--#8cf102841f2446e8|fd2424055c942019-->
+### `tests/test_discovery_error_i18n.py` (python) — Pytest module verifying that the discovery step's LLMCallError console panel (title and body, both rendered and persisted to step.error_message) is resolved through i18n and differs correctly between en-US and zh-CN. <!--#06eb1e871256158c|ef52fa3a6091903c-->
+- `captured_panels` (function) — Pytest fixture that monkeypatches `se3.engine.output.render_full` to append each (content, title) pair into a list instead of printing, so tests can assert on rendered console panels. <!--#d7f3edc0fb13d712-->
+- `_run_failing_discovery` (function) — Test helper that forces `_run_discovery_round` to raise a given error and invokes `discovery_handler` with stub step/flow objects, returning the resulting status and step. <!--#e41e04fa3ad63770-->
+- `test_json_extraction_failure_panel_is_translated` (function) — Parametrized over en-US/zh-CN, asserts a JSON-extraction LLMCallError makes discovery fail and render/persist the translated `error_json_extraction` body and `error_title` rather than raw i18n keys. <!--#8fd43acf1f29ac9e-->
+- `test_generic_llm_failure_panel_is_translated` (function) — Asserts a generic LLMCallError makes discovery fail and render/persist the translated `error_llm_call` panel with the underlying error message interpolated into it. <!--#068b675d38484ad7-->
+- `test_error_copy_translations_differ_by_language` (function) — Sanity check that the discovery error title and JSON-extraction copy actually resolve to different strings under en-US versus zh-CN. <!--#9c3219d3a69b0d4d-->
+
+### `tests/test_discovery_interactive_pause.py` (python) — Test module exercising the interactive discovery-pause dual-path wait in se3.commands.run, verifying that terminal question/confirm pauses mirror themselves to se3/calls/ call files answerable from the web console, that whichever of the terminal or web response answers first drives the same live process forward while keeping the flow RUNNING (or persists PAUSED on cancel) with correct file cleanup, and that the DaemonAggregator deduplicates multiple call files per (flow, step). <!--#cd0fc3903ca5a6ea|fd2424055c942019-->
 - `_make_step` (function) — Helper that builds a lightweight SimpleNamespace stand-in for a step with step_id, outputs, and inputs dicts. <!--#d448ec902f38d40e-->
 - `_make_flow` (function) — Helper that builds a minimal SimpleNamespace flow object carrying just a flow_id. <!--#d94def18ba399b1d-->
 - `_RecordingPersistence` (class) — Fake persistence double that counts save_flow calls to assert whether a pause persisted PAUSED state. <!--#2b535d692f3cc749-->
@@ -5371,7 +8210,7 @@
 - `_calls_dir` (function) — Helper returning the se3/calls/ directory path under a given project root. <!--#a92c0878d515002f-->
 - `_only_call_file` (function) — Helper that asserts exactly one non-response call file exists in se3/calls/ and returns it. <!--#d87ff5191a67b790-->
 - `test_interactive_question_pause_writes_call_file` (function) — Verifies a question pause writes a kind=call file with flow/step context and prompt while blocking, and cleans it up after a terminal answer is consumed. <!--#a6c31e7ef81b67f8-->
-- `test_interactive_confirm_pause_writes_discovery_confirm_call` (function) — Verifies the programmatic-confirm gate writes a kind=discovery_confirm call with a one-click value='1' option and cleans up after a terminal '1' confirms. <!--#3dc123f708d4804f-->
+- `test_interactive_confirm_pause_writes_discovery_confirm_call` (function) — Verifies that the interactive discovery confirmation gate writes a `discovery_confirm` call file (with the refined description, a single one-click option value '1', and flow/step context), marks the step confirmed when the user types '1', and removes the call file afterwards. <!--#4f2d3fd0acaee306-->
 - `test_interactive_pause_keeps_flow_running` (function) — Verifies a successful pause never calls save_flow, keeping the flow RUNNING so the daemon won't duplicate-spawn a --resume. <!--#e476bba46c576de8-->
 - `test_web_response_consumed_and_files_cleaned` (function) — Verifies a web response arriving mid-block is consumed and both the call file and its response sibling are removed. <!--#cbc16dd5f0f33e7a-->
 - `test_web_confirm_response_returns_sentinel` (function) — Verifies a web confirm submitting '1' drives the confirm gate identically to a terminal '1', returning the sentinel and cleaning up. <!--#ecd940c7c4b32283-->
@@ -5386,14 +8225,14 @@
 - `test_dedup_preserves_first_seen_order` (function) — Verifies the surviving deduped winner is emitted at its key's first-seen position in the list. <!--#6901a44a5dfef028-->
 - `test_dedup_integrates_with_snapshot` (function) — End-to-end test that two discovery call files sharing a step_id surface as a single pending call in the aggregator's per-flow snapshot. <!--#3813ff9dc47660e3-->
 
-### `tests/test_discovery_noninteractive.py` (python) — Unit tests for the non-interactive (daemon-spawned) discovery pause path in se3.commands.run, verifying that clarifying questions are written to se3/calls/ files (including confirmation-kind variants), that responses are read back from daemon or plain sibling files, and that the pause handler awaits, consumes answers, and handles programmatic confirmation correctly. <!--#6f446194f19d2a60|9029d62678599bc4-->
+### `tests/test_discovery_noninteractive.py` (python) — Unit tests for the non-interactive (daemon-spawned) discovery pause path in se3.commands.run, verifying that clarifying questions are written to se3/calls/ files (including confirmation-kind variants), that responses are read back from daemon or plain sibling files, and that the pause handler awaits, consumes answers, and handles programmatic confirmation correctly. <!--#b3e74b00a68d4cf2|9029d62678599bc4-->
 - `_make_step` (function) — Helper that builds a lightweight SimpleNamespace stand-in for a flow step with configurable step_id, outputs, and inputs dicts. <!--#d448ec902f38d40e-->
 - `_make_flow` (function) — Helper that builds a minimal SimpleNamespace stand-in for a flow carrying just a flow_id. <!--#d94def18ba399b1d-->
 - `_RecordingPersistence` (class) — Fake persistence double that counts save_flow calls so tests can assert flow state was persisted on pause. <!--#2b535d692f3cc749-->
   - `_RecordingPersistence.__init__` (method) — Initializes the fake persistence's saved counter to zero. <!--#128bbcc83bb6f82f-->
   - `_RecordingPersistence.save_flow` (method) — Records a save by incrementing the saved counter instead of actually persisting the flow. <!--#904c49a19a341084-->
 - `test_write_discovery_call_creates_question_call_file` (function) — Asserts _write_discovery_call writes a plain 'call'-kind question file under se3/calls/ with flow/step ids in context (and mirrored top-level), the prompt/questions embedded, and no confirm options. <!--#3d3a7aafe713e014-->
-- `test_write_discovery_call_marks_confirmation` (function) — Asserts that for an awaiting_programmatic_confirm step, _write_discovery_call emits a 'discovery_confirm'-kind file with the refined description, the '输入 1 确认' hint, and a single option whose value is the literal '1'. <!--#64df1aa62cbacfc1-->
+- `test_write_discovery_call_marks_confirmation` (function) — Asserts that `_write_discovery_call` emits a `discovery_confirm` pause file whose prompt embeds the refined description and confirm hint, with a single option valued "1" and context carrying the flow id and refined description. <!--#09b35209ef1c8d36-->
 - `test_read_discovery_response_from_daemon_envelope` (function) — Asserts _read_discovery_response extracts the answer from a .response.json daemon envelope's 'response' field. <!--#99e4e7e55a205970-->
 - `test_read_discovery_response_from_plain_sibling` (function) — Asserts _read_discovery_response reads the answer from a plain .response sibling file's 'feedback' field. <!--#617a4966c9a9c68a-->
 - `test_read_discovery_response_missing_returns_none` (function) — Asserts _read_discovery_response returns None when no response file exists yet. <!--#44cfe741dc26bbfc-->
@@ -5437,7 +8276,7 @@
 - `test_real_discovery_user_segment_is_literal_input_only` (function) — Asserts the marker-bounded user region equals the literal initial_description with no framework boilerplate leaking in. <!--#bae03fe12d23a032-->
 - `test_real_discovery_record_is_role_user` (function) — Asserts the persisted turn has role=user while still retaining the full framework boilerplate in its content body. <!--#8bfea2fc05fe06de-->
 
-### `tests/test_discovery_usage_display.py` (python) — Unit tests verifying that CliSink renders the discovery step's cumulative token-usage line (all fields plus cost) from step.outputs['token_usage'], renders nothing when usage is absent/empty/zero, correctly sums multi-round carried usage, and leaves confirm (compact footer) and plan (big block) usage rendering unregressed. <!--#02cbe9563d1e663e|0734a6c86f205983-->
+### `tests/test_discovery_usage_display.py` (python) — Unit tests verifying that CliSink renders the discovery step's cumulative token-usage line (all fields plus cost) from step.outputs['token_usage'], renders nothing when usage is absent/empty/zero, correctly sums multi-round carried usage, and leaves confirm (compact footer) and plan (big block) usage rendering unregressed. <!--#3f63dff0e890e719|0734a6c86f205983-->
 - `_make_discovery_step` (function) — Helper that builds a COMPLETED discovery Step with optional token_usage and extra outputs. <!--#17ba60e446944405-->
 - `_consume_discovery_completed` (function) — Helper that emits a STEP_COMPLETED event for a discovery step into a CliSink. <!--#2f20d56c19955d6a-->
 - `captured_console` (function) — Pytest fixture that installs and restores a recording Rich console for capturing CLI output. <!--#1bc2ac346057d2c4-->
@@ -5451,14 +8290,14 @@
 - `test_confirm_round_without_llm_does_not_affect_usage` (function) — Asserts a zero-increment confirmation round leaves carried UsageTotals unchanged and non-empty. <!--#12bbafc7b71e05d9-->
 - `_make_step_with_usage` (function) — Helper that builds a COMPLETED Step of an arbitrary type with optional token_usage. <!--#95f3f7b85fb58df8-->
 - `_consume_completed` (function) — Helper that emits a STEP_COMPLETED event for an arbitrary step type into a CliSink. <!--#3a2155356cc96311-->
-- `test_confirm_compact_footer_not_regressed` (function) — Asserts confirm steps still render the compact dim usage footer and not the big block. <!--#4f733f70e3b48ef4-->
+- `test_confirm_compact_footer_not_regressed` (function) — Regression test asserting that a completed 'confirm' step still renders the one-line dim token-usage footer ("This round … / Total …") rather than the larger 'Step Token Usage' block. <!--#ec43737e66d2a0a7-->
 - `test_plan_big_usage_block_not_regressed` (function) — Asserts plan steps still render the big 'Step Token Usage' block. <!--#1f146f932e5c9a40-->
 - `test_confirm_no_usage_renders_nothing` (function) — Asserts a confirm step without token_usage produces no output. <!--#58e31552411b6fb1-->
 - `test_plan_no_usage_renders_nothing` (function) — Asserts a plan step without token_usage produces no output and no big block. <!--#e4593b4d7d5bfd87-->
 - `test_discovery_step_failed_with_usage_renders_cumulative` (function) — Asserts a FAILED discovery step with usage still renders the cumulative line via STEP_FAILED. <!--#bfea5042a6de5ac0-->
 - `test_discovery_missing_outputs_renders_nothing` (function) — Asserts a discovery step with None outputs is handled safely and renders nothing. <!--#6a6810bbc914e165-->
 
-### `tests/test_discovery_workflow.py` (python) — Test suite for the discovery workflow, covering the DISCOVERY step type and step sequence, the discovery_handler's question/synthesis/confirmation modes, the programmatic confirmation gate and its sentinel guard, state-machine flow integration, conversation-history helpers, and read-only discovery prompt templates. <!--#4f486fc4cca7dc38|f37faef883cea851-->
+### `tests/test_discovery_workflow.py` (python) — Test suite for the discovery workflow, covering the DISCOVERY step type and step sequence, the discovery_handler's question/synthesis/confirmation modes, the programmatic confirmation gate and its sentinel guard, state-machine flow integration, conversation-history helpers, and read-only discovery prompt templates. <!--#b75c6f524652f981|f37faef883cea851-->
 - `TestDiscoveryStepType` (class) — Verifies the DISCOVERY StepType enum exists and is registered in the LLM-using step pool. <!--#814fa0121de8690e-->
   - `TestDiscoveryStepType.test_discovery_step_type_exists` (method) — Asserts StepType.DISCOVERY has the value 'discovery'. <!--#2cd607f6d06a3a2a-->
   - `TestDiscoveryStepType.test_discovery_in_step_pool` (method) — Asserts DISCOVERY is in STEP_POOL with the right name and uses_llm=True. <!--#24f48a12476eec51-->
@@ -5503,9 +8342,9 @@
   - `TestDiscoveryPromptTemplates.test_continue_prompt_forbids_overreach` (method) — Asserts the continue prompt forbids implementation plans, code, and file modifications. <!--#5f12898ffbd4581e-->
   - `TestDiscoveryPromptTemplates.test_initial_prompt_allows_reading` (method) — Asserts the initial prompt permits reading the code-index and source code. <!--#5fc4498955f6f8f5-->
   - `TestDiscoveryPromptTemplates.test_continue_prompt_allows_reading` (method) — Asserts the continue prompt permits reading the code-index and source code. <!--#8956cb5303e713f8-->
-- `TestDiscoveryLLMCallErrorHandling` (class) — Tests that LLMCallError variants are caught and surfaced as friendly FAILED messages with a panel. <!--#d7d7e24588ded79d-->
+- `TestDiscoveryLLMCallErrorHandling` (class) — Test class asserting the discovery step handler turns LLMCaller failures into a FAILED status with friendly, i18n-driven error messages and a rendered panel, while non-LLM exceptions fall back to the generic 'Discovery failed:' path. <!--#d6cf4785ead73820-->
   - `TestDiscoveryLLMCallErrorHandling.test_discovery_llm_json_extraction_failure` (method) — Asserts a JSON-extraction failure yields a friendly, traceback-free error and renders a panel. <!--#aeaaabb527486496-->
-  - `TestDiscoveryLLMCallErrorHandling.test_discovery_other_llm_error` (method) — Asserts a generic LLMCallError yields a concise localized error message and a panel. <!--#d2c1cfadfefaaaba-->
+  - `TestDiscoveryLLMCallErrorHandling.test_discovery_other_llm_error` (method) — Verifies that a generic LLMCallError (e.g. an API timeout) makes discovery_handler return FAILED with an error message matching the localized 'engine.discovery.error_llm_call' template and triggers exactly one panel render. <!--#f3aaac0381b7b25b-->
   - `TestDiscoveryLLMCallErrorHandling.test_discovery_non_llm_error` (method) — Asserts non-LLMCallError exceptions go through the generic 'Discovery failed:' error path. <!--#92178b0b9cf450db-->
 - `TestDiscoveryEmptyResponseRejection` (class) — Tests that LLM responses with no user-visible fields are rejected rather than rendered blank. <!--#cd658a72713bb87e-->
   - `TestDiscoveryEmptyResponseRejection.test_all_empty_fields_raise_llm_error` (method) — Asserts an all-empty response (no content/refined/questions) FAILs with a friendly message and panel. <!--#fe768b4c8f39f2a4-->
@@ -5714,7 +8553,7 @@
 - `test_deleted_cold_file_is_rewritten_on_next_save` (function) — Verifies that a hash-matching step whose cold file was deleted is regenerated on the next save via an on-disk existence check and reloads correctly. <!--#bf3cc10cad8be7d1-->
 - `test_resumable_roundtrip` (function) — Round-trips a flow through the resumable snapshot and asserts per-step outputs are restored. <!--#a9eac16ef5dd41d5-->
 
-### `tests/test_event_stream.py` (python) — Unit tests for the unified event stream subsystem, covering the EventType/Event model (serialization, round-trips, new_event kwarg routing) and the pluggable Sink implementations — EventEmitter subscription/isolation/scoping, JsonSink NDJSON output, CliSink rendering rules, and HistorySink jsonl persistence — including how CliSink and HistorySink diverge on interactive terminal events. <!--#daf4ab9d0b5df09a|a45302fb58a4f64d-->
+### `tests/test_event_stream.py` (python) — Unit tests for the unified event stream subsystem, covering the EventType/Event model (serialization, round-trips, new_event kwarg routing) and the pluggable Sink implementations — EventEmitter subscription/isolation/scoping, JsonSink NDJSON output, CliSink rendering rules, and HistorySink jsonl persistence — including how CliSink and HistorySink diverge on interactive terminal events. <!--#81a080652cc7e9db|a45302fb58a4f64d-->
 - `test_event_type_covers_full_lifecycle` (function) — Asserts the EventType enum contains exactly the expected full set of flow/step lifecycle event names. <!--#506825669025cff5-->
 - `test_event_to_dict_is_json_serializable` (function) — Verifies Event.to_dict() yields a JSON-serializable payload with a lowercased type string and preserved flow_id. <!--#ebedfd010f984e4e-->
 - `test_event_round_trips_through_dict` (function) — Checks an Event survives a to_dict/from_dict round-trip with type, flow_id, and data preserved. <!--#75a54afd115e14fc-->
@@ -5753,7 +8592,7 @@
 - `test_cli_sink_skips_interactive_terminal_events` (function) — Parametrized test that CliSink renders nothing for confirm/discovery/plan terminal events owned by the orchestrator. <!--#426da00abb31a2ef-->
 - `_usage_step` (function) — Test helper that builds a completed step whose outputs include a token_usage block. <!--#f0fac88bdf0c1a76-->
 - `test_cli_sink_plan_renders_big_usage_block` (function) — Verifies CliSink renders the large 'Step Token Usage' block for a plan step. <!--#f4564008da3a4646-->
-- `test_cli_sink_confirm_renders_compact_footer` (function) — Checks CliSink renders the compact per-round/cumulative usage footer (not the big block) for confirm. <!--#68823e2571aa2a85-->
+- `test_cli_sink_confirm_renders_compact_footer` (function) — Asserts that a STEP_COMPLETED event for a confirm step makes CliSink print the compact dim per-round/total token footer instead of the large 'Step Token Usage' block. <!--#dbaaa105c7f0e0d7-->
 - `test_cli_sink_discovery_renders_cumulative_usage` (function) — Confirms CliSink renders the discovery cumulative-usage line for a discovery terminal event. <!--#37b1949686f2f0d2-->
 - `test_cli_sink_skips_step_without_usage` (function) — Verifies an interactive step with no token_usage renders nothing on the CLI. <!--#1cc6f8c3f4d133eb-->
 - `test_cli_skips_but_history_persists_same_interactive_event` (function) — Confirms a discovery terminal event is skipped by CliSink yet persisted by HistorySink, showing the two sinks diverge. <!--#4672023fcd1d0583-->
@@ -5763,7 +8602,7 @@
 - `test_history_sink_persists_step_output_event` (function) — Verifies HistorySink persists a STEP_OUTPUT event carrying a step as a step_output jsonl record. <!--#d614f5f549cd082d-->
 - `test_history_sink_step_output_without_step_is_noop` (function) — Confirms HistorySink ignores STEP_OUTPUT events that carry no step payload. <!--#a2a58c56c47ae10e-->
 - `test_cli_sink_discovery_step_output_renders_cumulative_usage` (function) — Checks a discovery STEP_OUTPUT event renders the cumulative usage line rather than the big usage block. <!--#164db673fd4908ab-->
-- `test_cli_sink_confirm_step_output_renders_compact_footer` (function) — Checks a confirm STEP_OUTPUT event renders the compact dim footer rather than the big usage block. <!--#57b659fa47dfb997-->
+- `test_cli_sink_confirm_step_output_renders_compact_footer` (function) — Asserts the same compact-footer rule holds for mid-flight STEP_OUTPUT events on a confirm step (revision-needed), not just terminal events. <!--#3df9407f4fd9753a-->
 - `test_discovery_resume_does_not_emit_stale_step_output` (function) — Simulates run.py's guard to confirm STEP_OUTPUT is emitted only when step_ran_llm is True, suppressing stale resume usage. <!--#ba09c276a1ba5459-->
 - `test_paused_discovery_does_not_emit_step_output` (function) — Simulates run.py's guard excluding (discovery, PAUSED) so a paused discovery emits no duplicate STEP_OUTPUT usage. <!--#532f96eb4ee89cc0-->
 
@@ -5857,6 +8696,18 @@
 - `test_history_flow_id_elements_wired_into_page` (function) — Checks index.html contains the dedicated history-detail-flow-id line and a default-hidden history-usage-badge reusing the flow-usage-badge class. <!--#b997f617d606650a-->
 - `test_history_flow_id_css_present` (function) — Verifies style.css defines the list-card and detail-line flow_id selectors plus the reused .flow-usage-badge.hidden rule for empty-usage suppression. <!--#2f8f3e05fe4d43ec-->
 - `test_history_usage_badge_shares_flow_renderer` (function) — Confirms app.js exposes a shared applyUsageBadge helper that both the running-flow and history usage-badge updaters delegate to, preventing divergent rendering logic. <!--#3c6d726463ed343b-->
+
+### `tests/test_frontend_i18n.py` (python) — Pytest bridge for the WebUI i18n subsystem that statically guards the shipped frontend assets (en-US/zh-CN locale dictionaries with en-US as the key superset, the I18N subsystem and its exports in app.js, data-i18n annotations plus the language switch in index.html, and .lang-select styling in style.css) and runs the standalone Node i18n suite as a subprocess. <!--#5ef563b94ba7c0e3|e844255231af1a83-->
+- `test_locale_files_exist_and_parse` (function) — Asserts both the en-US and zh-CN WebUI locale JSON files exist and parse into non-empty objects. <!--#a711ff84a5f9eb90-->
+- `test_en_us_is_the_baseline_key_superset` (function) — Checks that en-US is the key superset backing the fallback chain — no zh-CN key is missing from it, and a representative spread of namespaces is present. <!--#fec4a88487350aa1-->
+- `test_endonym_labels_match_across_dicts` (function) — Verifies the language endonym labels (lang.en-US, lang.zh-CN) are identical in both dictionaries so the switcher reads the same in any language. <!--#48992619ed474e3c-->
+- `test_app_js_has_i18n_subsystem` (function) — Greps app.js for the i18n subsystem's core tokens (I18N object, resolveInitialLang/applyStaticTranslations/applyNodeTranslations/initI18n, the se3_ui_lang storage key, the /i18n/ fetch path). <!--#436181df599e03b7-->
+- `test_app_js_exports_i18n_helpers` (function) — Confirms app.js's module.exports block exposes I18N and applyNodeTranslations so the pure Node tests can import them. <!--#2b91e3232fce2c06-->
+- `test_index_html_has_language_switch_and_annotations` (function) — Checks index.html carries the language-select control plus a representative spread of data-i18n/-placeholder/-title annotations, with English fallback text kept in-markup. <!--#370b8ed516364b28-->
+- `test_index_html_annotations_reference_known_keys` (function) — Extracts every data-i18n* key from index.html by regex and asserts each one exists in the en-US baseline, so no annotation paints a raw key. <!--#1ec737fb508c621f-->
+- `test_style_css_styles_the_language_switch` (function) — Asserts style.css defines a .lang-select rule and that the 600px mobile-breakpoint block (found by brace matching) also adapts it. <!--#ccc896da8336851c-->
+- `test_i18n_node_module_present` (function) — Asserts the Node i18n test module file (tests/frontend/i18n_render_switch.test.mjs) exists. <!--#f78076181773e24a-->
+- `test_frontend_i18n_node_suite_passes` (function) — Runs the Node i18n assertion suite as a subprocess (skipping if node is absent) and requires a zero exit plus each expected check name in its output. <!--#f7ea6f5d95c3effb-->
 
 ### `tests/test_frontend_index_progress.py` (python) — Pytest bridge that pulls the G3 code-index update-progress frontend suite (index_progress.test.mjs, run via the Node test_app_pure.mjs harness) into the pytest run — asserting the mjs module exists and is registered, that the Node subprocess exits cleanly with every named G3 check (normalize, label, state, render, and in-place convergence) actually executed, and that style.css gives .index-progress-marker distinct border-left-color values for its running vs completed states. <!--#4918acf558f29fc8|576454bb0bf9d5bd-->
 - `test_index_progress_module_present` (function) — Asserts the G3 index_progress.test.mjs module file exists and is registered (imported and invoked as registerIndexProgressTests) in the test_app_pure.mjs Node harness. <!--#8887c90054840fb2-->
@@ -6091,6 +8942,70 @@
   - `TestNamingConvention.test_branch_slash_becomes_double_underscore_in_guardrail_call` (method) — Asserts guardrail call filenames use `__` (not `-`) for slashes in branch names. <!--#5e3f3fcb13e204ce-->
   - `TestNamingConvention.test_branch_slash_becomes_double_underscore_in_merge_call` (method) — Asserts merge call filenames use `__` (not `-`) for slashes in branch names. <!--#fe132b4814bf6b33-->
   - `TestNamingConvention.test_plain_branch_no_separator` (method) — Asserts a slash-free branch name appears verbatim with no `__` or `-` separator. <!--#93df7821c5def745-->
+
+### `tests/test_i18n.py` (python) — Unit test suite for the se3.i18n layer, covering locale-catalog discovery and auto-registration, t()'s fault-tolerant lookup with per-key en-US fallback and placeholder degradation, language-code normalization, the five-tier resolution precedence chain (SE3_LANG env → project se3.yaml → global ~/.se3 config → system locale → en-US base), and the lazy language singleton's reset seam — all with the process-wide i18n state and the developer's real home config/locale env isolated per test. <!--#6338e1550357b4bf|27944e28cf16e5d5-->
+- `_reset_i18n` (function) — Autouse fixture that resets the process-wide i18n language/catalog singletons and isolates each test from the real home config and host locale env vars. <!--#eba138c1c2d5cbdd-->
+- `TestCatalogLoading` (class) — Tests that locale JSON catalogs are discovered and loaded, including auto-registration of newly dropped language files and empty results for unknown codes. <!--#525e4a7939764da5-->
+  - `TestCatalogLoading.test_shipped_languages_discovered` (method) — Asserts the shipped en-US and zh-CN catalogs appear in supported_languages(). <!--#eb12714b8ccaa3e8-->
+  - `TestCatalogLoading.test_en_us_holds_seed_keys` (method) — Asserts the en-US catalog contains the expected baseline CLI keys and values. <!--#1cf71404ee048ee5-->
+  - `TestCatalogLoading.test_unknown_code_loads_empty_catalog` (method) — Asserts loading an unknown language code yields an empty catalog rather than raising. <!--#cbee43f1f6a193f5-->
+  - `TestCatalogLoading.test_new_language_file_autoregistered` (method) — Asserts a new <code>.json dropped into locales/ becomes a supported language with no code change, by faking the locale resource iterator. <!--#49ae41a7a3ca5b02-->
+- `TestTranslate` (class) — Tests t()'s lookup semantics: selected-language strings, en-US fallback, key echo when missing everywhere, and never raising on bad keys, missing kwargs, or malformed templates. <!--#35bfff9ba5dc8d9a-->
+  - `TestTranslate.test_returns_selected_language_string` (method) — Asserts t() returns the active language's translation for a known key. <!--#802fc32bae8c0454-->
+  - `TestTranslate.test_missing_key_falls_back_to_en_us` (method) — Asserts a key absent from the active catalog falls back to the en-US string. <!--#e7f5ca940302590d-->
+  - `TestTranslate.test_missing_everywhere_returns_key` (method) — Asserts a key missing from every catalog renders as the key itself. <!--#73fac6a19e12c755-->
+  - `TestTranslate.test_unknown_language_uses_en_us` (method) — Asserts selecting an unsupported language code falls back to the base en-US language. <!--#d20f13e0ebb45236-->
+  - `TestTranslate.test_placeholder_rendered` (method) — Asserts t() formats template placeholders from keyword arguments. <!--#1d6785964878ca5e-->
+  - `TestTranslate.test_missing_placeholder_returns_unformatted_template` (method) — Asserts a missing format kwarg degrades to the raw template instead of raising KeyError. <!--#fbcfd8447ed9676c-->
+  - `TestTranslate.test_extra_placeholder_kwargs_ignored` (method) — Asserts unused keyword arguments passed to t() are harmlessly ignored. <!--#49dd6bf4b1dd7f2a-->
+  - `TestTranslate.test_never_raises_on_any_input` (method) — Smoke-asserts t() never raises across empty, known, unknown, and placeholder-bearing keys. <!--#16fb9a7168a18901-->
+  - `TestTranslate.test_bad_field_access_in_template_returns_template` (method) — Asserts translator-authored templates using attribute/subscript/positional field access degrade to the raw template instead of crashing t(). <!--#be304b0243f9d2b4-->
+- `TestNormalization` (class) — Tests normalize_language()'s mapping of raw locale strings to supported codes and its safe None result for unknown or non-string inputs. <!--#3c390ca3d31bffc9-->
+  - `TestNormalization.test_normalizes_to_supported` (method) — Parametrized check that locale variants (case, underscores, encodings, bare language tags) normalize to the canonical supported codes. <!--#55f2ee9540f7d90d-->
+  - `TestNormalization.test_unknown_returns_none` (method) — Asserts empty, blank, None, and unsupported locale strings normalize to None. <!--#e66739b8f0749d98-->
+  - `TestNormalization.test_non_string_returns_none_without_raising` (method) — Asserts non-string values (YAML-typed booleans, ints, lists, dicts) normalize to None without raising. <!--#45b95bf284ff6893-->
+  - `TestNormalization.test_set_language_with_non_string_selects_base` (method) — Asserts set_language() with a non-string argument selects the base en-US language. <!--#ddf90e4133e939ad-->
+- `TestResolveLanguageChain` (class) — Tests the language resolution precedence chain — SE3_LANG env, project se3.yaml, global ~/.se3 config, system locale, en-US base — including how set-but-unsupported values fall back. <!--#434e4248f11fca3d-->
+  - `TestResolveLanguageChain._write_project` (method) — Helper writing a project se3.yaml with a given language setting. <!--#0d30f6d21ed4740c-->
+  - `TestResolveLanguageChain._write_global` (method) — Helper writing a global ~/.se3/config.yaml with a given language setting. <!--#57d31c57cd4459b2-->
+  - `TestResolveLanguageChain.test_env_wins_over_everything` (method) — Asserts SE3_LANG outranks project config and system locale. <!--#65afb867c8041e50-->
+  - `TestResolveLanguageChain.test_project_over_global_and_locale` (method) — Asserts the project config outranks the global config and system locale. <!--#39e9c3b9686be509-->
+  - `TestResolveLanguageChain.test_global_over_locale_when_no_project` (method) — Asserts the global config outranks the system locale when no project language is set. <!--#8a53af4e9ee41dce-->
+  - `TestResolveLanguageChain.test_locale_used_when_no_config` (method) — Asserts the system locale decides the language when no env or config value exists. <!--#afd1ad3afa6abb53-->
+  - `TestResolveLanguageChain.test_lc_all_beats_lang` (method) — Asserts LC_ALL takes precedence over LANG when reading the system locale. <!--#4704e72f1d01ba6e-->
+  - `TestResolveLanguageChain.test_falls_back_to_en_us` (method) — Asserts resolution lands on en-US when no env, config, or locale hint is present. <!--#ef23ac3103ec3ce5-->
+  - `TestResolveLanguageChain.test_higher_level_missing_passes_through` (method) — Asserts a null/unset value at a higher tier passes through to the next tier rather than terminating resolution. <!--#07cafd61c17803b4-->
+  - `TestResolveLanguageChain.test_unsupported_env_falls_back_to_base_not_lower_tier` (method) — Asserts a set-but-unsupported SE3_LANG resolves to en-US instead of leaking through to the project language. <!--#d5f29da6b9356d02-->
+  - `TestResolveLanguageChain.test_unsupported_project_falls_back_to_base_not_locale` (method) — Asserts a set-but-unsupported project language resolves to en-US instead of falling through to the system locale. <!--#8ae72733d4e022cf-->
+  - `TestResolveLanguageChain.test_non_string_project_language_falls_back_to_base_not_locale` (method) — Asserts a YAML-boolean project language (e.g. `language: NO`) is treated as explicit-but-invalid and resolves to en-US. <!--#b4642bda55a9952d-->
+  - `TestResolveLanguageChain.test_unsupported_locale_passes_through_to_base` (method) — Asserts an unsupported system locale, being only an OS hint, falls through to the en-US base language. <!--#a0270f8efd1c17b1-->
+- `TestLazySingleton` (class) — Tests the module-level language singleton: import is side-effect free, get_language() resolves lazily from cwd, and set/reset control re-resolution. <!--#c87c4f7fe0eb38a1-->
+  - `TestLazySingleton.test_import_does_not_read_config` (method) — Asserts the language slot stays unresolved after reset, so importing the module reads no config. <!--#907fa142dba5688c-->
+  - `TestLazySingleton.test_get_language_resolves_from_cwd` (method) — Asserts the first get_language() call lazily resolves from the current working directory's project config. <!--#e57c070701ce8fb8-->
+  - `TestLazySingleton.test_set_language_overrides_resolution` (method) — Asserts an explicit set_language() overrides what the resolution chain (including SE3_LANG) would pick. <!--#33d23e72611bda98-->
+  - `TestLazySingleton.test_reset_forces_reresolution` (method) — Asserts reset_language() clears the cached selection so the next get_language() re-runs the chain. <!--#2f599f05cc79f9ed-->
+- `TestBindProjectRoot` (class) — Tests bind_project_root(), which re-resolves the language against a target project so an import-time cwd-frozen language cannot stick to the wrong project. <!--#9ee7767f6ed4c472-->
+  - `TestBindProjectRoot.test_rebinds_language_frozen_at_import_time` (method) — Reproduces the Typer help-string freeze and asserts binding a different project root rebinds the language to that project's setting. <!--#cabb7509f0969899-->
+  - `TestBindProjectRoot.test_env_still_outranks_bound_project` (method) — Asserts binding re-runs the full chain, so SE3_LANG still outranks the bound project's language. <!--#903ef0d536b12273-->
+  - `TestBindProjectRoot.test_none_root_binds_cwd` (method) — Asserts bind_project_root(None) resolves against the current working directory. <!--#2d8b41f730aa5590-->
+- `test_cli_get_project_root_binds_language` (function) — Asserts the CLI's get_project_root() discovery seam rebinds the language, so commands run from a subdirectory render in the project's language. <!--#bb879f1f374f43bc-->
+- `test_wheel_includes_locales` (function) — Builds a wheel via the hatchling backend and asserts the en-US/zh-CN locale JSON catalogs are bundled, guarding the packaging contract. <!--#1d958b882d9d5ce9-->
+- `test_engine_run_chrome_keys_exist_in_both_catalogs` (function) — Asserts every `engine.*` key in the en-US baseline also exists in zh-CN, so run-path console chrome never leaks the other language. <!--#4b7550f04bb35448-->
+- `test_round_usage_footer_follows_active_language` (function) — Asserts the per-round token-usage footer's label chrome renders in the active language. <!--#71492bdc4bdb8054-->
+- `test_test_step_progress_line_follows_active_language` (function) — Asserts the test-step "Running tests" progress line renders through i18n while preserving the command text. <!--#22e739e3c82ca724-->
+- `test_usage_line_labels_follow_active_language` (function) — Asserts the compact token-usage line's in/out/cache labels localize so embedded usage lines don't render mixed-language text. <!--#6b9f9e75c54132d1-->
+- `test_discovery_confirm_metadata_follows_active_language` (function) — Asserts the discovery confirmation gate's prompt and option labels localize while the LLM-produced task description passes through verbatim. <!--#9b3a4ce8f9343380-->
+- `test_state_machine_banners_have_no_hardcoded_english` (function) — Greps state_machine.py for banned English literals and checks the corresponding revision/adjudicate banner keys render in zh-CN, forbidding hardcoded banner chrome. <!--#cb6e7a9fb4b3ca07-->
+- `test_status_key_normalizes_status_tokens` (function) — Asserts status_key() normalizes hyphen/apostrophe/case variants of status tokens into a single snake_case catalog key. <!--#c94f4d342a2af638-->
+- `test_status_key_accepts_enum` (function) — Asserts status_key() accepts an IssueStatus enum member and derives the right catalog key. <!--#6adec46878804aaf-->
+- `test_t_status_localizes_known_statuses` (function) — Parametrized check that t_status() renders known status tokens in the active language. <!--#a34206050e9e5292-->
+- `test_t_status_accepts_enum_members` (function) — Asserts t_status() localizes IssueStatus and StepStatus enum members, not just raw strings. <!--#fb759fc4c44188f7-->
+- `test_t_status_falls_back_to_raw_token_for_unknown_status` (function) — Asserts an unknown status renders as its raw token rather than t()'s key echo, in both languages. <!--#2cc2ef3c272aebc4-->
+- `test_t_status_en_us_renders_the_canonical_token` (function) — Asserts t_status() in en-US renders the canonical hyphenated status token. <!--#ec3a82018cf3bf72-->
+- `TestOutputWrapperChrome` (class) — Tests that the error/success output wrappers' prefixes and panel titles render through i18n instead of hardcoded English. <!--#3e20f702a6dcf803-->
+  - `TestOutputWrapperChrome.test_format_error_prefix_is_translated` (method) — Asserts format_error()'s Error:/Context: prefixes render in zh-CN while the message and context payload pass through. <!--#8ee2b197ffca7772-->
+  - `TestOutputWrapperChrome.test_format_error_prefix_in_base_language` (method) — Asserts format_error() renders the English "Error:" prefix under en-US. <!--#c8b88d81e4c07cc4-->
+  - `TestOutputWrapperChrome.test_panel_titles_are_translated` (method) — Asserts display_error()/display_success() pass localized panel titles to the renderer. <!--#b3c54b8161791296-->
 
 ### `tests/test_implement.py` (python) — Unit tests for the IMPLEMENT step handler, covering `_format_spec_brief`'s trailing-newline and empty-input handling plus `implement_handler`'s routing between DAG-parallel and sequential execution based on whether the repo has commits. <!--#659adb792c58a9e7|5a899e4138cfe1d0-->
 - `_make_step_and_flow` (function) — Test helper that builds a `Step` (IMPLEMENT type) and `FlowInstance` pair preconfigured with given task groups for exercising `implement_handler`. <!--#a07677d28297f697-->
@@ -6810,7 +9725,10 @@
   - `TestLooksLikeJson.test_array_with_unescaped_quotes` (method) — Asserts arrays with unescaped interior quotes are recognized as JSON. <!--#3408c6650498f858-->
   - `TestLooksLikeJson.test_null_parsed_by_looks_like_json` (method) — Asserts the literal JSON null value is recognized as JSON. <!--#6dc1412e053a47a2-->
 
-### `tests/test_language_config.py` (python) — Test module validating se3's language configuration: LanguageConfig/load_language_config parsing of the se3.yaml language section, get_language_instruction/get_step_language_instruction directive wording, and context_builder's routing of general vs. spec_language injection to the correct pipeline steps (HUMAN_FACING_STEPS/SPEC_STEPS). <!--#fb00ecba1e3aa4f3|9d8deb66977dd50e-->
+### `tests/test_language_config.py` (python) — Test suite for SE3's language configuration layer, covering LanguageConfig.load()'s parsing of the se3.yaml language section (present, missing, null, malformed) and its per-field project-over-global merge with ~/.se3/config.yaml, plus get_language_instruction()/get_step_language_instruction() behavior determining which pipeline steps receive general-language, spec-language, or no language injection. <!--#d2eb13ee55493b3a|f6e54c093c882331-->
+- `_isolated_global_home` (function) — Autouse fixture that redirects `Path.home()` to a fresh temp directory so a developer's real `~/.se3/config.yaml` language setting can't leak into these tests. <!--#b6529ca67d0c52b0-->
+- `global_home` (function) — Fixture exposing the isolated fake home directory so a test can write its own `~/.se3/config.yaml` global tier. <!--#f7773c64e7b85831-->
+- `_write_global_language` (function) — Helper that writes a minimal `~/.se3/config.yaml` under the given home with the requested `language` / `spec_language` values (or explicit nulls). <!--#a2c3b18e89db90c2-->
 - `TestLanguageConfigLoad` (class) — Test class verifying LanguageConfig.load() and load_language_config() parse the se3.yaml language section across present, missing, null, and malformed cases. <!--#550d01ccd4a51cb0-->
   - `TestLanguageConfigLoad.test_defaults_when_no_file` (method) — Asserts both language fields default to None when no se3.yaml exists. <!--#08988d719e459a62-->
   - `TestLanguageConfigLoad.test_defaults_when_no_language_section` (method) — Asserts both fields default to None when se3.yaml lacks a language section. <!--#1d8738f31b7d33b7-->
@@ -6821,6 +9739,12 @@
   - `TestLanguageConfigLoad.test_load_language_config_convenience` (method) — Verifies the load_language_config() convenience wrapper loads both fields. <!--#460cf028b5caad9c-->
   - `TestLanguageConfigLoad.test_invalid_yaml` (method) — Asserts malformed YAML is handled gracefully, yielding None fields. <!--#3f86be637028740c-->
   - `TestLanguageConfigLoad.test_language_section_not_dict` (method) — Asserts a scalar (non-dict) language section is handled gracefully as None fields. <!--#e434d78cf6c25682-->
+- `TestLanguageConfigGlobalMerge` (class) — Test class covering `LanguageConfig.load`'s per-field project-over-global merge of the language section, including global-only, partial-project, both-unset, and explicit-project-null cases. <!--#b3d910d74c30875c-->
+  - `TestLanguageConfigGlobalMerge.test_project_overrides_global` (method) — Asserts a project `se3.yaml` language/spec_language takes precedence over the global config values. <!--#f3efb660397d0a8b-->
+  - `TestLanguageConfigGlobalMerge.test_global_only` (method) — Asserts that with no project `se3.yaml`, the global config's language values are used. <!--#600da28068afd120-->
+  - `TestLanguageConfigGlobalMerge.test_global_fills_missing_project_field` (method) — Asserts the merge is per-field: a project field left unset inherits the global value while the set field still wins. <!--#6f40f09cc689ebc4-->
+  - `TestLanguageConfigGlobalMerge.test_neither_set_is_none` (method) — Asserts both language fields resolve to None when neither the project nor the global config sets them. <!--#71ba47566b93352a-->
+  - `TestLanguageConfigGlobalMerge.test_project_null_falls_through_to_global` (method) — Asserts an explicit `null` in the project config does not mask a set global value but falls through to it. <!--#8afb1d7a89a4b1f1-->
 - `TestGetLanguageInstruction` (class) — Test class for get_language_instruction()'s base behavior with None, empty, language-code, and optional-context inputs. <!--#cd9880f30017b52c-->
   - `TestGetLanguageInstruction.test_none_returns_empty` (method) — Asserts an empty string is returned when language is None. <!--#98d6430fef1697e2-->
   - `TestGetLanguageInstruction.test_empty_string_returns_empty` (method) — Asserts an empty string is returned when language is an empty string. <!--#23eadf5900da5b74-->
@@ -7949,7 +10873,7 @@
 - `test_record_lock_acquired_skipped_by_get_step_history` (function) — Asserts that the lock-acquired clear anchor does not produce any chat messages in CLI/retry step history. <!--#8c72aa0205bf0bda-->
 - `test_merge_lock_held_through_retry_not_released_until_flow_exit` (function) — Refutes the merge-lock-release-causes-freeze theory by showing the lock stays held and uncontendable through a simulated step-error/retry inside _run_flow_impl, released only by run_flow's finally on flow exit. <!--#c4527a045d299cfe-->
 
-### `tests/test_running_flow_console_chain.py` (python) — End-to-end regression suite (group G1) pinning that run_flow emits step_completed/step_failed terminal events for every finished step—including interactive DISCOVERY/CONFIRM, PLAN, and SUMMARIZE—so HistorySink persists their outputs to per-step jsonl while CliSink stays byte-identical, and asserting the daemon incremental reader and aggregator surface those records to the frontend in report-card shape without duplication or stale chips. <!--#33a5379092b2c1ba|753c48917f22bf32-->
+### `tests/test_running_flow_console_chain.py` (python) — End-to-end regression suite (group G1) pinning that run_flow emits step_completed/step_failed terminal events for every finished step—including interactive DISCOVERY/CONFIRM, PLAN, and SUMMARIZE—so HistorySink persists their outputs to per-step jsonl while CliSink stays byte-identical, and asserting the daemon incremental reader and aggregator surface those records to the frontend in report-card shape without duplication or stale chips. <!--#96740ca1b263f167|753c48917f22bf32-->
 - `_build_flow` (function) — Test helper that constructs a single-step FlowInstance of a given step type, outputs, and status for driving through the run loop. <!--#d3b1d3eedb2744b0-->
 - `_run_step` (function) — A test helper that drives a single-step FlowInstance through run_flow in cli mode while mocking PersistenceManager and StateMachine (run_step returns a caller-supplied StepStatus, transition_to_next marks the flow COMPLETED, and step failures are forced to a clean pause) so the real HistorySink console chain can be exercised end-to-end. <!--#0044a72e7585a709-->
 - `_history_path` (function) — Test helper returning the per-step jsonl history path for a flow's current step. <!--#1098f862f4eb62bb-->
@@ -7974,8 +10898,8 @@
 - `_make_discovery_flow` (function) — Test helper building a lightweight SimpleNamespace stand-in for a flow with just a flow_id. <!--#bfc445ee98f986b1-->
 - `_NullPersistence` (class) — Minimal no-op persistence stub used by the discovery-pause tests. <!--#a91cbba4c423b299-->
   - `_NullPersistence.save_flow` (method) — No-op save_flow stub method on the null persistence test double. <!--#babe5bd5029057a4-->
-- `test_discovery_confirm_call_payload_kind_options_context` (function) — Test asserting _write_discovery_call emits a confirm call carrying the right kind, options, context.flow_id, and the textual confirm hint plus refined description. <!--#5c9d9991b7b9ef6f-->
-- `test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options` (function) — Test asserting the daemon aggregator parses a discovery confirm call into a flow-scoped PendingCall preserving its kind and confirm option. <!--#2f5503a8e1aec344-->
+- `test_discovery_confirm_call_payload_kind_options_context` (function) — Asserts that the discovery-confirm call file written by `_write_discovery_call` carries the discovery-confirm kind, a context with flow/step ids and refined description, a prompt containing the textual confirm hint and description, and exactly one option whose value is the gate's literal "1". <!--#fe1991ee04bb5279-->
+- `test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options` (function) — Asserts end-to-end that a discovery-confirm call written to a project root is picked up by the daemon aggregator's snapshot, survives the per-flow scoping filter, and reaches the UI as a PendingCall retaining its kind, flow-scoped context, prompt hint, and confirm option. <!--#44bf33056ca88d70-->
 - `test_discovery_confirm_submission_gates_on_one` (function) — Test asserting submitting "1" confirms and advances the discovery gate while any other reply keeps refining and clears the confirm flag. <!--#0ee7e4a05b7622a2-->
 - `_ndjson_assistant` (function) — Test helper producing a minimal stream-json transcript with one assistant text block and a terminal result line. <!--#ff864e7b0ec49bb5-->
 - `test_summarize_records_user_and_assistant_to_jsonl` (function) — Test asserting summarize_handler persists both the user prompt and the assistant markdown summary to the per-step jsonl via the real LLMCaller path. <!--#d41222d9714e1414-->
@@ -8190,7 +11114,7 @@
   - `TestAcquireMergeStepLockWaitingCleanup._busy_then_raise_lock` (method) — Helper returning a fake lock whose non-blocking probe raises MergeLockBusy (forcing the wait path) and whose blocking acquire then raises the supplied exception. <!--#6d131d8a6a0628d5-->
   - `TestAcquireMergeStepLockWaitingCleanup.test_blocking_acquire_failure_clears_waiting_flag` (method) — Parametrized test asserting that for both OSError and KeyboardInterrupt during the blocking acquire, waiting_for_lock is cleared in memory and in the reloaded persisted flow after the exception raises. <!--#05b9219d2ca24507-->
 
-### `tests/test_server.py` (python) — Unit and end-to-end tests covering the daemon↔server wire protocol (Message encode/decode, typed constructors, direction partitioning), the ServerState registry (machine registration, status-update flow replacement, waiting-for-lock threading, resumability rules), and the multi-tenant FastAPI server's REST/WebSocket endpoints (health, frontend/static serving, machine and flow views, flow publish/respond dispatch, daemon handshake, and UI snapshot/broadcast). <!--#2305007d1ef6407e|5b1aa13536540cfd-->
+### `tests/test_server.py` (python) — Unit and end-to-end tests covering the daemon↔server wire protocol (Message encode/decode, typed constructors, direction partitioning), the ServerState registry (machine registration, status-update flow replacement, waiting-for-lock threading, resumability rules), and the multi-tenant FastAPI server's REST/WebSocket endpoints (health, frontend/static serving, machine and flow views, flow publish/respond dispatch, daemon handshake, and UI snapshot/broadcast). <!--#924dfbe347f393b6|5b1aa13536540cfd-->
 - `test_message_round_trip` (function) — Verifies a protocol Message survives JSON serialization and deserialization with all fields intact. <!--#ba37ff1018298003-->
 - `test_decode_rejects_unknown_type` (function) — Asserts decoding a message with an unrecognized type raises ProtocolError. <!--#402fa123ba282111-->
 - `test_decode_rejects_malformed_json` (function) — Asserts decoding non-JSON input raises ProtocolError. <!--#d23255ca155d47fb-->
@@ -8232,7 +11156,7 @@
 - `test_publish_flow_rejects_empty_project_root` (function) — Verifies a missing project root is rejected with 422. <!--#bb5883d78a467867-->
 - `test_respond_flow_dispatches_respond_call` (function) — Verifies POST /api/flows/{id}/respond dispatches a RESPOND_CALL to the daemon with call id, response, and project root. <!--#e9103c8d621c781d-->
 - `test_respond_flow_unknown_flow_404` (function) — Verifies responding to an unknown flow returns 404. <!--#c212198b62ba69db-->
-- `test_static_assets_served` (function) — Verifies index.html, style.css, and app.js static assets are served. <!--#4f221cb9e3ab454c-->
+- `test_static_assets_served` (function) — Asserts the WebUI server serves its static assets over HTTP — index.html at /, style.css, app.js, and the en-US/zh-CN i18n locale dictionaries at the root /i18n/ mount rather than /static/i18n/. <!--#6ee0255ec5fc942e-->
 - `test_ui_ws_receives_initial_snapshot` (function) — Verifies a /ws/ui client receives an initial snapshot message with empty machines. <!--#2dc447996d78089a-->
 - `test_ui_ws_broadcasts_daemon_status_update` (function) — Verifies daemon connection and status updates are broadcast to connected /ws/ui clients. <!--#396704e5b0fb5741-->
 - `test_run_passes_ws_max_size_to_uvicorn` (function) — Verifies app.run passes the raised ws_max_size frame cap plus host/port through to uvicorn.run. <!--#fa3316e822118242-->
@@ -8862,7 +11786,7 @@
 - `test_llm_resolver_applies_llm_output_and_stages` (function) — Verifies the LLM-aware resolver sends the conflict-markered buffer to a stubbed LLM and writes back the reconciled, marker-free result as a staged change while archiving both original sides. <!--#e21eee3451138a7f-->
 - `test_llm_resolver_falls_back_to_take_ours_on_llm_failure` (function) — Verifies the LLM resolver falls back to deterministic take-ours (merged HEAD) when the LLM raises, leaving no conflict markers and keeping the discarded stashed side recoverable. <!--#38fc00a4b3cd1ced-->
 
-### `tests/test_step_renderers.py` (python) — Unit tests for the step renderer functions in `se3/engine/step_renderers.py`, asserting that each step type (analyze, verify_spec, update_spec, commit, self_check, spec_gate, …) renders the right status, summary, and detail fields while hiding internal payloads and raw output. <!--#5de17437199aa0a0|b4bcb09a75bb6840-->
+### `tests/test_step_renderers.py` (python) — Unit tests for the step renderers in the engine's output layer, asserting that each step type (analyze, verify_spec, update_spec, commit, self_check, spec_gate, …) renders its status, key fields, and diagnostics correctly while hiding internal payloads and raw process output. <!--#f7471d550a6a6c59|e942bbc77554f9b6-->
 - `_make_step` (function) — Test helper that builds a Step of a given type with supplied outputs, error message, and status. <!--#90e3565a0a67def9-->
 - `TestRenderAnalyze` (class) — Test class for _render_analyze, checking status-bar fields, reasoning, and 'Relevant Spec Items' formatting while hiding internal payloads. <!--#0dde101567949fed-->
   - `TestRenderAnalyze.test_normal_output` (method) — Asserts a fully-populated analyze step renders task_type/complexity/scope, reasoning, and spec items while omitting spec_content/project_summary. <!--#9131779cc86db2e0-->
@@ -8899,8 +11823,8 @@
   - `TestRenderSelfCheck.test_completed_status_with_zero_actionable_shows_passed` (method) — Asserts a COMPLETED step with no issues shows PASSED. <!--#d5293f3b2dbf4acc-->
   - `TestRenderSelfCheck.test_failed_status_with_actionable_issues_shows_failed` (method) — Asserts a FAILED step with actionable issues shows FAILED. <!--#967aa13ca3c92376-->
   - `TestRenderSelfCheck.test_failed_status_no_outputs_shows_failed` (method) — Asserts a FAILED step with empty outputs (pre-failure) shows FAILED. <!--#23fbc9992e8ce30f-->
-- `TestRenderSpecGate` (class) — Test class for _render_spec_gate, covering registry registration, pass/skip/route cases, and ensuring raw test output never leaks. <!--#68d5b778b976d5cf-->
-  - `TestRenderSpecGate.test_registered_in_registry` (method) — Asserts SPEC_GATE is registered in both STEP_RENDERERS and STEP_DISPLAY_TITLES. <!--#3931a93810d31426-->
+- `TestRenderSpecGate` (class) — Test class asserting the SPEC_GATE step renderer is registered and renders pass/fail conclusions, routes, and fix instructions with a test-results summary while never leaking raw stdout/stderr. <!--#e119cba487402010-->
+  - `TestRenderSpecGate.test_registered_in_registry` (method) — Asserts StepType.SPEC_GATE has entries in both STEP_RENDERERS and STEP_TITLE_KEYS so it isn't default-rendered. <!--#9d0fb81a23307954-->
   - `TestRenderSpecGate.test_gate_passed_clean` (method) — Asserts a passed gate shows PASSED with the test command summary but no raw test output. <!--#1b231eb77f06d62d-->
   - `TestRenderSpecGate.test_gate_skipped_noop` (method) — Asserts a skipped gate shows PASSED and indicates it was skipped/no-op. <!--#b8c7393e7ae392b2-->
   - `TestRenderSpecGate.test_route_update_spec` (method) — Asserts a failed gate routing to update_spec shows FAILED with the route and fix instructions. <!--#55c6f098b0d65ad1-->
@@ -8913,6 +11837,10 @@
   - `TestStepUsageBlock.test_usage_block_for_default_rendered_step` (method) — Asserts even a step type without a custom renderer still gets its usage block. <!--#cef931d44cb187f3-->
   - `TestStepUsageBlock.test_usage_block_rendered_for_non_terminal_step` (method) — Asserts a non-terminal REVISION_NEEDED step with token_usage in outputs renders the usage block. <!--#7ca58cc7f1405b91-->
   - `TestStepUsageBlock.test_usage_block_not_read_from_carried_token_usage` (method) — Asserts render_step_usage reads only outputs.token_usage and ignores the engine-internal carried_token_usage. <!--#39f84794f4905508-->
+- `TestRenderImplement` (class) — Regression test class for the IMPLEMENT report card, pinning that the tests_added loop no longer shadows the i18n t() helper and that the token-usage block still renders after the report. <!--#c648f3a56730709b-->
+  - `TestRenderImplement.test_renders_full_report_card` (method) — Checks _render_implement emits the summary, changed files, and added tests with no unresolved i18n key strings. <!--#5e5172bc46adfb4e-->
+  - `TestRenderImplement.test_tests_added_loop_does_not_shadow_translator` (method) — Checks that sections rendered after a non-empty tests_added loop (e.g. incomplete_tasks) still appear, proving t() isn't shadowed. <!--#5020fbd3f722e18f-->
+  - `TestRenderImplement.test_usage_block_follows_report` (method) — Checks render_step_output renders both the IMPLEMENT report and the trailing token-usage block with the step's usage dict. <!--#97361f44f076007f-->
 
 ### `tests/test_stream_progress_agent_model.py` (python) — Unit tests verifying agent/model attribution on the stream_progress channel: that record_stream_progress writes optional agent_name/model_name keys only when present (byte-identical to legacy schema otherwise), that the model-name extraction helpers parse init/system metadata and tolerate garbage, and that StreamJSONTracker labels every progress record with its agent from the first fragment, upgrades records to carry the real model once an init line streams, and gives each attempt its own agent across rotation. <!--#7cf1cad79d1a7997|d312d4909f6252cf-->
 - `test_extract_model_from_obj_top_level` (function) — Asserts extract_model_name_from_obj reads the model from a top-level 'model' key on an init metadata object. <!--#c8160b5f152a2f13-->
@@ -9501,9 +12429,22 @@
 - `test_e2e_worktree_multiround_discovery_all_rounds_reach_frontend` (function) — #278 end-to-end regression test chaining real reader → real server relay → frontend reconcile to assert every round of a live multi-round worktree discovery (including the final verdict) reaches the frontend chat without drops or duplicates and matches the server's authoritative bundle. <!--#8611047cfa66114d-->
 - `test_e2e_worktree_discovery_cross_source_rounds_all_render` (function) — #278 end-to-end test for the split-root topology where a primary discovery file and a .from-<branch> sidecar each start at ordinal 0, asserting distinct step_ids keep their keys from colliding so both sources render fully instead of the sidecar being dropped as a duplicate. <!--#7e522cae26a74618-->
 
-## `tests/commands/` — Pytest package for the `se3` command layer, bundling the `se3 merge` sub-suite alongside module-level tests that exercise run-flow orchestration (resume, failure-action resolution, presets, worktree isolation), source-issue lifecycle finalization and backfill, the code-index search CLI, and the worktree-GC command. <!--#acbeb4176c6e8004|1b6e50f9f70f6cb1-->
+## `tests/commands/` — Test package for SE3's CLI command layer, bundling the `merge` command's own sub-suite alongside tests for `run` (flow orchestration, resume, failure-action/retry decisions, presets, worktree isolation mode), `code-index search`, `worktree gc`, `--from-issue` finalization, merge source-issue backfill, and command-layer i18n key coverage and language switching. <!--#12920df32bf1c921|ed8753e8890e5f3c-->
 
 ### `tests/commands/__init__.py` (python) — Package init marker for the se3 command tests directory, containing only a header comment and no functional code. <!--#2e351cd9cd7e4289|e3b0c44298fc1c14-->
+
+### `tests/commands/test_cli_i18n.py` (python) — Test suite guarding the CLI command-layer i18n migration: it AST-extracts every literal `t()` key used by the migrated command modules and asserts catalog coverage in en-US, checks zh-CN keys are a subset of the en-US base with per-key fallback, and runs end-to-end CLI invocations to verify output (including status values in issue/history tables) actually switches language under SE3_LANG. <!--#35fac6eca71021a6|f74bdfe0a5e665dd-->
+- `_t_literal_keys` (function) — Test helper that AST-parses a source file and returns the set of string-literal first arguments passed to `t(...)`, i.e. the translation keys that must resolve against the catalog. <!--#124ba74559d1d53a-->
+- `test_every_used_key_present_in_en_us` (function) — Parametrized test asserting that every literal `t()` key used by a migrated module exists in the en-US catalog. <!--#cdc6c0782d82c9d5-->
+- `test_all_modules_actually_migrated` (function) — Sanity test asserting each module listed in MIGRATED_MODULES actually contains at least one `t()` call site. <!--#d66f3785d1de66ca-->
+- `test_zh_keys_are_subset_of_en_base` (function) — Asserts zh-CN introduces no orphan keys, i.e. its key set is a subset of the en-US base catalog. <!--#4f9598f4007c3a89-->
+- `test_missing_zh_key_falls_back_to_en_per_key` (function) — Verifies per-key fallback: a key present only in en-US renders the en-US string even when the language is zh-CN. <!--#503206e35e411056-->
+- `test_command_output_switches_language` (function) — Parametrized end-to-end test that invokes CLI commands under SE3_LANG=en-US vs zh-CN and asserts the output contains the expected localized substrings and genuinely differs. <!--#be8d6573c1c80fff-->
+- `test_se3_lang_env_drives_cli_output` (function) — Asserts the SE3_LANG environment variable (top of the precedence chain) selects the CLI output language, using the `merge` command's error message. <!--#c035ffeb3e10862b-->
+- `test_multiline_prompt_chrome_is_resolved_at_call_time` (function) — Regression test that `cli._read_multiline_input` resolves its prompt title/message translations at call time (defaults are None) rather than pinning them at import time. <!--#f0a79d7857ba0360-->
+- `_cell_texts` (function) — Test helper that renders a Rich console callable into plain recorded text so table contents can be asserted on. <!--#ca75136990bf0ee5-->
+- `test_issue_list_and_show_localize_status_values` (function) — Asserts `issue list`/`issue show` localize the status *value* (e.g. `open` → 待处理) under zh-CN, not just the column header. <!--#62ae44b670ad9351-->
+- `test_history_tables_localize_status_values` (function) — Asserts the history flow-list table renders translated engine status tokens (e.g. `completed` → 已完成) under zh-CN instead of the raw enum value. <!--#c57557c7498a391c-->
 
 ### `tests/commands/test_code_index_search.py` (python) — Pytest suite driving the `se3 code-index search` CLI (grep-style search over code-index item lines) against a hand-authored `code-index.md`, verifying regex-vs-`-F` literal matching, case sensitivity/`-i`, `-m` max-count and exit codes, symbol path rendering, fingerprint-comment stripping, `-n` no-op acceptance, and rebuild hints for invalid/unbuilt states. <!--#af7e0ba91bb38ed8|f75e7bb6223de2e3-->
 - `built_project` (function) — Pytest fixture that writes the hand-authored `_MD` code-index map to a temp project and monkeypatches `get_project_root` so the CLI resolves to it. <!--#979b9f2476dbbe83-->
@@ -9655,6 +12596,17 @@
 - `test_cleanup_helper_removes_all_three_artifacts` (function) — Asserts `_cleanup_retry_decision_artifacts` removes the call file plus both `.response` and `.response.json` sibling variants after the CLI prompt answers. <!--#85b44953a6b1d2c6-->
 - `test_cleanup_helper_is_noop_when_nothing_exists` (function) — Asserts the cleanup helper is a quiet, idempotent no-op when no calls directory or artifacts exist. <!--#d539e3ef1539d3f0-->
 - `test_cleanup_targets_only_deterministic_retry_decision_file` (function) — Asserts cleanup deletes only the deterministic retry_decision call file, leaving other call kinds (e.g. a plain confirm call) in the same calls directory intact. <!--#540d93edaa542c0d-->
+
+### `tests/commands/test_run_i18n.py` (python) — Pytest module verifying that the `se3 run` command's user-facing strings are localized correctly — covering the non-interactive EOF fallback notice in `prompt_user_choice`, the empty resume-picker message in `handle_resume_interactive` (both in en-US and zh-CN), and the en-US fallback for run keys missing from the zh-CN catalog. <!--#7e1646d5e23cf8af|912bf5b6401ebada-->
+- `TestPromptUserChoiceNonInteractive` (class) — Test class asserting that the EOF/non-interactive fallback message of `run.prompt_user_choice` is rendered in the active locale (en-US and zh-CN) while still defaulting to the last option. <!--#9770111bdc599db4-->
+  - `TestPromptUserChoiceNonInteractive._run` (method) — Helper that sets the language, monkeypatches `input` to raise EOFError, calls `prompt_user_choice`, asserts the last option is auto-selected, and returns the captured stdout. <!--#9f1e3edced1c3653-->
+  - `TestPromptUserChoiceNonInteractive.test_en_us` (method) — Asserts the English non-interactive auto-selection notice appears in the output. <!--#02123f37d60d7133-->
+  - `TestPromptUserChoiceNonInteractive.test_zh_cn` (method) — Asserts the Chinese non-interactive auto-selection notice appears and no English text leaks through. <!--#9b0a4d6b2f604236-->
+- `TestResumePickerEmpty` (class) — Test class checking that `run.handle_resume_interactive` prints the localized "no existing flows" notice (en-US and zh-CN) and returns None when there is nothing to resume. <!--#741ba283386b5feb-->
+  - `TestResumePickerEmpty._capture` (method) — Helper that swaps the shared `se3.engine.display` console for a buffered Rich console, sets the language, runs `handle_resume_interactive` on an empty dir, and returns the captured output. <!--#51c7d4448d10392c-->
+  - `TestResumePickerEmpty.test_en_us` (method) — Asserts the English "No existing flows found" message is printed. <!--#d0abde0d671c2c61-->
+  - `TestResumePickerEmpty.test_zh_cn` (method) — Asserts the Chinese "no existing flows" message is printed. <!--#b934884e2657cce7-->
+- `test_unknown_run_key_falls_back_to_en_us` (function) — Verifies the i18n fallback machinery renders the en-US catalog string for a run key missing from zh-CN rather than emitting the raw key. <!--#3c86100be91aad58-->
 
 ### `tests/commands/test_run_preset.py` (python) — CLI integration tests for `se3 run --preset`, verifying the preset-prompt mechanism: preset/type mutual exclusion, unknown-preset listing, forwarding a preset's type and prompt text to run_flow, missing prompt_file errors, listing built-in and project layers, and project presets overriding built-in ones. <!--#15e69234dd0dd479|f538642fc6c61a11-->
 - `project_root` (function) — Pytest fixture returning a bare tmp_path directory used as the patched project root for each test. <!--#f14a7a57a646fa9e-->
@@ -10247,7 +13199,7 @@
   - `TestTruncatePreview.test_newlines_in_text` (method) — Verifies multi-line text is truncated correctly to the exact length with ellipsis. <!--#653d67df336bff9a-->
   - `TestTruncatePreview.test_default_max_length_is_100` (method) — Confirms the default max_length is 100, truncating to 97 chars plus an ellipsis. <!--#4f1b399a237cf8f6-->
 
-## `tests/engine/` — Test suite for the SE3 engine — with formatters/ and steps/ subpackages plus dozens of modules exercising the state machine (confirm/revision, self-check adjudication, baseline and fix loops, spec changes, partial reflow), the test-baseline and baseline-fix-memory machinery, the LLM caller (agents, rotation errors, step overrides), retry/context injection and continuation, chat-history timelines, prompt dedup/markers/runtime-environment injection, deterministic merge/conflict resolvers, git tags, docs updater, spec formatting/validation, code-index search guidance, display/tool formatters, and worktree GC. <!--#1b029eb9b867b9b9|b03c9736e95eca73-->
+## `tests/engine/` — Test package covering SE3's engine core — the state machine and step sequencing (confirm/revision, adjudication, self-check, baseline failures, spec changes, partial flows), the test/fix loop and baseline failure memory, LLM caller behavior (agents, rotation errors, step overrides, retry context injection/continuation), prompt construction (markers, dedup, runtime-environment and code-index-search injection), chat history and display/i18n rendering, merge conflict resolution, docs/version updating, spec validation and formatting, worktree GC and git tags — plus subpackages for engine formatters and individual step handlers (commit, implement, plan). <!--#e4da4ac98e62e211|562060bde9d7cbe4-->
 
 ### `tests/engine/__init__.py` (python) — Package initializer marking the tests/engine directory as the Python test package for engine-related tests. <!--#33fbe48a88ada88d|e3b0c44298fc1c14-->
 
@@ -10478,6 +13430,18 @@
   - `TestRenderUsageBlock.test_empty_dict_renders_nothing` (method) — Asserts render_usage_block produces no output for an empty dict. <!--#2a6d96af75f85ff6-->
   - `TestRenderUsageBlock.test_footer_uses_usage_color_and_fixed_width` (method) — Asserts the usage block avoids panel/rule border characters and uses the cyan _USAGE_BLOCK_COLOR accent. <!--#cf014a8194f3643a-->
 
+### `tests/engine/test_display_i18n.py` (python) — Tests that display.py's UI-framework text (usage-block titles/labels, proposal section labels) is routed through the se3.i18n catalog and flips with the active language, while LLM-generated content and caller-supplied titles pass through verbatim. <!--#a4f446ffecbcca62|3b4df4ca6ccf8750-->
+- `_isolate_console` (function) — A pytest fixture that snapshots the display module's global console and restores it after each test so console swaps don't leak between tests. <!--#ff2bb3fec5ef85f3-->
+- `_plain_console` (function) — Test helper that builds a Rich Console writing to an in-memory StringIO buffer (fixed width, no highlighting) and returns both for output assertions. <!--#3dfda5d33a47ccab-->
+- `_usage` (function) — Test helper returning a fixed UsageTotals sample (token counts and cost) used as input for usage-block rendering tests. <!--#09f16df5ffafc168-->
+- `TestUsageBlockLabels` (class) — Test class verifying that the token-usage block renders its title and field labels in the active language (en-US/zh-CN) while an explicitly supplied title is left untouched. <!--#a032606202f14cd4-->
+  - `TestUsageBlockLabels.test_default_title_and_labels_en_us` (method) — Asserts the usage block renders the English default title and labels when the language is set to en-US. <!--#eb346f1f6a655cf2-->
+  - `TestUsageBlockLabels.test_default_title_and_labels_zh_cn` (method) — Asserts the usage block renders Chinese title and labels under zh-CN with no English labels bleeding through. <!--#fdc1cfccd4f5d68f-->
+  - `TestUsageBlockLabels.test_explicit_title_preserved` (method) — Asserts a caller-supplied usage-block title is rendered verbatim rather than replaced by the localized default. <!--#2268895caf10bcfe-->
+  - `TestUsageBlockLabels._usage_or_skip` (method) — Small helper method returning the shared sample UsageTotals for the tests in this class. <!--#0f5d9d4ec066418e-->
+- `TestProposalLabelsVsContent` (class) — Test class checking that proposal rendering localizes its framework labels while passing LLM-generated content through untranslated. <!--#2d0b1948e09e448c-->
+  - `TestProposalLabelsVsContent.test_labels_localized_content_verbatim` (method) — Asserts that under zh-CN the proposal block shows Chinese labels, drops the English ones, and still prints the summary/rationale text verbatim. <!--#bebab60cde4c17d4-->
+
 ### `tests/engine/test_docs_updater.py` (python) — Unit tests for the docs_updater's VERSIONS.md changelog handling, verifying that colliding version blocks are merged rather than swallowed, verbatim rewrites stay idempotent, and head-blank accumulation is drained to a single separator and kept stable across repeated inserts. <!--#b0aebae65414ab47|715abec5e013d908-->
 - `_default_updater` (function) — Pytest helper fixture-builder that returns a DocumentationUpdater pinned to the built-in default entry template (by monkeypatching the template path to a nonexistent file) so tests exercise insertion/merge mechanics independent of the packaged versions_md.md. <!--#79a0d56ce8a0483d-->
 - `TestMergeIntoExistingVersion` (class) — Test class verifying that updating VERSIONS.md for an already-present version merges new bullets into the existing block without swallowing them, preserves older history, and is idempotent on verbatim rewrites. <!--#dffdac295fd3f42d-->
@@ -10642,6 +13606,24 @@
   - `TestSourceSemantics.test_source_round_trips_via_yaml` (method) — Asserts the source field survives YAML save and reload. <!--#1de4e15c2fa6f6ff-->
   - `TestSourceSemantics.test_missing_source_defaults_to_system_on_load` (method) — Asserts legacy YAML lacking a source field loads as source='system'. <!--#be8549a09f3d419d-->
   - `TestSourceSemantics.test_source_filter_list_issues` (method) — Asserts list_issues(source_filter=...) correctly filters issues by source. <!--#73554db2f00b8557-->
+
+### `tests/engine/test_knowledge_asset_language.py` (python) — Tests that `spec_language` alone (never the human `language` setting) governs language injection into knowledge-asset LLM prompts, verifying that both the charter-freshness propose prompt and the code-index summary prompt gain the respond-in-language directive, preserve-symbols clause, and knowledge-asset framing when it is set, carry zero injection when it is not, and that summaries still honour the single-line contract. <!--#5ac9073e5339f142|502f095fedb976bf-->
+- `_isolated_global_home` (function) — An autouse-style fixture that redirects `Path.home()` to a fresh temp directory so the developer's real `~/.se3/config.yaml` language block can't leak into the zero-injection assertions. <!--#f3027ea20d636859-->
+- `_write_project_language` (function) — Helper that writes a minimal `se3.yaml` under a project root containing a `language:` section with the given `language`/`spec_language` values (or nulls). <!--#bb4e5b18ebaaf304-->
+- `_install_fake_caller` (function) — Helper that monkeypatches `charter_freshness.LLMCaller` with a stub returning a canned response and records every prompt it is called with. <!--#c2f81c724a0eb789-->
+- `_make_flow` (function) — Helper that builds a minimal `FlowInstance` whose `change_path` points inside the temp project root, so the handler loads config from that root. <!--#397f11c215a7ea6a-->
+- `_make_step` (function) — Helper that builds a CHARTER_FRESHNESS `Step` with a non-empty changed-files diff, which is what forces the propose LLM call instead of the cheap no-LLM path. <!--#2f1e3acf2ce07a17-->
+- `_charter_prompt` (function) — Helper that runs the charter-freshness handler against a temp project with the given language settings and returns the captured propose prompt. <!--#4b70dcd4ec92b7e9-->
+- `test_charter_prompt_injects_spec_language_when_set` (function) — Asserts that with `spec_language` set the charter prompt gains the respond-in-language directive, the preserve-symbols clause, and knowledge-asset framing, while spec-file/SHALL-MUST wording stays out. <!--#e9c40cc9c2f0afad-->
+- `test_charter_prompt_zero_injection_when_spec_language_unset` (function) — Asserts that with no `spec_language` the charter prompt carries no language directive or preserve-symbols clause at all. <!--#6943c3bd342fe065-->
+- `test_charter_prompt_ignores_human_language_when_spec_language_unset` (function) — Asserts that the unified human `language` setting alone never drives the charter prompt — only `spec_language` governs a knowledge asset. <!--#5a722ba161fbf5e3-->
+- `_install_fake_summary_caller` (function) — Helper that stubs `LLMCaller` on `se3.engine.llm_caller` (where the summarizer's local import resolves it) to return a canned JSON summary map and capture each group's summary prompt. <!--#527c8baeca594d47-->
+- `_make_summary_target` (function) — Helper that builds a single symbol-level `SummaryTarget` for a trivial `foo.py::foo` function. <!--#9e712a6aa4ecc5c1-->
+- `_code_index_prompt` (function) — Helper that runs the code-index LLM summarizer against a temp project with the given language settings and returns the captured summary prompt. <!--#522b5d5043e8f163-->
+- `test_code_index_prompt_injects_spec_language_when_set` (function) — Asserts that with `spec_language` set the code-index summary prompt gains the respond-in-language directive, preserve-symbols clause, and knowledge-asset framing, without spec-file/SHALL-MUST wording. <!--#472112c46c772389-->
+- `test_code_index_prompt_zero_injection_when_spec_language_unset` (function) — Asserts that with no `spec_language` the code-index summary prompt contains no language injection. <!--#dbd165258578ceaf-->
+- `test_code_index_prompt_ignores_human_language_when_spec_language_unset` (function) — Asserts that the human `language` setting alone never injects into the code-index summary prompt. <!--#4e3348ae559e2dad-->
+- `test_code_index_summary_stays_single_line_with_injection` (function) — Asserts that language injection touches only the prompt, so returned summaries are still surfaced verbatim as single lines and the `_flatten_summary` markdown contract holds. <!--#d8476928571fb9e7-->
 
 ### `tests/engine/test_llm_caller.py` (python) — Unit tests for the LLM caller module's tool-preview formatters (truncate_preview, format_tool_use_preview, format_tool_result_preview) and stream/caller helpers, covering truncation rules, per-tool vs generic formatting, and value-type handling. <!--#c3c28f1d0eacd903|e3b0c44298fc1c14-->
 
@@ -12647,7 +15629,7 @@
 - `TestVersionRulesFileRelPath` (class) — Test class that pins the `VERSION_RULES_FILE_RELPATH` constant as an explicit contract. <!--#20fa80e2daccb3ce-->
   - `TestVersionRulesFileRelPath.test_relpath_is_the_documented_location` (method) — Asserts the relpath constant equals the documented `se3/version-rules.md` location. <!--#9d9d463c758139e7-->
 
-## `tests/frontend/` — Directory of frontend tests for the SE3 web console: a manual smoke-test checklist, replay fixtures (issue #209 transcripts and synthetic live-flow frames), and a suite of dual-mode Node/DOM-stub .test.mjs modules covering console rendering and interaction behaviors — streaming agent/model badges, CONFIRM approval chips and adjudicate-review panels, group/index progress markers, scroll anchoring across the discovery→analyze boundary, flow resume/end-session helpers, history list/detail rendering with token-usage badges, and the incremental self-heal and history-index delta-merge protocols. <!--#079a40270c656a55|b7fe1e92f37a11e8-->
+## `tests/frontend/` — Node-based (DOM-stub) test suite for the SE3 WebUI console's static app.js, aggregated by test_app_pure.mjs and covering live chat/step rendering, scroll anchoring, confirm/reply interaction, history and token-usage panels, i18n, incremental self-heal and progression protocols, plus JSONL/frame fixtures, browser render harnesses, and a manual smoke checklist. <!--#90db937c40e662ae|85d7de6c14674153-->
 
 ### `tests/frontend/SMOKE_CHECKLIST.md` (markdown) — A manual smoke-test checklist for accepting the web console's full-screen running-flow chat view, walking through setup, layout, reply input, conversation/intervention rendering, progressive disclosure, CLI↔Web parity, targeted bugfix and regression checks, and a recorded automated-run results table. <!--#8b01cd448a920d43|d282cc8d28b6c66e-->
 - `Running-Flow Chat View — Manual Smoke Checklist` (heading) — Top-level title and scope statement describing the full-screen chat view under test and which backend/static files trigger a re-run of this checklist. <!--#792347f5ecc19cd2-->
@@ -12664,11 +15646,11 @@
   - `Regression` (heading) — Checks that the full pytest suite and both frontend JS test files pass before sign-off. <!--#cdfc2d0ee842253d-->
     - `Recorded automated results (2026-05-21)` (heading) — A recorded table of the last automated test run's pass/skip counts plus a note on pre-existing out-of-scope test_steps.py failures. <!--#6b3c940aa0ca3b76-->
 
-### `tests/frontend/adjudicate_review.test.mjs` (text) — Dual-mode (harness-registrable and standalone-runnable) frontend test suite for the web console's `renderAdjudicateReview`, asserting that a CONFIRM-gated ADJUDICATE ruling surfaces its rationale panel plus a baseline→adjudicated_description before/after diff, returns null for non-adjudicate targets, and degrades gracefully when fields are missing. <!--#4061f61eb51848bc|e3b0c44298fc1c14-->
+### `tests/frontend/adjudicate_review.test.mjs` (text) — Dual-mode Node test module (importable via `registerAdjudicateReviewTests(ctx)` or runnable standalone with its own DOM stub) that checks the web console's `renderAdjudicateReview`: it renders the rationale panel and a baseline→adjudicated_description unified diff for ADJUDICATE confirm gates, degrades gracefully when fields are missing (all-added diff, unchanged-description note, null for empty or non-adjudicate targets), and surfaces the block in the docked reply box only for adjudicate confirm chips. <!--#49dfc2da4871a98f|e3b0c44298fc1c14-->
 
 ### `tests/frontend/agent_badge_live.test.mjs` (text) — A Node-stub frontend test module (Group G3) exporting registerAgentBadgeLiveTests() that drives the parent harness's app module to verify live accumulating-bubble agent/model badge behavior: the first streaming fragment with an agent_name shows a badge, a later model_name upgrades the same badge in place to "agent · model", agent rotation clears the stale model, and fragments lacking agent metadata render no badge. <!--#1e4c2bd75fbb98dd|e3b0c44298fc1c14-->
 
-### `tests/frontend/confirm_chip.test.mjs` (text) — Dual-mode (harness-importable via registerConfirmChipTests and standalone-runnable with its own DOM stub) Node test suite for the web console's G3 CONFIRM approval-gate chip, asserting that a kind:'confirm' pending call renders explicit 批准/打回 buttons plus an optional note textarea, POSTs a structured {response:{approved,feedback},call_id} decision to the flow's /respond endpoint, mirrors run.py's approve/reject token sets in the free-text fallback (second-guessing unknown notes as revisions), degrades kind-less legacy calls to a plain reply box, and guards against double-sends while a decision is in flight. <!--#dcaebf784415da39|e3b0c44298fc1c14-->
+### `tests/frontend/confirm_chip.test.mjs` (text) — Dual-mode Node/browser-stub frontend test suite (exportable via `registerConfirmChipTests` or runnable standalone) verifying that the web console renders a `kind: 'confirm'` pending call as an explicit Approve/Reject chip with an optional note textarea, POSTs a structured `{response:{approved,feedback}}` decision, degrades kind-less legacy calls to the plain free-text box, and maps recognized approval/rejection words while gating unrecognized notes behind a confirmation prompt. <!--#3cc50b3c9e76eb18|e3b0c44298fc1c14-->
 
 ### `tests/frontend/discovery_analyze_scroll_anchor.test.mjs` (text) — A node-stub frontend test suite (issue #260, group G5) that pins the discovery→analyze boundary scroll-anchor fix: after a silent progression rebuild, a bottom-follower (intent flag true) sticks to the new bottom despite a frozen-DOM isNearBottom misjudge, while a genuinely scrolled-up reader (flag false) keeps their anchored bubble's viewport offset when the analyze label appends below. <!--#a101f9422df42083|e3b0c44298fc1c14-->
 
@@ -12676,7 +15658,7 @@
 
 ### `tests/frontend/flow_resume.test.mjs` (text) — A DOM-free Node.js test module that directly exercises app.js's pure Resume-flow helpers (isFlowResumable, RESUMABLE_STATUSES, isResumeInProgress), asserting resumability rules across statuses, case-insensitivity, archived/history source exclusion, and the authoritative `resumable` flag with its completed/running guards and legacy fallback. <!--#5538adf9a03a59e1|e3b0c44298fc1c14-->
 
-### `tests/frontend/group_status.test.mjs` (text) — Frontend test module exporting registerGroupStatusTests(ctx) — run under the shared DOM-stub harness — that verifies the app's per-group DAG status markers: normalizeRecord mapping of `group_status` records, groupStatusLabel status-to-label mapping with fallbacks, and rendering of `.group-status-marker` elements that converge successive same-group states into one in-place card without disturbing interleaved chat bubbles. <!--#6dc3561406e0ad52|e3b0c44298fc1c14-->
+### `tests/frontend/group_status.test.mjs` (text) — Node-based frontend test module (registered by test_app_pure.mjs) that verifies the WebUI's per-group DAG status markers — that normalizeRecord parses `group_status` records, groupStatusLabel maps each status to its label with sensible fallbacks, and rendering produces a single in-place `.group-status-marker` card per (step, group) showing the latest state without disturbing interleaved chat bubbles. <!--#005fbbc00ad3153b|e3b0c44298fc1c14-->
 
 ### `tests/frontend/history_flow_id.test.mjs` (text) — A frontend test module exporting `registerHistoryFlowIdTests(ctx)` for the parent app-pure harness, verifying that the history list's meta rows render a `.history-item-flow-id` span (with full-value title), that `openHistorySession` shows the complete flow_id in the dedicated `#history-detail-flow-id` line independent of the task_description title, and that `closeHistory` clears that line and hides the usage badge. <!--#2dd585095b61ec8e|e3b0c44298fc1c14-->
 
@@ -12684,9 +15666,11 @@
 
 ### `tests/frontend/history_usage.test.mjs` (text) — Frontend unit-test module (Part 3, loaded by test_app_pure.mjs) whose `registerHistoryUsageTests` verifies the history-detail session token-usage badge shows/populates on non-empty usage, hides and clears on empty usage, and renders a value identical to the running-flow badge via the shared applyUsageBadge helper. <!--#f02c5ad0368af047|e3b0c44298fc1c14-->
 
+### `tests/frontend/i18n_render_switch.test.mjs` (text) — Node-based frontend test suite for the WebUI i18n subsystem in app.js, exercising language resolution (localStorage/navigator/en-US fallback), key lookup with per-key baseline fallback and {param} interpolation, DOM-stub attribute application, load-failure degradation, and a guard that the shipped en-US/zh-CN locale JSON files are valid and key-consistent. <!--#826691afedd98284|e3b0c44298fc1c14-->
+
 ### `tests/frontend/incremental_selfheal.test.mjs` (text) — A frontend test module (loaded by test_app_pure.mjs) exporting registerIncrementalSelfHealTests, which verifies that a periodic full-history re-pull (mode:full) authoritatively self-heals the WS append path — recovering dropped increment frames, deleting stale bubbles, converging mis-tracked index_progress cards, and staying idempotent under repeated identical snapshots. <!--#9ee6b7a9a0a3c719|e3b0c44298fc1c14-->
 
-### `tests/frontend/index_progress.test.mjs` (text) — Group-G3 frontend unit tests (registered into the shared test_app_pure.mjs harness) verifying that the web console handles code-index `index_progress` NDJSON markers—covering normalizeRecord field mapping, the indexProgressLabel/indexProgressState pure helpers, and rendering successive records of one commit step as a single in-place `.index-progress-marker` progress line with the correct status class. <!--#ee7f633de1f10300|e3b0c44298fc1c14-->
+### `tests/frontend/index_progress.test.mjs` (text) — Node-based frontend test module (registered via `registerIndexProgressTests` into the shared DOM-stub harness) that verifies the web console's code-index update progress marker: `normalizeRecord` mapping of `type:'index_progress'` NDJSON records, the pure `indexProgressLabel`/`indexProgressState` helpers, and that successive records from one commit step collapse into a single in-place `.index-progress-marker` line with the correct status class and latest-record-wins behavior. <!--#d8cf4e9c0bdfcbfa|e3b0c44298fc1c14-->
 
 ### `tests/frontend/interaction_view.test.mjs` (text) — A dependency-free Node assertion script that imports the web console's real pure helpers from app.js (normalizeRecord, isCollapsibleRole, normalizeKind, chipLabel, echo-dedup helpers) to verify the running-flow chat view's collapse/expand and prompt-classification contract is driven structurally by the record's role rather than by message text. <!--#56a79a1cbf88a1a4|e3b0c44298fc1c14-->
 
@@ -12696,15 +15680,15 @@
 
 ### `tests/frontend/issue_management.test.mjs` (text) — A Node-based pure-logic test module (Group G7) that exports registerIssueManagementTests() so the parent test_app_pure.mjs harness can drive DOM-free assertions over the WebUI's issue-management helpers — title/slug derivation, filtering, type/project-root collection, panel state, CSS class mapping, request-body builders (create/edit/action/flow), machine-id and composite-key contracts, launch gating, and the fetch/coalesce sequence-guard state machines. <!--#556f1a2cfef8102a|e3b0c44298fc1c14-->
 
-### `tests/frontend/live_append_after_respond.test.mjs` (text) — Frontend regression test module (issue #193) that registers browser-harness tests verifying the running-flow live view keeps appending daemon-pushed `mode: append` records after a respond/interject—reconciling optimistic reply echoes, deduping REST-snapshot overlaps, and recovering first-worktree assistant bodies from raw_json. <!--#da673c5c0b65c9ee|e3b0c44298fc1c14-->
+### `tests/frontend/live_append_after_respond.test.mjs` (text) — A frontend test module (registered into the shared test_app_pure.mjs harness) that regression-tests issue #193's "messages stop showing" bugs — verifying that after a respond/interject the daemon's `mode: append` frames keep streaming into the running-flow conversation view, that the optimistic local reply echo is reconciled against the authoritative daemon `user` record so the reply renders exactly once with no duplicate keys, and that `normalizeRecord` does not drop the body of a worktree session's first assistant record. <!--#a575be700a6bf23d|e3b0c44298fc1c14-->
 
 ### `tests/frontend/live_append_e2e_consistency.test.mjs` (text) — Frontend half of a cross-layer end-to-end test (registered via registerConsoleE2EConsistencyTests) that replays golden daemon→server→frontend broadcast frames from a JSON fixture to prove the incremental live-append console render converges exactly with a full-reload snapshot render — no loss, duplication, or freeze — including REST/WS overlap dedup and post-trigger continuation content. <!--#5afe614f2415af06|e3b0c44298fc1c14-->
 
-### `tests/frontend/live_append_retry_after_error.test.mjs` (text) — A frontend test module (registered via `registerLiveAppendRetryAfterErrorTests`) that regression-tests the live conversation view's retry-after-error streaming — verifying `recordKey`/dedupe distinguish a `retrying` status from the same-second resumed `running` anchor, similar retry output isn't dropped as a duplicate, the region un-freezes and settles on the re-run anchor, and incremental append converges with a full reload. <!--#846f4d2ff46fc436|e3b0c44298fc1c14-->
+### `tests/frontend/live_append_retry_after_error.test.mjs` (text) — A frontend test module (registered by test_app_pure.mjs) that verifies the WebUI live conversation view correctly streams a retry-after-error sequence — where a failed step is re-run under the same step_id — asserting recordKey distinguishes the 'retrying' status row from the resumed same-second 'running' anchor, that superseded-status pruning preserves the retry execution's anchors, and that incremental append and a full reload converge on the same conversation without loss, duplication, or a frozen region. <!--#10db7d854d08fc46|e3b0c44298fc1c14-->
 
-### `tests/frontend/live_append_step_transition.test.mjs` (text) — Frontend regression test suite (Group G1) that replays a canonical discovery→analyze daemon record stream both incrementally (mode:append) and via full rebuild (mode:full) to prove the live console keeps rendering post-transition increments identically and never freezes or drops records at the discovery→analyze step boundary. <!--#27afc9bb0e2708a7|e3b0c44298fc1c14-->
+### `tests/frontend/live_append_step_transition.test.mjs` (text) — A frontend test module (registered by the pure-app harness) that replays a canonical discovery→analyze daemon record stream both incrementally (mode: append) and as a full rebuild, pinning that the live console keeps rendering across the step transition — no dedupe-induced freeze, loss, or duplication. <!--#c79edd8039f7162c|e3b0c44298fc1c14-->
 
-### `tests/frontend/marker_dedup_ordinal.test.mjs` (text) — Group-G2 frontend unit tests (loaded by test_app_pure.mjs) verifying the web console's ordinal-identity reconcile: that records key on stable `stepId#ordinal` independent of content/timestamp so empty-content markers never falsely collide, and that reconcileAppendRecords appends distinct ordinals, treats byte-identical re-deliveries as no-ops, and updates retry rewrites of the same ordinal in place. <!--#80a301e0f45a1e64|e3b0c44298fc1c14-->
+### `tests/frontend/marker_dedup_ordinal.test.mjs` (text) — A Node test module (registerMarkerDedupOrdinalTests, loaded by test_app_pure.mjs) pinning the WebUI console's ordinal-identity reconcile behaviour: recordKey is a content-independent `stepId#ordinal` (with legacy content-key fallback when no ordinal), empty-content marker records no longer collide, and reconcileAppendRecords treats identical re-deliveries as no-ops while updating retry rewrites of the same ordinal in place. <!--#b0f7577fb0aee27c|e3b0c44298fc1c14-->
 
 ### `tests/frontend/mobile_responsive.test.mjs` (text) — Group-G7 pure-helper test module (loaded by test_app_pure.mjs) that registers assertions for the mobile-responsive DOM-free state-transition helpers — hamburger nav toggle, main-list machines↔flows switch, History list↔detail switch, and flow-view sidebar drawer — plus static-source guards checking the @media (max-width: 600px) breakpoint in style.css. <!--#2941421d8b7b9b82|e3b0c44298fc1c14-->
 
@@ -12718,25 +15702,25 @@
 
 ### `tests/frontend/render_real_records.mjs` (text) — A headless Node test harness that feeds real daemon `GET /api/history` conversation records through the production `app.js` `renderConversation` against a minimal FakeNode DOM stub, then applies the shared `paradigmAssertions` (imported from `render_in_browser.mjs`) to verify the message-rendering paradigm holds on real data, printing a JSON `{ok:...}` line for the pytest e2e harness without needing a browser. <!--#5069175237ea5096|e3b0c44298fc1c14-->
 
-### `tests/frontend/reply_box_prompt_collapse.test.mjs` (text) — A Group-G1 frontend test module exporting registerReplyBoxPromptCollapseTests, which drives the parent DOM-stub harness to verify the docked reply box's collapsible long-prompt behavior — buildCollapsiblePrompt's default-collapsed trigger/body, expand/collapse toggling, scroll-into-view, and the full renderInterventions→updateReplyBox path preserving expand state and scroll position across re-renders. <!--#184d0f8a6360c8ba|e3b0c44298fc1c14-->
+### `tests/frontend/reply_box_prompt_collapse.test.mjs` (text) — Frontend test module (registered by the test_app_pure.mjs harness) verifying that the running-flow docked reply box collapses long pending-call prompts behind an expand/collapse trigger — covering buildCollapsiblePrompt's default-hidden scrollable body, click toggling, scroll-into-view only on expand, and the full renderInterventions/updateReplyBox path keeping header and options visible. <!--#1a30ecceb64afb6e|e3b0c44298fc1c14-->
 
 ### `tests/frontend/reply_send_error_handling.test.mjs` (text) — Frontend regression test module (registerReplySendErrorHandlingTests, loaded by test_app_pure.mjs) that locks the issue #193 fix so a delivered reply whose post-success render or rank computation throws still reports success and records the optimistic echo, while genuine fetch rejections and non-2xx responses stay on the network/failure toast path. <!--#2c71b4c8561ebda9|e3b0c44298fc1c14-->
 
-### `tests/frontend/round_usage.test.mjs` (text) — A frontend unit-test module exporting `registerRoundUsageTests(ctx)` that plugs into the shared DOM-stubbed harness to verify per-round token-usage footnotes — covering `buildRoundUsageFootnote` (『本轮/累计』wording, null/fallback/NaN handling), `accumulateRoundUsageByStep` (per-step running sums, de-dup, cache/cost), `normalizeRecord.tokenUsage` extraction, and the assistant render paths that append the footnote only when a round carried usage. <!--#ab6a327bef60adfe|e3b0c44298fc1c14-->
+### `tests/frontend/round_usage.test.mjs` (text) — A Node/ESM frontend test module (registered into the shared test_app_pure.mjs harness) that verifies the WebUI's per-round token-usage footnote logic — buildRoundUsageFootnote wording and fallbacks, accumulateRoundUsageByStep running sums/de-dup across step_ids, normalizeRecord exposing token_usage, and the render paths that append the footnote only when a round actually consumed tokens. <!--#0cc8735aa45ae038|e3b0c44298fc1c14-->
 
 ### `tests/frontend/self_check_passed_fallback.test.mjs` (text) — Dual-mode Node test module (importable by test_app_pure.mjs or runnable standalone with its own DOM stub) that regression-tests the self_check step-report renderer's status-bar label, asserting it derives the issue count from issues.length when actionable_count is absent so it never shows ✓ PASSED above a non-empty issue list, while preserving the actionable wording, the failed-status override, and non-array issues robustness. <!--#c6af71310ddc4975|e3b0c44298fc1c14-->
 
 ### `tests/frontend/snapshot_discovery_dedup.test.mjs` (text) — A frontend test module (registered into the pure-app harness) verifying the worktree-mode snapshot discovery de-dup guard: `dedupeSnapshotDiscovery` collapses duplicate split-root discovery records to one while preserving order and leaving non-discovery steps (and `mergeHistoryResponse`'s full/delta paths) untouched. <!--#764e39b968f71150|e3b0c44298fc1c14-->
 
-### `tests/frontend/step_grouping.test.mjs` (text) — Frontend unit test module (Group G2) exporting registerStepGroupingTests, which verifies that the app's renderConversation collapses all records sharing one step_id into a single visual step region in timestamp order, that terminal/intermediate events (step_completed/step_failed/step_output) don't spawn duplicate regions, that a new step_id starts a fresh region, that incremental append preserves one region, and that the terminal report supersedes the running status anchor. <!--#323071f6b7111950|e3b0c44298fc1c14-->
+### `tests/frontend/step_grouping.test.mjs` (text) — Frontend unit-test module (Group G2) registering assertions that WebUI conversation rendering collapses all records sharing one step_id into a single visual step region — terminal/intermediate events don't spawn duplicate headers, a new step_id does start a new region, live incremental appends keep one region with the terminal report superseding the running anchor, and every bubble carries the shared step-type identity class. <!--#912f3e672c4eb6c8|e3b0c44298fc1c14-->
 
 ### `tests/frontend/step_lane_continuity.test.mjs` (text) — A Group-G2 read-only test module (registered via registerStepLaneContinuityTests into the test_app_pure.mjs harness) that asserts against style.css that the continuous step-lane background feature is implemented as a z-index:-1 ::before underlay driven by a --step-lane custom property, verifying the 13 per-type lane colours, the ±7px overflow underlay, stacking-context/positioning requirements, and the specificity-tripled boundary rules that suppress lane overflow at step and container edges. <!--#333f6ebba9595d35|e3b0c44298fc1c14-->
 
-### `tests/frontend/step_started_region.test.mjs` (text) — A frontend unit-test module (Group G2, loaded by test_app_pure.mjs) that verifies the web UI renders a lightweight RUNNING step region from a `step_started` record alone — covering normalizeRecord producing a report-less running anchor, non-LLM steps (test/commit/spec_gate) surfacing a step-header plus '进行中' status row, the affordance-free (no report/fold/raw/chip) status row with icon+text, and stepStatusDisplay's status-to-{icon,text} mapping with case-insensitive fallbacks. <!--#43445c4a741bbc14|e3b0c44298fc1c14-->
+### `tests/frontend/step_started_region.test.mjs` (text) — A Node-based frontend test module (registered by the shared test_app_pure.mjs harness) that verifies the WebUI's handling of `step_started` records — that normalizeRecord turns them into a lightweight running anchor with no report card, that non-LLM steps (test/commit/spec_gate) render their step region and an "In progress" status row as soon as they start, and that the row carries an icon plus step-type class with no fold/raw/chip affordances. <!--#f2a1e040cb348576|e3b0c44298fc1c14-->
 
 ### `tests/frontend/sticky_step_header.test.mjs` (text) — Group G5 frontend test module exporting registerStickyStepHeaderTests, which exercises the sticky floating step-header feature—covering the pure viewport-to-step logic (computeStickyStep, stickyScrollTarget) and the DOM wiring (ensureStickyHeaderMounted) across both running-flow and history views—via the shared DOM stub and check() reporter from the parent test_app_pure.mjs harness. <!--#02fe3a9837f4bd0c|e3b0c44298fc1c14-->
 
-### `tests/frontend/test_app_pure.mjs` (text) — Headless Node test suite (with a custom check() reporter and minimal fake DOM/select stubs) that exercises the frontend app.js pure helpers end-to-end — record/kind normalization, prompt splitting, assistant/report renderer registries and raw-fold disclosure layers, renderConversation incremental/partial-stream reconciliation, history snapshot/delta merging and dedup, intervention and reply-box lifecycle, and empty-state rendering — and registers a long list of sibling test modules against the shared app module. <!--#36b34de7488005ab|56688fc7db04e61c-->
+### `tests/frontend/test_app_pure.mjs` (text) — The Node-based frontend test entrypoint for the WebUI: it defines a lightweight `check()` reporter and a minimal DOM/document stub, then exercises app.js's pure helpers and rendering contracts end-to-end — record normalization and step_type resolution, renderer/report registries, conversation bubble rendering with incremental appends, live-partial accumulation and supersession, snapshot/live-append merging and dedup, raw-payload disclosure toggles, and intervention/reply-box UI — and finally registers the ~20 sibling frontend test modules against the shared app module and stub. <!--#ec573498dd349e14|a6d9981e3360b27f-->
 - `chunk:1` (chunk) [degraded:chunk] — Module header, custom `check()` reporter, and the first test groups: role-based collapse (isCollapsibleRole), record normalization, chip labels, kind normalization, intervention computation, and flow_id-filtered pendingCalls. <!--#0ec1427f8ec730ac-->
 - `chunk:2` (chunk) [degraded:chunk] — FakeSelect/FakeHint/global Option stubs plus tests for populateProjectSelect (zero/one/many roots + manual sentinel), isValidAbsolutePath, and the three-/two-segment splitUserPromptByMarker prompt-splitting helper. <!--#749168ce0fa6e90d-->
 - `chunk:3` (chunk) [degraded:chunk] — Tests for the assistant/report renderer registries (STEP_ASSISTANT_RENDERERS, makeStructuredAssistantRenderer null-fallbacks), extractStructuredJson, and normalizeRecord handling of step_completed/step_failed events and envelope step_type precedence. <!--#de284f63448e8f3e-->
@@ -12750,30 +15734,30 @@
 - `chunk:11` (chunk) [degraded:chunk] — mergeHistoryResponse full-fallback tests for local-echo preservation/reconciliation and timestamp-gated in-place rewrites (live rewrite wins over stale snapshot, authoritative snapshot wins over older live copy), plus stable-identity ordinal merge and unrecognized-delivery-defaults-to-full. <!--#60387db4243bb56d-->
 - `chunk:12` (chunk) [degraded:chunk] — stableMergeByTimestamp tests for (timestamp, index) stable interleaving and equal-timestamp tie-breaking (REST delta before held WS, baseline-held record first), plus mergeHistoryResponse delta/equal-timestamp full-rebuild, all-duplicate/empty-delta noops, and progress-token normalization. <!--#72861b9a68be0fbc-->
 - `chunk:13` (chunk) [degraded:chunk] — Assistant conversation-record rendering tests: plan_tasks reuses the plan renderer, text/malformed-JSON turns fall back to prose with an always-present 查看原始 toggle, and the two-layer structured-result + single raw-fold model (with throwing-renderer graceful degradation). <!--#aedbf71c709b06e2-->
-- `chunk:14` (chunk) [degraded:chunk] — Assistant no-result-turn (thinking shown inline, no folds) tests, renderGenericOutputs Q1 tests (long-string preview, nested-dict expansion, empty input, default-report reuse), and the G2 plan-report field-by-field proposal/design section rendering (no raw JSON pre blob). <!--#718adc783f86d428-->
-- `chunk:15` (chunk) [degraded:chunk] — String-proposal plan fallback test plus the 2b/2c result-identification tests distinguishing tool-call JSON (stays inline thinking) from real result JSON (structured Layer-1 view with single 查看原始 fold), including mixed tool-call-then-result and narrative+result cases. <!--#2e4ab0bd5a6b3ae9-->
-- `chunk:16` (chunk) [degraded:chunk] — Step-scoped result identification and the three 查看原始 raw-fold-always-present tests for the assistant inline branch, the collapsible system-role chip, and the non-collapsible other-role row (each showing the raw NDJSON payload or falling back to the content literal). <!--#60f37e8c2aa43429-->
-- `chunk:17` (chunk) [degraded:chunk] — Tests that the assistant bubble carries exactly one raw toggle (no row-level duplicate), that envelope-first step_type drives the implement renderer and IMPLEMENT/group-suffixed step headers, legacy commit_summary degrades gracefully, and stepHeaderLabel/rebuildStepHeaders render paradigm names; begins the user-turn three-layer disclosure fixtures. <!--#f1181eed9360f2f9-->
-- `chunk:18` (chunk) [degraded:chunk] — User-turn Layer-3 raw-fold tests: the envelope record is reachable when no raw payload exists, makeRawToggle keeps its null contract while makeUserRawToggle never returns null (preferring a raw_ndjson payload), empty-content chips reach the envelope, and marker-based two-segment layouts degrade to a collapsed system-prompt chip. <!--#9abf9bb4f4df47f9-->
-- `chunk:19` (chunk) [degraded:chunk] — historyListEmptyState pure-state tests (has-sessions/loading-refresh/loading-connect/empty-confirmed) and renderHistoryList DOM tests rendering the corresponding empty/loading/connecting hints, refresh bars, and live-partial bracket-format tool markers as .tool-marker blocks. <!--#e50a8ae13dfe02ab-->
-- `chunk:20` (chunk) [degraded:chunk] — Registration block that imports and wires up a long series of sibling test modules (step grouping, sticky headers, agent badges, reply-box collapse, token/round usage, history flow-id/usage, user/issue management, mobile responsiveness, reply-send errors, confirm chips, adjudicate review, self-check fallback) against the shared app module, check reporter, and DOM stub. <!--#e39cbda8ee242d08-->
-- `chunk:21` (chunk) [degraded:chunk] — Registers more sibling test modules (progression fallback retry, history-index delta merge, issue #217 and #260 scroll anchors) and begins the narrative rich-chip tests verifying that structured-result assistant turns with raw_json tool_use/tool_result pairs render upgraded ✓ tool chips instead of bare bracket markers. <!--#c444cf2659d7b3de-->
-- `chunk:22` (chunk) [degraded:chunk] — Tests that narrative rendering does not duplicate the result JSON when raw_json text blocks carry the full body, then covers the pure history-grouping helpers groupHistorySessionsByProjectRoot (recency-ordered buckets, in-bucket order, created_at fallback, UNKNOWN bucket) and introduces pickDefaultHistoryProjectRoot. <!--#bfc0fd6b2aac829a-->
-- `chunk:23` (chunk) [degraded:chunk] — Tests pickDefaultHistoryProjectRoot fallback/preservation behavior and renderHistoryList's project-select dropdown: default selection, change-event card filtering, UNKNOWN-option gating, single-project suppression, and the start of the collectJsonRegions embedded-fence regression guards. <!--#a8d3e4a73fcbc6ce-->
-- `chunk:24` (chunk) [degraded:chunk] — Regression tests for collectJsonRegions/extractResultJson structural robustness: trailing bare JSON, ```json-fenced results, non-JSON code fences in prose, and JSON whose string fields embed literal triple backticks must all yield exactly the result region with a clean narrative. <!--#57b9c132258de063-->
-- `chunk:25` (chunk) [degraded:chunk] — More collectJsonRegions guards: a real new-bug-session fixture with embedded backticks, plus the G1 relaxed-gate cases where a bare substantive JSON object followed by trailing prose registers while stray arrays/empty objects stay unregistered. <!--#5f07385ef4879144-->
-- `chunk:26` (chunk) [degraded:chunk] — G4 acceptance tests: confirm-step assistant outputs render as kv rows (not raw JSON code blocks), plan step reports expand proposal fields into named sections instead of a JSON pre, and tool-chip detail toggles are direct chip children ordered before the details panel. <!--#1e851aa36271682f-->
-- `chunk:27` (chunk) [degraded:chunk] — Tests the G4 interjection lifecycle (computeInterventions dedupe of synthetic vs real pending calls, applyInterjectionEvent pending→consumed transitions and cross-flow isolation), the reportList index-threading regression (GNaN fix), and implement-report summary numbering plus long-path list rendering. <!--#0a6480c7e731b8cc-->
-- `chunk:28` (chunk) [degraded:chunk] — Tests the spec_gate report renderer (FAILED routes with fix instructions and command summaries), spec_gate/charter_freshness STEP_RESULT_FIELDS recognition, the charter_freshness report's auto-updated diff / advisory / fresh shapes, and the formatAgentBadgeText agent-model badge helper. <!--#ed4d8692cb1100d7-->
-- `chunk:29` (chunk) [degraded:chunk] — Sets up the async reconnect-incremental test harness (checkAsync, canned/deferred/queued fetch installers, bubble-node helpers) and starts the running-flow view tests: first-open full load, reconnect delta appending without DOM clearing, and WS-append/REST-delta dedupe. <!--#a231250367376bb0-->
-- `chunk:30` (chunk) [degraded:chunk] — Async running-flow reconnect tests: all-duplicate deltas are render no-ops, the newest overlapping refresh wins, a WS full replacement invalidates stale REST responses, failed refreshes leave the conversation untouched, and optimistic local echoes reconcile to one user record or survive full fallbacks. <!--#d3fd5910bd8eccf1-->
-- `chunk:31` (chunk) [degraded:chunk] — Tests the silent (self-heal) flow refresh: full rebuild with signature write-back when data changes, scroll-position preservation for scrolled-up readers versus stick-to-bottom for bottom followers, no-op on failed requests, and reply-region state never being touched. <!--#5b53f5032ba63f95-->
-- `chunk:32` (chunk) [degraded:chunk] — Tests the G3 3-second periodic full-snapshot self-heal: pollFlowView issues both a detail pull and a full no-after history pull, unchanged snapshots skip the DOM rebuild entirely, sameRenderedConversation compares by identity/length/content/order, and an active poll demotes the progression grace fallback. <!--#e1641bdffb32ae89-->
-- `chunk:33` (chunk) [degraded:chunk] — Tests that a commit result landing after the terminal status flip is still self-healed in (no post-terminal latch), then starts the history-detail view reconnect tests: delta appends without clearing the DOM, all-duplicate deltas are no-ops, full fallbacks rebuild, and overlapping refreshes resolve newest-wins. <!--#99dc2251a7529970-->
-- `chunk:34` (chunk) [degraded:chunk] — Tests history-detail failure resilience and the G3 stale-offset regression guards: a held progress token with no backing records forces a full reload instead of echoing a stale after= offset, and exiting/re-entering an old session still walks the delta path with complete records; buildNewFlowBody coverage begins. <!--#04dd08d26dafbbfb-->
-- `chunk:35` (chunk) [degraded:chunk] — Tests the pure path/label helpers projectBasename and projectDisplayLabel (trailing slashes, Windows separators, worktree-root '(worktree)' labeling, degenerate input) and the G2 machinesSignature/flowsSignature render-guard hashes that change per visible field and ignore unpainted ones. <!--#4b8db55aa7431bac-->
-- `chunk:36` (chunk) [degraded:chunk] — Tests that renderMachines/renderFlows skip DOM rebuilds when signatures are unchanged (node identity preserved) but rebuild on real changes, that flows without a flow_id are skipped (empty-card defense), and that flowSidebarSignature is sensitive to status, progress, step history, resumability, and machine id. <!--#3712bbe616a92a4c-->
-- `chunk:37` (chunk) [degraded:chunk] — Tests interventionsSignature's sensitivity to every pending-call and reply-state field, and that renderInterventions skips all DOM mutation on identical data (preventing textarea reflow jank) while phase/target/pendingSend changes each force a rebuild; ends with the passed-count summary line. <!--#ca12f88ebe00329e-->
+- `chunk:14` (chunk) [degraded:chunk] — Tests the WebUI generic-outputs renderer — long-string preview with char count, i18n-localized chrome (char-count suffix, grep/glob pattern-path header), nested-dict expansion, empty-input handling, the default report's reuse of it — plus the plan report rendering proposal/design as field sections instead of a raw JSON blob. <!--#59f739a865e79b4c-->
+- `chunk:15` (chunk) [degraded:chunk] — Tests design-field fallback rendering and proposal-only plan reports, then opens the message-paradigm suite pinning that only a turn carrying a real step result renders a structured result card while tool-call-only JSON turns stay inline as visible thinking with an always-present 查看原始 fold. <!--#6b9aad1d82109c7e-->
+- `chunk:16` (chunk) [degraded:chunk] — Tests the unified "every conversation message can view raw" contract — the assistant inline branch, system-role chip, and empty-result turns all expose a 查看原始 toggle that prefers the raw NDJSON payload and falls back to the record's own content. <!--#a884537f714f12a3-->
+- `chunk:17` (chunk) [degraded:chunk] — Tests that non-conversation synthetic UI (step_completed report cards, group_status markers) carries no 查看原始 affordance, that group-suffixed implement records dispatch to the structured renderer on the real daemon envelope, and that step headers show paradigm names (IMPLEMENT, SELF CHECK) rather than raw step ids. <!--#1c80dadaccd8cabc-->
+- `chunk:18` (chunk) [degraded:chunk] — Tests the user-side three-layer disclosure: the Layer-3 raw toggle nests inside the expanded Layer-2 area, and when no raw payload exists makeUserRawToggle falls back to the original .jsonl envelope (never null) while the shared makeRawToggle keeps its null contract. <!--#b916cc7c902fc2d3-->
+- `chunk:19` (chunk) [degraded:chunk] — Tests strict chronological bubble ordering across role/step boundaries with per-contiguous-run step headers, plus the history-list empty-state tri-split (loading-refresh / loading-connect / empty-confirmed) both as a pure helper and as rendered hints. <!--#5fd08e046365ee83-->
+- `chunk:20` (chunk) [degraded:chunk] — Tests tool-error bracket markers in live partial bubbles, then registers the ~20 sibling frontend test modules (tool-chip state, group status, index progress, sticky headers, token usage, user/issue management, mobile responsive, reply-send errors, …) against the shared app module and DOM stub. <!--#a629c5e2b78ebf0b-->
+- `chunk:21` (chunk) [degraded:chunk] — Registers the remaining sibling test modules — issue-#209 real-frame replay, ordinal-identity marker dedup, incremental-drop self-heal, progression-refresh fallback and its periodic retry, history-index delta merge, and scroll-anchor preservation — then opens the narrative-chip suite for structured-result assistant turns. <!--#0576f3d10be10846-->
+- `chunk:22` (chunk) [degraded:chunk] — Tests that structured assistant renderers render rich tool chips when raw_json is available, fall back to bare bracket chips when it isn't, and never duplicate the result JSON into the narrative when the raw_json text block carries the full assistant body. <!--#f685f0ad65f86e08-->
+- `chunk:23` (chunk) [degraded:chunk] — Tests the History view's project grouping — groupHistorySessionsByProjectRoot bucketing/latestTs and pickDefaultHistoryProjectRoot selection — plus renderHistoryList's project-select dropdown, card filtering on change, and the pinned UNKNOWN bucket. <!--#792e61a672134313-->
+- `chunk:24` (chunk) [degraded:chunk] — Tests collectJsonRegions / extractResultJson structural robustness: bare vs fenced JSON, prose with non-JSON code fences, multiple tool-call segments before the real result, and narrative excision of every JSON region. <!--#f8f57ce1e59dfad1-->
+- `chunk:25` (chunk) [degraded:chunk] — Continues the JSON-region suite with multi-fence tool-call-then-result selection, pure-prose returning no regions, a real bug-session fixture with embedded backticks, and the G1 regression where a bare JSON object followed by trailing prose was silently dropped. <!--#8dd0ed2a1b737096-->
+- `chunk:26` (chunk) [degraded:chunk] — Tests bare tool-call JSON preceding a bare result, then the G4 rendering-fix trio: confirm-step outputs as kv rows (not a raw json code block), plan step_completed proposal fields as sections, and tool-chip toggle DOM ordering. <!--#56f01bbad62255b2-->
+- `chunk:27` (chunk) [degraded:chunk] — Tests the local-interjection lifecycle (FIFO call_id binding, consume, duplicate-chip suppression, phase events, cross-flow isolation) and reportList index threading including the implement Summary's G1…Gn numbering. <!--#b9c10e10c2d9e027-->
+- `chunk:28` (chunk) [degraded:chunk] — Tests the spec_gate step report (pass/skip/route annotations with no raw pytest dump, result-field recognition, header label) and the charter_freshness report (auto-update diff vs advisory shape). <!--#ed4dcedb77c6de6a-->
+- `chunk:29` (chunk) [degraded:chunk] — Tests agent/model badge normalization and backward compatibility, then sets up the async fetch-stub harness and begins the reconnect incremental-load suite proving a delta append echoes the progress token without clearing the DOM. <!--#be79bb56f0c06800-->
+- `chunk:30` (chunk) [degraded:chunk] — Tests running-flow reconnect edge cases — full-fallback rebuilds, newest-refresh-wins races, WS full replacement invalidating a stale REST response, failed requests leaving the conversation intact, and local echo collapsing onto the daemon's authoritative user record. <!--#5c93d64f3c7e7b18-->
+- `chunk:31` (chunk) [degraded:chunk] — Tests the silent self-heal refresh: no container clear or Loading placeholder before data arrives, signature-check pulls echoing progress token and bundle signature, scroll-position preservation vs bottom-sticking, and untouched state on failure. <!--#633850fe3c61d9b7-->
+- `chunk:32` (chunk) [degraded:chunk] — Tests reply-context prompt detail lazy-fetch (clipped prompts pull the full body on expand, short ones don't) and the pollFlowView self-heal pull that renders a full snapshot while skipping the DOM rebuild when nothing changed. <!--#0239f2aae0b3cb9f-->
+- `chunk:33` (chunk) [degraded:chunk] — Tests that a terminal-status flow keeps issuing self-heal pulls every tick (so a late-arriving commit result is still rendered) and begins the history-detail reconnect suite mirroring the flow-view delta/append behavior. <!--#911eb081ed5652be-->
+- `chunk:34` (chunk) [degraded:chunk] — Tests history-detail reconnect races and failures, plus the G3 stale-offset guard: a held progress token with no backing records forces a full load, and exit/re-enter of an old session reloads the complete record set. <!--#317b69ef71e9031b-->
+- `chunk:35` (chunk) [degraded:chunk] — Tests the diff-aware render-guard primitives — renderSignature stability/discrimination, resetRenderSignatures, projectBasename / projectDisplayLabel (worktree-aware), and machinesSignature field sensitivity. <!--#b520c02655bd2a18-->
+- `chunk:36` (chunk) [degraded:chunk] — Tests flowsSignature discrimination and that renderMachines / renderFlows skip the DOM rebuild on unchanged data (preserving node identity) while rebuilding on real changes, skipping flow_id-less entries, plus flowSidebarSignature. <!--#56e9248e729aac76-->
+- `chunk:37` (chunk) [degraded:chunk] — Tests interventionsSignature per-field discrimination across entry and reply-state fields, and that renderInterventions performs a zero-DOM skip on an unchanged status_update (the reply-textarea jank fix) while still rebuilding on real changes. <!--#615395e8dae97a80-->
 
 ### `tests/frontend/test_merge_step_render.py` (python) — Guardrail tests pinning the G8 retirement of the webui `merging` bypass status: asserting the flag/anchor/helper/badge/schema-field are fully gone across app.js, CSS, models, chat_history, schema, and daemon→server propagation (while still tolerating legacy archived `merging` rows), and that worktree-merge progress now renders through first-class `merge_integrate`/`version_reconcile` steps. <!--#3b3972be6fc484a0|01a65972095f4450-->
 - `_read` (function) — Test helper that asserts a path is a file and returns its UTF-8 text contents. <!--#ac919bc71595921b-->
@@ -12797,9 +15781,9 @@
 
 ### `tests/frontend/tool_chip_state.test.mjs` (text) — A Group-G3 frontend test module exporting `registerToolChipStateTests` that the parent `test_app_pure.mjs` harness invokes to verify the tool-chip rendering state machine — covering in-flight chips from tool_use partials, success/failure upgrades of the same chip by tool_use_id (with folded vs. default-expanded detail panels), the legacy no-tool_use_id fallback that avoids zombie chips, and structural equivalence between live-partial and final raw_json chip sequences. <!--#13fcafb1a7f80d84|e3b0c44298fc1c14-->
 
-### `tests/frontend/user_mgmt.test.mjs` (text) — A DOM-free frontend test module (Group G3) exposing registerUserMgmtTests() for the parent test_app_pure.mjs harness, asserting that app.userRowModel's pure row-action gating (self cannot be deleted/demoted, non-local providers cannot reset passwords, admin-vs-user labelling, robustness on malformed input, and the admin-only visibility projection) stays in lockstep with the server-side user guards. <!--#cbd5aa6a4c10d200|e3b0c44298fc1c14-->
+### `tests/frontend/user_mgmt.test.mjs` (text) — Frontend unit tests (Group G3) registered into the shared pure-app harness that verify `app.userRowModel`'s per-row action gating — self cannot be deleted or demoted, non-local providers cannot be password-reset, admin/user labelling, malformed-input tolerance, display-name fallback — plus the invariant that the admin-only UI surface is gated on `is_admin` rather than mere authentication. <!--#d3ce2365f1c310a1|e3b0c44298fc1c14-->
 
-### `tests/frontend/waiting_for_lock.test.mjs` (text) — DOM-free frontend test module that registers a suite (via registerWaitingForLockTests) verifying app.js's waiting-for-lock running sub-state: normalizeRecord/rendering of streamed waiting_for_lock events as a 等待锁 status row, its supersession by step_started, and the pure helpers isWaitingForLock and flowStatusLabel. <!--#8708d0cee7de6b90|e3b0c44298fc1c14-->
+### `tests/frontend/waiting_for_lock.test.mjs` (text) — DOM-free Node test module (registered into the shared tests/frontend/test_app_pure.mjs harness) that verifies the WebUI's waiting-for-lock running sub-state — normalizeRecord/renderConversation handling of streamed `waiting_for_lock` records, its supersession by a later step_started anchor, stepStatusDisplay mapping, and the isWaitingForLock / flowStatusLabel pure helpers in app.js. <!--#684484f90af1d7f7|e3b0c44298fc1c14-->
 
 ### `tests/frontend/worktree_discovery_multiround.test.mjs` (text) — Frontend regression tests (Group G3) pinning that multi-round worktree discovery chat history renders every round: daemon-disambiguated per-file step_ids keep primary/sidecar recordKeys distinct through reconcileAppendRecords, and dedupeSnapshotDiscovery drops only byte-identical clones rather than content-differing records sharing a stepId#ordinal. <!--#6f6a657871498573|e3b0c44298fc1c14-->
 
@@ -12825,7 +15809,7 @@
 ### `tests/frontend/fixtures/issue_209/daemon_frames.json` (json) — A frontend test fixture for issue 209 holding three sequential daemon frames (disc-stream-1 full, then disc-paused and resume-burst appends) that replay a live flow's step lifecycle and streaming records—discovery start, pause, resume, and the analyze/plan steps—each with its label, flow_id, full/append mode, cursor offsets, and per-tick step message records for driving the streaming-render tests. <!--#6452542e6ab3bc61|62cd6bcd001c169e-->
 - `frames` (json-key) — The top-level array of tick-by-tick daemon frames, each with a label, flow_id, full/append mode, cursor, and the list of step lifecycle/stream records the daemon delivers for that tick. <!--#f1ad1c2f8a174daf-->
 
-## `tests/server/` — Pytest package holding server-side test modules for the web console: static-asset rendering/spec guardrails for app.js/CSS/HTML (test_app_js_rendering.py, which also bridges the Node app.js suite) and the GET /api/history signature-check endpoint's three-state delivery, gzip, throttle, and bundle-versioning behavior (test_history_endpoint_signature.py). <!--#585f8535175a74f0|70a514d4daebfb8c-->
+## `tests/server/` — Test package for the SE3 web console server, covering the static frontend assets (app.js/CSS/HTML rendering guardrails plus the bridged Node assertion suite), the history signature-check endpoint's full/not-modified/delta delivery and throttling, and the WebUI i18n locale manifest endpoint and locale discovery. <!--#9298a7ec70a08dc2|194046198bbe0b6b-->
 
 ### `tests/server/__init__.py` (python) — Empty package initializer marking the tests/server directory as a Python package for server-related test modules. <!--#e3b0c44298fc1c14|e3b0c44298fc1c14-->
 
@@ -12850,7 +15834,7 @@
 - `test_group_status_record_renders_agent_model_badge` (function) — G4 guard that renderGroupStatusRecord surfaces the group's agent/model via the shared formatAgentBadgeText helper and an .agent-badge element. <!--#2e96ee17bd819f15-->
 - `test_group_status_normalize_extracts_agent_model` (function) — Asserts that the `group_status` branch of app.js's `normalizeRecord` extracts `agent_name`/`model_name` from the record (via `pick(...)`) instead of hard-coding them to null, so the group marker can display its live agent/model badge. <!--#310f309c363b6736-->
 - `test_step_event_record_stays_affordance_free` (function) — Asserts renderStepEventRecord (the step_completed/failed report card) carries no conversation view-raw affordance, keeping it a non-conversation surface. <!--#fdb7329924f80e90-->
-- `_read_style_css` (function) — Test helper that asserts the style.css asset file exists and returns its UTF-8 text content. <!--#7d64fc2c5b704c6d-->
+- `_read_style_css` (function) — Test helper that asserts the WebUI's style.css exists and returns its contents as a UTF-8 string for assertions about rendered styling. <!--#7d64fc2c5b704c6d-->
 - `_extract_rule_body` (function) — Helper that regex-extracts the brace body of a CSS rule matching a given selector from stylesheet text. <!--#4c659f4f6b908cea-->
 - `test_conversation_code_block_wraps_long_lines` (function) — Parametrized test asserting conversation code-block selectors wrap long lines (pre-wrap + per-character break) and avoid an inner `overflow-x: auto` scrollbar. <!--#79f915cbae91c80d-->
 - `test_step_report_list_items_wrap_long_text` (function) — Asserts the .step-report__list li rule declares a per-character break rule and avoids overflow-x:auto so long paths wrap inside the report card. <!--#0acdec0878895754-->
@@ -12886,3 +15870,10 @@
 - `test_full_pull_throttle_rate_limits_repeated_misses` (function) — Async ServerState unit test verifying full_pull_throttled/mark_full_pull rate-limiting: a just-marked pull is throttled within the floor window, a zero window never throttles, and other flows are unaffected. <!--#af4149617b098746-->
 - `test_signature_moves_with_record_count` (function) — Unit test that bundle_signature acts as a content-version stamp — stable for identical state but changing when the record count or generation changes. <!--#957941fed00fb82c-->
 - `test_not_modified_requires_a_signature` (function) — State-level test that not_modified is opt-in: an echoed token with a matching signature yields not_modified, while the same token without a signature degrades to a backward-compatible empty delta. <!--#79e7169a88e59d49-->
+
+### `tests/server/test_i18n_manifest.py` (python) — Test module covering the WebUI i18n language manifest: that GET /i18n/index.json is served unauthenticated with the shipped locales and their endonym labels, and that locale discovery picks up newly dropped locale files, skips malformed ones without failing, and falls back to the locale code when a dictionary lacks its own endonym. <!--#e2c55a4c21f2071b|d4f69fbb458c2644-->
+- `client` (function) — Pytest fixture yielding a FastAPI TestClient over an authenticated app instance for exercising the server's i18n manifest endpoint. <!--#70dfbef10d3a1b20-->
+- `test_manifest_lists_the_shipped_languages_unauthenticated` (function) — Asserts GET /i18n/index.json is reachable without login and lists the shipped locales (en-US, zh-CN) with their endonym labels drawn from each dictionary's own lang.<code> entry. <!--#5a4e889eb159af68-->
+- `test_a_new_locale_file_is_discovered_without_a_code_change` (function) — Verifies _discover_ui_languages() picks up any locale JSON dropped into the locales directory (e.g. a new fr-FR) with no code change, returning code/label pairs in sorted order. <!--#e0154532f83fbeb6-->
+- `test_a_malformed_locale_file_is_skipped_not_fatal` (function) — Verifies an unparseable locale JSON file is silently skipped rather than raising, so discovery still returns the valid locales. <!--#0bfed6196ed4a788-->
+- `test_a_locale_without_its_own_endonym_labels_itself` (function) — Verifies a locale dictionary lacking its own lang.<code> endonym falls back to using the locale code itself as the display label. <!--#b33ded6decdd61a0-->

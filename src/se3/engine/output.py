@@ -11,6 +11,8 @@ import json
 import logging
 from typing import Any, Dict, Optional, Union
 
+from ..i18n import t
+
 # Import display utilities for user-facing output
 from .display import (
     get_console,
@@ -84,11 +86,11 @@ def format_error(error: Union[str, Exception], context: Optional[Dict[str, Any]]
     else:
         error_msg = str(error)
 
-    lines = [f"[bold red]Error:[/bold red] {error_msg}"]
+    lines = [f"[bold red]{t('output.error.prefix')}[/bold red] {error_msg}"]
 
     if context:
         lines.append("")
-        lines.append("[bold]Context:[/bold]")
+        lines.append(f"[bold]{t('output.context.heading')}[/bold]")
         for key, value in context.items():
             lines.append(f"  {key}: {value}")
 
@@ -103,7 +105,7 @@ def display_error(error: Union[str, Exception], context: Optional[Dict[str, Any]
         context: Optional context information
     """
     content = format_error(error, context)
-    render_full(content, title="Error")
+    render_full(content, title=t("output.panel.error"))
 
 
 def display_success(message: str, details: Optional[Dict[str, Any]] = None) -> None:
@@ -121,4 +123,4 @@ def display_success(message: str, details: Optional[Dict[str, Any]] = None) -> N
             lines.append(f"[bold]{key}:[/bold] {value}")
 
     content = "\n".join(lines)
-    render_full(content, title="Success")
+    render_full(content, title=t("output.panel.success"))

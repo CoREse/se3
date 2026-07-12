@@ -1,5 +1,15 @@
 # SE3 Framework Version History
 
+## 11.21.0 - 2026-07-12
+
+- Add an extensible i18n framework shipping zh-CN and en-US locale packs, where en-US is the baseline holding the full key set and any missing key falls back to it
+- Localize all user-visible CLI output — cli.py, every command under src/se3/commands/, and the `se3 run` console progress, status, and confirmation text — through the new translation layer
+- Localize the WebUI: all hardcoded strings in index.html and app.js (buttons, labels, toasts, confirmation dialogs, error messages) now render from language JSON, with a top-bar language switcher
+- Resolve the CLI language from SE3_LANG, then project se3.yaml `language.language`, then ~/.se3/config.yaml, then system locale (LANG/LC_ALL), falling back to en-US; no new command-line flag is introduced
+- Persist the WebUI language as a per-user client preference in localStorage, auto-detecting from navigator.language on first visit; it is independent of any project's se3.yaml
+- Unify `language.language` as the single human-language setting driving both CLI UI text and the existing LLM human-facing output injection (summarize / discovery / confirmed steps)
+- Redefine `language.spec_language` as the knowledge-asset language and inject it into the charter_freshness and code-index summary prompts, so charter.md and code-index entries are written in the configured language going forward
+- Remove the legacy, unconsumed `human_call.language` key from the se3.yaml template and documentation; use `language.language` instead
 ## 11.20.1 - 2026-07-11
 
 - Fix worktree discovery chat history disappearing after the first round — all rounds now stay visible in the live console instead of only via the verdict-detail view

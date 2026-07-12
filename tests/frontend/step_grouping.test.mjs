@@ -62,7 +62,7 @@ export function registerStepGroupingTests(ctx) {
       "all same-step_id records must collapse into ONE region header");
     // Once the terminal report lands, the running status anchor is superseded
     // (the completed report IS the region's final state) — the region must NOT
-    // show both "进行中" and a completed report at once.
+    // show both "In progress" and a completed report at once.
     assert.ok(!findOne(container, "step-status-row"),
       "running anchor is superseded by the terminal report");
     assert.ok(findOne(container, "step-report"), "terminal report card present");
@@ -177,7 +177,7 @@ export function registerStepGroupingTests(ctx) {
   });
 
   // ---- (c2c) running → completed: no stale 进行中 beside the report --------
-  check("G2 running → completed supersedes the 进行中 anchor (issue 1)", () => {
+  check("G2 running → completed supersedes the In progress anchor (issue 1)", () => {
     const sid = "05_test_aa";
     const container = document.createElement("div");
     app.renderConversation(container, [
@@ -194,7 +194,7 @@ export function registerStepGroupingTests(ctx) {
   // The resumed run re-arms a 'running' anchor (later ts than the paused one),
   // so before completion the region reads 进行中; once the terminal report
   // lands every status anchor is superseded — no stale 已暂停 / 进行中 remains.
-  check("G2 resumed step shows 进行中, then the terminal report supersedes all anchors", () => {
+  check("G2 resumed step shows In progress, then the terminal report supersedes all anchors", () => {
     const sid = "01_discovery_ab";
     const container = document.createElement("div");
     // Mid-resume: running → paused → running (no terminal yet).
@@ -206,8 +206,8 @@ export function registerStepGroupingTests(ctx) {
     let rows = findAll(container, "step-status-row");
     assert.equal(rows.length, 1, "exactly one surviving status row mid-resume");
     let text = findOne(rows[0], "step-status-text");
-    assert.ok(text && text.textContent.includes("进行中"),
-      `resumed step must read 进行中, got ${text && text.textContent}`);
+    assert.ok(text && text.textContent.includes("In progress"),
+      `resumed step must read In progress, got ${text && text.textContent}`);
     // Now the step completes: every lifecycle anchor is superseded.
     app.renderConversation(container, [
       startedRecord(sid, "discovery", 1),
@@ -216,7 +216,7 @@ export function registerStepGroupingTests(ctx) {
       completedRecord(sid, "discovery", 4),
     ], false);
     assert.ok(!findOne(container, "step-status-row"),
-      "no 已暂停 / 进行中 anchor remains after completion");
+      "no Paused / In progress anchor remains after completion");
     assert.ok(findOne(container, "step-report"), "the completed report is shown");
     assert.deepEqual(stepHeaders(container), ["DISCOVERY"], "still one region");
   });
@@ -235,8 +235,8 @@ export function registerStepGroupingTests(ctx) {
     const rows = findAll(container, "step-status-row");
     assert.equal(rows.length, 1, "the running anchor is superseded by the paused row");
     const text = findOne(rows[0], "step-status-text");
-    assert.ok(text && text.textContent.includes("已暂停"),
-      `the surviving status row must read 已暂停, got ${text && text.textContent}`);
+    assert.ok(text && text.textContent.includes("Paused"),
+      `the surviving status row must read Paused, got ${text && text.textContent}`);
     assert.ok(rows[0].classList.contains("step-status-paused"));
   });
 
@@ -261,7 +261,7 @@ export function registerStepGroupingTests(ctx) {
   // its own terminal report, but the SECOND A region (a fresh contiguous run,
   // no terminal yet) must keep its 进行中 anchor — the terminal of the first
   // region must NOT reach across and strip the live second region's status.
-  check("G2 terminal supersede is scoped to its own region (re-running step keeps 进行中)", () => {
+  check("G2 terminal supersede is scoped to its own region (re-running step keeps In progress)", () => {
     const a = "06_self_check_aa";
     const b = "07_implement_bb";
     const container = document.createElement("div");
@@ -281,8 +281,8 @@ export function registerStepGroupingTests(ctx) {
     assert.equal(rows.length, 1,
       "only the live re-run region keeps a status anchor");
     const text = findOne(rows[0], "step-status-text");
-    assert.ok(text && text.textContent.includes("进行中"),
-      `the re-running region must read 进行中, got ${text && text.textContent}`);
+    assert.ok(text && text.textContent.includes("In progress"),
+      `the re-running region must read In progress, got ${text && text.textContent}`);
     // Two terminal report cards (the two completed runs) are present.
     assert.equal(findAll(container, "step-report").length, 2);
   });
@@ -308,14 +308,14 @@ export function registerStepGroupingTests(ctx) {
       "A's running anchor must be superseded by its terminal across the split");
     // A's completed report card is present.
     assert.equal(findAll(container, "step-report").length, 1,
-      "the completed step shows its report, not a stale 进行中");
+      "the completed step shows its report, not a stale In progress");
   });
 
   // ---- (c2g) split terminal does NOT strip a later fresh execution --------
   // started(A) → record(B) → completed(A) → record(B2) → started(A again).
   // The first A execution's terminal supersedes only its OWN preceding anchor;
   // the later, still-running A execution keeps its 进行中.
-  check("G2 split terminal preserves a later fresh execution's 进行中 (issue 2)", () => {
+  check("G2 split terminal preserves a later fresh execution's In progress (issue 2)", () => {
     const a = "06_self_check_aa";
     const b = "07_implement_bb";
     const container = document.createElement("div");
@@ -330,8 +330,8 @@ export function registerStepGroupingTests(ctx) {
     assert.equal(rows.length, 1,
       "only the later fresh A execution keeps a status anchor");
     const text = findOne(rows[0], "step-status-text");
-    assert.ok(text && text.textContent.includes("进行中"),
-      `the later A execution must read 进行中, got ${text && text.textContent}`);
+    assert.ok(text && text.textContent.includes("In progress"),
+      `the later A execution must read In progress, got ${text && text.textContent}`);
     assert.equal(findAll(container, "step-report").length, 1,
       "the first A execution's terminal report is present");
   });
@@ -365,12 +365,12 @@ export function registerStepGroupingTests(ctx) {
   });
 
   // ==========================================================================
-  // Group G3: final report card "结果/总结" semantic titling.
+  // Group G3: final report card "Result/Summary" semantic titling.
   //
   // The final report card of a step must read as that step's *result* (结果) /
   // *summary* (总结), never as a bare step name that a reader could mistake for
   // a brand-new step heading (the IMPLEMENT ambiguity). These cover:
-  //   (f) reportCardTitle is a pure `<步骤> · 结果/总结` builder; summarize → 总结.
+  //   (f) reportCardTitle is a pure `<步骤> · Result/Summary` builder; summarize → 总结.
   //   (g) IMPLEMENT's card title carries the explicit 结果/总结 semantic.
   //   (h) NO step's report-card title equals its bare step-region (header) title.
   //   (i) The rendered card DOM's title carries the suffix and never matches a
@@ -382,31 +382,31 @@ export function registerStepGroupingTests(ctx) {
   // Every StepType that has a header label — the bare step-region titles a card
   // must never collide with.
   const ALL_STEP_TYPES = Object.keys(app.STEP_HEADER_TITLES);
-  const SUFFIX_RE = /[·]\s*(结果|总结)\s*$/;
+  const SUFFIX_RE = /[·]\s*(Result|Summary)\s*$/;
 
   // ---- (f) reportCardTitle pure builder -----------------------------------
-  check("G3 reportCardTitle builds `<步骤> · 结果/总结` with a result/summary suffix", () => {
+  check("G3 reportCardTitle builds `<步骤> · Result/Summary` with a result/summary suffix", () => {
     for (const t of ALL_STEP_TYPES) {
       const title = app.reportCardTitle(t);
       assert.match(title, SUFFIX_RE,
-        `reportCardTitle(${t}) must end with · 结果 or · 总结, got "${title}"`);
+        `reportCardTitle(${t}) must end with · Result or · Summary, got "${title}"`);
       // The base label is the title-case STEP_REPORT_TITLES entry, distinct
       // from the uppercase step-header label.
       assert.ok(title.startsWith(app.STEP_REPORT_TITLES[t] + " · "),
         `reportCardTitle(${t}) must prefix the title-case report label`);
     }
     // summarize (itself a summary step) reads 总结; a non-summary step reads 结果.
-    assert.ok(app.reportCardTitle("summarize").endsWith("· 总结"),
-      "summarize card reads 总结");
-    assert.ok(app.reportCardTitle("implement").endsWith("· 结果"),
-      "implement card reads 结果");
+    assert.ok(app.reportCardTitle("summarize").endsWith("· Summary"),
+      "summarize card reads Summary");
+    assert.ok(app.reportCardTitle("implement").endsWith("· Result"),
+      "implement card reads Result");
     // Unknown step type degrades without throwing and still carries a suffix.
     assert.match(app.reportCardTitle("totally_unknown"), SUFFIX_RE);
     assert.match(app.reportCardTitle(""), SUFFIX_RE);
   });
 
   // ---- (g) IMPLEMENT card title is unambiguous result/summary -------------
-  check("G3 IMPLEMENT report-card title carries explicit 结果/总结 semantic", () => {
+  check("G3 IMPLEMENT report-card title carries explicit Result/Summary semantic", () => {
     const title = app.reportCardTitle("implement");
     assert.match(title, SUFFIX_RE,
       `implement card title must be result/summary, got "${title}"`);
@@ -441,7 +441,7 @@ export function registerStepGroupingTests(ctx) {
       const titleEl = findOne(card, "step-report__title");
       assert.ok(titleEl, `card for ${t} has a title element`);
       assert.match(titleEl.textContent, SUFFIX_RE,
-        `rendered ${t} card title must end with 结果/总结, got "${titleEl.textContent}"`);
+        `rendered ${t} card title must end with Result/Summary, got "${titleEl.textContent}"`);
       // The rendered card title is never identical to a step-region header
       // (so it is never read as a new step starting).
       assert.ok(!ALL_STEP_TYPES.some((o) => app.STEP_HEADER_TITLES[o] === titleEl.textContent),

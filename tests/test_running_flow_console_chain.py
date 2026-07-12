@@ -610,7 +610,8 @@ def test_step_completed_appended_to_existing_step_file_is_picked_up():
 #   * a one-click confirm option whose value is the literal "1" the gate's
 #     ``== "1"`` check expects,
 #   * context.flow_id so the daemon's per-flow filter scopes it,
-#   * a prompt with the "输入 1 确认" textual fallback + refined description.
+#   * a prompt with the "Type 1 to confirm" textual fallback (i18n-rendered;
+#     en-US under the test locale) + refined description.
 # Submitting the confirm action ("1") must drive the gate to continue.
 # ---------------------------------------------------------------------------
 
@@ -638,7 +639,7 @@ class _NullPersistence:
 
 def test_discovery_confirm_call_payload_kind_options_context():
     """The confirm call carries kind/options/context.flow_id and the textual
-    "输入 1 确认" hint + refined description in its prompt."""
+    confirm hint + refined description in its prompt."""
     from se3.commands.run import _write_discovery_call
     from se3.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
 
@@ -660,7 +661,7 @@ def test_discovery_confirm_call_payload_kind_options_context():
         assert data["context"]["step_id"] == step.step_id
         assert data["context"]["refined_description"] == "Add a /health endpoint"
         # The textual fallback + refined description live in the prompt.
-        assert "输入 1 确认" in data["prompt"]
+        assert "Type 1 to confirm" in data["prompt"]
         assert "Add a /health endpoint" in data["prompt"]
         # Exactly one confirm option, whose value is the gate's literal "1".
         assert len(data["options"]) == 1
@@ -717,7 +718,7 @@ def test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options():
         assert call.kind == CALL_KIND_DISCOVERY_CONFIRM
         assert call.context.get("flow_id") == "F-disc"
         assert call.options and call.options[0]["value"] == "1"
-        assert "输入 1 确认" in call.prompt
+        assert "Type 1 to confirm" in call.prompt
 
 
 def test_discovery_confirm_submission_gates_on_one():

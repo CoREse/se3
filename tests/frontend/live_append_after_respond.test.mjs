@@ -351,7 +351,7 @@ export function registerLiveAppendAfterRespondTests(ctx) {
   // Regression two (G2): answering a DISCOVERY pause must un-freeze the live  //
   // view — the post-answer `running` step_started anchor (and the records     //
   // that follow it) must reach the live append channel and supersede the      //
-  // frozen "已暂停" row, without exit/re-entry forcing a full rebuild.         //
+  // frozen "Paused" row, without exit/re-entry forcing a full rebuild.         //
   //                                                                           //
   // Root cause: recordKey omitted the lifecycle `status`, so a `paused`       //
   // step_status and the resumed `running` step_started for the SAME step at   //
@@ -398,7 +398,7 @@ export function registerLiveAppendAfterRespondTests(ctx) {
     assert.equal(app.normalizeRecord(fresh[0]).status, "running");
   });
 
-  check("G2 post-answer running anchor supersedes the frozen 已暂停 row via the live append", () => {
+  check("G2 post-answer running anchor supersedes the frozen Paused row via the live append", () => {
     const flowId = "flow-g2-resume";
     // The live view is frozen on the discovery pause: an assistant question plus
     // the paused lifecycle anchor are the last things rendered.
@@ -425,9 +425,9 @@ export function registerLiveAppendAfterRespondTests(ctx) {
     // The paused row is superseded by the running anchor (one truthful status),
     // and the post-answer assistant turn streamed in — no re-entry needed.
     rows = statusRows(c);
-    assert.equal(rows.length, 1, "the 已暂停 row is superseded, not stacked");
+    assert.equal(rows.length, 1, "the Paused row is superseded, not stacked");
     assert.ok(rows[0].classList.contains("step-status-running"),
-      "the surviving anchor reads 进行中 after the resume");
+      "the surviving anchor reads In progress after the resume");
     const asstBodies = app.state.flowConversationRecords
       .map(app.normalizeRecord).filter((n) => n.role === "assistant").map((n) => n.content);
     assert.deepEqual(asstBodies,
@@ -513,7 +513,7 @@ export function registerLiveAppendAfterRespondTests(ctx) {
       "live append converges to the same single anchor as the full rebuild");
     assert.ok(fullRows[0].classList.contains("step-status-running"));
     assert.ok(liveRows[0].classList.contains("step-status-running"),
-      "both paths settle on 进行中, never frozen on 已暂停");
+      "both paths settle on In progress, never frozen on Paused");
   });
 }
 

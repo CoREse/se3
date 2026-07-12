@@ -80,14 +80,14 @@ export function registerUserMgmtTests(ctx) {
     assert.equal(admin.adminLabel, "admin");
     assert.equal(admin.adminClass, "admin");
     assert.equal(admin.toggleAdminTo, false, "an admin toggles down to non-admin");
-    assert.equal(admin.toggleAdminLabel, "取消管理员");
+    assert.equal(admin.toggleAdminLabel, "Remove admin");
 
     const plain = app.userRowModel(user({ is_admin: false }), SELF);
     assert.equal(plain.isAdmin, false);
     assert.equal(plain.adminLabel, "user");
     assert.equal(plain.adminClass, "user");
     assert.equal(plain.toggleAdminTo, true, "a user toggles up to admin");
-    assert.equal(plain.toggleAdminLabel, "设为管理员");
+    assert.equal(plain.toggleAdminLabel, "Set as admin");
   });
 
   // ---- (d) robustness on missing / malformed input ------------------------

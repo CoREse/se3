@@ -576,7 +576,9 @@ function ownerLabel(identity) {
     (typeof identity.display_name === "string" && identity.display_name.trim()) ||
     (typeof identity.owner_id === "string" && identity.owner_id) ||
     "unknown";
-  return identity.is_admin ? `${name} (admin)` : name;
+  return identity.is_admin
+    ? tf("topbar.ownerAdmin", `${name} (admin)`, { name })
+    : name;
 }
 
 // A request is "unauthorized" exactly when the server answered 401. Used to
@@ -612,9 +614,13 @@ function visibleMachinesForOwner(machines, identity) {
 function daemonKeyRowModel(key) {
   key = key && typeof key === "object" ? key : {};
   const revoked = Boolean(key.revoked || key.revoked_at);
+  const trimmedLabel = (typeof key.label === "string" && key.label.trim()) || "";
   return {
     keyId: key.key_id || "",
-    label: (typeof key.label === "string" && key.label.trim()) || "(unlabeled)",
+    // `unlabeled` lets the renderer localize the placeholder via tf() at paint
+    // time (the model itself is I18N-free so its pure tests stay deterministic).
+    unlabeled: !trimmedLabel,
+    label: trimmedLabel || "(unlabeled)",
     revoked,
     statusLabel: revoked ? "Revoked" : "Active",
     statusClass: revoked ? "revoked" : "active",
@@ -670,7 +676,7 @@ function userRowModel(user, currentOwnerId) {
     canToggleAdmin: Boolean(ownerId) && !isSelf,
     // The label/intent of the admin toggle action for this row.
     toggleAdminTo: !isAdmin,
-    toggleAdminLabel: isAdmin ? "取消管理员" : "设为管理员",
+    toggleAdminLabel: isAdmin ? "Remove admin" : "Set as admin",
   };
 }
 
@@ -693,11 +699,16 @@ function el(tag, cls, text) {
 // itself, and a failed fetch degrades to an empty dict — so a network hiccup or
 // an untranslated key never blanks the UI: index.html keeps English text as the
 // in-markup default until a dictionary paints over it. Adding a language is a
-// data change: drop a new locales JSON and register its code in SUPPORTED — no
-// business code changes.
+// pure data change: drop a new static/i18n/<code>.json and the server's
+// /i18n/index.json manifest (derived from the locale files on disk) advertises
+// it — SUPPORTED below is only the offline bootstrap registry, used until the
+// manifest lands (or if it cannot be fetched, e.g. a plain static host).
 
 const I18N = {
   SUPPORTED: ["en-US", "zh-CN"],
+  // Endonyms (each language's own name) for the switcher options, seeded for the
+  // bootstrap registry and replaced by the manifest's labels once it loads.
+  LABELS: { "en-US": "English", "zh-CN": "中文" },
   FALLBACK: "en-US",
   STORAGE_KEY: "se3_ui_lang",
   lang: "en-US",
@@ -710,21 +721,38 @@ const I18N = {
 
   // Pure: choose the initial language from a stored preference, the browser's
   // navigator.language, and the supported-language list. Precedence:
-  // localStorage exact match > navigator.language exact match > navigator
-  // primary-subtag prefix match (e.g. "zh" / "zh-TW" → "zh-CN") > en-US.
+  // localStorage > navigator.language > en-US.
+  // WHY: the two layers match differently on purpose. A stored preference is an
+  // explicit user choice, so it is honored only when it names a supported
+  // language exactly (case-insensitively) — an unsupported stored code lands on
+  // en-US rather than being silently re-pointed at a same-primary-subtag
+  // neighbour ("zh-TW" must NOT become "zh-CN") and never falls through to the
+  // lower-priority browser locale. navigator.language, by contrast, is a mere
+  // hint about the environment, so guessing by primary subtag ("zh" / "zh-TW"
+  // → "zh-CN") is the desired auto-detection there.
   resolveInitialLang(stored, navLang, supported) {
     const list = Array.isArray(supported) && supported.length
       ? supported : ["en-US"];
-    if (stored && list.includes(stored)) return stored;
-    const nav = String(navLang || "");
-    if (nav && list.includes(nav)) return nav;
-    const prim = nav.split("-")[0].toLowerCase();
+    const base = list.includes("en-US") ? "en-US" : list[0];
+    const exact = (code) => {
+      const c = String(code || "").toLowerCase();
+      if (!c) return null;
+      for (const item of list) {
+        if (item.toLowerCase() === c) return item;
+      }
+      return null;
+    };
+    if (stored) return exact(stored) || base;
+    const c = String(navLang || "");
+    const hit = exact(c);
+    if (hit) return hit;
+    const prim = c.split("-")[0].toLowerCase();
     if (prim) {
-      for (const code of list) {
-        if (code.split("-")[0].toLowerCase() === prim) return code;
+      for (const item of list) {
+        if (item.split("-")[0].toLowerCase() === prim) return item;
       }
     }
-    return list.includes("en-US") ? "en-US" : list[0];
+    return base;
   },
 
   // Pure: resolve `key` against the active dict, then the baseline dict, then
@@ -762,6 +790,48 @@ const I18N = {
     return null;
   },
 
+  // Pure: normalize a language manifest into [{code, label}]. Accepts either the
+  // server's {languages: [{code, label}]} shape or a bare ["en-US", ...] array,
+  // and returns [] for anything unusable so the caller keeps its bootstrap
+  // registry. en-US is force-included: it is the per-key fallback dictionary, so
+  // it must always be loadable even if a deployment's manifest omits it.
+  parseManifest(data) {
+    const raw = Array.isArray(data) ? data
+      : (data && Array.isArray(data.languages)) ? data.languages : [];
+    const out = [];
+    const seen = new Set();
+    for (const item of raw) {
+      const code = typeof item === "string" ? item
+        : (item && typeof item.code === "string") ? item.code : null;
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      const label = (item && typeof item.label === "string" && item.label)
+        ? item.label : code;
+      out.push({ code, label });
+    }
+    if (out.length && !seen.has(I18N.FALLBACK)) {
+      out.unshift({ code: I18N.FALLBACK, label: "English" });
+    }
+    return out;
+  },
+
+  // Fetch the server-side language registry and adopt it as SUPPORTED/LABELS, so
+  // a newly dropped locale JSON becomes selectable with no frontend edit. Never
+  // rejects: a failed/empty manifest leaves the bootstrap registry in place.
+  async loadManifest() {
+    try {
+      const resp = await fetch("/i18n/index.json");
+      if (!resp.ok) throw new Error(`i18n manifest ${resp.status}`);
+      const langs = I18N.parseManifest(await resp.json());
+      if (langs.length) {
+        I18N.SUPPORTED = langs.map((l) => l.code);
+        I18N.LABELS = {};
+        for (const l of langs) I18N.LABELS[l.code] = l.label;
+      }
+    } catch (_) { /* keep the built-in bootstrap registry */ }
+    return I18N.SUPPORTED;
+  },
+
   // Fetch one language's dictionary JSON, caching it on `dicts`. A failed fetch
   // resolves to an empty dict (never rejects) so callers degrade to the
   // baseline / in-markup English rather than throwing on a boot-time network
@@ -789,7 +859,10 @@ const I18N = {
     const scope = root
       || (typeof document !== "undefined" ? document : null);
     if (!scope || typeof scope.querySelectorAll !== "function") return;
-    const sels = ["[data-i18n]", "[data-i18n-placeholder]", "[data-i18n-title]"];
+    const sels = [
+      "[data-i18n]", "[data-i18n-html]", "[data-i18n-placeholder]",
+      "[data-i18n-title]", "[data-i18n-aria-label]",
+    ];
     for (const sel of sels) {
       for (const node of scope.querySelectorAll(sel)) {
         // resolve() (not t()) so a missing key leaves the in-markup fallback.
@@ -815,9 +888,10 @@ const I18N = {
 };
 
 // Pure per-node attribute application (exported for the DOM-stub tests): reads
-// data-i18n (→ textContent), data-i18n-placeholder (→ placeholder), and
-// data-i18n-title (→ title) and writes the translated string via `tfn`. Each
-// attribute is independent so a single node can localize several surfaces.
+// data-i18n (→ textContent), data-i18n-html (→ innerHTML), data-i18n-placeholder
+// (→ placeholder), and data-i18n-title (→ title) and writes the translated
+// string via `tfn`. Each attribute is independent so a single node can localize
+// several surfaces.
 function applyNodeTranslations(node, tfn) {
   if (!node || typeof node.getAttribute !== "function") return;
   // A null/undefined result means "no translation" — leave the in-markup
@@ -826,6 +900,17 @@ function applyNodeTranslations(node, tfn) {
   if (textKey) {
     const v = tfn(textKey);
     if (v != null) node.textContent = v;
+  }
+  // data-i18n-html is the escape hatch for copy that carries inline markup
+  // (<strong>/<code> emphasis inside a hint paragraph): textContent would
+  // destroy the child elements, so those nodes opt into an innerHTML write and
+  // their catalog values carry the same inline tags. The values are our own
+  // static locale JSON (never user/LLM content), so this is not an injection
+  // surface — never point data-i18n-html at dynamic data.
+  const htmlKey = node.getAttribute("data-i18n-html");
+  if (htmlKey) {
+    const v = tfn(htmlKey);
+    if (v != null) node.innerHTML = v;
   }
   const phKey = node.getAttribute("data-i18n-placeholder");
   if (phKey) {
@@ -845,6 +930,15 @@ function applyNodeTranslations(node, tfn) {
       if (typeof node.setAttribute === "function") {
         node.setAttribute("title", v);
       }
+    }
+  }
+  // Screen-reader labels: aria-label is invisible chrome, so it needs the same
+  // localization path as visible copy or a zh-CN user hears English labels.
+  const ariaKey = node.getAttribute("data-i18n-aria-label");
+  if (ariaKey) {
+    const v = tfn(ariaKey);
+    if (v != null && typeof node.setAttribute === "function") {
+      node.setAttribute("aria-label", v);
     }
   }
 }
@@ -868,6 +962,15 @@ function statusClass(status) {
   return "unknown";
 }
 
+// Localized badge/label text for a raw flow status token. Unknown tokens (a
+// status a newer daemon emits) pass through verbatim rather than resolving to a
+// raw dotted key, so the UI degrades to the server's own word. Pure.
+function flowStatusText(status) {
+  const raw = String(status == null ? "" : status).trim();
+  if (!raw) return tf("status.flow.unknown", "unknown");
+  return tf("status.flow." + raw.toLowerCase(), raw);
+}
+
 // Whether a flow has started but is blocked acquiring the project's
 // main-worktree mutex before its first code-touching step. The flow stays
 // RUNNING — this is purely a running sub-state so a queued flow reads as
@@ -885,8 +988,10 @@ function isWaitingForLock(flow) {
 // flow's own merge_integrate / version_reconcile steps, which render through
 // the normal step lifecycle, so there is no merging override here. Pure.
 function flowStatusLabel(flow) {
-  const base = (flow && flow.status) || "unknown";
-  return isWaitingForLock(flow) ? `${base} · waiting for lock` : base;
+  const base = flowStatusText(flow && flow.status);
+  return isWaitingForLock(flow)
+    ? `${base} · ${tf("flow.statusWaitingLock", "waiting for lock")}`
+    : base;
 }
 
 // A flow is "active" while it can still consume a human interaction — it is
@@ -1004,10 +1109,39 @@ function showToast(kind, message) {
 // WebSocket client (with exponential-backoff reconnect)
 // ---------------------------------------------------------------------------
 
-function setConnStatus(kind, label) {
+// The badge shows LIVE connection state, so its copy cannot come from a
+// data-i18n attribute: applyStaticTranslations() repaints those on every
+// language switch and would rewrite a "connected" badge back to "connecting…".
+// Remembering the state as an i18n KEY (not a resolved string) lets
+// repaintConnStatus() re-render the CURRENT status in the new language after a
+// switch, and lets the boot-time dictionary load localize whatever the WS
+// lifecycle has already painted.
+let connStatus = {
+  kind: "connecting",
+  key: "conn.connecting",
+  fallback: "connecting…",
+};
+
+function setConnStatus(kind, key, fallback) {
+  connStatus = { kind, key, fallback };
+  repaintConnStatus();
+}
+
+// Re-render the badge from the remembered state (used after a language switch
+// and once the boot-time dictionaries land).
+function repaintConnStatus() {
   const node = $("conn-status");
-  node.className = "conn conn-" + kind;
-  node.textContent = label;
+  if (!node) return;
+  node.className = "conn conn-" + connStatus.kind;
+  node.textContent = tf(connStatus.key, connStatus.fallback);
+}
+
+// The browser tab title is user-visible copy, but <title> lives outside the
+// body scope applyStaticTranslations walks, so it is localized explicitly (on
+// boot and after every language switch) from the same key as the in-page h1.
+function applyDocumentTitle() {
+  if (typeof document === "undefined") return;
+  document.title = tf("topbar.title", "SE3 Control Plane");
 }
 
 // Toggle the "data may be stale" banners shown over the history view and the
@@ -1062,7 +1196,11 @@ function teardownWs() {
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws/ui`;
-  setConnStatus("connecting", reconnectAttempts ? "reconnecting…" : "connecting…");
+  setConnStatus(
+    "connecting",
+    reconnectAttempts ? "conn.reconnecting" : "conn.connecting",
+    reconnectAttempts ? "reconnecting…" : "connecting…",
+  );
 
   ws = new WebSocket(url);
 
@@ -1071,7 +1209,7 @@ function connect() {
     // showing stale data — clear the banners and refresh what's open.
     const wasReconnect = reconnectAttempts > 0 || state.connStale;
     reconnectAttempts = 0;
-    setConnStatus("connected", "connected");
+    setConnStatus("connected", "conn.connected", "connected");
     setStale(false);
     if (wasReconnect) {
       if (state.selectedFlowId) {
@@ -1127,7 +1265,7 @@ function connect() {
   };
 
   ws.onclose = () => {
-    setConnStatus("disconnected", "disconnected");
+    setConnStatus("disconnected", "conn.disconnected", "disconnected");
     setStale(true);
     scheduleReconnect();
   };
@@ -1213,9 +1351,9 @@ function applyInterjectionEvent(msg) {
   if (isOpenFlow && !state.interjectionToastsSeen[toastKey]) {
     state.interjectionToastsSeen[toastKey] = true;
     if (phase === "pending") {
-      showToast("info", tf("toast.interjectionDelivered", "插话已送达,等待 flow 消费"));
+      showToast("info", tf("toast.interjectionDelivered", "Interjection delivered — waiting for the flow to consume it"));
     } else if (phase === "consumed") {
-      showToast("success", tf("toast.interjectionConsumed", "插话已被消费"));
+      showToast("success", tf("toast.interjectionConsumed", "Interjection consumed"));
     }
   }
 
@@ -1289,9 +1427,9 @@ function applyInterjectionEvent(msg) {
 function applySpawnFailed(msg) {
   if (!msg || typeof msg !== "object") return;
   const projectRoot = String(msg.project_root || "");
-  const reason = String(msg.error || "unknown error");
+  const reason = String(msg.error || tf("toast.unknownError", "unknown error"));
   const where = projectRoot ? ` (${projectRoot})` : "";
-  showToast("error", tf("toast.taskLaunchFailed", `启动任务失败${where}：${reason}`, { where, reason }));
+  showToast("error", tf("toast.taskLaunchFailed", `Failed to launch task${where}: ${reason}`, { where, reason }));
 }
 
 // Clear pending-Send bookkeeping and re-enable the Send button via a
@@ -1452,9 +1590,12 @@ function applyHistoryPanelAction(action) {
 
 // Derive a display title from an issue object. Prefers the explicit `title`
 // field; falls back to the first non-empty line of `description`; final
-// fallback is "untitled". Pure — no DOM, no state.
+// fallback is the localized "untitled" placeholder (the in-code literal is the
+// built-in fallback, so the pure unit tests — which load no dictionary — still
+// see "untitled"). Issue text itself is data and is never translated.
 function issueDisplayTitle(issue) {
-  if (!issue || typeof issue !== "object") return "untitled";
+  const untitled = () => tf("issue.untitled", "untitled");
+  if (!issue || typeof issue !== "object") return untitled();
   if (issue.title && typeof issue.title === "string" && issue.title.trim()) {
     return issue.title.trim();
   }
@@ -1462,7 +1603,7 @@ function issueDisplayTitle(issue) {
     const first = issue.description.split(/\r?\n/).find((l) => l.trim());
     if (first) return first.trim().slice(0, 80);
   }
-  return "untitled";
+  return untitled();
 }
 
 // Derive a filesystem-style slug from an issue's display title. Lowercased,
@@ -1591,6 +1732,27 @@ function issueStatusClass(status) {
   }
 }
 
+// Catalog keys for the issue-status badge text. The raw status tokens carry
+// characters that make poor dotted keys ("won't-fix"), so the mapping is
+// explicit rather than derived from the token. Pure.
+const ISSUE_STATUS_KEYS = {
+  "open": "status.issue.open",
+  "in-progress": "status.issue.inProgress",
+  "resolved": "status.issue.resolved",
+  "won't-fix": "status.issue.wontFix",
+  "closed": "status.issue.closed",
+};
+
+// Localized badge text for a raw issue status. An unknown token (a status this
+// frontend does not know yet) falls back to the token itself, so a newer
+// backend still reads as *something* rather than blanking. Pure.
+function issueStatusText(status) {
+  const raw = String(status == null ? "" : status).trim();
+  if (!raw) return tf("status.issue.open", "open");
+  const key = ISSUE_STATUS_KEYS[raw.toLowerCase()];
+  return key ? tf(key, raw) : raw;
+}
+
 // CSS class for issue priority badges. Pure.
 function issuePriorityClass(priority) {
   switch (priority) {
@@ -1602,8 +1764,37 @@ function issuePriorityClass(priority) {
   }
 }
 
+// Localized text for the enum-like issue tokens (type / priority / source). The
+// catalogs carry only the tokens this frontend knows; anything else (a type a
+// project invents, a source a newer backend emits) passes through verbatim so it
+// still reads as *something* rather than as a raw catalog key. Pure.
+function issueTypeText(type) {
+  const raw = String(type == null ? "" : type).trim();
+  if (!raw) return "";
+  return KNOWN_ISSUE_TYPES.includes(raw.toLowerCase())
+    ? tf("issueType." + raw.toLowerCase(), raw)
+    : raw;
+}
+
+function issuePriorityText(priority) {
+  const raw = String(priority == null ? "" : priority).trim();
+  if (!raw) return "";
+  return KNOWN_ISSUE_PRIORITIES.includes(raw.toLowerCase())
+    ? tf("issuePriority." + raw.toLowerCase(), raw)
+    : raw;
+}
+
+function issueSourceText(source) {
+  const raw = String(source == null ? "" : source).trim() || "system";
+  return KNOWN_ISSUE_SOURCES.includes(raw.toLowerCase())
+    ? tf("issueSource." + raw.toLowerCase(), raw)
+    : raw;
+}
+
 // Known issue types for the create/edit form dropdown.
 const KNOWN_ISSUE_TYPES = ["bug", "feature", "enhancement", "idea", "task"];
+const KNOWN_ISSUE_PRIORITIES = ["critical", "high", "medium", "low"];
+const KNOWN_ISSUE_SOURCES = ["human", "system"];
 
 // Resolve the owning machine_id from an issue object returned by GET /api/issues.
 // The REST API attaches the key as ``machine_id`` (state.py get_issues); older
@@ -1669,10 +1860,19 @@ function buildIssueActionBody(machineId, projectRoot, reason) {
 // Human-readable disable reasons for the "从此 issue 启动 flow" entry, keyed by
 // the non-open statuses an issue can carry.  Used by issueLaunchModel.  Pure.
 const ISSUE_LAUNCH_DISABLED_REASONS = {
-  "in-progress": "issue 进行中，无法重复启动 flow",
-  "resolved": "issue 已解决，无需启动 flow",
-  "won't-fix": "issue 已标记为不修复",
-  "closed": "issue 已关闭",
+  "in-progress": "The issue is in progress; a flow cannot be launched again.",
+  "resolved": "The issue is resolved; no flow needs to be launched.",
+  "won't-fix": "The issue is marked won't-fix.",
+  "closed": "The issue is closed.",
+};
+
+// i18n keys parallel to ISSUE_LAUNCH_DISABLED_REASONS; resolved at render time
+// (the map literal is the offline fallback). Keyed identically.
+const ISSUE_LAUNCH_DISABLED_REASON_KEYS = {
+  "in-progress": "issueLaunch.reason.inProgress",
+  "resolved": "issueLaunch.reason.resolved",
+  "won't-fix": "issueLaunch.reason.wontFix",
+  "closed": "issueLaunch.reason.closed",
 };
 
 // Decide whether a flow may be started from an issue.  Only `open` issues are
@@ -1680,20 +1880,33 @@ const ISSUE_LAUNCH_DISABLED_REASONS = {
 // reason (the daemon still performs the final in-progress race check).  Pure.
 function issueLaunchModel(iss) {
   if (!iss || typeof iss !== "object") {
-    return { canLaunch: false, reason: "issue 无效" };
+    return {
+      canLaunch: false,
+      reason: "Invalid issue.",
+      reasonKey: "issueLaunch.reason.invalid",
+    };
   }
   const status = (iss.status == null ? "open" : String(iss.status))
     .trim()
     .toLowerCase() || "open";
   if (status === "open") {
-    return { canLaunch: true, reason: "" };
+    return { canLaunch: true, reason: "", reasonKey: "" };
   }
+  const known = ISSUE_LAUNCH_DISABLED_REASONS[status];
   return {
     canLaunch: false,
-    reason:
-      ISSUE_LAUNCH_DISABLED_REASONS[status] ||
-      `issue 状态为 ${status}，无法启动 flow`,
+    reason: known || `The issue status is ${status}; a flow cannot be launched.`,
+    reasonKey: ISSUE_LAUNCH_DISABLED_REASON_KEYS[status]
+      || "issueLaunch.reason.unknownStatus",
+    reasonParams: known ? undefined : { status },
   };
+}
+
+// Resolve an issueLaunchModel's disable reason via I18N at render time, falling
+// back to the model's built-in reason literal (offline / test env).
+function issueLaunchReasonText(model) {
+  if (!model || !model.reasonKey) return model ? model.reason : "";
+  return tf(model.reasonKey, model.reason, model.reasonParams);
 }
 
 // Build the ``POST /api/flows`` body for starting a flow from an issue.  The
@@ -1744,7 +1957,7 @@ function renderMachines() {
   list.innerHTML = "";
 
   if (!state.machines.length) {
-    list.appendChild(el("li", "empty", "No machines connected."));
+    list.appendChild(el("li", "empty", tf("machines.empty", "No machines connected.")));
     return;
   }
 
@@ -1755,8 +1968,11 @@ function renderMachines() {
     const dot = el("span", "dot " + (m.online ? "online" : "offline"));
     const name = el("span", "machine-name", m.hostname || m.machine_id);
     name.title = m.machine_id;
+    const flowN = (m.flows || []).length;
     const count = el("span", "machine-count",
-      `${(m.flows || []).length} flow${(m.flows || []).length === 1 ? "" : "s"}`);
+      flowN === 1
+        ? tf("machines.flowCount", `${flowN} flow`, { n: flowN })
+        : tf("machines.flowCountPlural", `${flowN} flows`, { n: flowN }));
 
     li.append(dot, name, count);
     li.addEventListener("click", () => {
@@ -1790,12 +2006,12 @@ function renderFlows() {
   panel.innerHTML = "";
 
   if (!machine) {
-    heading.textContent = "Flows";
-    panel.appendChild(el("p", "empty", "Select a machine to view its flows."));
+    heading.textContent = tf("flows.title", "Flows");
+    panel.appendChild(el("p", "empty", tf("flows.empty", "Select a machine to view its flows.")));
     return;
   }
 
-  heading.textContent = `Flows — ${machine.hostname || machine.machine_id}`;
+  heading.textContent = tf("flows.titleWith", `Flows — ${machine.hostname || machine.machine_id}`, { name: machine.hostname || machine.machine_id });
   // Defense-in-depth against the empty ``(untitled flow)`` card: skip any flow
   // lacking a flow_id so it neither renders a card nor blocks the empty state.
   // The root cause is fixed in DaemonAggregator._snapshot_for_root (an archived
@@ -1803,7 +2019,7 @@ function renderFlows() {
   // stale/legacy source must still never reach renderFlowCard.
   const flows = (machine.flows || []).filter((f) => f && f.flow_id);
   if (!flows.length) {
-    panel.appendChild(el("p", "empty", "No flows on this machine."));
+    panel.appendChild(el("p", "empty", tf("flows.emptyMachine", "No flows on this machine.")));
     return;
   }
 
@@ -1817,13 +2033,13 @@ function renderFlowCard(flow) {
 
   const head = el("div", "flow-card-head");
   const task = el("span", "flow-task",
-    flow.task_description || flow.flow_id || "(untitled flow)");
+    flow.task_description || flow.flow_id || tf("flow.untitled", "(untitled flow)"));
   task.title = flow.task_description || "";
   // The badge is the raw flow status; isWaitingForLock keeps its own separate ⏳
   // badge below (it layers on running). The worktree merge no longer has a
   // completed-body badge override — it renders as the flow's own merge steps.
   const sc = statusClass(flow.status);
-  const badge = el("span", "badge badge-" + sc, flow.status || "unknown");
+  const badge = el("span", "badge badge-" + sc, flowStatusText(flow.status));
   head.append(task, badge);
 
   // Annotate which project this running flow belongs to so flows from
@@ -1842,13 +2058,15 @@ function renderFlowCard(flow) {
   if (isWaitingForLock(flow)) {
     // Surface the running·waiting-for-lock sub-state so a queued flow reads as
     // running rather than appearing stalled.
-    head.appendChild(el("span", "badge badge-waiting-lock", "⏳ waiting for lock"));
+    head.appendChild(el("span", "badge badge-waiting-lock",
+      tf("flow.badge.waitingLock", "⏳ waiting for lock")));
   }
 
   if (hasPendingCall(flow)) {
     // The badge is purely an indicator — opening the flow view (below) is the
     // single entry point; there is no separate context-less call modal.
-    head.appendChild(el("span", "badge badge-call", "⚠ needs response"));
+    head.appendChild(el("span", "badge badge-call",
+      tf("flow.badge.needsResponse", "⚠ needs response")));
   }
 
   const resumeBtn = makeResumeButton(flow);
@@ -1865,7 +2083,8 @@ function renderFlowCard(flow) {
   const meta = el("div", "flow-meta");
   meta.append(
     el("span", null, flow.current_step
-      ? `step: ${flow.current_step}`
+      ? tf("flow.card.currentStep", `step: ${flow.current_step}`,
+        { step: flow.current_step })
       : (flow.task_type || "")),
     el("span", null, `${flow.current_step_index || 0}/${flow.total_steps || 0}`),
   );
@@ -1965,8 +2184,8 @@ function openFlowView(flowId) {
   $("flow-view").classList.remove("hidden");
   // Always open with the mobile sidebar drawer collapsed; inert on desktop.
   closeFlowSidebar();
-  $("flow-view-title").textContent = "Flow";
-  renderSidebarPlaceholder("Loading flow details…");
+  $("flow-view-title").textContent = tf("flow.title", "Flow");
+  renderSidebarPlaceholder(tf("flow.sidebarLoading", "Loading flow details…"));
   $("flow-interventions").innerHTML = "";
   // Reset the session-usage badge for the freshly-opened flow; it re-appears
   // once this flow's first usage-bearing step event is rendered.
@@ -2247,7 +2466,7 @@ async function loadFlowConversation(flowId, opts) {
     // Drop any reconciliation state left by a previously-open flow so a stray
     // append for this flow can't merge into the prior flow's detached sections.
     container.__convState = null;
-    container.appendChild(el("p", "empty", "Loading conversation…"));
+    container.appendChild(el("p", "empty", tf("flow.loadingConversation", "Loading conversation…")));
   } else if (silent) {
     // SILENT signature-check refresh (G5): no destructive pre-clear and no
     // placeholder, so the user sees no blank flash — the existing DOM stays put
@@ -2300,7 +2519,7 @@ async function loadFlowConversation(flowId, opts) {
       if (incremental || silent) return;
       container.innerHTML = "";
       container.appendChild(el("p", "empty",
-        `Could not load conversation for this flow (${resp.status}).`));
+        tf("flow.loadError", `Could not load conversation for this flow (${resp.status}).`, { status: resp.status })));
       return;
     }
     const data = await resp.json();
@@ -2420,7 +2639,7 @@ async function loadFlowConversation(flowId, opts) {
     ) return;
     if (incremental || silent) return;  // keep the existing conversation
     container.innerHTML = "";
-    container.appendChild(el("p", "empty", "Network error loading conversation."));
+    container.appendChild(el("p", "empty", tf("flow.networkError", "Network error loading conversation.")));
   }
 }
 
@@ -2524,7 +2743,7 @@ function noteDetailFetchFailure(message) {
   state.detailFetchFailures += 1;
   if (state.detailLoaded) return;
   if (state.detailFetchFailures >= 2) {
-    renderSidebarPlaceholder(message + " Retrying…");
+    renderSidebarPlaceholder(tf("flow.detailRetrying", `${message} Retrying…`, { message }));
   }
 }
 
@@ -2781,13 +3000,13 @@ async function refreshFlowDetail() {
     const resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}`);
     if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     if (!resp.ok) {
-      noteDetailFetchFailure(`Could not load flow details (${resp.status}).`);
+      noteDetailFetchFailure(tf("flow.detailLoadError", `Could not load flow details (${resp.status}).`, { status: resp.status }));
       return;
     }
     const data = await resp.json();
     if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     if (!data || !data.flow) {
-      noteDetailFetchFailure("This flow is not available on the server yet.");
+      noteDetailFetchFailure(tf("flow.detailNotAvailable", "This flow is not available on the server yet."));
       return;
     }
     // Drop a stale response that lost the race to a newer detail fetch already
@@ -2815,7 +3034,7 @@ async function refreshFlowDetail() {
     renderInterventions(data.flow);
   } catch (_) {
     if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
-    noteDetailFetchFailure("Network error loading flow details.");
+    noteDetailFetchFailure(tf("flow.detailNetworkError", "Network error loading flow details."));
   }
 }
 
@@ -2886,25 +3105,25 @@ function renderFlowSidebar(flow, machineId) {
 
   // -- overview --
   const overview = el("div", "detail-section");
-  overview.appendChild(el("h4", null, "Overview"));
-  overview.appendChild(kv("Status", flowStatusLabel(flow)));
-  overview.appendChild(kv("Type", flow.task_type || "-"));
+  overview.appendChild(el("h4", null, tf("flowSidebar.overview", "Overview")));
+  overview.appendChild(kv(tf("flowSidebar.status", "Status"), flowStatusLabel(flow)));
+  overview.appendChild(kv(tf("flowSidebar.type", "Type"), flow.task_type || "-"));
   overview.appendChild(kv(
-    "Project", projectDisplayLabel(flow.project_root) || "-", flow.project_root || "",
+    tf("flowSidebar.project", "Project"), projectDisplayLabel(flow.project_root) || "-", flow.project_root || "",
   ));
   overview.appendChild(kv(
-    "Progress",
+    tf("flowSidebar.progress", "Progress"),
     `${flow.current_step_index || 0}/${flow.total_steps || 0} ` +
     `(${Math.round((flow.progress || 0) * 100)}%)`,
   ));
-  if (flow.current_step) overview.appendChild(kv("Current step", flow.current_step));
-  if (flow.updated_at) overview.appendChild(kv("Updated", formatTime(flow.updated_at)));
+  if (flow.current_step) overview.appendChild(kv(tf("flowSidebar.currentStep", "Current step"), flow.current_step));
+  if (flow.updated_at) overview.appendChild(kv(tf("flowSidebar.updated", "Updated"), formatTime(flow.updated_at)));
   body.appendChild(overview);
 
   // -- steps --
   const steps = Array.isArray(flow.step_history) ? flow.step_history : [];
   const stepSec = el("div", "detail-section");
-  stepSec.appendChild(el("h4", null, "Steps"));
+  stepSec.appendChild(el("h4", null, tf("flowSidebar.steps", "Steps")));
   if (steps.length) {
     for (const step of steps) {
       const ss = String(step.status || "pending").toLowerCase();
@@ -2928,15 +3147,15 @@ function renderFlowSidebar(flow, machineId) {
     );
     stepSec.appendChild(row);
   } else {
-    stepSec.appendChild(el("p", "empty", "No step history reported."));
+    stepSec.appendChild(el("p", "empty", tf("flow.noStepHistory", "No step history reported.")));
   }
   body.appendChild(stepSec);
 
   // -- machine --
   const machineSec = el("div", "detail-section");
-  machineSec.appendChild(el("h4", null, "Machine"));
-  machineSec.appendChild(kv("Machine", machineId || "-"));
-  if (flow.flow_id) machineSec.appendChild(kv("Flow id", flow.flow_id));
+  machineSec.appendChild(el("h4", null, tf("flowSidebar.machineSection", "Machine")));
+  machineSec.appendChild(kv(tf("flowSidebar.machine", "Machine"), machineId || "-"));
+  if (flow.flow_id) machineSec.appendChild(kv(tf("flowSidebar.flowId", "Flow id"), flow.flow_id));
   body.appendChild(machineSec);
 
   // -- resume / end --
@@ -2989,7 +3208,7 @@ async function resumeFlow(flowId) {
       // rejection detail rather than a misleading "dispatched" success.
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || tf("toast.resumeStillRunning", "该 flow 仍在运行，无法 resume"));
+      showToast("error", detail || tf("toast.resumeStillRunning", "This flow is still running and cannot be resumed"));
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
@@ -3013,10 +3232,10 @@ function makeResumeButton(flow) {
   if (!isFlowResumable(flow)) return null;
   const flowId = flow.flow_id;
   const pending = isResumeInProgress(flowId);
-  const btn = el("button", "btn-resume", pending ? "Resuming…" : "Resume");
+  const btn = el("button", "btn-resume", pending ? tf("flow.resuming", "Resuming…") : tf("flow.resume", "Resume"));
   btn.type = "button";
   btn.disabled = pending;
-  btn.title = "Resume this flow";
+  btn.title = tf("flow.resumeTitle", "Resume this flow");
   btn.addEventListener("click", (e) => {
     e.stopPropagation(); // don't bubble to the card's click handler
     resumeFlow(flowId);
@@ -3088,9 +3307,10 @@ function openEndSessionModal(flow) {
   if (errBox) errBox.classList.add("hidden");
   const msgNode = $("end-session-message");
   if (msgNode) {
-    msgNode.textContent =
-      "确认结束并归档该 session（" + flow.flow_id.slice(0, 8) + "…）？" +
-      "若为 worktree，它会被清理归档，未提交的工作不会合并进主分支。";
+    msgNode.textContent = tf("endSession.confirmMessage",
+      "Confirm ending and archiving this session (" + flow.flow_id.slice(0, 8) + "…)? " +
+      "A worktree session will be cleaned up and archived, and uncommitted work will not be merged into the main branch.",
+      { id: flow.flow_id.slice(0, 8) });
   }
   modal.dataset.flowId = flow.flow_id;
   modal.classList.remove("hidden");
@@ -3140,9 +3360,9 @@ async function endFlow(flowId) {
     } else if (resp.status === 409) {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || tf("toast.endAlreadyEnded", "该 session 已结束，无法再次结束。"));
+      showToast("error", detail || tf("toast.endAlreadyEnded", "This session has already ended and cannot be ended again."));
     } else if (resp.status === 503) {
-      showToast("error", tf("toast.endMachineOffline", "机器未连接 — 无法下发结束指令。"));
+      showToast("error", tf("toast.endMachineOffline", "Machine not connected — could not dispatch the end command."));
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}
@@ -3167,10 +3387,10 @@ function makeEndButton(flow) {
   if (!isFlowEndable(flow)) return null;
   const flowId = flow.flow_id;
   const pending = isEndInProgress(flowId);
-  const btn = el("button", "btn-end", pending ? "Ending…" : "End");
+  const btn = el("button", "btn-end", pending ? tf("flow.ending", "Ending…") : tf("flow.end", "End"));
   btn.type = "button";
   btn.disabled = pending;
-  btn.title = "End (and archive) this session";
+  btn.title = tf("flow.endTitle", "End (and archive) this session");
   btn.addEventListener("click", (e) => {
     e.stopPropagation(); // don't bubble to the card's click handler
     openEndSessionModal(flow);
@@ -3194,28 +3414,38 @@ function makeEndButton(flow) {
 // so operators can still cross-reference call files when debugging.
 const KIND_META = {
   call: {
-    label: "待回复",
-    hint: "运行流程正在等待你的回复。",
+    label: "Awaiting reply",
+    labelKey: "intervention.call.label",
+    hint: "The running flow is waiting for your reply.",
+    hintKey: "intervention.call.hint",
     icon: "⚙",
   },
   interjection: {
-    label: "插话",
-    hint: "向正在运行的流程补一条额外指令。",
+    label: "Interject",
+    labelKey: "intervention.interjection.label",
+    hint: "Add an extra instruction to the running flow.",
+    hintKey: "intervention.interjection.hint",
     icon: "✎",
   },
   retry_decision: {
-    label: "需要决策",
-    hint: "某一步骤失败,请选择如何继续(例如 重试 / 跳过 / 终止)。",
+    label: "Decision needed",
+    labelKey: "intervention.retryDecision.label",
+    hint: "A step failed; choose how to continue (e.g. retry / skip / abort).",
+    hintKey: "intervention.retryDecision.hint",
     icon: "↻",
   },
   cli_confirm: {
-    label: "需要确认",
-    hint: "子进程正在等待一次确认。",
+    label: "Confirmation needed",
+    labelKey: "intervention.cliConfirm.label",
+    hint: "A subprocess is waiting for a confirmation.",
+    hintKey: "intervention.cliConfirm.hint",
     icon: "⌨",
   },
   discovery_confirm: {
-    label: "确认任务描述",
-    hint: "Discovery 已生成精炼后的任务描述。输入 1 确认并继续,或回复其它内容继续完善需求。",
+    label: "Confirm task description",
+    labelKey: "intervention.discoveryConfirm.label",
+    hint: "Discovery has produced a refined task description. Enter 1 to confirm and continue, or reply with anything else to keep refining.",
+    hintKey: "intervention.discoveryConfirm.hint",
     icon: "✓",
   },
   // A CONFIRM approval gate (plan 确认 / adjudicate 裁决审批 / per-step review).
@@ -3223,8 +3453,10 @@ const KIND_META = {
   // 批准/打回 buttons that POST a structured {approved, feedback} decision, so
   // an operator can never silently mis-approve/mis-reject via free text.
   confirm: {
-    label: "需要审批",
-    hint: "运行流程正在等待你的审批。点击 批准 通过,或 打回 并说明需要修改之处。",
+    label: "Approval needed",
+    labelKey: "intervention.confirm.label",
+    hint: "The running flow is waiting for your approval. Click Approve to pass, or Reject and explain what needs changing.",
+    hintKey: "intervention.confirm.hint",
     icon: "✓",
   },
 };
@@ -3477,8 +3709,8 @@ function syncInterjectButton(flow) {
   const active = !!state.flowInterjectRequested;
   btn.classList.toggle("active", active);
   btn.title = active
-    ? "取消插话"
-    : "向运行中的流程补一条额外指令。";
+    ? tf("interject.cancelTitle", "Cancel interjection")
+    : tf("interject.title", "Add an extra instruction to the running flow.");
   btn.textContent = active ? "✕" : "✎";
 }
 
@@ -3500,7 +3732,7 @@ function renderInterventionChip(entry) {
 
   chip.append(
     el("span", "intervention-chip-icon", meta.icon),
-    el("span", "intervention-chip-label", meta.label),
+    el("span", "intervention-chip-label", tf(meta.labelKey, meta.label)),
   );
   if (entry.callId) {
     // The internal call id stays on the chip for debugging — surfaced only
@@ -3588,8 +3820,8 @@ function buildCollapsiblePrompt(promptText, opts) {
   const restoreScrollTop = opts && opts.scrollTop;
   const loadFullText = opts && opts.loadFullText;
   const wrap = el("div", "flow-reply-prompt-wrap");
-  const collapsedLabel = "▸ 展开消息详情";
-  const expandedLabel = "▾ 收起消息详情";
+  const collapsedLabel = tf("prompt.expandDetail", "▸ Expand message detail");
+  const expandedLabel = tf("prompt.collapseDetail", "▾ Collapse message detail");
   const btn = el("button", "flow-reply-prompt-toggle",
     initialExpanded ? expandedLabel : collapsedLabel);
   btn.type = "button";
@@ -3676,11 +3908,11 @@ function renderAdjudicateReview(target) {
   if (!rationale && !adjudicated && !baseline) return null;
 
   const wrap = el("div", "flow-reply-adjudicate");
-  wrap.appendChild(el("div", "flow-reply-adjudicate-title", "裁决审批"));
+  wrap.appendChild(el("div", "flow-reply-adjudicate-title", tf("adjudicate.title", "Adjudication approval")));
 
   if (rationale) {
     const panel = el("div", "flow-reply-adjudicate-rationale");
-    panel.appendChild(el("div", "flow-reply-adjudicate-label", "裁决理由"));
+    panel.appendChild(el("div", "flow-reply-adjudicate-label", tf("adjudicate.rationaleLabel", "Adjudication rationale")));
     panel.appendChild(
       el("div", "flow-reply-adjudicate-rationale-body", rationale),
     );
@@ -3693,14 +3925,14 @@ function renderAdjudicateReview(target) {
   // misrepresent the ruling; render an explicit note instead. A missing baseline
   // still produces a sensible all-added diff via _toolUnifiedDiff.
   const diffWrap = el("div", "flow-reply-adjudicate-diff");
-  diffWrap.appendChild(el("div", "flow-reply-adjudicate-label", "任务描述"));
+  diffWrap.appendChild(el("div", "flow-reply-adjudicate-label", tf("adjudicate.taskDescLabel", "Task description")));
   if (!adjudicated) {
     diffWrap.appendChild(
-      el("p", "flow-reply-adjudicate-note", "本次裁决未修改任务描述。"),
+      el("p", "flow-reply-adjudicate-note", tf("adjudicate.noChange", "This adjudication did not modify the task description.")),
     );
   } else if (adjudicated === baseline) {
     diffWrap.appendChild(
-      el("p", "flow-reply-adjudicate-note", "任务描述与基线一致(无变更)。"),
+      el("p", "flow-reply-adjudicate-note", tf("adjudicate.sameAsBaseline", "The task description matches the baseline (no change).")),
     );
   } else {
     const diff = _toolUnifiedDiff(baseline, adjudicated, "adjudicated_description");
@@ -3745,15 +3977,15 @@ function updateReplyBox(flow) {
     // against a missing `window` in the DOM-stub test environment).
     input.placeholder = isActiveFlow(flow)
       ? (isMobilePortrait()
-          ? "可先草拟回复,或点 ✎ 插话…"
-          : "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…")
-      : "暂无待处理项…";
+          ? tf("reply.empty.canDraftMobile", "You can draft a reply, or tap ✎ to interject…")
+          : tf("reply.empty.canDraft", "No pending items — you can draft a reply first, or click ✎ to interject…"))
+      : tf("flow.replyPlaceholder", "No pending items…");
     ctx.className = "flow-reply-context";
     ctx.innerHTML = "";
     ctx.appendChild(el("p", "flow-reply-empty",
       isActiveFlow(flow)
-        ? "目前没有待处理的交互项 — 没有可以回复的对象。"
-        : "该流程已结束 — 无法再继续交互。"));
+        ? tf("reply.empty.active", "There are no pending interaction items right now — nothing to reply to.")
+        : tf("reply.empty.ended", "This flow has ended — no further interaction is possible.")));
     return;
   }
 
@@ -3771,14 +4003,14 @@ function updateReplyBox(flow) {
   submit.disabled = !!state.pendingSendSettleKey;
   input.placeholder =
     target.kind === "interjection"
-      ? "输入要插入运行流程的指令…"
+      ? tf("reply.placeholder.interject", "Enter the instruction to interject into the running flow…")
       : target.kind === "confirm"
         // Free-text fallback for the CONFIRM gate. List the words that are
         // recognized as an outright approval/rejection so the operator knows
         // what maps to which; anything else prompts a "will be treated as a
         // revision request" second-guess before it is sent.
-        ? "批准/通过/approve 直接通过,打回/拒绝/reject 直接打回,其它文本将按修改请求处理…"
-        : "输入你的回复…";
+        ? tf("reply.placeholder.confirm", "approve/pass/approve passes directly, reject/decline/reject rejects directly; any other text is treated as a revision request…")
+        : tf("reply.placeholder.reply", "Enter your reply…");
 
   ctx.className = "flow-reply-context active kind-" + target.kind;
   ctx.innerHTML = "";
@@ -3789,9 +4021,9 @@ function updateReplyBox(flow) {
   // calls when debugging, but is never surfaced to the user as jargon.
   const head = el("div", "flow-reply-head");
   head.append(
-    el("span", "flow-reply-to", "回复中"),
+    el("span", "flow-reply-to", tf("reply.replyingTo", "Replying to")),
     el("span", "flow-reply-sep", "·"),
-    el("span", "flow-reply-kind kind-" + target.kind, meta.label),
+    el("span", "flow-reply-kind kind-" + target.kind, tf(meta.labelKey, meta.label)),
   );
   if (target.callId) {
     head.dataset.callId = target.callId;
@@ -3854,7 +4086,7 @@ function updateReplyBox(flow) {
       onScroll(top) { state.flowReplyPromptScroll[target.id] = top; },
     }));
   } else {
-    ctx.appendChild(el("p", "flow-reply-hint", meta.hint));
+    ctx.appendChild(el("p", "flow-reply-hint", tf(meta.hintKey, meta.hint)));
   }
 
   // Context block is intentionally NOT rendered for any kind. Every pending
@@ -3884,12 +4116,12 @@ function updateReplyBox(flow) {
   if (target.kind === "confirm") {
     const decide = el("div", "flow-reply-confirm");
     const note = el("textarea", "flow-reply-confirm-note");
-    note.placeholder = "备注(可选;打回时说明需要修改之处)…";
+    note.placeholder = tf("reply.confirmNotePlaceholder", "Note (optional; explain what needs changing when rejecting)…");
     const btnRow = el("div", "flow-reply-confirm-actions");
     const approveBtn = el(
       "button",
       "flow-reply-option flow-reply-option-primary flow-reply-confirm-approve",
-      "批准",
+      tf("reply.approve", "Approve"),
     );
     approveBtn.type = "button";
     approveBtn.addEventListener("click", (e) => {
@@ -3900,7 +4132,7 @@ function updateReplyBox(flow) {
     const rejectBtn = el(
       "button",
       "flow-reply-option flow-reply-confirm-reject",
-      "打回",
+      tf("reply.reject", "Reject"),
     );
     rejectBtn.type = "button";
     rejectBtn.addEventListener("click", (e) => {
@@ -3928,7 +4160,7 @@ function updateReplyBox(flow) {
   // option, so the button + the "输入 1 确认" textual prompt always coexist.
   let options = target.options || [];
   if (target.kind === "discovery_confirm" && !options.length) {
-    options = [{ label: "确认并继续 (输入 1)", value: "1" }];
+    options = [{ label: tf("reply.confirmContinue", "Confirm and continue (enter 1)"), value: "1" }];
   }
   if (options.length) {
     const opts = el("div", "flow-reply-options");
@@ -3970,7 +4202,7 @@ function resetReplyBox() {
   ctx.className = "flow-reply-context";
   ctx.innerHTML = "";
   ctx.appendChild(el("p", "flow-reply-empty",
-    "No pending interaction right now."));
+    tf("flow.replyContext", "No pending interaction right now.")));
 }
 
 function truncate(text, max) {
@@ -4030,7 +4262,7 @@ function confirmRevisionIntent() {
       ? globalThis.confirm
       : null;
   if (!c) return true;
-  return !!c("你的回复将被视为修改请求,确定?");
+  return !!c(tf("reply.revisionConfirm", "Your reply will be treated as a revision request. Continue?"));
 }
 
 // ---------------------------------------------------------------------------
@@ -4164,20 +4396,20 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
         $("flow-reply-input").value = "";
         autoGrowReplyTextarea();
       }
-      showToast("success", approved ? tf("toast.approved", "已批准。") : tf("toast.rejected", "已打回。"));
+      showToast("success", approved ? tf("toast.approved", "Approved.") : tf("toast.rejected", "Rejected."));
       // Optimistic echo as a human-readable user bubble so the decision shows
       // immediately without waiting for the next history_data push.
       const echo = approved
         ? note
-          ? `批准:${note}`
-          : "批准"
+          ? tf("reply.echo.approveNote", `Approved: ${note}`, { note })
+          : tf("reply.approve", "Approve")
         : note
-          ? `打回:${note}`
-          : "打回";
+          ? tf("reply.echo.rejectNote", `Rejected: ${note}`, { note })
+          : tf("reply.reject", "Reject");
       appendLocalReply(flowId, target, echo);
     } else {
       const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || `Server returned ${resp.status}.`;
+      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
       showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
       settlePendingSend();
     }
@@ -4256,7 +4488,7 @@ async function sendReply(flowId, target, text) {
       appendLocalReply(flowId, target, text);
     } else {
       const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || `Server returned ${resp.status}.`;
+      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
       showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
       // Error path — settle immediately so the user can retry without
       // waiting on a ws update that will never come for this failed POST.
@@ -4312,6 +4544,11 @@ function appendLocalReply(flowId, target, text) {
     console.error("appendLocalReply: best-effort rank computation failed", err);
     priorCopies = 0;
   }
+  // The echo's step header is rendered from this literal (stepHeaderLabel falls
+  // back to the raw step_type), so compose it through I18N like every other
+  // dynamic label — otherwise a zh-CN user sees English chrome until the
+  // daemon's authoritative record replaces the echo.
+  const kindLabel = tf(meta.labelKey, meta.label);
   const record = {
     step_id: "interaction",
     // Mark this as the optimistic echo and keep the original literal text so
@@ -4328,7 +4565,8 @@ function appendLocalReply(flowId, target, text) {
       role: "user",
       content: text,
       timestamp: Date.now(),
-      step_type: meta.label + " response",
+      step_type: tf("flow.stepType.response", kindLabel + " response",
+        { label: kindLabel }),
     },
   };
   // State is the source of truth: append the echo to the conversation records
@@ -4656,7 +4894,7 @@ function historyListEmptyState({ sessions, loading, daemonConnected, indexConfir
 // cannot collide with any real absolute path; the visible label rendered for
 // this bucket is "未知项目".
 const UNKNOWN_PROJECT_ROOT = "__se3_unknown_project__";
-const UNKNOWN_PROJECT_ROOT_LABEL = "未知项目";
+const UNKNOWN_PROJECT_ROOT_LABEL = "Unknown project";
 
 // Group history sessions by their `project_root` field. Pure: no DOM, no
 // state. Returns an array of `{ project_root, label, sessions, latestTs }`
@@ -4722,12 +4960,15 @@ function pickDefaultHistoryProjectRoot(buckets, currentSelected) {
 // when buckets.length < 2 to avoid a visually-redundant single-option control).
 function renderHistoryProjectSelect(buckets, selected, onSelect) {
   const row = el("label", "history-project-select-row");
-  row.append(el("span", "history-project-select-label", "项目"));
+  row.append(el("span", "history-project-select-label", tf("history.projectLabel", "Project")));
   const select = el("select", "history-project-select");
   for (const b of buckets) {
-    const opt = el("option", null, b.label);
+    const label = b.project_root === UNKNOWN_PROJECT_ROOT
+      ? tf("history.unknownProject", UNKNOWN_PROJECT_ROOT_LABEL)
+      : b.label;
+    const opt = el("option", null, label);
     opt.value = b.project_root;
-    opt.title = b.label;
+    opt.title = label;
     select.appendChild(opt);
   }
   select.value = selected;
@@ -4752,13 +4993,13 @@ function renderHistoryList() {
     // empty-state while the daemon is still connecting or pushing its index.
     // Each state carries its own modifier class so it is DOM-distinguishable.
     if (emptyState === "loading-refresh") {
-      list.appendChild(el("p", "empty empty-loading-refresh", "正在刷新历史…"));
+      list.appendChild(el("p", "empty empty-loading-refresh", tf("history.refreshing", "Refreshing history…")));
     } else if (emptyState === "loading-connect") {
       list.appendChild(
-        el("p", "empty empty-loading-connect", "正在连接 / 正在等待历史数据…"));
+        el("p", "empty empty-loading-connect", tf("history.connecting", "Connecting / waiting for history data…")));
     } else {
       list.appendChild(
-        el("p", "empty empty-confirmed", "No history sessions reported."));
+        el("p", "empty empty-confirmed", tf("history.emptyConfirmed", "No history sessions reported.")));
     }
     return;
   }
@@ -4785,7 +5026,7 @@ function renderHistoryList() {
   // Have sessions: when a refresh is in flight, prepend a lightweight bar so
   // the user knows the list is being updated without hiding existing entries.
   if (state.historyIndexLoading) {
-    list.appendChild(el("p", "history-refreshing", "正在刷新历史…"));
+    list.appendChild(el("p", "history-refreshing", tf("history.refreshing", "Refreshing history…")));
   }
 
   // Render only the cards belonging to the selected bucket. An out-of-band
@@ -4799,7 +5040,7 @@ function renderHistoryList() {
 
     const head = el("div", "history-item-head");
     const task = el("span", "history-task",
-      s.task_description || s.flow_id || "(untitled session)");
+      s.task_description || s.flow_id || tf("history.untitledSession", "(untitled session)"));
     task.title = s.task_description || s.flow_id || "";
     // Badge is the raw session status. A worktree session's merge back now runs
     // as its own merge_integrate / version_reconcile steps (rendered in the
@@ -4807,8 +5048,9 @@ function renderHistoryList() {
     const sc = statusClass(s.status);
     head.append(
       task,
-      el("span", "badge badge-" + sc, s.status || "unknown"));
-    if (s.active) head.appendChild(el("span", "badge badge-live", "● live"));
+      el("span", "badge badge-" + sc, flowStatusText(s.status)));
+    if (s.active) head.appendChild(el("span", "badge badge-live",
+      tf("history.badge.live", "● live")));
     const resumeBtn = makeResumeButton(s);
     if (resumeBtn) head.appendChild(resumeBtn);
     card.appendChild(head);
@@ -4903,7 +5145,7 @@ async function openHistorySession(flowId, opts) {
     detail.innerHTML = "";
     // Drop reconciliation state from the previously-selected session.
     detail.__convState = null;
-    detail.appendChild(el("p", "empty", "Loading records…"));
+    detail.appendChild(el("p", "empty", tf("history.loadingRecords", "Loading records…")));
   }
   const requestEpoch = state.historyEpoch;
 
@@ -4932,7 +5174,7 @@ async function openHistorySession(flowId, opts) {
       if (incremental) return;
       detail.innerHTML = "";
       detail.appendChild(el("p", "empty",
-        `Could not load history for this session (${resp.status}).`));
+        tf("history.loadError", `Could not load history for this session (${resp.status}).`, { status: resp.status })));
       return;
     }
     const data = await resp.json();
@@ -4973,7 +5215,7 @@ async function openHistorySession(flowId, opts) {
     ) return;
     if (incremental) return;            // keep the existing detail
     detail.innerHTML = "";
-    detail.appendChild(el("p", "empty", "Network error loading session history."));
+    detail.appendChild(el("p", "empty", tf("history.networkError", "Network error loading session history.")));
   }
 }
 
@@ -5211,11 +5453,12 @@ function refreshIssueTypeFilter() {
   if (!sel) return;
   const current = sel.value;
   const types = selectTypeDropdownOptions(state.allIssueTypes, state.issues);
-  sel.innerHTML = '<option value="">全部类型</option>';
+  sel.innerHTML = "";
+  sel.appendChild(new Option(tf("issues.typeAll", "All types"), ""));
   for (const t of types) {
     const opt = document.createElement("option");
     opt.value = t;
-    opt.textContent = t;
+    opt.textContent = issueTypeText(t);
     sel.appendChild(opt);
   }
   sel.value = types.includes(current) ? current : "";
@@ -5236,7 +5479,8 @@ function refreshIssueProjectFilter() {
   // State is the single source of truth, so close-reset mirrors closeHistory.
   const current = state.issuesProjectFilter;
   const roots = state.allIssueProjectRoots;
-  sel.innerHTML = '<option value="">全部项目</option>';
+  sel.innerHTML = "";
+  sel.appendChild(new Option(tf("issues.projectAll", "All projects"), ""));
   for (const pr of roots) {
     const opt = document.createElement("option");
     opt.value = pr;
@@ -5267,11 +5511,11 @@ function renderIssuesList() {
   });
 
   if (state.issuesLoading && !filtered.length) {
-    list.appendChild(el("p", "empty", "Loading issues…"));
+    list.appendChild(el("p", "empty", tf("issues.loading", "Loading issues…")));
     return;
   }
   if (!filtered.length) {
-    list.appendChild(el("p", "empty", "暂无 issue。"));
+    list.appendChild(el("p", "empty", tf("issues.empty", "No issues yet.")));
     return;
   }
 
@@ -5290,15 +5534,17 @@ function renderIssuesList() {
     head.append(title, idLabel);
 
     const sc = issueStatusClass(iss.status);
-    head.appendChild(el("span", "badge " + sc, iss.status || "open"));
+    head.appendChild(el("span", "badge " + sc, issueStatusText(iss.status)));
     card.appendChild(head);
 
     const meta = el("div", "issue-item-meta");
-    if (iss.type) meta.appendChild(el("span", null, iss.type));
+    if (iss.type) meta.appendChild(el("span", null, issueTypeText(iss.type)));
     if (iss.priority) {
-      meta.appendChild(el("span", issuePriorityClass(iss.priority), iss.priority));
+      meta.appendChild(
+        el("span", issuePriorityClass(iss.priority), issuePriorityText(iss.priority)),
+      );
     }
-    meta.appendChild(el("span", null, iss.source || "system"));
+    meta.appendChild(el("span", null, issueSourceText(iss.source)));
     if (iss.created_at) {
       meta.appendChild(el("span", null, formatTime(iss.created_at)));
     }
@@ -5413,8 +5659,8 @@ function renderIssueDetail(issueId) {
 
   const iss = (state.issues || []).find((i) => i && issueCompositeKey(i) === issueId);
   if (!iss) {
-    detail.appendChild(el("p", "empty", "Issue 未找到。"));
-    if (titleNode) titleNode.textContent = "Issue";
+    detail.appendChild(el("p", "empty", tf("issueDetail.notFound", "Issue not found.")));
+    if (titleNode) titleNode.textContent = tf("issues.detailTitle", "Issue");
     return;
   }
 
@@ -5425,9 +5671,12 @@ function renderIssueDetail(issueId) {
   const header = el("div", "issue-detail-header");
   const titleEl = el("div", "issue-detail-title", displayTitle);
   const badges = el("div", "issue-detail-badges");
-  badges.appendChild(el("span", "badge " + issueStatusClass(iss.status), iss.status || "open"));
+  badges.appendChild(el("span", "badge " + issueStatusClass(iss.status),
+    issueStatusText(iss.status)));
   if (iss.source) {
-    badges.appendChild(el("span", "badge issue-source-" + iss.source, iss.source));
+    badges.appendChild(
+      el("span", "badge issue-source-" + iss.source, issueSourceText(iss.source)),
+    );
   }
   header.append(titleEl, badges);
   detail.appendChild(header);
@@ -5435,17 +5684,17 @@ function renderIssueDetail(issueId) {
   // Fields
   const fields = [
     ["ID", "#" + (iss.id || "?")],
-    ["类型", iss.type || "-"],
-    ["优先级", iss.priority || "-"],
-    ["来源", iss.source || "system"],
-    ["创建时间", formatTime(iss.created_at)],
-    ["更新时间", formatTime(iss.updated_at)],
+    [tf("issueDetail.field.type", "Type"), issueTypeText(iss.type) || "-"],
+    [tf("issueDetail.field.priority", "Priority"), issuePriorityText(iss.priority) || "-"],
+    [tf("issueDetail.field.source", "Source"), issueSourceText(iss.source)],
+    [tf("issueDetail.field.createdAt", "Created"), formatTime(iss.created_at)],
+    [tf("issueDetail.field.updatedAt", "Updated"), formatTime(iss.updated_at)],
   ];
   if (iss.tags && iss.tags.length) {
-    fields.push(["标签", iss.tags.join(", ")]);
+    fields.push([tf("issueDetail.field.tags", "Tags"), iss.tags.join(", ")]);
   }
   if (iss.project_root) {
-    fields.push(["项目", iss.project_root]);
+    fields.push([tf("issueDetail.field.project", "Project"), iss.project_root]);
   }
 
   for (const [label, value] of fields) {
@@ -5468,7 +5717,7 @@ function renderIssueDetail(issueId) {
     if (descriptionLikelyTruncated(iss.description)) {
       const note = el(
         "div", "issue-detail-desc-note hidden",
-        "无法加载完整描述，重新打开可重试。");
+        tf("issueDetail.descLoadFailed", "Could not load the full description; reopen to retry."));
       detail.appendChild(note);
       loadIssueFullDescription(iss, descNode, note);
     }
@@ -5477,19 +5726,19 @@ function renderIssueDetail(issueId) {
   // Action buttons
   const actions = el("div", "issue-detail-actions");
   actions.appendChild(makeIssueLaunchButton(iss, "issue-detail-launch"));
-  const editBtn = el("button", "ghost-btn", "编辑");
+  const editBtn = el("button", "ghost-btn", tf("issueDetail.edit", "Edit"));
   editBtn.type = "button";
   editBtn.addEventListener("click", () => openIssueEditModal(iss));
   actions.appendChild(editBtn);
 
   const closedStatuses = new Set(["resolved", "won't-fix", "closed"]);
   if (closedStatuses.has(iss.status)) {
-    const reopenBtn = el("button", "ghost-btn", "重开");
+    const reopenBtn = el("button", "ghost-btn", tf("issueDetail.reopen", "Reopen"));
     reopenBtn.type = "button";
     reopenBtn.addEventListener("click", () => openIssueActionModal("reopen", iss));
     actions.appendChild(reopenBtn);
   } else {
-    const closeBtn = el("button", "ghost-btn", "关闭");
+    const closeBtn = el("button", "ghost-btn", tf("issueDetail.close", "Close"));
     closeBtn.type = "button";
     closeBtn.addEventListener("click", () => openIssueActionModal("close", iss));
     actions.appendChild(closeBtn);
@@ -5534,7 +5783,7 @@ function _populateIssueMachineSelect() {
   sel.innerHTML = "";
   const online = (state.machines || []).filter((m) => m && m.online);
   if (!online.length) {
-    sel.appendChild(new Option("(no machines connected)", ""));
+    sel.appendChild(new Option(tf("issueModal.noMachines", "(no machines connected)"), ""));
     sel.disabled = true;
     return;
   }
@@ -5556,7 +5805,7 @@ function _refreshIssueProjectOptions() {
   const manualInput = $("issue-project-manual");
   if (manualInput) manualInput.classList.add("hidden");
   if (!roots.length) {
-    sel.appendChild(new Option("(该机器无已注册项目)", ""));
+    sel.appendChild(new Option(tf("issueModal.noProjects", "(this machine has no registered projects)"), ""));
     sel.disabled = true;
     return;
   }
@@ -5565,7 +5814,7 @@ function _refreshIssueProjectOptions() {
     sel.appendChild(new Option(roots[0], roots[0]));
     sel.value = roots[0];
   } else {
-    const ph = new Option("(select a project…)", "");
+    const ph = new Option(tf("issueModal.selectProject", "(select a project…)"), "");
     ph.disabled = true;
     ph.selected = true;
     sel.appendChild(ph);
@@ -5608,14 +5857,14 @@ function _setIssueDescriptionLock(phase, message) {
 }
 
 function openIssueCreateModal() {
-  $("issue-modal-title").textContent = "新建 Issue";
+  $("issue-modal-title").textContent = tf("issueModal.title", "New Issue");
   _setIssueDescriptionLock("clear");
   $("issue-description").value = "";
   $("issue-title").value = "";
   $("issue-type").value = "";
   $("issue-priority").value = "";
   $("issue-tags").value = "";
-  $("issue-form-submit").textContent = "创建";
+  $("issue-form-submit").textContent = tf("issueModal.submit", "Create");
   $("issue-form-error").classList.add("hidden");
   _issueFormDirty = new Set();
   // Store the editing context: null means create mode.
@@ -5633,14 +5882,14 @@ function openIssueCreateModal() {
 
 function openIssueEditModal(iss) {
   if (!iss) return;
-  $("issue-modal-title").textContent = "编辑 Issue #" + (iss.id || "?");
+  $("issue-modal-title").textContent = tf("issueModal.editTitle", "Edit Issue #" + (iss.id || "?"), { id: iss.id || "?" });
   _setIssueDescriptionLock("clear");
   $("issue-description").value = iss.description || "";
   $("issue-title").value = iss.title || "";
   $("issue-type").value = iss.type || "";
   $("issue-priority").value = iss.priority || "";
   $("issue-tags").value = formatTagsForInput(iss.tags);
-  $("issue-form-submit").textContent = "保存";
+  $("issue-form-submit").textContent = tf("issueModal.save", "Save");
   $("issue-form-error").classList.add("hidden");
   _issueFormDirty = new Set();
   $("issue-form").dataset.mode = "edit";
@@ -5670,7 +5919,7 @@ function openIssueEditModal(iss) {
     const issueId = String(iss.id || "");
     const machineId = String(issueMachineId(iss) || "");
     const projectRoot = String(iss.project_root || "");
-    _setIssueDescriptionLock("loading", "完整描述加载中…");
+    _setIssueDescriptionLock("loading", tf("issueModal.descLoading", "Loading full description…"));
     const _stillEditingThisIssue = () => {
       const form = $("issue-form");
       return form.dataset.mode === "edit"
@@ -5683,7 +5932,7 @@ function openIssueEditModal(iss) {
       if (full == null) {
         _setIssueDescriptionLock(
           "failed",
-          "完整描述加载失败，暂无法编辑描述（可关闭后重试）；其他字段仍可修改。");
+          tf("issueModal.descLoadFailed", "Could not load the full description; the description is temporarily uneditable (close and retry); other fields remain editable."));
         return;
       }
       if (!_issueFormDirty.has("issue-description")) {
@@ -5694,7 +5943,7 @@ function openIssueEditModal(iss) {
       if (!_stillEditingThisIssue()) return;
       _setIssueDescriptionLock(
         "failed",
-        "完整描述加载失败，暂无法编辑描述（可关闭后重试）；其他字段仍可修改。");
+        tf("issueModal.descLoadFailed", "Could not load the full description; the description is temporarily uneditable (close and retry); other fields remain editable."));
     });
   }
 }
@@ -5711,7 +5960,7 @@ async function submitIssueForm(event) {
   const mode = form.dataset.mode || "create";
   const description = $("issue-description").value.trim();
   if (!description) {
-    showFormError(errBox, "描述不能为空。");
+    showFormError(errBox, tf("issueModal.errDescRequired", "Description must not be empty."));
     return;
   }
 
@@ -5724,7 +5973,7 @@ async function submitIssueForm(event) {
       // Resolve machine_id and project_root from the form's dropdowns.
       const machineId = $("issue-machine") ? $("issue-machine").value.trim() : "";
       if (!machineId) {
-        showFormError(errBox, "没有可用的在线机器。");
+        showFormError(errBox, tf("issueModal.errNoMachine", "No online machine is available."));
         submit.disabled = false;
         return;
       }
@@ -5735,7 +5984,7 @@ async function submitIssueForm(event) {
           : "";
       }
       if (!projectRoot || !isValidAbsolutePath(projectRoot)) {
-        showFormError(errBox, "请选择或输入一个有效的项目路径。");
+        showFormError(errBox, tf("issueModal.errInvalidPath", "Select or enter a valid project path."));
         submit.disabled = false;
         return;
       }
@@ -5774,14 +6023,14 @@ async function submitIssueForm(event) {
 
     if (resp.ok || resp.status === 202) {
       closeIssueModal();
-      showToast("success", mode === "create" ? tf("toast.issueCreated", "Issue 已创建。") : tf("toast.issueUpdated", "Issue 已更新。"));
+      showToast("success", mode === "create" ? tf("toast.issueCreated", "Issue created.") : tf("toast.issueUpdated", "Issue updated."));
       fetchIssues();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not reach the server.");
+    showFormError(errBox, tf("error.networkReach", "Network error — could not reach the server."));
   } finally {
     submit.disabled = false;
   }
@@ -5804,13 +6053,13 @@ function openIssueActionModal(action, iss) {
   reasonInput.value = "";
 
   if (action === "close") {
-    titleNode.textContent = "关闭 Issue";
-    msgNode.textContent = "确认关闭 Issue #" + iss.id + "？";
+    titleNode.textContent = tf("issueAction.closeTitle", "Close Issue");
+    msgNode.textContent = tf("issueAction.closeMessage", "Confirm closing Issue #" + iss.id + "?", { id: iss.id });
     reasonLabel.classList.remove("hidden");
     reasonInput.classList.remove("hidden");
   } else {
-    titleNode.textContent = "重开 Issue";
-    msgNode.textContent = "确认重开 Issue #" + iss.id + "？";
+    titleNode.textContent = tf("issueAction.reopenTitle", "Reopen Issue");
+    msgNode.textContent = tf("issueAction.reopenMessage", "Confirm reopening Issue #" + iss.id + "?", { id: iss.id });
     reasonLabel.classList.add("hidden");
     reasonInput.classList.add("hidden");
   }
@@ -5871,14 +6120,14 @@ async function confirmIssueAction() {
 
     if (resp.ok || resp.status === 202) {
       closeIssueActionModal();
-      showToast("success", action === "close" ? tf("toast.issueClosed", "Issue 已关闭。") : tf("toast.issueReopened", "Issue 已重开。"));
+      showToast("success", action === "close" ? tf("toast.issueClosed", "Issue closed.") : tf("toast.issueReopened", "Issue reopened."));
       fetchIssues();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not reach the server.");
+    showFormError(errBox, tf("error.networkReach", "Network error — could not reach the server."));
   } finally {
     confirmBtn.disabled = false;
     _issueActionPending = false;
@@ -5905,17 +6154,17 @@ function isIssueLaunchInProgress(key) {
 // title, so the entry is visible but greyed out.
 function makeIssueLaunchButton(iss, extraClass) {
   const model = issueLaunchModel(iss);
-  const btn = el("button", "ghost-btn issue-launch-btn" + (extraClass ? " " + extraClass : ""), "启动 flow");
+  const btn = el("button", "ghost-btn issue-launch-btn" + (extraClass ? " " + extraClass : ""), tf("issueLaunch.button", "Launch flow"));
   btn.type = "button";
   if (!model.canLaunch) {
     btn.disabled = true;
     btn.classList.add("disabled");
-    btn.title = model.reason;
+    btn.title = issueLaunchReasonText(model);
   } else if (isIssueLaunchInProgress(issueCompositeKey(iss))) {
     btn.disabled = true;
-    btn.title = "正在派发…";
+    btn.title = tf("issueLaunch.dispatching", "Dispatching…");
   } else {
-    btn.title = "从此 issue 启动一个新的 flow";
+    btn.title = tf("issueLaunch.buttonTitle", "Launch a new flow from this issue");
   }
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -5929,7 +6178,7 @@ function openIssueLaunchModal(iss) {
   if (!iss) return;
   const model = issueLaunchModel(iss);
   if (!model.canLaunch) {
-    showToast("error", model.reason);
+    showToast("error", issueLaunchReasonText(model));
     return;
   }
   const modal = $("issue-launch-modal");
@@ -5939,10 +6188,11 @@ function openIssueLaunchModal(iss) {
   const discoverInput = $("issue-launch-discover");
   const worktreeInput = $("issue-launch-worktree");
   const errBox = $("issue-launch-error");
-  if (titleNode) titleNode.textContent = "从 Issue 启动 Flow";
+  if (titleNode) titleNode.textContent = tf("issueLaunch.title", "Launch Flow from Issue");
   if (msgNode) {
-    msgNode.textContent =
-      "将从 Issue #" + (iss.id || "?") + "（" + issueDisplayTitle(iss) + "）启动一个新的 flow。";
+    msgNode.textContent = tf("issueLaunch.message",
+      "A new flow will be launched from Issue #" + (iss.id || "?") + " (" + issueDisplayTitle(iss) + ").",
+      { id: iss.id || "?", title: issueDisplayTitle(iss) });
   }
   if (discoverInput) discoverInput.checked = false;
   if (worktreeInput) worktreeInput.checked = false;
@@ -5991,16 +6241,16 @@ async function confirmIssueLaunch() {
     });
     if (resp.status === 202) {
       closeIssueLaunchModal();
-      showToast("success", tf("toast.issueFlowDispatched", "已从 Issue 派发 flow。"));
+      showToast("success", tf("toast.issueFlowDispatched", "Flow dispatched from the issue."));
     } else {
       const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || `Server returned ${resp.status}.`;
+      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
       if (errBox) showFormError(errBox, message);
-      showToast("error", tf("toast.flowLaunchFailed", `启动 flow 失败：${message}`, { message }));
+      showToast("error", tf("toast.flowLaunchFailed", `Failed to launch flow: ${message}`, { message }));
     }
   } catch (_) {
-    if (errBox) showFormError(errBox, "Network error — could not reach the server.");
-    showToast("error", tf("toast.flowLaunchNetworkError", "启动 flow 失败 — 网络错误。"));
+    if (errBox) showFormError(errBox, tf("error.networkReach", "Network error — could not reach the server."));
+    showToast("error", tf("toast.flowLaunchNetworkError", "Failed to launch flow — network error."));
   } finally {
     if (key) state.issueLaunchRequests.delete(key);
     if (confirmBtn) confirmBtn.disabled = false;
@@ -7160,11 +7410,15 @@ function isCollapsibleRole(role) {
   return COLLAPSIBLE_ROLES.includes(String(role || "").toLowerCase());
 }
 
-// One-line label for a collapsed chip, e.g. "system prompt · discovery".
+// One-line label for a collapsed chip, e.g. "system prompt · discovery". The
+// role and step context stay raw (they are protocol identifiers, not copy); only
+// the surrounding template is translated.
 function chipLabel(norm) {
   const role = String((norm && norm.role) || "message");
   const ctx = (norm && (norm.stepType || norm.stepId)) || "";
-  return ctx ? `${role} prompt · ${ctx}` : `${role} prompt`;
+  return ctx
+    ? tf("prompt.chipLabel", `${role} prompt · ${ctx}`, { role, ctx })
+    : tf("prompt.chipLabelNoCtx", `${role} prompt`, { role });
 }
 
 // ---------------------------------------------------------------------------
@@ -7308,15 +7562,17 @@ const STEP_HEADER_TITLES = {
   summarize: "SUMMARY",
 };
 
-// Per-group DAG status → human-readable Chinese text. Keyed by lower-case
-// status as written by chat_history.record_group_status; mirrors the lifecycle
-// the DAGScheduler emits (queued → running → completed | failed | skipped).
+// Per-group DAG status → human-readable text. Keyed by lower-case status as
+// written by chat_history.record_group_status; mirrors the lifecycle the
+// DAGScheduler emits (queued → running → completed | failed | skipped).
+// The literals are the offline fallback (dicts unloaded) and are therefore
+// English, matching index.html's built-in English fallback contract.
 const GROUP_STATUS_TEXT = {
-  queued: "排队中",
-  running: "正在 worktree 实施中",
-  completed: "已完成",
-  failed: "失败",
-  skipped: "已跳过",
+  queued: "Queued",
+  running: "Implementing in worktree",
+  completed: "Completed",
+  failed: "Failed",
+  skipped: "Skipped",
 };
 
 // Per-group DAG status → leading status icon, giving running / completed /
@@ -7336,13 +7592,13 @@ const GROUP_STATUS_ICON = {
 // stay legible and accessible regardless of the status background tint a later
 // group applies. Keyed by the lower-case StepStatus value the engine persists.
 const STEP_STATUS_DISPLAY = {
-  running: { icon: "◐", text: "进行中" },
-  retrying: { icon: "↻", text: "重试中" },
-  paused: { icon: "⏸", text: "已暂停" },
-  completed: { icon: "✓", text: "已完成" },
-  failed: { icon: "✗", text: "失败" },
-  partial: { icon: "◑", text: "部分完成" },
-  waiting_for_lock: { icon: "⏳", text: "等待锁" },
+  running: { icon: "◐", text: "In progress" },
+  retrying: { icon: "↻", text: "Retrying" },
+  paused: { icon: "⏸", text: "Paused" },
+  completed: { icon: "✓", text: "Completed" },
+  failed: { icon: "✗", text: "Failed" },
+  partial: { icon: "◑", text: "Partially complete" },
+  waiting_for_lock: { icon: "⏳", text: "Waiting for lock" },
 };
 
 // Pure: resolve a step's status display ({icon, text}); unknown statuses fall
@@ -7416,10 +7672,10 @@ function indexProgressLabel(path, done, total) {
     const shown = Number.isFinite(d) ? d : 0;
     // Localize at render time; the built-in template is the offline fallback.
     const tr = I18N.resolve("indexProgress.withTotal", { path: p, done: shown, total: t });
-    return tr != null ? tr : `更新 code-index：${p} (${shown}/${t})`;
+    return tr != null ? tr : `Updating code-index: ${p} (${shown}/${t})`;
   }
   const tr = I18N.resolve("indexProgress.noTotal", { path: p });
-  return tr != null ? tr : `更新 code-index：${p}`;
+  return tr != null ? tr : `Updating code-index: ${p}`;
 }
 
 // Resolve the conversation step-header label for a step type. Known step types
@@ -7427,7 +7683,10 @@ function indexProgressLabel(path, done, total) {
 // key/label so the strict time order and separator rebuild are never broken.
 function stepHeaderLabel(stepType, fallback) {
   const key = String(stepType || "").toLowerCase();
-  if (key && STEP_HEADER_TITLES[key]) return STEP_HEADER_TITLES[key];
+  if (key && STEP_HEADER_TITLES[key]) {
+    const tr = I18N.resolve("stepHeader." + key);
+    return tr != null ? tr : STEP_HEADER_TITLES[key];
+  }
   return fallback || stepType || "step";
 }
 
@@ -7476,7 +7735,7 @@ function renderConversation(container, records, append) {
   container.__convState = fresh;
   if (!records.length) {
     container.appendChild(
-      el("p", "empty", "No conversation records for this session."));
+      el("p", "empty", tf("flow.noConversationRecords", "No conversation records for this session.")));
     return;
   }
   addConversationRecords(container, fresh, records, 0);
@@ -7563,7 +7822,8 @@ function addConversationRecords(container, st, records, startIndex) {
       catch (_) { /* console may be absent */ }
       bubble = el("div", "history-record conv-record role-error");
       bubble.appendChild(
-        el("p", "md-p conv-empty", "(this record could not be rendered)"));
+        el("p", "md-p conv-empty",
+          tf("conv.recordUnrenderable", "(this record could not be rendered)")));
     }
     bubble.__convTs = tsValue(norm && norm.timestamp);
     bubble.__convIdx = i;
@@ -8734,7 +8994,9 @@ function attachChipDetail(chip, detail, expanded) {
   if (!detail) return;
   const panel = el("div", "tool-marker-details" + (expanded ? " expanded" : " folded"));
   const toggle = el("button", "tool-marker-toggle",
-    expanded ? "hide details" : "details");
+    expanded
+      ? tf("tool.detail.toggleHide", "hide details")
+      : tf("tool.detail.toggleShow", "details"));
   toggle.type = "button";
   const body = el("div", "tool-marker-details-body");
   try {
@@ -8749,7 +9011,9 @@ function attachChipDetail(chip, detail, expanded) {
     const open = panel.classList.contains("expanded");
     panel.classList.toggle("expanded", !open);
     panel.classList.toggle("folded", open);
-    toggle.textContent = !open ? "hide details" : "details";
+    toggle.textContent = !open
+      ? tf("tool.detail.toggleHide", "hide details")
+      : tf("tool.detail.toggleShow", "details");
     if (!open) {
       try { requestAnimationFrame(() => panel.scrollIntoView({ block: "nearest" })); }
       catch (_) { /* RAF / DOM optional in test env */ }
@@ -8785,7 +9049,7 @@ function registerToolDetailRenderer(kind, fn) {
 function renderToolDetailPanel(detail) {
   if (!detail || typeof detail !== "object") {
     const frag = document.createDocumentFragment();
-    frag.appendChild(el("p", "tool-detail-empty", "(no details available)"));
+    frag.appendChild(el("p", "tool-detail-empty", tf("tool.detail.empty", "(no details available)")));
     return frag;
   }
   const fn = TOOL_DETAIL_RENDERERS[detail.kind] || TOOL_DETAIL_RENDERERS.text;
@@ -8830,7 +9094,7 @@ function renderDiffPanel(detail) {
     wrap.appendChild(row);
   }
   if (detail.truncated) {
-    wrap.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    wrap.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return wrap;
 }
@@ -8859,7 +9123,7 @@ registerToolDetailRenderer("write_full", (detail) => {
   }
   frag.appendChild(renderTextWithLineNumbers(detail.content, detail.start_line));
   if (detail.truncated) {
-    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    frag.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return frag;
 });
@@ -8871,7 +9135,7 @@ registerToolDetailRenderer("read_text", (detail) => {
   }
   frag.appendChild(renderTextWithLineNumbers(detail.text, detail.start_line));
   if (detail.truncated) {
-    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    frag.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return frag;
 });
@@ -8889,12 +9153,12 @@ registerToolDetailRenderer("bash_output", (detail) => {
   }
   if (detail.stderr) {
     const sw = el("div", "tool-marker-bash-stderr-wrap");
-    sw.appendChild(el("div", "tool-marker-bash-stderr-label", "stderr"));
+    sw.appendChild(el("div", "tool-marker-bash-stderr-label", tf("tool.detail.stderr", "stderr")));
     sw.appendChild(el("pre", "tool-marker-bash-stderr", String(detail.stderr)));
     frag.appendChild(sw);
   }
   if (detail.truncated) {
-    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    frag.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return frag;
 });
@@ -8902,7 +9166,7 @@ registerToolDetailRenderer("bash_output", (detail) => {
 function renderMatchList(items, emptyText) {
   const wrap = el("div", "tool-marker-matches");
   if (!items || !items.length) {
-    wrap.appendChild(el("p", "tool-detail-empty", emptyText || "(no matches)"));
+    wrap.appendChild(el("p", "tool-detail-empty", emptyText || tf("tool.detail.noMatches", "(no matches)")));
     return wrap;
   }
   for (const item of items) {
@@ -8911,16 +9175,28 @@ function renderMatchList(items, emptyText) {
   return wrap;
 }
 
+// The pattern/path values are the tool call's own arguments — passed through as
+// data; only the surrounding labels are translated.
+function patternPathHead(detail) {
+  const pattern = detail.pattern || "";
+  const path = detail.path || "";
+  const head = el("div", "tool-marker-diff-path");
+  head.textContent = tf(
+    "tool.detail.patternPath",
+    `pattern=${pattern} path=${path}`,
+    { pattern, path },
+  );
+  return head;
+}
+
 registerToolDetailRenderer("grep_matches", (detail) => {
   const frag = document.createDocumentFragment();
   if (detail.pattern || detail.path) {
-    const head = el("div", "tool-marker-diff-path");
-    head.textContent = `pattern=${detail.pattern || ""} path=${detail.path || ""}`;
-    frag.appendChild(head);
+    frag.appendChild(patternPathHead(detail));
   }
-  frag.appendChild(renderMatchList(detail.matches, "(no matches)"));
+  frag.appendChild(renderMatchList(detail.matches, tf("tool.detail.noMatches", "(no matches)")));
   if (detail.truncated) {
-    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    frag.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return frag;
 });
@@ -8928,13 +9204,11 @@ registerToolDetailRenderer("grep_matches", (detail) => {
 registerToolDetailRenderer("glob_matches", (detail) => {
   const frag = document.createDocumentFragment();
   if (detail.pattern || detail.path) {
-    const head = el("div", "tool-marker-diff-path");
-    head.textContent = `pattern=${detail.pattern || ""} path=${detail.path || ""}`;
-    frag.appendChild(head);
+    frag.appendChild(patternPathHead(detail));
   }
-  frag.appendChild(renderMatchList(detail.files, "(no files)"));
+  frag.appendChild(renderMatchList(detail.files, tf("tool.detail.noFiles", "(no files)")));
   if (detail.truncated) {
-    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    frag.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return frag;
 });
@@ -8943,7 +9217,7 @@ registerToolDetailRenderer("text", (detail) => {
   const wrap = el("div", "tool-marker-text-plain");
   wrap.appendChild(el("pre", "tool-marker-text-pre", String(detail.text || "")));
   if (detail.truncated) {
-    wrap.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+    wrap.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
   }
   return wrap;
 });
@@ -9812,7 +10086,8 @@ function renderDiscoveryAssistant(content, norm) {
     );
     const head = el("div", "step-report__head");
     head.appendChild(
-      el("span", "step-report__title", "Proposed Task Description"),
+      el("span", "step-report__title",
+        tf("discovery.proposedTaskDescription", "Proposed Task Description")),
     );
     card.appendChild(head);
     const body = el("div", "step-report__body");
@@ -9827,7 +10102,8 @@ function renderDiscoveryAssistant(content, norm) {
   const questions = value.questions;
   if (Array.isArray(questions) && questions.length) {
     const qWrap = el("div", "discovery-questions");
-    qWrap.appendChild(el("h6", "discovery-questions__title", "Questions"));
+    qWrap.appendChild(el("h6", "discovery-questions__title",
+      tf("discovery.questions", "Questions")));
     const ol = el("ol", "discovery-questions__list");
     for (const q of questions) {
       const li = el("li");
@@ -9986,7 +10262,7 @@ const FOLD_SUMMARY_CHARS = 700;
 
 // Human-readable size for a character count.
 function formatSize(n) {
-  if (n < 1024) return n + " chars";
+  if (n < 1024) return tf("common.size.chars", `${n} chars`, { n });
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
   return (n / (1024 * 1024)).toFixed(1) + " MB";
 }
@@ -10005,7 +10281,7 @@ function makeFoldable(renderFull, fullText) {
   summary.textContent = text.slice(0, FOLD_SUMMARY_CHARS).replace(/\s+$/, "") + " …";
   const full = el("div", "fold-full");
 
-  const collapsedLabel = `▸ 展开全部 (${formatSize(text.length)})`;
+  const collapsedLabel = tf("fold.expandAll", `▸ Expand all (${formatSize(text.length)})`, { size: formatSize(text.length) });
   const btn = el("button", "fold-toggle", collapsedLabel);
   let expanded = false;
   let built = false;
@@ -10017,7 +10293,7 @@ function makeFoldable(renderFull, fullText) {
     }
     wrap.classList.toggle("folded", !expanded);
     wrap.classList.toggle("expanded", expanded);
-    btn.textContent = expanded ? "▾ 收起" : collapsedLabel;
+    btn.textContent = expanded ? tf("fold.collapse", "▾ Collapse") : collapsedLabel;
     if (expanded) {
       requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
     }
@@ -10083,7 +10359,7 @@ function makeRawToggle(norm) {
   if (payload == null) return null;
 
   const wrap = el("div", "raw-toggle-wrap");
-  const btn = el("button", "raw-toggle", "查看原始");
+  const btn = el("button", "raw-toggle", tf("raw.view", "View raw"));
   const pre = el("pre", "raw-json hidden");
   let rendered = false;
   let shown = false;
@@ -10095,7 +10371,7 @@ function makeRawToggle(norm) {
     }
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
-    btn.textContent = shown ? `隐藏原始 (${kind})` : "查看原始";
+    btn.textContent = shown ? tf("raw.hide", `Hide raw (${kind})`, { kind }) : tf("raw.view", "View raw");
     if (shown) {
       requestAnimationFrame(() => pre.scrollIntoView({ block: "nearest" }));
     }
@@ -10124,7 +10400,7 @@ function makeAssistantRawToggle(content, norm) {
   const { payload, kind } = resolveRawPayload(norm);
   const hasRaw = payload != null;
   const wrap = el("div", "raw-toggle-wrap assistant-raw-toggle-wrap");
-  const btn = el("button", "raw-toggle", "查看原始");
+  const btn = el("button", "raw-toggle", tf("raw.view", "View raw"));
   btn.type = "button";
   const pre = el("pre", "raw-json hidden");
   let rendered = false;
@@ -10142,8 +10418,8 @@ function makeAssistantRawToggle(content, norm) {
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
     btn.textContent = shown
-      ? `隐藏原始 (${hasRaw ? kind : "content"})`
-      : "查看原始";
+      ? tf("raw.hide", `Hide raw (${hasRaw ? kind : "content"})`, { kind: hasRaw ? kind : "content" })
+      : tf("raw.view", "View raw");
     if (shown) {
       requestAnimationFrame(() => pre.scrollIntoView({ block: "nearest" }));
     }
@@ -10172,7 +10448,7 @@ function makeUserRawToggle(norm) {
     ? norm.raw.envelope
     : null;
   const wrap = el("div", "raw-toggle-wrap user-raw-toggle-wrap");
-  const btn = el("button", "raw-toggle", "查看原始");
+  const btn = el("button", "raw-toggle", tf("raw.view", "View raw"));
   btn.type = "button";
   const pre = el("pre", "raw-json hidden");
   let rendered = false;
@@ -10188,8 +10464,8 @@ function makeUserRawToggle(norm) {
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
     btn.textContent = shown
-      ? `隐藏原始 (${hasRaw ? kind : "envelope"})`
-      : "查看原始";
+      ? tf("raw.hide", `Hide raw (${hasRaw ? kind : "envelope"})`, { kind: hasRaw ? kind : "envelope" })
+      : tf("raw.view", "View raw");
     if (shown) {
       requestAnimationFrame(() => pre.scrollIntoView({ block: "nearest" }));
     }
@@ -10211,13 +10487,13 @@ function appendPromptSubsections(target, split) {
   const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
   if (hasPrefix) {
     const sec = el("div", "user-prompt-chip__section");
-    sec.appendChild(el("h6", "user-prompt-chip__section-title", "模板前缀"));
+    sec.appendChild(el("h6", "user-prompt-chip__section-title", tf("prompt.templatePrefix", "Template prefix")));
     sec.appendChild(el("pre", "conv-plain", split.prefix));
     target.appendChild(sec);
   }
   if (hasSuffix) {
     const sec = el("div", "user-prompt-chip__section");
-    sec.appendChild(el("h6", "user-prompt-chip__section-title", "框架后缀"));
+    sec.appendChild(el("h6", "user-prompt-chip__section-title", tf("prompt.frameworkSuffix", "Framework suffix")));
     sec.appendChild(el("pre", "conv-plain", split.suffix));
     target.appendChild(sec);
   }
@@ -10236,7 +10512,7 @@ function appendPromptSubsections(target, split) {
 // view.
 function makeUserPromptToggle(split, norm) {
   const wrap = el("div", "process-toggle-wrap user-prompt-toggle-wrap folded");
-  const btn = el("button", "process-toggle", "▸ 展开全部");
+  const btn = el("button", "process-toggle", tf("fold.expandAllSimple", "▸ Expand all"));
   btn.type = "button";
   const full = el("div", "process-full hidden");
   let built = false;
@@ -10256,7 +10532,7 @@ function makeUserPromptToggle(split, norm) {
     full.classList.toggle("hidden", !expanded);
     wrap.classList.toggle("folded", !expanded);
     wrap.classList.toggle("expanded", expanded);
-    btn.textContent = expanded ? "▾ 收起全部" : "▸ 展开全部";
+    btn.textContent = expanded ? tf("fold.collapseAll", "▾ Collapse all") : tf("fold.expandAllSimple", "▸ Expand all");
     if (expanded) {
       requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
     }
@@ -10575,7 +10851,8 @@ function renderConversationRecord(norm) {
     }
     if (!content) {
       bubble.appendChild(
-        el("p", "md-p conv-empty", "(no readable content for this record)"));
+        el("p", "md-p conv-empty",
+          tf("conv.recordEmpty", "(no readable content for this record)")));
     } else if (role === "assistant") {
       // assistant: two-layer progressive disclosure. The default view is the
       // narrative + clean structured result (via STEP_ASSISTANT_RENDERERS); the
@@ -10755,7 +11032,7 @@ function renderIndexProgressRecord(norm) {
 // per-step grouping styles.
 function renderStepStartedRecord(norm) {
   const stepLabel = norm.stepType
-    ? (STEP_REPORT_TITLES[String(norm.stepType).toLowerCase()] || norm.stepType)
+    ? (resolveStepReportTitle(norm.stepType) || norm.stepType)
     : "step";
   const status = String(norm.status || "running").toLowerCase();
   const display = stepStatusDisplay(status);
@@ -10787,10 +11064,12 @@ function renderStepEventRecord(norm) {
     "history-record conv-record role-step-event kind-" + norm.kind,
   );
 
-  const verb = isFailed ? "Step failed" : "Step completed";
+  const verb = isFailed
+    ? tf("stepReport.chip.failed", "Step failed")
+    : tf("stepReport.chip.completed", "Step completed");
   const icon = isFailed ? "✗" : "✓";
   const stepLabel = norm.stepType
-    ? (STEP_REPORT_TITLES[String(norm.stepType).toLowerCase()] || norm.stepType)
+    ? (resolveStepReportTitle(norm.stepType) || norm.stepType)
     : "step";
   const label = `${icon} ${verb} · ${stepLabel}`;
 
@@ -10849,7 +11128,7 @@ function renderStepOutputUsageRecord(norm) {
   );
 
   const stepLabel = norm.stepType
-    ? (STEP_REPORT_TITLES[String(norm.stepType).toLowerCase()] || norm.stepType)
+    ? (resolveStepReportTitle(norm.stepType) || norm.stepType)
     : "step";
 
   // Usage footnote — the primary visible content. Only rendered when the
@@ -10860,8 +11139,10 @@ function renderStepOutputUsageRecord(norm) {
     // No tokens consumed — still return the row with a collapsed chip only,
     // so the record's existence is preserved for the session badge logic.
     const chipWrap = el("div", "msg-chip-wrap collapsed step-event-chip kind-step_output");
+    const inProgress = () => tf(
+      "stepOutput.inProgress", stepLabel + " (in progress)", { label: stepLabel });
     const chip = el("button", "msg-chip step-event-chip-button",
-      "▸ " + stepLabel + " (in progress)");
+      "▸ " + inProgress());
     chip.type = "button";
     const detail = el("div", "msg-chip-detail");
     let chipBuilt = false;
@@ -10873,9 +11154,8 @@ function renderStepOutputUsageRecord(norm) {
         chipBuilt = true;
       }
       chipWrap.classList.toggle("collapsed");
-      chip.textContent = chipWrap.classList.contains("collapsed")
-        ? "▸ " + stepLabel + " (in progress)"
-        : "▾ " + stepLabel + " (in progress)";
+      chip.textContent = (chipWrap.classList.contains("collapsed") ? "▸ " : "▾ ")
+        + inProgress();
       if (!chipWrap.classList.contains("collapsed")) {
         requestAnimationFrame(() => detail.scrollIntoView({ block: "nearest" }));
       }
@@ -10966,9 +11246,12 @@ function renderUserMarkerRecord(norm, split) {
     // degrade to a single default-collapsed system-prompt chip combining the
     // prefix and suffix subsections (and the nested "查看原始" raw toggle), with
     // no user bubble.
-    const label = `system prompt · ${ctx}`;
+    // Re-resolved on every paint (not cached in a const): a language switch
+    // re-renders the console, and the toggle handler below must not restore a
+    // label captured under the previous language.
+    const label = () => chipLabel({ role: "system", stepType: ctx });
     const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
-    const chip = el("button", "msg-chip", "▸ " + label);
+    const chip = el("button", "msg-chip", "▸ " + label());
     chip.type = "button";
     const chipDetail = el("div", "msg-chip-detail");
     let chipBuilt = false;
@@ -10984,7 +11267,7 @@ function renderUserMarkerRecord(norm, split) {
         chipBuilt = true;
       }
       chipWrap.classList.toggle("collapsed", !chipExpanded);
-      chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
+      chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label();
       if (chipExpanded) {
         requestAnimationFrame(() => chipDetail.scrollIntoView({ block: "nearest" }));
       }
@@ -11041,9 +11324,9 @@ const STEP_REPORT_TITLES = {
 // as data (not a literal at the call site) so the title is unit-testable and
 // stays in parity across every registered STEP_REPORT_RENDERERS step.
 const STEP_REPORT_TITLE_SUFFIX = {
-  summarize: "总结",
+  summarize: "Summary",
 };
-const STEP_REPORT_TITLE_SUFFIX_DEFAULT = "结果";
+const STEP_REPORT_TITLE_SUFFIX_DEFAULT = "Result";
 
 // Pure: build a report-card title for `stepType` as `<步骤> · 结果/总结`. The
 // base label comes from STEP_REPORT_TITLES (title-case, intentionally distinct
@@ -11053,9 +11336,28 @@ const STEP_REPORT_TITLE_SUFFIX_DEFAULT = "结果";
 // "Step") plus the default suffix so nothing is silently dropped or thrown.
 function reportCardTitle(stepType) {
   const key = String(stepType || "").toLowerCase();
-  const base = STEP_REPORT_TITLES[key] || key || "Step";
-  const suffix = STEP_REPORT_TITLE_SUFFIX[key] || STEP_REPORT_TITLE_SUFFIX_DEFAULT;
+  const base = resolveStepReportTitle(stepType) || key || "Step";
+  // Resolve the semantic suffix (结果 / 总结) at render time; the map value is the
+  // offline fallback (null resolve = empty test dicts).
+  const hasSuffixKey = Object.prototype.hasOwnProperty.call(
+    STEP_REPORT_TITLE_SUFFIX, key);
+  const suffixFallback = STEP_REPORT_TITLE_SUFFIX[key]
+    || STEP_REPORT_TITLE_SUFFIX_DEFAULT;
+  const trSuffix = I18N.resolve(
+    hasSuffixKey ? "stepReportSuffix." + key : "stepReportSuffix.default");
+  const suffix = trSuffix != null ? trSuffix : suffixFallback;
   return base + " · " + suffix;
+}
+
+// Pure-ish: resolve a step type's title-case report label via I18N at render
+// time, falling back to the STEP_REPORT_TITLES map literal (offline / test env).
+// Returns null for an unknown step type so callers can degrade to the raw key.
+function resolveStepReportTitle(stepType) {
+  const key = String(stepType || "").toLowerCase();
+  const known = STEP_REPORT_TITLES[key];
+  if (!known) return null;
+  const tr = I18N.resolve("stepReport." + key);
+  return tr != null ? tr : known;
 }
 
 // ---------------------------------------------------------------------------
@@ -11110,16 +11412,27 @@ function formatCostUsd(v) {
 
 // Render a token_usage dict as a compact, labelled small string:
 //   "in 12,345 · out 6,789 · cache r/w 1,000/200 · $0.0123"
-// Safe for missing / null / partial input (each missing field → 0). Mirrors the
-// label grammar of `token_usage.format_usage_line` so CLI and Web read alike.
+// Safe for missing / null / partial input (each missing field → 0). The labels
+// are chrome, so they come from the language dictionary (`usage.valueLine`);
+// resolve() (not t()) is used so a boot-time dict miss degrades to the English
+// baseline below rather than painting a raw key into a usage badge.
 function formatTokenUsage(usage) {
   const u = usage && typeof usage === "object" ? usage : {};
+  const params = {
+    in: formatTokenCount(u.input_tokens),
+    out: formatTokenCount(u.output_tokens),
+    cacheRead: formatTokenCount(u.cache_read_input_tokens),
+    cacheWrite: formatTokenCount(u.cache_creation_input_tokens),
+    cost: formatCostUsd(u.total_cost_usd),
+  };
+  const line = I18N.resolve("usage.valueLine", params);
+  if (line != null) return line;
   return (
-    "in " + formatTokenCount(u.input_tokens) +
-    " · out " + formatTokenCount(u.output_tokens) +
-    " · cache r/w " + formatTokenCount(u.cache_read_input_tokens) +
-    "/" + formatTokenCount(u.cache_creation_input_tokens) +
-    " · " + formatCostUsd(u.total_cost_usd)
+    "in " + params.in +
+    " · out " + params.out +
+    " · cache r/w " + params.cacheRead +
+    "/" + params.cacheWrite +
+    " · " + params.cost
   );
 }
 
@@ -11265,7 +11578,7 @@ function buildStepUsageFootnote(usage) {
   if (isTokenUsageEmpty(usage)) return null;
   const foot = el("div", "step-report__usage");
   foot.append(
-    el("span", "step-report__usage-label", "tokens"),
+    el("span", "step-report__usage-label", tf("stepReport.usageLabel", "tokens")),
     el("span", "step-report__usage-value", formatTokenUsage(usage)),
   );
   return foot;
@@ -11356,11 +11669,17 @@ function accumulateRoundUsageByStep(records) {
 function buildRoundUsageFootnote(roundUsage, cumulativeUsage) {
   if (isTokenUsageEmpty(roundUsage)) return null;
   const cum = isTokenUsageEmpty(cumulativeUsage) ? roundUsage : cumulativeUsage;
-  const text =
-    "本轮 " + formatTokenCount(roundUsage.input_tokens) + " in / " +
-    formatTokenCount(roundUsage.output_tokens) + " out · 累计 " +
+  const text = tf("usage.roundFootnote",
+    "This round " + formatTokenCount(roundUsage.input_tokens) + " in / " +
+    formatTokenCount(roundUsage.output_tokens) + " out · Total " +
     formatTokenCount(cum.input_tokens) + " in / " +
-    formatTokenCount(cum.output_tokens) + " out";
+    formatTokenCount(cum.output_tokens) + " out",
+    {
+      roundIn: formatTokenCount(roundUsage.input_tokens),
+      roundOut: formatTokenCount(roundUsage.output_tokens),
+      cumIn: formatTokenCount(cum.input_tokens),
+      cumOut: formatTokenCount(cum.output_tokens),
+    });
   const foot = el("div", "round-usage");
   foot.appendChild(el("span", "round-usage__text", text));
   return foot;
@@ -11396,7 +11715,7 @@ function applyUsageBadge(badge, records) {
     }
     badge.innerHTML = "";
     badge.append(
-      el("span", "flow-usage-badge__label", "Session"),
+      el("span", "flow-usage-badge__label", tf("usage.sessionLabel", "Session")),
       el("span", "flow-usage-badge__value", formatTokenUsage(totals)),
     );
     badge.classList.remove("hidden");
@@ -11463,7 +11782,7 @@ function renderStepReport(step) {
     if (body instanceof Node) frag.appendChild(body);
     if (step.error_message) {
       frag.appendChild(el("div", "step-report__error",
-        "Error: " + String(step.error_message)));
+        tf("stepReport.errorPrefix", "Error: ") + String(step.error_message)));
     }
     // Token-usage footnote (G4): a low-key one-liner at the card's bottom,
     // shown only when this step actually consumed tokens. Steps with no
@@ -11477,7 +11796,7 @@ function renderStepReport(step) {
 // -- shared report-card building blocks --
 
 function reportEmpty(text) {
-  return el("p", "step-report__empty", text || "(no report fields)");
+  return el("p", "step-report__empty", text || tf("stepReport.empty", "(no report fields)"));
 }
 
 function reportStatusBar(parts) {
@@ -11560,8 +11879,11 @@ function renderGenericKvRow(k, v) {
   } else {
     const valEl = el("span", "step-report__kv-v");
     if (typeof v === "string" && v.length > 300) {
-      valEl.textContent = v.slice(0, 200).replace(/\n/g, " ") + `… (${v.length} chars)`;
-      valEl.title = `${v.length} chars`;
+      // Char count (not formatSize's KB/MB scaling) — keeps CLI parity with
+      // step_renderers.py:_default_render, which always reports characters.
+      const size = tf("common.size.chars", `${v.length} chars`, { n: v.length });
+      valEl.textContent = v.slice(0, 200).replace(/\n/g, " ") + `… (${size})`;
+      valEl.title = size;
     } else if (typeof v === "string") {
       valEl.textContent = v;
     } else {
@@ -11579,13 +11901,15 @@ function renderDefaultReport(step, outputs) {
   const hasFields = outputs && typeof outputs === "object" &&
     !Array.isArray(outputs) && Object.keys(outputs).length > 0;
   if (!hasFields) {
-    frag.appendChild(reportEmpty("(step produced no outputs)"));
+    frag.appendChild(reportEmpty(
+      tf("stepReport.empty.noOutputs", "(step produced no outputs)")));
   } else {
     frag.appendChild(renderGenericOutputs(outputs));
   }
   const status = step && step.status && String(step.status).toLowerCase();
   if (status && status !== "completed" && status !== "running") {
-    frag.appendChild(el("div", "step-report__muted", "Status: " + status));
+    frag.appendChild(el("div", "step-report__muted",
+      tf("stepReport.status", "Status: " + status, { status })));
   }
   return frag;
 }
@@ -11595,18 +11919,19 @@ function renderDefaultReport(step, outputs) {
 function renderAnalyzeReport(step, outputs) {
   const frag = document.createDocumentFragment();
   frag.appendChild(reportStatusBar([
-    `task: ${outputs.task_type || "N/A"}`,
-    `complexity: ${outputs.complexity || "N/A"}`,
-    `scope: ${outputs.scope || "N/A"}`,
+    `${tf("stepReport.label.task", "task")}: ${outputs.task_type || "N/A"}`,
+    `${tf("stepReport.label.complexity", "complexity")}: ${outputs.complexity || "N/A"}`,
+    `${tf("stepReport.label.scope", "scope")}: ${outputs.scope || "N/A"}`,
   ]));
   if (outputs.reasoning) {
-    frag.appendChild(reportSection("Reasoning", String(outputs.reasoning)));
+    frag.appendChild(reportSection(tf("stepReport.section.reasoning", "Reasoning"), String(outputs.reasoning)));
   }
   const items = (Array.isArray(outputs.selected_items) && outputs.selected_items.length)
     ? outputs.selected_items
     : (Array.isArray(outputs.relevant_specs) ? outputs.relevant_specs : []);
   if (items.length) {
-    frag.appendChild(reportSection(`Relevant Spec Items (${items.length})`,
+    frag.appendChild(reportSection(tf("stepReport.count.relevantSpecItems",
+      `Relevant Spec Items (${items.length})`, { n: items.length }),
       reportList(items, (it) => {
         if (it && typeof it === "object") {
           const spec = it.spec || it.spec_name || "";
@@ -11638,14 +11963,15 @@ function renderProposalFields(proposal) {
 
   const summary = proposal.summary;
   if (typeof summary === "string" && summary) {
-    frag.appendChild(reportSection("Summary", summary));
+    frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"), summary));
     known.add("summary");
   }
 
   const filesToModify = proposal.files_to_modify;
   if (Array.isArray(filesToModify) && filesToModify.length) {
     frag.appendChild(reportSection(
-      `Files to Modify (${filesToModify.length})`,
+      tf("stepReport.count.filesToModify",
+        `Files to Modify (${filesToModify.length})`, { n: filesToModify.length }),
       reportList(filesToModify, (f) => renderProposalFileItem(f, "reason")),
     ));
     known.add("files_to_modify");
@@ -11654,7 +11980,8 @@ function renderProposalFields(proposal) {
   const filesToCreate = proposal.files_to_create;
   if (Array.isArray(filesToCreate) && filesToCreate.length) {
     frag.appendChild(reportSection(
-      `Files to Create (${filesToCreate.length})`,
+      tf("stepReport.count.filesToCreate",
+        `Files to Create (${filesToCreate.length})`, { n: filesToCreate.length }),
       reportList(filesToCreate, (f) => renderProposalFileItem(f, "purpose")),
     ));
     known.add("files_to_create");
@@ -11662,7 +11989,7 @@ function renderProposalFields(proposal) {
 
   const rationale = proposal.rationale;
   if (typeof rationale === "string" && rationale) {
-    frag.appendChild(reportSection("Rationale", rationale));
+    frag.appendChild(reportSection(tf("stepReport.section.rationale", "Rationale"), rationale));
     known.add("rationale");
   }
 
@@ -11673,7 +12000,7 @@ function renderProposalFields(proposal) {
     }
   }
   if (Object.keys(rest).length) {
-    frag.appendChild(reportSection("Other Fields", renderGenericOutputs(rest)));
+    frag.appendChild(reportSection(tf("stepReport.section.otherFields", "Other Fields"), renderGenericOutputs(rest)));
   }
   return frag;
 }
@@ -11705,14 +12032,15 @@ function renderDesignFields(design) {
 
   const overview = design.overview;
   if (typeof overview === "string" && overview) {
-    frag.appendChild(reportSection("Overview", overview));
+    frag.appendChild(reportSection(tf("stepReport.section.overview", "Overview"), overview));
     known.add("overview");
   }
 
   const components = design.components;
   if (Array.isArray(components) && components.length) {
     frag.appendChild(reportSection(
-      `Components (${components.length})`,
+      tf("stepReport.count.components",
+        `Components (${components.length})`, { n: components.length }),
       reportList(components, renderDesignComponentItem),
     ));
     known.add("components");
@@ -11721,7 +12049,8 @@ function renderDesignFields(design) {
   const interfaces = design.interfaces;
   if (Array.isArray(interfaces) && interfaces.length) {
     frag.appendChild(reportSection(
-      `Interfaces (${interfaces.length})`,
+      tf("stepReport.count.interfaces",
+        `Interfaces (${interfaces.length})`, { n: interfaces.length }),
       reportList(interfaces, renderDesignInterfaceItem),
     ));
     known.add("interfaces");
@@ -11730,7 +12059,8 @@ function renderDesignFields(design) {
   const decisions = design.decisions;
   if (Array.isArray(decisions) && decisions.length) {
     frag.appendChild(reportSection(
-      `Key Decisions (${decisions.length})`,
+      tf("stepReport.count.keyDecisions",
+        `Key Decisions (${decisions.length})`, { n: decisions.length }),
       reportList(decisions, renderDesignDecisionItem),
     ));
     known.add("decisions");
@@ -11743,7 +12073,7 @@ function renderDesignFields(design) {
     }
   }
   if (Object.keys(rest).length) {
-    frag.appendChild(reportSection("Other Fields", renderGenericOutputs(rest)));
+    frag.appendChild(reportSection(tf("stepReport.section.otherFields", "Other Fields"), renderGenericOutputs(rest)));
   }
   return frag;
 }
@@ -11790,7 +12120,7 @@ function renderDesignDecisionItem(d) {
     const reason = d.reason || "";
     if (reason) {
       wrap.appendChild(el("span", "step-report__muted",
-        (decision ? " — " : "Reason: ") + String(reason)));
+        (decision ? " — " : tf("stepReport.design.reasonPrefix", "Reason: ")) + String(reason)));
     }
     return wrap;
   }
@@ -11808,39 +12138,43 @@ function renderPlanReport(step, outputs) {
   if (proposal && typeof proposal === "object" && !Array.isArray(proposal)) {
     const body = renderProposalFields(proposal);
     if (body.childNodes.length) {
-      frag.appendChild(reportSection("Proposal", body));
+      frag.appendChild(reportSection(tf("stepReport.section.proposal", "Proposal"), body));
     } else {
       // Empty-object proposal: keep the section header so the user still sees
       // it was present, but show the generic empty hint instead of a blank.
-      frag.appendChild(reportSection("Proposal", renderStructured(proposal)));
+      frag.appendChild(reportSection(tf("stepReport.section.proposal", "Proposal"), renderStructured(proposal)));
     }
   } else if (typeof proposal === "string" && proposal) {
-    frag.appendChild(reportSection("Proposal", proposal));
+    frag.appendChild(reportSection(tf("stepReport.section.proposal", "Proposal"), proposal));
   }
   if (design && typeof design === "object" && !Array.isArray(design)) {
     const body = renderDesignFields(design);
     if (body.childNodes.length) {
-      frag.appendChild(reportSection("Design", body));
+      frag.appendChild(reportSection(tf("stepReport.section.design", "Design"), body));
     } else {
-      frag.appendChild(reportSection("Design", renderStructured(design)));
+      frag.appendChild(reportSection(tf("stepReport.section.design", "Design"), renderStructured(design)));
     }
   } else if (typeof design === "string" && design) {
-    frag.appendChild(reportSection("Design", design));
+    frag.appendChild(reportSection(tf("stepReport.section.design", "Design"), design));
   }
   if (groups.length) {
-    frag.appendChild(reportSection(`Task Groups (${groups.length})`,
+    frag.appendChild(reportSection(
+      tf("stepReport.count.taskGroups",
+        `Task Groups (${groups.length})`, { n: groups.length }),
       reportList(groups, (g) => {
         const tasks = Array.isArray(g && g.tasks) ? g.tasks : [];
         const totalLoc = tasks.reduce(
           (s, t) => s + (Number(t && t.estimated_loc) || 0), 0);
         const deps = Array.isArray(g && g.depends_on) && g.depends_on.length
-          ? g.depends_on.join(", ") : "none";
+          ? g.depends_on.join(", ") : tf("stepReport.plan.dependsNone", "none");
         const row = el("span", "step-report__group-row");
         row.append(
           el("span", "step-report__group-id", String(g.group_id || "?")),
           el("span", "step-report__group-name", " " + String(g.name || "")),
           el("span", "step-report__muted",
-            `  · ${tasks.length} tasks · ~${totalLoc} LOC · depends: ${deps}`),
+            "  · " + tf("stepReport.plan.groupMeta",
+              `${tasks.length} tasks · ~${totalLoc} LOC · depends: ${deps}`,
+              { tasks: tasks.length, loc: totalLoc, deps })),
         );
         return row;
       })));
@@ -11878,28 +12212,32 @@ function renderImplementReport(step, outputs) {
   const bar = el("div", "step-report__status-bar");
   bar.append(
     el("span", "step-report__icon " + cls, icons[status] || "●"),
-    el("span", "step-report__label " + cls, status),
+    el("span", "step-report__label " + cls,
+      tf("stepReport.implement.status." + status, status)),
   );
   if (implGroups.length) {
     bar.append(el("span", "step-report__sep", "│"),
-      el("span", null, `${implGroups.length} groups`));
+      el("span", null, tf("stepReport.implement.groups",
+        `${implGroups.length} groups`, { n: implGroups.length })));
   }
   bar.append(
     el("span", "step-report__sep", "│"),
-    el("span", null, `${filesChanged.length} files`),
+    el("span", null, tf("stepReport.implement.files",
+      `${filesChanged.length} files`, { n: filesChanged.length })),
   );
   if (testsAdded.length) {
     bar.append(el("span", "step-report__sep", "│"),
-      el("span", null, `${testsAdded.length} tests`));
+      el("span", null, tf("stepReport.implement.tests",
+        `${testsAdded.length} tests`, { n: testsAdded.length })));
   }
   frag.appendChild(bar);
 
   if (summary) {
     const parts = String(summary).split(";").map((s) => s.trim()).filter(Boolean);
     if (parts.length <= 1) {
-      frag.appendChild(reportSection("Summary", parts[0] || String(summary)));
+      frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"), parts[0] || String(summary)));
     } else {
-      frag.appendChild(reportSection("Summary",
+      frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"),
         reportList(parts, (p, i) => {
           const span = el("span");
           span.appendChild(el("span", "step-report__group-id",
@@ -11936,16 +12274,19 @@ function renderImplementReport(step, outputs) {
       wrap.appendChild(dirEl);
     }
     frag.appendChild(reportSection(
-      `Files Changed (${filesChanged.length})`, wrap));
+      tf("stepReport.count.filesChanged",
+        `Files Changed (${filesChanged.length})`, { n: filesChanged.length }), wrap));
   }
 
   if (testsAdded.length) {
-    frag.appendChild(reportSection(`Tests Added (${testsAdded.length})`,
+    frag.appendChild(reportSection(tf("stepReport.count.testsAdded",
+      `Tests Added (${testsAdded.length})`, { n: testsAdded.length }),
       reportList(testsAdded, (t) => document.createTextNode("+ " + String(t)))));
   }
 
   if (incomplete.length) {
-    frag.appendChild(reportSection(`Incomplete Tasks (${incomplete.length})`,
+    frag.appendChild(reportSection(tf("stepReport.count.incompleteTasks",
+      `Incomplete Tasks (${incomplete.length})`, { n: incomplete.length }),
       reportList(incomplete, (t) => {
         if (t && typeof t === "object") {
           const tid = t.task_id || t.id || "?";
@@ -11963,11 +12304,15 @@ function renderImplementReport(step, outputs) {
     const body = el("div");
     if (restrictedApplied.length) {
       body.appendChild(el("div", "step-report__muted",
-        `Restricted edits applied: ${restrictedApplied.length}`));
+        tf("stepReport.restricted.applied",
+          `Restricted edits applied: ${restrictedApplied.length}`,
+          { n: restrictedApplied.length })));
     }
     if (restrictedFailed.length) {
       body.appendChild(el("div", "step-report__warn",
-        `Restricted edits failed: ${restrictedFailed.length}`));
+        tf("stepReport.restricted.failed",
+          `Restricted edits failed: ${restrictedFailed.length}`,
+          { n: restrictedFailed.length })));
       body.appendChild(reportList(restrictedFailed, (e) => {
         if (e && typeof e === "object") {
           return document.createTextNode(String(
@@ -11976,7 +12321,7 @@ function renderImplementReport(step, outputs) {
         return document.createTextNode(String(e));
       }));
     }
-    frag.appendChild(reportSection("Restricted Edits", body));
+    frag.appendChild(reportSection(tf("stepReport.section.restrictedEdits", "Restricted Edits"), body));
   }
   return frag;
 }
@@ -11994,17 +12339,20 @@ function renderTestReport(step, outputs) {
 
   const bar = el("div", "step-report__status-bar");
   bar.appendChild(el("span", "step-report__label " + (overall ? "ok" : "fail"),
-    overall ? "PASSED" : "FAILED"));
+    overall ? tf("stepReport.status.passed", "PASSED")
+            : tf("stepReport.status.failed", "FAILED")));
   const phases = Array.isArray(results.phases) ? results.phases : [];
   if (phases.length) {
     const passed = phases.filter((p) => p && p.passed).length;
     bar.append(el("span", "step-report__sep", "│"),
-      el("span", null, `${passed} / ${phases.length} phases`));
+      el("span", null, tf("stepReport.test.phaseCount",
+        `${passed} / ${phases.length} phases`,
+        { passed, total: phases.length })));
   }
   frag.appendChild(bar);
 
   if (phases.length) {
-    frag.appendChild(reportSection("Phases", reportList(phases, (p) => {
+    frag.appendChild(reportSection(tf("stepReport.section.phases", "Phases"), reportList(phases, (p) => {
       const ok = !!(p && p.passed);
       const row = el("span");
       row.appendChild(el("span", "step-report__icon " + (ok ? "ok" : "fail"),
@@ -12014,7 +12362,7 @@ function renderTestReport(step, outputs) {
     })));
   }
   if (results.command) {
-    frag.appendChild(reportSection("Command", String(results.command)));
+    frag.appendChild(reportSection(tf("stepReport.section.command", "Command"), String(results.command)));
   }
   return frag;
 }
@@ -12037,19 +12385,23 @@ function renderSelfCheckReport(step, outputs) {
 
   const bar = el("div", "step-report__status-bar");
   if (status === "failed") {
-    bar.appendChild(el("span", "step-report__label fail", "✗ FAILED"));
+    bar.appendChild(el("span", "step-report__label fail",
+      "✗ " + tf("stepReport.status.failed", "FAILED")));
   } else if (actionable === 0) {
-    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.status.passed", "PASSED")));
   } else {
     bar.appendChild(el("span", "step-report__label fail", hasCount
-      ? `✗ ${actionable} actionable issue(s)`
-      : `✗ ${actionable} issue(s)`));
+      ? tf("stepReport.selfCheck.actionableIssues",
+        `✗ ${actionable} actionable issue(s)`, { n: actionable })
+      : tf("stepReport.selfCheck.issues",
+        `✗ ${actionable} issue(s)`, { n: actionable })));
   }
   frag.appendChild(bar);
 
   const result = outputs.self_check_result;
   const summary = result && typeof result === "object" ? result.summary : "";
-  if (summary) frag.appendChild(reportSection("Summary", String(summary)));
+  if (summary) frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"), String(summary)));
 
   if (issues.length) {
     const bySev = { critical: [], high: [], medium: [], low: [] };
@@ -12061,7 +12413,10 @@ function renderSelfCheckReport(step, outputs) {
     for (const sev of ["critical", "high", "medium", "low"]) {
       const grp = bySev[sev];
       if (!grp || !grp.length) continue;
-      frag.appendChild(reportSection(`${sev} (${grp.length})`,
+      const sevLabel = tf("stepReport.severity." + sev, sev);
+      frag.appendChild(reportSection(
+        tf("stepReport.groupHeader",
+          `${sevLabel} (${grp.length})`, { label: sevLabel, n: grp.length }),
         reportList(grp, (i) => {
           const desc = i.description || i.message || safeStringify(i);
           const loc = i.location || "";
@@ -12089,18 +12444,21 @@ function renderVerifySpecReport(step, outputs) {
 
   const bar = el("div", "step-report__status-bar");
   if (verified === true) {
-    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.status.passed", "PASSED")));
   } else if (verified === false) {
-    bar.appendChild(el("span", "step-report__label fail", "✗ FAILED"));
+    bar.appendChild(el("span", "step-report__label fail",
+      "✗ " + tf("stepReport.status.failed", "FAILED")));
   } else {
-    bar.appendChild(el("span", "step-report__label muted", "?"));
+    bar.appendChild(el("span", "step-report__label muted",
+      tf("stepReport.status.unknown", "?")));
   }
   frag.appendChild(bar);
 
   const vRes = outputs.verification_result;
   const summary = outputs.summary
     || (vRes && typeof vRes === "object" ? vRes.summary : "");
-  if (summary) frag.appendChild(reportSection("Summary", String(summary)));
+  if (summary) frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"), String(summary)));
 
   const issues = Array.isArray(outputs.issues) ? outputs.issues : [];
   if (issues.length) {
@@ -12114,13 +12472,16 @@ function renderVerifySpecReport(step, outputs) {
       (byScope[sc] = byScope[sc] || []).push(i);
     }
     const scopes = [
-      ["In-scope", "in_scope"],
-      ["Out-of-scope", "out_of_scope"],
+      ["stepReport.scope.inScope", "In-scope", "in_scope"],
+      ["stepReport.scope.outOfScope", "Out-of-scope", "out_of_scope"],
     ];
-    for (const [label, key] of scopes) {
+    for (const [labelKey, labelFallback, key] of scopes) {
       const grp = byScope[key];
       if (!grp || !grp.length) continue;
-      frag.appendChild(reportSection(`${label} (${grp.length})`,
+      const label = tf(labelKey, labelFallback);
+      frag.appendChild(reportSection(
+        tf("stepReport.groupHeader",
+          `${label} (${grp.length})`, { label, n: grp.length }),
         reportList(grp, (i) => {
           const msg = i.message || safeStringify(i);
           const prio = String(i.priority || "medium").toLowerCase();
@@ -12142,7 +12503,7 @@ function renderVerifySpecReport(step, outputs) {
     : (vRes && typeof vRes === "object" && Array.isArray(vRes.recommendations)
       ? vRes.recommendations : []);
   if (recs.length) {
-    frag.appendChild(reportSection("Recommendations",
+    frag.appendChild(reportSection(tf("stepReport.section.recommendations", "Recommendations"),
       reportList(recs, (r) => document.createTextNode(String(r)))));
   }
   return frag;
@@ -12158,11 +12519,14 @@ function renderUpdateSpecReport(step, outputs) {
     return renderDefaultReport(step, outputs);
   }
   if (!specs.length && !(Array.isArray(caps) && caps.length)) {
-    frag.appendChild(reportEmpty("No spec updates needed"));
+    frag.appendChild(reportEmpty(
+      tf("stepReport.empty.noSpecUpdates", "No spec updates needed")));
     return frag;
   }
   if (specs.length) {
-    frag.appendChild(reportSection(`Updated Specs (${specs.length})`,
+    frag.appendChild(reportSection(
+      tf("stepReport.count.updatedSpecs",
+        `Updated Specs (${specs.length})`, { n: specs.length }),
       reportList(specs, (s) => {
         if (s && typeof s === "object") {
           const name = s.spec_name || s.name || "unknown";
@@ -12177,7 +12541,7 @@ function renderUpdateSpecReport(step, outputs) {
       })));
   }
   if (Array.isArray(caps) && caps.length) {
-    frag.appendChild(reportSection("New Capabilities",
+    frag.appendChild(reportSection(tf("stepReport.section.newCapabilities", "New Capabilities"),
       reportList(caps, (c) => document.createTextNode(String(c)))));
   }
   return frag;
@@ -12188,7 +12552,7 @@ function renderUpdateSpecReport(step, outputs) {
 function renderCommitReport(step, outputs) {
   const frag = document.createDocumentFragment();
   if (!outputs.committed) {
-    frag.appendChild(reportEmpty("No changes to commit"));
+    frag.appendChild(reportEmpty(tf("stepReport.empty.noChangesToCommit", "No changes to commit")));
     return frag;
   }
   const hash = String(outputs.commit_hash || "");
@@ -12203,7 +12567,7 @@ function renderCommitReport(step, outputs) {
   }
   frag.appendChild(bar);
   if (outputs.commit_message) {
-    frag.appendChild(reportSection("Commit Message",
+    frag.appendChild(reportSection(tf("stepReport.section.commitMessage", "Commit Message"),
       String(outputs.commit_message)));
   }
   return frag;
@@ -12221,10 +12585,14 @@ function renderVersionAnalyzeReport(step, outputs) {
       String(outputs.suggested_version || "N/A")),
   );
   frag.appendChild(bar);
+  const bumpType = String(outputs.bump_type || "?");
+  const confidence = String(outputs.confidence || "?");
   frag.appendChild(el("div", "step-report__muted",
-    `${outputs.bump_type || "?"} bump  │  confidence: ${outputs.confidence || "?"}`));
+    tf("stepReport.versionAnalyze.subline",
+      `${bumpType} bump  │  confidence: ${confidence}`,
+      { bumpType, confidence })));
   if (outputs.reasoning) {
-    frag.appendChild(reportSection("Reasoning", String(outputs.reasoning)));
+    frag.appendChild(reportSection(tf("stepReport.section.reasoning", "Reasoning"), String(outputs.reasoning)));
   }
   return frag;
 }
@@ -12239,7 +12607,7 @@ function renderSummarizeReport(step, outputs) {
     wrap.appendChild(renderMarkdown(String(summary)));
     frag.appendChild(wrap);
   } else {
-    frag.appendChild(reportEmpty("(no summary)"));
+    frag.appendChild(reportEmpty(tf("stepReport.empty.noSummary", "(no summary)")));
   }
   return frag;
 }
@@ -12249,13 +12617,13 @@ function renderSummarizeReport(step, outputs) {
 function renderDiscoveryReport(step, outputs) {
   const frag = document.createDocumentFragment();
   if (outputs.refined_description) {
-    frag.appendChild(reportSection("Refined Description",
+    frag.appendChild(reportSection(tf("stepReport.section.refinedDescription", "Refined Description"),
       String(outputs.refined_description)));
   }
   const dState = outputs.discovery_state;
   const mode = (dState && typeof dState === "object" && dState.mode)
     || outputs.mode;
-  if (mode) frag.appendChild(reportSection("Mode", String(mode)));
+  if (mode) frag.appendChild(reportSection(tf("stepReport.section.mode", "Mode"), String(mode)));
   const round = (dState && typeof dState === "object" && dState.round != null)
     ? dState.round : null;
   if (round != null) {
@@ -12297,26 +12665,32 @@ function renderSpecGateReport(step, outputs) {
 
   const bar = el("div", "step-report__status-bar");
   if (gateSkipped) {
-    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.status.passed", "PASSED")));
     bar.append(el("span", "step-report__sep", "│"),
-      el("span", "step-report__muted", "no spec change — gate skipped (no-op)"));
+      el("span", "step-report__muted",
+        tf("stepReport.specGate.skipped", "no spec change — gate skipped (no-op)")));
   } else if (gatePassed) {
-    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.status.passed", "PASSED")));
   } else {
-    bar.appendChild(el("span", "step-report__label fail", "✗ FAILED"));
+    bar.appendChild(el("span", "step-report__label fail",
+      "✗ " + tf("stepReport.status.failed", "FAILED")));
   }
   frag.appendChild(bar);
 
   if (gateRoute === "update_spec") {
     frag.appendChild(el("div", "step-report__muted",
-      "Route: back to update_spec (invalid spec artifact)"));
+      tf("stepReport.specGate.routeUpdateSpec",
+        "Route: back to update_spec (invalid spec artifact)")));
   } else if (gateRoute === "implement") {
     frag.appendChild(el("div", "step-report__muted",
-      "Route: to implement (spec edit broke a test)"));
+      tf("stepReport.specGate.routeImplement",
+        "Route: to implement (spec edit broke a test)")));
   }
 
   if (!gatePassed && outputs.fix_instructions) {
-    frag.appendChild(reportSection("Fix Instructions",
+    frag.appendChild(reportSection(tf("stepReport.section.fixInstructions", "Fix Instructions"),
       String(outputs.fix_instructions)));
   }
 
@@ -12324,7 +12698,7 @@ function renderSpecGateReport(step, outputs) {
   // the raw stdout/stderr never leaks into the DOM.
   const results = outputs.test_results;
   if (results && typeof results === "object") {
-    frag.appendChild(reportSection("Re-test",
+    frag.appendChild(reportSection(tf("stepReport.section.reTest", "Re-test"),
       renderTestReport(step, { test_results: results })));
   }
   return frag;
@@ -12345,36 +12719,44 @@ function renderCharterFreshnessReport(step, outputs) {
 
   const bar = el("div", "step-report__status-bar");
   if (autoUpdated) {
-    bar.appendChild(el("span", "step-report__label ok", "✓ charter auto-updated"));
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.charter.autoUpdated", "charter auto-updated")));
   } else if (updateNeeded) {
-    bar.appendChild(el("span", "step-report__label warn", "charter update advised"));
+    bar.appendChild(el("span", "step-report__label warn",
+      tf("stepReport.charter.updateAdvised", "charter update advised")));
   } else {
-    bar.appendChild(el("span", "step-report__label ok", "✓ charter fresh"));
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.charter.fresh", "charter fresh")));
   }
   const touched = outputs.touched_classes;
   if (Array.isArray(touched) && touched.length) {
+    const list = touched.join(", ");
     bar.append(el("span", "step-report__sep", "│"),
-      el("span", "step-report__muted", "touched: " + touched.join(", ")));
+      el("span", "step-report__muted",
+        tf("stepReport.charter.touched", "touched: " + list, { list })));
   }
   frag.appendChild(bar);
 
   if (autoUpdated) {
     frag.appendChild(el("div", "step-report__muted",
-      "se3/charter.md was updated to describe the already-reviewed change."));
+      tf("stepReport.charter.autoUpdatedNote",
+        "se3/charter.md was updated to describe the already-reviewed change.")));
     const diff = outputs.charter_diff;
     if (diff) {
       const pre = el("pre", "step-report__diff");
       pre.textContent = String(diff);
-      frag.appendChild(reportSection("Charter diff (old → new)", pre));
+      frag.appendChild(reportSection(tf("stepReport.section.charterDiff", "Charter diff (old → new)"), pre));
     }
   } else if (updateNeeded) {
     if (outputs.suggested_update) {
-      frag.appendChild(reportSection("Suggested update",
+      frag.appendChild(reportSection(tf("stepReport.section.suggestedUpdate", "Suggested update"),
         String(outputs.suggested_update)));
     }
     if (outputs.degraded_reason) {
       frag.appendChild(el("div", "step-report__muted",
-        "Not auto-applied: " + String(outputs.degraded_reason)));
+        tf("stepReport.section.notAutoApplied",
+          "Not auto-applied: " + String(outputs.degraded_reason),
+          { reason: String(outputs.degraded_reason) })));
     }
   }
 
@@ -12384,7 +12766,7 @@ function renderCharterFreshnessReport(step, outputs) {
 
   // Human-amendment monitoring light: when the diff itself edited the charter.
   if (outputs.admission_warning) {
-    frag.appendChild(reportSection("Charter admission",
+    frag.appendChild(reportSection(tf("stepReport.section.charterAdmission", "Charter admission"),
       String(outputs.admission_warning)));
   }
   return frag;
@@ -12412,7 +12794,8 @@ function renderRecordHead(norm) {
   head.appendChild(el("span", "record-role", norm.role));
   const right = el("div", "record-head-right");
   if (norm.attempt != null && norm.attempt !== "" && Number(norm.attempt) > 1) {
-    right.appendChild(el("span", "record-attempt", "attempt " + norm.attempt));
+    right.appendChild(el("span", "record-attempt",
+      tf("record.attempt", "attempt " + norm.attempt, { n: norm.attempt })));
   }
   if (norm.timestamp != null) {
     right.appendChild(el("span", "record-time", formatTime(norm.timestamp)));
@@ -12451,7 +12834,7 @@ function openNewTask() {
   select.innerHTML = "";
   const online = state.machines.filter((m) => m.online);
   if (!online.length) {
-    select.appendChild(new Option("(no machines connected)", ""));
+    select.appendChild(new Option(tf("issueModal.noMachines", "(no machines connected)"), ""));
   } else {
     for (const m of online) {
       select.appendChild(new Option(m.hostname || m.machine_id, m.machine_id));
@@ -12508,7 +12891,7 @@ function populateProjectSelect(select, roots, opts) {
   const submit = opts.submit || null;
   select.innerHTML = "";
   const list = Array.isArray(roots) ? roots.filter((r) => r) : [];
-  const manualOption = new Option("Other path…", PROJECT_MANUAL_SENTINEL);
+  const manualOption = new Option(tf("newTask.otherPath", "Other path…"), PROJECT_MANUAL_SENTINEL);
 
   if (!list.length) {
     // No known roots — show the empty hint, but keep the manual entry
@@ -12530,7 +12913,7 @@ function populateProjectSelect(select, roots, opts) {
     select.value = list[0];
     return list[0];
   }
-  const placeholder = new Option("(select a project…)", "");
+  const placeholder = new Option(tf("issueModal.selectProject", "(select a project…)"), "");
   placeholder.disabled = true;
   placeholder.selected = true;
   select.appendChild(placeholder);
@@ -12581,22 +12964,22 @@ async function submitNewTask(event) {
   const worktree = $("nt-worktree").checked;
   const projectSelectValue = $("nt-project").value.trim();
 
-  if (!machineId) return showFormError(errBox, "Select a target machine.");
-  if (!task) return showFormError(errBox, "Task description must not be empty.");
+  if (!machineId) return showFormError(errBox, tf("newTask.errSelectMachine", "Select a target machine."));
+  if (!task) return showFormError(errBox, tf("newTask.errTaskEmpty", "Task description must not be empty."));
   if (!projectSelectValue) {
-    return showFormError(errBox, "Select a project root for this task.");
+    return showFormError(errBox, tf("newTask.errSelectProject", "Select a project root for this task."));
   }
   let projectRoot;
   if (projectSelectValue === PROJECT_MANUAL_SENTINEL) {
     const manualInput = $("nt-project-manual");
     projectRoot = (manualInput && manualInput.value.trim()) || "";
     if (!projectRoot) {
-      return showFormError(errBox, "Enter an absolute path for the project.");
+      return showFormError(errBox, tf("newTask.errEnterPath", "Enter an absolute path for the project."));
     }
     if (!isValidAbsolutePath(projectRoot)) {
       return showFormError(
         errBox,
-        "Project path must be absolute (start with '/').",
+        tf("newTask.errPathAbsolute", "Project path must be absolute (start with '/')."),
       );
     }
   } else {
@@ -12625,13 +13008,13 @@ async function submitNewTask(event) {
       showToast("success", tf("toast.taskPublished", "Task published."));
     } else {
       const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || `Server returned ${resp.status}.`;
+      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
       showFormError(errBox, message);
       showToast("error", tf("toast.taskPublishFailed", `Could not publish task: ${message}`, { message }));
       submit.disabled = false;
     }
   } catch (err) {
-    showFormError(errBox, "Network error — could not reach the server.");
+    showFormError(errBox, tf("error.networkReach", "Network error — could not reach the server."));
     showToast("error", tf("toast.taskPublishNetworkError", "Could not publish task — network error."));
     submit.disabled = false;
   }
@@ -12745,8 +13128,8 @@ async function handleLogin(event) {
   errBox.classList.add("hidden");
   const username = $("login-username").value.trim();
   const password = $("login-password").value;
-  if (!username) return showFormError(errBox, "Enter your username.");
-  if (!password) return showFormError(errBox, "Enter your password.");
+  if (!username) return showFormError(errBox, tf("login.errUsername", "Enter your username."));
+  if (!password) return showFormError(errBox, tf("login.errPassword", "Enter your password."));
 
   const submit = $("login-submit");
   submit.disabled = true;
@@ -12761,14 +13144,14 @@ async function handleLogin(event) {
       $("login-password").value = "";
       onAuthenticated(identity, "login_ok");
     } else if (resp.status === 429) {
-      showFormError(errBox, "Too many attempts — wait a moment and retry.");
+      showFormError(errBox, tf("login.errTooMany", "Too many attempts — wait a moment and retry."));
     } else if (resp.status === 503) {
-      showFormError(errBox, "Password login is not enabled on this server.");
+      showFormError(errBox, tf("login.errNotEnabled", "Password login is not enabled on this server."));
     } else {
-      showFormError(errBox, "Invalid username or password.");
+      showFormError(errBox, tf("login.errInvalid", "Invalid username or password."));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not reach the server.");
+    showFormError(errBox, tf("error.networkReach", "Network error — could not reach the server."));
   } finally {
     submit.disabled = false;
   }
@@ -12779,7 +13162,7 @@ async function handleBreakglass(event) {
   const errBox = $("breakglass-error");
   errBox.classList.add("hidden");
   const token = $("breakglass-token").value.trim();
-  if (!token) return showFormError(errBox, "Paste the break-glass token.");
+  if (!token) return showFormError(errBox, tf("login.errPasteToken", "Paste the break-glass token."));
 
   const submit = $("breakglass-submit");
   submit.disabled = true;
@@ -12794,10 +13177,10 @@ async function handleBreakglass(event) {
       $("breakglass-token").value = "";
       onAuthenticated(identity, "breakglass_ok");
     } else {
-      showFormError(errBox, "Invalid or expired break-glass token.");
+      showFormError(errBox, tf("login.errInvalidToken", "Invalid or expired break-glass token."));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not reach the server.");
+    showFormError(errBox, tf("error.networkReach", "Network error — could not reach the server."));
   } finally {
     submit.disabled = false;
   }
@@ -12850,7 +13233,7 @@ function closeKeys() {
 async function loadDaemonKeys() {
   const listBox = $("keys-list");
   listBox.innerHTML = "";
-  listBox.appendChild(el("p", "empty", "Loading keys…"));
+  listBox.appendChild(el("p", "empty", tf("keys.loading", "Loading keys…")));
   try {
     const resp = await authedFetch("/api/daemon-keys");
     if (!resp.ok) {
@@ -12870,18 +13253,20 @@ function renderDaemonKeys() {
   const listBox = $("keys-list");
   listBox.innerHTML = "";
   if (!state.daemonKeys.length) {
-    listBox.appendChild(el("p", "empty", "No daemon keys yet."));
+    listBox.appendChild(el("p", "empty", tf("keys.empty", "No daemon keys yet.")));
     return;
   }
   for (const key of state.daemonKeys) {
     const model = daemonKeyRowModel(key);
     const row = el("div", "keys-row" + (model.revoked ? " revoked" : ""));
     row.append(
-      el("span", "keys-row-label", model.label),
-      el("span", "keys-row-status keys-status-" + model.statusClass, model.statusLabel),
+      el("span", "keys-row-label",
+        model.unlabeled ? tf("keys.unlabeled", "(unlabeled)") : model.label),
+      el("span", "keys-row-status keys-status-" + model.statusClass,
+        tf(model.statusClass === "revoked" ? "keys.statusRevoked" : "keys.statusActive", model.statusLabel)),
     );
     if (!model.revoked && model.keyId) {
-      const btn = el("button", "ghost-btn keys-revoke-btn", "Revoke");
+      const btn = el("button", "ghost-btn keys-revoke-btn", tf("keys.revoke", "Revoke"));
       btn.type = "button";
       btn.addEventListener("click", () => revokeDaemonKey(model.keyId));
       row.appendChild(btn);
@@ -12913,10 +13298,10 @@ async function createDaemonKey(event) {
       loadDaemonKeys();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not create the key.");
+    showFormError(errBox, tf("keys.errCreateNetwork", "Network error — could not create the key."));
   } finally {
     submit.disabled = false;
   }
@@ -12936,10 +13321,10 @@ async function revokeDaemonKey(keyId) {
       loadDaemonKeys();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not revoke the key.");
+    showFormError(errBox, tf("keys.errRevokeNetwork", "Network error — could not revoke the key."));
   }
 }
 
@@ -12964,7 +13349,7 @@ function closeUsers() {
 async function loadUsers() {
   const listBox = $("users-list");
   listBox.innerHTML = "";
-  listBox.appendChild(el("p", "empty", "Loading users…"));
+  listBox.appendChild(el("p", "empty", tf("users.loading", "Loading users…")));
   try {
     const resp = await authedFetch("/api/users");
     if (!resp.ok) {
@@ -12984,7 +13369,7 @@ function renderUsers() {
   const listBox = $("users-list");
   listBox.innerHTML = "";
   if (!state.users.length) {
-    listBox.appendChild(el("p", "empty", "No manageable users."));
+    listBox.appendChild(el("p", "empty", tf("users.empty", "No manageable users.")));
     return;
   }
   const currentOwnerId = state.identity && state.identity.owner_id;
@@ -12996,27 +13381,29 @@ function renderUsers() {
     main.append(
       el("span", "users-row-label", model.label),
       el("span", "users-row-provider", model.provider),
-      el("span", "users-row-admin users-admin-" + model.adminClass, model.adminLabel),
+      el("span", "users-row-admin users-admin-" + model.adminClass,
+        tf(model.adminClass === "admin" ? "users.roleAdmin" : "users.roleUser", model.adminLabel)),
     );
-    if (model.isSelf) main.appendChild(el("span", "users-row-self", "（本人）"));
+    if (model.isSelf) main.appendChild(el("span", "users-row-self", tf("users.self", "(You)")));
     row.appendChild(main);
 
     const actions = el("div", "users-row-actions");
     if (model.canToggleAdmin) {
-      const btn = el("button", "ghost-btn users-admin-btn", model.toggleAdminLabel);
+      const btn = el("button", "ghost-btn users-admin-btn",
+        tf(model.toggleAdminTo ? "users.setAdmin" : "users.unsetAdmin", model.toggleAdminLabel));
       btn.type = "button";
       btn.addEventListener("click", () =>
         toggleAdmin(model.ownerId, model.toggleAdminTo));
       actions.appendChild(btn);
     }
     if (model.canResetPassword) {
-      const btn = el("button", "ghost-btn users-password-btn", "重置密码");
+      const btn = el("button", "ghost-btn users-password-btn", tf("users.resetPassword", "Reset password"));
       btn.type = "button";
       btn.addEventListener("click", () => resetPassword(model.ownerId, model.label));
       actions.appendChild(btn);
     }
     if (model.canDelete) {
-      const btn = el("button", "ghost-btn users-delete-btn", "删除");
+      const btn = el("button", "ghost-btn users-delete-btn", tf("users.delete", "Delete"));
       btn.type = "button";
       btn.addEventListener("click", () => deleteUser(model.ownerId, model.label));
       actions.appendChild(btn);
@@ -13032,8 +13419,8 @@ async function createUser(event) {
   errBox.classList.add("hidden");
   const username = $("users-username").value.trim();
   const password = $("users-password").value;
-  if (!username) return showFormError(errBox, "用户名不能为空。");
-  if (!password) return showFormError(errBox, "密码不能为空。");
+  if (!username) return showFormError(errBox, tf("users.errUsername", "Username must not be empty."));
+  if (!password) return showFormError(errBox, tf("users.errPassword", "Password must not be empty."));
 
   const submit = $("users-create-submit");
   submit.disabled = true;
@@ -13053,14 +13440,14 @@ async function createUser(event) {
       $("users-password").value = "";
       $("users-display-name").value = "";
       $("users-is-admin").checked = false;
-      showToast("success", tf("toast.userCreated", "用户已创建。"));
+      showToast("success", tf("toast.userCreated", "User created."));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not create the user.");
+    showFormError(errBox, tf("users.errCreateNetwork", "Network error — could not create the user."));
   } finally {
     submit.disabled = false;
   }
@@ -13076,14 +13463,14 @@ async function deleteUser(ownerId, label) {
       { method: "DELETE" },
     );
     if (resp.ok) {
-      showToast("success", tf("toast.userDeleted", `已删除用户 ${label || ownerId}。`, { name: label || ownerId }));
+      showToast("success", tf("toast.userDeleted", `Deleted user ${label || ownerId}.`, { name: label || ownerId }));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not delete the user.");
+    showFormError(errBox, tf("users.errDeleteNetwork", "Network error — could not delete the user."));
   }
 }
 
@@ -13092,12 +13479,12 @@ async function resetPassword(ownerId, label) {
   const errBox = $("users-error");
   errBox.classList.add("hidden");
   const password = typeof prompt === "function"
-    ? prompt(`为 ${label || ownerId} 设置新密码：`)
+    ? prompt(tf("users.resetPrompt", `Set a new password for ${label || ownerId}:`, { name: label || ownerId }))
     : null;
   // A null result means the admin dismissed the prompt; an empty string would
   // be rejected by the backend (422), so guard both here.
   if (password == null) return;
-  if (!password) return showFormError(errBox, "新密码不能为空。");
+  if (!password) return showFormError(errBox, tf("users.errNewPassword", "New password must not be empty."));
   try {
     const resp = await authedFetch(
       `/api/users/${encodeURIComponent(ownerId)}/password`,
@@ -13108,13 +13495,13 @@ async function resetPassword(ownerId, label) {
       },
     );
     if (resp.ok) {
-      showToast("success", tf("toast.passwordReset", `已重置 ${label || ownerId} 的密码。`, { name: label || ownerId }));
+      showToast("success", tf("toast.passwordReset", `Reset password for ${label || ownerId}.`, { name: label || ownerId }));
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not reset the password.");
+    showFormError(errBox, tf("users.errResetNetwork", "Network error — could not reset the password."));
   }
 }
 
@@ -13132,14 +13519,14 @@ async function toggleAdmin(ownerId, isAdmin) {
       },
     );
     if (resp.ok) {
-      showToast("success", isAdmin ? tf("toast.adminGranted", "已设为管理员。") : tf("toast.adminRevoked", "已取消管理员。"));
+      showToast("success", isAdmin ? tf("toast.adminGranted", "Set as admin.") : tf("toast.adminRevoked", "Removed admin."));
       loadUsers();
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      showFormError(errBox, detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status }));
     }
   } catch (_) {
-    showFormError(errBox, "Network error — could not change admin status.");
+    showFormError(errBox, tf("users.errAdminNetwork", "Network error — could not change admin status."));
   }
 }
 
@@ -13147,23 +13534,150 @@ async function toggleAdmin(ownerId, isAdmin) {
 // Wiring
 // ---------------------------------------------------------------------------
 
-// Repaint the dynamic (JS-rendered) UI after a language switch. The static
-// data-i18n nodes are handled by applyStaticTranslations; here we force the
-// diff-aware list renderers to rebuild by clearing their cached signatures, so
-// any localized chrome they emit reflects the new language immediately rather
-// than being skipped as "unchanged".
-function rerenderDynamic() {
-  try {
-    if (typeof resetRenderSignatures === "function") resetRenderSignatures();
-    if (typeof renderMachines === "function") renderMachines();
-    if (typeof renderFlows === "function") renderFlows();
-  } catch (_) { /* best-effort repaint; never break a language switch */ }
+// Whether a modal shell (keys / users / issue-modal / …) is currently open.
+function isModalOpen(id) {
+  const m = typeof document !== "undefined" ? $(id) : null;
+  return !!(m && m.classList && !m.classList.contains("hidden"));
 }
 
-// Resolve the initial UI language (localStorage > navigator > en-US), wire the
-// top-bar switch control, then load the baseline + selected dictionaries and
-// paint the static text. Idempotent-safe: called once from init().
-function initI18n() {
+// Repaint the dynamic (JS-rendered) UI after a language switch. The static
+// data-i18n nodes are handled by applyStaticTranslations; the localized chrome
+// those JS renderers emit (via tf()) only reflects the new language when the
+// renderer is re-run, so here we rebuild every currently-visible dynamic
+// surface — not just the machine/flow lists. Each renderer resolves its text
+// through tf() at call time, so re-invoking it is all that a language switch
+// needs. Guarded and best-effort: a missing renderer or a mid-switch throw must
+// never break the language change.
+function rerenderDynamic() {
+  const call = (fn, ...args) => {
+    try { if (typeof fn === "function") fn(...args); } catch (_) { /* per-surface */ }
+  };
+  try {
+    // Clearing the diff-aware signatures forces the guarded list renderers to
+    // rebuild instead of skipping as "unchanged".
+    if (typeof resetRenderSignatures === "function") resetRenderSignatures();
+  } catch (_) { /* best-effort */ }
+  // Live-state chrome the static pass cannot own: the connection badge (its
+  // text is the current WS state, not a fixed string) and the browser tab
+  // title (outside the data-i18n DOM scope).
+  call(repaintConnStatus);
+  call(applyDocumentTitle);
+  call(renderMachines);
+  call(renderFlows);
+  // Open flow-detail view: sidebar (Overview/Steps/Machine), conversation, and
+  // reply-box chrome. refreshFlowDetail re-fetches then re-renders all three.
+  if (typeof isFlowViewOpen === "function" && isFlowViewOpen() && state.selectedFlowId) {
+    call(refreshFlowDetail);
+  }
+  // Open issues view: filter option labels, list, and the open detail pane.
+  if (typeof isIssuesOpen === "function" && isIssuesOpen()) {
+    call(refreshIssueTypeFilter);
+    call(refreshIssueProjectFilter);
+    call(renderIssuesList);
+    if (state.selectedIssueId) call(renderIssueDetail, state.selectedIssueId);
+  }
+  // Open history view: session list, and the open session detail (re-fetch as
+  // an incremental refresh so its records re-render in the new language).
+  if (typeof isHistoryOpen === "function" && isHistoryOpen()) {
+    call(renderHistoryList);
+    if (state.selectedHistoryId) {
+      call(openHistorySession, state.selectedHistoryId, { incremental: true });
+    }
+  }
+  // Open daemon-key / user-management modals: both render from cached state.
+  if (isModalOpen("keys-modal")) call(renderDaemonKeys);
+  if (isModalOpen("users-modal")) call(renderUsers);
+  // Confirmation/edit modals carry JS-set copy that reflects their current mode
+  // (edit-vs-create title, flow-specific end message, action/launch text). The
+  // static-translation pass in setLang has just repainted their data-i18n nodes
+  // back to the generic defaults, so restore the mode-specific copy here.
+  call(repaintOpenModals);
+}
+
+// Repaint the copy of any open confirmation/edit modal in its current mode so a
+// mid-session language switch keeps its flow/issue-specific text (not the static
+// data-i18n default). Each modal stashes what it needs on its own dataset, so
+// the copy is recoverable without re-opening it. Best-effort and guarded.
+function repaintOpenModals() {
+  // Issue create/edit modal: the title + submit label diverge by mode, and the
+  // static pass reset the title node to "New Issue" / "Create".
+  if (isModalOpen("issue-modal")) {
+    const form = $("issue-form");
+    const titleNode = $("issue-modal-title");
+    const submitNode = $("issue-form-submit");
+    const mode = form ? form.dataset.mode : "";
+    if (mode === "edit") {
+      const id = (form && form.dataset.issueId) || "?";
+      if (titleNode) titleNode.textContent =
+        tf("issueModal.editTitle", "Edit Issue #" + id, { id });
+      if (submitNode) submitNode.textContent = tf("issueModal.save", "Save");
+    } else if (titleNode || submitNode) {
+      if (titleNode) titleNode.textContent = tf("issueModal.title", "New Issue");
+      if (submitNode) submitNode.textContent = tf("issueModal.submit", "Create");
+    }
+  }
+
+  // Issue close/reopen confirmation: title + message vary by action + issue id.
+  // The message node has no data-i18n, so it would otherwise stay in the old
+  // language until the modal is reopened.
+  if (isModalOpen("issue-action-modal")) {
+    const modal = $("issue-action-modal");
+    const action = modal ? modal.dataset.action : "";
+    const id = (modal && modal.dataset.issueId) || "?";
+    const titleNode = $("issue-action-title");
+    const msgNode = $("issue-action-message");
+    if (action === "close") {
+      if (titleNode) titleNode.textContent = tf("issueAction.closeTitle", "Close Issue");
+      if (msgNode) msgNode.textContent =
+        tf("issueAction.closeMessage", "Confirm closing Issue #" + id + "?", { id });
+    } else {
+      if (titleNode) titleNode.textContent = tf("issueAction.reopenTitle", "Reopen Issue");
+      if (msgNode) msgNode.textContent =
+        tf("issueAction.reopenMessage", "Confirm reopening Issue #" + id + "?", { id });
+    }
+  }
+
+  // Launch-from-issue confirmation: the message embeds the issue title, which is
+  // recovered by looking the issue up in cached state via its composite key.
+  if (isModalOpen("issue-launch-modal")) {
+    const modal = $("issue-launch-modal");
+    const key = modal ? modal.dataset.issueKey : "";
+    const id = (modal && modal.dataset.issueId) || "?";
+    const iss = (state.issues || []).find(
+      (i) => i && issueCompositeKey(i) === key);
+    const title = iss ? issueDisplayTitle(iss) : "";
+    const titleNode = $("issue-launch-title");
+    const msgNode = $("issue-launch-message");
+    if (titleNode) titleNode.textContent = tf("issueLaunch.title", "Launch Flow from Issue");
+    if (msgNode) msgNode.textContent = tf("issueLaunch.message",
+      "A new flow will be launched from Issue #" + id + " (" + title + ").",
+      { id, title });
+  }
+
+  // End-session confirmation: the message embeds the flow id short-hash.
+  if (isModalOpen("end-session-modal")) {
+    const modal = $("end-session-modal");
+    const flowId = (modal && modal.dataset.flowId) || "";
+    const msgNode = $("end-session-message");
+    if (msgNode && flowId) {
+      const shortId = flowId.slice(0, 8);
+      msgNode.textContent = tf("endSession.confirmMessage",
+        "Confirm ending and archiving this session (" + shortId + "…)? " +
+        "A worktree session will be cleaned up and archived, and uncommitted work will not be merged into the main branch.",
+        { id: shortId });
+    }
+  }
+}
+
+// Adopt the server's language registry, resolve the initial UI language
+// (localStorage > navigator > en-US), wire the top-bar switch control, then load
+// the baseline + selected dictionaries and paint the static text. Idempotent-safe:
+// called once from init(). The manifest is awaited BEFORE the language is
+// resolved so a stored / browser preference for a language shipped after this
+// build (a new locale JSON) still wins instead of silently falling back to en-US.
+async function initI18n() {
+  await I18N.loadManifest();
+
   let stored = null;
   try {
     if (typeof localStorage !== "undefined") {
@@ -13182,8 +13696,10 @@ function initI18n() {
       const opt = document.createElement("option");
       opt.value = code;
       // Endonyms (native language names) — identical across every dictionary,
-      // so the label reads correctly whichever language is active.
-      opt.textContent = I18N.t(`lang.${code}`);
+      // so the label reads correctly whichever language is active. The manifest
+      // label is the fallback, so a language with no `lang.<code>` entry in the
+      // dictionaries still shows its own name rather than the raw dotted key.
+      opt.textContent = tf(`lang.${code}`, I18N.LABELS[code] || code);
       sel.appendChild(opt);
     }
     sel.value = I18N.lang;
@@ -13197,15 +13713,21 @@ function initI18n() {
 
   // Load baseline + selected dicts, then paint. Fetch failure degrades to the
   // in-markup English (I18N.load never rejects).
-  Promise.all([I18N.load(I18N.FALLBACK), I18N.load(I18N.lang)]).then(() => {
-    if (sel) {
-      for (const opt of sel.children) {
-        opt.textContent = I18N.t(`lang.${opt.value}`);
-      }
-      sel.value = I18N.lang;
+  await Promise.all([I18N.load(I18N.FALLBACK), I18N.load(I18N.lang)]);
+  if (sel) {
+    for (const opt of sel.children) {
+      opt.textContent = tf(`lang.${opt.value}`, I18N.LABELS[opt.value] || opt.value);
     }
-    I18N.applyStaticTranslations();
-  });
+    sel.value = I18N.lang;
+  }
+  I18N.applyStaticTranslations();
+  // Bootstrapping does not await initI18n: auth, the WebSocket and the first
+  // data renders all race the manifest + dictionary fetches, so any dynamic
+  // surface painted during that window carries the pre-load default language.
+  // Repaint every dynamic surface (this also covers the connection badge and the
+  // document title, which the static pass cannot own) once the dicts land, the
+  // same way a manual language switch does.
+  rerenderDynamic();
 }
 
 function init() {
@@ -13598,6 +14120,13 @@ if (typeof module !== "undefined" && module.exports) {
     // in tests/frontend/waiting_for_lock.test.mjs.
     isWaitingForLock,
     flowStatusLabel,
+    // Localized status-badge text — exposed for the DOM-free tests in
+    // tests/frontend/i18n_render_switch.test.mjs.
+    flowStatusText,
+    issueStatusText,
+    issueTypeText,
+    issuePriorityText,
+    issueSourceText,
     // Local interjection lifecycle helpers (G4) — exposed for the DOM-free
     // tests in tests/frontend/test_app_pure.mjs.
     bindLocalInterjectionToCallId,
@@ -13691,6 +14220,13 @@ if (typeof module !== "undefined" && module.exports) {
     // tests/frontend/i18n_render_switch.test.mjs.
     I18N,
     applyNodeTranslations,
+    repaintOpenModals,
+    // Live-state chrome that a language switch must repaint itself (the badge
+    // and the tab title carry no data-i18n attribute) — exposed for the
+    // DOM-stub tests in tests/frontend/i18n_render_switch.test.mjs.
+    setConnStatus,
+    repaintConnStatus,
+    applyDocumentTitle,
     state,
   };
 }

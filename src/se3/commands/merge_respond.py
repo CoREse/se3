@@ -181,20 +181,18 @@ def _check_version_unchanged(
         # input was already broken at pre_sha and this checker should not
         # claim the merge introduced a parse failure).
         if pre_version is not None and post_version is None:
-            return (
-                f"Version file {filename} is present at HEAD but the version "
-                f"field could not be parsed (corrupted file or missing version "
-                f"field). The merge has produced an unparseable version file "
-                f"— refusing to treat as a no-op."
-            )
+            # This sentence is embedded in the localized postcondition-failure
+            # block shown to the user, so it renders through i18n too.
+            return t("merge_respond.version_unparseable", filename=filename)
         if (
             pre_version is not None
             and post_version is not None
             and pre_version == post_version
         ):
-            return (
-                f"Version in {filename} unchanged at {pre_version} "
-                f"(pre-merge == HEAD)"
+            return t(
+                "merge_respond.version_unchanged",
+                filename=filename,
+                version=pre_version,
             )
     return None
 

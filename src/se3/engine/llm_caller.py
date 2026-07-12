@@ -223,6 +223,7 @@ def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
             logger.warning(f"Failed to clear Phase 1 cache for {step_id}: {e}")
 
 
+from ..i18n import t
 from .tool_formatters import (
     build_tool_detail_payload,
     format_tool_chip_header,
@@ -469,7 +470,10 @@ class StreamJSONTracker:
 
         if is_error:
             error_preview = truncate_preview(str(content)) if content else "Unknown error"
-            print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
+            print(
+                f"  {self.stream_prefix}[llm-stream] "
+                + t("engine.llm.stream.tool_error", preview=error_preview)
+            )
             if tool_name:
                 header = format_tool_chip_header(
                     tool_name, cached_input, content, is_error=True
@@ -673,7 +677,13 @@ class StreamJSONTracker:
 
             elif msg_type == 'error':
                 error_msg = data.get('error', 'Unknown error')
-                print(f"  {self.stream_prefix}[llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
+                print(
+                    f"  {self.stream_prefix}[llm-stream] "
+                    + t(
+                        "engine.llm.stream.error",
+                        preview=truncate_preview(str(error_msg)),
+                    )
+                )
                 self._flush_progress_text()
                 self._emit_progress(f"[Tool error: {truncate_preview(str(error_msg))}]", None)
                 self._last_ended_with_newline = True
@@ -748,9 +758,16 @@ class StreamJSONTracker:
         # stream's final result is recorded by LLMCaller._record_response.
         self._flush_progress_text()
         duration = time.time() - self.start_time
-        print(f"  {self.stream_prefix}[llm-stream] ✓ Stream complete: {self.message_count} messages, "
-              f"{len(self.tool_calls)} tool calls, {self.total_text_len} chars "
-              f"({duration:.1f}s)")
+        print(
+            f"  {self.stream_prefix}[llm-stream] "
+            + t(
+                "engine.llm.stream.complete",
+                messages=self.message_count,
+                tool_calls=len(self.tool_calls),
+                chars=self.total_text_len,
+                duration=f"{duration:.1f}",
+            )
+        )
         # Clean up caches to prevent memory leaks on stream interruption
         self._tool_use_id_to_input.clear()
         self._tool_use_id_to_old_content.clear()
@@ -1188,7 +1205,10 @@ class LLMCaller:
             return json.dumps(fast, ensure_ascii=False, indent=2)
 
         # Fallback: extract JSON via second-phase LLM call
-        print(f"  {self.stream_prefix}[llm-caller] 🔍 Extracting JSON from output (extract mode)...")
+        print(
+            f"  {self.stream_prefix}[llm-caller] "
+            + t("engine.llm.extract.start")
+        )
 
         from .json_extractor import JSONExtractor
 
@@ -1211,7 +1231,10 @@ class LLMCaller:
         # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)
 
-        print(f"  {self.stream_prefix}[llm-caller] ✅ JSON extraction complete")
+        print(
+            f"  {self.stream_prefix}[llm-caller] "
+            + t("engine.llm.extract.complete")
+        )
         return json_str
 
     @staticmethod
@@ -1390,7 +1413,10 @@ class LLMCaller:
         if self.external_attempt > 0 and cache_path and cache_path.exists():
             try:
                 phase1_output = cache_path.read_text(encoding="utf-8")
-                print(f"  {self.stream_prefix}[llm-caller] ⏩ Phase 1 skipped (cached from previous attempt)")
+                print(
+                    f"  {self.stream_prefix}[llm-caller] "
+                    + t("engine.llm.phase1.cached")
+                )
                 logger.info(f"Using cached Phase 1 output ({len(phase1_output)} chars)")
             except OSError as e:
                 logger.warning(f"Failed to read Phase 1 cache, re-running Phase 1: {e}")
@@ -1425,7 +1451,10 @@ class LLMCaller:
             result = parse_json_response(phase1_output, required_keys=required_keys)
             if result is not None:
                 logger.info("Two-phase: phase 1 output contained valid JSON with required keys, skipping phase 2")
-                print(f"  {self.stream_prefix}[llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
+                print(
+                    f"  {self.stream_prefix}[llm-caller] "
+                    + t("engine.llm.phase1.valid_json")
+                )
                 # Step fully done — delete cache
                 if cache_path and cache_path.exists():
                     try:
@@ -1435,7 +1464,10 @@ class LLMCaller:
                 return json.dumps(result, ensure_ascii=False, indent=2)
             else:
                 logger.info("Two-phase: phase 1 JSON missing required keys %s, falling back to phase 2", required_keys)
-                print(f"  {self.stream_prefix}[llm-caller] ⚠️  Phase 1 JSON missing required keys, falling back to phase 2")
+                print(
+                    f"  {self.stream_prefix}[llm-caller] "
+                    + t("engine.llm.phase1.missing_keys")
+                )
 
         # Phase 2: Extract JSON via LLM — routed through THIS caller's own
         # `_call_with_retry` instead of delegating to a fresh, default-config
@@ -1445,7 +1477,10 @@ class LLMCaller:
         # reset snap the agent index back to the preferred agent — so Phase 2 is
         # independent of wherever Phase 1's rotation stopped, yet still uses this
         # caller's agents rather than the global default chain.
-        print(f"  {self.stream_prefix}[llm-caller] 🔍 Phase 2: Extracting JSON from output...")
+        print(
+            f"  {self.stream_prefix}[llm-caller] "
+            + t("engine.llm.phase2.start")
+        )
 
         result = self._extract_json_phase2(
             raw_output=phase1_output,
@@ -1471,7 +1506,10 @@ class LLMCaller:
         # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)
 
-        print(f"  {self.stream_prefix}[llm-caller] ✅ JSON extraction complete")
+        print(
+            f"  {self.stream_prefix}[llm-caller] "
+            + t("engine.llm.extract.complete")
+        )
         return json_str
 
     def _extract_json_phase2(
@@ -1903,7 +1941,14 @@ class LLMCaller:
                     # Check if JSON is required but not received
                     if require_json and json_retry_count < max_json_retries:
                         if not self._contains_valid_json(result.output):
-                            print(f"  {self.stream_prefix}[llm-caller] ⚠️  Response is not valid JSON, requesting JSON format (retry {json_retry_count + 1}/{max_json_retries})")
+                            print(
+                                f"  {self.stream_prefix}[llm-caller] "
+                                + t(
+                                    "engine.llm.json_retry",
+                                    attempt=json_retry_count + 1,
+                                    max_retries=max_json_retries,
+                                )
+                            )
                             json_prompt = self._create_json_retry_prompt(prompt, result.output)
                             # Record the JSON retry prompt too (use a distinct attempt number for JSON retries)
                             json_attempt = self.external_attempt * 100 + json_retry_count  # Distinguish JSON retries

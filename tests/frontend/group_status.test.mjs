@@ -64,22 +64,22 @@ export function registerGroupStatusTests(ctx) {
 
   // ---- (b) groupStatusLabel mapping ---------------------------------------
   check("G4 groupStatusLabel covers every status", () => {
-    assert.equal(app.groupStatusLabel("G1", "queued"), "G1 排队中");
-    assert.equal(app.groupStatusLabel("G2", "running"), "G2 正在 worktree 实施中");
-    assert.equal(app.groupStatusLabel("G3", "completed"), "G3 已完成");
-    assert.equal(app.groupStatusLabel("G4", "failed"), "G4 失败");
-    assert.equal(app.groupStatusLabel("G5", "skipped"), "G5 已跳过");
+    assert.equal(app.groupStatusLabel("G1", "queued"), "G1 Queued");
+    assert.equal(app.groupStatusLabel("G2", "running"), "G2 Implementing in worktree");
+    assert.equal(app.groupStatusLabel("G3", "completed"), "G3 Completed");
+    assert.equal(app.groupStatusLabel("G4", "failed"), "G4 Failed");
+    assert.equal(app.groupStatusLabel("G5", "skipped"), "G5 Skipped");
   });
 
   check("G4 groupStatusLabel is case-insensitive on status", () => {
-    assert.equal(app.groupStatusLabel("G1", "RUNNING"), "G1 正在 worktree 实施中");
+    assert.equal(app.groupStatusLabel("G1", "RUNNING"), "G1 Implementing in worktree");
   });
 
   check("G4 groupStatusLabel falls back on unknown status / missing id", () => {
     // Unknown status keeps its raw token rather than dropping it.
     assert.equal(app.groupStatusLabel("G1", "merging"), "G1 merging");
     // Missing group id degrades to "?" rather than a dangling label.
-    assert.equal(app.groupStatusLabel("", "running"), "? 正在 worktree 实施中");
+    assert.equal(app.groupStatusLabel("", "running"), "? Implementing in worktree");
     assert.equal(app.groupStatusLabel(null, null), "?");
   });
 
@@ -92,7 +92,7 @@ export function registerGroupStatusTests(ctx) {
     assert.ok(marker.classList.contains("status-running"),
       "marker should carry the .status-running class");
     const text = findOne(marker, "group-status-text");
-    assert.ok(text && text.textContent === "G3 正在 worktree 实施中",
+    assert.ok(text && text.textContent === "G3 Implementing in worktree",
       `marker text should be the running label, got ${text && text.textContent}`);
     // No fold / raw / chip affordances on the marker.
     assert.equal(findAll(marker, "msg-chip").length, 0,
@@ -109,7 +109,7 @@ export function registerGroupStatusTests(ctx) {
     // The (step_id, group_id) composite key folds the three records to ONE
     // card — the terminal/latest state — instead of stacking three.
     const markers = findAll(container, "group-status-text").map((n) => n.textContent);
-    assert.deepEqual(markers, ["G3 已完成"]);
+    assert.deepEqual(markers, ["G3 Completed"]);
     assert.equal(findAll(container, "group-status-marker").length, 1);
   });
 
@@ -188,7 +188,7 @@ export function registerGroupStatusTests(ctx) {
     const badges = findAll(container, "agent-badge").map((b) => b.textContent);
     assert.deepEqual(badges, ["dclaude · claude-opus-4-8"]);
     const labels = findAll(container, "group-status-text").map((n) => n.textContent);
-    assert.deepEqual(labels, ["G3 已完成"]);
+    assert.deepEqual(labels, ["G3 Completed"]);
   });
 
   check("G4 retry / rotation reports the latest attempt's agent, never a stale one", () => {
@@ -211,7 +211,7 @@ export function registerGroupStatusTests(ctx) {
       "no badge should render when agent_name is absent");
     // The status text itself is unaffected — no dangling separator / placeholder.
     const text = findOne(marker, "group-status-text");
-    assert.equal(text.textContent, "G3 正在 worktree 实施中");
+    assert.equal(text.textContent, "G3 Implementing in worktree");
   });
 
   check("G4 final content salvage is unaffected by status markers carrying agent/model", () => {
@@ -261,9 +261,9 @@ export function registerGroupStatusTests(ctx) {
     ], false);
     const labels = findAll(container, "group-status-text").map((n) => n.textContent);
     assert.deepEqual(labels, [
-      "G1 正在 worktree 实施中",
-      "G2 正在 worktree 实施中",
-      "G3 正在 worktree 实施中",
+      "G1 Implementing in worktree",
+      "G2 Implementing in worktree",
+      "G3 Implementing in worktree",
     ]);
     assert.equal(findAll(container, "group-status-marker").length, 3,
       "G1/G2/G3 share a step_id but must each keep their own card");
@@ -287,7 +287,7 @@ export function registerGroupStatusTests(ctx) {
       gsRecord("G2", "completed", 2),
     ], false);
     const markers = findAll(container, "group-status-text").map((n) => n.textContent);
-    assert.deepEqual(markers, ["G2 已完成"]);
+    assert.deepEqual(markers, ["G2 Completed"]);
     const marker = findOne(container, "group-status-marker");
     assert.ok(marker.classList.contains("status-completed"),
       "the surviving card must be the terminal completed one");
@@ -310,7 +310,7 @@ export function registerGroupStatusTests(ctx) {
     assert.equal(findAll(container, "group-status-marker").length, 1,
       "after the live append the group still shows exactly one card");
     const labels = findAll(container, "group-status-text").map((n) => n.textContent);
-    assert.deepEqual(labels, ["G3 已完成"]);
+    assert.deepEqual(labels, ["G3 Completed"]);
     const badge = findOne(findOne(container, "group-status-marker"), "agent-badge");
     assert.equal(badge.textContent, "dclaude · claude-opus-4-8");
   });

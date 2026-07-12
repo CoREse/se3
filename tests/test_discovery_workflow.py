@@ -669,9 +669,14 @@ class TestDiscoveryLLMCallErrorHandling:
 
         result = discovery_handler(step, flow)
 
+        from se3.i18n import t
+
         assert result == StepStatus.FAILED
         assert "API timeout" in step.error_message
-        assert step.error_message.startswith("LLM 调用失败")
+        # The failure copy follows the active UI language (en-US under test).
+        assert step.error_message == t(
+            "engine.discovery.error_llm_call", error="API timeout after 60s"
+        )
         # Verify render_full was called to show friendly panel
         mock_render.assert_called_once()
 

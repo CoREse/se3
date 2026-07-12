@@ -48,7 +48,7 @@ try:
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
     from ..engine.sink import CliSink, HistorySink, JsonSink
-    from ..i18n import t
+    from ..i18n import t, t_status
     from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
@@ -72,7 +72,7 @@ except ImportError:
     )
     from engine.event_stream import EventEmitter, EventType, new_event
     from engine.sink import CliSink, HistorySink, JsonSink
-    from i18n import t
+    from i18n import t, t_status
     from cli import _read_multiline_input
 
 
@@ -105,18 +105,25 @@ def get_project_root() -> Path:
     ascends to the main repository when appropriate, so worktree-local
     ``se3.local.yaml`` still takes precedence and the main repo's
     ``se3.local.yaml`` can override the worktree's tracked ``se3.yaml``.
+
+    Also binds the i18n language to the discovered root: this is the point at
+    which the command settles on *which project* it operates on, and the root can
+    sit above the cwd, so the import-time (cwd-resolved) language singleton must
+    be re-resolved here for the project's ``language.language`` to take effect.
     """
     from ..config import is_se3_project_root
+    from ..i18n import bind_project_root
 
     cwd = Path.cwd()
+    root = cwd
     for parent in [cwd] + list(cwd.parents):
-        # Check for .git directory
-        if (parent / ".git").exists():
-            return parent
-        # Check for any SE3 project marker (se3.yaml, se3.local.yaml, se3.config.yaml)
-        if is_se3_project_root(parent):
-            return parent
-    return cwd
+        # Check for .git directory, or any SE3 project marker
+        # (se3.yaml, se3.local.yaml, se3.config.yaml).
+        if (parent / ".git").exists() or is_se3_project_root(parent):
+            root = parent
+            break
+    bind_project_root(root)
+    return root
 
 
 def _interpret_confirm_answer(text: str) -> tuple[bool, Optional[str]]:
@@ -368,7 +375,7 @@ def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
             flows.append({
                 "id": data.get("flow_id", "unknown"),
                 "status": data.get("status", "unknown"),
-                "description": data.get("task_description", "No description"),
+                "description": data.get("task_description") or t("cli.common.no_description"),
                 "current_step": state_data.get("current_step_id"),
                 "file": state_file.name,
             })
@@ -397,7 +404,7 @@ def find_resumable_snapshot_flows(project_root: Path) -> List[Dict[str, Any]]:
         flows.append({
             "id": flow.flow_id,
             "status": flow.status.value,
-            "description": flow.task_description or "No description",
+            "description": flow.task_description or t("cli.common.no_description"),
             "current_step": flow.state.current_step_id,
             "file": str(persistence.resumable_dir / f"{flow.flow_id}.json"),
         })
@@ -1637,10 +1644,11 @@ def _discovery_call_question(current_step: Any) -> str:
         for i, question in enumerate(questions, 1):
             parts.append(f"{i}. {question}")
     if not parts:
-        parts.append(
-            "Discovery is exploring your requirements. Reply with details to "
-            "help clarify what you want to build."
-        )
+        # Framework-authored copy (the LLM produced neither a message nor any
+        # questions), so it renders through i18n — unlike the LLM's own
+        # message/questions above, which pass through verbatim in whatever
+        # language the flow's language config made it produce.
+        parts.append(t("cli.run.discovery.empty_round_prompt"))
     return "\n".join(parts)
 
 
@@ -2620,8 +2628,13 @@ def _run_flow_impl(
             elif flow.state.is_type_pending():
                 type_suffix = t("cli.run.pending_suffix")
 
+            # The header is user-facing chrome, so it shows the localized step
+            # title; step_type_value stays raw for the event stream below.
+            from ..engine.step_renderers import step_display_title
+            step_title = step_display_title(current_step.step_type)
+
             console = get_console()
-            console.print(Rule(f"[bold]{step_type_value}[/bold]{type_suffix}", style="cyan"))
+            console.print(Rule(f"[bold]{step_title}[/bold]{type_suffix}", style="cyan"))
 
         step_start_time = datetime.now()
 
@@ -2933,7 +2946,7 @@ def _run_flow_impl(
             continue
 
         if result == StepStatus.FAILED:
-            error_msg = current_step.error_message or "Unknown error"
+            error_msg = current_step.error_message or t("cli.run.error.unknown")
             display_error(t("cli.run.error.step_failed", error=error_msg))
 
             max_retries = 3
@@ -3082,7 +3095,9 @@ def _run_flow_impl(
         return 0
     elif flow.status == FlowStatus.FAILED:
         current_step = flow.state.get_current_step()
-        error_msg = current_step.error_message if current_step else "Unknown error"
+        error_msg = (current_step.error_message if current_step else None) or t(
+            "cli.run.error.unknown"
+        )
         emitter.emit(new_event(
             EventType.FLOW_FAILED, flow_id=flow.flow_id, message=error_msg,
         ))
@@ -3449,7 +3464,7 @@ def _finalize_worktree_cleanup(
         _map_branches_to_source_issues,
     )
 
-    target = worktree_original_branch or "the original branch"
+    target = worktree_original_branch or t("cli.run.merge.unknown_target")
 
     # Guard: "COMPLETED" only means "landed" because a worktree flow's step
     # sequence now ends with merge_integrate + version_reconcile. But a flow
@@ -3652,7 +3667,7 @@ def run_worktree_mode(
             render_full(
                 t(
                     "cli.run.worktree.paused_no_merge",
-                    status=status or "unknown",
+                    status=t_status(status or "unknown"),
                     worktree_path=worktree_path,
                     branch=worktree_branch,
                 ),
@@ -3713,7 +3728,7 @@ def find_resumable_worktree_runs(project_root: Path) -> List[Dict[str, Any]]:
             {
                 "id": data.get("flow_id", "unknown"),
                 "status": data.get("status", "unknown"),
-                "description": data.get("task_description", "No description"),
+                "description": data.get("task_description") or t("cli.common.no_description"),
                 "current_step": state_data.get("current_step_id"),
                 "file": str(engine_file),
                 "is_worktree_run": True,
@@ -3831,7 +3846,7 @@ def _self_worktree_run(
     return {
         "id": data.get("flow_id", flow_id),
         "status": data.get("status", "unknown"),
-        "description": data.get("task_description", "No description"),
+        "description": data.get("task_description") or t("cli.common.no_description"),
         "is_worktree_run": True,
         "worktree_path": data.get("worktree_path") or str(project_root),
         "worktree_branch": data.get("worktree_branch"),
@@ -3914,7 +3929,7 @@ def _resume_worktree_run(
             render_full(
                 t(
                     "cli.run.worktree.paused_again",
-                    status=status or "unknown",
+                    status=t_status(status or "unknown"),
                     worktree_path=worktree_path,
                 ),
                 title=t("cli.run.worktree.paused_title"),
