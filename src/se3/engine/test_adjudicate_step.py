@@ -1153,3 +1153,223 @@ def test_contradiction_reruling_clears_stale_noop_flag(tmp_path):
     assert step.outputs["adjudicated_description"] == "Return None when x is None."
     assert step.outputs["superseded_fix_instructions"] == "ORIGINAL fix instructions"
     assert step.outputs["fix_instructions_superseded"] is True
+
+
+# --------------------------------------------------------------------------- #
+# covered_surfaces — homomorphic-surface sweep (one boundary clause, many
+# surfaces). The field is OPTIONAL (an empty sweep is a legitimate result), but
+# each listed entry must be complete or the ruling is not landable.
+# --------------------------------------------------------------------------- #
+
+def _sequenced_caller(payloads, prompts):
+    """LLMCaller stub returning ``payloads`` in order, recording each prompt."""
+    class _Caller:
+        def __init__(self, *a, **k):
+            pass
+
+        def call(self, *a, **k):
+            prompts.append(k.get("prompt", a[0] if a else ""))
+            return json.dumps(payloads[min(len(prompts) - 1, len(payloads) - 1)])
+
+    return _Caller
+
+
+def test_prompt_demands_homomorphic_sweep_and_conservatism(tmp_path):
+    """The ruling prompt carries the sweep instruction, the when-in-doubt-leave-it-out
+    rule, the rule-in-full demand, and the covered_surfaces schema."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    prompts: list[str] = []
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _sequenced_caller([payload], prompts)):
+        adjmod.adjudicate_handler(step, flow)
+    p = prompts[0]
+    assert "HOMOMORPHIC SURFACES" in p
+    assert "by construction" in p
+    assert "hints" in p.lower()  # ledger observations are hints, not the criterion
+    assert "WHEN IN DOUBT, LEAVE IT OUT" in p
+    assert "AUTO-PASS" in p
+    assert "covered_surfaces" in p
+    assert "justification" in p
+    assert "RULE IN FULL, IN ONE GO" in p
+
+
+def test_covered_surfaces_persisted_on_patch_path(tmp_path):
+    """A real contradiction with a well-formed sweep lands the sanitized list in
+    the step's own outputs (unconditionally — the confirm gate is usually off)."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None (all surfaces).",
+        "adjudication_rationale": "one boundary clause covers both surfaces",
+        "covered_surfaces": [
+            {"surface": "  step cold file  ", "justification": "  triggering surface: R27+R29  "},
+            {"surface": "_context.json", "justification": "B2 and B3 both govern it by construction"},
+        ],
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert step.outputs["covered_surfaces"] == [
+        {"surface": "step cold file", "justification": "triggering surface: R27+R29"},
+        {"surface": "_context.json", "justification": "B2 and B3 both govern it by construction"},
+    ]
+
+
+def test_covered_surfaces_absent_or_empty_still_actionable(tmp_path):
+    """An empty sweep is a legitimate outcome: a real-contradiction ruling with no
+    covered_surfaces (or an empty list) lands unchanged — forcing the field would
+    push the LLM to invent surfaces, the exact over-claim we guard against."""
+    for value in ("__omit__", None, []):
+        flow = _flow_with_ledger(tmp_path)
+        step = _adj_step(flow)
+        payload = {
+            "contradiction_type": "internal_contradiction",
+            "adjudicated_description": "Return None when x is None.",
+            "adjudication_rationale": "keep return",
+            "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+        }
+        if value != "__omit__":
+            payload["covered_surfaces"] = value
+        with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+            status = adjmod.adjudicate_handler(step, flow)
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["covered_surfaces"] == []
+
+
+def test_normalized_covered_surfaces_shapes():
+    ok = {"covered_surfaces": [{"surface": " s ", "justification": " j "}]}
+    assert adjmod._normalized_covered_surfaces(ok) == ([{"surface": "s", "justification": "j"}], True)
+    assert adjmod._normalized_covered_surfaces({}) == ([], True)
+    assert adjmod._normalized_covered_surfaces({"covered_surfaces": None}) == ([], True)
+    assert adjmod._normalized_covered_surfaces({"covered_surfaces": []}) == ([], True)
+    # Malformed shapes.
+    for bad in (
+        "a string",
+        ["not a dict"],
+        [{"justification": "j"}],
+        [{"surface": "s"}],
+        [{"surface": "  ", "justification": "j"}],
+        [{"surface": "s", "justification": ""}],
+        [{"surface": 3, "justification": "j"}],
+    ):
+        assert adjmod._normalized_covered_surfaces({"covered_surfaces": bad}) == ([], False)
+
+
+def test_incomplete_covered_surfaces_entry_triggers_semantic_retry(tmp_path):
+    """An entry missing its justification makes the ruling non-actionable: the
+    handler re-asks with the reason spelled out, and a corrected second ruling
+    lands."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    bad = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "covered_surfaces": [{"surface": "_context.json"}],  # no justification
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    good = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "covered_surfaces": [{"surface": "_context.json", "justification": "both clauses cover it"}],
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    responses = [json.dumps(bad), json.dumps(good)]
+    prompts: list[str] = []
+
+    class _Caller:
+        def __init__(self, *a, **k):
+            pass
+
+        def call(self, *a, **k):
+            prompts.append(k.get("prompt", a[0] if a else ""))
+            return responses.pop(0)
+
+    with patch.object(adjmod, "LLMCaller", _Caller):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert len(prompts) == 2
+    assert "malformed `covered_surfaces`" in prompts[1]
+    assert step.outputs["covered_surfaces"] == [
+        {"surface": "_context.json", "justification": "both clauses cover it"}
+    ]
+
+
+def test_covered_surfaces_never_valid_fails_with_reason(tmp_path):
+    """Two malformed rulings in a row → FAILED, and the error message names the
+    gate the ruling never cleared."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "covered_surfaces": "not a list",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.FAILED
+    assert "covered_surfaces" in step.error_message
+    # Nothing landed.
+    assert "adjudicated_at" not in step.outputs
+
+
+def test_review_divergence_ignores_malformed_covered_surfaces(tmp_path):
+    """A no-op ruling writes no boundary clause, so covered_surfaces is meaningless
+    there: a malformed one must not block an otherwise-valid review_divergence,
+    and the key must be ABSENT from the no-op outputs."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "review misfire",
+        "covered_surfaces": [{"surface": ""}],  # garbage — ignored for a no-op
+        "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "different scopes"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert step.outputs["adjudication_noop"] is True
+    assert "covered_surfaces" not in step.outputs
+
+
+def test_noop_rerun_pops_stale_covered_surfaces(tmp_path):
+    """covered_surfaces is a patch-class key: after a patch ruling is rejected and
+    the step re-runs in place as a review_divergence, no stale governance claim may
+    survive in the outputs."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow, fix_instructions="ORIGINAL")
+    patch_payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "REJECTED rewrite.",
+        "adjudication_rationale": "conflict",
+        "covered_surfaces": [{"surface": "_context.json", "justification": "both clauses cover it"}],
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(patch_payload)):
+        adjmod.adjudicate_handler(step, flow)
+    assert step.outputs["covered_surfaces"]
+
+    noop_payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudicated_plan": None,
+        "adjudication_rationale": "on reflection, a review misfire",
+        "candidate_verdicts": [{"id": 0, "verdict": "benign", "reason": "different scopes"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(noop_payload)):
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    assert "covered_surfaces" not in step.outputs

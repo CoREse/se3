@@ -59,7 +59,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import adjudication
 from ..llm_caller import LLMCaller
@@ -338,7 +338,36 @@ or BENIGN (the flip is a review misfire / already reconciled)?
    contradicts itself), "hard_constraint_conflict" (the spec conflicts with a
    charter/hard constraint), or "review_divergence" (no real contradiction; the
    review just diverged).
-2. Decide the SMALLEST fix that resolves the deadlock: rewrite the task
+2. If it IS a real contradiction (internal_contradiction /
+   hard_constraint_conflict), name the two spec clauses X and Y that collide.
+3. SWEEP FOR HOMOMORPHIC SURFACES. The same clause pair X x Y usually governs
+   more than the one surface (file / artifact / code location) that happened to
+   trigger you first — the sister surfaces contradict by construction too, and
+   each will otherwise re-trigger a separate ruling later, forcing you to mirror
+   today's decision. Before writing the patch, enumerate the OTHER surfaces that
+   X and Y both cover, using ONE test and one only:
+
+       Does clause X govern surface S? Does clause Y govern surface S?
+       If BOTH do, the same contradiction holds at S by construction.
+
+   The ledger observations and this round's candidate list are HINTS about where
+   to look — they are not the criterion. A surface qualifies only if you can
+   argue from the specification's own structure (quantifier scope, the class of
+   artifacts a clause names) that both clauses reach it. Do NOT free-associate
+   over the whole spec looking for loosely related text.
+   Every surface you confirm MUST be folded into the SAME boundary clause of
+   your patch — one rule covering all of them, not one rule per surface.
+4. CONSERVATISM IS ASYMMETRIC — WHEN IN DOUBT, LEAVE IT OUT. If you cannot make
+   the by-construction argument for a surface, do NOT include it. The two errors
+   do not cost the same:
+   - Missing a surface is self-healing: when its own evidence arrives it
+     re-triggers a ruling, which is cheap and already works.
+   - Wrongly claiming a surface writes a FALSE constraint into the contract. It
+     then takes another ruling to undo, and it poisons every review in between.
+     Adjudication runs AUTO-PASS by default (no human gate), so this rule is the
+     only guard against a wrong claim.
+   Under-cover rather than over-cover.
+5. Decide the SMALLEST fix that resolves the deadlock: rewrite the task
    DESCRIPTION, and/or override the plan's task GROUPS. Change only what is
    necessary — the override REPLACES the corresponding text wholesale, so return
    the complete corrected text/groups, but keep edits minimal.
@@ -347,9 +376,13 @@ or BENIGN (the flip is a review misfire / already reconciled)?
    - If the real fix is in the plan (e.g. a task's acceptance criterion is the
      contradictory demand), override `adjudicated_plan` with the full corrected
      task_groups instead.
+   - RULE IN FULL, IN ONE GO: if the same contradiction shows up BOTH in the
+     description AND in a plan acceptance criterion, return `adjudicated_description`
+     AND `adjudicated_plan` in THIS ruling. Never patch one surface and leave the
+     other for a later ruling to mirror.
    - If the situation is pure "review_divergence", leave BOTH null and mark the
      candidates benign.
-3. For EACH candidate, return a verdict: "contradiction" (real; resolved by your
+6. For EACH candidate, return a verdict: "contradiction" (real; resolved by your
    patch) or "benign" (not a real contradiction; give a short reason). Benign
    candidates will never re-trigger you.
 
@@ -360,6 +393,10 @@ Respond in JSON:
     "adjudicated_description": "full corrected task description, or null if unchanged",
     "adjudicated_plan": [ {{ "group_id": "G1", "name": "...", "tasks": [] }} ],
     "adjudication_rationale": "why this ruling resolves the oscillation (required)",
+    "covered_surfaces": [
+        {{"surface": "the surface the boundary clause governs",
+          "justification": "why clauses X and Y both cover it, by construction"}}
+    ],
     "candidate_verdicts": [
         {{"id": 0, "verdict": "contradiction|benign", "reason": "..."}}
     ]
@@ -369,6 +406,14 @@ Set `adjudicated_plan` to null if you are not changing the plan. Set
 `adjudicated_description` to null if you are not changing the description. At
 least one of them MUST be non-null unless `contradiction_type` is
 "review_divergence".
+
+`covered_surfaces` MUST list EVERY surface your boundary clause governs —
+including the surface that triggered this ruling (justify that one as "triggering
+surface: ..."), so a reviewer sees the clause's full claimed reach. Each entry
+needs a non-empty `surface` and a non-empty `justification`. If the sweep found
+no sister surface, list only the triggering surface — or omit the field / return
+`[]`; an empty sweep is a legitimate result and you must NEVER invent a surface
+to fill it. For "review_divergence" the field is ignored.
 """
 
 
@@ -450,16 +495,90 @@ _MAX_RULING_ATTEMPTS = 2
 
 _NOOP_RULING_REPROMPT = (
     "\n\n## Your previous ruling was rejected\n"
-    "Your ruling (\"{contradiction_type}\") was not actionable. EVERY ruling MUST "
+    "Your ruling (\"{contradiction_type}\") was not actionable: {reason}\n"
+    "EVERY ruling MUST "
     "carry a non-empty `adjudication_rationale` explaining the verdict (it is the "
     "recorded justification and the dismissal reason for benign candidates). A "
     "ruling that classifies a REAL contradiction (internal_contradiction / "
     "hard_constraint_conflict) MUST additionally carry a covering override patch "
     "(`adjudicated_description` and/or `adjudicated_plan`) so the effective spec "
-    "actually changes. Provide the missing field(s); if there is in fact no real "
-    "contradiction, reclassify as \"review_divergence\" — but still give a "
+    "actually changes. `covered_surfaces`, when present, MUST be a list whose every "
+    "entry has a non-empty `surface` and a non-empty `justification`; if your sweep "
+    "found no homomorphic surface, omit the field or return an empty list — do NOT "
+    "invent a surface to fill it. Provide the missing field(s); if there is in fact "
+    "no real contradiction, reclassify as \"review_divergence\" — but still give a "
     "rationale saying why.\n"
 )
+
+
+def _normalized_covered_surfaces(result: Dict[str, Any]) -> Tuple[List[Dict[str, str]], bool]:
+    """Sanitize ``covered_surfaces`` into (clean_list, is_valid).
+
+    WHY the validation is deliberately asymmetric — the FIELD is optional but each
+    ENTRY must be complete: making the field mandatory would leave "the sweep found
+    no sister surface" (a correct, common outcome) inexpressible and would push the
+    LLM to invent a surface to satisfy the schema — manufacturing exactly the
+    over-claim the conservatism rule exists to prevent. A half-filled entry, by
+    contrast, is a pure format breach with no legitimate meaning: it would let a
+    boundary clause claim a surface with no stated justification (or justify
+    nothing), so the reviewer's view of the clause's reach would be a lie. Missing /
+    None / [] therefore stay valid; a malformed shape is rejected and re-asked.
+
+    Returns ``([], True)`` for absent-or-empty, ``([], False)`` for any malformed
+    shape (non-list, non-dict entry, or an entry whose ``surface`` /
+    ``justification`` is missing, non-str, or blank after strip), and the stripped
+    list otherwise.
+    """
+    raw = result.get("covered_surfaces")
+    if raw is None:
+        return [], True
+    if not isinstance(raw, list):
+        return [], False
+    clean: List[Dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return [], False
+        surface = entry.get("surface")
+        justification = entry.get("justification")
+        if not isinstance(surface, str) or not surface.strip():
+            return [], False
+        if not isinstance(justification, str) or not justification.strip():
+            return [], False
+        clean.append({"surface": surface.strip(), "justification": justification.strip()})
+    return clean, True
+
+
+def _ruling_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
+    """Why this ruling cannot land, or ``None`` when it is actionable.
+
+    The single source of truth behind ``_ruling_is_actionable``; its string is
+    threaded into both the semantic-retry re-prompt (so the LLM is told exactly
+    what to fix rather than re-guessing) and the retries-exhausted FAILED
+    ``error_message`` (so the audit says which gate the ruling never cleared).
+    """
+    reasons: List[str] = []
+    rationale = str(result.get("adjudication_rationale", "") or "").strip()
+    if not rationale:
+        reasons.append("missing `adjudication_rationale`")
+
+    ctype = str(result.get("contradiction_type", "")).strip().lower()
+    # A review_divergence ruling patches nothing and its boundary clause does not
+    # exist, so covered_surfaces is meaningless there and is ignored outright —
+    # a malformed one must not block an otherwise-valid no-op verdict.
+    if ctype != "review_divergence":
+        desc, plan = _normalized_overrides(result)
+        if not (desc or plan):
+            reasons.append(
+                "no covering override patch (`adjudicated_description` and/or "
+                "`adjudicated_plan`)"
+            )
+        _, surfaces_ok = _normalized_covered_surfaces(result)
+        if not surfaces_ok:
+            reasons.append(
+                "malformed `covered_surfaces` (must be a list of entries, each with a "
+                "non-empty `surface` and a non-empty `justification`)"
+            )
+    return "; ".join(reasons) if reasons else None
 
 
 def _normalized_overrides(result: Dict[str, Any]) -> tuple:
@@ -492,16 +611,14 @@ def _ruling_is_actionable(result: Dict[str, Any]) -> bool:
     reused as the dismissal reason stamped onto each benign candidate. A blank or
     whitespace-only rationale would leave the audit empty and stamp whitespace
     reasons onto rejected candidates, so treat it as non-actionable and let the
-    semantic retry re-ask for one.
+    semantic retry re-ask for one. A real-contradiction ruling whose
+    ``covered_surfaces`` entries are incomplete is likewise held back — see
+    ``_normalized_covered_surfaces``.
+
+    Thin bool view of ``_ruling_rejection_reason`` so both the gate and the
+    re-prompt/FAILED message judge "landable" by the exact same rules.
     """
-    rationale = str(result.get("adjudication_rationale", "") or "").strip()
-    if not rationale:
-        return False
-    ctype = str(result.get("contradiction_type", "")).strip().lower()
-    if ctype == "review_divergence":
-        return True
-    desc, plan = _normalized_overrides(result)
-    return bool(desc or plan)
+    return _ruling_rejection_reason(result) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -667,6 +784,7 @@ def adjudicate_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     '"adjudicated_description": "... or null", '
                     '"adjudicated_plan": [{"group_id": "G1", "name": "...", "tasks": []}], '
                     '"adjudication_rationale": "...", '
+                    '"covered_surfaces": [{"surface": "...", "justification": "..."}], '
                     '"candidate_verdicts": [{"id": 0, "verdict": "contradiction|benign", "reason": "..."}]}'
                 ),
                 required_keys=["adjudication_rationale"],
@@ -680,28 +798,31 @@ def adjudicate_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.error_message = "Failed to parse adjudication result from LLM response"
             return StepStatus.FAILED
 
-        if _ruling_is_actionable(result):
+        rejection_reason = _ruling_rejection_reason(result)
+        if rejection_reason is None:
             break
 
         strict_suffix = _NOOP_RULING_REPROMPT.format(
-            contradiction_type=result.get("contradiction_type", "")
+            contradiction_type=result.get("contradiction_type", ""),
+            reason=rejection_reason,
         )
         logger.warning(
-            "Adjudication returned a no-op contradiction ruling "
-            "(attempt %d/%d); re-asking with a strict patch demand",
-            attempt + 1, _MAX_RULING_ATTEMPTS,
+            "Adjudication returned a non-actionable ruling (%s) "
+            "(attempt %d/%d); re-asking with a strict demand",
+            rejection_reason, attempt + 1, _MAX_RULING_ATTEMPTS,
         )
 
-    if not _ruling_is_actionable(result):
+    rejection_reason = _ruling_rejection_reason(result)
+    if rejection_reason is not None:
         # A ruling that never became actionable survived every retry (missing
-        # rationale, or a real-contradiction verdict with no covering patch):
-        # fail rather than reflow with an unchanged/unaudited spec (which would
-        # let the oscillation continue indefinitely).
+        # rationale, a real-contradiction verdict with no covering patch, or an
+        # incomplete covered_surfaces entry): fail rather than reflow with an
+        # unchanged/unaudited spec (which would let the oscillation continue
+        # indefinitely).
         step.error_message = (
             "Adjudication ruling was not actionable "
-            f"(type='{result.get('contradiction_type', '')}': missing rationale "
-            "and/or override patch) after retries; refusing to reflow with an "
-            "unchanged spec"
+            f"(type='{result.get('contradiction_type', '')}': {rejection_reason}) "
+            "after retries; refusing to reflow with an unchanged spec"
         )
         return StepStatus.FAILED
 
@@ -779,6 +900,10 @@ def _apply_ruling(
     rationale = result.get("adjudication_rationale", "")
     verdicts = result.get("candidate_verdicts") or []
     has_patch = bool(adjudicated_description or adjudicated_plan)
+    # Same sanitizer the actionability gate ran, so what lands is exactly what was
+    # judged landable (the gate already rejected any malformed shape; here it can
+    # only be a clean list, possibly empty).
+    covered_surfaces, _ = _normalized_covered_surfaces(result)
 
     # Map verdicts (by candidate id) to positions.
     quote_by_pos = {c["position_key"]: c["quote"] for c in candidates}
@@ -880,9 +1005,15 @@ def _apply_ruling(
         # on the spec rewrite the human explicitly rejected, bypassing the confirmation
         # gate. Consumers all read these via .get()/truthiness, so absence is equivalent
         # to the old sentinels for routing while keeping the audit trail honest.
+        # ``covered_surfaces`` is a patch-class key and must come and go WITH the
+        # patch: it describes the reach of a boundary clause that a no-op ruling
+        # never wrote. Leaving a prior in-place run's list behind would show an
+        # audit reader (and the confirm gate) a governance claim belonging to an
+        # override that does not exist here.
         for _patch_key in (
             "adjudicated_description",
             "adjudicated_plan",
+            "covered_surfaces",
             "superseded_fix_instructions",
             "fix_instructions_superseded",
         ):
@@ -947,6 +1078,12 @@ def _apply_ruling(
     step.outputs["adjudicated_description"] = adjudicated_description
     step.outputs["adjudicated_plan"] = adjudicated_plan
     step.outputs["adjudication_rationale"] = rationale
+    # Written UNCONDITIONALLY, regardless of the confirmation gate: adjudication
+    # runs auto-pass by default, so this is the only surviving record of what the
+    # boundary clause claimed to govern and on what grounds. Auditing a wrong claim
+    # after the fact must not depend on a gate that was probably never open. The
+    # gate, when open, merely renders this same list.
+    step.outputs["covered_surfaces"] = covered_surfaces
     step.outputs["adjudicated_at"] = datetime.now(timezone.utc).isoformat()
     step.outputs["superseded_fix_instructions"] = superseded
     step.outputs["fix_instructions_superseded"] = bool(superseded)
