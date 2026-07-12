@@ -125,10 +125,13 @@ def _create_call_file(step: Step, flow: FlowInstance, project_root: Path) -> Pat
     }
 
     # An adjudicate approval gate is un-actionable without the ruling in view:
-    # inject the rationale plus the pre-ruling baseline vs. post-ruling
-    # description so the web console can render a before/after diff. Non-adjudicate
-    # confirms carry none of these fields (helper returns {}), keeping their
-    # payload unchanged.
+    # inject the rationale, the pre-ruling baseline vs. post-ruling description
+    # (so the web console can render a before/after diff), and the boundary
+    # clause's `covered_surfaces` — the surfaces it claims to govern, each with
+    # its by-construction justification, which is what lets a human catch a
+    # wrongly-swept sibling surface before it is written into the contract.
+    # Non-adjudicate confirms carry none of these fields (helper returns {}),
+    # keeping their payload unchanged.
     if step_to_review_type == 'adjudicate':
         context.update(build_adjudicate_review_context(flow, step_to_review_id))
 

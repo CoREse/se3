@@ -1104,11 +1104,42 @@ def build_confirm_prompt(step_to_review_type: str) -> str:
     """
     label = (step_to_review_type or "step").replace("_", " ")
     if step_to_review_type == "adjudicate":
+        # The surfaces the boundary clause claims to govern are named explicitly:
+        # the human gate is the only place a wrongly-swept sibling surface can be
+        # caught before the clause is written into the contract.
         return (
-            "Review the adjudication ruling below (rationale + description diff) "
-            "and approve it, or request changes."
+            "Review the adjudication ruling below (rationale + description diff, "
+            "plus the surfaces the boundary clause claims to cover) and approve "
+            "it, or request changes."
         )
     return f"Review the {label} output and approve it, or request changes."
+
+
+def _display_covered_surfaces(raw: Any) -> List[Dict[str, str]]:
+    """Project a ruling's ``covered_surfaces`` into a display-safe list.
+
+    The adjudicate step already refuses to land an incomplete entry (its
+    ``_normalized_covered_surfaces`` gate), so in practice this only ever sees a
+    clean list. It re-sanitizes anyway — and *drops* bad entries instead of
+    raising — because the display layer is on the human-approval path: a
+    hand-edited or legacy state file must degrade to "nothing to show" rather
+    than crash the gate that a human is waiting at.
+    """
+    if not isinstance(raw, list):
+        return []
+    clean: List[Dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        surface = entry.get("surface")
+        justification = entry.get("justification")
+        if not isinstance(surface, str) or not isinstance(justification, str):
+            continue
+        surface, justification = surface.strip(), justification.strip()
+        if not surface or not justification:
+            continue
+        clean.append({"surface": surface, "justification": justification})
+    return clean
 
 
 def build_adjudicate_review_context(
@@ -1127,10 +1158,19 @@ def build_adjudicate_review_context(
     the reviewed step excluded, so the ruling's own not-yet-approved rewrite is
     never mistaken for its own baseline.
 
+    ``covered_surfaces`` carries the homomorphic-surface sweep: every surface the
+    ruling's boundary clause claims to govern, each with its by-construction
+    justification. It is a read-only projection of the reviewed step's outputs —
+    the audit record is written there unconditionally, this payload only renders
+    it — and it is defensively re-sanitized here so the display layer always
+    receives a predictable list of ``{surface, justification}`` (a malformed or
+    incomplete entry is dropped rather than crashing the gate).
+
     Returns a dict with ``adjudication_rationale`` / ``adjudicated_description`` /
-    ``baseline`` (each a string, possibly empty); an empty dict when the reviewed
-    step is missing or is not an ADJUDICATE ruling (so a non-adjudicate confirm
-    call carries none of these fields).
+    ``baseline`` (each a string, possibly empty) and ``covered_surfaces`` (a list,
+    possibly empty); an empty dict when the reviewed step is missing or is not an
+    ADJUDICATE ruling (so a non-adjudicate confirm call carries none of these
+    fields).
     """
     from .models import StepType
 
@@ -1142,6 +1182,7 @@ def build_adjudicate_review_context(
 
     rationale = reviewed.outputs.get("adjudication_rationale") or ""
     adjudicated_description = reviewed.outputs.get("adjudicated_description") or ""
+    covered_surfaces = _display_covered_surfaces(reviewed.outputs.get("covered_surfaces"))
 
     # Resolve the pre-ruling baseline through the shared effective-text layer so
     # the diff anchor matches exactly what the flow considered effective before
@@ -1156,4 +1197,5 @@ def build_adjudicate_review_context(
         "adjudication_rationale": rationale,
         "adjudicated_description": adjudicated_description,
         "baseline": baseline,
+        "covered_surfaces": covered_surfaces,
     }

@@ -276,6 +276,45 @@ def _check_confirm_response(flow: FlowInstance, current_step: Any, project_root:
     return None
 
 
+def _render_covered_surfaces(flow: FlowInstance, step_to_review_id: Optional[str]) -> None:
+    """Print the ruling's boundary-clause coverage at an adjudicate confirm gate.
+
+    ADJUDICATE has no dedicated CLI renderer, so its outputs would otherwise reach
+    the approver through the generic key-value dump — where a nested list of
+    ``{surface, justification}`` is effectively unreadable. Printing it explicitly
+    here is what makes the human gate able to do its one job: catch a surface the
+    sweep swept in *wrongly* before the boundary clause is written into the
+    contract. Read from ``step.outputs`` — the same audit record the call file's
+    display payload projects — never recomputed.
+    """
+    from rich.markup import escape
+
+    try:
+        from ..engine.context_builder import _display_covered_surfaces
+    except ImportError:  # direct-import (development) path, as at module top
+        from engine.context_builder import _display_covered_surfaces
+
+    reviewed = flow.state.steps.get(step_to_review_id) if (flow.state and step_to_review_id) else None
+    surfaces = _display_covered_surfaces(reviewed.outputs.get("covered_surfaces")) if reviewed else []
+
+    if not surfaces:
+        lines = [t("cli.run.confirm.adjudicate.covered_surfaces_none")]
+    else:
+        lines = []
+        for entry in surfaces:
+            lines.append(
+                t("cli.run.confirm.adjudicate.surface_item", surface=escape(entry["surface"]))
+            )
+            lines.append(
+                t(
+                    "cli.run.confirm.adjudicate.justification_item",
+                    justification=escape(entry["justification"]),
+                )
+            )
+
+    render_full("\n".join(lines), title=t("cli.run.confirm.adjudicate.covered_surfaces_title"))
+
+
 def _handle_confirm_pause(
     flow: FlowInstance,
     current_step: Any,
@@ -302,7 +341,12 @@ def _handle_confirm_pause(
     step_to_review_type = current_step.inputs.get("step_to_review_type", "unknown")
 
     # The reviewed step's output was already displayed by render_step_output
-    # in the previous iteration, so just prompt directly.
+    # in the previous iteration, so just prompt directly — except for an
+    # adjudicate ruling, whose boundary-clause coverage the generic renderer
+    # cannot show legibly (see _render_covered_surfaces).
+    if step_to_review_type == "adjudicate":
+        _render_covered_surfaces(flow, step_to_review_id)
+
     options = [
         t("cli.run.confirm.opt_approve"),
         t("cli.run.confirm.opt_request_changes"),

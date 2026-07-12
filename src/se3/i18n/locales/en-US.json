@@ -28,6 +28,10 @@
   "cli.run.confirm.changes_requested": "Changes requested: {feedback}",
   "cli.run.confirm.result_title": "Confirmation Result",
   "cli.run.confirm.found_existing": "[dim]Found existing confirmation response: {value}[/dim]",
+  "cli.run.confirm.adjudicate.covered_surfaces_title": "Surfaces covered by this boundary clause",
+  "cli.run.confirm.adjudicate.covered_surfaces_none": "[dim]No homomorphic surface was swept in — this clause covers only its triggering surface.[/dim]",
+  "cli.run.confirm.adjudicate.surface_item": "[bold]• {surface}[/bold]",
+  "cli.run.confirm.adjudicate.justification_item": "    {justification}",
 
   "cli.run.interjection_received": "[dim]Interjection received from web console: {text}[/dim]",
 

@@ -27,6 +27,10 @@
   "cli.run.confirm.changes_requested": "已请求修改：{feedback}",
   "cli.run.confirm.result_title": "确认结果",
   "cli.run.confirm.found_existing": "[dim]找到已有的确认回复：{value}[/dim]",
+  "cli.run.confirm.adjudicate.covered_surfaces_title": "该边界条款覆盖的表面",
+  "cli.run.confirm.adjudicate.covered_surfaces_none": "[dim]未清扫出同构表面——该条款仅覆盖其触发表面。[/dim]",
+  "cli.run.confirm.adjudicate.surface_item": "[bold]• {surface}[/bold]",
+  "cli.run.confirm.adjudicate.justification_item": "    {justification}",
 
   "cli.run.interjection_received": "[dim]收到来自 Web 控制台的插话：{text}[/dim]",
 
