@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+## 11.22.0 - 2026-07-13
+
+- Have adjudicate sweep for isomorphic surfaces: once a clause pair X x Y is ruled an internal contradiction, all other spec surfaces both clauses cover by construction are folded into one boundary clause, so a sister surface no longer triggers a second adjudication round
+- Add an optional covered_surfaces field to the ruling schema, listing every surface the boundary clause governs (including the triggering one) with a by-construction justification for each
+- Reject rulings whose covered_surfaces entries have an empty surface or justification as non-actionable, routing them through the existing semantic retry chain; a missing or empty list stays valid and behaves as before
+- Show covered_surfaces in the adjudicate confirmation gate — rendered in the WebUI adjudicate-review panel and in the CLI prompt — so an approver can see which surfaces a boundary clause claims to govern and on what grounds before approving
+- Persist covered_surfaces to step outputs for audit regardless of whether the confirmation gate is enabled
+- Require a single ruling to emit both adjudicated_description and adjudicated_plan when a contradiction shows up in both the description and the plan's acceptance clauses, instead of deferring the mirror fix to a later round
+- Instruct the adjudicator to omit any surface it is not certain about, since a missed surface self-heals via a cheap follow-up ruling while a wrongly claimed one writes a bad constraint into the contract
 ## 11.21.0 - 2026-07-12
 
 - Add an extensible i18n framework shipping zh-CN and en-US locale packs, where en-US is the baseline holding the full key set and any missing key falls back to it
