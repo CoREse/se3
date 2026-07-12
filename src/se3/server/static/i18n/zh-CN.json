@@ -282,6 +282,8 @@
   "adjudicate.taskDescLabel": "任务描述",
   "adjudicate.noChange": "本次裁决未修改任务描述。",
   "adjudicate.sameAsBaseline": "任务描述与基线一致(无变更)。",
+  "adjudicate.coveredSurfacesLabel": "边界条款覆盖的表面",
+  "adjudicate.coveredSurfaceJustification": "论证:",
 
   "prompt.expandDetail": "▸ 展开消息详情",
   "prompt.collapseDetail": "▾ 收起消息详情",

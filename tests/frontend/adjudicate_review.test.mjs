@@ -1,13 +1,15 @@
 /*
- * ADJUDICATE approval-review tests (Group G4).
+ * ADJUDICATE approval-review tests.
  *
  * When a CONFIRM gate reviews an ADJUDICATE ruling, the web console cannot let
  * the operator decide 批 vs 打回 blind: `renderAdjudicateReview(target)` surfaces
- * the ruling's `adjudication_rationale` panel plus a baseline→adjudicated_description
- * before/after diff (reusing the shared unified-diff renderer). The backend
- * (build_adjudicate_review_context) injects those three fields into
- * `target.context`; every field is best-effort, so the block degrades gracefully
- * when any subset is missing and returns null for a non-adjudicate target.
+ * the ruling's `adjudication_rationale` panel, a baseline→adjudicated_description
+ * before/after diff (reusing the shared unified-diff renderer), and the list of
+ * surfaces the boundary clause claims to cover — each with its by-construction
+ * justification, since an over-broad sweep can only be caught here. The backend
+ * (build_adjudicate_review_context) injects those fields into `target.context`;
+ * every field is best-effort, so the block degrades gracefully when any subset
+ * is missing and returns null for a non-adjudicate target.
  *
  * This file is dual-mode:
  *   - `registerAdjudicateReviewTests(ctx)` is imported by tests/frontend/
@@ -32,11 +34,12 @@ export async function registerAdjudicateReviewTests(ctx) {
   // Build a bare confirm target whose context carries the given adjudicate
   // fields. `renderAdjudicateReview` only reads `target.context`, so this is all
   // the shape it needs — no flow / state wiring required for the pure checks.
-  function target({ type = "adjudicate", rationale, baseline, description } = {}) {
+  function target({ type = "adjudicate", rationale, baseline, description, surfaces } = {}) {
     const context = { flow_id: "flow-x", step_to_review_type: type };
     if (rationale !== undefined) context.adjudication_rationale = rationale;
     if (baseline !== undefined) context.baseline = baseline;
     if (description !== undefined) context.adjudicated_description = description;
+    if (surfaces !== undefined) context.covered_surfaces = surfaces;
     return { kind: "confirm", callId: "cfADJ", context };
   }
 
@@ -123,6 +126,94 @@ export async function registerAdjudicateReviewTests(ctx) {
   check("G4 an adjudicate target with no rationale/baseline/description renders nothing", () => {
     assert.equal(app.renderAdjudicateReview(target({})), null,
       "an adjudicate target carrying none of the display fields degrades to null");
+  });
+
+  // ---- covered_surfaces: every swept surface + its justification renders -----
+  check("G3 covered_surfaces renders each surface with its by-construction justification", () => {
+    const node = app.renderAdjudicateReview(
+      target({
+        rationale: "B2×B3 冲突,统一边界条款。",
+        baseline: "旧描述",
+        description: "新描述",
+        surfaces: [
+          { surface: "step 冷文件", justification: "触发来源:R27+R29 配对观测。" },
+          { surface: "_context.json", justification: "B2 管冷文件写入、B3 管损坏降级,按构造同时覆盖。" },
+        ],
+      }),
+    );
+    assert.ok(node, "an adjudicate target with covered_surfaces still renders");
+    const sec = findOne(node, "flow-reply-adjudicate-surfaces");
+    assert.ok(sec, "the covered-surfaces section is rendered");
+
+    const names = findAll(node, "flow-reply-adjudicate-surface-name").map((n) => n.textContent);
+    assert.deepEqual(names, ["step 冷文件", "_context.json"], "both surfaces render, in ruling order");
+
+    const whys = findAll(node, "flow-reply-adjudicate-surface-why-body").map((n) => n.textContent);
+    assert.equal(whys.length, 2, "each surface carries its justification");
+    assert.ok(whys[0].includes("R27+R29"), `first justification renders, got: ${whys[0]}`);
+    assert.ok(whys[1].includes("按构造同时覆盖"), `second justification renders, got: ${whys[1]}`);
+
+    // The rationale panel and the description diff are untouched by the新小节.
+    assert.ok(findOne(node, "flow-reply-adjudicate-rationale-body"), "rationale panel still rendered");
+    assert.ok(findAll(node, "diff-add").length > 0, "the description diff still renders");
+  });
+
+  // ---- covered_surfaces absent / empty / non-array: section omitted ---------
+  check("G3 absent, empty or non-array covered_surfaces omits the section without touching the rest", () => {
+    const base = { rationale: "裁定收敛。", baseline: "旧描述", description: "新描述" };
+    for (const [label, surfaces] of [
+      ["absent", undefined],
+      ["empty", []],
+      ["non-array object", { surface: "x", justification: "y" }],
+      ["non-array string", "step 冷文件"],
+      ["null", null],
+    ]) {
+      const node = app.renderAdjudicateReview(target({ ...base, surfaces }));
+      assert.ok(node, `${label}: the panel still renders`);
+      assert.equal(findOne(node, "flow-reply-adjudicate-surfaces"), null,
+        `${label}: no covered-surfaces section is rendered`);
+      // The pre-existing panel content is unchanged by the degradation.
+      assert.equal(findOne(node, "flow-reply-adjudicate-rationale-body").textContent, "裁定收敛。",
+        `${label}: rationale panel unchanged`);
+      assert.ok(diffTextFor(node, "diff-add").includes("新描述"), `${label}: description diff unchanged`);
+    }
+  });
+
+  // ---- covered_surfaces: malformed entries are skipped ----------------------
+  check("G3 entries missing a surface or a justification are skipped, valid siblings still render", () => {
+    const node = app.renderAdjudicateReview(
+      target({
+        rationale: "裁定收敛。",
+        baseline: "旧描述",
+        description: "新描述",
+        surfaces: [
+          { surface: "step 冷文件", justification: "   " },   // blank justification → skipped
+          { surface: "", justification: "有论证但无表面" },     // blank surface → skipped
+          { justification: "缺 surface 键" },                  // missing key → skipped
+          { surface: "缺 justification 键" },                  // missing key → skipped
+          null,                                                // non-object → skipped
+          "step 冷文件",                                        // non-object → skipped
+          { surface: "_context.json", justification: "按构造同时覆盖。" },  // the only valid entry
+        ],
+      }),
+    );
+    const names = findAll(node, "flow-reply-adjudicate-surface-name").map((n) => n.textContent);
+    assert.deepEqual(names, ["_context.json"], "only the complete entry renders");
+    const whys = findAll(node, "flow-reply-adjudicate-surface-why-body").map((n) => n.textContent);
+    assert.deepEqual(whys, ["按构造同时覆盖。"], "the surviving entry keeps its justification");
+  });
+
+  check("G3 covered_surfaces whose every entry is malformed omits the section entirely", () => {
+    const node = app.renderAdjudicateReview(
+      target({
+        rationale: "裁定收敛。",
+        description: "新描述",
+        surfaces: [{ surface: "x" }, { justification: "y" }],
+      }),
+    );
+    assert.ok(node, "the panel still renders");
+    assert.equal(findOne(node, "flow-reply-adjudicate-surfaces"), null,
+      "no empty covered-surfaces frame is left behind");
   });
 
   // ---- integration: block appears in the docked reply box for adjudicate ---

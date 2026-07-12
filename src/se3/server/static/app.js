@@ -3947,6 +3947,52 @@ function renderAdjudicateReview(target) {
     );
   }
   wrap.appendChild(diffWrap);
+
+  // Boundary-clause coverage. A ruling may sweep sibling surfaces into ONE
+  // boundary clause, so the clause governs more than the surface that triggered
+  // it — and an over-broad sweep writes a wrong constraint into the contract.
+  // This gate is the only place a human can catch that, hence每个 surface 与其
+  // by-construction 论证 are shown side by side. Absent/empty/non-array degrades
+  // to omitting the section: "swept in nothing" is the conservative (宁漏勿错)
+  // outcome the prompt asks for, not an anomaly worth framing. Entries missing a
+  // surface or a justification are dropped rather than shown half-blank —
+  // the backend already rejects those, so seeing one here means malformed input.
+  const surfaces = [];
+  if (Array.isArray(ctx.covered_surfaces)) {
+    for (const entry of ctx.covered_surfaces) {
+      if (!entry || typeof entry !== "object") continue;
+      const surface = String(entry.surface == null ? "" : entry.surface).trim();
+      const justification = String(entry.justification == null ? "" : entry.justification).trim();
+      if (!surface || !justification) continue;
+      surfaces.push({ surface, justification });
+    }
+  }
+  if (surfaces.length) {
+    const sec = el("div", "flow-reply-adjudicate-surfaces");
+    sec.appendChild(
+      el(
+        "div",
+        "flow-reply-adjudicate-label",
+        tf("adjudicate.coveredSurfacesLabel", "Surfaces covered by the boundary clause"),
+      ),
+    );
+    for (const item of surfaces) {
+      const row = el("div", "flow-reply-adjudicate-surface");
+      row.appendChild(el("div", "flow-reply-adjudicate-surface-name", item.surface));
+      const just = el("div", "flow-reply-adjudicate-surface-why");
+      just.appendChild(
+        el(
+          "span",
+          "flow-reply-adjudicate-surface-why-label",
+          tf("adjudicate.coveredSurfaceJustification", "Why"),
+        ),
+      );
+      just.appendChild(el("span", "flow-reply-adjudicate-surface-why-body", item.justification));
+      row.appendChild(just);
+      sec.appendChild(row);
+    }
+    wrap.appendChild(sec);
+  }
   return wrap;
 }
 

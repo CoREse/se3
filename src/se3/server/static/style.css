@@ -814,6 +814,44 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-style: italic;
   color: var(--fg-dim);
 }
+/* Boundary-clause coverage list: the surface name is the scannable unit (the
+   approver checks "does this clause really govern that?"), so it is emphasized
+   and its by-construction justification reads as dimmed body text beneath. */
+.flow-reply-adjudicate-surfaces {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.flow-reply-adjudicate-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 9px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.flow-reply-adjudicate-surface-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+  word-break: break-word;
+}
+.flow-reply-adjudicate-surface-why {
+  display: flex;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.flow-reply-adjudicate-surface-why-label {
+  flex: none;
+  color: var(--fg-dim);
+  opacity: 0.8;
+}
+.flow-reply-adjudicate-surface-why-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 .flow-reply-row {
   display: flex;

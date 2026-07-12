@@ -282,6 +282,8 @@
   "adjudicate.taskDescLabel": "Task description",
   "adjudicate.noChange": "This adjudication did not modify the task description.",
   "adjudicate.sameAsBaseline": "The task description matches the baseline (no change).",
+  "adjudicate.coveredSurfacesLabel": "Surfaces covered by the boundary clause",
+  "adjudicate.coveredSurfaceJustification": "Why:",
 
   "prompt.expandDetail": "▸ Expand message detail",
   "prompt.collapseDetail": "▾ Collapse message detail",
