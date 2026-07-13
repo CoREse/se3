@@ -2,9 +2,9 @@ id: '287'
 description: '20260711-191420_75f3d89f
 
   这个修复之后，不光描述的问题没有解决，就连原本第一轮discovery可以正常显示都被弄没了，现在整个worktree的session的discovery步骤都只能靠下面的回复框来看到输出了什么内容了。'
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-07-12T01:04:32.891212'
-updated_at: '2026-07-12T01:04:32.891212'
+updated_at: '2026-07-13T14:13:16.330216'
 type: bug

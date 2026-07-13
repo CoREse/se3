@@ -410,6 +410,38 @@ def _round(ordinal: int) -> dict:
     }
 
 
+async def _register_flow(state, *, status: str, project_root: str, flow_id="f1"):
+    """Register *flow_id* on machine ``m1`` so the state layer can classify it.
+
+    The add-only floor is deliberately scoped to flows the worktree self-heal
+    reconcile can actually fire for, so a test that wants the floor engaged must
+    make the flow LOOK like one — an unregistered flow is not a worktree flow and
+    its full frames replace the bundle exactly as they always did.
+    """
+    await state.update_status(
+        "m1",
+        {
+            "machine_id": "m1",
+            "flows": [
+                {
+                    "flow_id": flow_id,
+                    "status": status,
+                    "project_root": project_root,
+                }
+            ],
+        },
+    )
+
+
+async def _paused_worktree_flow(state, flow_id="f1"):
+    await _register_flow(
+        state,
+        status="paused",
+        project_root="/repo/se3/worktrees/wt-a",
+        flow_id=flow_id,
+    )
+
+
 def test_empty_full_does_not_wipe_existing_bundle():
     """An empty full frame MUST NOT clear a non-empty bundle from the same machine.
 
@@ -421,6 +453,7 @@ def test_empty_full_does_not_wipe_existing_bundle():
     state = ServerState()
 
     async def scenario():
+        await _paused_worktree_flow(state)
         await state.append_history(
             "f1", protocol.HISTORY_MODE_FULL, [_round(0)], machine_id="m1"
         )
@@ -438,6 +471,188 @@ def test_empty_full_does_not_wipe_existing_bundle():
         assert snap["records"] == [_round(0)]
         # Generation kept ⇒ in-sync clients stay on the cheap not_modified path.
         assert snap["generation"] == gen1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "register",
+    [
+        pytest.param(None, id="no-status-snapshot"),
+        pytest.param(
+            {"status": "running", "project_root": "/repo"}, id="non-worktree-running"
+        ),
+        pytest.param(
+            {"status": "completed", "project_root": "/repo/se3/worktrees/wt-a"},
+            id="terminal-worktree",
+        ),
+    ],
+)
+def test_empty_full_never_wipes_existing_bundle_whatever_the_flow(register):
+    """The empty-full refusal is UNCONDITIONAL — it is not scoped to worktree flows.
+
+    The shrinking-but-non-empty floor is worktree-scoped (an ordinary flow may
+    legitimately shrink when a failed step is retried), but the EMPTY frame has no
+    legitimate reading for ANY flow the server already holds records for: on the
+    wire the daemon cannot distinguish "this flow has no records" from "I failed to
+    resolve its history directory". The scoped predicate is also blind precisely
+    when it matters most — right after a daemon reconnect the flow has no
+    STATUS_UPDATE snapshot yet, so a worktree flow does not even look like one.
+    """
+    state = ServerState()
+
+    async def scenario():
+        if register is not None:
+            await _register_flow(state, **register)
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0), _round(1)], machine_id="m1"
+        )
+        gen1 = (await state.get_history("f1"))["generation"]
+
+        outcome = await state.apply_history_frame(
+            "f1", protocol.HISTORY_MODE_FULL, [], machine_id="m1"
+        )
+        assert outcome.resolves_pull is True
+        # Rejected ⇒ the /ws/ui fan-out must not relay the zero-record frame either.
+        assert outcome.rejected_full is True
+
+        snap = await state.get_history("f1")
+        assert snap["records"] == [_round(0), _round(1)]
+        assert snap["generation"] == gen1
+
+    asyncio.run(scenario())
+
+
+def test_shorter_non_empty_full_does_not_shrink_existing_bundle():
+    """A same-machine full frame with FEWER records must not truncate the bundle.
+
+    The destructive frame need not be empty. A paused worktree flow whose
+    worktree copy of the history has been pruned/renamed leaves the daemon able
+    to resolve only the main-repo copy, so it honestly answers ``mode=full`` with
+    round 1 alone — non-empty, but strictly shorter than the rounds the cache
+    already holds. Wholesale replacement would drop round 2 and roll a fresh
+    generation, handing the browser a ``full`` rebuild with the later rounds
+    gone: the very multi-round loss #287 exists to eliminate, reached through the
+    reconcile path that was supposed to heal it.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await _paused_worktree_flow(state)
+        await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [_round(0), _round(1), _round(2), _round(3)],
+            machine_id="m1",
+        )
+        gen1 = (await state.get_history("f1"))["generation"]
+
+        applied = await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [_round(0), _round(1)],
+            machine_id="m1",
+        )
+        # Still "applied" so a pull waiter blocked on this reply is released.
+        assert applied is True
+
+        snap = await state.get_history("f1")
+        assert len(snap["records"]) == 4
+        assert snap["records"] == [_round(0), _round(1), _round(2), _round(3)]
+        assert snap["generation"] == gen1
+
+    asyncio.run(scenario())
+
+
+def test_same_length_full_replace_is_applied():
+    """Add-only is about COUNT, not content: an equal-length full still applies.
+
+    The guard must stay a floor against losing records, not a freeze on the
+    bundle — a same-machine full that rewrites a record in place (a retry
+    advancing a line) carries the same count and must take effect.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await _paused_worktree_flow(state)
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0), _round(1)], machine_id="m1"
+        )
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0), _round(2)], machine_id="m1"
+        )
+        assert applied is True
+
+        snap = await state.get_history("f1")
+        assert snap["records"] == [_round(0), _round(2)]
+
+    asyncio.run(scenario())
+
+
+def test_shrinking_full_still_replaces_bundle_for_a_non_worktree_flow():
+    """A NON-worktree flow's full frames behave exactly as they did before #287.
+
+    The add-only floor exists because an active worktree flow can only shrink by
+    accident (the daemon resolved its history dir partially or not at all). An
+    ordinary flow shrinks on purpose: a FAILED step retried rewrites its step
+    jsonl in place with a fresh, shorter batch, so the next cursorless pull
+    honestly carries fewer records. Applying the floor there would pin the chat
+    to the stale pre-retry records and silently drop the retry's own output — a
+    behaviour change #287 must not make. So the shorter full replaces the bundle
+    and rolls the generation, exactly as before.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await _register_flow(state, status="running", project_root="/repo")
+        await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [_round(0), _round(1), _round(2)],
+            machine_id="m1",
+        )
+        gen1 = (await state.get_history("f1"))["generation"]
+
+        outcome = await state.apply_history_frame(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0)], machine_id="m1"
+        )
+        assert outcome.resolves_pull is True
+        # Never flagged as rejected ⇒ the /ws/ui fan-out relays it as it always did.
+        assert outcome.rejected_full is False
+
+        snap = await state.get_history("f1")
+        assert snap["records"] == [_round(0)]
+        assert snap["generation"] != gen1
+
+    asyncio.run(scenario())
+
+
+def test_shrinking_full_still_replaces_bundle_for_a_completed_worktree_flow():
+    """The floor tracks the reconcile's own gate — including its status half.
+
+    ``is_active_worktree_flow`` is ``False`` once a worktree flow reaches a
+    terminal state, so no reconcile can fire for it and the shrink floor must not
+    either: a terminal flow is served from cache and its non-empty full frames stay
+    ordinary. (The EMPTY frame is refused for every flow regardless — see
+    ``test_empty_full_never_wipes_existing_bundle_whatever_the_flow``.)
+    """
+    state = ServerState()
+
+    async def scenario():
+        await _register_flow(
+            state, status="completed", project_root="/repo/se3/worktrees/wt-a"
+        )
+        await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [_round(0), _round(1), _round(2)],
+            machine_id="m1",
+        )
+        outcome = await state.apply_history_frame(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0)], machine_id="m1"
+        )
+        assert outcome.rejected_full is False
+        assert (await state.get_history("f1"))["records"] == [_round(0)]
 
     asyncio.run(scenario())
 

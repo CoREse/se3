@@ -331,6 +331,39 @@ def _owned(record: "MachineRecord", owner: Optional[str]) -> bool:
     return owner is None or record.owner_id == owner
 
 
+@dataclass(frozen=True)
+class HistoryWriteOutcome:
+    """What a single daemon history frame did to the cached bundle.
+
+    A plain ``bool`` cannot express the case #287 turns on: a ``full`` frame the
+    cache layer REFUSED as destructive (same machine, fewer records than the
+    bundle already holds) still reports "no waiter should time out on this", yet
+    its records are exactly the ones that must never reach a browser. The
+    fan-out layer needs both facts separately, so the write reports them
+    separately.
+    """
+
+    #: The frame left the cache in an authoritative state, so a REST pull waiter
+    #: parked on this flow may be resolved from it. True both for a frame that
+    #: populated / extended the bundle AND for one that was refused as a no-op
+    #: (identical or shrinking full) — in either case the daemon answered and
+    #: the cache holds the right records, so parking on to a 504 helps nobody.
+    resolves_pull: bool
+
+    #: The frame was a ``full`` snapshot REJECTED as destructive: it carried
+    #: fewer records than the same machine's non-empty cached bundle. The cache
+    #: kept its own records, so this frame's payload is known-truncated and MUST
+    #: NOT be relayed anywhere. Set in the two cases the full branch refuses,
+    #: whose scopes deliberately differ: an EMPTY frame is refused for EVERY
+    #: flow (a zero-record full can never be a legitimate answer for a flow the
+    #: server already holds records for — on the wire it is indistinguishable
+    #: from an unresolved history directory), while a SHORTER-but-non-empty
+    #: frame is refused only for an ACTIVE WORKTREE flow (for an ordinary flow a
+    #: shrink is legitimate: a retried failed step rewrites its step jsonl in
+    #: place). See the ``INVARIANT`` notes in :meth:`apply_history_frame`.
+    rejected_full: bool = False
+
+
 class ServerState:
     """Thread-safe (asyncio-safe) in-memory store of all machine state."""
 
@@ -941,23 +974,54 @@ class ServerState:
         cursor: Optional[Dict[str, Any]] = None,
         machine_id: str = "",
     ) -> bool:
-        """Cache history *records* for *flow_id*.
+        """Cache history *records* for *flow_id*; report waiter-resolvability.
+
+        Thin bool view of :meth:`apply_history_frame` for callers that only need
+        to know whether an on-demand pull waiter may be resolved from the frame
+        (see that method for the full write semantics). A caller that also
+        RELAYS the frame onward — the ``/ws/ui`` fan-out — must use
+        :meth:`apply_history_frame` instead: a rejected shrinking full resolves
+        the waiter yet carries records the cache refused, and this bool cannot
+        tell the two apart.
+        """
+        outcome = await self.apply_history_frame(
+            flow_id, mode, records, cursor=cursor, machine_id=machine_id
+        )
+        return outcome.resolves_pull
+
+    async def apply_history_frame(
+        self,
+        flow_id: str,
+        mode: str,
+        records: List[Dict[str, Any]],
+        *,
+        cursor: Optional[Dict[str, Any]] = None,
+        machine_id: str = "",
+    ) -> HistoryWriteOutcome:
+        """Cache history *records* for *flow_id* and report what the write did.
 
         ``mode == "full"`` replaces any cached records — except when the frame
-        is empty and the same machine already has a non-empty bundle, which is
-        refused (see the ``INVARIANT`` note in the full branch); ``mode ==
-        "append"`` extends an existing authoritative bundle. A first-sighting
-        append is
-        ignored and marks the flow as requiring a full pull, because it may be
-        only the tail after a server restart. *cursor* is stored verbatim for
-        the next incremental pull. Purely in-memory.
+        would shrink the same machine's non-empty bundle: an EMPTY full frame is
+        refused for ANY flow, and a merely shorter (non-empty) one is refused for
+        an ACTIVE WORKTREE flow (see the ``INVARIANT`` notes in the full branch);
+        ``mode == "append"`` extends an existing authoritative bundle. A first-sighting
+        append is ignored and marks the flow as requiring a full pull, because
+        it may be only the tail after a server restart. *cursor* is stored
+        verbatim for the next incremental pull. Purely in-memory.
 
-        Returns ``True`` when this call actually populated / extended the cached
-        bundle, and ``False`` when the records were discarded (a first-sighting
-        or otherwise unanchored append, or a cross-machine delta). An on-demand
-        pull waiter must be resolved only on a ``True`` result so a racing
-        ignored append cannot prematurely wake the REST handler before the
-        daemon's authoritative full reply lands.
+        ``resolves_pull`` is ``True`` when the cache is left authoritative — it
+        populated / extended the bundle, or it was a benign no-op on an already
+        correct bundle — and ``False`` when the records were discarded (a
+        first-sighting or otherwise unanchored append, or a cross-machine
+        delta). An on-demand pull waiter must be resolved only on a ``True``
+        result so a racing ignored append cannot prematurely wake the REST
+        handler before the daemon's authoritative full reply lands.
+
+        ``rejected_full`` flags the accepted-but-untrustworthy case: a full
+        snapshot refused for shrinking the same machine's non-empty bundle —
+        when EMPTY, for any flow; when merely shorter, only for an active
+        worktree flow (see the ``INVARIANT`` notes in the full branch). Its
+        records are truncated, so no consumer may relay them.
         """
         new_records = list(records or [])
         async with self._lock:
@@ -978,7 +1042,7 @@ class ServerState:
                     "(now flagged requires_full)",
                     flow_id,
                 )
-                return False
+                return HistoryWriteOutcome(resolves_pull=False)
             if (
                 mode == protocol.HISTORY_MODE_APPEND
                 and flow_id in self._history_requires_full
@@ -988,7 +1052,7 @@ class ServerState:
                     "records=%d (stuck until a full frame)",
                     flow_id, len(new_records),
                 )
-                return False
+                return HistoryWriteOutcome(resolves_pull=False)
             if mode == protocol.HISTORY_MODE_APPEND:
                 # An ordinary append keeps the bundle ``generation`` stable so a
                 # progress token issued before the append still validates. A
@@ -1014,7 +1078,7 @@ class ServerState:
                         "(bundle dropped, flagged requires_full)",
                         flow_id,
                     )
-                    return False
+                    return HistoryWriteOutcome(resolves_pull=False)
                 # Back-fill a stable generation for an old-format bundle that the
                 # ``full`` branch never created (or that lost the field), so the
                 # extended bundle is a first-class delta participant rather than
@@ -1032,7 +1096,7 @@ class ServerState:
                     "total=%d",
                     flow_id, len(new_records), len(existing["records"]),
                 )
-                return True
+                return HistoryWriteOutcome(resolves_pull=True)
             else:
                 # Any branch that replaces the cached bundle wholesale (a true
                 # ``full`` snapshot, or any other non-append / unrecognized mode
@@ -1063,43 +1127,72 @@ class ServerState:
                 # cached bundle from the SAME machine, keep the bundle and its
                 # generation (only the cursor may advance); the token stays valid
                 # and the next poll still answers the cheap ``not_modified``.
-                # INVARIANT: a reconcile may only ADD records, never take them
-                # away — an empty ``full`` frame MUST NOT wipe an existing
-                # non-empty bundle from the same machine. The daemon cannot
-                # distinguish "this flow has no records" from "I failed to
-                # resolve its history directory" on the wire: both arrive here as
-                # ``mode=full, records=[]``. The worktree self-heal reconcile
-                # (``is_active_worktree_flow``, widened to ``paused`` so a
-                # discovery flow waiting on a human reply can still catch a
-                # dropped round) fires exactly such a cursorless pull, so a single
-                # mis-resolved read would otherwise replace the cached rounds with
-                # nothing, roll a fresh generation, and hand the browser a
-                # ``full`` delivery of zero records — a blank chat pane (#287).
-                # Refuse the replacement, keep the bundle AND its generation (so
-                # in-sync clients stay on the cheap ``not_modified`` path), and
-                # still return ``True`` so a pull waiter blocked on this reply is
-                # released instead of timing out. A frame that brings records
-                # through — the self-heal path that fixes the original multi-round
-                # loss — falls through and replaces the bundle as before.
+                # INVARIANT: a ``full`` frame from the SAME machine may never take
+                # records AWAY from a non-empty cached bundle. Two cases, with
+                # deliberately different scopes:
+                #
+                # (1) EMPTY frame — refused for EVERY flow, worktree or not. The
+                # daemon cannot distinguish "this flow has no records" from "I
+                # failed to resolve its history directory" on the wire: both
+                # arrive as ``mode=full, records=[]``. So once the server holds
+                # records for a flow, an empty full can never be a legitimate
+                # answer for it — whatever the flow's kind, and even when the
+                # server has no ``flows`` snapshot for it at all (e.g. right after
+                # a daemon reconnect, before the STATUS_UPDATE lands, when the
+                # worktree predicate below cannot yet recognize it). Accepting one
+                # wipes the cached rounds, rolls a fresh generation, and fans a
+                # zero-record full out to every open console — a blank chat pane,
+                # which is exactly the #287 symptom.
+                #
+                # (2) SHORTER-but-non-empty frame — refused only for an active
+                # (``running`` / ``paused``) worktree flow, i.e. the same
+                # ``_is_active_worktree_flow_locked`` predicate that gates the
+                # self-heal reconcile. There a shrink can only come from a
+                # partially-resolved read: if the worktree copy of the history is
+                # pruned/renamed while the flow is still reported ``paused``, the
+                # daemon honestly resolves only the main-repo copy and returns
+                # round 1 alone, silently dropping every later round. For an
+                # ordinary flow a shrink IS legitimate — a FAILED step retried
+                # rewrites its step jsonl in place with a fresh, shorter batch —
+                # and refusing it would pin the chat to stale pre-retry records.
+                #
+                # In both cases: keep the bundle AND its generation (so in-sync
+                # clients stay on the cheap ``not_modified`` path), still resolve
+                # a pull waiter blocked on this reply instead of letting it time
+                # out, and report the refusal back as ``rejected_full`` — keeping
+                # the cache correct is only half the job, the frame's truncated
+                # records must also never be RELAYED (the ``/ws/ui`` fan-out would
+                # otherwise rebuild every open chat pane from them). A frame that
+                # brings records through — the self-heal path that fixes the
+                # original multi-round loss — falls through and replaces the
+                # bundle as before.
                 if (
                     existing is not None
                     and str(existing.get("machine_id") or "") == machine_id
                     and existing.get("records")
-                    and not new_records
+                    and len(new_records) < len(existing["records"])
+                    and (
+                        not new_records
+                        or self._is_active_worktree_flow_locked(flow_id)
+                    )
                 ):
                     if cursor:
                         existing["cursor"] = dict(cursor)
                     existing["updated_at"] = time.time()
                     generation = self._ensure_generation(existing)
                     logger.warning(
-                        "hist-diag append_history REJECTED-empty-full flow=%s "
-                        "machine=%s (kept %d cached records, generation %d) — the "
-                        "daemon returned an empty full snapshot for a flow the "
-                        "server already has records for; likely an unresolved "
+                        "hist-diag append_history REJECTED-shrinking-full flow=%s "
+                        "machine=%s (incoming %d records < %d cached; kept the "
+                        "cached bundle, generation %d) — the daemon returned a "
+                        "full snapshot shorter than what the server already holds "
+                        "for this flow; likely an unresolved or partially resolved "
                         "history directory on the daemon side",
-                        flow_id, machine_id, len(existing["records"]), generation,
+                        flow_id, machine_id, len(new_records),
+                        len(existing["records"]), generation,
                     )
-                    return True
+                    return HistoryWriteOutcome(
+                        resolves_pull=True, rejected_full=True
+                    )
                 if (
                     existing is not None
                     and str(existing.get("machine_id") or "") == machine_id
@@ -1114,7 +1207,7 @@ class ServerState:
                         "records=%d (identical bundle, generation %d kept)",
                         flow_id, len(new_records), generation,
                     )
-                    return True
+                    return HistoryWriteOutcome(resolves_pull=True)
                 self._history_data[flow_id] = {
                     "flow_id": flow_id,
                     "machine_id": machine_id,
@@ -1129,7 +1222,7 @@ class ServerState:
                     "(bundle replaced, requires_full cleared)",
                     flow_id, len(new_records),
                 )
-                return True
+                return HistoryWriteOutcome(resolves_pull=True)
 
     async def take_recovery_pull(self, flow_id: str) -> bool:
         """Return ``True`` when a self-heal full pull should be sent for *flow_id*.
@@ -1510,15 +1603,26 @@ class ServerState:
         ordinary session (which is served entirely from cache exactly as before).
         """
         async with self._lock:
-            for machine_id, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
-                flow = record.flows.get(flow_id)
-                if flow is None:
-                    continue
-                if str(flow.status or "").lower() not in ("running", "paused"):
-                    return False
-                return _is_worktree_session_path(flow.project_root)
+            return self._is_active_worktree_flow_locked(flow_id, owner=owner)
+
+    def _is_active_worktree_flow_locked(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> bool:
+        """:meth:`is_active_worktree_flow` for a caller that already holds the lock.
+
+        The history write path (:meth:`apply_history_frame`) must consult the
+        same predicate to keep its add-only floor scoped to worktree flows, and
+        it runs inside ``self._lock`` — re-entering it would deadlock.
+        """
+        for record in self._machines.values():
+            if not _owned(record, owner):
+                continue
+            flow = record.flows.get(flow_id)
+            if flow is None:
+                continue
+            if str(flow.status or "").lower() not in ("running", "paused"):
+                return False
+            return _is_worktree_session_path(flow.project_root)
         return False
 
     # -- issue mirror (from daemon STATUS_UPDATE snapshots) -----------------

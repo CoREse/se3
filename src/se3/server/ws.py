@@ -1338,16 +1338,17 @@ async def _handle_message(
         records = message.payload.get("records") or []
         cursor = message.payload.get("cursor") or {}
         if flow_id and isinstance(records, list):
-            applied = await state.append_history(
+            outcome = await state.apply_history_frame(
                 flow_id,
                 mode,
                 records,
                 cursor=cursor if isinstance(cursor, dict) else {},
                 machine_id=machine_id,
             )
-            # Resolve an on-demand pull waiter ONLY when this frame actually
-            # populated the cache. A periodic push-loop ``append`` that
-            # ``append_history`` discarded (a first-sighting append after a
+            applied = outcome.resolves_pull
+            # Resolve an on-demand pull waiter ONLY when this frame left the
+            # cache authoritative. A periodic push-loop ``append`` that
+            # ``apply_history_frame`` discarded (a first-sighting append after a
             # server restart, or a flow still flagged ``_history_requires_full``)
             # must not wake the REST handler: it would re-read the still-empty
             # cache and raise a spurious 409 while the daemon's authoritative
@@ -1386,19 +1387,44 @@ async def _handle_message(
             # broadcasting the append is safe. ``mode: append`` therefore always
             # broadcasts; only a resolved ``mode: full`` pull reply is
             # suppressed.
-            suppress_broadcast = resolved_pull and mode == protocol.HISTORY_MODE_FULL
+            #
+            # WHY (#287) the second suppression: a ``full`` frame the cache
+            # layer REJECTED as destructive (``rejected_full`` — same machine,
+            # fewer records than the non-empty cached bundle: an unresolved or
+            # partially resolved history directory on the daemon side) carries
+            # known-truncated records. This fires for an ORDINARY flow too, and
+            # must: the cache guard refuses an EMPTY full for every flow (a
+            # zero-record full is never a legitimate answer for a flow the
+            # server already holds records for), and only the narrower
+            # shorter-but-non-empty refusal is worktree-only (an ordinary flow
+            # may legitimately shrink when a failed step is retried, and that
+            # frame is applied and relayed exactly as before #287).
+            # Keeping it out of the CACHE is only half the defence: this
+            # fan-out relays the raw daemon frame, and a WS ``mode: full`` push
+            # rebuilds the receiving chat pane wholesale and clears its held
+            # progress token. Relaying a rejected frame would therefore blank the
+            # later rounds out of every open console — the exact loss the cache
+            # guard just refused — until the next REST poll restored them from
+            # the (still intact) bundle. The rejected records are authoritative
+            # nowhere, so they go nowhere: clients stay on the cached bundle,
+            # which the next poll serves unchanged.
+            suppress_broadcast = (
+                resolved_pull and mode == protocol.HISTORY_MODE_FULL
+            ) or outcome.rejected_full
             # HOP-4 DEBUG (server → UI fanout decision): whether this frame was
             # applied to the bundle and whether it will be broadcast to /ws/ui.
             # ``applied=False`` on a boundary append means state.append_history
             # discarded it (first-sighting or _history_requires_full) — the
             # persistent-freeze mode where every increment is dropped until a
             # full frame (exit/re-enter) arrives. ``suppress_broadcast=True``
-            # only ever legitimately fires for a resolved mode:full pull reply.
+            # fires for a resolved mode:full pull reply, and for a full frame the
+            # cache rejected as truncating (``rejected_full``).
             logger.debug(
                 "hist-diag ws HISTORY_DATA flow=%s mode=%s records=%d "
-                "applied=%s resolved_pull=%s suppress_broadcast=%s",
-                flow_id, mode, len(records), applied, resolved_pull,
-                suppress_broadcast,
+                "applied=%s rejected_full=%s resolved_pull=%s "
+                "suppress_broadcast=%s",
+                flow_id, mode, len(records), applied, outcome.rejected_full,
+                resolved_pull, suppress_broadcast,
             )
             # Self-heal the requires_full stuck-state. A live ``append`` that
             # ``append_history`` discarded (first-sighting after a server

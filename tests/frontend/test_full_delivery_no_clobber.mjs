@@ -197,6 +197,105 @@ export async function registerFullDeliveryNoClobberTests(ctx) {
   });
 
   // ------------------------------------------------------------------- //
+  // Scenario 4: the HISTORY DETAIL view has its own twin of each guard —
+  // `applyHistoryData`'s history-view branch and `openHistorySession`'s
+  // preserveTokens adoption guard. They are separate call sites from the
+  // running-flow ones above, so a refactor could blank an open history pane
+  // while every flow-conversation assertion above still passed. Drive them.
+  // ------------------------------------------------------------------- //
+  function seedOpenHistory(records, progress, signature) {
+    // `isHistoryOpen()` gates the history-view consumer of applyHistoryData; a
+    // sibling test may have left the view hidden.
+    document.getElementById("history-view").classList.remove("hidden");
+    // Null so the running-flow consumer stays out of these assertions — only
+    // the history-detail twin of the guard may act on the frame.
+    app.state.selectedFlowId = null;
+    app.state.selectedHistoryId = "WT1";
+    app.state.historyRecords = records;
+    app.state.historyProgress = progress || null;
+    app.state.historySignature = signature || null;
+    app.state.historyEpoch = 0;
+    app.state.historySessions = [{ flow_id: "WT1", machine_id: "m1" }];
+    const d = document.getElementById("history-detail");
+    d.innerHTML = "";
+    d.__convState = null;
+    app.renderConversation(d, records, false);
+    return d;
+  }
+
+  check("history detail: WS mode:full with zero records leaves the rendered pane alone", () => {
+    const held = twoRounds();
+    const d = seedOpenHistory(held, "tokH", "sigH");
+    const before = bubbleCount(d);
+    const epoch0 = app.state.historyEpoch;
+    assert.equal(before, 4, "the two discovery rounds rendered into the detail pane");
+
+    app.applyHistoryData({ type: "history_data", flow_id: "WT1", mode: "full", records: [] });
+
+    assert.equal(bubbleCount(d), before, "the empty WS full push did NOT blank the pane");
+    assert.equal(app.state.historyRecords, held, "records survive by identity");
+    assert.equal(app.state.historyEpoch, epoch0,
+      "a rejected frame takes no fresh epoch");
+    assert.equal(app.state.historyProgress, "tokH",
+      "the held progress token still pins the held records");
+    assert.equal(app.state.historySignature, "sigH", "…as does the signature");
+  });
+
+  check("history detail: WS mode:full with MORE records still rebuilds the pane", () => {
+    const held = [rec("round-1 question", 1), rec("round-1 answer", 2)];
+    const d = seedOpenHistory(held, "tokH", "sigH");
+    app.applyHistoryData({
+      type: "history_data", flow_id: "WT1", mode: "full", records: twoRounds(),
+    });
+    assert.equal(bubbleCount(d), 4, "the grown full push rebuilt all four bubbles");
+    assert.equal(app.state.historyProgress, null,
+      "a real full push invalidates the held delta cursor");
+  });
+
+  await checkAsync("history detail: a zero-record REST full keeps the pane and its tokens", async () => {
+    const held = twoRounds();
+    const d = seedOpenHistory(held, "tokH", "sigH");
+    const before = bubbleCount(d);
+    const f = withFetch({
+      delivery: "full", records: [], progress: "tokEMPTY", signature: "sigEMPTY",
+    });
+    try {
+      // `incremental` is the reconnect refresh — the only open path that holds
+      // records across the fetch (a fresh open clears them first, so its full is
+      // a legitimate first paint, not a regression to zero).
+      await app.openHistorySession("WT1", { incremental: true });
+      assert.equal(bubbleCount(d), before, "the detail pane was NOT blanked");
+      assert.equal(app.state.historyRecords, held, "the held records array is untouched");
+      assert.equal(app.state.historyProgress, "tokH",
+        "the rejected frame's cursor — which pins an EMPTY bundle — is not adopted");
+      assert.equal(app.state.historySignature, "sigH", "…nor its signature");
+    } finally {
+      f.restore();
+    }
+  });
+
+  await checkAsync("history detail: a GROWN REST full still heals the missing 2nd round", async () => {
+    const held = [rec("round-1 question", 1), rec("round-1 answer", 2)];
+    const d = seedOpenHistory(held, "tokH", "sigH");
+    const f = withFetch({
+      delivery: "full", records: twoRounds(), progress: "tok2", signature: "sig2",
+    });
+    try {
+      await app.openHistorySession("WT1", { incremental: true });
+      assert.deepEqual(bodies(app.state.historyRecords), [
+        "round-1 question", "round-1 answer",
+        "round-2 question", "round-2 answer",
+      ], "the authoritative full snapshot healed the missing 2nd round");
+      assert.equal(bubbleCount(d), 4, "all four bubbles are rendered");
+      assert.equal(app.state.historyProgress, "tok2",
+        "a genuine full adopts its fresh token");
+      assert.equal(app.state.historySignature, "sig2", "…and its fresh signature");
+    } finally {
+      f.restore();
+    }
+  });
+
+  // ------------------------------------------------------------------- //
   // The guard is scoped to full delivery: delta / not_modified are untouched.
   // ------------------------------------------------------------------- //
   check("the empty-full guard does not touch the delta / not_modified branches", () => {
@@ -227,4 +326,12 @@ export async function registerFullDeliveryNoClobberTests(ctx) {
     assert.ok(!emptyDelta.preserveTokens);
     assert.equal(emptyDelta.progress, "tokD2");
   });
+
+  // Later modules in the shared harness render against the same singleton state;
+  // drop our selections so neither consumer of `applyHistoryData` fires on their
+  // frames. The DOM stub's `history-view` is left as we found it — CLASSLESS,
+  // i.e. open — because later history tests drive the history-view consumer and
+  // rely on `isHistoryOpen()` defaulting to true.
+  app.state.selectedFlowId = null;
+  app.state.selectedHistoryId = null;
 }

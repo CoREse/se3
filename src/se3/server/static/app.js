@@ -4791,6 +4791,20 @@ function wsHistDebug() {
 // pseudo-empty snapshot). A view holding nothing yet still takes the empty frame
 // (a genuinely empty flow must render its empty state); only a regression to
 // zero is refused.
+//
+// WHY the browser stops at zero and does NOT enforce the full add-only floor
+// ("never fewer records than we hold"): a full frame that is legitimately
+// SHORTER is indistinguishable here from a truncated one. A replacement cache
+// generation — the bundle re-established by a different machine, or re-pulled
+// after the old one was dropped — is authoritative even when it carries fewer
+// records, and refusing it would pin the view to a stale generation forever. The
+// count floor therefore lives where the machine identity and the cached record
+// count ARE known: `ServerState.apply_history_frame` (same-machine fulls may
+// only grow) and the history endpoint's wire floor. A same-machine full the
+// cache rejects for shrinking is also never relayed over the WS at all (the
+// fan-out suppresses it), so no truncated-but-nonempty full reaches this guard
+// from that path. This guard is only the last-ditch backstop against the one
+// frame that can never be legitimate: an empty one.
 function rejectsEmptyFullPush(records, held) {
   return records.length === 0 && Array.isArray(held) && held.length > 0;
 }

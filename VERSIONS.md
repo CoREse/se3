@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+## 11.22.1 - 2026-07-13
+
+- Fix issue #287: discovery chat history for worktree sessions no longer disappears from the WebUI — the first round is visible again and subsequent rounds stay visible, including records produced while a flow waits for a manual reply.
+- Reject empty full-history frames that would clobber an existing non-empty bundle in the server cache, since an empty frame can never be a legitimate update for a flow the server already holds records for.
+- Reject strictly shrinking non-empty full frames for active (running/paused) worktree flows, preventing partial directory resolution from rolling history back; non-worktree whole-bundle replacement semantics are unchanged.
+- Fix the daemon history read path so a flow directory that cannot be resolved under the authoritative project root falls back to a registry walk with an explicit warning, instead of silently reporting zero records.
+- Merge main-root and worktree-root records on cursorless full reads for paused worktree flows, resolving the original multi-round history loss.
+- Add a WebUI guard so a zero-record full delivery (HTTP or WebSocket) never clears an already-rendered non-empty chat.
+- Add regression tests covering the paused-worktree reconcile invariant on the server and the no-clobber behavior in the frontend node-stub suite.
 ## 11.22.0 - 2026-07-13
 
 - Have adjudicate sweep for isomorphic surfaces: once a clause pair X x Y is ruled an internal contradiction, all other spec surfaces both clauses cover by construction are folded into one boundary clause, so a sister surface no longer triggers a second adjudication round

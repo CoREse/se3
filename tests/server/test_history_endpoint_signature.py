@@ -293,7 +293,11 @@ def test_paused_worktree_reconcile_record_count_never_decreases(client_and_app):
       directory) must leave the served record count untouched — never a ``full``
       delivery of zero records, which is what blanked the chat pane;
     * a LONGER full frame (the self-heal actually finding the round the live push
-      dropped) must still be applied, so the original multi-round loss stays fixed.
+      dropped) must still be applied, so the original multi-round loss stays fixed;
+    * a SHORTER but non-empty full frame (the daemon resolved only the main-repo
+      copy of the split-root flow, so it honestly returns round 1 alone) must
+      likewise leave the served records alone — truncating the chat pane is the
+      same user-visible loss as blanking it.
     """
     client, app = client_and_app
     # The throttle floor decides only *when* a reconcile may fire, never whether
@@ -322,6 +326,26 @@ def test_paused_worktree_reconcile_record_count_never_decreases(client_and_app):
         grown = client.get(f"/api/history/wt-flow?after={token}&sig={sig}").json()
         assert grown["delivery"] in ("full", "delta")
         assert len(client.get("/api/history/wt-flow").json()["records"]) == 2
+
+        # (c) daemon answers with FEWER but non-zero records: the worktree copy
+        # of the history is no longer resolvable, so only the main-repo round 1
+        # comes back. Serving it as a full rebuild would drop round 2 from an
+        # in-sync client's pane.
+        synced = client.get("/api/history/wt-flow").json()
+        token2, sig2 = synced["progress"], synced["signature"]
+        daemon.reply_records = [_RECORD_1]
+        shrunk = client.get(
+            f"/api/history/wt-flow?after={token2}&sig={sig2}"
+        ).json()
+        assert not (
+            shrunk["delivery"] == "full" and len(shrunk["records"]) < 2
+        ), (
+            "a truncated reconcile frame was served as a full rebuild — the "
+            "browser would drop the later discovery rounds (#287)"
+        )
+        assert len(client.get("/api/history/wt-flow").json()["records"]) == 2, (
+            "the truncated reconcile frame shrank the cached bundle"
+        )
     finally:
         daemon.close()
 

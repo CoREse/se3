@@ -2039,7 +2039,7 @@ def create_app(
             # ``paused`` without that floor is what turned a mis-resolved daemon
             # read into a blank chat pane (#287) — so the add-only semantics is
             # the precondition of this branch, enforced both in
-            # ``append_history`` and by the empty-full guard below.
+            # ``append_history`` and by the shrinking-full guard below.
             if (
                 snapshot.get("delivery") == "not_modified"
                 and not await state.full_pull_throttled(flow_id)
@@ -2051,6 +2051,15 @@ def create_app(
                 if owner_connection is not None:
                     reconcile_root = await state.get_history_flow_project_root(
                         flow_id, owner=target_owner
+                    )
+                    # Record count the cache held BEFORE the reconcile, so the
+                    # add-only floor below can be an actual comparison rather than
+                    # a mere emptiness test: a daemon read that resolves only part
+                    # of a worktree flow's history answers with FEWER (but not
+                    # zero) records, and adopting it would drop the later rounds.
+                    cached_bundle = await state.get_history(flow_id)
+                    cached_record_count = len(
+                        (cached_bundle or {}).get("records") or []
                     )
                     await state.mark_full_pull(flow_id)
                     try:
@@ -2072,19 +2081,21 @@ def create_app(
                     )
                     # INVARIANT: the reconcile has ADD-only semantics — its reply
                     # may extend the bundle, never shrink it. ``append_history``
-                    # enforces that at the cache (an empty full frame can no
-                    # longer overwrite a non-empty bundle), and this is the
-                    # matching floor on the wire: if the re-read somehow still
-                    # comes back as a ``full`` rebuild carrying ZERO records, the
-                    # client — which was provably in sync a moment ago — would
-                    # rebuild its chat pane from nothing (#287). Serve the
-                    # snapshot we already validated instead, so a degraded
-                    # reconcile costs a wasted pull and nothing else. ``None``
-                    # (bundle dropped / moved machine mid-pull) falls through to
-                    # the same cached snapshot below.
+                    # enforces that at the cache (a full frame carrying fewer
+                    # records than the cached bundle can no longer overwrite it),
+                    # and this is the matching floor on the wire: if the re-read
+                    # somehow still comes back as a ``full`` rebuild carrying
+                    # FEWER records than the cache held a moment ago (zero being
+                    # the degenerate case), the client — which was provably in
+                    # sync — would rebuild its chat pane with rounds missing
+                    # (#287). Serve the snapshot we already validated instead, so
+                    # a degraded reconcile costs a wasted pull and nothing else.
+                    # ``None`` (bundle dropped / moved machine mid-pull) falls
+                    # through to the same cached snapshot below.
                     if reconciled is not None and not (
                         reconciled.get("delivery") == "full"
-                        and not reconciled.get("records")
+                        and len(reconciled.get("records") or [])
+                        < cached_record_count
                     ):
                         return {"flow_id": flow_id, "cached": True, **reconciled}
             return {"flow_id": flow_id, "cached": True, **snapshot}
