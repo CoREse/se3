@@ -1347,7 +1347,43 @@ class DaemonHistoryReader:
         # physical filename (largest/most-complete copy wins) so the by-filename
         # cursor never collides between a root's clone of the same step file.
         flow_dirs = self._resolve_flow_dirs(flow_id, project_root)
+        if not flow_dirs and project_root:
+            # WHY: an authoritative root that resolves to NO history directory is
+            # a resolution failure, not the fact "this flow has no records" — yet
+            # both left here as the same wire frame (``mode=full, records=[]``).
+            # The server's worktree self-heal reconcile pulls exactly such a
+            # cursorless full frame, so that pseudo-empty answer used to replace
+            # the cached rounds with nothing and blank the browser's chat pane
+            # (#287). Fall back to the registry walk — a pruned/moved/renamed
+            # worktree root still has its records reachable under some tracked
+            # root — and re-expand from the root we actually found, so the
+            # main+worktree merge stays complete instead of degrading to the
+            # single first match.
+            legacy = self._resolve_flow_dir(flow_id, None)
+            if legacy is not None:
+                logger.warning(
+                    "history: flow %s not found under authoritative root %s; "
+                    "falling back to the registry walk (found %s)",
+                    flow_id, project_root, legacy,
+                )
+                # ``legacy`` is ``<root>/se3/history/<flow_id>`` — walk back up to
+                # its owning root so the fallback gets the same main→worktree
+                # expansion an authoritative read would have had.
+                fallback_root = legacy.parent.parent.parent
+                flow_dirs = self._resolve_flow_dirs(
+                    flow_id, str(fallback_root)
+                ) or [legacy]
         if not flow_dirs:
+            # Genuinely unresolvable under every known root. Still an empty
+            # snapshot on the wire (there is nothing else to send), but WARN so a
+            # live run makes the difference visible: the server-side no-rollback
+            # invariant now refuses to act on this frame, and this line is the
+            # only place the failure is diagnosable.
+            logger.warning(
+                "history: no history directory resolved for flow %s "
+                "(project_root=%s) — returning an empty %s snapshot",
+                flow_id, project_root or "<registry>", mode,
+            )
             return FlowRead(flow_id=flow_id, mode=mode, records=[], cursor=cursor)
 
         new_cursor: Dict[str, int] = dict(cursor)

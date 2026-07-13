@@ -2032,6 +2032,14 @@ def create_app(
             # the missing round rolls the generation and the re-read below serves
             # it as ``full``. Ordinary (non-worktree / completed) flows skip this
             # entirely and are served straight from cache, unchanged.
+            #
+            # WHY the paused window is safe to reconcile in at all: the reconcile
+            # is only ever allowed to *top up* the bundle, never to replace it
+            # with whatever the daemon happened to answer. Widening the gate to
+            # ``paused`` without that floor is what turned a mis-resolved daemon
+            # read into a blank chat pane (#287) — so the add-only semantics is
+            # the precondition of this branch, enforced both in
+            # ``append_history`` and by the empty-full guard below.
             if (
                 snapshot.get("delivery") == "not_modified"
                 and not await state.full_pull_throttled(flow_id)
@@ -2062,7 +2070,22 @@ def create_app(
                         expected_owner=target_owner,
                         known_signature=sig,
                     )
-                    if reconciled is not None:
+                    # INVARIANT: the reconcile has ADD-only semantics — its reply
+                    # may extend the bundle, never shrink it. ``append_history``
+                    # enforces that at the cache (an empty full frame can no
+                    # longer overwrite a non-empty bundle), and this is the
+                    # matching floor on the wire: if the re-read somehow still
+                    # comes back as a ``full`` rebuild carrying ZERO records, the
+                    # client — which was provably in sync a moment ago — would
+                    # rebuild its chat pane from nothing (#287). Serve the
+                    # snapshot we already validated instead, so a degraded
+                    # reconcile costs a wasted pull and nothing else. ``None``
+                    # (bundle dropped / moved machine mid-pull) falls through to
+                    # the same cached snapshot below.
+                    if reconciled is not None and not (
+                        reconciled.get("delivery") == "full"
+                        and not reconciled.get("records")
+                    ):
                         return {"flow_id": flow_id, "cached": True, **reconciled}
             return {"flow_id": flow_id, "cached": True, **snapshot}
         # Cache miss (no bundle, or the bundle's machine no longer matches the

@@ -25,6 +25,7 @@ monotonic floor is deterministic.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -199,6 +200,174 @@ def test_full_pull_throttle_rate_limits_repeated_misses():
         assert await state.full_pull_throttled("other") is False
 
     asyncio.run(scenario())
+
+
+class _ReconcileDaemon:
+    """A connected daemon that counts and answers ``MSG_HISTORY_REQUEST``.
+
+    The worktree self-heal reconcile fires *inside* a blocking ``TestClient.get``,
+    so the reply has to come from another thread. ``reply_records`` is what the
+    daemon's cursorless (``full``) read is pretending to have found — flip it to
+    ``[]`` to emit the pseudo-empty frame an unresolved history directory produces
+    (#287), or to a longer list to emit the round the live push dropped.
+    """
+
+    def __init__(self, client, app, flow_id, machine_id="m1"):
+        self.flow_id = flow_id
+        self._ctx = client.websocket_connect("/ws")
+        self.sock = self._ctx.__enter__()
+        self.sock.send_text(authed_hello(app, machine_id, "host", "6.4.0"))
+        protocol.decode(self.sock.receive_text())  # WELCOME
+        self.reply_records = []
+        self.requests = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        while not self._stop.is_set():
+            try:
+                msg = protocol.decode(self.sock.receive_text())
+            except Exception:
+                return
+            if msg.type == protocol.MSG_HISTORY_REQUEST:
+                self.requests += 1
+                self.sock.send_text(
+                    protocol.make_history_data(
+                        self.flow_id,
+                        protocol.HISTORY_MODE_FULL,
+                        list(self.reply_records),
+                    ).to_json()
+                )
+
+    def push_full(self, records):
+        self.sock.send_text(
+            protocol.make_history_data(
+                self.flow_id, protocol.HISTORY_MODE_FULL, list(records)
+            ).to_json()
+        )
+
+    def report_flow(self, *, status, project_root):
+        self.sock.send_text(
+            protocol.make_status_update(
+                {
+                    "machine_id": "m1",
+                    "hostname": "host",
+                    "project_roots": [project_root],
+                    "flows": [
+                        {
+                            "flow_id": self.flow_id,
+                            "status": status,
+                            "project_root": project_root,
+                        }
+                    ],
+                }
+            ).to_json()
+        )
+
+    def seed(self, client, records):
+        """Push *records* and wait until they are visible via the REST cache."""
+        self.push_full(records)
+        for _ in range(50):
+            resp = client.get(f"/api/history/{self.flow_id}")
+            if resp.status_code == 200 and resp.json().get("records"):
+                return resp.json()
+        raise AssertionError("bundle never became cache-visible")
+
+    def close(self):
+        self._stop.set()
+        self._ctx.__exit__(None, None, None)
+
+
+_WORKTREE_ROOT = "/tmp/repo/se3/worktrees/wt-a"
+_RECORD_1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"content": "q1"}}
+_RECORD_2 = {"step_id": "01_discovery", "ordinal": 1, "message": {"content": "a1"}}
+
+
+def test_paused_worktree_reconcile_record_count_never_decreases(client_and_app):
+    """#287: the reconcile has ADD-only semantics at the endpoint boundary.
+
+    Both daemon replies are exercised against the same cached bundle:
+
+    * an EMPTY full frame (the daemon could not resolve the flow's history
+      directory) must leave the served record count untouched — never a ``full``
+      delivery of zero records, which is what blanked the chat pane;
+    * a LONGER full frame (the self-heal actually finding the round the live push
+      dropped) must still be applied, so the original multi-round loss stays fixed.
+    """
+    client, app = client_and_app
+    # The throttle floor decides only *when* a reconcile may fire, never whether
+    # its frame is safe to apply; drop it so both polls below reconcile.
+    app.state.server_state._HISTORY_FULL_PULL_MIN_INTERVAL = 0.0
+    daemon = _ReconcileDaemon(client, app, "wt-flow")
+    try:
+        daemon.report_flow(status="paused", project_root=_WORKTREE_ROOT)
+        seeded = daemon.seed(client, [_RECORD_1])
+        token, sig = seeded["progress"], seeded["signature"]
+
+        # (a) daemon answers EMPTY.
+        daemon.reply_records = []
+        empty = client.get(
+            f"/api/history/wt-flow?after={token}&sig={sig}"
+        ).json()
+        assert daemon.requests >= 1, "the paused-worktree reconcile never fired"
+        assert not (empty["delivery"] == "full" and not empty["records"]), (
+            "an empty reconcile frame was served as a full rebuild of zero "
+            "records — the browser would blank its chat pane (#287)"
+        )
+        assert len(client.get("/api/history/wt-flow").json()["records"]) == 1
+
+        # (b) daemon answers with MORE — the round the live push dropped.
+        daemon.reply_records = [_RECORD_1, _RECORD_2]
+        grown = client.get(f"/api/history/wt-flow?after={token}&sig={sig}").json()
+        assert grown["delivery"] in ("full", "delta")
+        assert len(client.get("/api/history/wt-flow").json()["records"]) == 2
+    finally:
+        daemon.close()
+
+
+def test_non_worktree_flow_is_served_from_cache_without_any_daemon_pull(
+    client_and_app,
+):
+    """The blast-radius lock: an ordinary flow's poll path is byte-for-byte as before.
+
+    A running NON-worktree flow must never enter the self-heal branch — no
+    ``MSG_HISTORY_REQUEST`` leaves the server — and its three delivery states are
+    unchanged: an in-sync poll is ``not_modified``, a poll behind the bundle is a
+    ``delta`` carrying only the tail.
+    """
+    client, app = client_and_app
+    app.state.server_state._HISTORY_FULL_PULL_MIN_INTERVAL = 0.0
+    daemon = _ReconcileDaemon(client, app, "plain-flow")
+    try:
+        daemon.report_flow(status="running", project_root="/tmp/repo")
+        seeded = daemon.seed(client, [_RECORD_1])
+        token, sig = seeded["progress"], seeded["signature"]
+
+        for _ in range(3):
+            body = client.get(
+                f"/api/history/plain-flow?after={token}&sig={sig}"
+            ).json()
+            assert body["delivery"] == "not_modified"
+            assert body["records"] == []
+
+        # The tail still arrives as a delta against the same token.
+        daemon.push_full([_RECORD_1, _RECORD_2])
+        for _ in range(50):
+            body = client.get(
+                f"/api/history/plain-flow?after={token}&sig={sig}"
+            ).json()
+            if body["delivery"] != "not_modified":
+                break
+        assert body["delivery"] == "full"
+        assert len(body["records"]) == 2
+
+        assert daemon.requests == 0, (
+            "a non-worktree flow triggered a回源 pull — the self-heal reconcile "
+            "must not widen beyond worktree flows"
+        )
+    finally:
+        daemon.close()
 
 
 def test_signature_moves_with_record_count():

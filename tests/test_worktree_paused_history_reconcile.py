@@ -94,6 +94,30 @@ def _write_jsonl(path, records):
     )
 
 
+def _write_engine_json(root, *, status):
+    """Give *root* a live ``engine.json`` for FLOW_ID in *status*.
+
+    This is what makes the reader treat the flow as ``source="active"`` (and hence
+    a candidate for ``read_active_flows``); a history directory alone only ever
+    yields a history-only row.
+    """
+    path = root / "se3" / "state" / "engine.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "flow_id": FLOW_ID,
+                "status": status,
+                "task_description": "worktree discovery",
+                "task_type": "discovery",
+                "created_at": "2026-07-11T19:14:20",
+                "updated_at": "2026-07-11T19:20:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _build_two_root_history(tmp_path):
     """Lay down the on-disk shape a paused ``--worktree`` discovery really has.
 
@@ -133,17 +157,21 @@ def test_read_flow_merges_both_roots_for_a_worktree_flow(tmp_path):
     ]
 
 
-def test_read_flow_unresolvable_root_is_indistinguishable_from_empty(tmp_path):
-    """An unresolvable authoritative root yields a *pseudo-empty* full frame.
+def test_read_flow_unresolvable_root_falls_back_to_the_registry_walk(
+    tmp_path, caplog
+):
+    """Hop 1 of #287: a resolution failure must not masquerade as an empty flow.
 
-    This is hop 1 of #287. ``_resolve_flow_dirs`` finds no
-    ``se3/history/<flow_id>`` under the root it was handed (a worktree that was
-    pruned, a root recorded before a move, a path the daemon cannot see) and
-    ``read_flow`` reports ``mode="full", records=[]`` — byte-identical on the wire
-    to "this flow has no records at all". The registry walk the reader falls back
-    to when NO authoritative root is given does find the records, which is what
-    makes the empty answer a lie rather than a fact of the filesystem.
+    ``_resolve_flow_dirs`` finds no ``se3/history/<flow_id>`` under the root it
+    was handed (a worktree that was pruned, a root recorded before a move, a path
+    the daemon cannot see). Before the fix ``read_flow`` reported ``mode="full",
+    records=[]`` — byte-identical on the wire to "this flow has no records at
+    all" — and the server's reconcile then replaced the cached rounds with that
+    nothing. Now the reader falls back to the registry walk, which plainly can
+    reach the records, and re-expands from the root it found so the main+worktree
+    merge is still complete (round 2 included).
     """
+    caplog.set_level(logging.WARNING, logger="se3.daemon.history")
     main_root, _worktree_root = _build_two_root_history(tmp_path)
     ghost_root = tmp_path / "pruned-worktree"
     ghost_root.mkdir()
@@ -152,17 +180,78 @@ def test_read_flow_unresolvable_root_is_indistinguishable_from_empty(tmp_path):
     read = reader.read_flow(FLOW_ID, project_root=str(ghost_root), cursor={})
 
     assert read.mode == protocol.HISTORY_MODE_FULL
-    assert read.records == []
-
-    # ... yet the flow's records are plainly reachable from the registry.
-    fallback = DaemonHistoryReader(
-        project_roots_provider=lambda: [str(main_root)]
-    ).read_flow(FLOW_ID, project_root=None, cursor={})
-    assert fallback.records, (
-        "the legacy registry walk finds records the authoritative-root read "
-        "reported as absent — the empty full frame is a resolution failure, "
-        "not an empty flow"
+    assert len(read.records) == len(ROUND_2), (
+        "the unresolvable authoritative root produced a pseudo-empty full frame "
+        "instead of falling back to the registry walk — issue #287 hop 1"
     )
+    assert [r["message"]["content"] for r in read.records] == [
+        line["content"] for line in ROUND_2
+    ]
+    assert any(
+        "falling back to the registry walk" in rec.getMessage()
+        for rec in caplog.records
+    ), "the fallback must be diagnosable, not silent"
+
+
+def test_read_flow_truly_unknown_flow_returns_empty_with_a_warning(
+    tmp_path, caplog
+):
+    """The other side of the distinction: nothing resolves anywhere.
+
+    An empty snapshot is the only honest answer here (there is nothing to send),
+    but it MUST be accompanied by a warning — that log line is the only place a
+    live run can tell "the daemon could not resolve the directory" apart from
+    "the flow really has no records", and the server's no-rollback invariant now
+    refuses to act on the frame either way.
+    """
+    caplog.set_level(logging.WARNING, logger="se3.daemon.history")
+    main_root, _worktree_root = _build_two_root_history(tmp_path)
+    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(main_root)])
+
+    read = reader.read_flow(
+        "20260101-000000_deadbeef", project_root=str(main_root), cursor={}
+    )
+
+    assert read.mode == protocol.HISTORY_MODE_FULL
+    assert read.records == []
+    assert any(
+        "no history directory resolved" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_read_active_flows_keeps_streaming_a_paused_worktree_flow(tmp_path):
+    """A PAUSED flow stays in the active set and keeps producing deltas.
+
+    The pending-reply window is exactly when discovery rounds 2+ are written, so
+    a flow dropping out of ``read_active_flows`` the moment it pauses would strand
+    them on the daemon (the original multi-round loss). This locks
+    ``_is_active_status``: only COMPLETED / FAILED are terminal.
+    """
+    main_root, worktree_root = _build_two_root_history(tmp_path)
+    # Only round 1 exists when the flow pauses on the human reply.
+    live = worktree_root / "se3" / "history" / FLOW_ID / "01_discovery.jsonl"
+    _write_jsonl(live, ROUND_1)
+    _write_engine_json(worktree_root, status="PAUSED")
+    reader = DaemonHistoryReader(
+        project_roots_provider=lambda: [str(main_root), str(worktree_root)]
+    )
+
+    first = {r.flow_id: r for r in reader.read_active_flows({})}
+    assert FLOW_ID in first, "a paused flow must stay in the active set"
+    assert len(first[FLOW_ID].records) == len(ROUND_1)
+
+    # Round 2 lands while the flow is STILL paused (the human has not replied to
+    # the next question yet) — it must reach the caller as an append delta.
+    _write_jsonl(live, ROUND_2)
+    second = {r.flow_id: r for r in reader.read_active_flows(
+        {FLOW_ID: dict(first[FLOW_ID].cursor)}
+    )}
+    assert FLOW_ID in second
+    assert second[FLOW_ID].mode == protocol.HISTORY_MODE_APPEND
+    assert [r["message"]["content"] for r in second[FLOW_ID].records] == [
+        line["content"] for line in ROUND_2[len(ROUND_1):]
+    ]
 
 
 # --------------------------------------------------------------------------
