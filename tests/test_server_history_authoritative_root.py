@@ -283,6 +283,32 @@ def test_is_active_worktree_flow_false_for_non_worktree():
     asyncio.run(scenario())
 
 
+def test_is_active_worktree_flow_false_for_paused_non_worktree():
+    """The widening in ``0962eda6`` is ``running|paused`` AND worktree — never
+    ``paused`` alone. ``paused`` is the ordinary discovery pending-reply state of
+    *every* flow, so without this the gate would open the reconcile path for the
+    whole fleet."""
+    state = ServerState()
+
+    async def scenario():
+        await state.update_status(
+            "m1",
+            {
+                "machine_id": "m1",
+                "flows": [
+                    {
+                        "flow_id": "f1",
+                        "status": "paused",
+                        "project_root": "/repo",
+                    }
+                ],
+            },
+        )
+        assert await state.is_active_worktree_flow("f1") is False
+
+    asyncio.run(scenario())
+
+
 def test_is_active_worktree_flow_false_for_unknown_flow():
     state = ServerState()
     assert asyncio.run(state.is_active_worktree_flow("ghost")) is False

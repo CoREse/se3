@@ -370,6 +370,42 @@ def test_non_worktree_flow_is_served_from_cache_without_any_daemon_pull(
         daemon.close()
 
 
+def test_paused_non_worktree_flow_never_reconciles(client_and_app):
+    """The other half of the blast-radius lock: ``paused`` alone must not open it.
+
+    Every discovery flow — worktree or not — sits ``paused`` while it waits on a
+    human reply, so the widened gate is only safe if the worktree half of the
+    condition still holds. A paused ordinary flow keeps being served straight from
+    cache: no ``MSG_HISTORY_REQUEST``, and an in-sync poll stays ``not_modified``.
+    """
+    client, app = client_and_app
+    app.state.server_state._HISTORY_FULL_PULL_MIN_INTERVAL = 0.0
+    daemon = _ReconcileDaemon(client, app, "paused-plain-flow")
+    try:
+        daemon.report_flow(status="paused", project_root="/tmp/repo")
+        seeded = daemon.seed(client, [_RECORD_1])
+        token, sig = seeded["progress"], seeded["signature"]
+
+        # Were the reconcile to fire here, this empty reply is what would erase
+        # the bundle — so a surviving record 1 is what proves it never fired.
+        daemon.reply_records = []
+        for _ in range(3):
+            body = client.get(
+                f"/api/history/paused-plain-flow?after={token}&sig={sig}"
+            ).json()
+            assert body["delivery"] == "not_modified"
+
+        assert daemon.requests == 0, (
+            "a paused NON-worktree flow triggered a re-pull — the self-heal gate "
+            "widened on status alone instead of status AND worktree"
+        )
+        assert (
+            len(client.get("/api/history/paused-plain-flow").json()["records"]) == 1
+        )
+    finally:
+        daemon.close()
+
+
 def test_signature_moves_with_record_count():
     """``bundle_signature`` is a content-version stamp: it changes as records grow.
 
