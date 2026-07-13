@@ -4064,6 +4064,14 @@ issue217AnchorMod.registerIssue217ScrollAnchorTests({ app, check, checkAsync, fi
 const discoveryAnalyzeAnchorMod = await import("./discovery_analyze_scroll_anchor.test.mjs");
 await discoveryAnalyzeAnchorMod.registerDiscoveryAnalyzeScrollAnchorTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the empty-full no-clobber guard (issue #287 / G4): a zero-record
+// `delivery:"full"` (REST) or `mode:"full"` (WS) frame — the worktree self-heal's
+// pseudo-empty snapshot — must not blank an already-rendered conversation, while
+// a grown full still rebuilds authoritatively and a genuinely empty first load
+// still renders the empty state.
+const fullNoClobberMod = await import("./test_full_delivery_no_clobber.mjs");
+await fullNoClobberMod.registerFullDeliveryNoClobberTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

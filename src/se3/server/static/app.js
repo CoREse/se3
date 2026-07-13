@@ -2571,12 +2571,18 @@ async function loadFlowConversation(flowId, opts) {
       state.flowConversationRecords,
       requestRecords,
     );
-    state.flowConversationProgress = result.progress;
-    // Refresh the held bundle signature so the next self-heal poll echoes the
-    // current generation. Guarded on a present value so a legacy / test response
-    // that omits `signature` does not clobber a good held signature to null.
-    if (result.signature != null) {
-      state.flowConversationSignature = result.signature;
+    // `preserveTokens` marks a frame the merge REJECTED wholesale (the #287
+    // empty-full guard): nothing about the held generation changed, so the held
+    // token/signature must stand — adopting the rejected frame's (null) pair
+    // would force the next poll into a needless full re-pull.
+    if (!result.preserveTokens) {
+      state.flowConversationProgress = result.progress;
+      // Refresh the held bundle signature so the next self-heal poll echoes the
+      // current generation. Guarded on a present value so a legacy / test response
+      // that omits `signature` does not clobber a good held signature to null.
+      if (result.signature != null) {
+        state.flowConversationSignature = result.signature;
+      }
     }
     if (result.render === "noop") {
       // Nothing to repaint: a `not_modified` reply (the client was provably in
@@ -4778,6 +4784,17 @@ function wsHistDebug() {
   return false;
 }
 
+// WHY (#287): the same empty-full defence mergeHistoryResponse applies to the
+// REST path, for the WS `mode:"full"` push — a zero-record full frame must not
+// wipe a view that already holds records. It replaces the whole bundle, so
+// adopting an empty one blanks the chat pane (the worktree self-heal's
+// pseudo-empty snapshot). A view holding nothing yet still takes the empty frame
+// (a genuinely empty flow must render its empty state); only a regression to
+// zero is refused.
+function rejectsEmptyFullPush(records, held) {
+  return records.length === 0 && Array.isArray(held) && held.length > 0;
+}
+
 function applyHistoryData(msg) {
   const records = Array.isArray(msg.records) ? msg.records : [];
   const append = msg.mode === "append";
@@ -4807,6 +4824,9 @@ function applyHistoryData(msg) {
         if (stick) scrollHistoryToBottom();
       }
       // else: nothing changed (all no-op re-deliveries) — skip render entirely
+    } else if (rejectsEmptyFullPush(records, state.historyRecords)) {
+      // Empty full push against a populated detail view — discard it (#287),
+      // keeping the rendered records and the token/signature that pin them.
     } else {
       state.historyEpoch += 1;
       state.historyRecords = records;
@@ -4862,6 +4882,12 @@ function applyHistoryData(msg) {
           msg.flow_id, rec.fresh.length, rec.updatedInPlace,
           state.flowConversationAppendSeq);
       }
+    } else if (rejectsEmptyFullPush(records, state.flowConversationRecords)) {
+      // Empty full push against an already-rendered conversation — discard the
+      // frame (#287). The history consumer above has already run, so returning
+      // here short-circuits only this running-flow consumer, leaving the DOM,
+      // the records, the epoch and the held token/signature exactly as they were.
+      return;
     } else {
       state.flowConversationEpoch += 1;
       merged = records;
@@ -5239,9 +5265,14 @@ async function openHistorySession(flowId, opts) {
       state.historyRecords,
       requestRecords,
     );
-    state.historyProgress = result.progress;
-    if (result.signature != null) {
-      state.historySignature = result.signature;
+    // See loadFlowConversation: a merge-rejected frame (the #287 empty-full
+    // guard) leaves the held generation — and therefore its token/signature —
+    // untouched.
+    if (!result.preserveTokens) {
+      state.historyProgress = result.progress;
+      if (result.signature != null) {
+        state.historySignature = result.signature;
+      }
     }
     if (result.render === "noop") {
       // A `not_modified` reply, or a delta that added nothing new after dedup —
@@ -7215,6 +7246,10 @@ function stableMergeByTimestamp(held, fresh, requestBaseline) {
 //         the server records are the new authority, with only live appends that
 //         arrived during the fetch preserved, and the caller MUST rebuild the
 //         conversation.
+// A rejected empty-full frame (see the #287 guard below) additionally sets
+// `preserveTokens: true`, meaning the caller must KEEP the token/signature it
+// already holds rather than adopting this (null) pair — the frame is discarded
+// wholesale, so nothing about the held generation changed.
 function mergeHistoryResponse(response, existing, requestBaseline) {
   const base = Array.isArray(existing) ? existing : [];
   const baseline = Array.isArray(requestBaseline) ? requestBaseline : base;
@@ -7301,6 +7336,28 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       progress,
       signature,
       render: "full",
+    };
+  }
+  // WHY (#287): a `delivery:"full"` frame carrying ZERO records must never be
+  // allowed to erase an already-rendered conversation. The worktree self-heal
+  // re-pull can hand the server an empty full snapshot when the daemon fails to
+  // resolve the flow's history directory ("no dir" surfacing as "no records"),
+  // and adopting it wholesale blanked the whole chat pane — including the first
+  // discovery round that had rendered correctly. The daemon (G3) and the server
+  // cache (G2) each refuse to produce such a frame; this is the last layer of
+  // that defence, so no single failure upstream can reach the reader as an empty
+  // chat. Treated as a no-op: the held records, DOM, progress token and
+  // signature all stand (`preserveTokens` tells the caller not to adopt this
+  // frame's cursor, which pins an empty bundle). A genuinely empty flow (nothing
+  // held yet) still renders its empty state — only a REGRESSION to zero is
+  // rejected, never a first paint.
+  if (!records.length && base.length) {
+    return {
+      records: base,
+      progress: null,
+      signature: null,
+      render: "noop",
+      preserveTokens: true,
     };
   }
   // Full (or unrecognised) delivery invalidates the previous generation.
