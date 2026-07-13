@@ -371,6 +371,136 @@ def test_identical_full_repull_keeps_generation():
 
 
 # --------------------------------------------------------------------------
+# ServerState.append_history — reconcile may only add, never take away (#287)
+# --------------------------------------------------------------------------
+
+
+def _round(ordinal: int) -> dict:
+    return {
+        "step_id": "01_discovery_ab12",
+        "step_type": "discovery",
+        "ordinal": ordinal,
+        "message": {"round": ordinal + 1},
+    }
+
+
+def test_empty_full_does_not_wipe_existing_bundle():
+    """An empty full frame MUST NOT clear a non-empty bundle from the same machine.
+
+    This is the #287 regression at its narrowest: the paused-worktree self-heal
+    reconcile fires a cursorless pull, the daemon fails to resolve the flow's
+    history dir and answers ``mode=full, records=[]``, and the wholesale replace
+    left the browser with a ``full`` delivery of zero records — a blank chat.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0)], machine_id="m1"
+        )
+        gen1 = (await state.get_history("f1"))["generation"]
+
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [], machine_id="m1"
+        )
+        # Reported as applied so a pull waiter blocked on this reply is released
+        # rather than spinning until the REST handler times out.
+        assert applied is True
+
+        snap = await state.get_history("f1")
+        assert len(snap["records"]) == 1
+        assert snap["records"] == [_round(0)]
+        # Generation kept ⇒ in-sync clients stay on the cheap not_modified path.
+        assert snap["generation"] == gen1
+
+    asyncio.run(scenario())
+
+
+def test_non_empty_full_still_replaces_and_rolls_generation():
+    """The guard must not blunt a genuine reconcile: a fuller frame still wins.
+
+    This is the self-heal path that fixes the ORIGINAL multi-round loss — a
+    reconcile that brings records the live push dropped must replace the bundle
+    and roll the generation so the client re-fetches.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0)], machine_id="m1"
+        )
+        gen1 = (await state.get_history("f1"))["generation"]
+
+        applied = await state.append_history(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [_round(0), _round(1), _round(2)],
+            machine_id="m1",
+        )
+        assert applied is True
+
+        snap = await state.get_history("f1")
+        assert len(snap["records"]) == 3
+        assert snap["generation"] != gen1
+
+    asyncio.run(scenario())
+
+
+def test_cross_machine_full_still_establishes_new_bundle():
+    """A real machine switch still replaces the bundle wholesale.
+
+    The no-rollback guard is scoped to the SAME machine: another daemon's full
+    snapshot is authoritative for the flow it now owns, so it must take over the
+    bundle even though that discards the previous machine's records.
+    """
+    state = ServerState()
+
+    async def scenario():
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0), _round(1)], machine_id="m1"
+        )
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [_round(0)], machine_id="m2"
+        )
+        assert applied is True
+
+        snap = await state.get_history("f1")
+        assert snap["machine_id"] == "m2"
+        assert snap["records"] == [_round(0)]
+
+    asyncio.run(scenario())
+
+
+def test_first_empty_full_still_creates_empty_bundle():
+    """With no cached bundle there is nothing to protect: an empty full writes through.
+
+    A flow that genuinely has no records yet must still get an authoritative
+    (empty) bundle, otherwise the REST read stays a cache miss and re-pulls the
+    daemon on every poll.
+    """
+    state = ServerState()
+
+    async def scenario():
+        applied = await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [], machine_id="m1"
+        )
+        assert applied is True
+
+        snap = await state.get_history("f1")
+        assert snap is not None
+        assert snap["records"] == []
+        assert snap["machine_id"] == "m1"
+
+        # And the empty bundle is a normal anchor: a live append extends it.
+        assert await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [_round(0)], machine_id="m1"
+        )
+        assert len((await state.get_history("f1"))["records"]) == 1
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
 # history_detail running-worktree self-heal reconcile (integration)
 # --------------------------------------------------------------------------
 

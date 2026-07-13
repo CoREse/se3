@@ -943,8 +943,11 @@ class ServerState:
     ) -> bool:
         """Cache history *records* for *flow_id*.
 
-        ``mode == "full"`` replaces any cached records; ``mode == "append"``
-        extends an existing authoritative bundle. A first-sighting append is
+        ``mode == "full"`` replaces any cached records — except when the frame
+        is empty and the same machine already has a non-empty bundle, which is
+        refused (see the ``INVARIANT`` note in the full branch); ``mode ==
+        "append"`` extends an existing authoritative bundle. A first-sighting
+        append is
         ignored and marks the flow as requiring a full pull, because it may be
         only the tail after a server restart. *cursor* is stored verbatim for
         the next incremental pull. Purely in-memory.
@@ -1060,6 +1063,43 @@ class ServerState:
                 # cached bundle from the SAME machine, keep the bundle and its
                 # generation (only the cursor may advance); the token stays valid
                 # and the next poll still answers the cheap ``not_modified``.
+                # INVARIANT: a reconcile may only ADD records, never take them
+                # away — an empty ``full`` frame MUST NOT wipe an existing
+                # non-empty bundle from the same machine. The daemon cannot
+                # distinguish "this flow has no records" from "I failed to
+                # resolve its history directory" on the wire: both arrive here as
+                # ``mode=full, records=[]``. The worktree self-heal reconcile
+                # (``is_active_worktree_flow``, widened to ``paused`` so a
+                # discovery flow waiting on a human reply can still catch a
+                # dropped round) fires exactly such a cursorless pull, so a single
+                # mis-resolved read would otherwise replace the cached rounds with
+                # nothing, roll a fresh generation, and hand the browser a
+                # ``full`` delivery of zero records — a blank chat pane (#287).
+                # Refuse the replacement, keep the bundle AND its generation (so
+                # in-sync clients stay on the cheap ``not_modified`` path), and
+                # still return ``True`` so a pull waiter blocked on this reply is
+                # released instead of timing out. A frame that brings records
+                # through — the self-heal path that fixes the original multi-round
+                # loss — falls through and replaces the bundle as before.
+                if (
+                    existing is not None
+                    and str(existing.get("machine_id") or "") == machine_id
+                    and existing.get("records")
+                    and not new_records
+                ):
+                    if cursor:
+                        existing["cursor"] = dict(cursor)
+                    existing["updated_at"] = time.time()
+                    generation = self._ensure_generation(existing)
+                    logger.warning(
+                        "hist-diag append_history REJECTED-empty-full flow=%s "
+                        "machine=%s (kept %d cached records, generation %d) — the "
+                        "daemon returned an empty full snapshot for a flow the "
+                        "server already has records for; likely an unresolved "
+                        "history directory on the daemon side",
+                        flow_id, machine_id, len(existing["records"]), generation,
+                    )
+                    return True
                 if (
                     existing is not None
                     and str(existing.get("machine_id") or "") == machine_id
