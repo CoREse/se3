@@ -1,5 +1,15 @@
 # SE3 Framework Version History
 
+## 11.22.3 - 2026-07-14
+
+- Fix worktree-mode WebUI chat history losing the first message permanently: the head records were never delivered while the server receipt claimed full sync.
+- Add client-side history integrity self-check that compares held records (stepId#ordinal) against the server cursor after every poll response and WebSocket push, instead of trusting the progress token as proof of possession.
+- Add ordinal-based backfill: the client requests exactly the missing record numbers via a new optional `missing` parameter on `GET /api/history/{flow_id}`, and the server returns them in a new `backfill` delivery without changing progress-token semantics.
+- Fall back to a full history reload when the client holds more than the cursor claims, when generation/machine/signature mismatch, when backfill exceeds its budget, or when legacy records lack ordinals — with a per-(flow, generation) budget so full reloads stay an exception, never a per-append routine.
+- Fix the WebSocket history broadcast to carry cursor and signature, so pushed frames can be integrity-checked like polled responses.
+- Ensure a full history request for a paused worktree flow returns a complete bundle including the head records.
+- Add regression coverage for head-loss recovery, generation-mismatch fallback, backfill delivery, and unchanged token semantics in the node-stub frontend suite and server pytest suite.
+- Document the root cause, deployment-surface findings, and the issue 288 status conclusion (already fixed by e41a6a31's step_type sanitization) in the verification report.
 ## 11.22.2 - 2026-07-14
 
 - Fix WebUI chat rendering aborting on locally echoed replies: the optimistic record now carries a machine-safe step_type token instead of the localized display text, which under zh-CN produced an invalid DOM class token and threw InvalidCharacterError
