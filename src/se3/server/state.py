@@ -30,6 +30,29 @@ from se3.daemon import protocol
 logger = logging.getLogger(__name__)
 
 
+def _display_step_id(filename: str) -> str:
+    """Map a history cursor key (a bare ``*.jsonl`` filename) to the ``step_id``
+    the daemon stamps on the records read out of that file.
+
+    The wire cursor is keyed by physical filename while records are keyed by
+    display step id, so the gap check (:meth:`ServerState._detect_cursor_gap`)
+    can only line a frame's records up against its cursor by re-deriving one from
+    the other. This mirrors ``se3.daemon.history._display_step_id`` (the
+    ``.from-<branch>`` sidecar marker is KEPT, so a step's primary file and its
+    sidecars stay distinct streams); it is duplicated rather than imported to
+    keep the server package free of a daemon-internals import for one pure
+    string rule.
+    """
+    idx = filename.find(".jsonl")
+    if idx < 0:
+        return filename
+    stem = filename[:idx]
+    suffix = filename[idx + len(".jsonl"):]
+    if suffix.startswith(".from-") and len(suffix) > len(".from-"):
+        return f"{stem}{suffix}"
+    return stem
+
+
 def _is_worktree_session_path(project_root: object) -> bool:
     """Return whether *project_root* is an se3 ``--worktree`` isolation dir.
 
@@ -350,17 +373,21 @@ class HistoryWriteOutcome:
     #: the cache holds the right records, so parking on to a 504 helps nobody.
     resolves_pull: bool
 
-    #: The frame was a ``full`` snapshot REJECTED as destructive: it carried
-    #: fewer records than the same machine's non-empty cached bundle. The cache
-    #: kept its own records, so this frame's payload is known-truncated and MUST
-    #: NOT be relayed anywhere. Set in the two cases the full branch refuses,
-    #: whose scopes deliberately differ: an EMPTY frame is refused for EVERY
+    #: The frame was a ``full`` snapshot REJECTED as untrustworthy, so its
+    #: payload is known-bad and MUST NOT be relayed anywhere. Set in the three
+    #: cases the full branch refuses, whose scopes deliberately differ:
+    #: an EMPTY frame landing on a non-empty cached bundle is refused for EVERY
     #: flow (a zero-record full can never be a legitimate answer for a flow the
     #: server already holds records for — on the wire it is indistinguishable
-    #: from an unresolved history directory), while a SHORTER-but-non-empty
-    #: frame is refused only for an ACTIVE WORKTREE flow (for an ordinary flow a
-    #: shrink is legitimate: a retried failed step rewrites its step jsonl in
-    #: place). See the ``INVARIANT`` notes in :meth:`apply_history_frame`.
+    #: from an unresolved history directory); an EMPTY frame landing on NO cached
+    #: bundle is refused for an ACTIVE WORKTREE flow, which by definition has
+    #: already written a discovery round (there, uniquely, ``resolves_pull`` is
+    #: ``False``: there is no correct bundle to hand a waiter, so it ends on its
+    #: pull timeout rather than being answered "authoritatively empty"); and a
+    #: SHORTER-but-non-empty frame is refused only for an ACTIVE WORKTREE flow
+    #: (for an ordinary flow a shrink is legitimate: a retried failed step
+    #: rewrites its step jsonl in place). See the ``INVARIANT`` notes in
+    #: :meth:`apply_history_frame`.
     rejected_full: bool = False
 
 
@@ -1001,27 +1028,33 @@ class ServerState:
         """Cache history *records* for *flow_id* and report what the write did.
 
         ``mode == "full"`` replaces any cached records — except when the frame
-        would shrink the same machine's non-empty bundle: an EMPTY full frame is
-        refused for ANY flow, and a merely shorter (non-empty) one is refused for
-        an ACTIVE WORKTREE flow (see the ``INVARIANT`` notes in the full branch);
-        ``mode == "append"`` extends an existing authoritative bundle. A first-sighting
+        would leave the flow with LESS history than it truthfully has: an EMPTY
+        full frame is refused for ANY flow that already has cached records, and
+        also for an ACTIVE WORKTREE flow with no bundle at all (which cannot
+        truthfully be empty), while a merely shorter (non-empty) one is refused
+        for an ACTIVE WORKTREE flow (see the ``INVARIANT`` notes in the full
+        branch). ``mode == "append"`` extends an existing authoritative bundle,
+        but only when its cursor shows it CONTINUES that bundle: a frame starting
+        past the cached water mark would bake a hole into the history, so it is
+        refused and the flow is armed for a self-heal full pull. A first-sighting
         append is ignored and marks the flow as requiring a full pull, because
         it may be only the tail after a server restart. *cursor* is stored
         verbatim for the next incremental pull. Purely in-memory.
 
         ``resolves_pull`` is ``True`` when the cache is left authoritative — it
         populated / extended the bundle, or it was a benign no-op on an already
-        correct bundle — and ``False`` when the records were discarded (a
-        first-sighting or otherwise unanchored append, or a cross-machine
-        delta). An on-demand pull waiter must be resolved only on a ``True``
+        correct bundle — and ``False`` when the cache is left WITHOUT a
+        trustworthy bundle for this flow: the records were discarded (a
+        first-sighting, gapped, or otherwise unanchored append, or a
+        cross-machine delta), or an empty full was refused with nothing cached to
+        fall back on. An on-demand pull waiter must be resolved only on a ``True``
         result so a racing ignored append cannot prematurely wake the REST
         handler before the daemon's authoritative full reply lands.
 
-        ``rejected_full`` flags the accepted-but-untrustworthy case: a full
-        snapshot refused for shrinking the same machine's non-empty bundle —
-        when EMPTY, for any flow; when merely shorter, only for an active
-        worktree flow (see the ``INVARIANT`` notes in the full branch). Its
-        records are truncated, so no consumer may relay them.
+        ``rejected_full`` flags a full snapshot refused as untrustworthy (see
+        :class:`HistoryWriteOutcome` and the ``INVARIANT`` notes in the full
+        branch for the three scopes). Its records are truncated, so no consumer
+        may relay them.
         """
         new_records = list(records or [])
         async with self._lock:
@@ -1083,6 +1116,39 @@ class ServerState:
                 # ``full`` branch never created (or that lost the field), so the
                 # extended bundle is a first-class delta participant rather than
                 # being stuck on the full fallback forever.
+                # INVARIANT: the server's cached history may never have a HOLE in
+                # it — an append whose first line lies BEYOND the cached water
+                # mark means the lines in between never arrived, and extending
+                # over them would silently pin a head-truncated bundle as
+                # authoritative (every later poll then answers ``not_modified``
+                # on it, so the loss is permanent — the #287 "the first round is
+                # missing and never comes back" symptom). This is the LAST-RESORT
+                # invariant of the whole history path: it assumes nothing about
+                # the daemon's correctness (a dropped frame, a cursor committed
+                # for records that never went out, a reconnect mid-stream) and
+                # still detects the loss, because the frame's own cursor says
+                # which lines it claims to cover. On a gap we take NOTHING from
+                # the frame — records and cursor both — and arm ``requires_full``
+                # so the receive loop's ``take_recovery_pull`` self-heals the
+                # bundle from a fresh full snapshot.
+                gap = self._detect_cursor_gap(
+                    existing.get("cursor") or {},
+                    cursor or {},
+                    new_records,
+                    cache_is_empty=not existing.get("records"),
+                )
+                if gap is not None:
+                    self._history_requires_full.add(flow_id)
+                    logger.warning(
+                        "hist-diag append_history DISCARD flow=%s reason=cursor-gap "
+                        "file=%s existing_cursor=%s incoming_cursor=%s records=%d "
+                        "(the frame starts past the cached water mark — the lines "
+                        "in between never arrived; flagged requires_full so a "
+                        "self-heal full pull rebuilds the bundle)",
+                        flow_id, gap, existing.get("cursor") or {},
+                        cursor or {}, len(new_records),
+                    )
+                    return HistoryWriteOutcome(resolves_pull=False)
                 self._ensure_generation(existing)
                 existing["records"].extend(new_records)
                 existing["mode"] = mode
@@ -1098,6 +1164,46 @@ class ServerState:
                 )
                 return HistoryWriteOutcome(resolves_pull=True)
             else:
+                # INVARIANT: an EMPTY full frame may never be made AUTHORITATIVE
+                # for an active (``running``/``paused``) worktree flow — not even
+                # when the server holds no bundle for it yet. The older guard
+                # below only protected a NON-EMPTY cached bundle, which left the
+                # most fragile moment unprotected: the very first bundle. An
+                # active worktree flow has by definition already written at least
+                # one discovery round, so "this flow has no records" cannot be a
+                # truthful answer for it — and on the wire it is indistinguishable
+                # from the daemon's read failure (``read_flow`` returns
+                # ``mode=full, records=[]`` when it resolves no history dir).
+                # Accepting one pinned an empty bundle as authoritative AND
+                # cleared ``requires_full`` / the recovery marker below, DISARMING
+                # the self-heal — so the flow's head was lost for good. Instead:
+                # take nothing, keep no bundle (so a REST read stays a cache miss
+                # and re-pulls), keep the flow armed for a full pull, and report
+                # ``rejected_full`` so the frame is relayed nowhere.
+                # ``resolves_pull=False``: a REST waiter parked on this pull must
+                # NOT be woken with "authoritatively empty" — it is left to end on
+                # the existing ``HISTORY_PULL_TIMEOUT`` path (504, client retries)
+                # rather than being handed a blank chat as a final answer.
+                if (
+                    not new_records
+                    and not (existing and existing.get("records"))
+                    and self._is_active_worktree_flow_locked(flow_id)
+                ):
+                    if existing is not None:
+                        del self._history_data[flow_id]
+                    self._history_requires_full.add(flow_id)
+                    logger.warning(
+                        "hist-diag append_history REJECTED-empty-full flow=%s "
+                        "machine=%s (no cached records to fall back on; an active "
+                        "worktree flow cannot legitimately have zero records, so "
+                        "the frame is treated as an unresolved daemon read — no "
+                        "authoritative empty bundle established, requires_full "
+                        "kept armed for a self-heal full pull)",
+                        flow_id, machine_id,
+                    )
+                    return HistoryWriteOutcome(
+                        resolves_pull=False, rejected_full=True
+                    )
                 # Any branch that replaces the cached bundle wholesale (a true
                 # ``full`` snapshot, or any other non-append / unrecognized mode
                 # from a version-skewed or malformed daemon) establishes a fresh
@@ -1283,6 +1389,111 @@ class ServerState:
         """
         async with self._lock:
             self._history_recovery_inflight.pop(flow_id, None)
+
+    def _detect_cursor_gap(
+        self,
+        existing_cursor: Dict[str, Any],
+        incoming_cursor: Dict[str, Any],
+        records: List[Dict[str, Any]],
+        *,
+        cache_is_empty: bool = False,
+    ) -> Optional[str]:
+        """Return the first file whose append delta starts PAST the cached water
+        mark, or ``None`` when the frame is contiguous with the bundle.
+
+        The history cursor is a per-file ``{jsonl-filename: consumed-line-count}``
+        water mark, so a frame carries its own coverage claim: with the cache at
+        line *n*, the frame's cursor at *m* and *r* records for that file, the
+        frame covers lines ``[m - r, m)``. ``m - r > n`` therefore means the
+        ``m - r - n`` lines in between were never delivered — a hole.
+
+        Overlap (``m - r <= n``, and the ``m <= n`` rollback) is deliberately
+        NOT a gap. It is the normal shape of two legitimate flows: a daemon that
+        re-reads and re-sends a frame whose previous send failed (its cursor only
+        advances on a successful send), and a retried FAILED step that rewrites
+        its jsonl in place. Both re-deliver records the bundle already holds, and
+        the frontend's ``dedupeAppendRecords`` collapses the duplicates — whereas
+        forcing a full pull on every overlap would turn a routine retry into a
+        pull storm. Only a FORWARD jump loses information.
+
+        A file the cache carries no water mark for is at line 0 — a step file the
+        flow only just created starts there, and an append that instead starts
+        mid-file has lost that file's head exactly like any other gap. The one
+        exception: a bundle that holds records under a WHOLLY empty cursor was
+        built by a cursorless full frame, so its water marks are *unknown* rather
+        than zero and no file of it can be judged. An EMPTY bundle
+        (*cache_is_empty*) is judged normally — it holds nothing, so every file's
+        water mark really is 0.
+
+        Attribution of records to files is per-file whenever the frame supports
+        it (a daemon record carries the ``step_id`` its file resolves to, and an
+        ``ordinal`` that IS its physical line number — the sharpest possible start
+        line). When the frame's records cannot be attributed — a version-skewed or
+        synthetic frame whose records carry no matching ``step_id`` — the check
+        degrades to the whole-frame form (total advance across all files vs total
+        record count) rather than assuming zero records per file, which would
+        report a gap on every such frame.
+        """
+        if not isinstance(incoming_cursor, dict):
+            return None
+        if not existing_cursor and not cache_is_empty:
+            return None
+        record_list = [r for r in records if isinstance(r, dict)]
+        starts: Dict[str, int] = {}
+        counts: Dict[str, int] = {}
+        for record in record_list:
+            key = str(record.get("step_id") or "")
+            counts[key] = counts.get(key, 0) + 1
+            ordinal = record.get("ordinal")
+            if isinstance(ordinal, int) and not isinstance(ordinal, bool):
+                prior = starts.get(key)
+                if prior is None or ordinal < prior:
+                    starts[key] = ordinal
+        cursor_keys = {_display_step_id(str(name)) for name in incoming_cursor}
+        attributable = bool(record_list) and all(
+            key in cursor_keys for key in counts
+        )
+
+        advanced: List[Tuple[str, str, int, int]] = []
+        for name, raw_water in incoming_cursor.items():
+            try:
+                incoming_water = int(raw_water)
+            except (TypeError, ValueError):
+                continue
+            raw_cached = (existing_cursor or {}).get(name)
+            if raw_cached is None:
+                cached_water = 0
+            else:
+                try:
+                    cached_water = int(raw_cached)
+                except (TypeError, ValueError):
+                    continue
+            if incoming_water <= cached_water:
+                continue
+            advanced.append(
+                (str(name), _display_step_id(str(name)), cached_water,
+                 incoming_water)
+            )
+        if not advanced:
+            return None
+
+        if not attributable:
+            total_advance = sum(m - n for _, _, n, m in advanced)
+            if total_advance > len(record_list):
+                return advanced[0][0]
+            return None
+
+        for name, key, cached_water, incoming_water in advanced:
+            # Prefer the record's own ``ordinal`` (its 0-based physical line
+            # number, which a full read of the same file reproduces identically)
+            # as the frame's start line; fall back to the count-derived ``m - r``
+            # when a record carries none.
+            start = starts.get(key)
+            if start is None:
+                start = incoming_water - counts.get(key, 0)
+            if start > cached_water:
+                return name
+        return None
 
     def _next_generation(self) -> int:
         """Hand out a fresh bundle generation. Caller must hold ``self._lock``."""
