@@ -4072,6 +4072,14 @@ await discoveryAnalyzeAnchorMod.registerDiscoveryAnalyzeScrollAnchorTests({ app,
 const fullNoClobberMod = await import("./test_full_delivery_no_clobber.mjs");
 await fullNoClobberMod.registerFullDeliveryNoClobberTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the step_type token-safety + render-isolation tests (Bug A): the
+// optimistic echo's step_type is a machine-safe `reply_<kind>` token (never a
+// rendered i18n label — zh-CN's "待回复 回复" carries a space and made
+// classList.add throw on every render, freezing the whole chat view), its step
+// header stays localized, and a dirty record can no longer take the batch down.
+const stepTypeTokenSafetyMod = await import("./step_type_token_safety.test.mjs");
+stepTypeTokenSafetyMod.registerStepTypeTokenSafetyTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
