@@ -1289,6 +1289,7 @@ class DaemonClient:
                     read.mode,
                     read.records,
                     cursor=read.cursor,
+                    cursor_base=read.cursor_base,
                     seq=self._next_seq(),
                 ),
             )
@@ -1688,6 +1689,7 @@ class DaemonClient:
                         read.mode,
                         read.records,
                         cursor=read.cursor,
+                        cursor_base=read.cursor_base,
                         seq=self._next_seq(),
                     ),
                 )

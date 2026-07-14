@@ -757,6 +757,7 @@ def make_history_data(
     records: Any,
     *,
     cursor: Dict[str, Any] | None = None,
+    cursor_base: Dict[str, Any] | None = None,
     seq: int = 0,
 ) -> Message:
     """daemon → server: deliver history records for *flow_id*.
@@ -766,6 +767,15 @@ def make_history_data(
     *records* is the list of history record dicts. *cursor* is the updated
     per-step file-cursor dict the recipient should send back on its next
     request to continue incrementally.
+
+    *cursor_base* is the per-file line index the read STARTED at, so the frame
+    states the window ``[cursor_base, cursor)`` it covers instead of leaving the
+    receiver to guess it from the record count. WHY: the cursor counts every
+    physical line, while blank / unparseable lines yield no record, so a
+    count-derived start line is wrong for any delta that skipped one — and the
+    server's gap check would reject a contiguous frame as a hole. It is OPTIONAL
+    on the wire: a version-skewed daemon omits it and the receiver falls back to
+    its count-derived estimate.
 
     Raises :class:`ProtocolError` when *mode* is not a recognized value.
     """
@@ -780,6 +790,7 @@ def make_history_data(
             "mode": mode,
             "records": list(records),
             "cursor": dict(cursor) if cursor else {},
+            "cursor_base": dict(cursor_base) if cursor_base else {},
         },
         seq=seq,
     )

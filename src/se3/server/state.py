@@ -35,9 +35,11 @@ def _display_step_id(filename: str) -> str:
     the daemon stamps on the records read out of that file.
 
     The wire cursor is keyed by physical filename while records are keyed by
-    display step id, so the gap check (:meth:`ServerState._detect_cursor_gap`)
-    can only line a frame's records up against its cursor by re-deriving one from
-    the other. This mirrors ``se3.daemon.history._display_step_id`` (the
+    display step id, so the gap check's version-skew fallback
+    (:meth:`ServerState._detect_cursor_gap`, used only for a frame that declares
+    no ``cursor_base``) can line a frame's records up against its cursor only by
+    re-deriving one key from the other. This mirrors
+    ``se3.daemon.history._display_step_id`` (the
     ``.from-<branch>`` sidecar marker is KEPT, so a step's primary file and its
     sidecars stay distinct streams); it is duplicated rather than imported to
     keep the server package free of a daemon-internals import for one pure
@@ -999,6 +1001,7 @@ class ServerState:
         records: List[Dict[str, Any]],
         *,
         cursor: Optional[Dict[str, Any]] = None,
+        cursor_base: Optional[Dict[str, Any]] = None,
         machine_id: str = "",
     ) -> bool:
         """Cache history *records* for *flow_id*; report waiter-resolvability.
@@ -1012,7 +1015,12 @@ class ServerState:
         tell the two apart.
         """
         outcome = await self.apply_history_frame(
-            flow_id, mode, records, cursor=cursor, machine_id=machine_id
+            flow_id,
+            mode,
+            records,
+            cursor=cursor,
+            cursor_base=cursor_base,
+            machine_id=machine_id,
         )
         return outcome.resolves_pull
 
@@ -1023,6 +1031,7 @@ class ServerState:
         records: List[Dict[str, Any]],
         *,
         cursor: Optional[Dict[str, Any]] = None,
+        cursor_base: Optional[Dict[str, Any]] = None,
         machine_id: str = "",
     ) -> HistoryWriteOutcome:
         """Cache history *records* for *flow_id* and report what the write did.
@@ -1039,7 +1048,10 @@ class ServerState:
         refused and the flow is armed for a self-heal full pull. A first-sighting
         append is ignored and marks the flow as requiring a full pull, because
         it may be only the tail after a server restart. *cursor* is stored
-        verbatim for the next incremental pull. Purely in-memory.
+        verbatim for the next incremental pull. *cursor_base* is the frame's
+        per-file coverage lower bound (the line the daemon's read started at);
+        it is what makes the append continuity check exact, and is empty for a
+        version-skewed daemon that does not send one. Purely in-memory.
 
         ``resolves_pull`` is ``True`` when the cache is left authoritative — it
         populated / extended the bundle, or it was a benign no-op on an already
@@ -1126,8 +1138,9 @@ class ServerState:
                 # invariant of the whole history path: it assumes nothing about
                 # the daemon's correctness (a dropped frame, a cursor committed
                 # for records that never went out, a reconnect mid-stream) and
-                # still detects the loss, because the frame's own cursor says
-                # which lines it claims to cover. On a gap we take NOTHING from
+                # still detects the loss, because the frame states the line
+                # window it covers (``cursor_base`` → ``cursor``). On a gap we
+                # take NOTHING from
                 # the frame — records and cursor both — and arm ``requires_full``
                 # so the receive loop's ``take_recovery_pull`` self-heals the
                 # bundle from a fresh full snapshot.
@@ -1135,6 +1148,7 @@ class ServerState:
                     existing.get("cursor") or {},
                     cursor or {},
                     new_records,
+                    cursor_base=cursor_base or {},
                     cache_is_empty=not existing.get("records"),
                 )
                 if gap is not None:
@@ -1396,25 +1410,44 @@ class ServerState:
         incoming_cursor: Dict[str, Any],
         records: List[Dict[str, Any]],
         *,
+        cursor_base: Optional[Dict[str, Any]] = None,
         cache_is_empty: bool = False,
     ) -> Optional[str]:
         """Return the first file whose append delta starts PAST the cached water
         mark, or ``None`` when the frame is contiguous with the bundle.
 
         The history cursor is a per-file ``{jsonl-filename: consumed-line-count}``
-        water mark, so a frame carries its own coverage claim: with the cache at
-        line *n*, the frame's cursor at *m* and *r* records for that file, the
-        frame covers lines ``[m - r, m)``. ``m - r > n`` therefore means the
-        ``m - r - n`` lines in between were never delivered — a hole.
+        water mark. A frame states the window it covers per file:
+        ``[cursor_base[f], cursor[f])``. With the cache at line *n*, a frame whose
+        window for *f* starts past *n* means the lines in between were never
+        delivered — a hole.
 
-        Overlap (``m - r <= n``, and the ``m <= n`` rollback) is deliberately
-        NOT a gap. It is the normal shape of two legitimate flows: a daemon that
-        re-reads and re-sends a frame whose previous send failed (its cursor only
-        advances on a successful send), and a retried FAILED step that rewrites
-        its jsonl in place. Both re-deliver records the bundle already holds, and
-        the frontend's ``dedupeAppendRecords`` collapses the duplicates — whereas
-        forcing a full pull on every overlap would turn a routine retry into a
-        pull storm. Only a FORWARD jump loses information.
+        The frame's own *cursor_base* is the ONLY sound source for that start
+        line. It cannot be re-derived from the records, because the cursor counts
+        every PHYSICAL line the daemon consumed while only parseable dict lines
+        become records: a delta that stepped over a blank or mid-write line
+        carries fewer records than its cursor advanced, and its first record's
+        ordinal sits past the cached water mark even though nothing was lost.
+        Inferring the start from ``cursor - len(records)`` (or from the lowest
+        ordinal) therefore condemns a perfectly contiguous frame, discards a live
+        delta and fires a needless recovery pull — the console stalls until the
+        full round-trips. So when the frame declares its base we trust it, and a
+        file whose water advanced with NO declared window is a gap by definition:
+        the daemon consumed those lines without ever putting them on the wire.
+
+        The count-derived estimate survives only as the fallback for a frame that
+        declares no base at all (a version-skewed daemon, a synthetic frame). It
+        over-reports on skipped lines, but its failure mode is a redundant full
+        pull rather than a baked-in hole.
+
+        Overlap (a window starting at or before *n*, and the ``m <= n`` rollback)
+        is deliberately NOT a gap. It is the normal shape of two legitimate flows:
+        a daemon that re-reads and re-sends a frame whose previous send failed
+        (its cursor only advances on a successful send), and a retried FAILED step
+        that rewrites its jsonl in place. Both re-deliver records the bundle
+        already holds, and the frontend's ``dedupeAppendRecords`` collapses the
+        duplicates — whereas forcing a full pull on every overlap would turn a
+        routine retry into a pull storm. Only a FORWARD jump loses information.
 
         A file the cache carries no water mark for is at line 0 — a step file the
         flow only just created starts there, and an append that instead starts
@@ -1424,15 +1457,6 @@ class ServerState:
         than zero and no file of it can be judged. An EMPTY bundle
         (*cache_is_empty*) is judged normally — it holds nothing, so every file's
         water mark really is 0.
-
-        Attribution of records to files is per-file whenever the frame supports
-        it (a daemon record carries the ``step_id`` its file resolves to, and an
-        ``ordinal`` that IS its physical line number — the sharpest possible start
-        line). When the frame's records cannot be attributed — a version-skewed or
-        synthetic frame whose records carry no matching ``step_id`` — the check
-        degrades to the whole-frame form (total advance across all files vs total
-        record count) rather than assuming zero records per file, which would
-        report a gap on every such frame.
         """
         if not isinstance(incoming_cursor, dict):
             return None
@@ -1475,6 +1499,24 @@ class ServerState:
                  incoming_water)
             )
         if not advanced:
+            return None
+
+        bases: Dict[str, int] = {}
+        if isinstance(cursor_base, dict):
+            for name, raw_base in cursor_base.items():
+                try:
+                    bases[str(name)] = int(raw_base)
+                except (TypeError, ValueError):
+                    continue
+
+        if bases:
+            # The frame declared its coverage windows: judge every advanced file
+            # against the one it declared, and treat a file it advanced but never
+            # opened a window for as a gap (those lines went nowhere).
+            for name, _key, cached_water, _incoming_water in advanced:
+                start = bases.get(name)
+                if start is None or start > cached_water:
+                    return name
             return None
 
         if not attributable:

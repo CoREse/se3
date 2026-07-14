@@ -33,10 +33,9 @@ drives the whole chain through the real components and asserts the head survives
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
-
-import pytest
 
 from se3.daemon.history import DaemonHistoryReader
 from se3.server.state import ServerState
@@ -93,67 +92,73 @@ def _ordinals(state: ServerState) -> list[int]:
     return [record.get("ordinal") for record in bundle["records"]]
 
 
-@pytest.mark.asyncio
-async def test_lost_frame_then_empty_full_still_yields_complete_history(tmp_path):
+def test_lost_frame_then_empty_full_still_yields_complete_history(tmp_path):
     """The confirmed live chain: a lost frame AND an empty full, head survives."""
-    # A real `se3 run --worktree` layout: the flow body lives under
-    # <main>/se3/worktrees/<name>/ and keeps its own se3/history there. The path
-    # shape matters — it is what makes the server treat the flow as an active
-    # worktree flow, which scopes the empty-full guard.
-    root = tmp_path / "se3" / "worktrees" / "wt-a4af4b75"
-    (root / "se3" / "history" / FLOW).mkdir(parents=True)
 
-    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(root)])
-    state = ServerState()
-    await _mark_active_worktree_flow(state, root)
+    # The scenario drives its own loop: pytest-asyncio is not a test dependency
+    # of this project, so the suite must run on a bare pytest install.
+    async def scenario():
+        # A real `se3 run --worktree` layout: the flow body lives under
+        # <main>/se3/worktrees/<name>/ and keeps its own se3/history there. The
+        # path shape matters — it is what makes the server treat the flow as an
+        # active worktree flow, which scopes the empty-full guard.
+        root = tmp_path / "se3" / "worktrees" / "wt-a4af4b75"
+        (root / "se3" / "history" / FLOW).mkdir(parents=True)
 
-    # T0 — the daemon sees the flow the moment engine.json says "running", which
-    # is BEFORE the discovery step has flushed its first jsonl line. read_flow
-    # honestly reports "no records", indistinguishable on the wire from a failed
-    # root resolution. This is the empty full (hole 2).
-    empty_full = reader.read_flow(FLOW, project_root=str(root), cursor=None)
-    assert empty_full.records == []
-    await _apply(state, empty_full)
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(root)])
+        state = ServerState()
+        await _mark_active_worktree_flow(state, root)
 
-    # It must NOT have become the authoritative bundle: an active worktree flow
-    # cannot legitimately have zero records, and installing it here is what would
-    # disarm the recovery path that the lost frame below depends on.
-    assert state._history_data.get(FLOW) is None, (
-        "an empty full frame was installed as the authoritative bundle for an "
-        "active worktree flow — this is the interlock that made the head loss "
-        "permanent"
-    )
+        # T0 — the daemon sees the flow the moment engine.json says "running",
+        # which is BEFORE the discovery step has flushed its first jsonl line.
+        # read_flow honestly reports "no records", indistinguishable on the wire
+        # from a failed root resolution. This is the empty full (hole 2).
+        empty_full = reader.read_flow(FLOW, project_root=str(root), cursor=None)
+        assert empty_full.records == []
+        await _apply(state, empty_full)
 
-    # T1 — round 1 lands on disk and the daemon reads it, but the frame never
-    # reaches the server (socket down mid-send). The daemon must NOT commit the
-    # cursor for a batch it failed to deliver (hole 1); here we simulate the loss
-    # by simply not applying the frame, and — reproducing the pre-fix bug exactly
-    # — carrying its cursor forward anyway, so the batch is never re-sent.
-    _flush(root, ROUND1, start=0)
-    lost = reader.read_flow(FLOW, project_root=str(root), cursor=None)
-    assert len(lost.records) == ROUND1
-    advanced_cursor = lost.cursor  # the water mark the daemon wrongly kept
+        # It must NOT have become the authoritative bundle: an active worktree
+        # flow cannot legitimately have zero records, and installing it here is
+        # what would disarm the recovery path the lost frame below depends on.
+        assert state._history_data.get(FLOW) is None, (
+            "an empty full frame was installed as the authoritative bundle for an "
+            "active worktree flow — this is the interlock that made the head loss "
+            "permanent"
+        )
 
-    # T2 — round 2 lands, and the daemon appends from that advanced water mark.
-    # The frame's own cursor says it covers lines 26..30, but the server holds
-    # nothing: the head never arrived. It must be refused, not extended onto an
-    # empty bundle.
-    _flush(root, ROUND2, start=ROUND1)
-    tail = reader.read_flow(FLOW, project_root=str(root), cursor=advanced_cursor)
-    assert len(tail.records) == ROUND2
-    await _apply(state, tail)
+        # T1 — round 1 lands on disk and the daemon reads it, but the frame never
+        # reaches the server (socket down mid-send). The daemon must NOT commit
+        # the cursor for a batch it failed to deliver (hole 1); here we simulate
+        # the loss by simply not applying the frame, and — reproducing the pre-fix
+        # bug exactly — carrying its cursor forward anyway, so the batch is never
+        # re-sent.
+        _flush(root, ROUND1, start=0)
+        lost = reader.read_flow(FLOW, project_root=str(root), cursor=None)
+        assert len(lost.records) == ROUND1
+        advanced_cursor = lost.cursor  # the water mark the daemon wrongly kept
 
-    assert _ordinals(state) != list(range(ROUND1, ROUND1 + ROUND2)), (
-        "a head-truncated bundle was established from an append that starts past "
-        "the cached water mark"
-    )
+        # T2 — round 2 lands, and the daemon appends from that advanced water
+        # mark. The frame's own cursor says it covers lines 26..30, but the server
+        # holds nothing: the head never arrived. It must be refused, not extended
+        # onto an empty bundle.
+        _flush(root, ROUND2, start=ROUND1)
+        tail = reader.read_flow(FLOW, project_root=str(root), cursor=advanced_cursor)
+        assert len(tail.records) == ROUND2
+        await _apply(state, tail)
 
-    # T3 — the refusal armed the self-heal, so the server pulls a full snapshot
-    # and the daemon re-reads the flow from line 0.
-    assert await state.take_recovery_pull(FLOW) is True
-    healed = reader.read_flow(FLOW, project_root=str(root), cursor=None)
-    await _apply(state, healed)
+        assert _ordinals(state) != list(range(ROUND1, ROUND1 + ROUND2)), (
+            "a head-truncated bundle was established from an append that starts "
+            "past the cached water mark"
+        )
 
-    # The invariant the user actually cares about: the browser sees round 1.
-    assert _ordinals(state) == list(range(ROUND1 + ROUND2))
-    assert FLOW not in state._history_requires_full
+        # T3 — the refusal armed the self-heal, so the server pulls a full
+        # snapshot and the daemon re-reads the flow from line 0.
+        assert await state.take_recovery_pull(FLOW) is True
+        healed = reader.read_flow(FLOW, project_root=str(root), cursor=None)
+        await _apply(state, healed)
+
+        # The invariant the user actually cares about: the browser sees round 1.
+        assert _ordinals(state) == list(range(ROUND1 + ROUND2))
+        assert FLOW not in state._history_requires_full
+
+    asyncio.run(scenario())

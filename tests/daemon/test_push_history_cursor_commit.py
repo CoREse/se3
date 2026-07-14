@@ -22,10 +22,14 @@ real jsonl files (so the re-read semantics are the genuine ones, not a stub's
 idea of them) behind a minimal provider, and feed the frames that actually
 reached the socket into a real :class:`~se3.server.state.ServerState` to assert
 the server ends up with the complete, duplicate-free history.
+
+The async cases drive their own event loop via ``asyncio.run``: pytest-asyncio is
+not a test dependency of this project, so the suite must run on a bare pytest.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
@@ -153,117 +157,141 @@ def flow_env(tmp_path):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_failed_send_does_not_advance_cursor(flow_env):
+def test_failed_send_does_not_advance_cursor(flow_env):
     """A HISTORY_DATA send failure must leave the flow's cursor untouched."""
-    root, flow_id, step, provider = flow_env
-    _append_records(root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")])
 
-    client = _client(provider)
-    ws = _StubWS()
-    ws.fail_flows = {flow_id}
+    async def scenario():
+        root, flow_id, step, provider = flow_env
+        _append_records(
+            root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")]
+        )
 
-    await client._push_history(ws)
+        client = _client(provider)
+        ws = _StubWS()
+        ws.fail_flows = {flow_id}
 
-    assert ws.history_frames(flow_id) == []
-    # The batch never left the socket, so nothing may be recorded as delivered.
-    # Before the fix this held {step: 2} and the two records were lost forever.
-    assert flow_id not in client._history_cursors
+        await client._push_history(ws)
+
+        assert ws.history_frames(flow_id) == []
+        # The batch never left the socket, so nothing may be recorded as
+        # delivered. Before the fix this held {step: 2} and the two records were
+        # lost forever.
+        assert flow_id not in client._history_cursors
+
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_failed_batch_is_re_read_and_re_sent_next_round(flow_env):
+def test_failed_batch_is_re_read_and_re_sent_next_round(flow_env):
     """The batch dropped by a failed send is re-read and re-sent next round."""
-    root, flow_id, step, provider = flow_env
-    _append_records(root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")])
 
-    client = _client(provider)
-    ws = _StubWS()
-    ws.fail_flows = {flow_id}
-    await client._push_history(ws)
-    assert ws.history_frames(flow_id) == []
+    async def scenario():
+        root, flow_id, step, provider = flow_env
+        _append_records(
+            root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")]
+        )
 
-    # Socket recovers; the same records must be read again from the retained
-    # water mark and shipped as the flow's first (full) frame.
-    ws.fail_flows = set()
-    await client._push_history(ws)
+        client = _client(provider)
+        ws = _StubWS()
+        ws.fail_flows = {flow_id}
+        await client._push_history(ws)
+        assert ws.history_frames(flow_id) == []
 
-    frames = ws.history_frames(flow_id)
-    assert len(frames) == 1
-    assert frames[0]["mode"] == HISTORY_MODE_FULL
-    assert _bodies(frames[0]["records"]) == ["round-1", "r1"]
-    assert client._history_cursors[flow_id] == {step: 2}
+        # Socket recovers; the same records must be read again from the retained
+        # water mark and shipped as the flow's first (full) frame.
+        ws.fail_flows = set()
+        await client._push_history(ws)
+
+        frames = ws.history_frames(flow_id)
+        assert len(frames) == 1
+        assert frames[0]["mode"] == HISTORY_MODE_FULL
+        assert _bodies(frames[0]["records"]) == ["round-1", "r1"]
+        assert client._history_cursors[flow_id] == {step: 2}
+
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_mid_flow_send_failure_re_sends_only_the_dropped_delta(flow_env):
+def test_mid_flow_send_failure_re_sends_only_the_dropped_delta(flow_env):
     """A failure on a later append re-ships exactly that delta, not the whole flow."""
-    root, flow_id, step, provider = flow_env
-    _append_records(root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")])
 
-    client = _client(provider)
-    ws = _StubWS()
-    await client._push_history(ws)
-    assert client._history_cursors[flow_id] == {step: 2}
+    async def scenario():
+        root, flow_id, step, provider = flow_env
+        _append_records(
+            root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")]
+        )
 
-    # Round 2 lands on disk but the socket dies while it is being shipped.
-    _append_records(root, flow_id, step, [_msg("user", "round-2"), _msg("assistant", "r2")])
-    ws.fail_flows = {flow_id}
-    await client._push_history(ws)
-    assert client._history_cursors[flow_id] == {step: 2}
-    assert len(ws.history_frames(flow_id)) == 1
+        client = _client(provider)
+        ws = _StubWS()
+        await client._push_history(ws)
+        assert client._history_cursors[flow_id] == {step: 2}
 
-    ws.fail_flows = set()
-    await client._push_history(ws)
+        # Round 2 lands on disk but the socket dies while it is being shipped.
+        _append_records(
+            root, flow_id, step, [_msg("user", "round-2"), _msg("assistant", "r2")]
+        )
+        ws.fail_flows = {flow_id}
+        await client._push_history(ws)
+        assert client._history_cursors[flow_id] == {step: 2}
+        assert len(ws.history_frames(flow_id)) == 1
 
-    frames = ws.history_frames(flow_id)
-    assert len(frames) == 2
-    assert frames[1]["mode"] == HISTORY_MODE_APPEND
-    assert _bodies(frames[1]["records"]) == ["round-2", "r2"]
-    assert client._history_cursors[flow_id] == {step: 4}
+        ws.fail_flows = set()
+        await client._push_history(ws)
+
+        frames = ws.history_frames(flow_id)
+        assert len(frames) == 2
+        assert frames[1]["mode"] == HISTORY_MODE_APPEND
+        assert _bodies(frames[1]["records"]) == ["round-2", "r2"]
+        assert client._history_cursors[flow_id] == {step: 4}
+
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_empty_delta_commits_and_send_is_skipped(flow_env):
+def test_empty_delta_commits_and_send_is_skipped(flow_env):
     """A flow with nothing new ships no frame and still keeps its cursor."""
-    root, flow_id, step, provider = flow_env
-    _append_records(root, flow_id, step, [_msg("user", "round-1")])
 
-    client = _client(provider)
-    ws = _StubWS()
-    await client._push_history(ws)
-    assert client._history_cursors[flow_id] == {step: 1}
+    async def scenario():
+        root, flow_id, step, provider = flow_env
+        _append_records(root, flow_id, step, [_msg("user", "round-1")])
 
-    # No new records: the read is an empty append, so there is no delivery that
-    # could fail and the cursor is committed unconditionally.
-    ws.fail_flows = {flow_id}
-    await client._push_history(ws)
-    assert client._history_cursors[flow_id] == {step: 1}
-    assert len(ws.history_frames(flow_id)) == 1
+        client = _client(provider)
+        ws = _StubWS()
+        await client._push_history(ws)
+        assert client._history_cursors[flow_id] == {step: 1}
+
+        # No new records: the read is an empty append, so there is no delivery
+        # that could fail and the cursor is committed unconditionally.
+        ws.fail_flows = {flow_id}
+        await client._push_history(ws)
+        assert client._history_cursors[flow_id] == {step: 1}
+        assert len(ws.history_frames(flow_id)) == 1
+
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_successful_flow_cursor_survives_another_flows_failure(tmp_path):
+def test_successful_flow_cursor_survives_another_flows_failure(tmp_path):
     """A flow already shipped this round is not rolled back by a later failure."""
-    good, bad = "20260714-000000_aaaa", "20260714-000001_bbbb"
-    step = "01_discovery_1111.jsonl"
-    reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
-    provider = _Provider(reader, tmp_path, [good, bad])
-    _append_records(tmp_path, good, step, [_msg("user", "good-1")])
-    _append_records(tmp_path, bad, step, [_msg("user", "bad-1")])
 
-    client = _client(provider)
-    ws = _StubWS()
-    ws.fail_flows = {bad}
+    async def scenario():
+        good, bad = "20260714-000000_aaaa", "20260714-000001_bbbb"
+        step = "01_discovery_1111.jsonl"
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+        provider = _Provider(reader, tmp_path, [good, bad])
+        _append_records(tmp_path, good, step, [_msg("user", "good-1")])
+        _append_records(tmp_path, bad, step, [_msg("user", "bad-1")])
 
-    await client._push_history(ws)
+        client = _client(provider)
+        ws = _StubWS()
+        ws.fail_flows = {bad}
 
-    # ``good`` was shipped before the socket died on ``bad``; rolling it back
-    # would only manufacture duplicate traffic on the next round.
-    assert client._history_cursors[good] == {step: 1}
-    assert bad not in client._history_cursors
-    assert _bodies(ws.history_frames(good)[0]["records"]) == ["good-1"]
-    assert ws.history_frames(bad) == []
+        await client._push_history(ws)
+
+        # ``good`` was shipped before the socket died on ``bad``; rolling it back
+        # would only manufacture duplicate traffic on the next round.
+        assert client._history_cursors[good] == {step: 1}
+        assert bad not in client._history_cursors
+        assert _bodies(ws.history_frames(good)[0]["records"]) == ["good-1"]
+        assert ws.history_frames(bad) == []
+
+    asyncio.run(scenario())
 
 
 # --------------------------------------------------------------------------
@@ -271,8 +299,7 @@ async def test_successful_flow_cursor_survives_another_flows_failure(tmp_path):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_server_bundle_is_complete_and_duplicate_free_after_a_drop(flow_env):
+def test_server_bundle_is_complete_and_duplicate_free_after_a_drop(flow_env):
     """Every frame that reached the socket, replayed into the real ServerState.
 
     This is the invariant the whole fix exists for: a mid-flight send failure
@@ -281,39 +308,52 @@ async def test_server_bundle_is_complete_and_duplicate_free_after_a_drop(flow_en
     """
     from se3.server.state import ServerState
 
-    root, flow_id, step, provider = flow_env
-    client = _client(provider)
-    ws = _StubWS()
-    state = ServerState()
+    async def scenario():
+        root, flow_id, step, provider = flow_env
+        client = _client(provider)
+        ws = _StubWS()
+        state = ServerState()
 
-    # Round 1 is written and dropped on the floor by a dying socket.
-    _append_records(root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")])
-    ws.fail_flows = {flow_id}
-    await client._push_history(ws)
-
-    # Round 2 lands while the socket is back up. The round-1 records are re-read
-    # from the retained water mark, so this frame carries BOTH rounds.
-    _append_records(root, flow_id, step, [_msg("user", "round-2"), _msg("assistant", "r2")])
-    ws.fail_flows = set()
-    await client._push_history(ws)
-
-    # Round 3 is an ordinary incremental append on top.
-    _append_records(root, flow_id, step, [_msg("user", "round-3")])
-    await client._push_history(ws)
-
-    for frame in ws.history_frames(flow_id):
-        await state.apply_history_frame(
-            frame["flow_id"],
-            frame["mode"],
-            frame["records"],
-            cursor=frame.get("cursor"),
-            machine_id="m1",
+        # Round 1 is written and dropped on the floor by a dying socket.
+        _append_records(
+            root, flow_id, step, [_msg("user", "round-1"), _msg("assistant", "r1")]
         )
+        ws.fail_flows = {flow_id}
+        await client._push_history(ws)
 
-    cached = await state.get_history(flow_id)
-    assert cached is not None
-    assert _bodies(cached["records"]) == ["round-1", "r1", "round-2", "r2", "round-3"]
-    # No record was delivered twice: the physical identity the frontend
-    # reconciles by is unique across the whole bundle.
-    assert len(set(_keys(cached["records"]))) == len(cached["records"])
-    assert cached["cursor"] == {step: 5}
+        # Round 2 lands while the socket is back up. The round-1 records are
+        # re-read from the retained water mark, so this frame carries BOTH rounds.
+        _append_records(
+            root, flow_id, step, [_msg("user", "round-2"), _msg("assistant", "r2")]
+        )
+        ws.fail_flows = set()
+        await client._push_history(ws)
+
+        # Round 3 is an ordinary incremental append on top.
+        _append_records(root, flow_id, step, [_msg("user", "round-3")])
+        await client._push_history(ws)
+
+        for frame in ws.history_frames(flow_id):
+            await state.apply_history_frame(
+                frame["flow_id"],
+                frame["mode"],
+                frame["records"],
+                cursor=frame.get("cursor"),
+                machine_id="m1",
+            )
+
+        cached = await state.get_history(flow_id)
+        assert cached is not None
+        assert _bodies(cached["records"]) == [
+            "round-1",
+            "r1",
+            "round-2",
+            "r2",
+            "round-3",
+        ]
+        # No record was delivered twice: the physical identity the frontend
+        # reconciles by is unique across the whole bundle.
+        assert len(set(_keys(cached["records"]))) == len(cached["records"])
+        assert cached["cursor"] == {step: 5}
+
+    asyncio.run(scenario())

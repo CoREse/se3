@@ -430,12 +430,26 @@ class FlowRead:
             mistaken for a duplicate of another marker.
         cursor: The updated per-step line cursor to send back on the next
             request to continue incrementally.
+        cursor_base: The per-file 0-based physical line index this read STARTED
+            at — the lower bound of the window ``[cursor_base, cursor)`` the
+            frame claims to cover, one entry per file the read touched.
+
+            WHY: ``cursor`` counts every physical line consumed, but only
+            parseable dict lines become ``records``, so a delta containing a
+            blank / mid-write / unparseable line carries fewer records than its
+            cursor advanced. A consumer therefore CANNOT re-derive where the
+            delta began from ``len(records)`` or from the records' ordinals — a
+            skipped line is indistinguishable from a line that never arrived,
+            and the server's gap check (``ServerState._detect_cursor_gap``)
+            would condemn a perfectly contiguous frame. Only the reader knows
+            its true start line, so it states it explicitly.
     """
 
     flow_id: str
     mode: str
     records: List[Dict[str, Any]] = field(default_factory=list)
     cursor: Dict[str, int] = field(default_factory=dict)
+    cursor_base: Dict[str, int] = field(default_factory=dict)
 
 
 class DaemonHistoryReader:
@@ -1406,6 +1420,11 @@ class DaemonHistoryReader:
             return FlowRead(flow_id=flow_id, mode=mode, records=[], cursor=cursor)
 
         new_cursor: Dict[str, int] = dict(cursor)
+        # The lower bound of each file's coverage window this read. Only files
+        # actually read get an entry: a file carried over from the caller's
+        # cursor untouched makes no coverage claim at all, and must not be able
+        # to pass one off (see FlowRead.cursor_base).
+        base_cursor: Dict[str, int] = {}
         records: List[Dict[str, Any]] = []
         truncated = False
 
@@ -1555,8 +1574,11 @@ class DaemonHistoryReader:
             )
 
             if can_incremental and cur_size == prev[1]:
-                # No new bytes — file is unchanged since last read.
+                # No new bytes — file is unchanged since last read. The window
+                # is empty but still anchored at the water mark we hold, so the
+                # frame's coverage claim stays contiguous with the peer's.
                 new_cursor[jsonl.name] = prev[0]
+                base_cursor[jsonl.name] = prev[0]
                 continue
 
             # --- Read lines ------------------------------------------------
@@ -1571,6 +1593,8 @@ class DaemonHistoryReader:
                 # consumed_lines so far from prior reads.
                 consumed = prev[0]
                 offset = prev[1]
+                # This delta resumes exactly where the last one stopped.
+                base_cursor[jsonl.name] = prev[0]
                 # The running full-prefix hash is extended from the bytes we just
                 # read (no extra disk read): the bytes consumed THIS round are the
                 # leading ``offset - prev_offset_start`` bytes of ``new_bytes``.
@@ -1730,6 +1754,11 @@ class DaemonHistoryReader:
                 # (higher ordinals) finally arrive.
                 if rewritten or copy_switched or start > total_physical_lines:
                     start = 0
+                # ``start`` is the first line index this read emits from, so it
+                # is the file's coverage lower bound — 0 whenever the cursor was
+                # discarded above, which is what tells the peer this file is
+                # re-delivered from its head rather than jumping forward.
+                base_cursor[jsonl.name] = start
 
                 def _emit(line_text: str, ordinal: int) -> bool:
                     """Append a parsed record for *line_text*; return truncation.
@@ -1833,7 +1862,13 @@ class DaemonHistoryReader:
                 "flow %s (project_root=%s cursor=%s) but produced no records",
                 len(flow_dirs), flow_id, project_root or "<registry>", cursor,
             )
-        return FlowRead(flow_id=flow_id, mode=mode, records=records, cursor=new_cursor)
+        return FlowRead(
+            flow_id=flow_id,
+            mode=mode,
+            records=records,
+            cursor=new_cursor,
+            cursor_base=base_cursor,
+        )
 
     def read_active_flows(
         self, cursors: Optional[Dict[str, Dict[str, int]]] = None
