@@ -1375,14 +1375,33 @@ class DaemonHistoryReader:
                 ) or [legacy]
         if not flow_dirs:
             # Genuinely unresolvable under every known root. Still an empty
-            # snapshot on the wire (there is nothing else to send), but WARN so a
-            # live run makes the difference visible: the server-side no-rollback
-            # invariant now refuses to act on this frame, and this line is the
-            # only place the failure is diagnosable.
+            # snapshot on the wire (there is nothing else to send, and the
+            # ``FlowRead`` schema has no way to say "I failed to resolve" that an
+            # older server would understand), but WARN so a live run makes the
+            # difference visible: this line is the only place the failure is
+            # diagnosable.
+            #
+            # WHY: ``mode=full, records=[]`` is ambiguous on the wire — it means
+            # either "this flow genuinely has no records" or "I could not resolve
+            # its history". Its known producers, all of which reach the server via
+            # the REST cache-miss pull and the worktree self-heal reconcile pull
+            # (both issue a CURSORLESS read, hence ``mode=full``), are:
+            #   1. this branch — root resolution failed under every known root
+            #      (pruned / moved / renamed worktree, unregistered root);
+            #   2. a resolved flow directory that holds no ``*.jsonl`` step file
+            #      yet (the flow was just created, the first step has not flushed);
+            #   3. a flow whose step files exist but hold only blank or
+            #      unparseable lines (a record caught mid-write).
+            # Producer 1 is a lie about an ACTIVE flow, and the server cannot tell
+            # it apart from the others, so the server-side guard treats ANY empty
+            # full frame for an active flow as untrustworthy: it refuses to install
+            # it as the authoritative bundle and keeps its self-heal armed rather
+            # than blanking the browser's chat pane (#287).
             logger.warning(
-                "history: no history directory resolved for flow %s "
-                "(project_root=%s) — returning an empty %s snapshot",
-                flow_id, project_root or "<registry>", mode,
+                "hist-diag read_flow EMPTY-FULL: no history directory resolved "
+                "for flow %s (project_root=%s mode=%s cursor=%s) — returning an "
+                "empty snapshot",
+                flow_id, project_root or "<registry>", mode, cursor,
             )
             return FlowRead(flow_id=flow_id, mode=mode, records=[], cursor=cursor)
 
@@ -1801,6 +1820,19 @@ class DaemonHistoryReader:
             "hist-diag read_flow RESULT flow=%s mode=%s records=%d cursor=%s",
             flow_id, mode, len(records), new_cursor,
         )
+        if mode == HISTORY_MODE_FULL and not records:
+            # The other empty-full producers registered in the WHY: note above
+            # (a resolved-but-stepless flow dir, or step files holding only blank
+            # / mid-write lines). Logged at the same level and with the same
+            # marker as the resolution failure so one grep of a DEBUG run shows
+            # every empty full frame that left this daemon, whichever branch made
+            # it — that is what tells the server-side rejection apart from a real
+            # empty flow when a live trigger chain is reconstructed.
+            logger.warning(
+                "hist-diag read_flow EMPTY-FULL: resolved %d history dir(s) for "
+                "flow %s (project_root=%s cursor=%s) but produced no records",
+                len(flow_dirs), flow_id, project_root or "<registry>", cursor,
+            )
         return FlowRead(flow_id=flow_id, mode=mode, records=records, cursor=new_cursor)
 
     def read_active_flows(
