@@ -30,7 +30,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.gzip import GZipMiddleware
@@ -160,6 +160,12 @@ ISSUE_RECONCILE_TIMEOUT = 15.0
 #: STATUS_UPDATE promptly without busy-spinning.
 ISSUE_RECONCILE_POLL_INTERVAL = 0.5
 
+#: Ceiling on how many record numbers one ``missing=`` backfill request may name.
+#: A client that has genuinely fallen far behind is better served by one full
+#: rebuild than by an enormous numbered pick-list, and the cap keeps a malformed
+#: or hostile query from turning into an unbounded index walk.
+MISSING_MAX_ORDINALS = 200
+
 #: The identity-binding discriminator + external id of the single break-glass
 #: admin subject. Break-glass is deliberately a *single* admin subject (not a
 #: per-user impersonation channel), so every consumed break-glass token resolves
@@ -167,6 +173,49 @@ ISSUE_RECONCILE_POLL_INTERVAL = 0.5
 #: auth provider's job. See the multi-tenant design's break-glass section.
 BREAKGLASS_PROVIDER = "breakglass"
 BREAKGLASS_EXTERNAL_ID = "admin"
+
+
+def parse_missing_param(raw: Optional[str]) -> Optional[Dict[str, List[int]]]:
+    """Parse the ``missing=`` backfill query parameter.
+
+    Wire form: ``stepId:ord[,ord…];stepId:ord…`` — the record numbers a client's
+    cursor self-check found it does not hold.
+
+    WHY every malformed input degrades to ``None`` (= "no missing list") instead
+    of raising: ``missing`` is an *optimisation over* the existing full fallback,
+    never a precondition of it. A client on an older/newer encoding, a truncated
+    URL, or an over-long list must still get a correct history reply — it simply
+    gets the complete bundle instead of a numbered slice. Refusing the request
+    would turn a self-heal poll into a user-visible error.
+    """
+    if not raw:
+        return None
+    result: Dict[str, List[int]] = {}
+    total = 0
+    for group in raw.split(";"):
+        group = group.strip()
+        if not group:
+            continue
+        key, sep, ordinals_raw = group.partition(":")
+        key = key.strip()
+        if not sep or not key:
+            return None
+        ordinals = result.setdefault(key, [])
+        for token in ordinals_raw.split(","):
+            token = token.strip()
+            # ``isdigit`` rejects the empty string, a sign, and any non-decimal
+            # token in one check — ordinals are 0-based line positions.
+            if not token.isdigit():
+                return None
+            total += 1
+            if total > MISSING_MAX_ORDINALS:
+                return None
+            value = int(token)
+            if value not in ordinals:
+                ordinals.append(value)
+        if not ordinals:
+            return None
+    return result or None
 
 
 # -- request models --------------------------------------------------------
@@ -1898,7 +1947,13 @@ def create_app(
         identity_: OwnerIdentity = Depends(require_owner),
         after: Optional[str] = None,
         sig: Optional[str] = None,
+        missing: Optional[str] = None,
     ) -> dict:
+        # ``missing`` names the records the client's own cursor self-check found
+        # it does not hold (``stepId:ord,ord;…``). Any unparseable value degrades
+        # to "no missing list" — the client then falls back to a full rebuild,
+        # which is correct, just less frugal (see ``parse_missing_param``).
+        missing_map = parse_missing_param(missing)
         # Ownership gate first: a flow whose owning machine belongs to another
         # owner (or is unknown) reads as absent — even if its records happen to
         # be cached server-side — so one owner can never pull another's history.
@@ -2007,12 +2062,16 @@ def create_app(
         # machine makes a bundle that has since moved daemons read as a miss, so
         # we re-pull the authoritative records below rather than serve a stale
         # snapshot.
+        # A ``missing`` list additionally yields ``delivery: "backfill"`` — the
+        # named records taken out of the SAME cached bundle — so a client whose
+        # cursor self-check found a hole can close it without a full rebuild.
         snapshot = await state.get_history_snapshot(
             flow_id,
             after=after,
             expected_machine_id=owner_machine,
             expected_owner=target_owner,
             known_signature=sig,
+            missing=missing_map,
         )
         if snapshot is not None:
             # Running-worktree self-heal. A ``not_modified`` reply means the
@@ -2040,8 +2099,15 @@ def create_app(
             # read into a blank chat pane (#287) — so the add-only semantics is
             # the precondition of this branch, enforced both in
             # ``append_history`` and by the shrinking-full guard below.
+            #
+            # WHY a ``missing`` request never reconciles: it is a targeted read
+            # of records the cache already holds, not a claim that the cache is
+            # behind the daemon. Letting it fire a回源 pull would also spend the
+            # ``mark_full_pull`` throttle budget that the genuine self-heal poll
+            # depends on.
             if (
-                snapshot.get("delivery") == "not_modified"
+                not missing_map
+                and snapshot.get("delivery") == "not_modified"
                 and not await state.full_pull_throttled(flow_id)
                 and await state.is_active_worktree_flow(
                     flow_id, owner=target_owner

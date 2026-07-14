@@ -929,12 +929,77 @@ async def _push_history_data(
     History records originate from a specific daemon (*machine_id*), so the
     delta is visible only to that machine's owner (plus the admin view) — never
     to another owner's console.
+
+    WHY the frame also carries the post-frame ``cursor`` + ``signature``: without
+    them a pushed frame is unverifiable. A client that joins the stream late (it
+    was still at the login gate — ``/api/auth/me`` 401 keeps the WebSocket
+    unopened — or the flow's pane was not yet open) sees only the tail appends
+    that happen after it arrives, and NOTHING in the frame tells it that the
+    bundle holds earlier records it never received. It then grows a headless
+    conversation and, because the server's progress receipt separately advances
+    to "fully delivered", every later poll answers ``not_modified`` and the hole
+    is welded in for good. The cursor is the bundle's own statement of what it
+    contains (per-step-file record counts), so the client can check its held
+    ``stepId#ordinal`` set against it and ask for exactly the numbers it lacks;
+    the signature says which bundle generation those counts describe.
     """
     if hub is None or hub.client_count == 0:
         return
     owner = await state.get_machine_owner(machine_id)
+    frame: Dict[str, Any] = {
+        "type": "history_data",
+        "flow_id": flow_id,
+        "mode": mode,
+        "records": records,
+    }
+    # Read the bundle AFTER the frame was applied, so the counts describe what
+    # the client should hold once it merges these records — the same values the
+    # REST snapshot would hand it at this instant. An older frontend simply
+    # ignores the extra keys.
+    meta = await state.get_history_bundle_meta(flow_id)
+    if meta is not None:
+        frame["cursor"] = meta["cursor"]
+        frame["signature"] = meta["signature"]
+        # The generation names WHICH bundle these counts belong to, so the client
+        # can scope its repair budget and its retired-unfillable numbers to that
+        # bundle and drop both the moment it is replaced.
+        frame["generation"] = meta["generation"]
+    await hub.broadcast_owned(frame, owner)
+
+
+async def _push_history_cursor(
+    hub: Optional["UiHub"],
+    state: ServerState,
+    machine_id: str,
+    flow_id: str,
+) -> None:
+    """Broadcast a records-less bundle-state advisory for *flow_id*.
+
+    WHY this exists: some frames are deliberately NOT relayed to the UI — a
+    ``mode: full`` reply that resolved a cache-miss pull (re-broadcasting it
+    would blow away the progress token the parked REST response just delivered)
+    and a ``full`` the cache rejected as truncating (#287). Suppressing the
+    RECORDS is right, but suppressing the fact that the bundle changed is not:
+    the frame that repairs a bundle after a discarded append is precisely one of
+    these, so the consoles that most need to know the head exists were the ones
+    told nothing. This advisory carries only the authoritative ``cursor`` +
+    ``signature`` — enough for a client to notice it is missing records and pull
+    exactly those numbers, with no full-frame DOM rebuild and no token reset.
+    """
+    if hub is None or hub.client_count == 0:
+        return
+    meta = await state.get_history_bundle_meta(flow_id)
+    if meta is None:
+        return
+    owner = await state.get_machine_owner(machine_id)
     await hub.broadcast_owned(
-        {"type": "history_data", "flow_id": flow_id, "mode": mode, "records": records},
+        {
+            "type": "history_cursor",
+            "flow_id": flow_id,
+            "cursor": meta["cursor"],
+            "signature": meta["signature"],
+            "generation": meta["generation"],
+        },
         owner,
     )
 
@@ -1414,17 +1479,33 @@ async def _handle_message(
             # the (still intact) bundle. The rejected records are authoritative
             # nowhere, so they go nowhere: clients stay on the cached bundle,
             # which the next poll serves unchanged.
+            #
+            # INVARIANT: records the cache DISCARDED are relayed to nobody. An
+            # append the cache refused (first sighting with no bundle behind it,
+            # a flow already flagged ``requires_full``, a cross-machine delta, a
+            # cursor gap) is authoritative NOWHERE — yet it used to be broadcast
+            # anyway, because the fan-out rule only ever looked at ``full``
+            # frames. That is how a console came to hold a headless tail: it
+            # applied an unanchored append the server itself had thrown away, so
+            # its records could not be a suffix of any bundle, and no later frame
+            # said otherwise. The bundle is repaired by the recovery pull just
+            # below; the client learns of it from that pull's frame (or from the
+            # advisory, when that frame is suppressed) — never from a record the
+            # server does not itself vouch for.
             suppress_broadcast = (
-                resolved_pull and mode == protocol.HISTORY_MODE_FULL
-            ) or outcome.rejected_full
+                (resolved_pull and mode == protocol.HISTORY_MODE_FULL)
+                or outcome.rejected_full
+                or not applied
+            )
             # HOP-4 DEBUG (server → UI fanout decision): whether this frame was
             # applied to the bundle and whether it will be broadcast to /ws/ui.
             # ``applied=False`` on a boundary append means state.append_history
             # discarded it (first-sighting or _history_requires_full) — the
             # persistent-freeze mode where every increment is dropped until a
-            # full frame (exit/re-enter) arrives. ``suppress_broadcast=True``
-            # fires for a resolved mode:full pull reply, and for a full frame the
-            # cache rejected as truncating (``rejected_full``).
+            # full frame (exit/re-enter) arrives; such a frame is no longer fanned
+            # out. ``suppress_broadcast=True`` also fires for a resolved mode:full
+            # pull reply, and for a full frame the cache rejected as truncating
+            # (``rejected_full``).
             logger.debug(
                 "hist-diag ws HISTORY_DATA flow=%s mode=%s records=%d "
                 "applied=%s rejected_full=%s resolved_pull=%s "
@@ -1479,6 +1560,18 @@ async def _handle_message(
                 await _push_history_data(
                     hub, state, machine_id, flow_id, mode, records
                 )
+            elif applied:
+                # The frame changed the bundle but its records may not be
+                # relayed (a resolved full pull whose records are already on
+                # their way back over REST, or a rejected truncating full whose
+                # records are authoritative nowhere). Suppressing the records is
+                # right; leaving the consoles unaware that the bundle moved is
+                # not — the very frame that repairs a bundle after a discarded
+                # append lands here, and a console that missed the head would
+                # otherwise never be told it exists. Send the cursor/signature
+                # alone: it costs nothing, rebuilds nothing, resets no token, and
+                # lets a client that is short of records ask for exactly those.
+                await _push_history_cursor(hub, state, machine_id, flow_id)
     elif message.type == protocol.MSG_SPAWN_FAILED:
         # The daemon could not carry out a server-dispatched spawn / resume /
         # project-init *after* the REST handler already answered 202. Relay the

@@ -1,0 +1,20 @@
+{
+  "flow_id": "20260714-122542_d4e052c5",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] se3/code-index.md\n- [modified] src/se3/server/app.py\n- [modified] src/se3/server/state.py\n- [modified] src/se3/server/static/app.js\n- [modified] src/se3/server/ws.py\n- [modified] tests/WEBUI_HISTORY_HEAD_LOSS_DIAGNOSIS.md\n- [modified] tests/WEBUI_HISTORY_HEAD_LOSS_VERIFICATION.md\n- [modified] tests/frontend/history_cursor_backfill.test.mjs\n- [modified] tests/frontend/test_app_pure.mjs\n- [modified] tests/server/test_history_backfill.py\n- [modified] tests/server/test_history_push_cursor.py\n- [modified] tests/test_server_history.py\n\n### Implementation Groups:\n- 根因诊断与部署面排查: 在动任何代码前，用现场 flow 数据与代码事实定位头部记录为何从未送达客户端，区分『旧代码未生效』与『新缺陷』，并核实 /api/auth/me 401 对 WS 建连与历史推送的影响。产出诊断记录文件，供 G6 汇入验证报告。本组只读分析 + 一个 markdown 产物，不改生产代码。\n- 服务端：missing 参数与 backfill delivery: 在 ServerState 与 /api/history/{flow_id} 上落地『按编号取记录』：新增 missing 入参、backfill delivery，保持 progress token 与 bundle signature 的铸造语义完全不变。附 tests/server 回归用例。\n- 投递路径实修：WS 帧携带 cursor + daemon/server 侧缺陷: 修复 G1 诊断出的投递路径缺陷本身（不靠补取机制掩盖）：至少包含 `_push_history_data` 广播帧补上 cursor/signature；若 G1 判定头部丢失源于 daemon 读取或 server bundle 组装/时序，则一并修复并保证 paused worktree flow 的 full 请求返回含头部的完整 bundle。\n- 前端：cursor 完整性自查 + 按编号补取 + full 回落: 在 app.js 落地用户给定的修复模型：每次收到历史响应（含 not_modified）与每帧 WS 推送后，按 recordKey=stepId#ordinal 对照 cursor 自查完整性；缺失则按编号补取；持有量超出 / 世代失配 / 补取超限则回落 full；unkeyable 按世代一次性 full 后降级 token-only。\n- 前端回归测试（node-stub 套件）: 在既有 tests/frontend node-stub 套件补齐本次机制的回归用例，并注册进 test_app_pure.mjs（由 tests/server/test_app_js_rendering.py 桥接进 pytest）。\n- 回归验证与验证报告: 运行相关测试子集，确认无回归（排除已知环境性失败），并产出验证报告：根因结论、issue 288 修复状态结论、部署面排查结果、测试范围与结果。不做任何 issue 状态变更。\n\n## Spec Changes\n\nNo spec changes recorded.\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Fix worktree-mode WebUI chat history losing the first message permanently: the head records were never delivered while the server receipt claimed full sync.",
+    "Add client-side history integrity self-check that compares held records (stepId#ordinal) against the server cursor after every poll response and WebSocket push, instead of trusting the progress token as proof of possession.",
+    "Add ordinal-based backfill: the client requests exactly the missing record numbers via a new optional `missing` parameter on `GET /api/history/{flow_id}`, and the server returns them in a new `backfill` delivery without changing progress-token semantics.",
+    "Fall back to a full history reload when the client holds more than the cursor claims, when generation/machine/signature mismatch, when backfill exceeds its budget, or when legacy records lack ordinals — with a per-(flow, generation) budget so full reloads stay an exception, never a per-append routine.",
+    "Fix the WebSocket history broadcast to carry cursor and signature, so pushed frames can be integrity-checked like polled responses.",
+    "Ensure a full history request for a paused worktree flow returns a complete bundle including the head records.",
+    "Add regression coverage for head-loss recovery, generation-mismatch fallback, backfill delivery, and unchanged token semantics in the node-stub frontend suite and server pytest suite.",
+    "Document the root cause, deployment-surface findings, and the issue 288 status conclusion (already fixed by e41a6a31's step_type sanitization) in the verification report."
+  ],
+  "bump_type": "patch",
+  "is_tag": false,
+  "pre_session_baseline": "11.22.2",
+  "provisional_suggested_version": "11.22.3",
+  "consumed": false,
+  "consumed_by": null
+}

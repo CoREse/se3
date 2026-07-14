@@ -23,7 +23,7 @@ import secrets
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from se3.daemon import protocol
 
@@ -1587,6 +1587,161 @@ class ServerState:
                 "updated_at": cached.get("updated_at"),
             }
 
+    async def get_history_bundle_meta(
+        self, flow_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the bundle's authoritative ``{cursor, signature, generation,
+        total, machine_id}`` for *flow_id*, or ``None`` on a cache miss.
+
+        WHY: a WS ``history_data`` frame historically carried only its records,
+        so a client that received a partial stream (an append it joined
+        mid-flight, or a frame that landed while it was still at the login gate)
+        had NO way to tell that the bundle holds records it never got. The
+        ``cursor`` — per-step-file record counts — is the only authoritative
+        statement of what the bundle contains, and the client checks its held
+        ``stepId#ordinal`` set against it. Pushing it with every frame is what
+        makes the push path self-checkable at all; the ``signature`` lets the
+        client tell WHICH bundle generation the counts describe, so counts from
+        a superseded bundle can never be mistaken for the current one.
+
+        The values are exactly those :meth:`get_history_snapshot` would return
+        for the same bundle at the same moment — one source of truth, so the
+        push and poll paths can never disagree about what the client should
+        hold.
+        """
+        async with self._lock:
+            cached = self._history_data.get(flow_id)
+            if cached is None:
+                return None
+            generation = self._ensure_generation(cached)
+            total = len(cached["records"])
+            machine = str(cached.get("machine_id") or "")
+            return {
+                "cursor": dict(cached.get("cursor") or {}),
+                "signature": bundle_signature(generation, total, machine),
+                "generation": generation,
+                "total": total,
+                "machine_id": machine,
+            }
+
+    @staticmethod
+    def _record_ordinal(record: Any) -> Optional[int]:
+        """The record's 0-based per-step line ordinal, or ``None`` if it has none.
+
+        Envelope-first (that is where the daemon history reader stamps it), with
+        a ``message.ordinal`` fallback for an already-unwrapped shape — mirroring
+        the frontend's ``recordOrdinal`` so both sides agree on which records are
+        addressable by ``step_id#ordinal`` and which are legacy/echo records that
+        are not.
+        """
+        if not isinstance(record, dict):
+            return None
+        value = record.get("ordinal")
+        if value is None:
+            message = record.get("message")
+            if isinstance(message, dict):
+                value = message.get("ordinal")
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    @classmethod
+    def _index_records_by_ordinal(
+        cls, records: List[Any]
+    ) -> Dict[Tuple[str, int], int]:
+        """Map ``(step_id, ordinal) -> position`` over a bundle's flat records.
+
+        WHY positions rather than the records themselves: the backfill slice must
+        be emitted in **bundle order** and unioned with the token's tail without
+        duplicating a record that appears in both, and positions make that a
+        plain set union over indices.
+
+        Records carrying no ordinal (optimistic echoes, pre-ordinal daemons) are
+        simply absent from the index — they are not addressable by number, so
+        they can never be named by a client nor mis-bound to a neighbour.
+        """
+        index: Dict[Tuple[str, int], int] = {}
+        for position, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            step_id = record.get("step_id")
+            ordinal = cls._record_ordinal(record)
+            if not step_id or ordinal is None:
+                continue
+            index.setdefault((str(step_id), ordinal), position)
+        return index
+
+    @classmethod
+    def _unnumbered_steps(cls, records: List[Any]) -> Set[str]:
+        """The step ids holding at least one record that carries no ordinal.
+
+        Such a step's records are only PARTIALLY addressable by number, so a
+        number that fails to resolve there says nothing about whether the bundle
+        holds the record — see :meth:`_locate_missing_positions`.
+        """
+        steps: Set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            step_id = record.get("step_id")
+            if step_id and cls._record_ordinal(record) is None:
+                steps.add(str(step_id))
+        return steps
+
+    @classmethod
+    def _locate_missing_positions(
+        cls, records: List[Any], missing: Dict[str, List[int]]
+    ) -> Tuple[List[int], Dict[str, List[int]], bool]:
+        """Resolve a client's missing ``(step_id, ordinal)`` list against the bundle.
+
+        Returns ``(positions, unfillable, needs_full)``: the bundle positions of
+        the numbers that DO exist, ``{step_id: [ordinal, …]}`` for the numbers the
+        bundle provably holds no record for, and a flag demanding the whole bundle
+        instead of a numbered slice.
+
+        WHY an unlocatable number is *declared* rather than escalated to a full
+        rebuild: a number below a file's cursor need not name a record at all.
+        The cursor counts PHYSICAL LINES (the daemon advances it past blank /
+        unparseable lines, and a read resumed at ``cursor_base > 0`` never emits
+        the lines below that base), so a bundle can be complete and still hold no
+        record at some number under its own cursor. Rebuilding serves the very
+        same bundle back, which still lacks the number — the client would
+        re-detect the identical hole on the next signal and re-spend its budget
+        forever. Naming the unfillable numbers instead lets the client retire
+        them from its self-check, so a permanent, legitimate gap costs exactly
+        one round-trip for the life of the flow instead of a request storm.
+
+        INVARIANT: only a number the bundle DEMONSTRABLY holds no record for may
+        be declared unfillable — a record the bundle does hold must always reach
+        the client. In a step that also carries un-numbered records (a pre-ordinal
+        daemon, an echo), a failed index lookup is ambiguous: the record may well
+        be sitting there un-numbered. Declaring it unfillable would have the
+        client retire a number whose record exists, re-creating the very
+        head-loss this repair path exists to close. So such a request escalates to
+        ``needs_full`` — one whole-bundle delivery, which renders every record
+        including the un-numbered ones — instead of a slice that silently omits it.
+
+        Cursor keys are physical ``*.jsonl`` filenames while records are keyed by
+        display step id, so a key arriving in either form is folded through
+        :func:`_display_step_id` (a no-op on a bare step id).
+        """
+        index = cls._index_records_by_ordinal(records)
+        unnumbered = cls._unnumbered_steps(records)
+        positions: List[int] = []
+        unfillable: Dict[str, List[int]] = {}
+        needs_full = False
+        for key, ordinals in missing.items():
+            step_id = _display_step_id(str(key))
+            for ordinal in ordinals:
+                position = index.get((step_id, ordinal))
+                if position is not None:
+                    positions.append(position)
+                elif step_id in unnumbered:
+                    needs_full = True
+                else:
+                    unfillable.setdefault(step_id, []).append(ordinal)
+        return positions, unfillable, needs_full
+
     async def get_history_snapshot(
         self,
         flow_id: str,
@@ -1595,6 +1750,7 @@ class ServerState:
         expected_machine_id: Optional[str] = None,
         expected_owner: Optional[str] = None,
         known_signature: Optional[str] = None,
+        missing: Optional[Dict[str, List[int]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Atomically read a full or incremental history snapshot for *flow_id*.
 
@@ -1622,15 +1778,35 @@ class ServerState:
             ``"delta"`` here, so the new state is opt-in and backward compatible.
           - ``"delta"`` — a valid token with an in-range offset behind the
             record count; ``records`` holds only the tail after that offset.
+          - ``"backfill"`` — a valid token PLUS a non-empty *missing* list: the
+            client's own cursor self-check found records it never received.
+            ``records`` holds exactly those numbered records (∪ the tail after
+            the token's offset), taken from the SAME bundle in bundle order, and
+            ``unfillable`` names the requested numbers this bundle holds no
+            record for (see :meth:`_locate_missing_positions`).
           - ``"full"`` — every fallback (no / malformed / stale token,
-            out-of-range offset, generation or machine mismatch); ``records``
-            holds the complete bundle.
+            out-of-range offset, generation or machine mismatch, or a *missing*
+            number the bundle cannot answer for unambiguously because the step
+            also holds un-numbered records); ``records`` holds the complete
+            bundle.
         * ``progress`` — a fresh opaque token pinned to this snapshot's
           generation, machine and record count, for the client to echo on its
           next reconnect.
         * ``signature`` — the bundle's short content-version signature (see
           :func:`bundle_signature`), for the client to echo back as
           *known_signature* so the server can answer ``not_modified`` cheaply.
+
+        *missing* is ``{step_id: [ordinal, …]}`` — the records the client's own
+        cursor self-check found it does NOT hold. WHY it exists at all: the
+        progress token's offset is the server's self-signed claim of what it
+        SENT, which cannot witness what the client KEPT — a record dropped in
+        flight leaves a hole the token can never see, and ``not_modified``
+        then locks that hole in forever. The authoritative per-file record count
+        (``cursor``) is what the client checks itself against, and *missing* is
+        how it names the numbers that check turned up. The token's minting
+        semantics are deliberately UNCHANGED (``offset`` still means "records in
+        this bundle"), so the delta / not_modified state machine is untouched:
+        backfill is an extra read of the same bundle, not a new token dialect.
         """
         async with self._lock:
             cached = self._history_data.get(flow_id)
@@ -1676,6 +1852,31 @@ class ServerState:
                 and 0 <= token["offset"] <= total
             )
             signature = bundle_signature(generation, total, bundle_machine)
+            # A backfill is served only ON TOP of a valid token (generation +
+            # machine + in-range offset): the numbers the client is naming are
+            # only meaningful within the bundle its cursor came from, so a token
+            # that no longer binds this bundle invalidates the numbering too and
+            # must rebuild rather than pick records out by index.
+            backfill_positions: List[int] = []
+            unfillable: Dict[str, List[int]] = {}
+            served_backfill = False
+            if is_delta and missing:
+                (
+                    backfill_positions,
+                    unfillable,
+                    needs_full,
+                ) = self._locate_missing_positions(records, missing)
+                if needs_full:
+                    # A requested number landed in a step that also holds
+                    # un-numbered records, so its absence from the index is not
+                    # evidence the bundle lacks the record. Demote to the full
+                    # delivery — it carries every record, numbered or not — rather
+                    # than answer with a slice that would omit a record we HOLD and
+                    # have the client retire its number forever.
+                    is_delta = False
+                    backfill_positions, unfillable = [], {}
+                else:
+                    served_backfill = True
             if is_delta:
                 out_records = list(records[token["offset"]:])
                 # No new records AND the client echoed a signature that still
@@ -1683,7 +1884,20 @@ class ServerState:
                 # supplied signature so a legacy client (token only) keeps
                 # getting the records-empty ``delta`` it already handles — the
                 # new state never reaches a consumer that cannot interpret it.
-                if (
+                if served_backfill:
+                    # The named records ∪ the token's tail, emitted in bundle
+                    # order and de-duplicated, so a number that also lies in the
+                    # tail travels exactly once and the client can merge the
+                    # reply by ``step_id#ordinal`` without ordering surprises.
+                    # Numbers that name no record travel back in ``unfillable``
+                    # instead — the reply is still a backfill, just a partial one
+                    # the client can reason about (see _locate_missing_positions).
+                    wanted = sorted(
+                        set(backfill_positions) | set(range(token["offset"], total))
+                    )
+                    out_records = [records[i] for i in wanted]
+                    delivery = "backfill"
+                elif (
                     token["offset"] == total
                     and known_signature is not None
                     and known_signature == signature
@@ -1728,6 +1942,19 @@ class ServerState:
                 ),
                 "signature": signature,
                 "cursor": dict(cached.get("cursor") or {}),
+                # The bundle lifecycle id the cursor's counts (and the numbers the
+                # client checks against them) describe. WHY the client needs it in
+                # the clear: its repair budget and its set of retired-unfillable
+                # numbers are facts about ONE bundle, and must be dropped the moment
+                # that bundle is replaced — a gap that was legitimately unfillable
+                # in the old generation may be a real, servable record in the new
+                # one. The signature cannot key that state (it is re-minted on every
+                # append), and the token is opaque; the generation is the only stable
+                # per-bundle identity the client can see.
+                "generation": generation,
+                # The numbers of *missing* this bundle holds no record for. Empty
+                # on every other delivery, so the reply's key set is uniform.
+                "unfillable": {k: list(v) for k, v in unfillable.items()},
                 "updated_at": cached.get("updated_at"),
             }
 
