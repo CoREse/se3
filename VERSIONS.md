@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+## 11.22.2 - 2026-07-14
+
+- Fix WebUI chat rendering aborting on locally echoed replies: the optimistic record now carries a machine-safe step_type token instead of the localized display text, which under zh-CN produced an invalid DOM class token and threw InvalidCharacterError
+- Harden conversation rendering so a single malformed record can no longer break the entire chat area — step_type tokens are sanitized and each record renders in isolation
+- Fix daemon history push dropping records permanently when a send fails: cursors are now committed only after a successful send, so unsent records are re-read and re-delivered on the next round
+- Prevent the server from accepting an empty full-history frame as authoritative for an active flow, which previously wiped out the self-heal arming and left the flow with a permanently empty history bundle
+- Add per-file cursor continuity validation to appended history frames: gapped appends are now rejected and trigger an automatic full-history recovery pull instead of silently losing the head of the conversation
+- Ensure newly opened or refreshed WebUI pages render active worktree discovery chat history from the very first record, with automatic self-heal if any frame is lost mid-stream
+- Add regression coverage across the daemon, server, and frontend layers for cursor commit-on-send, empty-full rejection, gap recovery, and DOM-token safety
 ## 11.22.1 - 2026-07-13
 
 - Fix issue #287: discovery chat history for worktree sessions no longer disappears from the WebUI — the first round is visible again and subsequent rounds stay visible, including records produced while a flow waits for a manual reply.
