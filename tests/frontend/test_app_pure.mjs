@@ -4080,6 +4080,15 @@ await fullNoClobberMod.registerFullDeliveryNoClobberTests({ app, check, checkAsy
 const stepTypeTokenSafetyMod = await import("./step_type_token_safety.test.mjs");
 stepTypeTokenSafetyMod.registerStepTypeTokenSafetyTests({ app, check, checkAsync, findOne, findAll });
 
+// Register the cursor completeness self-check + numbered backfill (the WebUI
+// head-loss repair): the console held the bundle's TAIL while the server's
+// progress receipt already read "fully delivered", so every poll was answered
+// `not_modified` and the first message stayed invisible forever. Completeness is
+// now decided against the bundle's own `cursor`, and a hole is healed by asking
+// for exactly the record numbers the client lacks.
+const cursorBackfillMod = await import("./history_cursor_backfill.test.mjs");
+await cursorBackfillMod.registerHistoryCursorBackfillTests({ app, check, checkAsync, findOne, findAll });
+
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------

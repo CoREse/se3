@@ -186,6 +186,32 @@ const state = {
   // `delivery:"not_modified"` instead of re-sending its whole bundle. Reset
   // wherever `historyProgress` is.
   historySignature: null,
+  // Cursor-completeness self-check bookkeeping (shared by both views).
+  //   backfillInFlight  — `"<view>|<flowId>" -> true` while a backfill or its
+  //     full escalation is awaiting the server, so the 3s poll and a burst of WS
+  //     frames collapse to ONE repair request instead of one per signal.
+  //   backfillAttempts  — `"<view>|<flowId>" -> { generation, backfills, full,
+  //     unkeyableFull }`, the repair budget spent against ONE bundle.
+  //   backfillUnfillable — `"<view>|<flowId>" -> { generation, map: { stepId:
+  //     [ordinal…] } }`, the numbers the SERVER answered are absent from that
+  //     bundle. A number below a file's cursor need not name a record at all (the
+  //     cursor counts physical lines, so a blank / unparseable line advances it
+  //     without emitting one), so such a number is legitimately unfillable and is
+  //     retired from the self-check rather than re-requested on every signal.
+  //
+  // Both are scoped to a (view, flow, GENERATION) — the generation being the
+  // server's lifecycle id for the bundle these facts describe (see
+  // `repairBudget`). Never to the bundle SIGNATURE: that is re-minted on every
+  // appended record, so a signature-scoped budget would be handed back on each
+  // append and a hole the server cannot fill would re-spend it forever (one full
+  // re-pull per streamed record). And never to the flow ALONE: a retired number
+  // and a spent budget are claims about one bundle, and when the daemon replaces
+  // it (a restart rewrites the step file) the very same number can name a real,
+  // servable record — carrying the old verdict across would keep that record
+  // invisible for the life of the page.
+  backfillInFlight: {},
+  backfillAttempts: {},
+  backfillUnfillable: {},
   // History-detail counterpart of `flowConversationEpoch`.
   historyEpoch: 0,
   // project_root key of the currently-selected History tab; null lets
@@ -1257,6 +1283,12 @@ function connect() {
       applyHistoryIndexDelta(msg.upserts, msg.removed);
     } else if (msg.type === "history_data" && msg.flow_id) {
       applyHistoryData(msg);
+    } else if (msg.type === "history_cursor" && msg.flow_id) {
+      // A records-less bundle-state advisory: the server applied a frame it
+      // deliberately does not relay (a cache-miss full pull, a rejected
+      // truncating full). Nothing to render, but the cursor it carries is
+      // precisely how a console learns the bundle holds records it never got.
+      applyHistoryCursor(msg);
     } else if (msg.type === "interjection_event" && msg.call_id && msg.phase) {
       applyInterjectionEvent(msg);
     } else if (msg.type === "spawn_failed") {
@@ -2585,10 +2617,13 @@ async function loadFlowConversation(flowId, opts) {
       }
     }
     if (result.render === "noop") {
-      // Nothing to repaint: a `not_modified` reply (the client was provably in
-      // sync — the common idle self-heal case) or an incremental delivery that,
-      // after dedup, added nothing new (the WS append for the same batch beat
-      // this fetch in).
+      // Nothing to REPAINT: a `not_modified` reply (the server has nothing more
+      // to send) or an incremental delivery that, after dedup, added nothing new
+      // (the WS append for the same batch beat this fetch in). It is NOT proof
+      // the view is complete — the token only records what the server sent — so
+      // the cursor self-check still runs; on the healthy path it is one set
+      // comparison and no request.
+      await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation);
       return;
     }
     // Reconcile after the merge: if the response already holds the daemon's
@@ -2607,6 +2642,7 @@ async function loadFlowConversation(flowId, opts) {
     // still holds the pre-merge array. Only the silent path opts in — a first-open
     // / reconnect must always render its authoritative result.
     if (silent && sameRenderedConversation(reconciled, state.flowConversationRecords)) {
+      await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation);
       return;
     }
     state.flowConversationRecords = reconciled;
@@ -2638,6 +2674,11 @@ async function loadFlowConversation(flowId, opts) {
       restoreScrollAnchor(
         container, state.flowConversationRecords, scrollAnchor, preserveScrollTop);
     }
+    // The reply is rendered; now verify it is COMPLETE. A delta/full can itself
+    // arrive with the head still absent (the server only ever sends what its
+    // receipt says is outstanding), so the cursor check runs on every delivery,
+    // not just the no-op ones.
+    await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation);
   } catch (_) {
     if (
       state.selectedFlowId !== flowId ||
@@ -4818,7 +4859,21 @@ function rejectsEmptyFullPush(records, held) {
   return records.length === 0 && Array.isArray(held) && held.length > 0;
 }
 
+// Apply a pushed history frame, then self-check what the view now holds against
+// the frame's authoritative cursor. WHY the check runs even when the frame was
+// discarded as an all-duplicate or empty-full re-delivery (hence the `finally`):
+// the hole this heals is one the frame itself does NOT carry — a console that
+// missed the head only ever sees tail appends, and every one of them is its cue
+// to notice the head is absent and pull it by number.
 function applyHistoryData(msg) {
+  try {
+    applyHistoryFrameRecords(msg);
+  } finally {
+    applyHistoryCursor(msg);
+  }
+}
+
+function applyHistoryFrameRecords(msg) {
   const records = Array.isArray(msg.records) ? msg.records : [];
   const append = msg.mode === "append";
   if (wsHistDebug()) {
@@ -5299,7 +5354,9 @@ async function openHistorySession(flowId, opts) {
     }
     if (result.render === "noop") {
       // A `not_modified` reply, or a delta that added nothing new after dedup —
-      // keep the existing detail as-is.
+      // nothing to repaint. As in loadFlowConversation this is not evidence of
+      // completeness, so the cursor self-check still runs.
+      await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation);
       return;
     }
     state.historyRecords = result.records;
@@ -5308,6 +5365,7 @@ async function openHistorySession(flowId, opts) {
     refreshHistoryStickyHeader();
     updateHistoryUsageBadge(state.historyRecords);
     if (stick) scrollHistoryToBottom();
+    await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation);
   } catch (_) {
     if (
       state.selectedHistoryId !== flowId ||
@@ -7162,6 +7220,140 @@ function dedupeSnapshotDiscovery(records) {
   return dropped ? out : records;
 }
 
+// --- cursor completeness self-check (numbered backfill) ---------------------
+//
+// WHY this layer exists at all: the progress token's offset is the SERVER's
+// self-signed receipt of what it SENT, and nothing ever reconciles it against
+// what the client KEPT. A client that joined the stream late (the `/api/auth/me`
+// 401 login gate holds the WebSocket shut, so it sees no push at all until it
+// authenticates) or that lost a single frame holds a TAIL of the bundle while
+// the receipt already reads "fully delivered" — every later poll is answered
+// `not_modified`, and the hole is welded in permanently (the live head-loss
+// defect: cursor said 2 records, the console held 1, and no code path could ever
+// notice). The bundle's `cursor` — its own per-step-file record COUNTS — is the
+// only signal that describes the bundle's CONTENT rather than the server's
+// belief about the client, so completeness is decided against the cursor, by
+// checking that every `stepId#ordinal` in 0..n-1 is actually held.
+
+//: Must match the server's MISSING_MAX_ORDINALS (src/se3/server/app.py) — a
+//: longer list is rejected there, so encoding one would waste a round trip.
+const MISSING_MAX_ORDINALS = 200;
+//: Per (view, flow, bundle generation): how many numbered backfills to try
+//: before escalating to one full re-pull, and then giving up. WHY a cap: when
+//: the server bundle ITSELF lacks the number (a record the daemon never
+//: reported), the self-check can never be satisfied and an uncapped reconcile
+//: would fire one request per poll, forever.
+const MAX_BACKFILL_ATTEMPTS = 2;
+
+// Map a cursor key (a physical history filename) to the step id the records
+// carry. Mirrors the daemon's `_display_step_id`: strip at `.jsonl`, but KEEP a
+// `.from-<branch>` merge-back sidecar marker, because the daemon gives each
+// physical file a distinct step id so their per-file ordinals cannot collide.
+function stepIdFromCursorKey(filename) {
+  if (typeof filename !== "string") return "";
+  const idx = filename.indexOf(".jsonl");
+  if (idx < 0) return filename;
+  const stem = filename.slice(0, idx);
+  const suffix = filename.slice(idx + ".jsonl".length);
+  const m = /^\.from-(.+)$/.exec(suffix);
+  return m ? `${stem}.from-${m[1]}` : stem;
+}
+
+// Compare the records a view HOLDS against the counts the bundle's `cursor`
+// declares, and report exactly which record numbers are absent.
+//
+// `unfillable` (optional) is `{ stepId: [ordinal…] }` — numbers the SERVER has
+// already answered are absent from its bundle. They are excluded from `missing`:
+// the cursor counts PHYSICAL LINES (a blank / unparseable line advances it
+// without producing a record, and a read resumed at a non-zero base never emits
+// the lines below it), so a number under the cursor need not name a record at
+// all. Re-asking for one on every signal — and re-pulling the whole bundle when
+// the ask fails — is exactly the request storm the numbering was meant to avoid.
+//
+// Returns `{ missing, surplus, unkeyable }`:
+//   * `missing`   — `{ stepId: [ordinal…] }`, the numbers in 0..n-1 the client
+//                   does not hold and the server has not declared unfillable (a
+//                   step file it holds NOTHING of yields the whole 0..n-1 range).
+//   * `surplus`   — the client holds MORE records for a step than the cursor
+//                   claims exist (or one numbered at/after n). The numbering no
+//                   longer describes the same bundle, so a numbered backfill
+//                   would be meaningless — the caller must re-pull in full.
+//   * `unkeyable` — a step covered by the cursor holds a record with no ordinal
+//                   (a pre-ordinal daemon). Such a record is not addressable by
+//                   number, so the numbered self-check is not a sound
+//                   completeness test here and the caller must simply SKIP it —
+//                   falling back to the token-only behaviour. It must NOT force a
+//                   full re-pull: the condition holds for every frame the flow
+//                   ever pushes, which would trade one cheap delta poll for one
+//                   whole-bundle download per streamed record.
+// Pure / DOM-free. Optimistic local echoes are excluded from the held set (they
+// belong to no server bundle, carry no ordinal, and would otherwise read as
+// either surplus or un-numbered records), as are records whose step is absent
+// from the cursor.
+function findMissingOrdinals(records, cursor, unfillable) {
+  const missing = {};
+  let surplus = false;
+  let unkeyable = false;
+  if (!cursor || typeof cursor !== "object") {
+    return { missing, surplus, unkeyable };
+  }
+  const held = new Map();     // stepId -> { ords: Set, count, legacy: bool }
+  for (const rec of (Array.isArray(records) ? records : [])) {
+    if (rec && rec.__localEcho) continue;
+    let stepId = "";
+    try { stepId = normalizeRecord(rec).stepId || ""; } catch (_) { stepId = ""; }
+    if (!stepId) continue;
+    let entry = held.get(stepId);
+    if (!entry) {
+      entry = { ords: new Set(), count: 0, legacy: false };
+      held.set(stepId, entry);
+    }
+    entry.count += 1;
+    const ord = recordOrdinal(rec);
+    if (ord == null) entry.legacy = true;
+    else entry.ords.add(ord);
+  }
+  const known = (unfillable && typeof unfillable === "object") ? unfillable : {};
+  for (const key of Object.keys(cursor)) {
+    const total = cursor[key];
+    if (typeof total !== "number" || !Number.isInteger(total) || total < 0) continue;
+    const stepId = stepIdFromCursorKey(key);
+    if (!stepId) continue;
+    const entry = held.get(stepId) || { ords: new Set(), count: 0, legacy: false };
+    if (entry.legacy) unkeyable = true;
+    const retired = new Set(Array.isArray(known[stepId]) ? known[stepId] : []);
+    if (entry.count > total) surplus = true;
+    const gaps = [];
+    for (let i = 0; i < total; i++) {
+      if (!entry.ords.has(i) && !retired.has(i)) gaps.push(i);
+    }
+    for (const ord of entry.ords) {
+      if (ord >= total) surplus = true;
+    }
+    if (gaps.length) missing[stepId] = gaps;
+  }
+  return { missing, surplus, unkeyable };
+}
+
+// Encode a `{ stepId: [ordinal…] }` map into the `missing=` wire form the
+// history endpoint parses: `stepId:ord,ord;stepId:ord`. Returns null when there
+// is nothing to ask for, or when the list exceeds the server's ordinal cap — the
+// caller then re-pulls in full rather than sending a request the server would
+// reject.
+function encodeMissingParam(missing) {
+  if (!missing || typeof missing !== "object") return null;
+  const groups = [];
+  let total = 0;
+  for (const stepId of Object.keys(missing)) {
+    const ords = missing[stepId];
+    if (!Array.isArray(ords) || !ords.length) continue;
+    total += ords.length;
+    if (total > MISSING_MAX_ORDINALS) return null;
+    groups.push(`${stepId}:${ords.join(",")}`);
+  }
+  return groups.length ? groups.join(";") : null;
+}
+
 // Build the `GET /api/history/{flow_id}` URL, appending the opaque progress
 // token as the `after` query parameter when one is held so the server can
 // serve an incremental delta. With no progress (first open / after an
@@ -7169,7 +7361,13 @@ function dedupeSnapshotDiscovery(records) {
 // full snapshot — the first-open behaviour is unchanged. The token is encoded
 // via URLSearchParams so a base64url token (`-` / `_` / `=`) is transmitted
 // safely. Shared by both the running-flow and history-detail reconnect loaders.
-function historySnapshotUrl(flowId, progress, signature) {
+//
+// `missing` (optional) is the encoded record-number list a cursor self-check
+// found absent; the server answers it with `delivery:"backfill"` — exactly those
+// records, taken from the SAME bundle the held token pins. It therefore only
+// travels alongside a live token, for the same reason `sig` does: the numbers
+// are only meaningful within the generation the token binds.
+function historySnapshotUrl(flowId, progress, signature, missing) {
   const base = `/api/history/${encodeURIComponent(flowId)}`;
   if (!progress) return base;
   const params = new URLSearchParams();
@@ -7179,6 +7377,7 @@ function historySnapshotUrl(flowId, progress, signature) {
   // matches, so a `sig` without an `after` offset is meaningless. Omitted when
   // none is held so a token-only reconnect still gets a delta/full.
   if (signature) params.set("sig", signature);
+  if (missing) params.set("missing", missing);
   return `${base}?${params.toString()}`;
 }
 
@@ -7249,7 +7448,10 @@ function stableMergeByTimestamp(held, fresh, requestBaseline) {
 // request, and therefore the only data safe to preserve across a full fallback
 // that invalidates the previous cache generation.
 //
-// Returns `{ records, progress, signature, render }` where:
+// Returns `{ records, progress, signature, cursor, generation, render }` where:
+//   * `generation`— the lifecycle id of the bundle `cursor` describes (or null
+//                  when the reply carried none / its cursor was withheld). The
+//                  self-check scopes its per-bundle repair state to it.
 //   * `records`  — the merged array the caller should adopt.
 //   * `progress` — the response's fresh progress token (a string, or null when
 //                  the response carried none) for the caller to store and echo
@@ -7257,6 +7459,16 @@ function stableMergeByTimestamp(held, fresh, requestBaseline) {
 //   * `signature`— the response's bundle content signature (a string, or null),
 //                  for the caller to store and echo as `?sig=` so an unchanged
 //                  bundle can be answered `not_modified` next time.
+//   * `cursor`   — the response's authoritative per-step-file record counts (or
+//                  null when it carried none), returned on EVERY branch so the
+//                  caller can run its completeness self-check. WHY it must
+//                  travel even on `not_modified`: the progress token proves only
+//                  what the server SENT, never what the client KEPT, so
+//                  `not_modified` is no longer evidence of being in sync — it
+//                  merely means the caller has nothing to REPAINT. Completeness
+//                  is decided by the caller against this cursor
+//                  (`reconcileCursorCompleteness`), and a hole found there is
+//                  healed by a numbered backfill.
 //   * `render`   — how the caller should paint the result:
 //       - "delta": an incremental delivery whose new records were appended
 //         (after `dedupeAppendRecords` filtered out anything already held);
@@ -7274,6 +7486,18 @@ function stableMergeByTimestamp(held, fresh, requestBaseline) {
 // already holds rather than adopting this (null) pair — the frame is discarded
 // wholesale, so nothing about the held generation changed.
 function mergeHistoryResponse(response, existing, requestBaseline) {
+  const merged = mergeHistoryDelivery(response, existing, requestBaseline);
+  // The bundle generation travels WITH the cursor, never apart from it: the two
+  // are one statement ("this bundle holds these counts"), and the self-check
+  // scopes its repair budget and its retired numbers to it. A frame whose cursor
+  // was withheld (the #287 empty-full rejection) therefore carries no generation
+  // either — there is nothing to key against.
+  merged.generation = (merged.cursor && response
+    && Number.isInteger(response.generation)) ? response.generation : null;
+  return merged;
+}
+
+function mergeHistoryDelivery(response, existing, requestBaseline) {
   const base = Array.isArray(existing) ? existing : [];
   const baseline = Array.isArray(requestBaseline) ? requestBaseline : base;
   const records = (response && Array.isArray(response.records))
@@ -7282,14 +7506,41 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
     ? response.progress : null;
   const signature = (response && typeof response.signature === "string")
     ? response.signature : null;
+  const cursor = (response && response.cursor && typeof response.cursor === "object")
+    ? response.cursor : null;
   if (response && response.delivery === "not_modified") {
-    // The client is provably in sync (the echoed token's offset equals the
-    // record count AND the echoed signature matched), so the server sent no
-    // records. Hold the existing array and skip every render — the extra-small
-    // idle-poll reply that keeps the periodic self-heal from re-searching the
-    // whole bundle. progress/signature are still refreshed so the next poll
-    // keeps comparing against the current generation.
-    return { records: base, progress, signature, render: "noop" };
+    // The server has nothing further to SEND (the echoed token's offset equals
+    // its record count and the signature matched), so there is nothing to
+    // repaint — the extra-small idle-poll reply that keeps the periodic
+    // self-heal from re-shipping the whole bundle. WHY this is no longer taken
+    // as proof the client is in SYNC: the token's offset is the server's own
+    // receipt of what it sent, so a client that never received (or never kept) a
+    // record is answered `not_modified` forever and its hole never heals — the
+    // live head-loss defect. The caller must still self-check the returned
+    // `cursor` against the records it holds; `noop` now means only "nothing to
+    // render".
+    return { records: base, progress, signature, cursor, render: "noop" };
+  }
+  if (response && response.delivery === "backfill") {
+    // The numbered records this client's cursor self-check found it lacked,
+    // taken from the SAME bundle its token pins (plus that token's tail). They
+    // are by definition NOT tail records — the head/middle of the conversation —
+    // so an append render cannot place them: fold them in by timestamp (the
+    // reconcile de-dups by `stepId#ordinal`, making a repeated backfill of the
+    // same number idempotent) and rebuild in full.
+    const rec = reconcileAppendRecords(base, records);
+    if (!rec.changed) {
+      return { records: base, progress, signature, cursor, render: "noop" };
+    }
+    return {
+      records: rec.fresh.length
+        ? stableMergeByTimestamp(rec.rebased, rec.fresh, requestBaseline)
+        : rec.rebased,
+      progress,
+      signature,
+      cursor,
+      render: "full",
+    };
   }
   if (response && response.delivery === "delta") {
     // Idempotent reconcile: `fresh` are the genuinely-new lines to place by
@@ -7302,7 +7553,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       // Every delta record is a byte-identical re-delivery of a line already
       // held (e.g. the WS append for the same batch beat the snapshot in).
       // Nothing to render.
-      return { records: base, progress, signature, render: "noop" };
+      return { records: base, progress, signature, cursor, render: "noop" };
     }
     const fresh = rec.fresh;
     if (rec.updatedInPlace) {
@@ -7315,6 +7566,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
           : rec.rebased,
         progress,
         signature,
+        cursor,
         render: "full",
       };
     }
@@ -7347,7 +7599,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       ? recordSortTs(base[base.length - 1]) : -Infinity;
     const inOrder = fresh.every((r) => recordSortTs(r) > tailTs);
     if (inOrder) {
-      return { records: base.concat(fresh), progress, signature, render: "delta" };
+      return { records: base.concat(fresh), progress, signature, cursor, render: "delta" };
     }
     return {
       // Pass the RAW `requestBaseline` (not the `base`-defaulted `baseline`) so
@@ -7358,6 +7610,7 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       records: stableMergeByTimestamp(base, fresh, requestBaseline),
       progress,
       signature,
+      cursor,
       render: "full",
     };
   }
@@ -7379,6 +7632,11 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
       records: base,
       progress: null,
       signature: null,
+      // The frame is discarded wholesale, so its cursor — which describes the
+      // rejected EMPTY bundle — must not reach the completeness self-check
+      // either: checking against it would read every held record as surplus and
+      // trigger a pointless full re-pull of the very bundle we just refused.
+      cursor: null,
       render: "noop",
       preserveTokens: true,
     };
@@ -7424,8 +7682,257 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
     records: mergeSnapshotWithLiveAppends(dedupeSnapshotDiscovery(records), preserved),
     progress,
     signature,
+    cursor,
     render: "full",
   };
+}
+
+// --- the completeness self-check entry point --------------------------------
+//
+// Run after EVERY history signal — each REST reply folded by
+// `mergeHistoryResponse` (including a `not_modified`, whose whole point used to
+// be "do nothing") and each WS `history_data` / `history_cursor` frame, both of
+// which now carry the post-frame cursor. It compares the records the view holds
+// against the bundle's own per-file counts and repairs any hole by asking for
+// exactly the numbers it lacks.
+//
+// WHY the repair is a NUMBERED backfill rather than a full re-pull: the full
+// bundle of a long flow is megabytes, the server throttles full pulls, and the
+// hole is usually one record — so a full re-pull is the wrong instrument for the
+// common case. It stays as the fallback for the cases where the NUMBERING itself
+// cannot be trusted (surplus / legacy un-numbered records / no token to pin a
+// generation / the backfill budget spent).
+
+function viewIsCurrent(view, flowId) {
+  return view === "flow"
+    ? state.selectedFlowId === flowId
+    : state.selectedHistoryId === flowId;
+}
+
+function heldHistoryRecords(view) {
+  return view === "flow" ? state.flowConversationRecords : state.historyRecords;
+}
+
+// Adopt a repair reply's records into `view` and repaint from scratch. A
+// backfill lands head/middle records, so the cheap append render never applies.
+function commitBackfillResult(view, flowId, result) {
+  if (!result.preserveTokens) {
+    if (view === "flow") {
+      state.flowConversationProgress = result.progress;
+      if (result.signature != null) state.flowConversationSignature = result.signature;
+    } else {
+      state.historyProgress = result.progress;
+      if (result.signature != null) state.historySignature = result.signature;
+    }
+  }
+  if (result.render === "noop") return;
+  if (view === "flow") {
+    const container = $("flow-conversation");
+    const stick = isNearBottom(container);
+    state.flowConversationRecords = reconcileLocalEchoes(result.records);
+    container.__convState = null;
+    renderConversation(container, state.flowConversationRecords, false);
+    refreshFlowStickyHeader();
+    updateFlowUsageBadge(state.flowConversationRecords);
+    if (stick) scrollFlowConversationToBottom();
+  } else {
+    const stick = isNearBottom(historyScrollContainer());
+    state.historyRecords = result.records;
+    renderHistoryRecords(flowId, state.historyRecords, false);
+    refreshHistoryStickyHeader();
+    updateHistoryUsageBadge(state.historyRecords);
+    if (stick) scrollHistoryToBottom();
+  }
+}
+
+// Drop the held token/signature and re-pull the whole bundle. Used only when the
+// numbering is unusable, so it must be able to cross a generation boundary: the
+// held token is discarded (not echoed), which makes the loader send the bare
+// no-token URL the server answers with a complete `delivery:"full"`.
+async function forceFullHistoryReload(view, flowId) {
+  if (view === "flow") {
+    state.flowConversationProgress = null;
+    state.flowConversationSignature = null;
+    await loadFlowConversation(flowId, { silent: true });
+  } else {
+    state.historyProgress = null;
+    state.historySignature = null;
+    await openHistorySession(flowId, { incremental: true });
+  }
+}
+
+// The repair budget spent against ONE bundle. Scoped to (view, flow, generation):
+// every fact it carries — how much of the budget is gone, whether the un-numbered
+// escalation has already been tried — is a claim about the bundle currently
+// cached server-side, and is void the moment the daemon replaces it. Re-keying on
+// a generation change hands the new bundle a fresh budget, which is exactly right:
+// a hole in a NEW bundle is a new hole and deserves its own repair attempts.
+//
+// `generation` is null when the server (or a test stub) sends none; every signal
+// then keys the same null bucket, which degrades to the flow-scoped budget rather
+// than to an unbounded one.
+function repairBudget(key, generation) {
+  const gen = Number.isInteger(generation) ? generation : null;
+  let spent = state.backfillAttempts[key];
+  if (!spent || spent.generation !== gen) {
+    spent = { generation: gen, backfills: 0, full: 0, unkeyableFull: false };
+    state.backfillAttempts[key] = spent;
+  }
+  return spent;
+}
+
+// The numbers the SERVER has declared its bundle holds no record for, for the
+// bundle *generation* currently held. A verdict from a superseded bundle is
+// dropped rather than carried over — see `repairBudget`.
+function retiredOrdinals(key, generation) {
+  const gen = Number.isInteger(generation) ? generation : null;
+  const known = state.backfillUnfillable[key];
+  if (!known || known.generation !== gen) return null;
+  return known.map;
+}
+
+// Fold a backfill reply's `unfillable` list into the generation's retired-number
+// set, so a number the server has told us its bundle does not hold is never asked
+// for again while that bundle stands. Returns true when something was retired.
+function retireUnfillableOrdinals(key, generation, unfillable) {
+  if (!unfillable || typeof unfillable !== "object") return false;
+  const gen = Number.isInteger(generation) ? generation : null;
+  let entry = state.backfillUnfillable[key];
+  if (!entry || entry.generation !== gen) {
+    entry = { generation: gen, map: {} };
+  }
+  let retired = false;
+  for (const stepId of Object.keys(unfillable)) {
+    const ords = unfillable[stepId];
+    if (!Array.isArray(ords) || !ords.length) continue;
+    const merged = new Set(entry.map[stepId] || []);
+    for (const ord of ords) {
+      if (Number.isInteger(ord)) { merged.add(ord); retired = true; }
+    }
+    entry.map[stepId] = Array.from(merged);
+  }
+  if (retired) state.backfillUnfillable[key] = entry;
+  return retired;
+}
+
+async function reconcileCursorCompleteness(view, flowId, cursor, generation) {
+  if (!flowId || !cursor || typeof cursor !== "object") return;
+  if (!viewIsCurrent(view, flowId)) return;
+  const flightKey = `${view}|${flowId}`;
+  if (state.backfillInFlight[flightKey]) return;
+
+  const held = heldHistoryRecords(view);
+  const probe = findMissingOrdinals(
+    held, cursor, retiredOrdinals(flightKey, generation));
+  const spent = repairBudget(flightKey, generation);
+  const progress = view === "flow"
+    ? state.flowConversationProgress : state.historyProgress;
+  const signature = view === "flow"
+    ? state.flowConversationSignature : state.historySignature;
+
+  if (probe.unkeyable) {
+    // The view holds a record no number can name (a pre-ordinal daemon), so the
+    // numbered check cannot decide whether anything is missing — and a numbered
+    // backfill could not repair it if it were. Escalate ONCE per generation to a
+    // token-less full re-pull, which serves every record the bundle holds
+    // regardless of numbering and so heals a genuine hole here in a single
+    // request. If the view is STILL unkeyable after that full, the un-numbered
+    // records are a property of the daemon, not a transient hole: retire the
+    // numbered self-check for this bundle (falling back to the token-only
+    // behaviour, zero extra requests) rather than re-pull once per streamed
+    // record. A new generation re-arms it — the replacing daemon may well number.
+    if (spent.unkeyableFull) return;
+    spent.unkeyableFull = true;
+    state.backfillInFlight[flightKey] = true;
+    try {
+      await forceFullHistoryReload(view, flowId);
+    } catch (_) {
+      // Transient: the retirement stands for this generation either way — a
+      // failed full is not evidence the numbering became usable.
+    } finally {
+      delete state.backfillInFlight[flightKey];
+    }
+    return;
+  }
+
+  const encoded = probe.surplus ? null : encodeMissingParam(probe.missing);
+
+  if (!probe.surplus && !Object.keys(probe.missing).length) {
+    // Healthy: the held set covers every number the bundle declares (bar the
+    // ones the server declared unfillable). Zero extra requests, zero renders —
+    // the idle poll stays as cheap as it was — and the repair budget is released
+    // so a LATER hole in this flow is still repairable.
+    delete state.backfillAttempts[flightKey];
+    return;
+  }
+
+  // A numbered backfill is only servable against a live token: the numbers name
+  // positions in the bundle that token pins. With no token (or with a surplus,
+  // which means the numbering no longer describes this bundle) the only sound
+  // repair is a full re-pull.
+  const canBackfill = !!(encoded && progress && spent.backfills < MAX_BACKFILL_ATTEMPTS);
+  if (!canBackfill && spent.full >= 1) {
+    // The budget is spent and the hole is still open. Stop: repeating the
+    // request every poll would turn a server-side gap into a client-driven
+    // request storm. The budget is handed back by a clean self-check (the flow
+    // actually recovered) or by a new bundle generation, never by a mere new
+    // record arriving.
+    // eslint-disable-next-line no-console
+    console.debug(
+      "history cursor self-check: gap persists after backfill+full for flow=%s (view=%s) — giving up",
+      flowId, view);
+    return;
+  }
+
+  state.backfillInFlight[flightKey] = true;
+  try {
+    if (!canBackfill) {
+      spent.full += 1;
+      await forceFullHistoryReload(view, flowId);
+      return;
+    }
+    spent.backfills += 1;
+    const requestRecords = held;
+    const resp = await authedFetch(
+      historySnapshotUrl(flowId, progress, signature, encoded));
+    if (!resp.ok || !viewIsCurrent(view, flowId)) return;
+    const data = await resp.json();
+    if (!viewIsCurrent(view, flowId)) return;
+    // Numbers the bundle holds no record for are retired BEFORE the merge, so
+    // the self-check that runs on the next signal no longer counts them missing
+    // and the repair converges instead of re-firing. Retired against the REPLY's
+    // generation — the bundle whose verdict this is — which may already differ
+    // from the one the probe ran against.
+    if (data && Number.isInteger(data.generation)) {
+      retireUnfillableOrdinals(flightKey, data.generation, data.unfillable);
+    } else {
+      retireUnfillableOrdinals(flightKey, generation, data && data.unfillable);
+    }
+    commitBackfillResult(
+      view, flowId,
+      mergeHistoryResponse(data, heldHistoryRecords(view), requestRecords));
+  } catch (_) {
+    // A transient failure changes nothing: the next poll re-runs the self-check
+    // and, since the hole is still there, retries within the same budget.
+  } finally {
+    delete state.backfillInFlight[flightKey];
+  }
+}
+
+// Run the self-check for whichever view(s) a WS frame concerns. Both
+// `history_data` (records + post-frame cursor) and the records-less
+// `history_cursor` advisory (the frame that REPAIRS a bundle the cache refused to
+// relay) land here, so the push path is self-checkable exactly like the poll.
+function applyHistoryCursor(msg) {
+  if (!msg || !msg.flow_id || !msg.cursor) return;
+  if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
+    void reconcileCursorCompleteness(
+      "history", msg.flow_id, msg.cursor, msg.generation);
+  }
+  if (state.selectedFlowId === msg.flow_id) {
+    void reconcileCursorCompleteness(
+      "flow", msg.flow_id, msg.cursor, msg.generation);
+  }
 }
 
 // Reduce a user record's text to its literal, marker-stripped, trimmed form so
@@ -14216,6 +14723,13 @@ if (typeof module !== "undefined" && module.exports) {
     stableMergeByTimestamp,
     historySnapshotUrl,
     mergeHistoryResponse,
+    // Cursor completeness self-check + numbered backfill (head-loss repair) —
+    // exposed for tests/frontend/history_cursor_backfill.test.mjs.
+    stepIdFromCursorKey,
+    findMissingOrdinals,
+    encodeMissingParam,
+    reconcileCursorCompleteness,
+    applyHistoryCursor,
     reconcileLocalEchoes,
     comparableUserText,
     // Optimistic reply echo + send path (G1/G2) — exposed for the DOM-stub
