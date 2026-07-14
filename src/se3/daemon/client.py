@@ -1618,13 +1618,25 @@ class DaemonClient:
         except Exception:
             logger.exception("Active-flow history read failed")
             return
-        # Rebuild the cursor map from this read so it tracks exactly the flows
-        # still producing records: every active flow (always returned, even with
-        # an empty delta, so its cursor keeps advancing) plus any terminal flow
-        # flushed one last time. Atomic engine.json writes mean an active flow is
-        # never transiently missing, so pruning cannot accidentally trigger a
-        # duplicate full re-read.
-        new_cursors = {read.flow_id: read.cursor for read in reads}
+        # The cursor map tracks exactly the flows still producing records: every
+        # active flow (always returned, even with an empty delta, so its cursor
+        # keeps advancing) plus any terminal flow flushed one last time. Atomic
+        # engine.json writes mean an active flow is never transiently missing, so
+        # pruning cannot accidentally trigger a duplicate full re-read.
+        #
+        # INVARIANT: a flow's entry in ``self._history_cursors`` is the water mark
+        # the PEER has received, never merely the one we have READ off disk. The
+        # candidate cursors computed here are therefore only *committed* per flow
+        # once that flow's frame has actually left the socket (or there was
+        # nothing to send). WHY: the previous code installed the whole read-side
+        # map up front and treated a send failure as a bare `log + return`, which
+        # marked records as delivered that never reached the server — the next
+        # round read past them and they were lost for the lifetime of the flow
+        # (the "chat history is missing its first round" symptom, #287). Retaining
+        # the old cursor makes ``read_flow`` fall back to a full re-read from that
+        # water mark next round, re-sending the dropped batch; the resulting
+        # overlap is absorbed by the server-side dedupe.
+        candidates = {read.flow_id: read.cursor for read in reads}
         # Retain the cursor of a terminal flow that produced no records this
         # round but is still the live engine.json flow (e.g. a FAILED flow
         # awaiting `se3 run --resume`). Without this it would drop out the round
@@ -1639,13 +1651,26 @@ class DaemonClient:
         # the authoritative active-flow reads are deliberately un-cached fresh
         # reads, so this call would otherwise cache-miss and parse on the loop.
         resumable = await asyncio.to_thread(self._resumable_flow_ids, provider)
-        for flow_id, cursor in self._history_cursors.items():
-            if flow_id not in new_cursors and flow_id in resumable:
-                new_cursors[flow_id] = cursor
-        self._history_cursors = new_cursors
+        previous = self._history_cursors
+        committed: Dict[str, Dict[str, int]] = {
+            flow_id: cursor
+            for flow_id, cursor in previous.items()
+            if flow_id not in candidates and flow_id in resumable
+        }
+        # A flow with an empty delta ships no frame, so its candidate cursor is
+        # committed unconditionally — there is no delivery that could fail.
         for read in reads:
             if not read.records:
-                continue
+                committed[read.flow_id] = read.cursor
+
+        def _keep_old(flow_id: str) -> None:
+            """Preserve *flow_id*'s pre-send water mark so the batch is re-read."""
+            old = previous.get(flow_id)
+            if old is not None:
+                committed[flow_id] = old
+
+        pending = [read for read in reads if read.records]
+        for position, read in enumerate(pending):
             # HOP-3 DEBUG (daemon→server send): the actual MSG_HISTORY_DATA frame
             # leaving the daemon. If this line appears for the analyze records but
             # the UI never renders them, the drop is downstream (server
@@ -1667,8 +1692,21 @@ class DaemonClient:
                     ),
                 )
             except Exception:
-                logger.debug("HISTORY_DATA send failed", exc_info=True)
+                logger.debug(
+                    "hist-diag HISTORY_DATA send failed flow=%s cursor=%s "
+                    "(cursor NOT advanced; batch will be re-read next round)",
+                    read.flow_id, read.cursor, exc_info=True,
+                )
+                # The socket is down: this flow and every flow still queued behind
+                # it keep their old water mark, so the next round re-reads and
+                # re-sends them. Flows already sent this round stay committed —
+                # rolling them back would only manufacture duplicate traffic.
+                for unsent in pending[position:]:
+                    _keep_old(unsent.flow_id)
+                self._history_cursors = committed
                 return
+            committed[read.flow_id] = read.cursor
+        self._history_cursors = committed
 
     async def _push_history_index(
         self,
