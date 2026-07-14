@@ -3473,6 +3473,20 @@ function normalizeKind(kind) {
   return KIND_META[k] ? k : "call";
 }
 
+// The `step_type` of an optimistic local echo, e.g. "reply_call".
+// WHY: `step_type` is an IDENTIFIER, never display text — it is used as a DOM
+// class suffix (`step-type-<type>`), as a grouping key, and as the step-header
+// fallback. Putting a rendered i18n label in it made the field's DOM validity
+// depend on the language pack: zh-CN's "待回复 回复" contains a space, and
+// `classList.add()` then threw InvalidCharacterError on every render of the
+// echo, freezing the whole chat view. The token is therefore derived from the
+// (already canonical, ASCII) kind and never passes through I18N; the human
+// label is resolved separately at render time by stepHeaderLabel.
+const REPLY_STEP_TYPE_PREFIX = "reply_";
+function replyStepType(kind) {
+  return REPLY_STEP_TYPE_PREFIX + normalizeKind(kind);
+}
+
 // Derive the ordered list of intervention entries for a flow. Each pending
 // call becomes one entry. The reply box is enabled ONLY when an entry exists,
 // so during a normal step with nothing waiting on input the box stays
@@ -4563,7 +4577,6 @@ async function sendReply(flowId, target, text) {
 // visible immediately, without waiting for the next `history_data` push.
 function appendLocalReply(flowId, target, text) {
   if (state.selectedFlowId !== flowId) return;
-  const meta = KIND_META[target.kind] || KIND_META.call;
   // Snapshot this reply's *rank* among all copies of the same text — i.e. how
   // many prior copies already exist, counting BOTH authoritative (non-echo)
   // user records AND still-pending optimistic echoes of the same text. This
@@ -4596,11 +4609,6 @@ function appendLocalReply(flowId, target, text) {
     console.error("appendLocalReply: best-effort rank computation failed", err);
     priorCopies = 0;
   }
-  // The echo's step header is rendered from this literal (stepHeaderLabel falls
-  // back to the raw step_type), so compose it through I18N like every other
-  // dynamic label — otherwise a zh-CN user sees English chrome until the
-  // daemon's authoritative record replaces the echo.
-  const kindLabel = tf(meta.labelKey, meta.label);
   const record = {
     step_id: "interaction",
     // Mark this as the optimistic echo and keep the original literal text so
@@ -4617,8 +4625,9 @@ function appendLocalReply(flowId, target, text) {
       role: "user",
       content: text,
       timestamp: Date.now(),
-      step_type: tf("flow.stepType.response", kindLabel + " response",
-        { label: kindLabel }),
+      // A machine-safe token (see replyStepType) — NOT the display label. The
+      // localized header text is resolved from it at render time.
+      step_type: replyStepType(target && target.kind),
     },
   };
   // State is the source of truth: append the echo to the conversation records
@@ -7634,15 +7643,34 @@ function stepKey(norm) {
   return String(norm.stepId || norm.stepType || "step");
 }
 
+// Coerce an arbitrary step-type string into a legal DOM token (the suffix of a
+// `step-type-<token>` class): lower-case, whitespace folded to "-", anything
+// outside [a-z0-9_-] dropped, runs of "-" collapsed and trimmed. Returns "" when
+// nothing legal survives (e.g. a pure-CJK label), which callers read as "skip".
+// WHY: `classList.add()` throws InvalidCharacterError on a token containing
+// whitespace, and a record's step_type is untrusted input — it can come from a
+// version-skewed daemon or from an older frontend's echo left in state. The
+// renderer must never be the thing that a single bad field takes down.
+function sanitizeDomToken(raw) {
+  return String(raw == null ? "" : raw)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-]+|[-]+$/g, "");
+}
+
 // Tag a conversation bubble with a stable, lower-cased `step-type-<type>` DOM
 // class so a later group can paint each step region with a low-saturation,
 // distinguishable per-step grouping style. Applied uniformly to every bubble
 // (chat turns, step-event rows, step_started anchors) in addConversationRecords
 // so the whole step region — start status, conversation, and final report —
 // shares one step-type class. No-op when the step type is empty (legacy
-// records), so nothing dangling is added.
+// records) or sanitizes to nothing, so nothing dangling — and nothing illegal —
+// is added. Never throws, whatever it is handed.
 function tagStepType(bubble, stepType) {
-  const key = String(stepType || "").toLowerCase();
+  const key = sanitizeDomToken(stepType);
   if (key && bubble && bubble.classList) {
     bubble.classList.add("step-type-" + key);
   }
@@ -7804,6 +7832,18 @@ function stepHeaderLabel(stepType, fallback) {
     const tr = I18N.resolve("stepHeader." + key);
     return tr != null ? tr : STEP_HEADER_TITLES[key];
   }
+  // Optimistic local echoes carry a `reply_<kind>` token rather than a rendered
+  // label (see replyStepType): compose the human heading here, from the SAME
+  // i18n keys the intervention chip uses, so the echo's header stays localized
+  // without the label ever leaking back into the identifier field.
+  if (key.startsWith(REPLY_STEP_TYPE_PREFIX)) {
+    const meta = KIND_META[key.slice(REPLY_STEP_TYPE_PREFIX.length)];
+    if (meta) {
+      const kindLabel = tf(meta.labelKey, meta.label);
+      return tf("flow.stepType.response", kindLabel + " response",
+        { label: kindLabel });
+    }
+  }
   return fallback || stepType || "step";
 }
 
@@ -7942,70 +7982,83 @@ function addConversationRecords(container, st, records, startIndex) {
         el("p", "md-p conv-empty",
           tf("conv.recordUnrenderable", "(this record could not be rendered)")));
     }
-    bubble.__convTs = tsValue(norm && norm.timestamp);
-    bubble.__convIdx = i;
-    bubble.__convStepKey = stepKey(norm || {});
-    bubble.__convStepType = (norm && norm.stepType) || "";
-    tagStepType(bubble, bubble.__convStepType);
-    bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
-    // Tag partial (stream-progress) bubbles so they can be folded away once the
-    // turn's final result arrives (see removeSupersededProgress).
-    bubble.__convPartial = !!(norm && norm.partial);
-    if (bubble.__convPartial) {
-      bubble.classList.add("conv-partial");
-      bubble.__convTurnKey = progressTurnKey(norm);
+    // WHY: one dirty record must never break the whole conversation render.
+    // Everything below (ordering metadata, DOM-class tagging, the supersede
+    // tags, the insert) touches untrusted record fields, and this loop sits on
+    // the ws.onmessage → applyHistoryData → renderConversation path where an
+    // escaping throw freezes the entire chat view — not just the offending
+    // bubble — until the reader exits and re-enters the session (that is exactly
+    // how a single echo with a space in its step_type froze live chat). Isolate
+    // per record: log, drop this one bubble, keep the batch flowing.
+    try {
+      bubble.__convTs = tsValue(norm && norm.timestamp);
+      bubble.__convIdx = i;
+      bubble.__convStepKey = stepKey(norm || {});
+      bubble.__convStepType = (norm && norm.stepType) || "";
+      tagStepType(bubble, bubble.__convStepType);
+      bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
+      // Tag partial (stream-progress) bubbles so they can be folded away once the
+      // turn's final result arrives (see removeSupersededProgress).
+      bubble.__convPartial = !!(norm && norm.partial);
+      if (bubble.__convPartial) {
+        bubble.classList.add("conv-partial");
+        bubble.__convTurnKey = progressTurnKey(norm);
+      }
+      // Tag the step lifecycle status anchors (step_started / step_status /
+      // waiting_for_lock) so a later, more-current anchor for the SAME step
+      // region supersedes the earlier one — the region then shows only its
+      // current state (等待锁 → 进行中 → 已暂停) rather than stacking redundant
+      // status rows.
+      bubble.__convStatusRow = !!(
+        norm
+        && (norm.kind === "step_started"
+          || norm.kind === "step_status"
+          || norm.kind === "waiting_for_lock"));
+      // Tag the terminal report rows (step_completed / step_failed). Once a step
+      // region has a terminal report, ITS non-terminal status anchors (进行中 /
+      // 已暂停 / 重试中) are stale — the report card itself conveys the final
+      // completed/failed state — so removeSupersededStatusRows drops them. This
+      // is what stops a finished region from simultaneously showing 进行中 (or a
+      // stale 已暂停) alongside its completed report.
+      bubble.__convTerminalRow = !!(
+        norm && (norm.kind === "step_completed" || norm.kind === "step_failed"));
+      // Tag per-group DAG status markers with a (step_id, group_id) composite
+      // identity. A group emits several `group_status` records over its lifetime
+      // (running w/o model → running w/ agent → running w/ agent·model →
+      // completed/failed), all sharing one (step_id, group_id); they must
+      // converge to a SINGLE card that updates in place. removeSupersededStatusRows
+      // can't do this — it keys on step_id alone, and many groups of one implement
+      // step share a step_id, so it would wrongly fold distinct groups together.
+      // removeSupersededGroupStatusRows reconciles per composite key instead, so
+      // each group keeps its own card while successive records for the SAME group
+      // (which carry the accumulated agent/model) supersede the older one in place.
+      if (norm && norm.kind === "group_status") {
+        const gStatus = String(norm.status || "").toLowerCase();
+        bubble.__convGroupStatusRow = true;
+        bubble.__convGroupId = norm.groupId || "";
+        bubble.__convGroupStatusKey =
+          String(norm.stepId || stepKey(norm)) + "#" + (norm.groupId || "");
+        bubble.__convGroupStatusTerminal =
+          ["completed", "failed", "skipped"].includes(gStatus);
+      }
+      // Tag code-index update-progress markers so a step's successive markers
+      // (one per file/dir node, each with a higher `done`) converge to a SINGLE
+      // progress line that updates in place. Unlike group_status these key on the
+      // step_id ALONE: one commit step rebuilds ONE index, so every marker of the
+      // step is the same climbing line. removeSupersededIndexProgressRows keeps the
+      // latest (terminal-preferred) marker per step so the count advances and the
+      // icon flips to ✓ instead of stacking one row per file.
+      if (norm && norm.kind === "index_progress") {
+        bubble.__convIndexProgressRow = true;
+        bubble.__convIndexProgressKey = String(norm.stepId || stepKey(norm));
+        bubble.__convIndexProgressTerminal =
+          indexProgressState(norm.done, norm.total) === "completed";
+      }
+      insertBubbleSorted(container, bubble);
+    } catch (err) {
+      try { console.error("conversation record post-render failed", i, err); }
+      catch (_) { /* console may be absent */ }
     }
-    // Tag the step lifecycle status anchors (step_started / step_status /
-    // waiting_for_lock) so a later, more-current anchor for the SAME step
-    // region supersedes the earlier one — the region then shows only its
-    // current state (等待锁 → 进行中 → 已暂停) rather than stacking redundant
-    // status rows.
-    bubble.__convStatusRow = !!(
-      norm
-      && (norm.kind === "step_started"
-        || norm.kind === "step_status"
-        || norm.kind === "waiting_for_lock"));
-    // Tag the terminal report rows (step_completed / step_failed). Once a step
-    // region has a terminal report, ITS non-terminal status anchors (进行中 /
-    // 已暂停 / 重试中) are stale — the report card itself conveys the final
-    // completed/failed state — so removeSupersededStatusRows drops them. This
-    // is what stops a finished region from simultaneously showing 进行中 (or a
-    // stale 已暂停) alongside its completed report.
-    bubble.__convTerminalRow = !!(
-      norm && (norm.kind === "step_completed" || norm.kind === "step_failed"));
-    // Tag per-group DAG status markers with a (step_id, group_id) composite
-    // identity. A group emits several `group_status` records over its lifetime
-    // (running w/o model → running w/ agent → running w/ agent·model →
-    // completed/failed), all sharing one (step_id, group_id); they must
-    // converge to a SINGLE card that updates in place. removeSupersededStatusRows
-    // can't do this — it keys on step_id alone, and many groups of one implement
-    // step share a step_id, so it would wrongly fold distinct groups together.
-    // removeSupersededGroupStatusRows reconciles per composite key instead, so
-    // each group keeps its own card while successive records for the SAME group
-    // (which carry the accumulated agent/model) supersede the older one in place.
-    if (norm && norm.kind === "group_status") {
-      const gStatus = String(norm.status || "").toLowerCase();
-      bubble.__convGroupStatusRow = true;
-      bubble.__convGroupId = norm.groupId || "";
-      bubble.__convGroupStatusKey =
-        String(norm.stepId || stepKey(norm)) + "#" + (norm.groupId || "");
-      bubble.__convGroupStatusTerminal =
-        ["completed", "failed", "skipped"].includes(gStatus);
-    }
-    // Tag code-index update-progress markers so a step's successive markers
-    // (one per file/dir node, each with a higher `done`) converge to a SINGLE
-    // progress line that updates in place. Unlike group_status these key on the
-    // step_id ALONE: one commit step rebuilds ONE index, so every marker of the
-    // step is the same climbing line. removeSupersededIndexProgressRows keeps the
-    // latest (terminal-preferred) marker per step so the count advances and the
-    // icon flips to ✓ instead of stacking one row per file.
-    if (norm && norm.kind === "index_progress") {
-      bubble.__convIndexProgressRow = true;
-      bubble.__convIndexProgressKey = String(norm.stepId || stepKey(norm));
-      bubble.__convIndexProgressTerminal =
-        indexProgressState(norm.done, norm.total) === "completed";
-    }
-    insertBubbleSorted(container, bubble);
   }
   // Advance the cursor before the (stateless) header rebuild so the count is
   // correct even if header rebuilding ever throws. The cursor counts processed
@@ -14042,6 +14095,8 @@ if (typeof module !== "undefined" && module.exports) {
     isCollapsibleRole,
     chipLabel,
     normalizeKind,
+    replyStepType,
+    sanitizeDomToken,
     computeInterventions,
     normalizeRecord,
     isActiveFlow,

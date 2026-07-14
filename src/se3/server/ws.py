@@ -1337,12 +1337,18 @@ async def _handle_message(
         mode = str(message.payload.get("mode") or "")
         records = message.payload.get("records") or []
         cursor = message.payload.get("cursor") or {}
+        # Absent from a version-skewed daemon's frame; the gap check falls back
+        # to its count-derived estimate when it is empty.
+        cursor_base = message.payload.get("cursor_base") or {}
         if flow_id and isinstance(records, list):
             outcome = await state.apply_history_frame(
                 flow_id,
                 mode,
                 records,
                 cursor=cursor if isinstance(cursor, dict) else {},
+                cursor_base=(
+                    cursor_base if isinstance(cursor_base, dict) else {}
+                ),
                 machine_id=machine_id,
             )
             applied = outcome.resolves_pull

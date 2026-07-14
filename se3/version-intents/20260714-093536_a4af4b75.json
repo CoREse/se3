@@ -1,0 +1,19 @@
+{
+  "flow_id": "20260714-093536_a4af4b75",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] se3/code-index.md\n- [modified] src/se3/daemon/client.py\n- [modified] src/se3/daemon/history.py\n- [modified] src/se3/daemon/protocol.py\n- [modified] src/se3/server/state.py\n- [modified] src/se3/server/static/app.js\n- [modified] src/se3/server/ws.py\n- [modified] tests/daemon/__init__.py\n- [modified] tests/daemon/test_push_history_cursor_commit.py\n- [modified] tests/frontend/step_type_token_safety.test.mjs\n- [modified] tests/frontend/test_app_pure.mjs\n- [modified] tests/server/test_history_cursor_base_coverage.py\n- [modified] tests/server/test_history_gap_recovery.py\n- [modified] tests/test_frontend_step_type_token_safety.py\n- [modified] tests/test_history_head_truncation_interlock.py\n\n### Implementation Groups:\n- Bug A：前端 step_type 毒丸与渲染容错: 把乐观回显记录的 step_type 从 i18n 显示文案改为机器安全的稳定 token，显示文案与标识符解耦；给 tagStepType 加 DOM token 消毒、给会话渲染加单条记录隔离，使任何一条脏记录都不能中断整个聊天区渲染。补齐 Node 断言套件与 pytest 桥接。\n- Bug B-1：daemon 游标提交与发送成功绑定: 修复 _push_history 中『游标先整体前进、发送失败仅 log + return』导致记录永不重发的漏洞：改为逐 read 在 _send 成功后才提交该 flow 的新 cursor，失败保留旧 cursor 供下轮重读重发；并核对 read_flow 根解析失败返回空 full 的应答路径。\n- Bug B-2/B-3：server 拒空守卫扩展与 append 游标连续性校验: 在 apply_history_frame 中堵死两个结构性漏洞：活跃 flow 的空 full 不得在空缓存上建立权威 bundle（且不得解除 requires_full/recovery 武装）；append 分支新增 per-file cursor 连续性校验，检测到缺口即拒收并触发既有 self-heal 全量拉取。这是不依赖上游正确性的兜底不变量。\n- 跨层验证、触发链确认与回归收敛: 合流验证：跑通三层测试套件与既有相关回归，在 DEBUG 日志下复现 worktree discovery 首轮场景以确认头部丢失实际走的触发链（漏洞 1 还是 2），并把结论沉淀进提交信息。\n\n## Spec Changes\n\nNo spec changes recorded.\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Fix WebUI chat rendering aborting on locally echoed replies: the optimistic record now carries a machine-safe step_type token instead of the localized display text, which under zh-CN produced an invalid DOM class token and threw InvalidCharacterError",
+    "Harden conversation rendering so a single malformed record can no longer break the entire chat area — step_type tokens are sanitized and each record renders in isolation",
+    "Fix daemon history push dropping records permanently when a send fails: cursors are now committed only after a successful send, so unsent records are re-read and re-delivered on the next round",
+    "Prevent the server from accepting an empty full-history frame as authoritative for an active flow, which previously wiped out the self-heal arming and left the flow with a permanently empty history bundle",
+    "Add per-file cursor continuity validation to appended history frames: gapped appends are now rejected and trigger an automatic full-history recovery pull instead of silently losing the head of the conversation",
+    "Ensure newly opened or refreshed WebUI pages render active worktree discovery chat history from the very first record, with automatic self-heal if any frame is lost mid-stream",
+    "Add regression coverage across the daemon, server, and frontend layers for cursor commit-on-send, empty-full rejection, gap recovery, and DOM-token safety"
+  ],
+  "bump_type": "patch",
+  "is_tag": false,
+  "pre_session_baseline": "11.22.1",
+  "provisional_suggested_version": "11.22.2",
+  "consumed": false,
+  "consumed_by": null
+}
