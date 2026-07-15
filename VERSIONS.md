@@ -1,5 +1,12 @@
 # SE3 Framework Version History
 
+## 11.22.4 - 2026-07-15
+
+- Fix worktree flows writing round-1 chat history (user prompt, stream, and assistant reply) into the main checkout instead of the worktree, the root cause of the first message and first reply being invisible in the WebUI
+- Add a shared flow project_root resolver that prefers the flow's stored context['project_root'] so in-process steps and the orchestration layer agree on a single history home per flow
+- Preserve the existing change_path.parent → cwd() fallback so legacy-persisted flows and non-worktree flows keep their current behavior
+- Route all step handlers (discovery, analyze, plan, implement, commit, confirm, self_check, summarize, and others) through the shared resolver to prevent divergent history writes
+- Add regression tests covering project_root resolution priority and worktree round-1 history write targeting
 ## 11.22.3 - 2026-07-14
 
 - Fix worktree-mode WebUI chat history losing the first message permanently: the head records were never delivered while the server receipt claimed full sync.
