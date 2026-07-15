@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..project_context import ProjectContextCollector
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def project_summary_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     logger.info("Generating project summary...")
 

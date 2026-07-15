@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ def test_handler_with_fail_loop(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED with test results
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     tracker_file = project_root / TEST_RUN_TRACKER_FILE
     
     # Read current run count

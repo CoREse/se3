@@ -64,6 +64,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .. import adjudication
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ._project_root import resolve_flow_project_root
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -715,7 +716,7 @@ def adjudicate_handler(step: Step, flow: FlowInstance) -> StepStatus:
     post-ruling routing (skip IMPLEMENT/TEST, re-run SELF_CHECK at pass #1) are
     the state machine's responsibility.
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     ctx = flow.state.context if flow.state else {}
 
     ledger = _ledger(flow)

@@ -85,6 +85,7 @@ from ..charter import (
 )
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
@@ -613,7 +614,7 @@ def charter_freshness_handler(step: Step, flow: FlowInstance) -> StepStatus:
     mode (no precondition, gate rejection, LLM/write error) degrades to today's
     advisory behavior with the charter left byte-for-byte unchanged.
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     changes_made = step.inputs.get("changes_made") or {}
     if not isinstance(changes_made, dict):

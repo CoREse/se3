@@ -13,6 +13,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_step_language_instruction,
         get_runtime_environment_injection,
     )
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     lang_instruction = get_step_language_instruction("summarize", project_root)
     if lang_instruction:
         prompt += lang_instruction
@@ -573,7 +574,7 @@ def _save_summary(flow: FlowInstance, summary_text: str) -> None:
         flow: The flow instance
         summary_text: Summary text to save
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Save to se3/state/summary-{flow_id}.md (Markdown format)
     summary_dir = project_root / "se3" / "state"

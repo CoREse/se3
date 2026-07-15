@@ -36,6 +36,7 @@ from typing import Any
 from ..charter import load_charter
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 from ...config import DEFAULT_MAX_FIX_ITERATIONS
@@ -699,7 +700,7 @@ def invariant_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     validation, letting the state machine route the fix loop and handle
     exhaustion centrally.
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     changes_made = step.inputs.get("changes_made") or {}
 

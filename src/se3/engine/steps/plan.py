@@ -16,6 +16,7 @@ from ..display import get_console
 from ..formatters import TaskFormatter
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
@@ -401,7 +402,7 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_code_index_injection,
         get_runtime_environment_injection,
     )
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     # All three injections key off "plan": this handler is the unified planning
     # step, and deprecated stubs (PROPOSE/DESIGN/PLAN_TASKS) forward here to do
     # plan work. Using "plan" keeps injection semantics consistent regardless

@@ -33,6 +33,7 @@ from ..prompt_markers import inject_boundary
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..utils.json_parser import parse_json_response
 from .plan import VERSION_FILE_GUARDRAIL as _PLAN_VERSION_FILE_GUARDRAIL
 
@@ -423,7 +424,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     is_fix_iteration = step.inputs.get("is_fix_iteration", False)
     fix_iteration = step.inputs.get("fix_iteration", 0)
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Baseline for session-commit collection: prefer the flow-wide baseline
     # captured at flow init (state_machine._record_baseline_commit), which is
