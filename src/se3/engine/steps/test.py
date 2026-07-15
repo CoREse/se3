@@ -27,6 +27,7 @@ from typing import Any, Dict, List
 from ...i18n import t
 from ..baseline_fix_memory import load_given_up, record_given_up
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..truncation import (
     FAILURES_SECTION_MAX_CHARS,
     FIX_STDERR_TAIL_CHARS,
@@ -310,7 +311,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     from ...config import TestConfig
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     config = TestConfig.load(project_root)
 
     verdict = run_and_classify_tests(

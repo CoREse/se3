@@ -16,6 +16,7 @@ from typing import Any
 from .. import adjudication
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 from ..truncation import (
     PHASE_STDERR_TAIL_CHARS,
@@ -722,7 +723,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         fix_context=fix_context_text,
     )
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Inject the project charter (full text) + the code-index top map, replacing
     # the retired spec-name list.

@@ -15,6 +15,7 @@ from ..context_builder import (
 from ..interaction_calls import CALL_KIND_CONFIRM
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ._project_root import resolve_flow_project_root
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -227,7 +228,7 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     # requirement-coverage review (decompose requirements -> check every
     # requirement has a covering task), fully decoupled from the generic
     # per-step confirm; every other step keeps the generic review prompt.
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     task_description = step.inputs.get("task_description", flow.task_description)
     if step_to_review_type == 'plan':
         prompt = build_plan_confirm_prompt(
@@ -329,7 +330,7 @@ def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return status
 
     # Human reviewer path
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
     calls_dir = project_root / "se3" / "calls"
 
     change_id = flow.change_name or flow.flow_id

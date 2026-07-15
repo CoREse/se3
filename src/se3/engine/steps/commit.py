@@ -27,6 +27,7 @@ from ..git_tags import (
     tag_name_for_version,
 )
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ._project_root import resolve_flow_project_root
 from ..version_bumper import VersionBumper, VersionConfig
 
 logger = logging.getLogger(__name__)
@@ -359,7 +360,7 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Check if there are changes to commit
     baseline_commit = getattr(flow, "baseline_commit", None)
@@ -1192,7 +1193,7 @@ def _guard_version_race(
         )
         return target_version
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Crash-resume own-write recognition (change D, issue: set_version→commit
     # crash window). If the process died AFTER set_version wrote the version file
@@ -1706,7 +1707,7 @@ def _generate_template_summary(flow: FlowInstance, step: Step) -> None:
         flow: The flow instance
         step: The commit step (with outputs populated)
     """
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     commit_message = step.outputs.get("commit_message", "")
     commit_hash = step.outputs.get("commit_hash", "unknown")

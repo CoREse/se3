@@ -14,6 +14,7 @@ from typing import Any, Optional
 from ..context import effective_task_type
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 
 logger = logging.getLogger(__name__)
@@ -230,7 +231,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Get current version if available
     current_version = _get_current_version(flow)
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Read optional project-specific version rules
     rules_text = _read_version_rules_file(project_root)
@@ -594,7 +595,7 @@ def _get_current_version(flow: FlowInstance) -> str:
         from ...config import load_version_config
         from ..version_bumper import VersionBumper
 
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+        project_root = resolve_flow_project_root(flow)
         config = load_version_config(project_root)
 
         if not config.enabled:

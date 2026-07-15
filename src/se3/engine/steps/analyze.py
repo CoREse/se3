@@ -23,6 +23,7 @@ from typing import List
 from ..context import RUN_MODE_TYPES
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, get_default_step_sequence
+from ._project_root import resolve_flow_project_root
 from ..project_context import ProjectContextCollector
 from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
@@ -112,7 +113,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.error_message = "No task description provided"
         return StepStatus.FAILED
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # --- Pre-processing (programmatic, no LLM) ---
 
@@ -390,7 +391,7 @@ def _update_flow_steps(
     # Get default sequence for task type (fixed sequences per spec)
     selected_steps = get_default_step_sequence(task_type)
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Append optional steps from se3.yaml (e.g. summarize).
     # _update_flow_steps rebuilds from the default sequence every time, so

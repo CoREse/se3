@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ._project_root import resolve_flow_project_root
 from ..prompt_markers import wrap_user_section
 from ..utils.json_parser import parse_json_response
 
@@ -635,7 +636,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     resumed = step.inputs.get("resumed", False)
     user_response = step.inputs.get("user_response", "")
 
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    project_root = resolve_flow_project_root(flow)
 
     # Gather project context
     project_context = _gather_project_context(project_root)
