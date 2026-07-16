@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.22.5 - 2026-07-16
+
+- Auto-repair a project's `.gitignore` when the `se3/version-intents/` path is ignored, so pre-11.14.0 projects that never ran `se3 migrate` no longer break the version_analyze step mid-flow
+- Handle both legacy `.gitignore` shapes: insert the `!/se3/version-intents/` whitelist after an existing `/se3/*` layer, or synthesize the `!/se3/` + `/se3/*` + `!/se3/version-intents/` structure when the whole `se3/` directory is ignored
+- Re-verify with `git check-ignore` after self-heal and emit a warning-level log noting the automatic `.gitignore` edit, then continue writing the intent so the worktree flow is no longer interrupted
+- Keep fail-loud behavior only when self-heal truly cannot succeed, raising VersionIntentIgnoredError with corrected guidance to fix the flow's worktree `.gitignore` (or run `se3 migrate`) and resume
+- Remove the inaccurate 're-running se3 init adds it' message, which never actually added the version-intents whitelist to an existing `.gitignore`
+- Preserve existing best-effort tolerance for missing git, non-git repositories, and `git check-ignore` failures so those cases never block intent writes
 ## 11.22.4 - 2026-07-15
 
 - Fix worktree flows writing round-1 chat history (user prompt, stream, and assistant reply) into the main checkout instead of the worktree, the root cause of the first message and first reply being invisible in the WebUI

@@ -220,39 +220,287 @@ def write_intent(project_root: Path, intent: VersionIntent) -> Path:
     return path
 
 
-def _assert_intent_path_not_ignored(project_root: Path, path: Path) -> None:
-    """Raise :class:`VersionIntentIgnoredError` if *path* is gitignored.
+# The whitelist line that makes ``se3/version-intents/`` tracked again, plus the
+# structural rules a self-heal appends when ``se3/`` is ignored as a whole dir.
+# git cannot re-include a path under a fully-excluded parent, so a lone negative
+# rule is void: the dir must first be re-included (``!/se3/``), its contents
+# re-excluded (``/se3/*``), and only then the intents whitelisted.
+_INTENT_WHITELIST_LINE = f"!/{VERSION_INTENT_DIR_RELPATH}/"
+_SE3_CONTENTS_ANCHOR = "/se3/*"
+_SE3_WHOLE_DIR_REINCLUDE = "!/se3/"
+# Ways a legacy .gitignore may exclude the whole ``se3/`` directory. When any of
+# these coexists with a ``/se3/*`` anchor, the anchor+whitelist alone are void —
+# git won't recurse into a fully-excluded parent — so the ``!/se3/`` re-include
+# is also required (see :func:`_heal_gitignore_for_intents`).
+_SE3_WHOLE_DIR_RULES = frozenset({"/se3/", "se3/", "/se3", "se3"})
 
-    Best-effort: a missing git / non-repo / probe fault does NOT block the write
-    (``git check-ignore`` exit 128 or a subprocess error) — only a definitive
-    "this path is ignored" (exit 0) raises. The whole point is to catch the one
-    concrete, actionable misconfiguration (an old committed .gitignore that
-    ignores ``se3/`` without the ``!/se3/version-intents/`` whitelist) at its
-    source rather than let it fail the flow's final step with a wrong diagnosis.
+# Sentinel distinguishing "pre-heal .gitignore was unreadable" from "no
+# .gitignore existed". Rollback must skip the former (unlinking on None would
+# destroy a real-but-unreadable file whose ignore verdict came from
+# .git/info/exclude or core.excludesFile), and only remove a file the heal
+# itself created for the latter.
+_GITIGNORE_PRESTATE_UNKNOWN = object()
+
+
+def _probe_ignored(project_root: Path, rel: str) -> bool:
+    """Return True iff git DEFINITIVELY reports *rel* as ignored.
+
+    Best-effort: a missing git / non-repo / probe fault (``git check-ignore``
+    exit 128 or a subprocess/OS error) reads as "not ignored" (returns False) so
+    it never blocks the write — only a real "this path is ignored" (exit 0)
+    returns True.
     """
-    try:
-        rel = os.path.relpath(path, project_root)
-    except ValueError:
-        return
     try:
         # -q: quiet, exit status only. 0 => ignored, 1 => not ignored, 128 =>
         # fatal (not a repo / no HEAD). check=False so only a real "ignored"
-        # signal (rc 0) blocks; everything else falls through to the write.
+        # signal (rc 0) counts; everything else is treated as not-ignored.
         result = _run_git(
             project_root, "check-ignore", "-q", "--", rel, check=False, timeout=15
         )
     except (subprocess.SubprocessError, OSError) as exc:
         logger.debug("check-ignore probe failed for %s: %s", rel, exc)
-        return
-    if result.returncode == 0:
-        raise VersionIntentIgnoredError(
-            f"the version-intent path {rel!r} is gitignored, so the commit step's "
-            f"'git add -A' cannot stage it and this worktree session's version "
-            f"bump/changelog would never reach the merge-side version_reconcile. "
-            f"Add a whitelist line '!/{VERSION_INTENT_DIR_RELPATH}/' to .gitignore "
-            f"(re-running 'se3 init' / 'se3 migrate' adds it), commit it, and "
-            f"resume."
+        return False
+    return result.returncode == 0
+
+
+def _probe_not_ignored_definitive(project_root: Path, rel: str) -> bool:
+    """Return True ONLY when git DEFINITIVELY reports *rel* as NOT ignored.
+
+    Stricter than the negation of :func:`_probe_ignored`: this returns True *only*
+    on ``git check-ignore`` exit 1 (a positive "not ignored" verdict). Any probe
+    fault (subprocess/OS error, timeout, exit 128) returns False. Used for the
+    POST-heal re-verification, where the path was already definitively reported
+    ignored moments earlier: a faulted re-probe leaves the heal's effectiveness
+    unproven, and releasing the write on it would risk the very silent version /
+    changelog loss the fail-loud guard exists to prevent, so only a proven-clear
+    verdict may release.
+    """
+    try:
+        result = _run_git(
+            project_root, "check-ignore", "-q", "--", rel, check=False, timeout=15
         )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.debug("check-ignore re-probe failed for %s: %s", rel, exc)
+        return False
+    return result.returncode == 1
+
+
+def _heal_gitignore_for_intents(project_root: Path) -> bool:
+    """Idempotently patch ``project_root/.gitignore`` so intents are tracked.
+
+    Ensures the ``!/se3/version-intents/`` whitelist genuinely takes effect on an
+    existing project whose committed ``.gitignore`` predates it. Two legacy
+    shapes are covered:
+
+      * a ``/se3/*`` anchor already exposes ``se3/``'s contents — the whitelist
+        is inserted right after that anchor (mirroring
+        :func:`migrate_cmd._rewrite_gitignore`'s insertion), so the negation
+        takes effect. If a whole-dir rule (``/se3/`` etc.) coexists with the
+        anchor, the ``!/se3/`` re-include is additionally inserted before the
+        anchor, since the anchor alone is void under a fully-excluded parent;
+      * ``se3/`` (or ``/se3/``) is ignored as a WHOLE directory — a lone
+        negation is void under a fully-excluded parent, so the re-include /
+        re-exclude / whitelist trio (``!/se3/`` + ``/se3/*`` + the whitelist) is
+        appended to reconstruct a tracked ``se3/version-intents/``.
+
+    In both shapes the whitelist is placed AFTER the ``/se3/*`` re-exclude,
+    because it is effective only as the last matching rule. A legacy file may
+    already carry a VOID whitelist positioned before the anchor (the exact state
+    a user reaches by following the OLD error text under a still-excluded
+    parent); such an occurrence is repositioned after the anchor rather than
+    left stranded, else ``/se3/*`` would remain the last match and the heal would
+    fail its own re-probe.
+
+    Idempotent: an already-effective whitelist (present and after the anchor) is
+    left untouched, so a repeat call (or a second flow's write) adds nothing.
+    Returns whether the file was modified. Propagates :class:`OSError` (unreadable /
+    unwritable file) AND :class:`UnicodeDecodeError` (a legacy ``.gitignore``
+    with non-UTF-8 bytes — ``git check-ignore`` matches on raw bytes, so such a
+    file can still cause the ignore this heal must repair) — the caller must be
+    able to tell a real self-heal from a silently-failed one (re-including a
+    version bump that git will drop is worse than surfacing the fault), so the
+    failure is NOT swallowed as success. ``UnicodeDecodeError`` is a
+    ``ValueError`` subclass (NOT an ``OSError``), so the caller catches it
+    explicitly, mirroring :func:`migrate_cmd._rewrite_gitignore`.
+    """
+    path = Path(project_root) / ".gitignore"
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+
+    lines = original.splitlines()
+    stripped = {ln.strip() for ln in lines}
+    changed = False
+
+    # se3/ excluded as a WHOLE directory: a lone whitelist is void under a fully
+    # excluded parent, so the dir must first be re-included (``!/se3/``) before its
+    # contents are re-excluded (``/se3/*``) and only then the intents whitelisted.
+    whole_dir_ignored = bool(stripped & _SE3_WHOLE_DIR_RULES)
+
+    # Establish the ``/se3/*`` re-exclude anchor. The intents whitelist takes
+    # effect ONLY as the last matching rule, so it must ultimately sit AFTER this
+    # anchor; everything below positions relative to it.
+    anchor_idx = next(
+        (i for i, ln in enumerate(lines) if ln.strip() == _SE3_CONTENTS_ANCHOR),
+        None,
+    )
+    if anchor_idx is None:
+        # Shape (b): no ``/se3/*`` anchor yet. Re-include se3/ first when it is
+        # whole-dir excluded, then append the contents re-exclude to anchor onto.
+        if whole_dir_ignored and _SE3_WHOLE_DIR_REINCLUDE not in stripped:
+            lines.append(_SE3_WHOLE_DIR_REINCLUDE)
+            stripped.add(_SE3_WHOLE_DIR_REINCLUDE)
+            changed = True
+        lines.append(_SE3_CONTENTS_ANCHOR)
+        stripped.add(_SE3_CONTENTS_ANCHOR)
+        anchor_idx = len(lines) - 1
+        changed = True
+    elif whole_dir_ignored and _SE3_WHOLE_DIR_REINCLUDE not in stripped:
+        # Shape (a) COEXISTING with a whole-dir ignore (a hand-edited legacy file
+        # carrying both ``/se3/`` and ``/se3/*``): the anchor+whitelist are void
+        # until se3/ is re-included. Insert ``!/se3/`` just before the anchor
+        # (after the whole-dir rule, before ``/se3/*`` re-excludes the contents) so
+        # the directory is re-included first.
+        lines.insert(anchor_idx, _SE3_WHOLE_DIR_REINCLUDE)
+        stripped.add(_SE3_WHOLE_DIR_REINCLUDE)
+        anchor_idx += 1
+        changed = True
+
+    # Position the whitelist AFTER the anchor. A legacy file may already carry a
+    # VOID whitelist before the anchor — e.g. ``/se3/`` + ``!/se3/version-intents/``,
+    # the exact state a user reaches by following the OLD error text and appending
+    # the negation under a still-excluded parent. Set-membership dedup alone would
+    # leave that occurrence stranded before the ``/se3/*`` re-exclude we add, so
+    # ``/se3/*`` would remain the last match and the path stay ignored. Reposition
+    # any occurrence that is not already after the anchor so the negation genuinely
+    # wins; the post-heal re-probe is the final arbiter for unusual orderings.
+    whitelist_positions = [
+        i for i, ln in enumerate(lines) if ln.strip() == _INTENT_WHITELIST_LINE
+    ]
+    if not (whitelist_positions and all(i > anchor_idx for i in whitelist_positions)):
+        for i in reversed(whitelist_positions):
+            del lines[i]
+            if i < anchor_idx:
+                anchor_idx -= 1
+        lines.insert(anchor_idx + 1, _INTENT_WHITELIST_LINE)
+        stripped.add(_INTENT_WHITELIST_LINE)
+        changed = True
+
+    if changed:
+        new_text = "\n".join(lines)
+        # Preserve a trailing newline (and give a fresh file one) so the rewrite
+        # keeps POSIX line-ending hygiene.
+        if original.endswith("\n") or not original:
+            new_text += "\n"
+        path.write_text(new_text, encoding="utf-8")
+    return changed
+
+
+def _restore_gitignore(path: Path, original_bytes: Optional[bytes]) -> None:
+    """Revert *path* to its pre-heal state (best-effort).
+
+    ``original_bytes is None`` means no ``.gitignore`` existed before the heal, so
+    any file the heal created is removed; otherwise the exact original bytes are
+    rewritten. Failures are swallowed — rollback is a courtesy that keeps a failed
+    heal from leaving a stray ``/se3/*`` re-exclude behind, and if it cannot run
+    the fail-loud raise still stops the flow before the intent is written.
+    """
+    try:
+        if original_bytes is None:
+            if path.exists():
+                path.unlink()
+        else:
+            path.write_bytes(original_bytes)
+    except OSError as exc:
+        logger.debug("could not roll back .gitignore self-heal at %s: %s", path, exc)
+
+
+def _assert_intent_path_not_ignored(project_root: Path, path: Path) -> None:
+    """Ensure *path* is not gitignored, self-healing ``.gitignore`` if it is.
+
+    Best-effort probe: a missing git / non-repo / probe fault does NOT block the
+    write and does NOT trigger a self-heal — only a definitive "this path is
+    ignored" (``git check-ignore`` exit 0) engages the heal. On that signal the
+    worktree's OWN ``.gitignore`` (``check-ignore`` runs with *project_root* — the
+    worktree dir — as cwd) is minimally, idempotently patched to make the
+    ``!/se3/version-intents/`` whitelist take effect, then re-probed. Only a
+    re-probe that DEFINITIVELY confirms the path is no longer ignored
+    (``git check-ignore`` exit 1) lets the write proceed, with a warning logged
+    (the ``.gitignore`` change rides the flow's later ``git add -A`` into the
+    commit and travels with the merge). If the heal cannot run, or the re-probe
+    still reports the path ignored OR merely faults (a timeout / subprocess error
+    proves nothing after a definitive ignore verdict), the heal mutation is rolled
+    back and :class:`VersionIntentIgnoredError` is raised — silently proceeding
+    would let the commit step drop the intent and strand this session's version
+    bump/changelog at the merge-side reconcile.
+    """
+    try:
+        rel = os.path.relpath(path, project_root)
+    except ValueError:
+        return
+    if not _probe_ignored(project_root, rel):
+        return
+    # Definitively ignored — try a minimal, idempotent self-heal of the worktree's
+    # own .gitignore, then re-probe. Only a re-probe that DEFINITIVELY clears the
+    # ignore (check-ignore exit 1) proves git will actually stage the intent (a
+    # lone whitelist under a fully-excluded parent, or an unrelated rule such as
+    # ``*.json``, looks patched but stays ignored; a faulted/timed-out re-probe
+    # proves nothing). Success is decided by git's positive verdict, not by "we
+    # wrote a line" nor by a lenient probe that reads a fault as "not ignored".
+    gitignore = Path(project_root) / ".gitignore"
+    # Capture the pre-heal bytes so a heal that fails to clear the ignore can be
+    # reverted exactly (bytes, not text — a non-UTF-8 legacy file must round-trip
+    # unchanged). ``None`` records "no file existed" so rollback removes a file the
+    # heal created.
+    try:
+        original_bytes = gitignore.read_bytes() if gitignore.exists() else None
+    except OSError as exc:
+        # A .gitignore that EXISTS but is unreadable (mode 000 / root-owned) must
+        # NOT collapse to the "no file existed" sentinel (None): the fail-loud
+        # rollback would then unlink the user's real file — and the ignore verdict
+        # can legitimately originate from .git/info/exclude or core.excludesFile,
+        # not this file at all. Record the pre-state as UNKNOWN so rollback is
+        # skipped and the existing file is left untouched.
+        logger.debug("could not read pre-heal .gitignore bytes at %s: %s", gitignore, exc)
+        original_bytes = _GITIGNORE_PRESTATE_UNKNOWN
+    try:
+        # UnicodeDecodeError (a ValueError subclass, NOT OSError) — a legacy
+        # .gitignore with non-UTF-8 bytes — is an "unrepairable" case too: catch it
+        # alongside OSError so it degrades to the fail-loud VersionIntentIgnoredError
+        # (which version_analyze rides via its OSError->FAILED step channel) instead
+        # of escaping as a raw traceback.
+        _heal_gitignore_for_intents(project_root)
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.debug("gitignore self-heal for %s could not proceed: %s", rel, exc)
+    else:
+        if _probe_not_ignored_definitive(project_root, rel):
+            logger.warning(
+                "version-intent path %r was gitignored; automatically added the "
+                "'%s' whitelist to %s/.gitignore so this session's version "
+                "bump/changelog can be committed and reach the merge-side "
+                "version_reconcile.",
+                rel,
+                _INTENT_WHITELIST_LINE,
+                project_root,
+            )
+            return
+    # Heal could not run, or its mutation did not prove the ignore cleared. Undo
+    # any mutation so an unrelated ignore rule (e.g. ``*.json``) is not left with a
+    # stray se3/ re-exclude that would newly untrack other se3/ files after the
+    # user fixes the real rule and resumes, then fail loud. Skip rollback when the
+    # pre-state was unreadable: a heal that never wrote anything (its own read_text
+    # would have failed too) leaves nothing to undo, and unlinking here would
+    # destroy the user's existing-but-unreadable .gitignore.
+    if original_bytes is not _GITIGNORE_PRESTATE_UNKNOWN:
+        _restore_gitignore(gitignore, original_bytes)
+    raise VersionIntentIgnoredError(
+        f"the version-intent path {rel!r} is gitignored, so the commit step's "
+        f"'git add -A' cannot stage it and this worktree session's version "
+        f"bump/changelog would never reach the merge-side version_reconcile. "
+        f"An automatic .gitignore fix was attempted but did not clear the ignore "
+        f"rule. Enter this flow's worktree directory (under 'se3/worktrees/', or "
+        f"locate it with 'git worktree list'), add a whitelist line "
+        f"'!/{VERSION_INTENT_DIR_RELPATH}/' to that worktree's .gitignore (or run "
+        f"'se3 migrate' there), then resume."
+    )
 
 
 def read_intent(project_root: Path, flow_id: str) -> Optional[VersionIntent]:
