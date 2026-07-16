@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.22.6 - 2026-07-16
+
+- Fix worktree merge-reconcile in version-script mode leaving the version bump (e.g. pyproject.toml) as an uncommitted working-tree change instead of committing it
+- Include the version file actually rewritten by the version script in the reconcile commit pathspec so the bump reliably lands in the reconcile commit
+- Protect the script-written version file during detach/reattach so an operator's unrelated dirty changes to that file are not lost
+- Add fail-loud validation that raises ReconcileError instead of silently succeeding when the version bump is missing from the commit or the committed version does not match the final version
+- Detect and reject the case where the version write is unobservable (empty written set) on a publishing path, surfacing an actionable recovery hint
+- Preserve the existing reconcile path-limit constraint so unrelated staged files in the shared checkout are never swept into the version commit
 ## 11.22.5 - 2026-07-16
 
 - Auto-repair a project's `.gitignore` when the `se3/version-intents/` path is ignored, so pre-11.14.0 projects that never ran `se3 migrate` no longer break the version_analyze step mid-flow

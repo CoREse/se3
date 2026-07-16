@@ -794,3 +794,426 @@ def test_reconcile_runs_on_already_ancestor_shape(tmp_path):
 def test_historical_versions_parsed(tmp_path):
     root = _make_project(tmp_path, "1.2.3")
     assert "1.2.3" in historical_versions(root)
+
+
+# --- script mode (version script rewrites pyproject.toml) --------------------
+#
+# Regression coverage for the worktree merge-reconcile + script-mode defect:
+# when a version SCRIPT (se3/scripts/version.py) rewrites pyproject.toml,
+# detect_version_file returns the SCRIPT path — so the file the script actually
+# bumps was never in the commit pathspec and the bump leaked out as working-tree
+# dirt (Specom flow 20260716-105509_043642a0). reconcile now measures the
+# script-written set empirically and folds it into both the commit pathspec and
+# the detach/reattach protection.
+
+# A minimal, real version script: get/set the ``[project].version`` in
+# pyproject.toml. VersionScriptRunner runs a ``.py`` script via the current
+# interpreter with cwd=project_root, so no shebang/chmod is needed and
+# "pyproject.toml" resolves against the project root.
+VERSION_SCRIPT = '''\
+import re
+import sys
+from pathlib import Path
+
+PYPROJECT = Path("pyproject.toml")
+PATTERN = re.compile(r'^version = "([^"]+)"', re.MULTILINE)
+
+
+def _read():
+    m = PATTERN.search(PYPROJECT.read_text(encoding="utf-8"))
+    if not m:
+        sys.exit("no version in pyproject.toml")
+    return m.group(1)
+
+
+def _write(value):
+    text = PATTERN.sub(f'version = "{value}"', PYPROJECT.read_text(encoding="utf-8"), count=1)
+    PYPROJECT.write_text(text, encoding="utf-8")
+
+
+def main(argv):
+    if argv and argv[0] == "get":
+        print(_read())
+    elif len(argv) >= 3 and argv[0] == "set" and argv[1] == "--version":
+        _write(argv[2])
+        print(argv[2])
+    else:
+        sys.exit(f"usage: version.py <get|set --version X>; got {argv!r}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+'''
+
+
+def _make_script_project(tmp_path: Path, version: str = "0.31.1") -> Path:
+    """A git project whose version lives in pyproject.toml, bumped via a script.
+
+    The presence of se3/scripts/version.py auto-activates script mode
+    (DEFAULT_SCRIPT_PATHS), so detect_version_file returns the script — the exact
+    condition under which the reconcile bump used to leak out of the commit.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        PYPROJECT_TEMPLATE.format(version=version), encoding="utf-8"
+    )
+    (root / "VERSIONS.md").write_text(
+        VERSIONS_TEMPLATE.format(version=version), encoding="utf-8"
+    )
+    scripts_dir = root / "se3" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "version.py").write_text(VERSION_SCRIPT, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "baseline")
+    return root
+
+
+def test_script_project_fixture_activates_script_mode(tmp_path):
+    # Anchor for the whole script-mode regression suite: if the fixture ever
+    # silently degraded to file mode (e.g. se3/scripts/version.py drops off the
+    # DEFAULT_SCRIPT_PATHS list), detect_version_file would return pyproject.toml
+    # directly and the leak this suite guards against could never reproduce — the
+    # tests below would pass for the wrong reason. Assert the fixture really trips
+    # script mode and that the script's own get/set round-trips pyproject.toml.
+    import sys
+
+    from se3.engine.version_script_interface import find_version_script
+
+    reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_script_project(tmp_path, "0.31.1")
+
+    assert find_version_script(root) == root / "se3" / "scripts" / "version.py"
+
+    # Build the bumper exactly as reconcile does (project-scoped config) so the
+    # detection this asserts matches the code path under test.
+    bumper = reconcile_mod._version_bumper(root)
+    detected = bumper.detect_version_file(root)
+    # script mode returns the SCRIPT path (the exact condition behind the defect),
+    # not the pyproject.toml the script rewrites.
+    assert detected == root / "se3" / "scripts" / "version.py"
+    assert bumper._use_script_mode is True
+
+    # The symmetric read side (delegated to the script's ``get``) sees the file.
+    assert bumper.read_version() == "0.31.1"
+    # And the write side (delegated to ``set``) rewrites pyproject.toml in place.
+    bumper.set_version("0.31.2")
+    assert 'version = "0.31.2"' in (root / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_script_mode_bump_lands_in_reconcile_commit(tmp_path):
+    # (a) + (b): the script-written pyproject.toml bump is IN the reconcile commit
+    # and NOT left as working-tree dirt.
+    root = _make_script_project(tmp_path, "0.31.1")
+    _put_intent(root, "flowScript", bump_type="patch", versions_changes=["fix x"])
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.channel == "deterministic"
+    assert result.final_version == "0.31.2"
+    # (a) the version bump is recorded in the reconcile commit itself.
+    raw = _git(
+        root, "show", "--raw", "--format=", result.reconcile_commit
+    ).stdout
+    assert "pyproject.toml" in raw
+    committed = _git(
+        root, "show", f"{result.reconcile_commit}:pyproject.toml"
+    ).stdout
+    assert 'version = "0.31.2"' in committed
+    # (b) nothing is left behind as an uncommitted version-file change.
+    assert (
+        _git(root, "status", "--porcelain", "--", "pyproject.toml").stdout.strip()
+        == ""
+    )
+    assert read_current_version(root) == "0.31.2"
+
+
+def test_script_mode_operator_dirt_on_version_file_preserved(tmp_path):
+    # (e): the version file ALSO carries an operator's unrelated uncommitted edit.
+    # detach/reattach must neutralize it before the bump (so the base reads clean
+    # and the bump lands in the commit) and replay it afterwards (so it is not
+    # lost) — the script-mode autodetect in _reconcile_owned_relpaths is what puts
+    # pyproject.toml under detach protection even though detect_version_file
+    # returned the script.
+    root = _make_script_project(tmp_path, "0.31.1")
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8") + 'description = "operator wip"\n',
+        encoding="utf-8",
+    )
+    _put_intent(root, "flowScript", bump_type="patch", versions_changes=["fix x"])
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.final_version == "0.31.2"
+    # The bump landed in the commit WITHOUT the operator's unrelated edit.
+    committed = _git(
+        root, "show", f"{result.reconcile_commit}:pyproject.toml"
+    ).stdout
+    assert 'version = "0.31.2"' in committed
+    assert "operator wip" not in committed
+    # The operator's unrelated edit survives in the working tree (reattached) and
+    # so does the committed bump.
+    final = pyproject.read_text(encoding="utf-8")
+    assert 'description = "operator wip"' in final
+    assert 'version = "0.31.2"' in final
+
+
+# --- fail-loud verification (G2: git layer + semantic layer) -----------------
+#
+# Two trigger-path-agnostic assertions run AFTER _commit_reconcile so a version
+# bump that never reached the commit (the defect) — or a commit whose version
+# value is wrong — can never be reported as a silent success.
+
+
+def test_fail_loud_when_version_file_missed_by_commit(tmp_path):
+    # (c): primary (git-layer) check. Force the script-written pyproject.toml OUT
+    # of the commit pathspec (as the original defect did) by dropping the measured
+    # written_set; the bump then stays as working-tree dirt and reconcile must
+    # raise rather than report success.
+    import sys
+
+    reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_script_project(tmp_path, "0.31.1")
+    _put_intent(root, "flowScript", bump_type="patch", versions_changes=["fix x"])
+
+    real_commit = reconcile_mod._commit_reconcile
+
+    def drop_written_set(project_root, message, **kwargs):
+        # Simulate the pre-fix pathspec that never staged the script-written file.
+        kwargs["extra_version_paths"] = None
+        return real_commit(project_root, message, **kwargs)
+
+    monkeypatch_target = "_commit_reconcile"
+    orig = getattr(reconcile_mod, monkeypatch_target)
+    setattr(reconcile_mod, monkeypatch_target, drop_written_set)
+    try:
+        with pytest.raises(ReconcileError) as excinfo:
+            reconcile(root)
+    finally:
+        setattr(reconcile_mod, monkeypatch_target, orig)
+
+    msg = str(excinfo.value)
+    # Names the stray version file and gives an actionable recovery hint.
+    assert "pyproject.toml" in msg
+    assert "did NOT land" in msg or "uncommitted" in msg
+
+
+def test_fail_loud_when_committed_version_value_wrong(tmp_path):
+    # (d): secondary (semantic-layer) check. The file lands in the commit but the
+    # readback value != final_version. Stub the read-side so ONLY the post-commit
+    # readback (which sees the freshly-bumped 0.31.2) returns a wrong value; the
+    # base read (which sees 0.31.1) is untouched. reconcile must raise.
+    import sys
+
+    reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_script_project(tmp_path, "0.31.1")
+    _put_intent(root, "flowScript", bump_type="patch", versions_changes=["fix x"])
+
+    real_read = reconcile_mod.read_current_version
+
+    def wrong_readback(project_root):
+        v = real_read(project_root)
+        # Only the post-commit readback observes the bumped version; corrupt it so
+        # the symmetric read-side assertion trips without disturbing the base read.
+        return "9.9.9" if v == "0.31.2" else v
+
+    monkeypatch_target = "read_current_version"
+    orig = getattr(reconcile_mod, monkeypatch_target)
+    setattr(reconcile_mod, monkeypatch_target, wrong_readback)
+    try:
+        with pytest.raises(ReconcileError) as excinfo:
+            reconcile(root)
+    finally:
+        setattr(reconcile_mod, monkeypatch_target, orig)
+
+    msg = str(excinfo.value)
+    assert "0.31.2" in msg
+    assert "mismatch" in msg or "9.9.9" in msg
+
+
+def test_fail_loud_checks_skipped_on_noop(tmp_path):
+    # The no-bump no-op path (no versionable change) must NOT trip the fail-loud
+    # checks — there is no new number to verify. A docs-only intent with no bump
+    # hint and no changelog substance settles final == current with no publish.
+    root = _make_script_project(tmp_path, "0.31.1")
+    _put_intent(root, "flowNoop", bump_type="none", versions_changes=[])
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.final_version == "0.31.1"
+    # Version file untouched, working tree clean — the checks did not fire/mutate.
+    assert read_current_version(root) == "0.31.1"
+    assert (
+        _git(root, "status", "--porcelain", "--", "pyproject.toml").stdout.strip()
+        == ""
+    )
+
+
+def test_fail_loud_when_written_set_measures_empty(tmp_path):
+    # (e): the vacuous-pass hole. On a genuine publish, if written_set comes back
+    # EMPTY (a diff bracket that cancelled out, or a script observed to touch
+    # nothing), the git-layer clean-check would be SKIPPED and the semantic
+    # readback would see the still-uncommitted working-tree bump and match — a
+    # silent success with the bump absent from the commit. reconcile must instead
+    # raise, treating an unobserved write as unverifiable.
+    import sys
+
+    reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_script_project(tmp_path, "0.31.1")
+    _put_intent(root, "flowScript", bump_type="patch", versions_changes=["fix x"])
+
+    real_write = reconcile_mod._write_final_version
+
+    def blank_written_set(project_root, final_version):
+        # Perform the real write (so the working tree carries the bumped value the
+        # semantic readback would otherwise vacuously accept) but report an empty
+        # measured set, exactly as a cancelled diff bracket would.
+        version_file, _written = real_write(project_root, final_version)
+        return version_file, []
+
+    orig = reconcile_mod._write_final_version
+    reconcile_mod._write_final_version = blank_written_set
+    try:
+        with pytest.raises(ReconcileError) as excinfo:
+            reconcile(root)
+    finally:
+        reconcile_mod._write_final_version = orig
+
+    msg = str(excinfo.value)
+    assert "0.31.2" in msg
+    assert "no file change was observed" in msg or "unobserved" in msg
+
+
+def test_written_set_diff_measurement_fault_raises(tmp_path):
+    # (Fix 1/3): a git fault while measuring the before/after diff bracket must
+    # RAISE, not degrade to the empty set. A degraded-empty AFTER snapshot drops
+    # the bump out of the commit pathspec; a degraded-empty BEFORE snapshot would
+    # expand written_set to the operator's whole dirty set. Both are silent-wrong,
+    # so _dirty_tracked_relpaths aborts loudly.
+    import sys
+
+    reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+
+    root = _make_script_project(tmp_path, "0.31.1")
+
+    real_run_git = reconcile_mod._run_git
+
+    def failing_diff(project_root, *args, **kwargs):
+        if args[:2] == ("diff", "--name-only"):
+            return subprocess.CompletedProcess(
+                args=["git", *args], returncode=128, stdout="", stderr="git error"
+            )
+        return real_run_git(project_root, *args, **kwargs)
+
+    orig = reconcile_mod._run_git
+    reconcile_mod._run_git = failing_diff
+    try:
+        with pytest.raises(ReconcileError) as excinfo:
+            reconcile_mod._write_final_version(root, "0.31.2")
+    finally:
+        reconcile_mod._run_git = orig
+
+    assert "could not measure" in str(excinfo.value)
+
+
+# A version script whose backing file has a NON-ASCII name. With git's default
+# core.quotePath=true a bare `git diff --name-only` would render this path as a
+# quoted octal-escaped string; the fixture exists to prove the reconcile write
+# measurement is quoting-proof (`-z`) so the bump still lands and the fail-loud
+# checks are not vacuously satisfied by an unmatched pathspec.
+VERSION_SCRIPT_UNICODE = '''\
+import sys
+from pathlib import Path
+
+VERSION_FILE = Path("se3") / "版本.txt"
+
+
+def main(argv):
+    if argv and argv[0] == "get":
+        print(VERSION_FILE.read_text(encoding="utf-8").strip())
+    elif len(argv) >= 3 and argv[0] == "set" and argv[1] == "--version":
+        VERSION_FILE.write_text(argv[2] + "\\n", encoding="utf-8")
+        print(argv[2])
+    else:
+        sys.exit(f"usage: version.py <get|set --version X>; got {argv!r}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+'''
+
+
+def _make_unicode_script_project(tmp_path: Path, version: str = "0.31.1") -> Path:
+    """A script-mode project whose version lives in a non-ASCII-named file.
+
+    The version script rewrites ``se3/版本.txt`` (tracked, so the reconcile diff
+    bracket observes it). Reproduces the quotePath encoding path where a bare
+    `git diff --name-only` would emit a quoted octal-escaped pseudo-path.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "VERSIONS.md").write_text(
+        VERSIONS_TEMPLATE.format(version=version), encoding="utf-8"
+    )
+    scripts_dir = root / "se3" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "version.py").write_text(
+        VERSION_SCRIPT_UNICODE, encoding="utf-8"
+    )
+    (root / "se3" / "版本.txt").write_text(
+        version + "\n", encoding="utf-8"
+    )
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "baseline")
+    return root
+
+
+def test_script_mode_bump_lands_when_version_file_is_non_ascii(tmp_path):
+    # (Fix 1/3): the script rewrites a non-ASCII-named version file. Under the
+    # pre-fix `git diff --name-only` measurement, core.quotePath would emit the
+    # path as a quoted octal-escaped string that the commit pathspec cannot stage
+    # and `git status --porcelain -- <that string>` matches nothing (vacuous
+    # pass) — a silent success with the bump left as working-tree dirt. The `-z`
+    # measurement yields the real path, so the bump lands and the working tree is
+    # clean. Left dirty (or dropped from the commit), _assert_version_bump_committed
+    # would raise; reaching success here proves the encoding path is closed.
+    root = _make_unicode_script_project(tmp_path, "0.31.1")
+    version_relpath = "se3/版本.txt"
+    _put_intent(root, "flowUnicode", bump_type="patch", versions_changes=["fix x"])
+
+    result = reconcile(root)
+
+    assert result.success
+    assert result.final_version == "0.31.2"
+    # The non-ASCII version file's bump is recorded in the reconcile commit.
+    raw = _git(
+        root, "show", "--raw", "--format=", result.reconcile_commit
+    ).stdout
+    assert "版本" in raw or "\\347\\211\\210" in raw
+    committed = _git(
+        root, "show", f"{result.reconcile_commit}:{version_relpath}"
+    ).stdout
+    assert committed.strip() == "0.31.2"
+    # Nothing left behind as an uncommitted change on the version file.
+    assert (
+        _git(
+            root, "status", "--porcelain", "--", version_relpath
+        ).stdout.strip()
+        == ""
+    )

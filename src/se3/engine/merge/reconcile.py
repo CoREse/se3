@@ -595,16 +595,78 @@ def validate_no_regression(
 
 # --- persistence -------------------------------------------------------------
 
-def _write_final_version(project_root: Path, final_version: str) -> Path:
+def _dirty_tracked_relpaths(project_root: Path) -> set[str]:
+    """Tracked files with unstaged working-tree modifications (``git diff --name-only``).
+
+    Used to bracket a version-script write: taking this snapshot immediately
+    before and after ``set_version`` and diffing ``after − before`` yields
+    exactly the files the black-box script actually rewrote — WITHOUT ever
+    running ``git add -A`` (which would sweep an operator's unrelated staged
+    files into the version commit). An operator's pre-existing working-tree dirt
+    sits in BOTH snapshots and cancels out of the difference, so the result is
+    path-limited to this write by construction.
+
+    A git failure RAISES ``ReconcileError`` rather than degrading to the empty
+    set. An unmeasurable bracket is not the same as "the script wrote nothing":
+    a degraded-to-empty AFTER snapshot would make the version bump slip out of
+    the commit pathspec and the emptiness pass every downstream fail-loud check
+    vacuously (the whole defect this module exists to prevent); a degraded-to-
+    empty BEFORE snapshot would make ``after − before`` the operator's ENTIRE
+    dirty set and sweep unrelated tracked edits into the version commit. Both
+    outcomes are silently wrong, so a measurement fault must abort loudly.
+    """
+    # `-z` yields NUL-separated, VERBATIM paths: with git's default
+    # core.quotePath=true, a plain `git diff --name-only` renders a non-ASCII or
+    # quote/backslash-bearing filename as a quoted octal-escaped string (e.g.
+    # `"se3/\347\211\210.txt"`, quotes included). That literal is not a real
+    # repo-relative path, so it would silently fail the commit pathspec's
+    # existence filter (the bump never gets staged) AND match nothing in the
+    # `git status --porcelain -- <written_set>` fail-loud check (vacuous pass) —
+    # reproducing the exact silent-success defect this module prevents, via an
+    # encoding path. `-z` emits raw bytes and never quotes, so every measured
+    # entry is a genuine path the pathspec can stage and porcelain can match.
+    result = _run_git(
+        project_root, "diff", "--name-only", "-z", check=False, timeout=15
+    )
+    if result.returncode != 0:
+        raise ReconcileError(
+            "could not measure the version-write file set: "
+            f"`git diff --name-only -z` failed "
+            f"({result.stderr.strip() or 'unknown error'}). Cannot verify the "
+            "version bump landed in the reconcile commit; re-run merge after "
+            "inspecting the working tree."
+        )
+    return {entry for entry in result.stdout.split("\0") if entry}
+
+
+def _write_final_version(
+    project_root: Path, final_version: str
+) -> tuple[Path, list[str]]:
     """Write *final_version* into the project's configured version file.
 
-    Returns the version file path so the caller can stage exactly that file
-    (package.json / an explicit ``version.file_path``, not necessarily
-    pyproject.toml). Uses the same ``VersionBumper`` the commit step uses, so
-    every project type / config the commit path supports reconciles too.
+    Returns ``(version_file, written_set)``:
+
+    - *version_file* is the detected version file/script path so the caller can
+      stage exactly that file (package.json / an explicit ``version.file_path`` /
+      a version script, not necessarily pyproject.toml).
+    - *written_set* is the set of repo-relative paths this write actually
+      changed. In script mode ``version_file`` is the SCRIPT (which is itself
+      unchanged) while the file the script rewrites (e.g. pyproject.toml) is what
+      must land in the reconcile commit — so we measure it empirically via a
+      before/after ``git diff`` bracket rather than assuming which file the
+      black-box script touches. In file mode the written file IS the version file.
+
+    Uses the same ``VersionBumper`` the commit step uses, so every project type /
+    config the commit path supports reconciles too.
 
     Raises:
-        ReconcileError: when no version file can be found or the write fails.
+        ReconcileError: when no version file can be found, the write fails, or the
+            before/after diff bracket that measures ``written_set`` cannot be taken
+            (:func:`_dirty_tracked_relpaths` raises on git fault). A measurement
+            fault is NOT degraded to an empty set: an unmeasurable bracket would
+            either drop the bump out of the commit pathspec or (before-fault)
+            expand ``written_set`` to the operator's whole dirty set, both silent
+            and wrong — so it aborts loudly here instead.
     """
     bumper = _version_bumper(project_root)
     # detect_version_file also primes script mode as a side effect, so it must
@@ -614,6 +676,13 @@ def _write_final_version(project_root: Path, final_version: str) -> Path:
         raise ReconcileError(
             "no version file found in project; cannot write reconciled version"
         )
+    script_mode = bool(
+        getattr(bumper, "_use_script_mode", False) and bumper._script_runner
+    )
+    # Snapshot the dirty-tracked set BEFORE the script write so the after−before
+    # difference isolates exactly what the script rewrote. Only needed in script
+    # mode; in file mode the written file is known up front (it IS version_file).
+    before = _dirty_tracked_relpaths(project_root) if script_mode else set()
     try:
         # Write through the resolved handler / script runner rather than
         # VersionBumper.set_version: set_version enforces SemVer, but the
@@ -621,7 +690,7 @@ def _write_final_version(project_root: Path, final_version: str) -> Path:
         # build schemes) that validate_no_regression already accepted — so we
         # must not re-reject it here. File-type coverage (toml/json/py/script)
         # is identical to the commit path's abstraction.
-        if getattr(bumper, "_use_script_mode", False) and bumper._script_runner:
+        if script_mode:
             bumper._script_runner.set_version(final_version)
         else:
             handler = bumper._get_handler(version_file)
@@ -630,7 +699,14 @@ def _write_final_version(project_root: Path, final_version: str) -> Path:
         raise ReconcileError(
             f"failed to write version file {version_file}: {exc}"
         ) from exc
-    return version_file
+    if script_mode:
+        written_set = sorted(_dirty_tracked_relpaths(project_root) - before)
+    else:
+        try:
+            written_set = [str(Path(version_file).relative_to(project_root))]
+        except ValueError:
+            written_set = [str(version_file)]
+    return version_file, written_set
 
 
 def _merge_changelog(
@@ -718,6 +794,7 @@ def _commit_reconcile(
     message: str,
     *,
     version_file: Optional[Path] = None,
+    extra_version_paths: Optional[list[str]] = None,
     allow_empty: bool = False,
     intended_tag: Optional[str] = None,
 ) -> Optional[str]:
@@ -739,6 +816,14 @@ def _commit_reconcile(
     included in the commit pathspec explicitly so a package.json / custom
     ``version.file_path`` lands in the commit rather than assuming pyproject.toml.
 
+    *extra_version_paths* are the files a version SCRIPT actually rewrote
+    (empirically measured by :func:`_write_final_version`). In script mode
+    *version_file* is the script itself (unchanged), so the file the script bumps
+    — e.g. pyproject.toml — would otherwise never be staged; folding it into the
+    pathspec here is what lands the version bump in the reconcile commit. Merged
+    and de-duplicated with the fixed reconcile-owned paths; still path-limited, so
+    no ``git add -A`` and no operator-staged file ever rides along.
+
     *allow_empty* forces the commit even when the reconcile-owned paths carry no
     diff. The reconcile step passes it because the commit's trailer — not the
     file diff — is the sole durable idempotency signal
@@ -758,6 +843,16 @@ def _commit_reconcile(
         except ValueError:
             reconcile_paths.append(str(version_file))
     reconcile_paths += ["VERSIONS.md", "README.md", "se3/version-intents"]
+    if extra_version_paths:
+        reconcile_paths += list(extra_version_paths)
+    # De-duplicate while preserving order: version_file and a script-written path
+    # can coincide (file mode), and the same measured path must not be staged
+    # twice. Order is irrelevant to git but a stable, minimal pathspec keeps the
+    # path-limit intent legible.
+    seen: set[str] = set()
+    reconcile_paths = [
+        p for p in reconcile_paths if not (p in seen or seen.add(p))
+    ]
     existing = [p for p in reconcile_paths if (Path(project_root) / p).exists()]
 
     # Stage the reconcile-owned paths first — ``git add`` is what pulls in an
@@ -837,6 +932,121 @@ def _describe_head_location(project_root: Path) -> str:
     return "HEAD (current branch could not be determined)"
 
 
+def _assert_version_bump_committed(
+    project_root: Path,
+    written_set: list[str],
+    final_version: str,
+) -> None:
+    """Fail loud if the reconciled version bump did not actually land in the commit.
+
+    Two independent, trigger-path-agnostic checks run AFTER ``_commit_reconcile``,
+    so the deterministic hole this whole change closes — a version bump written to
+    disk but never staged into the reconcile commit (the worktree + script-mode
+    combination) — can never be reported as a silent success. Neither check needs
+    se3 to know up front WHICH file carries the version, so both hold identically in
+    script and file mode.
+
+    Primary (git layer): every file the version write actually touched
+    (``written_set``, empirically measured by :func:`_write_final_version` — the
+    script-rewritten pyproject.toml in script mode, the version file in file mode)
+    MUST be clean in the working tree now. A leftover uncommitted change is exactly
+    the defect symptom: the bump was written but the commit pathspec missed it.
+    Runs BEFORE the caller's ``finally`` reattaches operator dirt, so anything dirty
+    here is the bump itself, not a replayed operator edit.
+
+    Secondary (semantic layer): re-read the version through the SAME abstraction
+    that wrote it (``VersionBumper.read_version`` — the file handler in file mode,
+    the script ``get`` subcommand in script mode) and assert it equals
+    *final_version*. This catches the subtler "file landed in the commit but its
+    value is not the target version". String equality (NOT SemVer parse) so a
+    legitimate non-SemVer custom-rules final is not spuriously rejected. The primary
+    check having proved the working tree clean for ``written_set``, this working-tree
+    read is equivalent to reading it back out of the commit.
+
+    Non-empty precondition: this runs only on a genuine new-number publish that
+    produced a commit (``final`` != ``current``), so the version write MUST have
+    changed at least one file. An EMPTY ``written_set`` here means the write was
+    never observed — a diff bracket that cancelled out, or a script that touched
+    nothing — which makes both checks below vacuous: the git-layer clean-check is
+    skipped and the semantic read-back sees the still-uncommitted working-tree
+    value and matches. That is precisely the silent-success hole this change
+    exists to close, so an empty set is itself a hard failure, not a pass.
+    """
+    if not written_set:
+        raise ReconcileError(
+            f"reconcile could not verify the version bump to {final_version}: no "
+            "file change was observed for the version write, so it cannot be "
+            "confirmed to have landed in the reconcile commit (an unobserved "
+            "write would leave the bump as uncommitted working-tree dirt). "
+            "Inspect the version file / script and re-run merge."
+        )
+    if written_set:
+        status = _run_git(
+            project_root, "status", "--porcelain", "--", *written_set,
+            check=False, timeout=15,
+        )
+        if status.returncode != 0:
+            raise ReconcileError(
+                f"reconcile could not verify that the version bump to "
+                f"{final_version} landed in the reconcile commit: git status failed "
+                f"for {written_set} ({status.stderr.strip() or 'unknown error'}). "
+                "Inspect the working tree and re-run merge."
+            )
+        stray = [ln.strip() for ln in status.stdout.splitlines() if ln.strip()]
+        if stray:
+            raise ReconcileError(
+                f"version bump to {final_version} did NOT land in the reconcile "
+                f"commit: {', '.join(stray)} still carry uncommitted changes after "
+                "the commit. `git add` the stray version file(s) and amend the "
+                "reconcile commit, or discard the working-tree change and re-run "
+                "merge."
+            )
+
+    # Semantic backstop: read the version straight back through the same
+    # write-side abstraction. read_current_version swallows read faults into None,
+    # which we treat as an unverifiable (therefore failed) reconcile.
+    try:
+        readback = read_current_version(project_root)
+    except Exception as exc:  # noqa: BLE001 - any readback fault is a typed failure
+        raise ReconcileError(
+            f"reconcile committed version {final_version} but could not read it "
+            f"back to confirm it: {exc}. Re-run merge after inspecting the version "
+            "file."
+        ) from exc
+    if readback is None:
+        raise ReconcileError(
+            f"reconcile committed version {final_version} but the project's version "
+            "file could not be read back to confirm it. Re-run merge after "
+            "inspecting the version file."
+        )
+    if readback.strip() != final_version.strip():
+        raise ReconcileError(
+            f"version reconcile mismatch: the reconcile commit was created but the "
+            f"version file reads {readback!r}, not the reconciled {final_version!r}. "
+            "Re-run merge after inspecting the version file."
+        )
+
+
+def _regular_version_file(project_root: Path) -> Optional[Path]:
+    """The plain (non-script) version-file autodetect: pyproject.toml / package.json.
+
+    In script mode ``detect_version_file`` returns the SCRIPT path, never the file
+    the script actually rewrites — so detach/reattach would not cover that file and
+    an operator's unrelated edit to it (a dependency bump in pyproject.toml) could
+    be lost when reconcile's finally reattaches. This resolves that file the way
+    file mode would: an explicit ``version.file_path`` first, else the detector's
+    common-file scan. Returns ``None`` when none is found or on any fault.
+    """
+    bumper = _version_bumper(project_root)
+    config_file_path = getattr(bumper.config, "file_path", None)
+    if config_file_path:
+        path = Path(config_file_path)
+        if not path.is_absolute():
+            path = Path(project_root) / path
+        return path if path.exists() else None
+    return bumper._detector.get_version_file_path(Path(project_root))
+
+
 def _reconcile_owned_relpaths(project_root: Path) -> list[str]:
     """The paths reconcile writes and must therefore isolate from operator dirt.
 
@@ -847,19 +1057,41 @@ def _reconcile_owned_relpaths(project_root: Path) -> list[str]:
     dirt must be neutralized before the base version is read so a half-applied
     bump can never be re-read as the base. Version-file detection faults degrade to
     the doc-only set rather than aborting reconcile.
+
+    In SCRIPT mode ``detect_version_file`` returns the version SCRIPT, not the file
+    the script bumps. detach runs BEFORE ``_write_final_version`` (where the
+    script-written set becomes empirically knowable), so it cannot rely on that
+    measurement; instead it ALSO resolves the plain (non-script) version file here
+    and adds it, guaranteeing the file the script will rewrite is snapshotted up
+    front and its operator dirt neutralized-then-replayed.
     """
     rels = ["README.md", "VERSIONS.md"]
     try:
-        version_file = _version_bumper(project_root).detect_version_file(
-            Path(project_root)
-        )
+        bumper = _version_bumper(project_root)
+        version_file = bumper.detect_version_file(Path(project_root))
     except Exception:  # noqa: BLE001 - version-file detection must not abort reconcile
+        bumper = None
         version_file = None
+    owned: list[Path] = []
     if version_file is not None:
+        owned.append(version_file)
+    # In script mode detect_version_file returned the SCRIPT, not the file it
+    # rewrites — resolve that file the plain (file-mode) way so detach protects it
+    # up front, before _write_final_version makes the written set knowable.
+    if bumper is not None and getattr(bumper, "_use_script_mode", False):
         try:
-            rels.insert(0, str(Path(version_file).relative_to(project_root)))
+            regular = _regular_version_file(project_root)
+        except Exception:  # noqa: BLE001 - autodetect fault must not abort reconcile
+            regular = None
+        if regular is not None:
+            owned.append(regular)
+    for vf in owned:
+        try:
+            rel = str(Path(vf).relative_to(project_root))
         except ValueError:
-            rels.insert(0, str(version_file))
+            rel = str(vf)
+        if rel not in rels:
+            rels.insert(0, rel)
     return rels
 
 
@@ -2214,8 +2446,11 @@ def reconcile(
         # is now safe (detach fully completed → every operator path is snapshotted).
         apply_started = True
         version_file: Optional[Path] = None
+        written_version_paths: list[str] = []
         if publish_release:
-            version_file = _write_final_version(project_root, final_version)
+            version_file, written_version_paths = _write_final_version(
+                project_root, final_version
+            )
             _merge_changelog(project_root, final_version, changelog_entries)
 
         # Mark consumed BEFORE committing so the consumed intent files ship
@@ -2243,9 +2478,26 @@ def reconcile(
             # outstanding despite the step reporting "complete".
             reconcile_commit = _commit_reconcile(
                 project_root, message, version_file=version_file,
+                extra_version_paths=written_version_paths,
                 allow_empty=True,
                 intended_tag=tag_name if (publish_release and is_tag) else None,
             )
+            # Fail loud BEFORE tagging (design order ⑧ commit-check → ⑨ tag): a
+            # tag must never be minted on a commit whose version bump silently
+            # failed to land. Gated on publish_release ALONE, not on a truthy
+            # reconcile_commit: allow_empty=True above means _commit_reconcile
+            # always executes the commit (or raises), so on a publish path a None
+            # return can only be the rev-parse-HEAD-failed-with-no-tag-owed
+            # branch — where the commit IS durable, just unidentifiable. The three
+            # checks take only project_root/written_set/final_version, never the
+            # hash, so skipping them on that None would let the very defect they
+            # exist to close (a bump dropped from the commit) pass unverified.
+            # Runs inside the try so a raise routes through the same
+            # rollback+reattach as any other apply-phase fault.
+            if publish_release:
+                _assert_version_bump_committed(
+                    project_root, written_version_paths, final_version
+                )
             if publish_release and is_tag and reconcile_commit:
                 try:
                     tag_name = create_annotated_version_tag(
