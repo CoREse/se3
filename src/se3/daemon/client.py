@@ -630,6 +630,22 @@ class DaemonClient:
             # synchronously on the event loop. The reader is the push loop's sole
             # caller of this method, so the off-thread mutation of its signature
             # state is race-free.
+            #
+            # The status tick's backstop role extends to the reader's dirty-
+            # sentinel gate: the gate skips idle roots on fast ticks, trusting
+            # the PersistenceManager-bumped sentinel — a change written by a
+            # sentinel-unaware writer would stay gated forever. Dropping the
+            # gate here (before the scan below) makes every status tick an
+            # ungated full scan, bounding that staleness by one status
+            # interval. A presence wake drops it too: the just-opened browser
+            # must not inherit a gated (possibly stale) view. getattr-probed
+            # like invalidate_index_cache so stub providers stay valid.
+            if status_due or presence_wake:
+                clear_gate = getattr(
+                    self._history_provider, "clear_sentinel_gate", None
+                )
+                if clear_gate is not None:
+                    clear_gate()
             history_changed = await asyncio.to_thread(self._history_changed)
             if status_due or history_changed or presence_wake:
                 # A real disk change (engine.json rewrite / jsonl append) means

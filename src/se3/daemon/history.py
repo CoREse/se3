@@ -474,6 +474,21 @@ class DaemonHistoryReader:
         self._index_cache: Optional[List[SessionMeta]] = None
         self._index_cache_at: float = 0.0
 
+        # Dirty-sentinel gate for :meth:`active_flow_signature` (fast tick).
+        # Maps a project root to the ``(st_mtime_ns, st_size, st_ino)`` of
+        # its ``se3/state/.dirty`` sentinel observed just before the last
+        # deep scan that found NO active flow there. While the sentinel stays at
+        # that value, nothing was persisted under the root, so the fast tick
+        # skips the root's whole deep scan (engine.json peek/read + jsonl
+        # enumeration) for the cost of one stat. A root with an active flow
+        # is never gated (streamed jsonl bypasses the sentinel — see the
+        # WHY in :meth:`active_flow_signature`); a root without a sentinel
+        # fails open to the ungated scan. The push loop is the sole caller
+        # (worker-thread offloaded, one at a time), so no lock is needed —
+        # the same race-free-by-single-caller convention as the reader's
+        # other signature state.
+        self._sentinel_gate: Dict[Path, Tuple[int, int, int]] = {}
+
         # Per-directory content-signature cache for history-only flows.
         # When ``_build_index_fresh`` rebuilds the index, unchanged directories
         # (same set of files, same mtimes/sizes) reuse their cached
@@ -544,6 +559,27 @@ class DaemonHistoryReader:
         """
         self._index_cache = None
         self._index_cache_at = 0.0
+        # Deliberately NOT clearing the sentinel gate here: the client
+        # invalidates on every real history change (every fast tick while a
+        # flow streams), which would force the idle roots back into full
+        # deep scans exactly when the daemon is busiest. The events this
+        # method signals (spawn / status change / end-session) all persist
+        # through PersistenceManager, whose sentinel bump breaks the gate on
+        # its own; anything else is bounded by the status-tick
+        # ``clear_sentinel_gate`` backstop.
+
+    def clear_sentinel_gate(self) -> None:
+        """Drop the dirty-sentinel gate so the next signature scan is full.
+
+        WHY: the sentinel only reflects writes routed through
+        ``PersistenceManager`` — an out-of-band engine.json rewrite (an old
+        se3 version running in a sentinel-bearing root, a manual edit) moves
+        nothing. The daemon client calls this on every status tick, turning
+        the status heartbeat into the bounded-staleness backstop: a change
+        the gate missed is picked up within one status interval instead of
+        never.
+        """
+        self._sentinel_gate.clear()
 
     # -- project roots -----------------------------------------------------
 
@@ -1972,87 +2008,135 @@ class DaemonHistoryReader:
         This is intentionally lighter than :func:`build_index`: it only reads
         the active ``engine.json`` per root (and that flow's jsonl files),
         skipping the archive / history-only enumeration, so it is safe to call
-        on a fast polling cadence.
+        on a fast polling cadence. A root whose previous scan found no active
+        flow is additionally gated on the ``se3/state/.dirty`` sentinel (see
+        the loop below): while the sentinel is unmoved, the root's whole scan
+        collapses to that single stat. Callers needing an ungated pass (the
+        status-tick backstop) call :meth:`clear_sentinel_gate` first.
         """
         signature: Dict[str, Any] = {}
         for root in self._iter_roots():
-            engine_json = root / "se3" / "state" / "engine.json"
-            # Cheap pre-pass (stat-keyed peek, zero read/parse): decide whether
-            # this root's flow is worth the verify_content read at all. WHY:
-            # the verify_content whole-content hash exists to catch a same-
-            # ``(mtime, size)`` IN-PLACE rewrite (the PAUSED↔RUNNING flip on a
-            # coarse-mtime filesystem) — a hazard only a *live* flow's
-            # engine.json is exposed to. A terminal (completed / failed)
-            # engine.json is never rewritten in place; its next change is a
-            # brand-new flow's full rewrite, which moves ``(mtime_ns, size)``
-            # and busts the peek anyway. Paying the full read+hash for every
-            # terminal root on the 1s fast tick was the residual idle-disk
-            # hotspot (a multi-MB completed engine.json re-read every second);
-            # the peek reduces a settled terminal root to one stat per tick. A
-            # peek MISS (first sighting / changed file) falls through to the
-            # verify read below, so an unchanged file is still parsed at most
-            # once (the issue-#209 parse-once invariant).
-            header = peek_cached_header(engine_json)
-            if isinstance(header, dict):
-                if not str(header.get("flow_id") or ""):
-                    continue
-                if not _is_active_status(str(header.get("status") or "")):
-                    continue
-            # active=True read: a matching (path, mtime, size) is trusted only
-            # together with an unchanged whole-content digest; a real rewrite
-            # re-parses. flow_id/status are (re-)derived from this verified
-            # parse — never from the peek, whose stat-keyed hit could be stale
-            # across a same-stat in-place rewrite. The signature below also
-            # folds in the engine.json (mtime, size) directly, so a genuine
-            # flow change always shifts the signature.
-            data = read_engine_header(engine_json, active=True)
-            if not isinstance(data, dict):
+            # Dirty-sentinel gate: PersistenceManager bumps
+            # ``se3/state/.dirty`` after every state persist, so for a root
+            # whose previous deep scan found NO active flow, an unmoved
+            # sentinel proves nothing persisted since — the whole root is
+            # skipped for the cost of this one stat. The stat is taken BEFORE
+            # the deep scan so a persist landing mid-scan always moves the
+            # sentinel relative to the value armed below (stat-after would
+            # let a write slip between the engine read and the arm, gating
+            # away a real change until the backstop).
+            #
+            # WHY: only a no-active-flow root may be gated. History jsonl is
+            # appended by chat_history/HistorySink DIRECTLY — it never passes
+            # through PersistenceManager — so the sentinel does not move on a
+            # live flow's streamed records; gating an active root would
+            # degrade web streaming from the fast tick to the status backstop.
+            # An active root's deep scan is small (one engine.json + one
+            # flow's jsonl dir) and is not the idle hotspot anyway. A missing
+            # sentinel (old se3 version, root never persisted by a
+            # sentinel-aware engine) fails open to the ungated deep scan:
+            # the sentinel is an optimization signal, never a correctness
+            # dependency.
+            sentinel_stat = _sentinel_stat(root / "se3" / "state" / ".dirty")
+            gate = self._sentinel_gate.get(root)
+            if (
+                gate is not None
+                and sentinel_stat is not None
+                and gate == sentinel_stat
+            ):
                 continue
-            flow_id = str(data.get("flow_id") or "")
-            if not flow_id:
-                continue
-            status = str(data.get("status") or "")
-            if not _is_active_status(status):
-                continue
-            # The raw ``(mtime, size)`` alone debounces a same-``(mtime, size)``
-            # in-place engine.json rewrite — the PAUSE→resume / same-length
-            # status-flip churn on coarse-mtime filesystems — so the push loop
-            # would stall that frame until an unrelated jsonl append nudges the
-            # token. Fold in the whole-content digest the ``read_engine_header``
-            # call just above already computed and cached (zero extra read/hash):
-            # a mid-file rewrite that keeps ``(mtime, size)`` identical still
-            # moves the digest, so the signature shifts and the delta is read on
-            # the next tick. ``None`` (never-active read / oversized degrade)
-            # leaves the token as before, matching the previous behaviour.
-            engine_digest = cached_content_digest(engine_json)
-            parts: List[Any] = [
-                ("__engine__", *_safe_stat(engine_json), engine_digest),
-                ("__status__", status.strip().lower()),
-            ]
-            hist_dir = root / "se3" / "history" / flow_id
-            if hist_dir.is_dir():
-                # Include ``*.jsonl.from-<branch>`` sidecars so a worktree
-                # merge-back that only appends sidecar records still moves the
-                # signature forward and triggers a history push.
-                for jsonl in _iter_history_jsonl(hist_dir):
-                    mtime, size = _safe_stat(jsonl)
-                    parts.append((jsonl.name, mtime, size))
-            signature[flow_id] = tuple(parts)
-            # HOP-1 DEBUG: the change-detection fingerprint the push loop diffs
-            # (via client._history_changed) to decide whether to read+push a
-            # delta. The __engine__ part carries the raw ``(mtime, size)`` PLUS
-            # the whole-content digest, so a same-(mtime,size) in-place rewrite
-            # still shifts it; __status__/flow_id come from the cached parse.
-            # Logged with the jsonl-part count so a live run can see, tick by
-            # tick, whether the boundary actually shifts the signature (a new
-            # 02_analyze jsonl adds a part) or debounces.
-            logger.debug(
-                "hist-diag active_flow_signature: flow=%s status=%s "
-                "engine=%s jsonl_parts=%d",
-                flow_id, status.strip().lower(),
-                (parts[0][1], parts[0][2]), len(parts) - 2,
-            )
+            found_active = self._scan_root_signature(root, signature)
+            if found_active or sentinel_stat is None:
+                self._sentinel_gate.pop(root, None)
+            else:
+                self._sentinel_gate[root] = sentinel_stat
         return signature
+
+    def _scan_root_signature(
+        self, root: Path, signature: Dict[str, Any]
+    ) -> bool:
+        """Deep-scan one root's active flow into *signature*.
+
+        Returns whether an active flow was found (its token added), which is
+        what decides sentinel-gate eligibility in the caller.
+        """
+        engine_json = root / "se3" / "state" / "engine.json"
+        # Cheap pre-pass (stat-keyed peek, zero read/parse): decide whether
+        # this root's flow is worth the verify_content read at all. WHY:
+        # the verify_content whole-content hash exists to catch a same-
+        # ``(mtime, size)`` IN-PLACE rewrite (the PAUSED↔RUNNING flip on a
+        # coarse-mtime filesystem) — a hazard only a *live* flow's
+        # engine.json is exposed to. A terminal (completed / failed)
+        # engine.json is never rewritten in place; its next change is a
+        # brand-new flow's full rewrite, which moves ``(mtime_ns, size)``
+        # and busts the peek anyway. Paying the full read+hash for every
+        # terminal root on the 1s fast tick was the residual idle-disk
+        # hotspot (a multi-MB completed engine.json re-read every second);
+        # the peek reduces a settled terminal root to one stat per tick. A
+        # peek MISS (first sighting / changed file) falls through to the
+        # verify read below, so an unchanged file is still parsed at most
+        # once (the issue-#209 parse-once invariant).
+        header = peek_cached_header(engine_json)
+        if isinstance(header, dict):
+            if not str(header.get("flow_id") or ""):
+                return False
+            if not _is_active_status(str(header.get("status") or "")):
+                return False
+        # active=True read: a matching (path, mtime, size) is trusted only
+        # together with an unchanged whole-content digest; a real rewrite
+        # re-parses. flow_id/status are (re-)derived from this verified
+        # parse — never from the peek, whose stat-keyed hit could be stale
+        # across a same-stat in-place rewrite. The signature below also
+        # folds in the engine.json (mtime, size) directly, so a genuine
+        # flow change always shifts the signature.
+        data = read_engine_header(engine_json, active=True)
+        if not isinstance(data, dict):
+            return False
+        flow_id = str(data.get("flow_id") or "")
+        if not flow_id:
+            return False
+        status = str(data.get("status") or "")
+        if not _is_active_status(status):
+            return False
+        # The raw ``(mtime, size)`` alone debounces a same-``(mtime, size)``
+        # in-place engine.json rewrite — the PAUSE→resume / same-length
+        # status-flip churn on coarse-mtime filesystems — so the push loop
+        # would stall that frame until an unrelated jsonl append nudges the
+        # token. Fold in the whole-content digest the ``read_engine_header``
+        # call just above already computed and cached (zero extra read/hash):
+        # a mid-file rewrite that keeps ``(mtime, size)`` identical still
+        # moves the digest, so the signature shifts and the delta is read on
+        # the next tick. ``None`` (never-active read / oversized degrade)
+        # leaves the token as before, matching the previous behaviour.
+        engine_digest = cached_content_digest(engine_json)
+        parts: List[Any] = [
+            ("__engine__", *_safe_stat(engine_json), engine_digest),
+            ("__status__", status.strip().lower()),
+        ]
+        hist_dir = root / "se3" / "history" / flow_id
+        if hist_dir.is_dir():
+            # Include ``*.jsonl.from-<branch>`` sidecars so a worktree
+            # merge-back that only appends sidecar records still moves the
+            # signature forward and triggers a history push.
+            for jsonl in _iter_history_jsonl(hist_dir):
+                mtime, size = _safe_stat(jsonl)
+                parts.append((jsonl.name, mtime, size))
+        signature[flow_id] = tuple(parts)
+        # HOP-1 DEBUG: the change-detection fingerprint the push loop diffs
+        # (via client._history_changed) to decide whether to read+push a
+        # delta. The __engine__ part carries the raw ``(mtime, size)`` PLUS
+        # the whole-content digest, so a same-(mtime,size) in-place rewrite
+        # still shifts it; __status__/flow_id come from the cached parse.
+        # Logged with the jsonl-part count so a live run can see, tick by
+        # tick, whether the boundary actually shifts the signature (a new
+        # 02_analyze jsonl adds a part) or debounces.
+        logger.debug(
+            "hist-diag active_flow_signature: flow=%s status=%s "
+            "engine=%s jsonl_parts=%d",
+            flow_id, status.strip().lower(),
+            (parts[0][1], parts[0][2]), len(parts) - 2,
+        )
+        return True
 
     def live_flow_ids(self) -> Set[str]:
         """Return the flow_ids that are the current ``engine.json`` flow per root.
@@ -2100,6 +2184,29 @@ def _safe_mtime(path: Path) -> Optional[float]:
     """Return *path*'s mtime, or ``None`` when it is missing / unreadable."""
     try:
         return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _sentinel_stat(path: Path) -> Optional[Tuple[int, int, int]]:
+    """Return the sentinel's ``(st_mtime_ns, st_size, st_ino)``, or ``None``.
+
+    ``None`` (missing / unreadable) means "no sentinel signal" and the caller
+    must fail open to a full deep scan — unlike :func:`_safe_stat`'s sentinel
+    tuple, absence here must be distinguishable from any real stat value.
+
+    WHY st_ino: file mtimes come from the kernel's COARSE clock (~ms tick),
+    so two sentinel bumps inside one tick with an equal-width seq (``{"seq":
+    1}`` → ``{"seq": 2}``) leave ``(mtime_ns, size)`` identical and the gate
+    would sleep through the second persist. Every bump is an atomic
+    tmp+rename, which swaps the inode, so folding ``st_ino`` in makes any
+    single bump observable from the stat alone — no per-tick content read.
+    (An inode-number ABA across ≥2 bumps plus a same-tick mtime is left to
+    the status-tick ``clear_sentinel_gate`` backstop.)
+    """
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
     except OSError:
         return None
 
