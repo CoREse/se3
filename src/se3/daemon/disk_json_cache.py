@@ -39,10 +39,13 @@ whole file and held a raw copy in memory every tick):
   per-poll cost stays a bounded read + one C-speed digest instead of the
   full-file ``json.loads`` it used to be.
 * A size guard (:data:`MAX_PARSE_BYTES`): a file above the threshold is never
-  fully parsed and its content/result is never cached (so a giant legacy file
+  fully parsed and its parsed body is never cached (so a giant legacy file
   cannot inflate daemon memory). The hot path instead uses
   :func:`read_engine_header`, which extracts just the few top-level keys it
-  needs from a bounded head+tail read.
+  needs from a bounded head+tail read. That small *extracted header* (KB-scale,
+  never the multi-MB body) IS cached, keyed by ``(path, mtime_ns, size)`` — see
+  :data:`_DEGRADED_CACHE` — so an unchanged oversized archive snapshot costs one
+  ``stat`` per enumeration instead of a 256 KiB head+tail re-read every tick.
 
 The cache lives here (not in ``aggregator`` / ``history``) so both subsystems
 share one keyed store and one size guard, per the #243 design.
@@ -114,6 +117,30 @@ _CACHE_LOCK = threading.Lock()
 #: does not grow monotonically with every file the daemon has ever seen.
 _MAX_CACHE_ENTRIES = 512
 
+#: (path) -> (mtime_ns, size, extracted header dict or None) for OVERSIZED
+#: files — the :func:`_degraded_header` result cache. Kept separate from
+#: :data:`_CACHE` on purpose: the main store holds *full parses* whose
+#: ``verify_content`` / ``peek_cached_header`` semantics must never be
+#: satisfied by a lossy degraded extraction, while this store holds only the
+#: tiny header dict (a handful of string/bool keys — never the multi-MB body,
+#: so the memory ceiling the size guard exists for is preserved).
+#:
+#: WHY stat-keyed is enough here: the oversized population is dominated by
+#: archive snapshots (``se3/state/archive/engine_*.json``) whose content is
+#: immutable after archival — their mtime only moves when the file is replaced —
+#: so a ``(mtime_ns, size)`` hit is authoritative, exactly like the
+#: immutable-snapshot path of :func:`read_json_cached`. An oversized *live*
+#: engine.json thereby trades away the same-``(mtime_ns, size)`` in-place-
+#: rewrite detection the under-guard verify_content path provides; that is an
+#: accepted degraded-mode trade-off — such a file is a legacy artifact already
+#: served best-effort, every real step transition rewrites it (moving
+#: ``mtime_ns``), and the alternative was the 256 KiB head+tail re-read per
+#: tick that produced the residual ~1.1 MB/s idle disk load. A failed
+#: extraction (``None``) is cached too, so a persistently broken oversized file
+#: costs one scan (and one warning via :func:`_warn_once_degraded`), not one
+#: per tick.
+_DEGRADED_CACHE: "OrderedDict[str, Tuple[int, int, Optional[dict]]]" = OrderedDict()
+
 #: Paths already warned about (degraded extraction failure), so a persistently
 #: broken oversized file warns once rather than every tick.
 _WARNED: set = set()
@@ -151,6 +178,7 @@ def clear_cache() -> None:
     """Drop all cached parses (used by tests for isolation)."""
     with _CACHE_LOCK:
         _CACHE.clear()
+        _DEGRADED_CACHE.clear()
     with _WARNED_LOCK:
         _WARNED.clear()
 
@@ -175,9 +203,11 @@ def _drop_entry(key: str) -> None:
     A deleted worktree/archive file must not leak its parsed dict for the
     daemon's lifetime: the failed stat that bypasses the cache also drops the
     stale entry so resident memory tracks live files, not historical ones.
+    The degraded-header store is dropped alongside for the same reason.
     """
     with _CACHE_LOCK:
         _CACHE.pop(key, None)
+        _DEGRADED_CACHE.pop(key, None)
 
 
 def cached_content_digest(path: Path) -> Optional[bytes]:
@@ -287,7 +317,7 @@ def _read_active_content(path: Path) -> Optional[bytes]:
 
     The read is bounded: :func:`read_json_cached` only reaches the verify path for
     a file at or under :data:`MAX_PARSE_BYTES` (an oversized legacy engine.json
-    degrades to the always-fresh head+tail scan instead), so this reads at most
+    degrades to the stat-keyed head+tail scan instead), so this reads at most
     that many bytes and hashes them through a fast C digest — never the whole-file
     ``json.loads`` (which still runs only when the digest moves), so it does not
     reintroduce the #209/#243 per-tick parse sink. Returns ``None`` on an I/O
@@ -490,9 +520,12 @@ def read_engine_header(
     * **Over the guard** — a bounded head+tail read scans for the top-level
       keys directly. The oversized body is never fully parsed nor cached, so a
       giant legacy engine.json belonging to a still-active worktree run stays
-      *visible* in the WebUI without ever freezing the loop. Degraded
-      extraction that cannot even find ``flow_id`` returns ``None`` and
-      warns once.
+      *visible* in the WebUI without ever freezing the loop. The small
+      *extracted header* (including a ``None`` extraction failure) IS cached
+      keyed by ``(path, mtime_ns, size)`` — see :data:`_DEGRADED_CACHE` — so an
+      unchanged oversized archive snapshot costs one ``stat`` per enumeration
+      instead of a 256 KiB head+tail re-read. Degraded extraction that cannot
+      even find ``flow_id`` returns ``None`` and warns once.
 
     *active* ``True`` reads the at/under-guard file with
     ``verify_content=True`` — for the one live ``engine.json`` whose in-place,
@@ -500,8 +533,10 @@ def read_engine_header(
     cache hit (see :func:`read_json_cached`). It re-hashes the file's whole
     content each poll and reuses the parse while that content is unchanged, so the
     decode still runs at most once per real change while a middle-only rewrite is
-    never masked. An oversized active file degrades via the always-fresh head+tail
-    scan, so it is never stale either way.
+    never masked. An oversized active file degrades to the stat-keyed head+tail
+    scan — accepting that a same-``(mtime_ns, size)`` in-place rewrite is masked
+    there (the trade-off :data:`_DEGRADED_CACHE` records), since degraded mode is
+    already a best-effort legacy path.
 
     *force_fresh* (only with ``active``) bypasses the cached parse for this call —
     the true-value re-confirmation the active-flow *drop* decision uses so a
@@ -513,9 +548,31 @@ def read_engine_header(
         # pinned for the daemon's lifetime (mirrors read_json_cached).
         _drop_entry(str(path))
         return None
-    _mtime, size = stat
+    mtime, size = stat
     if size > MAX_PARSE_BYTES:
-        return _degraded_header(path, size)
+        key = str(path)
+        # force_fresh is the drop-decision's true-value re-confirmation: it
+        # must reach disk even here, or the re-confirm would just echo the
+        # possibly-collided cached header it is meant to double-check.
+        if not force_fresh:
+            with _CACHE_LOCK:
+                cached = _DEGRADED_CACHE.get(key)
+                if cached is not None and cached[0] == mtime and cached[1] == size:
+                    # Stat hit on an oversized file: serve the cached header
+                    # (possibly a cached None failure — a broken file is scanned
+                    # once, not once per tick). Refresh LRU recency so the archive
+                    # working set enumerated every rebuild is not evicted.
+                    _DEGRADED_CACHE.move_to_end(key)
+                    return cached[2]
+        header = _degraded_header(path, size)
+        with _CACHE_LOCK:
+            _DEGRADED_CACHE[key] = (mtime, size, header)
+            _DEGRADED_CACHE.move_to_end(key)
+            # Same LRU bound as the main store: each entry is a tiny header
+            # dict, but a long-lived daemon must not pin one per path ever seen.
+            while len(_DEGRADED_CACHE) > _MAX_CACHE_ENTRIES:
+                _DEGRADED_CACHE.popitem(last=False)
+        return header
     return read_json_cached(
         path, parse=parse, verify_content=active, force_fresh=force_fresh
     )

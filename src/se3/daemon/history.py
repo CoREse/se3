@@ -297,10 +297,22 @@ _DESC_CLIP = 200
 #: with a large history tree the full directory walk + JSON parse is expensive
 #: enough to saturate the thread-pool workers and starve the event loop of CPU
 #: (the same class of stall the aggregator's ``HISTORICAL_ROOTS_TTL`` fixed for
-#: ``all_project_roots``).  Caching the index for a conservative window
-#: collapses repeated identical rebuilds into one, while still reflecting new
-#: flows within the window.
-BUILD_INDEX_TTL = 3.0
+#: ``all_project_roots``).
+#:
+#: WHY 60 s: freshness is driven by *change signals*, not this TTL — the push
+#: loop invalidates the cache the moment ``active_flow_signature`` moves, every
+#: explicit state-changing command (SPAWN_FLOW / resume / END_SESSION /
+#: ISSUE_COMMAND / HISTORY_INDEX_REQUEST) invalidates on arrival, and
+#: ``build_index`` itself re-checks a per-root source stat token
+#: (:meth:`DaemonHistoryReader._index_change_token`) so even a signal-less
+#: change like a new history-only flow directory rebuilds within one tick. The
+#: TTL is the last-resort backstop for mutations even the token cannot see (an
+#: in-place edit inside an existing flow directory by hand). It used to be
+#: 3 s — *below* the 5 s status heartbeat — so every status tick of an idle
+#: daemon paid a cold rebuild (~17.5k stats across the history tree) despite
+#: zero changes; at 60 s an idle daemon rebuilds at most once a minute while
+#: any signalled change still rebuilds immediately.
+BUILD_INDEX_TTL = 60.0
 
 #: Cross-root flow_id de-duplication precedence (lower number = higher priority).
 #: When the SAME flow_id is found under more than one root — the classic
@@ -473,6 +485,13 @@ class DaemonHistoryReader:
         # repeated identical rebuilds into one.
         self._index_cache: Optional[List[SessionMeta]] = None
         self._index_cache_at: float = 0.0
+        # Cheap per-root change token recorded with the cached index (see
+        # :meth:`_index_change_token`). Serving the cache requires the token to
+        # still match, so a change with NO other signal — most importantly a
+        # new/removed history-only flow directory, which never moves
+        # ``active_flow_signature`` — still rebuilds on the next call instead
+        # of waiting out the long TTL backstop.
+        self._index_cache_token: Optional[tuple] = None
 
         # Per-directory content-signature cache for history-only flows.
         # When ``_build_index_fresh`` rebuilds the index, unchanged directories
@@ -536,14 +555,47 @@ class DaemonHistoryReader:
         # contract.
         self._cursor_source: Dict[str, str] = {}
 
+    def _index_change_token(self) -> tuple:
+        """Return a cheap stat token over every index *source* location.
+
+        One ``stat`` per root of ``engine.json``, the ``archive``/``resumable``
+        dirs and the ``se3/history`` dir — a handful of syscalls versus the
+        ~17.5k-stat full walk :meth:`_build_index_fresh` costs. A POSIX
+        directory's mtime moves whenever an entry is created/removed/renamed
+        in it, so the token shifts on exactly the events that change the
+        index's row set: a new/archived engine.json, a new resumable snapshot,
+        and — crucially — a new *history-only* flow directory, which produces
+        no ``active_flow_signature`` movement and no explicit command, i.e.
+        would otherwise only surface at the TTL backstop. Content growth
+        *inside* an existing flow dir does not move these mtimes; that path is
+        covered by the client's signature-driven invalidation for active flows
+        (and by the TTL for a hand-edited dormant flow).
+        """
+        parts: List[Any] = []
+        for root in self._iter_roots():
+            state_dir = root / "se3" / "state"
+            for path in (
+                state_dir / "engine.json",
+                state_dir / "archive",
+                state_dir / "resumable",
+                root / "se3" / "history",
+            ):
+                parts.append((str(path), _stat_token(path)))
+        return tuple(parts)
+
     def invalidate_index_cache(self) -> None:
         """Drop the cached index, forcing the next ``build_index`` to rebuild.
 
-        Called when a new flow is spawned or a flow status changes, so the
-        index reflects the new state promptly rather than waiting out the TTL.
+        Called on every change signal — the active-flow disk signature moving,
+        or an explicit state-changing command (spawn / resume / end-session /
+        issue command / HISTORY_INDEX_REQUEST) — so the index reflects the new
+        state promptly. This signal-driven invalidation is what carries index
+        freshness; the :data:`BUILD_INDEX_TTL` is only the backstop for changes
+        no signal can observe (direct disk edits).
         """
         self._index_cache = None
         self._index_cache_at = 0.0
+        self._index_cache_token = None
 
     # -- project roots -----------------------------------------------------
 
@@ -575,9 +627,11 @@ class DaemonHistoryReader:
         wins over an archive copy, which wins over a history-only directory)
         and sorted by ``updated_at`` descending.
 
-        Results are cached for :data:`BUILD_INDEX_TTL` seconds so the daemon
-        client's per-tick ``_push_history`` call does not trigger a full
-        directory walk + JSON parse on every fast tick.
+        Results are cached until a change signal invalidates them
+        (:meth:`invalidate_index_cache`) or :data:`BUILD_INDEX_TTL` expires as
+        a backstop, so the daemon client's per-tick ``_push_history`` call does
+        not trigger a full directory walk + JSON parse on every fast tick — nor
+        a cold rebuild on every idle status tick.
 
         Callers that need *live* active-status (e.g. :meth:`read_active_flows`)
         must re-check the on-disk ``engine.json`` status because a cached index
@@ -585,11 +639,22 @@ class DaemonHistoryReader:
         """
         now = time.monotonic()
         cached = self._index_cache
-        if cached is not None and (now - self._index_cache_at) < BUILD_INDEX_TTL:
+        # Serving the cache requires BOTH the TTL window and an unchanged
+        # source token: the token (a handful of stats) is what lets the TTL be
+        # a long backstop instead of the sub-heartbeat window that caused a
+        # full cold rebuild on every idle status tick — a change with no other
+        # signal (a new history-only flow dir) still rebuilds within one tick.
+        token = self._index_change_token()
+        if (
+            cached is not None
+            and token == self._index_cache_token
+            and (now - self._index_cache_at) < BUILD_INDEX_TTL
+        ):
             return cached
         metas = self._build_index_fresh()
         self._index_cache = metas
         self._index_cache_at = now
+        self._index_cache_token = token
         return metas
 
     def _build_index_fresh(self) -> List[SessionMeta]:
@@ -2102,6 +2167,21 @@ def _safe_mtime(path: Path) -> Optional[float]:
         return path.stat().st_mtime
     except OSError:
         return None
+
+
+def _stat_token(path: Path) -> Tuple[int, int]:
+    """Return *path*'s ``(st_mtime_ns, st_size)``, or ``(0, 0)`` when absent.
+
+    Integer nanosecond mtime (not the float ``st_mtime``) so two directory
+    mutations landing close together still produce distinct tokens wherever
+    the filesystem resolves them. Used by
+    :meth:`DaemonHistoryReader._index_change_token`.
+    """
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (0, 0)
 
 
 def _safe_stat(path: Path) -> tuple:

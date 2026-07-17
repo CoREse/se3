@@ -1081,6 +1081,19 @@ class DaemonClient:
             logger.info("END_SESSION handled for flow %s", flow_id)
         except Exception:
             logger.exception("END_SESSION handler failed for flow %s", flow_id)
+            return
+        # End-session archives the flow (engine.json → archive), a change the
+        # active-flow signature cannot see when the flow was already terminal
+        # (terminal flows are excluded from the signature). With the index TTL
+        # now a long backstop, this explicit invalidation is what keeps the
+        # active→archived row transition prompt instead of up-to-TTL stale.
+        # (Chained getattr: partially-constructed clients in tests may carry no
+        # history provider attribute at all.)
+        invalidate = getattr(
+            getattr(self, "_history_provider", None), "invalidate_index_cache", None
+        )
+        if invalidate is not None:
+            invalidate()
 
     async def _handle_issue_command(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Execute an issue write command via :class:`IssueManager`.
@@ -1176,6 +1189,15 @@ class DaemonClient:
         # latency low and avoids the server falsely reporting a timeout for an
         # issue that already landed on disk.
         await _reply(ok=True, issue_id=str(result or ""))
+        # An explicit state-changing command drops the cached index so the next
+        # push rebuilds from disk. Issue writes do not (today) surface in the
+        # history index itself, but the index TTL is now a long backstop and
+        # the invalidation contract is "every explicit write command refreshes"
+        # — a rare, user-initiated rebuild, kept uniform with spawn / resume /
+        # end-session rather than special-cased.
+        invalidate = getattr(self._history_provider, "invalidate_index_cache", None)
+        if invalidate is not None:
+            invalidate()
         # The issue file changed on disk — trigger a fast push so the web
         # sees the update on the next tick.
         self._trigger_fast_push()
