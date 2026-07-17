@@ -515,3 +515,207 @@ def test_provider_without_gate_hook_is_tolerated():
     # tick (the only path that probes for the hook) actually fires.
     client = _client(_MinimalHistory(), fast=0.05, status=0.5)
     _run_push_loop(client, duration=0.7)  # would raise inside the loop task
+
+
+# --------------------------------------------------------------------------
+# task 13 (a) — idle-profile integration: all three layers stacked
+#
+# The environment mirrors the issue report's idle daemon: a settled root with
+# a terminal engine.json, a ~307-file issue directory and a >MAX_PARSE_BYTES
+# archive snapshot, plus a second history-only root. After one cold warm-up
+# pass, idle ticks must cost stat-level work only: zero full-content reads,
+# zero JSON/YAML parses, zero cold index rebuilds — and a gated fast tick
+# exactly one sentinel stat per root.
+# --------------------------------------------------------------------------
+
+from collections import Counter
+
+from se3.daemon.aggregator import DaemonAggregator
+
+
+# The issue-farm scale from the diagnosis (~307 YAML files, 0.3–0.6 s of
+# pure-Python parsing per uncached snapshot) — the cache must reduce every
+# subsequent snapshot to a directory-stat pass.
+_ISSUE_FARM_SIZE = 307
+_IDLE_TICKS = 5
+
+
+def _build_idle_estate(tmp_path: Path) -> tuple:
+    """Build the two-root on-disk estate the idle-profile tests scan."""
+    root_a = tmp_path / "proj-settled"
+    root_b = tmp_path / "proj-history-only"
+
+    # Terminal engine.json written through PersistenceManager — which also
+    # plants the sentinel, so the root is gate-eligible from the start.
+    pm = PersistenceManager(root_a)
+    pm.save_flow(_make_flow("flow-term", FlowStatus.COMPLETED))
+
+    issues = root_a / "se3" / "issues" / "open"
+    issues.mkdir(parents=True)
+    for i in range(_ISSUE_FARM_SIZE):
+        (issues / f"{i:03d}_idle.yaml").write_text(
+            f"id: '{i:03d}'\n"
+            f"title: idle profile issue {i}\n"
+            f"description: body {i}\n"
+            "status: open\n",
+            encoding="utf-8",
+        )
+
+    # Oversized archive snapshot (> MAX_PARSE_BYTES): only its bounded
+    # degraded head+tail header may ever be read — and only once, thanks to
+    # the stat-keyed _DEGRADED_CACHE (this was the residual ~1.1 MB/s read).
+    archive = root_a / "se3" / "state" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    big = {
+        "flow_id": "flow-big-archive",
+        "status": "completed",
+        "task_description": "giant legacy archive snapshot",
+        "project_root": str(root_a),
+        "state": {"pad": "x" * (disk_cache.MAX_PARSE_BYTES + 1024)},
+    }
+    (archive / "engine_20260101_000000.json").write_text(
+        json.dumps(big, indent=2), encoding="utf-8"
+    )
+
+    # History-only root: no engine.json at all, one flow dir, plus a sentinel
+    # so the fast tick can gate it too.
+    hist = root_b / "se3" / "history" / "flow-hist"
+    hist.mkdir(parents=True)
+    (hist / "01_discovery.jsonl").write_text(
+        '{"type": "prompt", "content": "hello"}\n', encoding="utf-8"
+    )
+    (root_b / "se3" / "state").mkdir(parents=True)
+    _bump_sentinel_raw(root_b, 1)
+
+    return root_a, root_b
+
+
+@pytest.fixture()
+def io_counters(monkeypatch):
+    """Count every expensive-IO seam the idle profile must keep at zero."""
+    counts = {
+        "full_read": 0,      # whole-content verify read (active engine.json)
+        "json_parse": 0,     # full json.loads through the counted seam chain
+        "degraded": 0,       # 256 KiB head+tail scan of an oversized file
+        "yaml": 0,           # issue-YAML parse
+        "index_rebuild": 0,  # build_index cold rebuild (the ~17.5k-stat walk)
+    }
+
+    real_read = disk_cache._read_active_content
+
+    def counting_read(path):
+        counts["full_read"] += 1
+        return real_read(path)
+
+    monkeypatch.setattr(disk_cache, "_read_active_content", counting_read)
+
+    real_loads = disk_cache._json_loads
+
+    def counting_loads(raw):
+        counts["json_parse"] += 1
+        return real_loads(raw)
+
+    monkeypatch.setattr(disk_cache, "_json_loads", counting_loads)
+
+    real_degraded = disk_cache._degraded_header
+
+    def counting_degraded(path, size):
+        counts["degraded"] += 1
+        return real_degraded(path, size)
+
+    monkeypatch.setattr(disk_cache, "_degraded_header", counting_degraded)
+
+    import yaml
+
+    real_yaml_load = yaml.load
+
+    def counting_yaml(*args, **kwargs):
+        counts["yaml"] += 1
+        return real_yaml_load(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "load", counting_yaml)
+
+    real_fresh = DaemonHistoryReader._build_index_fresh
+
+    def counting_fresh(self):
+        counts["index_rebuild"] += 1
+        return real_fresh(self)
+
+    monkeypatch.setattr(DaemonHistoryReader, "_build_index_fresh", counting_fresh)
+    return counts
+
+
+def test_idle_fast_ticks_cost_one_sentinel_stat_per_root(
+    tmp_path, io_counters, deep_scans, sentinel_stats
+):
+    """Gated fast ticks: zero reads/parses/scans, exactly 1 stat per root."""
+    root_a, root_b = _build_idle_estate(tmp_path)
+    reader = DaemonHistoryReader(
+        project_roots_provider=lambda: [root_a, root_b]
+    )
+
+    # Warm-up: one deep scan finds no active flow anywhere and arms both
+    # roots' sentinel gates (the cold engine.json read/parse is paid here).
+    assert reader.active_flow_signature() == {}
+    baseline = dict(io_counters)
+    deep_scans.clear()
+    sentinel_stats.clear()
+
+    for _ in range(_IDLE_TICKS):
+        assert reader.active_flow_signature() == {}
+
+    assert io_counters["full_read"] == baseline["full_read"]
+    assert io_counters["json_parse"] == baseline["json_parse"]
+    assert io_counters["degraded"] == baseline["degraded"]
+    assert deep_scans == []
+    # Exactly one sentinel stat per root per tick — the whole cost of a
+    # gated idle fast tick.
+    per_root = Counter(sentinel_stats)
+    assert len(per_root) == 2
+    assert set(per_root.values()) == {_IDLE_TICKS}
+
+
+def test_idle_status_ticks_reuse_every_cache(tmp_path, io_counters):
+    """Ungated status ticks: 0 YAML parses, 0 cold rebuilds, 0 big-file reads."""
+    root_a, root_b = _build_idle_estate(tmp_path)
+    reader = DaemonHistoryReader(
+        project_roots_provider=lambda: [root_a, root_b]
+    )
+    aggregator = DaemonAggregator(machine_id="m-idle")
+    aggregator.add_project_root(root_a)
+    aggregator.add_project_root(root_b)
+
+    # Warm-up: one full pass pays every cold cost exactly once.
+    reader.active_flow_signature()
+    warm_index = reader.build_index()
+    aggregator.get_snapshot()
+    assert io_counters["yaml"] >= _ISSUE_FARM_SIZE  # cold issue-farm parse
+    assert io_counters["index_rebuild"] == 1
+    assert io_counters["degraded"] >= 1  # the >5MB archive scanned once
+    # The caches must not have degraded correctness: all three flows are
+    # indexed, including the one whose only source is the degraded header.
+    indexed = {m.flow_id for m in warm_index}
+    assert {"flow-term", "flow-hist", "flow-big-archive"} <= indexed
+
+    baseline = dict(io_counters)
+    snapshot = None
+    for _ in range(3):
+        # One status tick's disk work, mirroring the push/poll loops: the
+        # ungated backstop signature scan, the aggregator snapshot, and the
+        # (token-guarded) index serve.
+        reader.clear_sentinel_gate()
+        reader.active_flow_signature()
+        snapshot = aggregator.get_snapshot()
+        assert {m.flow_id for m in reader.build_index()} == indexed
+
+    assert io_counters["yaml"] == baseline["yaml"]
+    assert io_counters["index_rebuild"] == baseline["index_rebuild"]
+    assert io_counters["degraded"] == baseline["degraded"]
+    assert io_counters["json_parse"] == baseline["json_parse"]
+    # The only residual read is the bounded verify of root_a's small terminal
+    # engine.json inside get_snapshot (the ungated signature scan itself is
+    # read-free: the stat-keyed peek skips terminal flows) — one whole-file
+    # read+hash per engine.json-bearing root per status tick, never a parse.
+    assert io_counters["full_read"] - baseline["full_read"] <= 3
+    # Snapshot correctness is intact off the caches.
+    assert len(snapshot.issues) == _ISSUE_FARM_SIZE

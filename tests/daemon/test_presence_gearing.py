@@ -473,3 +473,97 @@ def test_status_file_reports_the_poll_gear(tmp_path):
     payload = json.loads(daemon.config.status_file.read_text(encoding="utf-8"))
     assert payload["poll_gear"] == "full"
     assert payload["viewer_count"] == 3
+
+
+# --------------------------------------------------------------------------
+# task 13 (c) — compat matrix, daemon side: a v4 daemon on a v3 server runs a
+# full revision-3 session — full speed, no downshift, no new frame types.
+# --------------------------------------------------------------------------
+
+
+def test_v4_daemon_on_v3_server_stays_full_speed_revision3():
+    """v4 daemon × v3 server: the WELCOME pins the peer at revision 3, so no
+    presence input may ever downshift, the push loop keeps the configured
+    cadence, and every outbound frame is one a v3 server understands."""
+    history = _FakeHistory()
+    client = _client(
+        peer_version=None, history_provider=history, fast=0.1, status=0.5
+    )
+    ws = _FakeWS()
+
+    async def body():
+        # The v3 server's real WELCOME (accepted, protocol_version "3").
+        await client._dispatch(
+            ws,
+            protocol.Message(
+                type=protocol.MSG_WELCOME,
+                payload={
+                    "server_version": "old",
+                    "protocol_version": "3",
+                    "accepted": True,
+                },
+            ),
+        )
+        # Its heartbeats carry no viewers level; PONGs must flow regardless.
+        await client._dispatch(ws, protocol.make_ping(seq=1))
+        # Even a stray zero (misrouted frame) cannot downshift against v3.
+        await client._dispatch(ws, _viewers(0))
+        assert client.viewer_count is None
+        assert client._effective_intervals() == (0.1, 0.5)
+        # The push loop runs at the configured full-speed cadence: the 0.5 s
+        # status heartbeat fires repeatedly inside this window.
+        await _wait_until(
+            lambda: len(
+                [
+                    m
+                    for m in ws.sent
+                    if m.type
+                    in (protocol.MSG_STATUS_UPDATE, protocol.MSG_KEEPALIVE)
+                ]
+            )
+            >= 2,
+            timeout=3.0,
+        )
+
+    asyncio.run(_run_push_loop_for(client, ws, body))
+    sent_types = set(_types(ws))
+    # Nothing outside the daemon→server vocabulary a v3 server already knows
+    # (revision 4 added no daemon→server frame; MSG_VIEWERS is downlink-only).
+    assert sent_types <= set(protocol.DAEMON_TO_SERVER)
+    assert protocol.MSG_VIEWERS not in sent_types
+    assert protocol.MSG_PONG in sent_types
+
+
+def test_unknown_frame_mid_stream_does_not_kill_the_receive_loop():
+    """The receive loop drops an unknown-typed frame and keeps serving — the
+    exact behavior a v3 daemon shows a v4 server's MSG_VIEWERS broadcast (its
+    decode() rejects the type), so the ungated broadcast is safe fleet-wide."""
+
+    class _IterWS:
+        def __init__(self, frames):
+            self._frames = list(frames)
+            self.sent = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._frames:
+                raise StopAsyncIteration
+            return self._frames.pop(0)
+
+        async def send(self, data):
+            self.sent.append(protocol.decode(data))
+
+    client = _client()
+    # A frame whose type this endpoint does not know — to a v3 daemon,
+    # MSG_VIEWERS is exactly such a frame — followed by a normal PING.
+    unknown = json.dumps({"type": "viewers/next", "seq": 1, "payload": {}})
+    ws = _IterWS([unknown, protocol.make_ping(seq=2).to_json()])
+
+    asyncio.run(client._receive_loop(ws, asyncio.Event()))
+
+    # The unknown frame was dropped, the session survived, the PING after it
+    # was still answered.
+    assert [m.type for m in ws.sent] == [protocol.MSG_PONG]
+    assert ws.sent[0].seq == 2

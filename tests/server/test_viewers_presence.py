@@ -464,3 +464,294 @@ def test_daemon_ping_with_viewers_still_replies_pong():
     assert len(ws.sent) == 1
     assert ws.sent[0].type == protocol.MSG_PONG
     assert ws.sent[0].seq == 7
+
+
+# --------------------------------------------------------------------------
+# task 13 (b)/(c) — full-flow integration: a real UiHub + ConnectionManager on
+# the server side wired, in memory, to a real DaemonClient push loop on the
+# daemon side. No network, no threads — the bridge socket dispatches every
+# server→daemon frame straight into the client.
+# --------------------------------------------------------------------------
+
+from se3.daemon import client as client_module
+from se3.daemon.client import DaemonClient
+
+
+class _ClientOutWS:
+    """The daemon client's outbound socket: captures daemon→server frames."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, data):
+        self.sent.append(protocol.decode(data))
+
+    def types(self):
+        return [m.type for m in self.sent]
+
+
+class _PresenceBridgeWS:
+    """Server-side daemon socket piping frames into a live DaemonClient.
+
+    ``send_text`` (the server's downlink) decodes and dispatches directly into
+    the client — the in-memory stand-in for the WebSocket hop — so presence
+    edges, WELCOMEs and heartbeats reach the client exactly as encoded on the
+    wire. ``receive_text`` blocks forever (the daemon's uplink is captured on
+    :class:`_ClientOutWS` instead); ``fail_next_send`` ends a server heartbeat
+    loop for teardown, mirroring :class:`_BlockingDaemonWS`.
+    """
+
+    def __init__(self, client, client_out):
+        self._client = client
+        self._out = client_out
+        self.fail_next_send = False
+
+    async def accept(self):
+        pass
+
+    async def receive_text(self):
+        await asyncio.Event().wait()  # cancelled at teardown
+
+    async def send_text(self, data):
+        if self.fail_next_send:
+            raise RuntimeError("socket closed")
+        await self._client._dispatch(self._out, protocol.decode(data))
+
+    async def close(self, code=1000):
+        pass
+
+
+class _IndexedHistory:
+    """Minimal history provider whose index push is observable."""
+
+    def build_index(self):
+        return []
+
+    def read_active_flows(self, cursors):
+        return []
+
+    def active_flow_signature(self):
+        return {}
+
+    def invalidate_index_cache(self):
+        pass
+
+    def live_flow_ids(self):
+        return set()
+
+
+def _make_client(*, fast: float = 0.1, status: float = 0.5) -> DaemonClient:
+    return DaemonClient(
+        "ws://server",
+        machine_id="m1",
+        hostname="host",
+        se3_version="11.0.0",
+        snapshot_provider=lambda: {
+            "machine_id": "m1",
+            "flows": [],
+            "issues": [],
+            "pending_calls": [],
+            "project_roots": [],
+        },
+        history_provider=_IndexedHistory(),
+        status_interval=status,
+        history_poll_interval=fast,
+    )
+
+
+def test_presence_full_flow_open_upshift_close_downshift(monkeypatch):
+    """UI connect → edge → daemon upshifts with a forced full first screen;
+    UI disconnect → edge → daemon drops back into the idle gear."""
+    monkeypatch.setattr(client_module, "_IDLE_FAST_INTERVAL", 5.0)
+    monkeypatch.setattr(client_module, "_IDLE_STATUS_INTERVAL", 10.0)
+
+    async def scenario():
+        manager = ConnectionManager()
+        # The exact assembly app.py wires: the hub's 0↔non-0 edge fans a
+        # MSG_VIEWERS to every connected daemon.
+        hub = UiHub(on_presence_edge=manager.broadcast_viewers)
+
+        # (The client clamps to its 0.1 s fast / 0.5 s status floors.)
+        client = _make_client(fast=0.1, status=0.5)
+        out = _ClientOutWS()
+        client._fast_push_event = asyncio.Event()
+        bridge = _PresenceBridgeWS(client, out)
+        await manager.connect("m1", bridge)
+
+        # The server-side handshake tail for a v4 daemon: WELCOME (which is
+        # how the client learns the peer speaks revision 4) followed by the
+        # immediate viewers level — here zero, nobody watching yet.
+        await manager.send_to("m1", protocol.make_welcome("test-server"))
+        await manager.send_to("m1", protocol.make_viewers(hub.client_count))
+        assert client.viewer_count == 0
+
+        # Prime the status baseline so a later unforced push would collapse to
+        # a keepalive — proving the presence wake genuinely forces a full one.
+        await client._push_status(out)
+        pushed_baseline = len(out.sent)
+
+        stop = asyncio.Event()
+        push_task = asyncio.create_task(client._push_loop(out, stop))
+        try:
+            # Idle gear: the loop's first tick is 5 s away — silence.
+            await asyncio.sleep(0.3)
+            assert len(out.sent) == pushed_baseline
+
+            # Browser opens: hub edge → broadcast → upshift + forced refresh.
+            ui = _FakeUiWS()
+            await hub.register(ui, "A")
+            assert client.viewer_count == 1
+            assert client._effective_intervals() == (0.1, 0.5)
+            await _wait_for(
+                lambda: protocol.MSG_HISTORY_INDEX in out.types()[pushed_baseline:]
+                and protocol.MSG_STATUS_UPDATE in out.types()[pushed_baseline:]
+            )
+            woke = out.types()[pushed_baseline:]
+            # The first screen must be real content, never a keepalive.
+            assert protocol.MSG_KEEPALIVE not in woke
+
+            # Browser closes: hub edge → broadcast → back to the idle gear.
+            await hub.unregister(ui)
+            assert client.viewer_count == 0
+            assert client._effective_intervals() == (5.0, 10.0)
+
+            # Let any in-flight full-speed tick drain, then require silence.
+            await asyncio.sleep(0.15)
+            settled = len(out.sent)
+            await asyncio.sleep(0.4)
+            assert len(out.sent) == settled
+        finally:
+            stop.set()
+            await asyncio.wait_for(push_task, timeout=5)
+
+    asyncio.run(scenario())
+
+
+def test_ping_level_self_heals_lost_edges_in_both_directions(monkeypatch):
+    """A lost MSG_VIEWERS edge is repaired by the heartbeat level within one
+    PING interval — in both the 0→1 and the 1→0 direction."""
+    monkeypatch.setattr(ws_module, "PING_INTERVAL", 0.02)
+
+    async def scenario():
+        state = ServerState()
+        manager = ConnectionManager()
+        # No edge callback wired: every edge is "lost" — only the PING level
+        # can carry presence, which is exactly the self-heal path under test.
+        hub = UiHub()
+
+        client = _make_client()
+        out = _ClientOutWS()
+        client._fast_push_event = asyncio.Event()
+        client._peer_protocol_version = "4"
+        client._viewer_count = 0  # stale belief: idle
+        bridge = _PresenceBridgeWS(client, out)
+
+        ui = _FakeUiWS()
+        await hub.register(ui)  # someone IS watching; the edge never arrived
+
+        beat_task = asyncio.create_task(
+            _serve_loop(bridge, manager, state, "m1", hub)
+        )
+        try:
+            await _wait_for(lambda: client.viewer_count == 1)
+            # The healed 0→1 also arms the forced-refresh wake, so the
+            # just-opened browser still gets a fresh first screen.
+            assert client._presence_wake_force is True
+            assert client._fast_push_event.is_set()
+
+            # Now lose the closing edge too: the level must heal 1→0.
+            await hub.unregister(ui)
+            await _wait_for(lambda: client.viewer_count == 0)
+            # Every heartbeat kept its PONG (liveness never traded away).
+            assert protocol.MSG_PONG in out.types()
+        finally:
+            bridge.fail_next_send = True
+            await asyncio.wait_for(beat_task, timeout=5)
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# task 13 (c) — compat matrix, server side: a revision-3 daemon on a v4 server
+# keeps its revision-3 session shape and nothing anomalous kills it.
+# --------------------------------------------------------------------------
+
+
+class _SessionDaemonWS(_FakeDaemonWS):
+    """A daemon socket that stays connected after draining its frames.
+
+    ``drained`` fires once the queued frames (the HELLO) are consumed;
+    ``release`` then lets ``receive_text`` raise the disconnect, ending the
+    session — so a test can act mid-session, unlike :class:`_FakeDaemonWS`
+    whose empty queue disconnects immediately.
+    """
+
+    def __init__(self, frames):
+        super().__init__(frames)
+        self.drained = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def receive_text(self):
+        if self._incoming:
+            return self._incoming.pop(0)
+        self.drained.set()
+        await self.release.wait()
+        raise _Disconnect()
+
+
+def test_v3_daemon_session_survives_ui_churn_on_a_v4_server(monkeypatch):
+    """v3 daemon × v4 server: the handshake stays revision-3 (no viewers
+    level), UI churn mid-session broadcasts MSG_VIEWERS without disturbing the
+    session, and heartbeats keep flowing throughout."""
+    monkeypatch.setattr(ws_module, "PING_INTERVAL", 0.02)
+
+    async def scenario():
+        state = ServerState()
+        manager = ConnectionManager()
+        hub = UiHub(on_presence_edge=manager.broadcast_viewers)
+
+        hello_v3 = protocol.Message(
+            type=protocol.MSG_HELLO,
+            payload={
+                "machine_id": "m-old",
+                "hostname": "host",
+                "se3_version": "6.0.0",
+                "protocol_version": "3",
+            },
+        ).to_json()
+        sock = _SessionDaemonWS([hello_v3])
+        session = asyncio.create_task(
+            handle_daemon_connection(sock, manager, state, hub)
+        )
+        try:
+            await asyncio.wait_for(sock.drained.wait(), timeout=5)
+            # Revision-3 handshake shape: WELCOME accepted, no viewers level.
+            welcomes = sock.frames_of_type(protocol.MSG_WELCOME)
+            assert welcomes and welcomes[0].payload["accepted"] is True
+            assert sock.frames_of_type(protocol.MSG_VIEWERS) == []
+
+            # UI churn mid-session. The broadcast is deliberately ungated (a
+            # real v3 daemon's decode() rejects the unknown type and drops the
+            # frame — the documented fail-open no-op), so the frames DO go out
+            # and the session must shrug them off.
+            ui = _FakeUiWS()
+            await hub.register(ui)
+            await hub.unregister(ui)
+            viewers = sock.frames_of_type(protocol.MSG_VIEWERS)
+            assert [m.payload["count"] for m in viewers] == [1, 0]
+            assert not session.done()  # nothing tore the session down
+
+            # Heartbeats keep flowing after the churn.
+            pings_before = len(sock.frames_of_type(protocol.MSG_PING))
+            await _wait_for(
+                lambda: len(sock.frames_of_type(protocol.MSG_PING))
+                > pings_before
+            )
+        finally:
+            sock.release.set()
+            await asyncio.wait_for(session, timeout=5)
+
+        # The daemon went offline cleanly — no unhandled exception escaped.
+        assert session.exception() is None
+
+    asyncio.run(scenario())
