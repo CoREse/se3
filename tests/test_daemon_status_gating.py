@@ -193,7 +193,7 @@ def test_collected_issue_description_is_clipped(tmp_path: Path):
         encoding="utf-8",
     )
 
-    snaps = DaemonAggregator._collect_issues(tmp_path)
+    snaps = DaemonAggregator()._collect_issues(tmp_path)
 
     assert len(snaps) == 1
     snap = snaps[0]
