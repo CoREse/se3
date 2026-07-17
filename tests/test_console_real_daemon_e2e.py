@@ -350,6 +350,21 @@ class _IsolatedConsole:
     # -- convenience -------------------------------------------------------
 
     def flow_history(self, flow_id: str) -> List[Dict[str, Any]]:
+        # Hit the list endpoint first, exactly as a real browser does when it
+        # opens the history view before drilling into one flow. WHY this is
+        # required, not cosmetic: these records are written straight to disk as
+        # bare *.jsonl (no engine.json), so they raise no active_flow_signature
+        # or dirty-sentinel change signal for the presence-idle daemon to notice
+        # — and the detail endpoint is deliberately a cheap indexed lookup that
+        # never forces a fleet re-index (app.py: it must not re-create the
+        # rebuild storm presence gating removed). Discovery of a freshly written
+        # flow is the LIST endpoint's job: it broadcasts a forced index re-push
+        # (MSG_HISTORY_INDEX_REQUEST), which a command handler answers regardless
+        # of the idle gear, so the flow lands in the index the detail lookup reads.
+        try:
+            _http_get(self.base + "/api/history")
+        except Exception:
+            pass
         data = _http_get(self.base + f"/api/history/{flow_id}")
         return list(data.get("records") or [])
 

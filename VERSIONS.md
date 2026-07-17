@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+## 11.23.0 - 2026-07-17
+
+- Add browser-presence gearing: the daemon drops to a low-power heartbeat when no WebUI viewer is connected and returns to real-time cadence when a page opens, driving idle CPU toward zero
+- Introduce daemon↔server protocol revision 4 with a MSG_VIEWERS message and a viewers level field on the heartbeat, negotiated for backward compatibility with older servers (assumed viewers>0)
+- Publish live viewer counts from the server's WebUI connection manager to the daemon via 0↔non-zero edge broadcasts plus a self-healing level on the 15s heartbeat
+- Deliver a fresh full snapshot within ~1s on the first viewer (0→1 wake) by reusing the fast-push pipeline
+- Cache issue-YAML snapshots by directory signature and skip full-content hashing for terminal flows, eliminating the ~10% idle-CPU issue-parsing and engine.json re-hash hotspots
+- Cache oversized archive file headers and converge build_index invalidation to remove residual disk-read churn and the stat storm across history directories
+- Add a dirty-sentinel written by the persistence layer so the daemon's fast tick degrades to a single stat for idle roots
 ## 11.22.6 - 2026-07-16
 
 - Fix worktree merge-reconcile in version-script mode leaving the version bump (e.g. pyproject.toml) as an uncommitted working-tree change instead of committing it

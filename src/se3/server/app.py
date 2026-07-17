@@ -1922,28 +1922,34 @@ def create_app(
     # serves cached records, pulling them on demand from the owning daemon
     # on a cache miss. Nothing here is persisted to disk.
 
+    async def _refresh_history_index() -> None:
+        """Ask every connected daemon to rebuild + re-push its history index.
+
+        Briefly waits for the re-pushes to land; with no connected daemon —
+        or when a daemon is slow and the wait times out — the caller degrades
+        gracefully to the currently cached index.
+        """
+        waiters = await broadcast_index_refresh(manager, index_refresh_registry)
+        if not waiters:
+            return
+        try:
+            await asyncio.wait(
+                list(waiters.values()),
+                timeout=HISTORY_INDEX_REFRESH_TIMEOUT,
+            )
+        finally:
+            # Drop every parked waiter regardless of whether it resolved,
+            # so a late re-push never leaves a dangling future behind.
+            for machine_id, fut in waiters.items():
+                index_refresh_registry.discard(machine_id, fut)
+
     @app.get("/api/history")
     async def list_history(
         identity_: OwnerIdentity = Depends(require_owner),
     ) -> dict:
         # Entering the history view must always reflect the latest sessions, not
-        # whatever index a daemon last happened to push. Actively ask every
-        # connected daemon to rebuild and re-push its index, then briefly wait
-        # for those re-pushes to land before aggregating. With no connected
-        # daemon — or when a daemon is slow and the wait times out — we degrade
-        # gracefully to the currently cached index and still return 200.
-        waiters = await broadcast_index_refresh(manager, index_refresh_registry)
-        if waiters:
-            try:
-                await asyncio.wait(
-                    list(waiters.values()),
-                    timeout=HISTORY_INDEX_REFRESH_TIMEOUT,
-                )
-            finally:
-                # Drop every parked waiter regardless of whether it resolved,
-                # so a late re-push never leaves a dangling future behind.
-                for machine_id, fut in waiters.items():
-                    index_refresh_registry.discard(machine_id, fut)
+        # whatever index a daemon last happened to push.
+        await _refresh_history_index()
         index = await state.get_history_index(owner=_scope_for(identity_))
         return {"sessions": index, "count": len(index)}
 
@@ -1965,6 +1971,15 @@ def create_app(
         # be cached server-side — so one owner can never pull another's history.
         scope = _scope_for(identity_)
         owner_machine = await state.find_machine_for_history_flow(flow_id, owner=scope)
+        # A cache miss here returns 404 immediately — the detail endpoint stays
+        # a cheap indexed lookup with NO daemon-side work. WHY it must not
+        # force a fleet refresh: a stale browser tab (or any client) polling the
+        # detail URL of a deleted / never-existing flow would otherwise drive a
+        # full build_index cold rebuild (~17.5k stats) on every connected daemon
+        # per request — re-creating on demand the exact rebuild storm the
+        # presence gating removed. Discovery of a freshly created flow is the
+        # list endpoint's job (it alone pays the forced re-push); once the flow
+        # is indexed the browser reaches its detail through this fast path.
         if owner_machine is None:
             raise HTTPException(
                 status_code=404,

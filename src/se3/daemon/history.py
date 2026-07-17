@@ -633,6 +633,27 @@ class DaemonHistoryReader:
         """
         self._sentinel_gate.clear()
 
+    def gated_roots(self) -> Set[str]:
+        """Return the roots the last signature pass sentinel-gated (idle).
+
+        A root is present exactly when the previous ``active_flow_signature``
+        pass found NO active flow there and armed its gate on a present
+        ``se3/state/.dirty`` sentinel — i.e. the root whose fast-tick history
+        deep scan is currently being skipped for one sentinel stat.
+
+        WHY this exists: the calls-signature scan
+        (``aggregator.pending_calls_signature``) reuses this same verdict so an
+        idle root's WHOLE fast tick — history AND calls — costs the single
+        sentinel stat the history scan already paid, instead of additionally
+        ``iterdir``-ing ``se3/calls/`` on every tick. Zero IO: it reports the
+        membership the last pass computed, so it can lag real disk by one fast
+        tick — the identical one-tick bound the sentinel gate itself accepts,
+        with the status-tick ``clear_sentinel_gate`` backstop re-scanning
+        regardless. ``list()`` snapshots the dict so a concurrent gate mutation
+        cannot raise mid-iteration.
+        """
+        return {str(root) for root in list(self._sentinel_gate)}
+
     # -- project roots -----------------------------------------------------
 
     def _iter_roots(self) -> List[Path]:

@@ -719,3 +719,105 @@ def test_idle_status_ticks_reuse_every_cache(tmp_path, io_counters):
     assert io_counters["full_read"] - baseline["full_read"] <= 3
     # Snapshot correctness is intact off the caches.
     assert len(snapshot.issues) == _ISSUE_FARM_SIZE
+
+
+# --------------------------------------------------------------------------
+# task 12 — the calls-signature scan reuses the SAME sentinel gate
+#
+# The reader's dirty-sentinel gate must also elide the aggregator's
+# ``pending_calls_signature`` ``se3/calls/`` iterdir for a gated idle root, so
+# the WHOLE idle fast tick (history + calls) collapses to the single sentinel
+# stat the history scan already pays — not "1 stat + 1 calls enumeration".
+# --------------------------------------------------------------------------
+
+
+def _count_calls_iterdir(monkeypatch):
+    """Count ``iterdir`` calls that touch any ``se3/calls`` directory."""
+    import pathlib
+
+    real = pathlib.Path.iterdir
+    hits: List[str] = []
+
+    def counting(self):
+        if self.name == "calls":
+            hits.append(str(self))
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", counting)
+    return hits
+
+
+def test_calls_signature_skips_gated_idle_root(tmp_path, monkeypatch):
+    """A gated root's calls dir is NOT enumerated and its fingerprint reused."""
+    root = tmp_path / "proj"
+    calls_dir = root / "se3" / "calls"
+    calls_dir.mkdir(parents=True)
+    (calls_dir / "interjection_1.json").write_text("{}", encoding="utf-8")
+
+    agg = DaemonAggregator(machine_id="m-calls")
+    agg.add_project_root(root)
+
+    scans = _count_calls_iterdir(monkeypatch)
+
+    # Ungated baseline: the calls dir is enumerated once.
+    base = agg.pending_calls_signature()
+    assert str(root) in base
+    assert len(scans) == 1
+
+    # Gate the root; a new call file lands but the gated tick must neither
+    # enumerate the dir again NOR let the new file shift the fingerprint (the
+    # prior per-root tuple is reused verbatim, keeping the client diff stable).
+    agg.set_calls_gate_source(lambda: {str(root)})
+    (calls_dir / "interjection_2.json").write_text("{}", encoding="utf-8")
+    gated_sig = agg.pending_calls_signature()
+    assert len(scans) == 1  # zero additional calls-dir enumerations
+    assert gated_sig == base  # new file invisible while gated
+
+    # Un-gate (what a sentinel bump / active-flow tick effects): the same call
+    # dir is re-scanned and the new file surfaces.
+    agg.set_calls_gate_source(lambda: set())
+    fresh = agg.pending_calls_signature()
+    assert len(scans) == 2
+    assert fresh != base
+
+
+def test_calls_signature_gate_source_failure_scans_all(tmp_path, monkeypatch):
+    """A raising gate source fails open to a full scan (optimization, not a
+    correctness dependency)."""
+    root = tmp_path / "proj"
+    calls_dir = root / "se3" / "calls"
+    calls_dir.mkdir(parents=True)
+    (calls_dir / "interjection_1.json").write_text("{}", encoding="utf-8")
+
+    agg = DaemonAggregator(machine_id="m-calls-fail")
+    agg.add_project_root(root)
+
+    def _boom():
+        raise RuntimeError("gate source down")
+
+    agg.set_calls_gate_source(_boom)
+    scans = _count_calls_iterdir(monkeypatch)
+    sig = agg.pending_calls_signature()
+    assert len(scans) == 1  # scanned despite the gate error
+    assert str(root) in sig
+
+
+def test_gated_roots_reports_idle_roots_from_reader(tmp_path):
+    """The reader's ``gated_roots`` reflects the last signature pass's verdict.
+
+    This is the seam the aggregator's calls scan consumes: a settled terminal
+    root (idle + sentinel) is reported; an active root is not.
+    """
+    _write_engine_raw(tmp_path, {"flow_id": "done", "status": "COMPLETED"})
+    _bump_sentinel_raw(tmp_path, 1)
+    reader = _make_reader(tmp_path)
+
+    # First pass arms the gate; the root is now reported as gated.
+    assert reader.active_flow_signature() == {}
+    assert reader.gated_roots() == {str(tmp_path)}
+
+    # An active flow (persisted, so the sentinel moves) un-gates the root.
+    pm = PersistenceManager(tmp_path)
+    pm.save_flow(_make_flow("live", FlowStatus.RUNNING))
+    assert set(reader.active_flow_signature()) == {"live"}
+    assert reader.gated_roots() == set()

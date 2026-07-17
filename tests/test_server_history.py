@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from _authsrv import authed_hello
+from _authsrv import authed_hello, login
 from se3.daemon import protocol
 from se3.server.state import (
     ServerState,
@@ -1203,6 +1203,85 @@ def test_history_detail_on_demand_pull(client_and_app):
         body = resp.json()
         assert body["cached"] is False
         assert body["records"][0]["line"] == "pulled"
+
+
+def test_history_detail_unknown_flow_404s_without_fleet_refresh(
+    client_and_app, monkeypatch
+):
+    """A globally-unknown flow 404s at once with NO daemon-side rebuild.
+
+    Guards the detail endpoint's cheap-lookup contract: it must never force a
+    fleet-wide index refresh (a ~17.5k-stat cold rebuild on every connected
+    daemon) just because a stale tab polls a deleted / never-existing flow_id —
+    the exact rebuild storm the presence gating set out to remove. Discovery of
+    a freshly created flow is the list endpoint's job; the detail endpoint stays
+    an indexed lookup.
+    """
+    client, app = client_and_app
+    import se3.server.app as app_module
+
+    refreshes = {"n": 0}
+    real = app_module.broadcast_index_refresh
+
+    async def spy(manager, registry):
+        refreshes["n"] += 1
+        return await real(manager, registry)
+
+    monkeypatch.setattr(app_module, "broadcast_index_refresh", spy)
+
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        resp = client.get("/api/history/ghost-never-indexed")
+        assert resp.status_code == 404
+        # The detail miss triggered zero fleet refreshes.
+        assert refreshes["n"] == 0
+
+
+def test_history_detail_cross_owner_404s_without_fleet_refresh(
+    client_and_app, monkeypatch
+):
+    """A cross-owner probe of an ALREADY-indexed flow 404s at once, no refresh.
+
+    The scoped lookup misses (the flow belongs to another owner's machine); the
+    endpoint must not fall back to a fleet refresh — a cross-owner 404 costs no
+    more than an unindexed miss, leaking neither a timing signal nor rebuild
+    churn.
+    """
+    client, app = client_and_app  # admin session
+    import se3.server.app as app_module
+    import se3.server.crypto as crypto
+
+    store = app.state.store
+    vid = store.create_owner("viewer", is_admin=False)
+    store.link_identity(vid, "local", "viewer")
+    store.set_password(vid, crypto.hash_password("pw"))
+
+    refreshes = {"n": 0}
+    real = app_module.broadcast_index_refresh
+
+    async def spy(manager, registry):
+        refreshes["n"] += 1
+        return await real(manager, registry)
+
+    monkeypatch.setattr(app_module, "broadcast_index_refresh", spy)
+
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+        protocol.decode(daemon.receive_text())  # WELCOME
+        # m1 (owned by admin) reports it owns f1 — so f1 IS globally indexed.
+        daemon.send_text(protocol.make_history_index([{"flow_id": "f1"}]).to_json())
+        for _ in range(50):
+            if client.get("/api/history").json()["sessions"]:
+                break
+        refreshes["n"] = 0  # ignore the list endpoint's own refreshes above
+
+        # Switch this client's session to the non-admin viewer owner, who does
+        # not own m1: the scoped detail lookup misses.
+        login(client, username="viewer", password="pw")
+        resp = client.get("/api/history/f1")
+        assert resp.status_code == 404
+        assert refreshes["n"] == 0
 
 
 def test_on_demand_pull_reply_not_rebroadcast_to_ui(client_and_app):

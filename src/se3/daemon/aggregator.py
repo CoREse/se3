@@ -348,6 +348,19 @@ class DaemonAggregator:
         self._issue_cache: Dict[
             str, Tuple[Tuple[Tuple[str, int, int], ...], List[IssueSnapshot]]
         ] = {}
+        # Dirty-sentinel gate source for ``pending_calls_signature`` (set by the
+        # daemon to the history reader's ``gated_roots``). When a root is idle
+        # (no active flow last fast tick) and its ``se3/state/.dirty`` sentinel
+        # is unmoved, the history reader already skipped its deep scan for one
+        # sentinel stat; the calls-signature scan reuses that same verdict so
+        # the SAME idle tick does not additionally ``iterdir`` + stat every file
+        # under ``se3/calls/``. ``_last_calls_signature`` holds the last emitted
+        # fingerprint so a gated root reuses its prior per-root tuple verbatim —
+        # dropping the root would instead flip the client's signature diff and
+        # defeat the gate. ``None`` gate source (default / unit tests) scans
+        # every root exactly as before.
+        self._calls_gate_source: Optional[Callable[[], Set[str]]] = None
+        self._last_calls_signature: Dict[str, Any] = {}
 
     # -- project-root registry --------------------------------------------
 
@@ -800,11 +813,32 @@ class DaemonAggregator:
         # would risk "Set changed size during iteration" and a failed signature.
         roots = [str(r) for r in list(self._project_roots)]
         roots.extend(self._active_worktree_run_roots())
+        # Roots the history reader is currently sentinel-gating (idle + unmoved
+        # sentinel as of the previous fast tick). Their calls dir is skipped and
+        # the prior fingerprint reused — see the ``_calls_gate_source`` note in
+        # ``__init__``. A worktree run subdir is never in this set (it is always
+        # an active flow), so its calls stay scanned every tick. A gate-source
+        # failure fails open to a full scan: the gate is an optimization, never
+        # a correctness dependency for chip freshness.
+        gated: Set[str] = set()
+        if self._calls_gate_source is not None:
+            try:
+                gated = self._calls_gate_source() or set()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("calls gate source failed; scanning all roots")
+                gated = set()
         seen_dirs: Set[str] = set()
         for root_str in roots:
             if root_str in seen_dirs:
                 continue
             seen_dirs.add(root_str)
+            # A gated idle root reuses its last fingerprint (only when one exists
+            # — the first-ever scan of a root must still run to establish the
+            # baseline). Reusing the prior tuple keeps the client-side signature
+            # diff stable, so a gated tick fires no spurious status push.
+            if root_str in gated and root_str in self._last_calls_signature:
+                signature[root_str] = self._last_calls_signature[root_str]
+                continue
             root = Path(root_str)
             calls_dir = root / "se3" / "calls"
             try:
@@ -824,7 +858,21 @@ class DaemonAggregator:
                 mtime, size = _safe_stat(entry)
                 parts.append((name, mtime, size))
             signature[str(root)] = tuple(parts)
+        self._last_calls_signature = signature
         return signature
+
+    def set_calls_gate_source(
+        self, source: Optional[Callable[[], Set[str]]]
+    ) -> None:
+        """Inject the idle-root gate for :meth:`pending_calls_signature`.
+
+        *source* returns the set of root path strings the history reader is
+        currently sentinel-gating; those roots' calls dirs are skipped on the
+        fast tick and their prior fingerprint reused. Wired by the daemon to the
+        reader's ``gated_roots`` so the two halves of an idle fast tick collapse
+        to the single sentinel stat the reader already pays.
+        """
+        self._calls_gate_source = source
 
     def _merge_project_roots(self) -> List[str]:
         """Produce the snapshot's ``project_roots`` field.

@@ -217,6 +217,12 @@ class Daemon:
         self.history_reader = DaemonHistoryReader(
             project_roots_provider=lambda: self.aggregator.all_observable_roots()
         )
+        # Share the reader's dirty-sentinel gate with the aggregator's calls
+        # scan so an idle root's fast tick collapses to a single sentinel stat:
+        # the reader skips its history deep scan AND the aggregator skips the
+        # ``se3/calls/`` iterdir for the same gated root. Wired after both exist
+        # (the reader is constructed just above).
+        self.aggregator.set_calls_gate_source(self.history_reader.gated_roots)
         self._stop_event: Optional[asyncio.Event] = None
         self._running = False
         # The outbound WebSocket client to the central server. Created lazily

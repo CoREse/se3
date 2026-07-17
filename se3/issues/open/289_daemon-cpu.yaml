@@ -73,14 +73,14 @@ description: '## 现象
 
 
   ①+②+③ 做完,daemon 空闲 CPU 应接近 0%(现 ~28%),有人看页面时恢复现有实时性。'
-status: open
+status: in-progress
 tags:
 - daemon
 - performance
 - webui
 source: human
 created_at: '2026-07-17T11:10:50.775557'
-updated_at: '2026-07-17T11:14:37.333277'
+updated_at: '2026-07-17T11:15:23.286130'
 title: daemon 空闲时持续高 CPU:轮询热路径缺缓存 + 无 presence 门控
 priority: high
 type: performance
