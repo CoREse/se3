@@ -21,7 +21,17 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from . import protocol
 from .disk_json_cache import read_engine_header
@@ -326,6 +336,18 @@ class DaemonAggregator:
         self._hist_roots_cache: Optional[List[str]] = None
         self._hist_roots_at: Optional[float] = None
         self._hist_roots_base: Optional[FrozenSet[str]] = None
+        # Per-root issue-snapshot cache for ``_collect_issues``:
+        # ``{root: (directory stat signature, parsed snapshots)}``. Issue YAML
+        # is written atomically by IssueManager (tempfile + rename), so any
+        # content change moves the file's ``(name, st_mtime_ns, st_size)``
+        # tuple — a matching directory signature is therefore authoritative
+        # and the snapshots can be reused without re-parsing. This removes the
+        # dominant idle-CPU hotspot: without it every 5s status tick paid a
+        # full ``yaml.safe_load`` of every issue file (~307 files → 0.3–0.6s
+        # of pure-Python parsing per snapshot).
+        self._issue_cache: Dict[
+            str, Tuple[Tuple[Tuple[str, int, int], ...], List[IssueSnapshot]]
+        ] = {}
 
     # -- project-root registry --------------------------------------------
 
@@ -1289,13 +1311,21 @@ class DaemonAggregator:
                 return str(summary)
         return None
 
-    @staticmethod
-    def _collect_issues(root: Path) -> List[IssueSnapshot]:
+    def _collect_issues(self, root: Path) -> List[IssueSnapshot]:
         """Read issue YAML files from ``se3/issues/`` and return snapshots.
 
         Scans both ``open/`` and ``closed/`` subdirectories.  Malformed or
         unreadable files are silently skipped so a corrupt issue never breaks
         the status snapshot.
+
+        Results are cached per root behind a directory stat signature — the
+        ordered ``(relative name, st_mtime_ns, st_size)`` tuples of every
+        ``*.yaml`` under ``open/`` and ``closed/``. While the signature is
+        unchanged the previous snapshots are returned as-is (pure stat cost,
+        zero reads / YAML parses); any add / remove / rewrite moves the
+        signature and triggers a full re-parse of the root. See the
+        ``_issue_cache`` why-comment in ``__init__`` for the idle-CPU
+        rationale.
 
         An ``se3 run --worktree`` isolation directory clones the main project's
         ``se3/issues/`` into ``<main>/se3/worktrees/<name>/se3/issues/``.
@@ -1304,62 +1334,90 @@ class DaemonAggregator:
         counted — otherwise every issue surfaces twice (once for the main root,
         once for the worktree copy) for the duration of the run. Worktree copy
         roots are therefore skipped here so only the main project's issues are
-        aggregated.
+        aggregated (and never cached — a copy root is transient).
         """
         if is_worktree_copy_root(str(root)):
             return []
 
-        import yaml  # deferred — the core CLI path never calls this
-
+        cache_key = str(root)
         issues_dir = root / "se3" / "issues"
         if not issues_dir.is_dir():
+            # Drop any stale entry so a removed issues tree doesn't pin its
+            # parsed snapshots for the daemon's lifetime.
+            self._issue_cache.pop(cache_key, None)
             return []
 
-        result: List[IssueSnapshot] = []
+        # Directory signature + parse-ordered file list in one pass, so the
+        # signature covers exactly the files a re-parse would read.
+        sig_parts: List[Tuple[str, int, int]] = []
+        files: List[Path] = []
         for subdir in ("open", "closed"):
             target = issues_dir / subdir
             if not target.is_dir():
                 continue
             for f in sorted(target.glob("*.yaml")):
                 try:
-                    content = f.read_text(encoding="utf-8")
-                    data = yaml.safe_load(content)
-                    if not data or not isinstance(data, dict):
-                        continue
-                    raw_id = data.get("id")
-                    if raw_id is None:
-                        continue
-                    # Issue.from_dict tolerates empty/missing description
-                    # (degrading to ""), so the read path no longer validates
-                    # it.  Skip only files missing a valid id — description is
-                    # allowed to be empty so the webui surface matches the CLI.
-                    raw_desc = data.get("description")
-                    # Normalize + clip description: empty/None degrades to "",
-                    # mirroring Issue.from_dict's read-tolerance, then truncate to
-                    # the shared _DESC_CLIP standard so the snapshot carries only a
-                    # preview (the full body is a MSG_DETAIL_REQUEST away). Clipping
-                    # at collection — not just in to_dict — also keeps the in-memory
-                    # snapshot bounded rather than holding every issue's full text.
-                    result.append(
-                        IssueSnapshot(
-                            id=str(raw_id),
-                            project_root=str(root),
-                            title=data.get("title"),
-                            description=_clip(str(data.get("description") or "")),
-                            status=str(data.get("status") or "open"),
-                            priority=data.get("priority"),
-                            type=data.get("type"),
-                            tags=list(data.get("tags") or []),
-                            source=str(data.get("source") or "system"),
-                            created_at=str(data.get("created_at") or ""),
-                            updated_at=str(data.get("updated_at") or ""),
-                        )
+                    st = f.stat()
+                except OSError:
+                    # Vanished mid-scan (concurrent issue close/renumber):
+                    # exclude it from this round entirely — the next tick's
+                    # signature will differ and re-parse the settled state.
+                    continue
+                sig_parts.append((f"{subdir}/{f.name}", st.st_mtime_ns, st.st_size))
+                files.append(f)
+        signature = tuple(sig_parts)
+
+        cached = self._issue_cache.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        import yaml  # deferred — the core CLI path never calls this
+
+        # CSafeLoader (libyaml) parses ~10x faster than the pure-Python
+        # SafeLoader; it's an optional C extension, so probe and fall back.
+        loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+        result: List[IssueSnapshot] = []
+        for f in files:
+            try:
+                content = f.read_text(encoding="utf-8")
+                data = yaml.load(content, Loader=loader)
+                if not data or not isinstance(data, dict):
+                    continue
+                raw_id = data.get("id")
+                if raw_id is None:
+                    continue
+                # Issue.from_dict tolerates empty/missing description
+                # (degrading to ""), so the read path no longer validates
+                # it.  Skip only files missing a valid id — description is
+                # allowed to be empty so the webui surface matches the CLI.
+                # Normalize + clip description: empty/None degrades to "",
+                # mirroring Issue.from_dict's read-tolerance, then truncate to
+                # the shared _DESC_CLIP standard so the snapshot carries only a
+                # preview (the full body is a MSG_DETAIL_REQUEST away). Clipping
+                # at collection — not just in to_dict — also keeps the in-memory
+                # snapshot bounded rather than holding every issue's full text.
+                result.append(
+                    IssueSnapshot(
+                        id=str(raw_id),
+                        project_root=str(root),
+                        title=data.get("title"),
+                        description=_clip(str(data.get("description") or "")),
+                        status=str(data.get("status") or "open"),
+                        priority=data.get("priority"),
+                        type=data.get("type"),
+                        tags=list(data.get("tags") or []),
+                        source=str(data.get("source") or "system"),
+                        created_at=str(data.get("created_at") or ""),
+                        updated_at=str(data.get("updated_at") or ""),
                     )
-                except Exception:  # pragma: no cover — defensive
-                    logger.debug(
-                        "aggregator: skipping unreadable issue file %s", f,
-                        exc_info=True,
-                    )
+                )
+            except Exception:  # pragma: no cover — defensive
+                logger.debug(
+                    "aggregator: skipping unreadable issue file %s", f,
+                    exc_info=True,
+                )
+        self._issue_cache[cache_key] = (signature, result)
         return result
 
 

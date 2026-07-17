@@ -92,7 +92,7 @@ def test_issue_snapshot_description_clipped(tmp_path: Path) -> None:
     long_desc = "x" * 5000
     _write_issue(tmp_path, "001", description=long_desc)
 
-    issues = DaemonAggregator._collect_issues(tmp_path)
+    issues = DaemonAggregator()._collect_issues(tmp_path)
     assert len(issues) == 1
     desc = issues[0].description
     # Aligned with history._clip: <= _DESC_CLIP content + a 3-char ellipsis.
@@ -105,7 +105,7 @@ def test_issue_snapshot_description_clipped(tmp_path: Path) -> None:
 
 def test_short_issue_description_untouched(tmp_path: Path) -> None:
     _write_issue(tmp_path, "001", description="short body")
-    issues = DaemonAggregator._collect_issues(tmp_path)
+    issues = DaemonAggregator()._collect_issues(tmp_path)
     assert issues[0].description == "short body"
 
 

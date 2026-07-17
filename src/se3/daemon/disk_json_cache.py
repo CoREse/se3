@@ -206,6 +206,42 @@ def cached_content_digest(path: Path) -> Optional[bytes]:
     return cached[2]
 
 
+def peek_cached_header(path: Path) -> Optional[dict]:
+    """Return *path*'s cached parse ONLY on a ``(mtime_ns, size)`` stat hit.
+
+    A pure lookup — one ``stat`` and a dict probe, never a read or parse. On a
+    miss (first sighting, changed/oversized/vanished file, or a cached parse
+    failure) it returns ``None`` and the caller chooses which read path to pay.
+
+    WHY: this is the cheap pre-pass the 1s fast tick uses to decide whether a
+    root's engine.json is even worth the ``active=True`` verify_content read
+    (whole-file read + hash). A terminal (completed / failed) flow's cached
+    header lets the tick skip that read entirely; routing the peek through
+    :func:`read_engine_header` instead would parse on a miss WITHOUT recording
+    a content digest, forcing the verify read that follows to parse the same
+    unchanged file a second time (the issue-#209 parse-once invariant).
+
+    The stat hit is trusted here exactly like the immutable-snapshot path in
+    :func:`read_json_cached` — the caller must treat the result as a *hint*
+    and re-verify through ``active=True`` before acting on a live flow.
+    """
+    stat = _safe_stat(path)
+    if stat is None:
+        _drop_entry(str(path))
+        return None
+    mtime, size = stat
+    key = str(path)
+    with _CACHE_LOCK:
+        cached = _CACHE.get(key)
+        if cached is not None and cached[0] == mtime and cached[1] == size:
+            # Refresh LRU recency: a terminal engine.json served by peek every
+            # tick must not be evicted under the cap (a drop would re-trigger
+            # its full verify read).
+            _CACHE.move_to_end(key)
+            return cached[3]
+    return None
+
+
 def _warn_once_degraded(path: Path) -> None:
     """Warn (once per path) that degraded header extraction failed for *path*.
 

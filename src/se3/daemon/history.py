@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from .disk_json_cache import (
     cached_content_digest,
+    peek_cached_header,
     read_engine_header,
     read_json_cached,
 )
@@ -1976,10 +1977,34 @@ class DaemonHistoryReader:
         signature: Dict[str, Any] = {}
         for root in self._iter_roots():
             engine_json = root / "se3" / "state" / "engine.json"
-            # active=True read: a matching (path, mtime, size) is trusted, a real
-            # rewrite moves the key and re-parses. The signature below also folds
-            # in the engine.json (mtime, size) directly, so a genuine flow change
-            # always shifts the signature.
+            # Cheap pre-pass (stat-keyed peek, zero read/parse): decide whether
+            # this root's flow is worth the verify_content read at all. WHY:
+            # the verify_content whole-content hash exists to catch a same-
+            # ``(mtime, size)`` IN-PLACE rewrite (the PAUSED↔RUNNING flip on a
+            # coarse-mtime filesystem) — a hazard only a *live* flow's
+            # engine.json is exposed to. A terminal (completed / failed)
+            # engine.json is never rewritten in place; its next change is a
+            # brand-new flow's full rewrite, which moves ``(mtime_ns, size)``
+            # and busts the peek anyway. Paying the full read+hash for every
+            # terminal root on the 1s fast tick was the residual idle-disk
+            # hotspot (a multi-MB completed engine.json re-read every second);
+            # the peek reduces a settled terminal root to one stat per tick. A
+            # peek MISS (first sighting / changed file) falls through to the
+            # verify read below, so an unchanged file is still parsed at most
+            # once (the issue-#209 parse-once invariant).
+            header = peek_cached_header(engine_json)
+            if isinstance(header, dict):
+                if not str(header.get("flow_id") or ""):
+                    continue
+                if not _is_active_status(str(header.get("status") or "")):
+                    continue
+            # active=True read: a matching (path, mtime, size) is trusted only
+            # together with an unchanged whole-content digest; a real rewrite
+            # re-parses. flow_id/status are (re-)derived from this verified
+            # parse — never from the peek, whose stat-keyed hit could be stale
+            # across a same-stat in-place rewrite. The signature below also
+            # folds in the engine.json (mtime, size) directly, so a genuine
+            # flow change always shifts the signature.
             data = read_engine_header(engine_json, active=True)
             if not isinstance(data, dict):
                 continue

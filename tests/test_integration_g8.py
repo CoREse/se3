@@ -841,7 +841,7 @@ class TestIssueCrudRoundTrip:
         _write_modern_yaml(tmp_path, "001", source="human", title="Test Issue")
         _write_legacy_yaml(tmp_path, "002", description="Legacy")
 
-        issues = DaemonAggregator._collect_issues(tmp_path)
+        issues = DaemonAggregator()._collect_issues(tmp_path)
         assert len(issues) == 2
         ids = {i.id for i in issues}
         assert "001" in ids
@@ -851,7 +851,7 @@ class TestIssueCrudRoundTrip:
         """IssueSnapshot includes source field."""
         _write_modern_yaml(tmp_path, "001", source="human")
 
-        issues = DaemonAggregator._collect_issues(tmp_path)
+        issues = DaemonAggregator()._collect_issues(tmp_path)
         assert len(issues) == 1
         assert issues[0].source == "human"
 
@@ -871,7 +871,7 @@ class TestIssueCrudRoundTrip:
             yaml.dump({"title": "no id"}), encoding="utf-8"
         )
 
-        issues = DaemonAggregator._collect_issues(tmp_path)
+        issues = DaemonAggregator()._collect_issues(tmp_path)
         assert len(issues) == 1
         assert issues[0].id == "001"
 

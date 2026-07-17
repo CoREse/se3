@@ -789,7 +789,7 @@ def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:
     _write_issue(tmp_path, "002", subdir="closed", title="Second", status="closed")
     _write_issue(tmp_path, "003", subdir="open", title="Third")
 
-    issues = DaemonAggregator._collect_issues(tmp_path)
+    issues = DaemonAggregator()._collect_issues(tmp_path)
     assert len(issues) == 3
     ids = {i.id for i in issues}
     assert ids == {"001", "002", "003"}
@@ -811,7 +811,7 @@ def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
         source="human",
     )
 
-    issues = DaemonAggregator._collect_issues(tmp_path)
+    issues = DaemonAggregator()._collect_issues(tmp_path)
     assert len(issues) == 1
     iss = issues[0]
     assert iss.id == "007"
@@ -841,7 +841,7 @@ def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
     # Write a valid issue alongside
     _write_issue(tmp_path, "001", subdir="open", title="Good")
 
-    issues = DaemonAggregator._collect_issues(tmp_path)
+    issues = DaemonAggregator()._collect_issues(tmp_path)
     assert len(issues) == 1
     assert issues[0].id == "001"
 
@@ -849,7 +849,7 @@ def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
 def test_collect_issues_returns_empty_when_no_dir(tmp_path: Path) -> None:
     from se3.daemon.aggregator import DaemonAggregator
 
-    assert DaemonAggregator._collect_issues(tmp_path) == []
+    assert DaemonAggregator()._collect_issues(tmp_path) == []
 
 
 def test_machine_status_includes_issues(tmp_path: Path) -> None:
