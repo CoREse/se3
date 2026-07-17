@@ -153,6 +153,22 @@ class ConnectionManager:
         async with self._lock:
             return self._connections.get(machine_id) is websocket
 
+    async def broadcast_viewers(self, count: int) -> None:
+        """Send a ``MSG_VIEWERS`` presence edge to every connected daemon.
+
+        Fired by the :class:`UiHub` presence-edge callback when the browser
+        connection count crosses the 0↔non-0 boundary, so each daemon can
+        shift between its full-speed and low-power cadences. Per-machine
+        delivery goes through :meth:`send_to`, which already swallows a single
+        socket's failure and accounts the sent bytes — one stalled daemon must
+        not keep the rest of the fleet in the wrong gear. A pre-v4 daemon that
+        receives the frame drops it as an unknown type (its decode() rejects
+        it), which is exactly the fail-open no-op the presence design wants.
+        """
+        message = protocol.make_viewers(count)
+        for machine_id in self.machine_ids:
+            await self.send_to(machine_id, message)
+
     async def send_to_connection(
         self,
         machine_id: str,
@@ -725,9 +741,20 @@ class UiHub:
     ``None`` for the unscoped/admin view (an operator console, or a deployment
     that has not yet wired authentication): a ``None`` client receives the
     unfiltered stream, exactly as before multi-tenancy existed.
+
+    The hub is also the single point that knows the exact browser connection
+    count, so it doubles as the *presence* source (protocol revision 4): when
+    that count crosses the 0↔non-0 boundary, the injected *on_presence_edge*
+    callback fires so the daemons can be told to shift gears. Intermediate
+    1→2 / 2→1 changes are deliberately silent — the daemons' gear selection
+    only needs the single "anyone watching?" bit.
     """
 
-    def __init__(self, metrics: Optional[WireMetrics] = None) -> None:
+    def __init__(
+        self,
+        metrics: Optional[WireMetrics] = None,
+        on_presence_edge: Optional[Any] = None,
+    ) -> None:
         # websocket -> owner_id (None == unscoped/admin view)
         self._clients: Dict[Any, Optional[str]] = {}
         self._lock = asyncio.Lock()
@@ -735,16 +762,51 @@ class UiHub:
         # recorded under a ``ui:<type>`` key so the /ws/ui fan-out shows up
         # distinctly from the server→daemon downlink in the metrics snapshot.
         self._metrics = metrics
+        # Async ``callable(count)`` awaited on each 0↔non-0 client-count edge
+        # (``None`` keeps the pre-presence behaviour exactly). Held as an
+        # opaque attribute rather than typed, since the hub must import
+        # nothing about what the edge drives (the daemon broadcast lives in
+        # ConnectionManager).
+        self._on_presence_edge = on_presence_edge
 
     async def register(self, websocket: Any, owner: Optional[str] = None) -> None:
+        # The edge decision is computed under the lock (from the counts before
+        # and after the mutation) so two concurrent registers can never both
+        # observe "I was the 0→1 transition"; the callback itself is awaited
+        # OUTSIDE the lock so a slow daemon broadcast cannot stall every other
+        # register/unregister/fan-out.
         async with self._lock:
+            before = len(self._clients)
             self._clients[websocket] = owner
+            after = len(self._clients)
         logger.info("UI client connected (%d total)", len(self._clients))
+        if before == 0 and after > 0:
+            await self._fire_presence_edge(after)
 
     async def unregister(self, websocket: Any) -> None:
         async with self._lock:
+            before = len(self._clients)
             self._clients.pop(websocket, None)
+            after = len(self._clients)
         logger.info("UI client disconnected (%d total)", len(self._clients))
+        if before > 0 and after == 0:
+            await self._fire_presence_edge(0)
+
+    async def _fire_presence_edge(self, count: int) -> None:
+        """Await the injected presence-edge callback, swallowing its failures.
+
+        Presence is a power optimisation, never a correctness dependency: a
+        callback failure must not break UI client registration (the daemons
+        self-heal from the ``viewers`` level riding every heartbeat PING).
+        """
+        if self._on_presence_edge is None:
+            return
+        try:
+            await self._on_presence_edge(count)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning(
+                "presence edge callback failed (count=%d)", count, exc_info=True
+            )
 
     @property
     def client_count(self) -> int:
@@ -843,8 +905,16 @@ class UiHub:
                 dead.append(client)
         if dead:
             async with self._lock:
+                before = len(self._clients)
                 for client in dead:
                     self._clients.pop(client, None)
+                after = len(self._clients)
+            # A client pruned here is gone before its handler's unregister
+            # runs, so that unregister sees no count change and fires no edge.
+            # Detect the non0→0 transition at the prune itself, or the daemons
+            # would stay in the full-speed gear until the PING level self-heals.
+            if before > 0 and after == 0:
+                await self._fire_presence_edge(0)
 
 
 async def _push_state(hub: Optional["UiHub"], state: ServerState, kind: str) -> None:
@@ -1197,6 +1267,16 @@ async def handle_daemon_connection(
         )
         await manager.connect(machine_id, websocket)
         await _send_welcome(protocol.make_welcome(SERVER_VERSION))
+        # Hand a presence-aware daemon the current viewers level right after
+        # the handshake: a daemon that reconnects while browsers are watching
+        # must not idle in the low-power gear for up to a full PING interval
+        # before the level self-heals it. Gated on the peer's revision — a
+        # pre-v4 daemon would only reject the frame as an unknown type, so
+        # skipping it spares a per-connect warning in its logs.
+        if hub is not None and protocol.supports_presence(peer_protocol_version):
+            await manager.send_to(
+                machine_id, protocol.make_viewers(hub.client_count)
+            )
         await _push_state(hub, state, "status_update")
 
         await _serve_loop(
@@ -1277,7 +1357,17 @@ async def _serve_loop(
                 return
             seq += 1
             try:
-                ping_text = protocol.make_ping(seq=seq).to_json()
+                # Piggyback the current browser-presence count on the heartbeat
+                # (the *level* half of the presence scheme): a MSG_VIEWERS edge
+                # lost across a disconnect window is repaired within one PING
+                # interval, at zero extra frames. Read live at send time so the
+                # level always reflects the count of this instant, not the one
+                # at connect. No hub wired (bare test harnesses) sends the
+                # revision-3-identical payload.
+                ping_text = protocol.make_ping(
+                    seq=seq,
+                    viewers=hub.client_count if hub is not None else None,
+                ).to_json()
                 await websocket.send_text(ping_text)
                 # Account the heartbeat: on an idle connection the periodic PING
                 # is the ONLY server→daemon traffic, so it must show in the

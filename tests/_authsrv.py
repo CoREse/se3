@@ -60,3 +60,17 @@ def authed_hello(
     return protocol.make_hello(
         machine_id, hostname, version, key=app.state.test_daemon_key
     ).to_json()
+
+
+def recv_daemon_frame(sock):
+    """Decode the next substantive server→daemon frame from a TestClient socket.
+
+    Skips ``MSG_VIEWERS`` presence frames: since protocol revision 4 the server
+    sends one right after every accepted v4 handshake, plus one on each UI
+    0↔non-0 client-count edge, so tests asserting on a specific dispatched
+    frame (SPAWN/RESPOND/INTERJECT/...) must read past them.
+    """
+    while True:
+        msg = protocol.decode(sock.receive_text())
+        if msg.type != protocol.MSG_VIEWERS:
+            return msg

@@ -1085,17 +1085,23 @@ def client_and_app(monkeypatch):
 
 
 def _receive_until(daemon, msg_type):
-    """Read frames from *daemon*, skipping index-refresh broadcasts.
+    """Read frames from *daemon*, skipping expected background broadcasts.
 
     ``GET /api/history`` queues a ``MSG_HISTORY_INDEX_REQUEST`` on every
-    connected daemon; a test that next expects a different server→daemon frame
-    must skip past those broadcasts. Returns the first frame of *msg_type*.
+    connected daemon, and since protocol revision 4 the server also sends
+    ``MSG_VIEWERS`` presence frames (one right after the handshake, plus one on
+    each 0↔non-0 UI-client edge); a test that next expects a different
+    server→daemon frame must skip past both. Returns the first frame of
+    *msg_type*.
     """
     while True:
         frame = protocol.decode(daemon.receive_text())
         if frame.type == msg_type:
             return frame
-        assert frame.type == protocol.MSG_HISTORY_INDEX_REQUEST
+        assert frame.type in (
+            protocol.MSG_HISTORY_INDEX_REQUEST,
+            protocol.MSG_VIEWERS,
+        )
 
 
 def test_history_index_message_routed_to_state(client_and_app):

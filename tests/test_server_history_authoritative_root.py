@@ -23,7 +23,7 @@ import threading
 
 import pytest
 
-from _authsrv import authed_hello
+from _authsrv import authed_hello, recv_daemon_frame
 from se3.daemon import protocol
 from se3.server.state import ServerState
 
@@ -178,7 +178,7 @@ def client_and_app(monkeypatch):
 
 def _receive_until(daemon, msg_type):
     while True:
-        frame = protocol.decode(daemon.receive_text())
+        frame = recv_daemon_frame(daemon)
         if frame.type == msg_type:
             return frame
         assert frame.type == protocol.MSG_HISTORY_INDEX_REQUEST
@@ -819,7 +819,7 @@ def test_running_worktree_selfheal_reconciles_missing_round(
     }
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         _report_running_flow(daemon, wt)
         _sync_live_flow(client)
 
@@ -869,7 +869,7 @@ def test_running_worktree_selfheal_respects_throttle(client_and_app):
     round1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"round": 1}}
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         _report_running_flow(daemon, wt)
         _sync_live_flow(client)
 
@@ -898,7 +898,7 @@ def test_non_worktree_flow_never_reconciles(client_and_app, monkeypatch):
     round1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"round": 1}}
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         _report_running_flow(daemon, "/repo")  # ordinary root, not a worktree
         _sync_live_flow(client)
 
@@ -922,7 +922,7 @@ def test_cache_miss_pull_sends_authoritative_project_root(client_and_app):
     worktree_root = "/repo/se3/worktrees/wt-a"
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         # Report the index carrying the flow's authoritative run root.
         daemon.send_text(
             protocol.make_history_index(
@@ -966,7 +966,7 @@ def test_cache_miss_pull_empty_root_when_unrecorded(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         daemon.send_text(
             protocol.make_history_index([{"flow_id": "f1"}]).to_json()
         )

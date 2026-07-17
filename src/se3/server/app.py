@@ -402,7 +402,13 @@ def create_app(
     wire_metrics = WireMetrics()
     state = ServerState()
     manager = ConnectionManager(metrics=wire_metrics)
-    ui_hub = UiHub(metrics=wire_metrics)
+    # Presence wiring (revision 4): the hub is the only component that knows
+    # the exact browser connection count, the manager the only one that can
+    # reach every daemon — so the 0↔non-0 edge is bridged here at assembly
+    # rather than by either module importing the other.
+    ui_hub = UiHub(
+        metrics=wire_metrics, on_presence_edge=manager.broadcast_viewers
+    )
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
     issue_command_registry = IssueCommandRegistry()

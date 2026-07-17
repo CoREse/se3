@@ -18,6 +18,8 @@ import logging
 import pytest
 
 from se3.daemon import protocol
+
+from _authsrv import recv_daemon_frame
 from se3.daemon.client import DaemonClient
 from se3.daemon.daemon import Daemon, DaemonConfig, daemon_status
 
@@ -382,7 +384,7 @@ def test_old_daemon_without_key_rejected_by_live_server():
         with client.websocket_connect("/ws") as ws:
             # An old daemon's HELLO carries no ``key`` field at all.
             ws.send_text(protocol.make_hello("mOld", "h", "6.4.0").to_json())
-            welcome = protocol.decode(ws.receive_text())
+            welcome = recv_daemon_frame(ws)
             assert welcome.type == protocol.MSG_WELCOME
             assert welcome.payload["accepted"] is False
             assert welcome.payload.get("reason")  # a human-readable reason
@@ -408,6 +410,6 @@ def test_live_server_tolerates_unknown_key_bearing_hello_field():
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as ws:
             ws.send_text(authed_hello(app, "mNew"))
-            welcome = protocol.decode(ws.receive_text())
+            welcome = recv_daemon_frame(ws)
             assert welcome.type == protocol.MSG_WELCOME
             assert welcome.payload["accepted"] is True
