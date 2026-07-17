@@ -554,6 +554,19 @@ def _owner_hello(app, owner_name, machine_id):
     return protocol.make_hello(machine_id, "h", "6.4.0", key=key).to_json()
 
 
+def _next_daemon_frame(sock):
+    """Read the next substantive server→daemon frame, skipping presence frames.
+
+    Since protocol revision 4 the server sends ``MSG_VIEWERS`` levels/edges
+    (right after the handshake and on UI-client 0↔non-0 transitions); tests
+    that assert on a specific dispatched frame must not trip over them.
+    """
+    while True:
+        msg = protocol.decode(sock.receive_text())
+        if msg.type != protocol.MSG_VIEWERS:
+            return msg
+
+
 def _await_visible(client, machine_id, tries=100):
     for _ in range(tries):
         machines = client.get("/api/machines").json().get("machines", [])
@@ -660,7 +673,7 @@ def test_rest_writes_are_owner_isolated(authz_app):
                 json={"machine_id": "mA", "task": "do", "project_root": "/pa"},
             )
             assert ok.status_code == 202
-            spawn = protocol.decode(da.receive_text())
+            spawn = _next_daemon_frame(da)
             assert spawn.type == protocol.MSG_SPAWN_FLOW
 
             # A may NOT dispatch to B's daemon — cross-owner reads as absent (404).
@@ -689,7 +702,7 @@ def test_rest_writes_are_owner_isolated(authz_app):
             # A may respond to its own flow's pending call.
             own = ca.post("/api/flows/fA/respond", json={"response": "yes"})
             assert own.status_code == 200
-            respond = protocol.decode(da.receive_text())
+            respond = _next_daemon_frame(da)
             assert respond.type == protocol.MSG_RESPOND_CALL
             assert respond.payload["call_id"] == "cA"
 
@@ -742,7 +755,7 @@ def test_rest_resume_is_owner_isolated(authz_app):
             # A can resume its own flow.
             ok = ca.post("/api/flows/fA/resume")
             assert ok.status_code == 202
-            spawn = protocol.decode(da.receive_text())
+            spawn = _next_daemon_frame(da)
             assert spawn.type == protocol.MSG_SPAWN_FLOW
             assert spawn.payload["resume_flow_id"] == "fA"
 
@@ -792,7 +805,7 @@ def test_rest_publish_from_issue_is_owner_isolated(authz_app):
             # A may launch a flow from its OWN issue.
             ok = ca.post("/api/flows", json={"from_issue_id": "001"})
             assert ok.status_code == 202
-            spawn = protocol.decode(da.receive_text())
+            spawn = _next_daemon_frame(da)
             assert spawn.type == protocol.MSG_SPAWN_FLOW
             assert spawn.payload["from_issue_id"] == "001"
 
@@ -987,7 +1000,7 @@ def test_issue_endpoints_are_owner_isolated(authz_app):
             worker = threading.Thread(target=do_create)
             worker.start()
             try:
-                msg = protocol.decode(da.receive_text())
+                msg = _next_daemon_frame(da)
                 assert msg.type == protocol.MSG_ISSUE_COMMAND
                 da.send_text(protocol.make_issue_result(
                     msg.payload.get("request_id", ""),

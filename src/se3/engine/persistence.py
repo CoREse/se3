@@ -223,6 +223,14 @@ class PersistenceManager:
     # flow that reuses the same auto-generated step ids.
     STEPS_DIRNAME = "steps"
     CONTEXT_COLD_FILENAME = "_context.json"
+    # Dirty sentinel: se3/state/.dirty holds {"seq": N}, bumped after every
+    # successful state persist (save_flow / snapshot save / snapshot clear /
+    # archive). Consumed by the daemon's DaemonHistoryReader, whose fast tick
+    # gates an idle root's deep scan on this one file's stat — see the
+    # sentinel gate in se3.daemon.history. se3/state/ is excluded by the root
+    # .gitignore's deny-by-default whitelist, so the sentinel is never
+    # committed.
+    DIRTY_SENTINEL_FILENAME = ".dirty"
 
     def __init__(self, project_root: Path):
         """Initialize with project root.
@@ -301,6 +309,43 @@ class PersistenceManager:
             if temp_file.exists():
                 temp_file.unlink(missing_ok=True)
             raise
+
+    def _touch_dirty_sentinel(self) -> None:
+        """Bump the ``se3/state/.dirty`` sentinel's sequence number.
+
+        Called at the end of every successful state persist (``save_flow``,
+        ``save_resumable_snapshot``, ``clear_resumable_snapshot``,
+        ``clear_state``) so a single stat of this one file tells the daemon's
+        fast tick whether ANY persisted state under this root moved since the
+        last tick.
+
+        WHY: the sentinel is a pure optimization signal, never a correctness
+        dependency — its consumer (the daemon reader's sentinel gate) fails
+        open to a full deep scan whenever the file is missing, stale-looking,
+        or unreadable. That contract is what allows every failure here to be
+        swallowed: a read-only state dir, a corrupt sentinel, or a full disk
+        must never break the persistence primary path, and the worst outcome
+        of a missed bump is the daemon spending a few extra stats. The content
+        is a monotonically increasing ``{"seq": N}`` (not a bare mtime touch)
+        so a same-mtime-resolution double persist still moves the observable
+        ``(mtime_ns, size, seq)`` state via the atomic-rename inode swap.
+        """
+        sentinel = self.state_dir / self.DIRTY_SENTINEL_FILENAME
+        try:
+            seq = 0
+            try:
+                data = json.loads(sentinel.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    seq = int(data.get("seq") or 0)
+            except (OSError, ValueError, TypeError):
+                seq = 0
+            self._atomic_write_json(sentinel, {"seq": seq + 1})
+        except Exception:
+            logger.debug(
+                "Failed to touch dirty sentinel %s; persistence unaffected",
+                sentinel,
+                exc_info=True,
+            )
 
     def _prior_cold_hashes(
         self, header_path: Path, flow_id: str
@@ -498,6 +543,7 @@ class PersistenceManager:
                 exc_info=True,
             )
 
+        self._touch_dirty_sentinel()
         return self.state_file
 
     @staticmethod
@@ -817,6 +863,7 @@ class PersistenceManager:
             header = _header
 
         self._atomic_write_json(snapshot_file, header)
+        self._touch_dirty_sentinel()
         return snapshot_file
 
     def load_resumable_snapshot(self, flow_id: str) -> Optional[FlowInstance]:
@@ -879,6 +926,7 @@ class PersistenceManager:
         except OSError:
             pass
         self._prune_cold_partition_if_orphan(flow_id)
+        self._touch_dirty_sentinel()
 
     def _prune_cold_partition_if_orphan(self, flow_id: str) -> None:
         """Delete ``steps/<flow_id>/`` when nothing references it any more.
@@ -1489,6 +1537,10 @@ class PersistenceManager:
                     cold_src,
                     exc_info=True,
                 )
+        # Archival removed the live engine.json — a state change the daemon's
+        # sentinel gate must see, or an idle-gated root would keep advertising
+        # the archived flow until the status-tick backstop.
+        self._touch_dirty_sentinel()
 
     def list_active_flows(self) -> List[Dict[str, Any]]:
         """List all active (non-archived) flow states.

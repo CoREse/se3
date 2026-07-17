@@ -8,6 +8,8 @@ import threading
 import pytest
 
 from se3.daemon import protocol
+
+from _authsrv import recv_daemon_frame
 from se3.server.state import FlowSnapshot, ServerState
 
 
@@ -394,7 +396,7 @@ def test_daemon_handshake_and_status_update(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        welcome = protocol.decode(ws.receive_text())
+        welcome = recv_daemon_frame(ws)
         assert welcome.type == protocol.MSG_WELCOME
         assert welcome.payload["accepted"] is True
 
@@ -419,7 +421,7 @@ def test_bad_hello_is_rejected(client_and_app):
     with client.websocket_connect("/ws") as ws:
         # First frame is a STATUS_UPDATE, not a HELLO.
         ws.send_text(protocol.make_status_update(_snapshot()).to_json())
-        welcome = protocol.decode(ws.receive_text())
+        welcome = recv_daemon_frame(ws)
         assert welcome.type == protocol.MSG_WELCOME
         assert welcome.payload["accepted"] is False
 
@@ -428,7 +430,7 @@ def test_publish_flow_dispatches_spawn(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
 
         resp = client.post(
             "/api/flows",
@@ -440,7 +442,7 @@ def test_publish_flow_dispatches_spawn(client_and_app):
             },
         )
         assert resp.status_code == 202
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["task_description"] == "Build X"
         assert spawn.payload["discover"] is False
@@ -450,7 +452,7 @@ def test_publish_flow_threads_discover_flag(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
 
         resp = client.post(
             "/api/flows",
@@ -462,7 +464,7 @@ def test_publish_flow_threads_discover_flag(client_and_app):
             },
         )
         assert resp.status_code == 202
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["discover"] is True
 
@@ -471,7 +473,7 @@ def test_publish_flow_threads_worktree_flag(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
 
         resp = client.post(
             "/api/flows",
@@ -483,7 +485,7 @@ def test_publish_flow_threads_worktree_flag(client_and_app):
             },
         )
         assert resp.status_code == 202
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["worktree"] is True
 
@@ -492,14 +494,14 @@ def test_publish_flow_omits_worktree_key_by_default(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
 
         resp = client.post(
             "/api/flows",
             json={"machine_id": "m1", "task": "Plain", "project_root": "/p"},
         )
         assert resp.status_code == 202
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert "worktree" not in spawn.payload
 
 
@@ -516,7 +518,7 @@ def test_publish_flow_rejects_empty_task(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         resp = client.post(
             "/api/flows",
             json={"machine_id": "m1", "task": "  ", "project_root": "/p"},
@@ -533,7 +535,7 @@ def test_publish_flow_accepts_unknown_absolute_project_root(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
 
         # Note: '/never/registered/path' is not in any STATUS_UPDATE.
         resp = client.post(
@@ -545,7 +547,7 @@ def test_publish_flow_accepts_unknown_absolute_project_root(client_and_app):
             },
         )
         assert resp.status_code == 202
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.payload["project_root"] == "/never/registered/path"
 
 
@@ -553,7 +555,7 @@ def test_publish_flow_rejects_non_absolute_project_root(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         resp = client.post(
             "/api/flows",
             json={
@@ -569,7 +571,7 @@ def test_publish_flow_rejects_empty_project_root(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         resp = client.post(
             "/api/flows",
             json={"machine_id": "m1", "task": "X"},
@@ -581,7 +583,7 @@ def test_respond_flow_dispatches_respond_call(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -602,7 +604,7 @@ def test_respond_flow_dispatches_respond_call(client_and_app):
 
         resp = client.post("/api/flows/f1/respond", json={"response": "yes"})
         assert resp.status_code == 200
-        respond = protocol.decode(ws.receive_text())
+        respond = recv_daemon_frame(ws)
         assert respond.type == protocol.MSG_RESPOND_CALL
         assert respond.payload["call_id"] == "c1"
         assert respond.payload["response"] == "yes"
@@ -658,7 +660,7 @@ def test_ui_ws_broadcasts_daemon_status_update(client_and_app):
 
         with client.websocket_connect("/ws") as daemon:
             daemon.send_text(_hello(app))
-            protocol.decode(daemon.receive_text())  # WELCOME
+            recv_daemon_frame(daemon)  # WELCOME
             # Daemon connect triggers a broadcast to the UI client.
             on_connect = json.loads(ui.receive_text())
             assert on_connect["type"] == "status_update"
@@ -889,7 +891,7 @@ def test_list_issues_endpoint(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "001", "project_root": "/p", "status": "open", "source": "human"},
@@ -912,7 +914,7 @@ def test_list_issues_include_closed(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "001", "project_root": "/p", "status": "open"},
@@ -933,7 +935,7 @@ def test_list_issues_filter_by_source(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "001", "project_root": "/p", "status": "open", "source": "human"},
@@ -956,7 +958,7 @@ def test_get_issue_by_id_endpoint(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "open", "title": "Test"},
@@ -985,7 +987,7 @@ def test_create_issue_dispatches_command(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
 
         result: dict = {}
 
@@ -1002,7 +1004,7 @@ def test_create_issue_dispatches_command(client_and_app):
         worker = threading.Thread(target=do_post)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "create"
             assert msg.payload["description"] == "Something is broken"
@@ -1025,7 +1027,7 @@ def test_create_issue_rejects_empty_description(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         resp = client.post("/api/issues", json={
             "machine_id": "m1",
             "project_root": "/proj",
@@ -1038,7 +1040,7 @@ def test_create_issue_rejects_non_absolute_root(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         resp = client.post("/api/issues", json={
             "machine_id": "m1",
             "project_root": "relative",
@@ -1061,7 +1063,7 @@ def test_edit_issue_dispatches_command(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "open"},
@@ -1082,7 +1084,7 @@ def test_edit_issue_dispatches_command(client_and_app):
         worker = threading.Thread(target=do_patch)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "edit"
             assert msg.payload["issue_id"] == "042"
@@ -1103,7 +1105,7 @@ def test_close_issue_dispatches_command(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "open"},
@@ -1124,7 +1126,7 @@ def test_close_issue_dispatches_command(client_and_app):
         worker = threading.Thread(target=do_close)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "close"
             assert msg.payload["reason"] == "Fixed"
@@ -1144,7 +1146,7 @@ def test_reopen_issue_dispatches_command(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "closed"},
@@ -1163,7 +1165,7 @@ def test_reopen_issue_dispatches_command(client_and_app):
         worker = threading.Thread(target=do_reopen)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "reopen"
             assert msg.payload["issue_id"] == "042"
@@ -1206,7 +1208,7 @@ def test_create_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
 
         result: dict = {}
 
@@ -1220,7 +1222,7 @@ def test_create_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
         worker = threading.Thread(target=do_post)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "create"
             # Deliberately do NOT send MSG_ISSUE_RESULT. Instead the issue
@@ -1257,7 +1259,7 @@ def test_create_issue_reconcile_ignores_preexisting_issue(client_and_app, monkey
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         # Seed the mirror with a pre-existing issue (the baseline).
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
@@ -1286,7 +1288,7 @@ def test_create_issue_reconcile_ignores_preexisting_issue(client_and_app, monkey
         worker = threading.Thread(target=do_post)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             # No ack and no new issue ever appears: only the baseline 005 is
             # in the mirror, so reconcile must NOT match it.
@@ -1302,7 +1304,7 @@ def test_edit_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "open",
@@ -1323,7 +1325,7 @@ def test_edit_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
         worker = threading.Thread(target=do_patch)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "edit"
             # No ack; the edit lands and shows up in the next STATUS_UPDATE.
@@ -1346,7 +1348,7 @@ def test_close_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "open"},
@@ -1366,7 +1368,7 @@ def test_close_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
         worker = threading.Thread(target=do_close)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "close"
             ws.send_text(protocol.make_status_update(
@@ -1387,7 +1389,7 @@ def test_reopen_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(protocol.make_status_update(
             _snapshot_with_issues(issues=[
                 {"id": "042", "project_root": "/proj", "status": "closed"},
@@ -1405,7 +1407,7 @@ def test_reopen_issue_reconciles_after_ack_timeout(client_and_app, monkeypatch):
         worker = threading.Thread(target=do_reopen)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             assert msg.payload["operation"] == "reopen"
             ws.send_text(protocol.make_status_update(
@@ -1430,7 +1432,7 @@ def test_create_issue_reconcile_fails_when_never_persisted(client_and_app, monke
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
 
         result: dict = {}
 
@@ -1444,7 +1446,7 @@ def test_create_issue_reconcile_fails_when_never_persisted(client_and_app, monke
         worker = threading.Thread(target=do_post)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             # No ack, and never push a STATUS_UPDATE reflecting the issue.
         finally:
@@ -1464,7 +1466,7 @@ def test_create_issue_normal_ack_path_skips_reconcile(client_and_app, monkeypatc
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
 
         result: dict = {}
 
@@ -1478,7 +1480,7 @@ def test_create_issue_normal_ack_path_skips_reconcile(client_and_app, monkeypatc
         worker = threading.Thread(target=do_post)
         worker.start()
         try:
-            msg = protocol.decode(ws.receive_text())
+            msg = recv_daemon_frame(ws)
             assert msg.type == protocol.MSG_ISSUE_COMMAND
             ws.send_text(protocol.make_issue_result(
                 msg.payload.get("request_id", ""),
@@ -1501,7 +1503,7 @@ def test_resume_flow_dispatches_spawn_with_resume_flow_id(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -1526,7 +1528,7 @@ def test_resume_flow_dispatches_spawn_with_resume_flow_id(client_and_app):
         assert body["status"] == "resume_dispatched"
         assert body["flow_id"] == "f-resume"
 
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["resume_flow_id"] == "f-resume"
         assert spawn.payload["project_root"] == "/proj"
@@ -1537,7 +1539,7 @@ def test_resume_flow_failed_is_resumable(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -1566,7 +1568,7 @@ def test_resume_flow_completed_returns_409(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -1602,7 +1604,7 @@ def test_resume_flow_running_returns_409_with_still_running_detail(client_and_ap
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -1639,7 +1641,7 @@ def test_resume_flow_running_but_dead_is_resumable(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -1676,7 +1678,7 @@ def test_resume_flow_daemon_disconnected_returns_404(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -1734,7 +1736,7 @@ def test_publish_flow_from_issue_dispatches(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         _push_issue(ws, client, app, issue_id="001", project_root="/p")
 
         # task content is supplied but MUST be ignored on the from-issue path.
@@ -1747,7 +1749,7 @@ def test_publish_flow_from_issue_dispatches(client_and_app):
         assert body["from_issue_id"] == "001"
         assert body["machine_id"] == "m1"
 
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["from_issue_id"] == "001"
         assert spawn.payload["project_root"] == "/p"
@@ -1760,7 +1762,7 @@ def test_publish_flow_from_issue_threads_discover(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         _push_issue(ws, client, app, issue_id="007", project_root="/p")
 
         resp = client.post(
@@ -1768,7 +1770,7 @@ def test_publish_flow_from_issue_threads_discover(client_and_app):
             json={"from_issue_id": "007", "discover": True},
         )
         assert resp.status_code == 202, resp.text
-        spawn = protocol.decode(ws.receive_text())
+        spawn = recv_daemon_frame(ws)
         assert spawn.payload["from_issue_id"] == "007"
         assert spawn.payload["discover"] is True
 
@@ -1777,7 +1779,7 @@ def test_publish_flow_from_issue_unknown_404(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         # No issue pushed — the id resolves to nothing.
         resp = client.post("/api/flows", json={"from_issue_id": "999"})
         assert resp.status_code == 404
@@ -1787,7 +1789,7 @@ def test_publish_flow_from_issue_non_open_409(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         _push_issue(ws, client, app, issue_id="002", status="in-progress")
 
         resp = client.post("/api/flows", json={"from_issue_id": "002"})
@@ -1798,7 +1800,7 @@ def test_publish_flow_from_issue_target_mismatch_404(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         _push_issue(ws, client, app, issue_id="003", machine_id="m1")
 
         # Request names a machine that does not own the issue -> 404.
@@ -1813,7 +1815,7 @@ def test_publish_flow_from_issue_daemon_disconnected_404(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         _push_issue(ws, client, app, issue_id="004", project_root="/p")
     # After the ws context exits the daemon is disconnected; the issue mirror
     # persists (machine merely marked offline), so the not-connected branch

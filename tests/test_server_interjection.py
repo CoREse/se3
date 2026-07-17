@@ -22,6 +22,8 @@ from types import SimpleNamespace
 import pytest
 
 from se3.daemon import protocol
+
+from _authsrv import recv_daemon_frame
 from se3.engine import interaction_calls
 
 
@@ -56,7 +58,7 @@ def _register(client, app, ws, flows):
     from _authsrv import authed_hello
 
     ws.send_text(authed_hello(app, "m1", "host-1", "6.4.0"))
-    protocol.decode(ws.receive_text())  # WELCOME
+    recv_daemon_frame(ws)  # WELCOME
     ws.send_text(protocol.make_status_update(_snapshot("m1", flows)).to_json())
     for _ in range(50):
         if client.get(f"/api/flows/{flows[0]['flow_id']}").status_code == 200:
@@ -76,7 +78,7 @@ def test_interject_endpoint_dispatches(client_and_app):
         assert body["status"] == "dispatched"
         assert body["flow_id"] == "f1"
         # The daemon receives an INTERJECT_FLOW frame carrying the text.
-        msg = protocol.decode(ws.receive_text())
+        msg = recv_daemon_frame(ws)
         assert msg.type == protocol.MSG_INTERJECT_FLOW
         assert msg.payload["text"] == "add logging"
         assert msg.payload["flow_id"] == "f1"
@@ -133,7 +135,7 @@ def test_respond_locates_non_call_kind_pending_call(client_and_app):
         )
         assert resp.status_code == 200
         assert resp.json()["call_id"] == "retry_decision_s1"
-        msg = protocol.decode(ws.receive_text())
+        msg = recv_daemon_frame(ws)
         assert msg.type == protocol.MSG_RESPOND_CALL
         assert msg.payload["call_id"] == "retry_decision_s1"
         assert msg.payload["response"] == {"decision": "retry"}

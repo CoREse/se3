@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from _authsrv import authed_app, login
+from _authsrv import authed_app, login, recv_daemon_frame
 
 from se3.daemon import protocol
 from se3.server.auth.ratelimit import LoginRateLimiter, RateLimitConfig
@@ -446,7 +446,7 @@ def test_full_chain_bootstrap_owner_key_daemon_dispatch():
             daemon.send_text(
                 protocol.make_hello("mAlice", "h", "6.4.0", key=dkey).to_json()
             )
-            welcome = protocol.decode(daemon.receive_text())
+            welcome = recv_daemon_frame(daemon)
             assert welcome.type == protocol.MSG_WELCOME
             assert welcome.payload["accepted"] is True
             # The secret key is never echoed back in the WELCOME.
@@ -478,7 +478,7 @@ def test_full_chain_bootstrap_owner_key_daemon_dispatch():
                 json={"machine_id": "mAlice", "task": "do", "project_root": "/pa"},
             )
             assert ok.status_code == 202
-            spawn = protocol.decode(daemon.receive_text())
+            spawn = recv_daemon_frame(daemon)
             assert spawn.type == protocol.MSG_SPAWN_FLOW
 
             # 7. bob CANNOT dispatch to alice's daemon — it reads as absent (404),
@@ -508,7 +508,7 @@ def test_full_chain_fail_closed_without_identity():
         # daemon /ws: a HELLO with no key is rejected (WELCOME accepted=false).
         with anon.websocket_connect("/ws") as ws:
             ws.send_text(protocol.make_hello("mGhost", "h", "6.4.0").to_json())
-            welcome = protocol.decode(ws.receive_text())
+            welcome = recv_daemon_frame(ws)
             assert welcome.type == protocol.MSG_WELCOME
             assert welcome.payload["accepted"] is False
         # The rejected daemon registered nothing the operator could later see.

@@ -20,6 +20,8 @@ import json
 from pathlib import Path
 
 from se3.daemon import protocol
+
+from _authsrv import recv_daemon_frame
 from se3.daemon.aggregator import DaemonAggregator
 from se3.daemon.client import DaemonClient
 from se3.server.ws import (
@@ -376,7 +378,7 @@ def test_status_update_broadcasts_interjection_event_to_ui_clients():
                 daemon_ws.send_text(
                     authed_hello(app, "m-e2e", "h", "6.4.0")
                 )
-                protocol.decode(daemon_ws.receive_text())  # WELCOME
+                recv_daemon_frame(daemon_ws)  # WELCOME
                 # STATUS_UPDATE: a new interjection-kind pending_call appears.
                 snap = {
                     "machine_id": "m-e2e",

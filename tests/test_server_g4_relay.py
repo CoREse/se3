@@ -15,7 +15,7 @@ import threading
 
 import pytest
 
-from _authsrv import authed_hello
+from _authsrv import authed_hello, recv_daemon_frame
 from fastapi.middleware.gzip import GZipMiddleware
 
 from se3.daemon import protocol
@@ -439,7 +439,7 @@ def client_and_app(monkeypatch):
 
 def _drain_index_requests(daemon, want_type):
     while True:
-        frame = protocol.decode(daemon.receive_text())
+        frame = recv_daemon_frame(daemon)
         if frame.type == want_type:
             return frame
         assert frame.type == protocol.MSG_HISTORY_INDEX_REQUEST
@@ -513,7 +513,7 @@ def test_history_bundle_large_json_served_intact(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         big = [{"step": "s1", "line": "x" * 2000, "ordinal": i} for i in range(50)]
         daemon.send_text(
             protocol.make_history_data("f1", protocol.HISTORY_MODE_FULL, big).to_json()
@@ -530,7 +530,7 @@ def test_history_not_modified_via_rest(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         daemon.send_text(protocol.make_history_index([{"flow_id": "f1"}]).to_json())
         for _ in range(50):
             if client.get("/api/history").json()["sessions"]:
@@ -559,7 +559,7 @@ def test_issue_detail_endpoint_pulls_full_text(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         # Report an issue (truncated) via STATUS_UPDATE so the server can resolve
         # its owning machine / root.
         daemon.send_text(
@@ -604,7 +604,7 @@ def test_call_detail_endpoint_resolves_owner_and_pulls(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         daemon.send_text(
             protocol.make_status_update(
                 {
@@ -657,7 +657,7 @@ def test_wire_metrics_endpoint_counts_downlink(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         # A GET /api/history broadcasts a HISTORY_INDEX_REQUEST downlink; drain it
         # so the send is accounted.
         client.get("/api/history")
@@ -670,7 +670,7 @@ def test_wire_metrics_endpoint_counts_downlink(client_and_app):
 def _drain_index_requests_soft(daemon):
     # Best-effort: read one frame (the index-refresh request) if present.
     try:
-        protocol.decode(daemon.receive_text())
+        recv_daemon_frame(daemon)
     except Exception:
         pass
 
@@ -695,7 +695,7 @@ def test_wire_metrics_records_welcome_and_ping(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         snap = client.get("/api/wire-metrics").json()["metrics"]
         assert snap.get(protocol.MSG_WELCOME, {}).get("bytes", 0) > 0
         assert snap.get(protocol.MSG_WELCOME, {}).get("count", 0) >= 1
@@ -710,7 +710,7 @@ def test_issue_detail_pre_v3_daemon_serves_mirror(client_and_app):
     full_desc = "x" * 500  # >200 chars: would look "truncated" to the frontend
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(_authed_hello_v2(app, "m1"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         daemon.send_text(
             protocol.make_status_update(
                 {
@@ -737,7 +737,7 @@ def test_call_detail_pre_v3_daemon_serves_mirror(client_and_app):
     full_prompt = "p" * 500
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(_authed_hello_v2(app, "m1"))
-        protocol.decode(daemon.receive_text())  # WELCOME
+        recv_daemon_frame(daemon)  # WELCOME
         daemon.send_text(
             protocol.make_status_update(
                 {

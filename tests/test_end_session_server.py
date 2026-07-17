@@ -13,7 +13,7 @@ import pytest
 
 from se3.daemon import protocol
 
-from _authsrv import authed_app, authed_hello, login  # noqa: E402
+from _authsrv import authed_app, authed_hello, login, recv_daemon_frame  # noqa: E402
 
 
 @pytest.fixture()
@@ -39,7 +39,7 @@ def _snapshot(machine_id="m1", flows=None):
 def _report_flow(ws, client, app, flow_id, status, project_root="/proj"):
     """Send a HELLO + STATUS_UPDATE for one flow and wait until it is visible."""
     ws.send_text(authed_hello(app))
-    protocol.decode(ws.receive_text())  # WELCOME
+    recv_daemon_frame(ws)  # WELCOME
     ws.send_text(
         protocol.make_status_update(
             _snapshot(
@@ -108,9 +108,9 @@ def test_end_flow_cross_owner_returns_404():
         login(cb, "B", "pw")
         with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
             da.send_text(_hello("A", "mA"))
-            protocol.decode(da.receive_text())
+            recv_daemon_frame(da)
             db.send_text(_hello("B", "mB"))
-            protocol.decode(db.receive_text())
+            recv_daemon_frame(db)
             db.send_text(
                 protocol.make_status_update(
                     {
@@ -130,7 +130,7 @@ def test_end_flow_cross_owner_returns_404():
                     break
             # B owns fB and may end it (its daemon is connected → 202).
             assert cb.post("/api/flows/fB/end").status_code == 202
-            protocol.decode(db.receive_text())  # END_SESSION drained
+            recv_daemon_frame(db)  # END_SESSION drained
             # A cannot — cross-owner reads as absent (404), never 409/503.
             cross = ca.post("/api/flows/fB/end")
             assert cross.status_code == 404
@@ -169,7 +169,7 @@ def test_end_flow_completed_worktree_dispatches(client_and_app):
         assert body["status"] == "end_dispatched"
         assert body["flow_id"] == "f-wt"
 
-        dispatched = protocol.decode(ws.receive_text())
+        dispatched = recv_daemon_frame(ws)
         assert dispatched.type == protocol.MSG_END_SESSION
         assert dispatched.payload["flow_id"] == "f-wt"
         # The server forwards the worktree sandbox path; the daemon folds it back
@@ -217,7 +217,7 @@ def test_end_flow_dispatches_end_session(client_and_app, status):
         assert body["machine_id"] == "m1"
         assert body["reason"] == "cleanup"
 
-        dispatched = protocol.decode(ws.receive_text())
+        dispatched = recv_daemon_frame(ws)
         assert dispatched.type == protocol.MSG_END_SESSION
         assert dispatched.payload["flow_id"] == "f-end"
         assert dispatched.payload["project_root"] == "/proj"
@@ -232,6 +232,6 @@ def test_end_flow_default_reason_when_body_omitted(client_and_app):
         resp = client.post("/api/flows/f-noreason/end")
         assert resp.status_code == 202, resp.text
         assert resp.json()["reason"] == "user terminated"
-        dispatched = protocol.decode(ws.receive_text())
+        dispatched = recv_daemon_frame(ws)
         assert dispatched.type == protocol.MSG_END_SESSION
         assert dispatched.payload["reason"] == "user terminated"

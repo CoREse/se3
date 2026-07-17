@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from se3.daemon import protocol
+
+from _authsrv import recv_daemon_frame
 from se3.daemon.aggregator import DaemonAggregator
 from se3.daemon.client import DaemonClient
 from se3.daemon.protocol import (
@@ -276,7 +278,7 @@ def test_interject_endpoint_dispatches(server_client):
                 "m1", "h", "6.4.0", key=server_client.app.state.test_daemon_key
             ).to_json()
         )
-        protocol.decode(ws.receive_text())  # WELCOME
+        recv_daemon_frame(ws)  # WELCOME
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(
@@ -294,7 +296,7 @@ def test_interject_endpoint_dispatches(server_client):
         assert resp.status_code == 200
         assert resp.json()["flow_id"] == "f1"
 
-        msg = protocol.decode(ws.receive_text())
+        msg = recv_daemon_frame(ws)
         assert msg.type == MSG_INTERJECT_FLOW
         assert msg.payload["flow_id"] == "f1"
         assert msg.payload["text"] == "also fix the typo"
@@ -313,7 +315,7 @@ def test_interject_endpoint_rejects_empty_text(server_client):
                 "m1", "h", "6.4.0", key=server_client.app.state.test_daemon_key
             ).to_json()
         )
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(
             protocol.make_status_update(
                 _snapshot("m1", [{"flow_id": "f1", "project_root": "/proj"}])
@@ -334,7 +336,7 @@ def test_interject_pending_call_fields_reach_snapshot(server_client):
                 "m1", "h", "6.4.0", key=server_client.app.state.test_daemon_key
             ).to_json()
         )
-        protocol.decode(ws.receive_text())
+        recv_daemon_frame(ws)
         ws.send_text(
             protocol.make_status_update(
                 _snapshot(

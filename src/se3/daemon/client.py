@@ -54,6 +54,16 @@ _STATUS_INTERVAL = 5.0
 # line is reflected on the web within a tick instead of a full status interval.
 _HISTORY_POLL_INTERVAL = 1.0
 
+# Idle-gear cadences (seconds) used when the connected server (revision >= 4)
+# reports zero browser viewers: nobody is watching the web UI, so neither the
+# 1 s disk-signature tick nor the 5 s status heartbeat buys anything — both
+# drop to a low-power cadence until presence returns. Module-level (looked up
+# at call time) so tests can shrink them; server-command wakeups still bypass
+# the cadence entirely via ``_fast_push_event``, so a SPAWN/INTERJECT/ISSUE
+# command stays instant even in the idle gear.
+_IDLE_FAST_INTERVAL = 30.0
+_IDLE_STATUS_INTERVAL = 60.0
+
 #: Type of the snapshot provider — returns a JSON-serializable machine snapshot.
 SnapshotProvider = Callable[[], Dict[str, Any]]
 #: Type of the spawn handler — called with
@@ -327,6 +337,18 @@ class DaemonClient:
         # "no snapshot built yet"; the issue handler then falls back to building
         # one snapshot to validate against.
         self._last_known_project_roots: Optional[set] = None
+        # Browser-presence belief learned from the server: the MSG_VIEWERS
+        # 0↔non-0 edges and the ``viewers`` level riding on every PING both
+        # funnel into :meth:`_update_viewer_count`. ``None`` means "unknown"
+        # and — like any count > 0 — keeps the full-speed cadence: the client
+        # only downshifts on a trustworthy, explicit zero (fail-open, so any
+        # lost/absent presence info can cost CPU but never real-time behavior).
+        self._viewer_count: Optional[int] = None
+        # Set on a 0→non-0 presence edge; the next push-loop tick consumes it
+        # and forces a full STATUS_UPDATE + full HISTORY_INDEX so a just-opened
+        # browser's first screen is fresh within one fast tick, closing the
+        # 0→1 wake race left by the idle gear's long cadence.
+        self._presence_wake_force = False
 
     # -- introspection -----------------------------------------------------
 
@@ -339,6 +361,21 @@ class DaemonClient:
     def last_error(self) -> Optional[str]:
         """The most recent connection error string, if any."""
         return self._last_error
+
+    @property
+    def viewer_count(self) -> Optional[int]:
+        """The server-reported browser viewer count, gated on peer support.
+
+        Returns ``None`` — "unknown, assume watched" — until a revision >= 4
+        server has been welcomed this session, so a count recorded against a
+        legacy (< v4) server can never report an *effective* zero: such a
+        server has no presence channel to wake the daemon back up with, and
+        downshifting on its silence would trade away the web UI's real-time
+        behavior. The daemon's poll loop reads this to pick its own gear.
+        """
+        if not protocol.supports_presence(self._peer_protocol_version):
+            return None
+        return self._viewer_count
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -446,6 +483,13 @@ class DaemonClient:
             # its keepalive support is unknown until this session's WELCOME.
             self._last_status_sig = None
             self._peer_protocol_version = None
+            # Presence belief is per-session: the server re-announces the
+            # count right after the handshake (post-handshake MSG_VIEWERS +
+            # the PING level), so a stale zero from the previous session must
+            # not idle-gear the client against a server that can no longer
+            # correct it. ``None`` fails open to full speed.
+            self._viewer_count = None
+            self._presence_wake_force = False
             # Bind the fast-push event to *this* session's running loop; the
             # previous session's event (if any) is dropped along with it.
             self._fast_push_event = asyncio.Event()
@@ -526,6 +570,15 @@ class DaemonClient:
         ever missed. When nothing changed, the signature checks are cheap
         stat-only scans and no frame is sent (debounce).
 
+        Both cadences are the *effective* intervals from
+        :meth:`_effective_intervals`: when the server reports zero browser
+        viewers, the loop runs in the idle gear (30 s / 60 s) instead of the
+        configured full-speed cadence. A 0→non-0 presence edge sets
+        ``_presence_wake_force`` (and the fast-push event), which this loop
+        consumes as "force a full STATUS_UPDATE + full HISTORY_INDEX now" so
+        a just-opened browser gets fresh state within one fast tick rather
+        than a stale idle-gear snapshot.
+
         Both pushes share this one coroutine so their ``ws.send`` calls never
         interleave (which two independent loops racing on the same socket could
         do), keeping every wire frame intact.
@@ -535,8 +588,13 @@ class DaemonClient:
             woke_for_fast_push = await self._wait_next_tick(stop_event)
             if stop_event.is_set():
                 break
+            # Consume the presence-wake flag exactly once. It rode in on the
+            # fast-push event, so this tick started immediately after the edge.
+            presence_wake = self._presence_wake_force
+            self._presence_wake_force = False
             now = time.monotonic()
-            status_due = (now - last_status) >= self.status_interval
+            _, effective_status_interval = self._effective_intervals()
+            status_due = (now - last_status) >= effective_status_interval
             # A genuine call-file change drives an immediate STATUS_UPDATE so
             # the web sees the new / drained interjection chip within ~1 s. The
             # calls signature scans every tracked root AND every active
@@ -550,15 +608,19 @@ class DaemonClient:
             # instant a server-delivered interjection has hit disk — push now
             # rather than waiting for the next ``has_changes``-style scan to
             # notice it on the next tick.
-            push_status = status_due or calls_changed or woke_for_fast_push
+            push_status = (
+                status_due or calls_changed or woke_for_fast_push or presence_wake
+            )
             if push_status:
                 last_status = now
                 # A call-file change or a fast-push wake is a genuine content
                 # event that must ship a *real* STATUS_UPDATE, so it bypasses the
                 # keepalive content-gate. A plain heartbeat tick (status_due
                 # alone) may collapse to a keepalive when nothing actually
-                # changed since the last snapshot.
-                force = calls_changed or woke_for_fast_push
+                # changed since the last snapshot. A presence wake must also
+                # bypass the gate: the browser that just opened holds no state
+                # at all, so a keepalive would leave its first screen empty.
+                force = calls_changed or woke_for_fast_push or presence_wake
                 await self._push_status(ws, force=force)
             # Push history on a real disk change, or on the status tick (backstop).
             # The change check reads each active flow's engine.json + stats its
@@ -568,13 +630,32 @@ class DaemonClient:
             # synchronously on the event loop. The reader is the push loop's sole
             # caller of this method, so the off-thread mutation of its signature
             # state is race-free.
+            #
+            # The status tick's backstop role extends to the reader's dirty-
+            # sentinel gate: the gate skips idle roots on fast ticks, trusting
+            # the PersistenceManager-bumped sentinel — a change written by a
+            # sentinel-unaware writer would stay gated forever. Dropping the
+            # gate here (before the scan below) makes every status tick an
+            # ungated full scan, bounding that staleness by one status
+            # interval. A presence wake drops it too: the just-opened browser
+            # must not inherit a gated (possibly stale) view. getattr-probed
+            # like invalidate_index_cache so stub providers stay valid.
+            if status_due or presence_wake:
+                clear_gate = getattr(
+                    self._history_provider, "clear_sentinel_gate", None
+                )
+                if clear_gate is not None:
+                    clear_gate()
             history_changed = await asyncio.to_thread(self._history_changed)
-            if status_due or history_changed:
+            if status_due or history_changed or presence_wake:
                 # A real disk change (engine.json rewrite / jsonl append) means
                 # the on-disk state diverged from the cached index.  Invalidate
                 # so the next build_index() rebuilds from disk instead of
-                # returning a stale snapshot for up to BUILD_INDEX_TTL.
-                if history_changed:
+                # returning a stale snapshot for up to BUILD_INDEX_TTL. A
+                # presence wake invalidates too: the idle gear may have skipped
+                # ticks for long enough that a TTL-cached index predates real
+                # changes, and the just-opened browser must see fresh state.
+                if history_changed or presence_wake:
                     invalidate = getattr(
                         self._history_provider, "invalidate_index_cache", None
                     )
@@ -583,8 +664,12 @@ class DaemonClient:
                 # ``status_due`` doubles as the throttle window for updated_at-only
                 # meta churn: an active flow's timestamp-only delta is held back on
                 # a fast tick and only flushed on the status heartbeat, so it never
-                # re-pushes more often than the heartbeat itself.
-                await self._push_history(ws, status_tick=status_due)
+                # re-pushes more often than the heartbeat itself. ``force_index``
+                # on a presence wake re-baselines the server's index mirror, the
+                # HISTORY half of the 0→1 full refresh.
+                await self._push_history(
+                    ws, status_tick=status_due, force_index=presence_wake
+                )
 
     async def _wait_next_tick(self, stop_event: asyncio.Event) -> bool:
         """Wait one fast tick, returning whether the fast-push event woke us.
@@ -596,13 +681,16 @@ class DaemonClient:
         concurrent ``set`` between two ticks still wakes the *next* tick.
         Returns ``True`` only when the fast-push event actually triggered the
         wakeup, so the caller can force a STATUS_UPDATE on that tick.
+
+        The tick length is the *effective* fast interval — the configured
+        ``history_poll_interval`` while watched, the idle-gear cadence when the
+        server reports zero viewers — so the whole loop slows down together.
         """
+        fast_interval, _ = self._effective_intervals()
         event = self._fast_push_event
         if event is None:  # pragma: no cover - defensive (set in _session)
             try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=self.history_poll_interval
-                )
+                await asyncio.wait_for(stop_event.wait(), timeout=fast_interval)
             except asyncio.TimeoutError:
                 pass
             return False
@@ -611,7 +699,7 @@ class DaemonClient:
         try:
             done, pending = await asyncio.wait(
                 {stop_task, push_task},
-                timeout=self.history_poll_interval,
+                timeout=fast_interval,
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
@@ -671,6 +759,39 @@ class DaemonClient:
         if event is not None:
             event.set()
 
+    def _effective_intervals(self) -> Tuple[float, float]:
+        """Return the ``(fast, status)`` cadences for the current gear.
+
+        The idle gear — the module-level ``_IDLE_FAST_INTERVAL`` /
+        ``_IDLE_STATUS_INTERVAL`` constants — applies only when the server
+        reported an explicit ``viewers == 0`` *and* advertised revision >= 4
+        (both folded into the :attr:`viewer_count` property): a legacy server
+        or an unknown count keeps the configured full-speed cadence, so any
+        presence-signal loss degrades to today's behavior, never to a stale
+        web UI.
+        """
+        if self.viewer_count == 0:
+            return (_IDLE_FAST_INTERVAL, _IDLE_STATUS_INTERVAL)
+        return (self.history_poll_interval, self.status_interval)
+
+    def _update_viewer_count(self, value: Any) -> None:
+        """Fold one presence report (edge or PING level) into the gear state.
+
+        A missing / malformed *value* is ignored — the current gear must never
+        move on garbage, only on an explicit well-formed count. A 0→non-0
+        transition (including the session's very first non-zero report) arms
+        ``_presence_wake_force`` and wakes the push loop immediately, so the
+        browser that just connected gets a forced full refresh within one fast
+        tick instead of waiting out the idle-gear cadence.
+        """
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return
+        previous = self._viewer_count
+        self._viewer_count = value
+        if value > 0 and (previous is None or previous == 0):
+            self._presence_wake_force = True
+            self._trigger_fast_push()
+
     def _history_changed(self) -> bool:
         """Return whether any active flow's disk signature changed since last check.
 
@@ -712,7 +833,15 @@ class DaemonClient:
     async def _dispatch(self, ws: Any, message: protocol.Message) -> None:
         """Route one inbound server message to its handler."""
         if message.type == protocol.MSG_PING:
+            # Answer first — the PONG is the liveness signal the server times
+            # out on, so it must never wait behind presence bookkeeping. The
+            # optional ``viewers`` level riding on the heartbeat is the
+            # self-healing path for a lost MSG_VIEWERS edge (absent/malformed
+            # → ignored, gear unchanged).
             await self._send(ws, protocol.make_pong(seq=message.seq))
+            self._update_viewer_count(message.payload.get("viewers"))
+        elif message.type == protocol.MSG_VIEWERS:
+            self._update_viewer_count(message.payload.get("count"))
         elif message.type == protocol.MSG_WELCOME:
             self._handle_welcome(message.payload)
         elif message.type == protocol.MSG_SPAWN_FLOW:
