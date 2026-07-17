@@ -1,0 +1,86 @@
+id: '289'
+description: '## 现象
+
+
+  daemon 在没有任何 session 运行、没有浏览器打开 WebUI 时,持续占用 ~30% CPU、~10MB/s 磁盘读(40 分钟读了 28.8GB)。
+
+
+  ## 诊断(2026-07-17 实测)
+
+
+  已修复的部分:多个项目遗留 2MB/3.8MB 的 completed engine.json 从未归档,`active_flow_signature()` 每
+  1s tick 对每个注册 root 全文重读+hash engine.json(verify_content 设计),且 status 判断发生在读取之后——completed
+  流照样付全款。已用 `se3 end-session -p <root>` 归档,磁盘读降到 1.1MB/s。但 CPU 仅从 ~33% 降到 ~28%,剩余热点:
+
+
+  1. **issues YAML 零缓存(~10% CPU)**:`DaemonAggregator._collect_issues`(aggregator.py:1293)每次
+  `get_snapshot`(5s status tick)对全部 ~307 个 issue YAML 做纯 Python `yaml.safe_load`,单次
+  0.3–0.6s。engine.json 有 disk_json_cache,issues 什么缓存都没有。
+
+  2. **build_index stat 风暴(~5% CPU)**:每次 warm 重建 0.15s,1.75 万次 stat 遍历 431 个 history
+  目录 / 8200 个文件算目录签名;TTL 3s,且每个 status tick 强制失效重建。
+
+  3. **residual 1.1MB/s 读**:archive 里 14 个超过 MAX_PARSE_BYTES(5MB)的大文件永不缓存,每次 build_index
+  各付 256KB head+tail 读。
+
+  4. **无 presence 门控**:以上所有工作 7×24 全速跑,不管有没有浏览器在看。
+
+
+  ## 修复方案(按性价比排序)
+
+
+  ### ① 纯 bug 级修复
+
+
+  - `_collect_issues` 加 stat 签名缓存:目录签名(文件名+mtime+size 集合)不变就复用上次解析结果;顺手用 CSafeLoader(已可用)。
+
+  - `active_flow_signature` 先走便宜路径(stat-keyed)拿 status,terminal 状态的流跳过 verify_content
+  全文 hash——防"同 mtime 原地改写"只对活跃流有意义。
+
+
+  ### ② presence 门控(架构收益最大)
+
+
+  server 端 `/ws/ui` 的 UIConnectionManager 精确掌握浏览器连接数,但从不告诉 daemon。方案(边沿+电平双保险):
+
+
+  - **边沿**:新增 `MSG_VIEWERS`(server→daemon,`{type: "viewers", count: N}`),仅在 0↔非 0
+  跳变时发(UIConnectionManager connect/disconnect 回调各加一行)。1→2、2→1 不发。
+
+  - **电平**:现有 15s `MSG_PING` 搭载 `viewers: N` 字段,零新增帧,作为丢消息/重连后的自愈路径,最多 15s 收敛。
+
+  - **daemon 档位切换**:`viewers > 0` → 现节奏(1s fast tick / 5s status);`viewers == 0` →
+  30–60s 心跳档。
+
+  - **0→1 唤醒竞态**:收到 0→1 边沿立即触发一次全量扫描+推送,复用 `_handle_interject` 的 `woke_for_fast_push`
+  即时唤醒管道,保证首屏 1s 内拿到新鲜数据;server 侧可对称地发一个 `MSG_HISTORY_INDEX_REQUEST` 互为兜底。
+
+  - **向后兼容**:daemon 从未收到 viewers 信息(旧 server)→ 假定 `viewers > 0` 维持现状全速,照抄 revision
+  3 `supports_traffic_reduction` 的协商模式(升 revision 4)。
+
+
+  presence 机制通信成本≈0:边沿消息只在开/关页面时发,电平骑在已有心跳上。
+
+
+  ### ③ sentinel 文件(把 fast tick 降成单次 stat)
+
+
+  PersistenceManager 已集中所有状态写入,落盘后 touch 一个 `se3/state/.dirty` sentinel(内容递增序号)。daemon
+  fast tick 退化成"每秒 stat 这一个文件",没变化直接睡,变了才深扫描。文件接口不变,十几行改动。(inotify 方案收益重叠且有 NFS/溢出边角,不推荐。)
+
+
+  ## 预期效果
+
+
+  ①+②+③ 做完,daemon 空闲 CPU 应接近 0%(现 ~28%),有人看页面时恢复现有实时性。'
+status: open
+tags:
+- daemon
+- performance
+- webui
+source: human
+created_at: '2026-07-17T11:10:50.775557'
+updated_at: '2026-07-17T11:14:37.333277'
+title: daemon 空闲时持续高 CPU:轮询热路径缺缓存 + 无 presence 门控
+priority: high
+type: performance
