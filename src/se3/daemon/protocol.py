@@ -29,7 +29,7 @@ Message directions
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
   :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`,
   :data:`MSG_ISSUE_COMMAND`, :data:`MSG_DETAIL_REQUEST`,
-  :data:`MSG_END_SESSION`.
+  :data:`MSG_END_SESSION`, :data:`MSG_VIEWERS`.
 
 Backward compatibility
 ----------------------
@@ -60,6 +60,19 @@ payload (the daemon credential the server resolves to an owner). It is purely
 additive: a daemon with no key omits the field, and an older single-tenant
 server that does not understand it simply ignores it — so the version was not
 bumped for it. The key is a secret and MUST never be logged.
+
+Protocol version 4 added the *presence* signalling (:data:`MSG_VIEWERS` and
+the optional ``viewers`` field piggybacked on :data:`MSG_PING`), which lets a
+daemon throttle its polling / push cadence to a low-power gear while no
+browser is watching the web UI. The behavioural risk runs the other way from
+revision 3: a daemon must never downshift on the strength of *absent* viewer
+information — an older server simply never reports it. The version was bumped
+to ``4`` so the daemon can gate the low-power gear on the peer's advertised
+``protocol_version`` (see :func:`supports_presence`) and **fail open to
+today's full-speed behaviour** whenever the server speaks an older revision
+or has not yet reported a count. The gear-shifting logic lives in the daemon
+client and server hub; this module only owns the wire schema, the version
+constant, and this contract.
 """
 
 from __future__ import annotations
@@ -75,7 +88,11 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # Revision "3" added the traffic-reduction messages (MSG_KEEPALIVE,
 # MSG_HISTORY_INDEX_DELTA, MSG_DETAIL_REQUEST/DATA); a peer advertising "2" or
 # older must be driven with full-frame semantics (see the module docstring).
-PROTOCOL_VERSION = "3"
+# Revision "4" added the presence signalling (MSG_VIEWERS + the optional
+# ``viewers`` field on MSG_PING); a daemon may only enter its low-power idle
+# gear when the server advertises "4" or newer — otherwise it assumes viewers
+# are present and stays at full speed (see the module docstring).
+PROTOCOL_VERSION = "4"
 
 #: Minimum peer ``protocol_version`` that understands the revision-3
 #: traffic-reduction messages. When a peer advertises a value below this in its
@@ -98,6 +115,33 @@ def supports_traffic_reduction(peer_version: Any) -> bool:
     """
     try:
         return int(str(peer_version).strip()) >= MIN_VERSION_TRAFFIC_REDUCTION
+    except (TypeError, ValueError):
+        return False
+
+
+#: Minimum peer ``protocol_version`` that reports browser-presence information
+#: (:data:`MSG_VIEWERS` edges + the ``viewers`` level field on PING). When the
+#: server advertises a value below this in its WELCOME, the daemon MUST assume
+#: viewers are present and keep its full-speed cadence — a legacy server never
+#: reports a count, and downshifting on that silence would trade away the web
+#: UI's real-time behaviour. Version strings are compared as integers with a
+#: safe fallback so a non-numeric or missing value degrades to "legacy"
+#: (full speed).
+MIN_VERSION_PRESENCE = 4
+
+
+def supports_presence(peer_version: Any) -> bool:
+    """Return whether *peer_version* reports the revision-4 presence signals.
+
+    Used by the daemon client to decide whether the peer server will ever send
+    :data:`MSG_VIEWERS` / PING ``viewers`` information — i.e. whether a
+    ``viewers == 0`` belief is trustworthy enough to enter the low-power idle
+    gear. A missing or non-numeric version degrades safely to ``False``
+    (assume watched, run full speed), mirroring
+    :func:`supports_traffic_reduction`.
+    """
+    try:
+        return int(str(peer_version).strip()) >= MIN_VERSION_PRESENCE
     except (TypeError, ValueError):
         return False
 
@@ -206,6 +250,18 @@ MSG_END_SESSION = "end_session"
 #: validates the operation and delegates to :class:`IssueManager`.
 MSG_ISSUE_COMMAND = "issue_command"
 
+#: server → daemon: report the number of browsers currently watching the web
+#: UI. Sent as an *edge* only on the 0↔non-0 transitions (open the first page /
+#: close the last one) — 1→2 or 2→1 changes are not broadcast, because the
+#: daemon only cares whether *anyone* is watching, not how many. The same count
+#: also rides on every :data:`MSG_PING` as a *level* field, which self-heals a
+#: lost edge within one heartbeat interval. On ``count > 0`` the daemon resumes
+#: its full-speed cadence (and fast-pushes fresh data immediately); on
+#: ``count == 0`` it may drop to a low-power idle gear. Revision 4; a daemon
+#: never downshifts unless the server advertises support (see
+#: :func:`supports_presence`).
+MSG_VIEWERS = "viewers"
+
 #: daemon → server: acknowledge the result of a :data:`MSG_ISSUE_COMMAND`.
 #: Carries ``request_id`` (echoed from the command) and either ``ok=true``
 #: or ``ok=false`` with an ``error`` message.
@@ -302,6 +358,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_ISSUE_COMMAND,
         MSG_DETAIL_REQUEST,
         MSG_END_SESSION,
+        MSG_VIEWERS,
     }
 )
 #: Every known message type.
@@ -684,14 +741,43 @@ def make_issue_result(
     return Message(type=MSG_ISSUE_RESULT, payload=payload)
 
 
-def make_ping(*, seq: int = 0) -> Message:
-    """server → daemon: heartbeat probe."""
-    return Message(type=MSG_PING, payload={}, seq=seq)
+def make_ping(*, seq: int = 0, viewers: Optional[int] = None) -> Message:
+    """server → daemon: heartbeat probe.
+
+    *viewers* optionally piggybacks the current browser-presence count
+    (revision 4) on the heartbeat as the *level* half of the presence scheme:
+    the 0↔non-0 :data:`MSG_VIEWERS` edges carry the transition instantly, and
+    this per-PING level repairs any edge lost across a disconnect / dropped
+    frame within one heartbeat interval — at zero extra frames. ``None`` omits
+    the field entirely, keeping the payload byte-identical to the revision-3
+    PING for older callers and peers.
+    """
+    payload: Dict[str, Any] = {}
+    if viewers is not None:
+        payload["viewers"] = int(viewers)
+    return Message(type=MSG_PING, payload=payload, seq=seq)
 
 
 def make_pong(*, seq: int = 0) -> Message:
     """daemon → server: heartbeat reply."""
     return Message(type=MSG_PONG, payload={}, seq=seq)
+
+
+# -- presence messages (protocol revision 4) -------------------------------
+
+
+def make_viewers(count: int, *, seq: int = 0) -> Message:
+    """server → daemon: report the browser-presence count (edge message).
+
+    Broadcast to every connected daemon only when the web UI's connection
+    count crosses the 0↔non-0 boundary — that single bit is all the daemon's
+    gear selection needs, so intermediate 1→2 / 2→1 changes cost no frames.
+    The daemon shifts to its full-speed cadence (with an immediate fast push)
+    on ``count > 0`` and may enter the low-power idle gear on ``count == 0``.
+    The lost-edge case is repaired by the ``viewers`` level riding on every
+    :data:`MSG_PING` (see :func:`make_ping`). Revision 4.
+    """
+    return Message(type=MSG_VIEWERS, payload={"count": int(count)}, seq=seq)
 
 
 # -- history messages (protocol revision 2) -------------------------------
