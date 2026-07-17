@@ -59,6 +59,15 @@ LOG_FILENAME = "daemon.log"
 #: process is currently live — and across daemon restarts.
 PROJECT_ROOTS_FILENAME = "project_roots.json"
 
+#: Idle-gear cadence (seconds) for the aggregation poll loop, used when the
+#: outbound client's server (revision >= 4) reports zero browser viewers:
+#: nobody is watching, so the aggregator scan behind each tick buys nothing at
+#: 2 s. Kept fast enough (30 s) that the daemon still discovers CLI-started
+#: flows reasonably promptly even while idle-geared — the poll loop must never
+#: fully stop, or external ``se3 run`` processes would go unsupervised.
+#: Module-level (looked up at call time) so tests can shrink it.
+_IDLE_POLL_INTERVAL = 30.0
+
 #: Log format for the daemon process; the leading ``%(asctime)s`` is what makes
 #: every line in ``~/.se3/daemon.log`` (and the foreground terminal) attributable
 #: to a particular run.
@@ -656,8 +665,20 @@ class Daemon:
             logger.exception("Failed to resume paused flow %s", flow_id)
 
     async def _poll_loop(self) -> None:
-        """Aggregate local state on a fixed interval until the stop event fires."""
+        """Aggregate local state on a gear-aware interval until stop fires.
+
+        The wait between ticks re-reads the outbound client's viewer count
+        every iteration: with zero browser viewers (revision >= 4 server) the
+        loop drops to the ``_IDLE_POLL_INTERVAL`` low-power cadence, otherwise
+        it keeps ``config.poll_interval``. The gear is re-evaluated per tick —
+        never latched — so a 0→1 presence flip shortens only the *next* wait;
+        the client's own fast-push pipeline covers the immediate first-screen
+        refresh, and the stop event still interrupts an idle-gear wait at once.
+        The worktree-GC cadence is unaffected: ``_maybe_run_gc`` gates itself
+        on wall-clock ``gc_interval``, which every idle tick still satisfies.
+        """
         assert self._stop_event is not None
+        idle_gear = False
         while not self._stop_event.is_set():
             try:
                 await self._poll_once()
@@ -670,12 +691,42 @@ class Daemon:
                 await self._maybe_run_gc()
             except Exception:  # pragma: no cover - defensive
                 logger.exception("Daemon GC iteration failed")
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self.config.poll_interval
+            idle = self._presence_idle()
+            if idle != idle_gear:
+                # Operator-facing observability for the gear switch (log +
+                # status file); deliberately plain logging, not i18n.
+                logger.info(
+                    "Daemon poll gear -> %s (viewer_count=%s)",
+                    "idle" if idle else "full",
+                    self._client_viewer_count(),
                 )
+                idle_gear = idle
+            timeout = _IDLE_POLL_INTERVAL if idle else self.config.poll_interval
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 continue
+
+    def _client_viewer_count(self) -> Optional[int]:
+        """The outbound client's effective viewer count, or ``None`` (watched).
+
+        ``None`` — "assume someone is watching" — is returned for every
+        degraded shape: no client configured, client not currently connected
+        (its last-known count is stale the moment the link drops), an older
+        client object without the attribute, or a malformed value. Only a
+        well-formed count from a live connection may downshift the poll loop.
+        """
+        client = self._client
+        if client is None or not bool(getattr(client, "connected", False)):
+            return None
+        count = getattr(client, "viewer_count", None)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        return count
+
+    def _presence_idle(self) -> bool:
+        """Whether the poll loop may run in the idle gear (zero viewers)."""
+        return self._client_viewer_count() == 0
 
     async def _poll_once(self) -> None:
         """A single aggregation tick: discover flows, snapshot, persist status.
@@ -882,6 +933,12 @@ class Daemon:
             "server_configured": server_configured,
             "connected": connected,
             "last_error": last_error,
+            # Presence-gearing observability: the effective viewer count the
+            # poll loop keys its gear on (``null`` = unknown/assume watched)
+            # and the resulting gear, so an operator can tell a deliberately
+            # idle-geared daemon from a stuck one at a glance.
+            "viewer_count": self._client_viewer_count(),
+            "poll_gear": "idle" if self._presence_idle() else "full",
             "wire_metrics": wire_metrics,
             "tracked_flows": [
                 rec.to_dict() for rec in flows if hasattr(rec, "to_dict")
