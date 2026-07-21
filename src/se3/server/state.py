@@ -1897,6 +1897,17 @@ class ServerState:
           daemon → keep waiting) when it falls here, and *unfillable* (a proven
           hole → retire it) otherwise. Empty ``{}`` whenever the records cover the
           cursor — so an in-sync bundle names nothing pending.
+        * ``resync`` — ``True`` only when the client presented a signed cursor
+          (*after*) the server could not bind to the current bundle (expired /
+          tampered / a stale generation or machine from a daemon-reconnect bundle
+          rotation), so the delivery fell back to ``"full"``. It marks that reply
+          as a *recoverable resync*: the client MUST adopt this snapshot's
+          authoritative ``progress`` / ``signature`` / ``generation`` and stop
+          re-presenting the dead cursor. A stale cursor never reaches
+          ``require_owner`` (cookie-only, resolved first) so it can NEVER 401 —
+          this marker is how the poll degrades gracefully instead. ``False`` on a
+          first-load full (no *after*) and on every honoured delta / not_modified
+          / backfill.
 
         *missing* is ``{step_id: [ordinal, …]}`` — the records the client's own
         cursor self-check found it does NOT hold. WHY it exists at all: the
@@ -1953,6 +1964,25 @@ class ServerState:
                 and token["machine_id"] == bundle_machine
                 and 0 <= token["offset"] <= total
             )
+            # WHY: a signed cursor the client PRESENTED but the server could not
+            # bind to the current bundle — malformed / unsigned / tampered
+            # (``token is None``), or a stale generation / different machine /
+            # out-of-range offset from a daemon-reconnect bundle rotation — is a
+            # *recoverable* miss, not an auth failure. It never reaches
+            # ``require_owner`` (which is cookie-only and runs BEFORE this) so it
+            # can never 401; it simply falls through to the full fallback below.
+            # But a bare full is indistinguishable from a first-ever load, so a
+            # client cannot tell "your cursor was rejected, resync to the
+            # authoritative one" from a routine rebuild and may loop re-presenting
+            # the same dead cursor. ``resync`` names that case explicitly: it is
+            # set only when a non-empty ``after`` was offered yet did not validate
+            # as a delta base, so the client adopts this reply's authoritative
+            # ``progress``/``signature``/``generation`` and stops retrying the
+            # stale cursor. Captured here, BEFORE the ``missing``-needs-full
+            # demotion below, so a genuinely valid token demoted only because a
+            # backfill could not be answered from the index is NOT mislabelled a
+            # stale cursor.
+            resync = bool(after) and not is_delta
             signature = bundle_signature(generation, total, bundle_machine)
             # A backfill is served only ON TOP of a valid token (generation +
             # machine + in-range offset): the numbers the client is naming are
@@ -2071,6 +2101,14 @@ class ServerState:
                 # can distinguish "keep waiting" from "give up" for any cursor
                 # gap; empty ({}) whenever the bundle's records cover its cursor.
                 "pending": {k: list(v) for k, v in pending.items()},
+                # True when the client presented a signed cursor (``after``) the
+                # server could not bind to this bundle (see ``resync`` above) — a
+                # stale/expired/rotated cursor that fell back to full. The reply's
+                # ``progress``/``signature``/``generation`` are authoritative, so
+                # the client resynchronises to them instead of bare-retrying the
+                # dead cursor. False on a first-load full (no ``after``) and on
+                # every honoured delta / not_modified / backfill.
+                "resync": resync,
                 "updated_at": cached.get("updated_at"),
             }
 

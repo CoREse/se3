@@ -1966,6 +1966,17 @@ def create_app(
         # to "no missing list" — the client then falls back to a full rebuild,
         # which is correct, just less frugal (see ``parse_missing_param``).
         missing_map = parse_missing_param(missing)
+        # WHY the signed cursor (``after``/``sig``) plays NO part in authn/authz:
+        # ``require_owner`` resolves identity from the session cookie ALONE and
+        # runs BEFORE this body, so a stale / expired / rotated signed cursor can
+        # never produce a 401 — it is only decoded inside ``get_history_snapshot``
+        # (well after the owner gate) and fail-closes to a recoverable ``full``
+        # snapshot flagged ``resync`` so the client resynchronises its cursor
+        # rather than bare-retrying. This is the Defect-C finding: the field's
+        # intermittent 401s under a daemon-reconnect storm are genuine session
+        # failures (the daemon ``/ws`` key channel never touches the browser
+        # ``SessionStore``), and MUST stay fail-closed — cross-owner still reads
+        # 404 below, unauthenticated still 401s at ``require_owner``.
         # Ownership gate first: a flow whose owning machine belongs to another
         # owner (or is unknown) reads as absent — even if its records happen to
         # be cached server-side — so one owner can never pull another's history.
