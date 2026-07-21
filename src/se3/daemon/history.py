@@ -87,6 +87,30 @@ def _warn_once_unreadable(path: Path, kind: str) -> None:
 #: caller picks the rest up incrementally on its next request.
 MAX_RECORDS_PER_REPORT = 2000
 
+#: Hard cap on the *byte volume* of the records a single :func:`read_flow` call
+#: returns, applied in parallel with :data:`MAX_RECORDS_PER_REPORT` — whichever
+#: limit is reached first truncates the read at that record, and the returned
+#: cursor advances only to the truncation point (the two share the SAME
+#: ``_record_offset`` commit path, so the offset / consumed / full-prefix-hash
+#: state stays identical to a record-count truncation and the #209 / #287
+#: rewrite-detection invariants are preserved).
+#:
+#: WHY: the record-count cap alone cannot bound a frame's wire size because
+#: record sizes vary wildly (a single ``implement`` record can be ~10 KB while a
+#: status marker is a few dozen bytes), so a step well under 2000 records can
+#: still be multiple MB in one frame (the 8.4 MB / 815-line ``06_implement``
+#: that caused the delivery livelock). On the confirmed failure environment the
+#: daemon↔server link is force-recycled roughly every ~40 s; a multi-MB frame
+#: cannot finish transferring and being confirmed inside one such window, so the
+#: all-or-nothing frame is discarded every window and the cursor never advances
+#: (livelock). Capping by BYTES makes every frame a bounded chunk that a very
+#: poor link can transfer and confirm within a few seconds — so every connection
+#: window makes net forward progress and a large backlog is caught up
+#: monotonically across successive windows. The value is a few hundred KB: large
+#: enough that catch-up needs few round-trips, small enough that one chunk
+#: reliably completes inside a short-lived, proxy-throttled connection window.
+MAX_BYTES_PER_REPORT = 256 * 1024
+
 #: Rewrite detection must satisfy the hard correctness guarantee — catch ANY
 #: change to the already-consumed prefix no matter which part the rewrite
 #: preserved — while staying far cheaper than the whole-file
@@ -463,6 +487,12 @@ class FlowRead:
     records: List[Dict[str, Any]] = field(default_factory=list)
     cursor: Dict[str, int] = field(default_factory=dict)
     cursor_base: Dict[str, int] = field(default_factory=dict)
+    #: Whether this read stopped at a bounded-chunk limit (record-count OR byte
+    #: cap) with more backlog still on disk past ``cursor``. It signals the push
+    #: loop that the flow has NOT caught up, so it can re-arm fast-push and keep
+    #: draining the remaining chunks in the same connection window instead of
+    #: waiting out a possibly idle-geared tick (see ``_push_history``).
+    truncated: bool = False
 
 
 class DaemonHistoryReader:
@@ -1470,9 +1500,12 @@ class DaemonHistoryReader:
 
         Returns:
             A :class:`FlowRead`. Its ``mode`` is ``full`` when *cursor* was
-            empty, else ``append``. ``records`` is capped at
-            :data:`MAX_RECORDS_PER_REPORT`; when capped, ``cursor`` advances
-            only to the truncation point so the caller can continue.
+            empty, else ``append``. ``records`` is bounded by BOTH
+            :data:`MAX_RECORDS_PER_REPORT` and :data:`MAX_BYTES_PER_REPORT`
+            (whichever trips first); when either cap truncates the read,
+            ``cursor`` advances only to the truncation point, ``truncated`` is
+            set so the caller knows more backlog remains, and the caller
+            continues from that cursor on its next request.
         """
         cursor = dict(cursor) if cursor else {}
         mode = HISTORY_MODE_FULL if not cursor else HISTORY_MODE_APPEND
@@ -1549,6 +1582,12 @@ class DaemonHistoryReader:
         # to pass one off (see FlowRead.cursor_base).
         base_cursor: Dict[str, int] = {}
         records: List[Dict[str, Any]] = []
+        # Cumulative UTF-8 byte volume of the records emitted THIS read, summed
+        # across every step file the read touches (records accumulate across
+        # files, so the byte budget must too). Once it reaches
+        # MAX_BYTES_PER_REPORT the read truncates at that record — the byte twin
+        # of the MAX_RECORDS_PER_REPORT cap, whichever trips first.
+        byte_count = 0
         truncated = False
 
         for jsonl in self._merge_flow_jsonl(flow_dirs):
@@ -1767,7 +1806,16 @@ class DaemonHistoryReader:
                             "message": message,
                         }
                     )
-                    if len(records) >= MAX_RECORDS_PER_REPORT:
+                    # Count the raw jsonl line bytes (a faithful proxy for the
+                    # record's wire size) toward the byte budget. Both caps are
+                    # checked AFTER appending, so the record that crosses a limit
+                    # is still emitted — the returned frame may exceed the cap by
+                    # at most one record, which is the intended small overshoot.
+                    byte_count += len(line_text.encode("utf-8"))
+                    if (
+                        len(records) >= MAX_RECORDS_PER_REPORT
+                        or byte_count >= MAX_BYTES_PER_REPORT
+                    ):
                         truncated = True
                         # Only advance the offset table to the truncation
                         # point.  The caller's cursor will match consumed
@@ -1893,6 +1941,7 @@ class DaemonHistoryReader:
                     update in place by ``step_id#ordinal`` regardless of which
                     read path delivered the record.
                     """
+                    nonlocal byte_count
                     stripped = line_text.strip()
                     if not stripped:
                         return False
@@ -1910,7 +1959,14 @@ class DaemonHistoryReader:
                             "message": message,
                         }
                     )
-                    return len(records) >= MAX_RECORDS_PER_REPORT
+                    # Byte budget applied alongside the record-count cap (same
+                    # after-append semantics as the incremental path): the record
+                    # that crosses either limit is emitted, then the read stops.
+                    byte_count += len(line_text.encode("utf-8"))
+                    return (
+                        len(records) >= MAX_RECORDS_PER_REPORT
+                        or byte_count >= MAX_BYTES_PER_REPORT
+                    )
 
                 for idx, line_text in enumerate(complete_lines):
                     consumed = idx + 1
@@ -1991,6 +2047,7 @@ class DaemonHistoryReader:
             records=records,
             cursor=new_cursor,
             cursor_base=base_cursor,
+            truncated=truncated,
         )
 
     def read_active_flows(

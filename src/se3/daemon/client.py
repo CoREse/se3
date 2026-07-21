@@ -1860,6 +1860,25 @@ class DaemonClient:
                 return
             committed[read.flow_id] = read.cursor
         self._history_cursors = committed
+        # A bounded chunk was emitted for at least one flow that still has
+        # backlog on disk past its cursor (read.truncated). Re-arm fast-push so
+        # the next chunk goes out on the very next fast tick instead of waiting
+        # out a possibly idle-geared cadence.
+        #
+        # WHY: byte-bounded chunking (see MAX_BYTES_PER_REPORT) makes each frame
+        # small enough to clear a short-lived, proxy-throttled connection window,
+        # but a multi-MB backlog still needs many chunks. If the catch-up rate is
+        # throttled by the presence idle gear (viewers==0 slows the tick to tens
+        # of seconds), draining a large backlog would take an impractically long
+        # time. Re-arming fast-push on every truncated round keeps the drain rate
+        # bound to the link's usable bandwidth — each bounded chunk still leaves
+        # the socket independently, so a mid-drain disconnect only costs the
+        # in-flight chunk (its cursor was never committed) and the next window
+        # resumes from the last confirmed point. Reached only on the fully-sent
+        # path; the send-failure branch above returns early (socket is down, and
+        # a reconnect re-drives the push regardless).
+        if any(read.truncated for read in reads):
+            self._trigger_fast_push()
 
     async def _push_history_index(
         self,
