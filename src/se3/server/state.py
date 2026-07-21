@@ -1591,7 +1591,7 @@ class ServerState:
         self, flow_id: str
     ) -> Optional[Dict[str, Any]]:
         """Return the bundle's authoritative ``{cursor, signature, generation,
-        total, machine_id}`` for *flow_id*, or ``None`` on a cache miss.
+        total, machine_id, pending}`` for *flow_id*, or ``None`` on a cache miss.
 
         WHY: a WS ``history_data`` frame historically carried only its records,
         so a client that received a partial stream (an append it joined
@@ -1616,12 +1616,20 @@ class ServerState:
             generation = self._ensure_generation(cached)
             total = len(cached["records"])
             machine = str(cached.get("machine_id") or "")
+            pending = self._bundle_pending_positions(
+                cached["records"], cached.get("cursor") or {}
+            )
             return {
                 "cursor": dict(cached.get("cursor") or {}),
                 "signature": bundle_signature(generation, total, machine),
                 "generation": generation,
                 "total": total,
                 "machine_id": machine,
+                # WHY on the push meta too: the WS frame carries the same cursor
+                # the REST snapshot does, so it must carry the SAME pending window
+                # — otherwise a client self-checking off a pushed frame would draw
+                # the pending/unfillable line differently from one that polled.
+                "pending": {k: list(v) for k, v in pending.items()},
             }
 
     @staticmethod
@@ -1689,8 +1697,78 @@ class ServerState:
         return steps
 
     @classmethod
+    def _bundle_pending_positions(
+        cls, records: List[Any], cursor: Dict[str, Any]
+    ) -> Dict[str, List[int]]:
+        """Numbers the bundle's ``cursor`` DECLARES exist but has not received yet.
+
+        Returns ``{step_id: [ordinal, …]}`` for the ordinals in ``0..cursor-1``
+        that lie ABOVE every record the bundle currently holds for that step —
+        the daemon has advanced the file's physical-line count but its records
+        have not caught up to it, so those numbers are *waiting for the daemon*
+        rather than provably absent.
+
+        WHY this is a distinct verdict from ``unfillable`` (see
+        :meth:`_locate_missing_positions`): both describe a number the bundle
+        holds no record for, but their causes are opposite and the client must
+        act on them oppositely. An ``unfillable`` number is one the bundle can
+        PROVE it will never hold — a blank / unparseable physical line the daemon
+        stepped over, which shows up as a hole BELOW a later record it did
+        deliver (both neighbours are present, so the gap between them is
+        permanent). A ``pending`` number is one the bundle has simply not been
+        SENT — it lies past the highest ordinal delivered for the step, in the
+        trailing window the daemon is still streaming (the livelock shape: the
+        cursor says 815 lines, only the first tens of records have crossed a
+        short-lived connection). Declaring a pending number unfillable would have
+        the client retire a record that is genuinely on its way; leaving a
+        permanent blank named pending would have it wait forever. So the split
+        is drawn at the highest ordinal held: interior holes are unfillable,
+        the trailing declared-but-undelivered window is pending.
+
+        A step that carries ANY un-numbered record is skipped: its ordinals are
+        not a sound completeness signal, and such a request already escalates to
+        ``needs_full`` in :meth:`_locate_missing_positions` — so a numbered
+        pending claim there could name a record the bundle holds un-numbered.
+
+        A ``full`` bundle carries no cursor (the daemon reports line counts only
+        on incremental reads), so ``cursor`` is empty and pending is ``{}`` —
+        the pre-existing behaviour where such a bundle names nothing pending.
+        Cursor keys are physical filenames folded through :func:`_display_step_id`.
+        """
+        if not cursor:
+            return {}
+        highest: Dict[str, int] = {}
+        unnumbered: Set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            step_id = record.get("step_id")
+            if not step_id:
+                continue
+            step_id = str(step_id)
+            ordinal = cls._record_ordinal(record)
+            if ordinal is None:
+                unnumbered.add(step_id)
+            elif ordinal > highest.get(step_id, -1):
+                highest[step_id] = ordinal
+        pending: Dict[str, List[int]] = {}
+        for key, total in cursor.items():
+            if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                continue
+            step_id = _display_step_id(str(key))
+            if step_id in unnumbered:
+                continue
+            start = highest.get(step_id, -1) + 1
+            if start < total:
+                pending[step_id] = list(range(start, total))
+        return pending
+
+    @classmethod
     def _locate_missing_positions(
-        cls, records: List[Any], missing: Dict[str, List[int]]
+        cls,
+        records: List[Any],
+        missing: Dict[str, List[int]],
+        pending: Optional[Dict[str, List[int]]] = None,
     ) -> Tuple[List[int], Dict[str, List[int]], bool]:
         """Resolve a client's missing ``(step_id, ordinal)`` list against the bundle.
 
@@ -1721,12 +1799,24 @@ class ServerState:
         ``needs_full`` — one whole-bundle delivery, which renders every record
         including the un-numbered ones — instead of a slice that silently omits it.
 
+        WHY *pending* is subtracted from unfillable: a number the bundle has not
+        yet been SENT (past the highest ordinal delivered for its step — see
+        :meth:`_bundle_pending_positions`) is not a number the bundle can prove
+        it will never hold. Declaring it unfillable would have the client retire a
+        record still in flight from the daemon, so a pending number is left OUT of
+        unfillable — the caller reports it under ``pending`` instead, where the
+        client keeps waiting for the increment rather than giving up.
+
         Cursor keys are physical ``*.jsonl`` filenames while records are keyed by
         display step id, so a key arriving in either form is folded through
         :func:`_display_step_id` (a no-op on a bare step id).
         """
         index = cls._index_records_by_ordinal(records)
         unnumbered = cls._unnumbered_steps(records)
+        pending_sets: Dict[str, Set[int]] = {
+            step_id: set(ordinals)
+            for step_id, ordinals in (pending or {}).items()
+        }
         positions: List[int] = []
         unfillable: Dict[str, List[int]] = {}
         needs_full = False
@@ -1738,6 +1828,11 @@ class ServerState:
                     positions.append(position)
                 elif step_id in unnumbered:
                     needs_full = True
+                elif ordinal in pending_sets.get(step_id, ()):
+                    # Not yet delivered by the daemon (a trailing declared-but-
+                    # unsent number), so it is NOT unfillable — it travels back
+                    # under ``pending`` and the client keeps waiting for it.
+                    continue
                 else:
                     unfillable.setdefault(step_id, []).append(ordinal)
         return positions, unfillable, needs_full
@@ -1795,6 +1890,13 @@ class ServerState:
         * ``signature`` — the bundle's short content-version signature (see
           :func:`bundle_signature`), for the client to echo back as
           *known_signature* so the server can answer ``not_modified`` cheaply.
+        * ``pending`` — ``{step_id: [ordinal, …]}`` the bundle's cursor DECLARES
+          but has not yet received (see :meth:`_bundle_pending_positions`),
+          present on EVERY delivery. It is the counterpart of ``unfillable``: a
+          cursor gap the client finds is *pending* (still streaming from the
+          daemon → keep waiting) when it falls here, and *unfillable* (a proven
+          hole → retire it) otherwise. Empty ``{}`` whenever the records cover the
+          cursor — so an in-sync bundle names nothing pending.
 
         *missing* is ``{step_id: [ordinal, …]}`` — the records the client's own
         cursor self-check found it does NOT hold. WHY it exists at all: the
@@ -1857,6 +1959,14 @@ class ServerState:
             # only meaningful within the bundle its cursor came from, so a token
             # that no longer binds this bundle invalidates the numbering too and
             # must rebuild rather than pick records out by index.
+            # The bundle's own pending window — ordinals its cursor declares but
+            # its records have not caught up to (see _bundle_pending_positions).
+            # Computed on EVERY delivery (empty for a full bundle, whose cursor is
+            # itself empty) so a client that finds a cursor gap can tell a number
+            # still streaming from the daemon apart from a permanent hole WITHOUT
+            # a second round trip, and so this poll and the WS push (which reads
+            # the same bundle via get_history_bundle_meta) can never disagree.
+            pending = self._bundle_pending_positions(records, cached.get("cursor") or {})
             backfill_positions: List[int] = []
             unfillable: Dict[str, List[int]] = {}
             served_backfill = False
@@ -1865,7 +1975,7 @@ class ServerState:
                     backfill_positions,
                     unfillable,
                     needs_full,
-                ) = self._locate_missing_positions(records, missing)
+                ) = self._locate_missing_positions(records, missing, pending)
                 if needs_full:
                     # A requested number landed in a step that also holds
                     # un-numbered records, so its absence from the index is not
@@ -1955,6 +2065,12 @@ class ServerState:
                 # The numbers of *missing* this bundle holds no record for. Empty
                 # on every other delivery, so the reply's key set is uniform.
                 "unfillable": {k: list(v) for k, v in unfillable.items()},
+                # The numbers the bundle's cursor DECLARES but has not yet been
+                # sent (see _bundle_pending_positions) — waiting on the daemon,
+                # not permanently absent. Present on every delivery so the client
+                # can distinguish "keep waiting" from "give up" for any cursor
+                # gap; empty ({}) whenever the bundle's records cover its cursor.
+                "pending": {k: list(v) for k, v in pending.items()},
                 "updated_at": cached.get("updated_at"),
             }
 

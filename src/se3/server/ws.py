@@ -1034,6 +1034,12 @@ async def _push_history_data(
         # can scope its repair budget and its retired-unfillable numbers to that
         # bundle and drop both the moment it is replaced.
         frame["generation"] = meta["generation"]
+        # The pending window (cursor declares it, records have not caught up) is
+        # carried alongside the cursor so a client self-checking off this pushed
+        # frame reaches the SAME pending/unfillable verdict a REST poll would —
+        # the two faces read one bundle via one source. An older frontend ignores
+        # the extra key.
+        frame["pending"] = meta["pending"]
     await hub.broadcast_owned(frame, owner)
 
 
@@ -1069,6 +1075,10 @@ async def _push_history_cursor(
             "cursor": meta["cursor"],
             "signature": meta["signature"],
             "generation": meta["generation"],
+            # Same pending window as the REST snapshot and the history_data frame,
+            # so an advisory-triggered self-check draws the pending/unfillable line
+            # identically (see get_history_bundle_meta).
+            "pending": meta["pending"],
         },
         owner,
     )
