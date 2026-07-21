@@ -4090,6 +4090,23 @@ const cursorBackfillMod = await import("./history_cursor_backfill.test.mjs");
 await cursorBackfillMod.registerHistoryCursorBackfillTests({ app, check, checkAsync, findOne, findAll });
 
 // ---------------------------------------------------------------------------
+// Pending-gap self-check must not wedge; stale signed cursor resyncs (G5)
+// ---------------------------------------------------------------------------
+//
+// The delivery-livelock defect (flow 20260720-163316_2df2d504): the daemon→
+// server push was all-or-nothing, so a multi-MB backlog never fit one ~40s
+// reconnect window and the server cursor DECLARED records it never received.
+// The frozen frontend, finding that cursor gap, drained its backfill+full budget
+// and printed "gap persists … giving up" while the frame carried unfillable={}.
+// The server now names that trailing declared-but-undelivered window `pending`
+// (still coming, not a hole); the frontend must keep rendering, stop the futile
+// backfill, stay armed, and heal on the daemon's later delivery — and a stale/
+// rotated signed cursor must adopt the authoritative token once rather than
+// bare-retry (it can never 401 — require_owner is cookie-only, the G4 finding).
+const pendingGapMod = await import("./pending_gap_no_wedge.test.mjs");
+await pendingGapMod.registerPendingGapNoWedgeTests({ app, check, checkAsync, findOne, findAll });
+
+// ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
 //

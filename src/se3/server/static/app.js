@@ -2616,6 +2616,14 @@ async function loadFlowConversation(flowId, opts) {
         state.flowConversationSignature = result.signature;
       }
     }
+    if (result.resync) {
+      // The signed cursor we echoed no longer bound the server's bundle (stale /
+      // rotated after a daemon reconnect); the reply is a recoverable full whose
+      // authoritative token we just adopted. Shed the repair state keyed to the
+      // dead generation — see resetRepairStateForResync. Bounded: the next poll
+      // echoes the fresh cursor and resyncs no more.
+      resetRepairStateForResync("flow", flowId);
+    }
     if (result.render === "noop") {
       // Nothing to REPAINT: a `not_modified` reply (the server has nothing more
       // to send) or an incremental delivery that, after dedup, added nothing new
@@ -2623,7 +2631,7 @@ async function loadFlowConversation(flowId, opts) {
       // the view is complete — the token only records what the server sent — so
       // the cursor self-check still runs; on the healthy path it is one set
       // comparison and no request.
-      await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation);
+      await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation, result.pending);
       return;
     }
     // Reconcile after the merge: if the response already holds the daemon's
@@ -2642,7 +2650,7 @@ async function loadFlowConversation(flowId, opts) {
     // still holds the pre-merge array. Only the silent path opts in — a first-open
     // / reconnect must always render its authoritative result.
     if (silent && sameRenderedConversation(reconciled, state.flowConversationRecords)) {
-      await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation);
+      await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation, result.pending);
       return;
     }
     state.flowConversationRecords = reconciled;
@@ -2678,7 +2686,7 @@ async function loadFlowConversation(flowId, opts) {
     // arrive with the head still absent (the server only ever sends what its
     // receipt says is outstanding), so the cursor check runs on every delivery,
     // not just the no-op ones.
-    await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation);
+    await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation, result.pending);
   } catch (_) {
     if (
       state.selectedFlowId !== flowId ||
@@ -5352,11 +5360,17 @@ async function openHistorySession(flowId, opts) {
         state.historySignature = result.signature;
       }
     }
+    if (result.resync) {
+      // Symmetric with loadFlowConversation: a stale/rotated signed cursor drew
+      // a recoverable full; adopt its authoritative token (above) and void the
+      // dead generation's repair state (see resetRepairStateForResync).
+      resetRepairStateForResync("history", flowId);
+    }
     if (result.render === "noop") {
       // A `not_modified` reply, or a delta that added nothing new after dedup —
       // nothing to repaint. As in loadFlowConversation this is not evidence of
       // completeness, so the cursor self-check still runs.
-      await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation);
+      await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation, result.pending);
       return;
     }
     state.historyRecords = result.records;
@@ -5365,7 +5379,7 @@ async function openHistorySession(flowId, opts) {
     refreshHistoryStickyHeader();
     updateHistoryUsageBadge(state.historyRecords);
     if (stick) scrollHistoryToBottom();
-    await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation);
+    await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation, result.pending);
   } catch (_) {
     if (
       state.selectedHistoryId !== flowId ||
@@ -7270,10 +7284,24 @@ function stepIdFromCursorKey(filename) {
 // all. Re-asking for one on every signal — and re-pulling the whole bundle when
 // the ask fails — is exactly the request storm the numbering was meant to avoid.
 //
-// Returns `{ missing, surplus, unkeyable }`:
+// `pending` (optional) is `{ stepId: [ordinal…] }` — numbers the SERVER's cursor
+// DECLARES but has not yet received from the daemon (still streaming; the live
+// backlog crossing many short-lived daemon↔server windows). They are excluded
+// from `missing` for the OPPOSITE reason to `unfillable`: not because the bundle
+// will never hold them (permanent), but because it does not hold them YET
+// (transient). Asking for a pending number yields nothing — it is not in the
+// bundle to slice — and re-asking every signal is the same request storm, so a
+// pending gap must neither drive a backfill nor tip the self-check into its
+// giving-up terminal state. It is reported via `pendingGap` so the caller can
+// tell "waiting on the daemon → keep the panel rendering, stay armed" apart from
+// "fully in sync". When the daemon delivers the pending window the cursor
+// advances and the next self-check settles, with no user intervention.
+//
+// Returns `{ missing, surplus, unkeyable, pendingGap }`:
 //   * `missing`   — `{ stepId: [ordinal…] }`, the numbers in 0..n-1 the client
-//                   does not hold and the server has not declared unfillable (a
-//                   step file it holds NOTHING of yields the whole 0..n-1 range).
+//                   does not hold and the server has declared neither unfillable
+//                   NOR pending (a step file it holds NOTHING of yields the whole
+//                   0..n-1 range, minus any pending/unfillable numbers).
 //   * `surplus`   — the client holds MORE records for a step than the cursor
 //                   claims exist (or one numbered at/after n). The numbering no
 //                   longer describes the same bundle, so a numbered backfill
@@ -7286,16 +7314,22 @@ function stepIdFromCursorKey(filename) {
 //                   full re-pull: the condition holds for every frame the flow
 //                   ever pushes, which would trade one cheap delta poll for one
 //                   whole-bundle download per streamed record.
+//   * `pendingGap`— at least one cursor gap fell in the server-declared `pending`
+//                   window (still streaming from the daemon). Excluded from
+//                   `missing`, so a pending-only gap yields an empty `missing`;
+//                   the caller uses this flag to keep rendering + stay armed
+//                   rather than treat the empty `missing` as "fully complete".
 // Pure / DOM-free. Optimistic local echoes are excluded from the held set (they
 // belong to no server bundle, carry no ordinal, and would otherwise read as
 // either surplus or un-numbered records), as are records whose step is absent
 // from the cursor.
-function findMissingOrdinals(records, cursor, unfillable) {
+function findMissingOrdinals(records, cursor, unfillable, pending) {
   const missing = {};
   let surplus = false;
   let unkeyable = false;
+  let pendingGap = false;
   if (!cursor || typeof cursor !== "object") {
-    return { missing, surplus, unkeyable };
+    return { missing, surplus, unkeyable, pendingGap };
   }
   const held = new Map();     // stepId -> { ords: Set, count, legacy: bool }
   for (const rec of (Array.isArray(records) ? records : [])) {
@@ -7314,6 +7348,7 @@ function findMissingOrdinals(records, cursor, unfillable) {
     else entry.ords.add(ord);
   }
   const known = (unfillable && typeof unfillable === "object") ? unfillable : {};
+  const waiting = (pending && typeof pending === "object") ? pending : {};
   for (const key of Object.keys(cursor)) {
     const total = cursor[key];
     if (typeof total !== "number" || !Number.isInteger(total) || total < 0) continue;
@@ -7322,17 +7357,23 @@ function findMissingOrdinals(records, cursor, unfillable) {
     const entry = held.get(stepId) || { ords: new Set(), count: 0, legacy: false };
     if (entry.legacy) unkeyable = true;
     const retired = new Set(Array.isArray(known[stepId]) ? known[stepId] : []);
+    // Numbers the server says are still in flight from the daemon: excluded
+    // from `missing` (asking for them serves nothing) but flagged so the caller
+    // keeps the panel live and the self-check armed instead of giving up.
+    const declaredPending = new Set(Array.isArray(waiting[stepId]) ? waiting[stepId] : []);
     if (entry.count > total) surplus = true;
     const gaps = [];
     for (let i = 0; i < total; i++) {
-      if (!entry.ords.has(i) && !retired.has(i)) gaps.push(i);
+      if (entry.ords.has(i) || retired.has(i)) continue;
+      if (declaredPending.has(i)) { pendingGap = true; continue; }
+      gaps.push(i);
     }
     for (const ord of entry.ords) {
       if (ord >= total) surplus = true;
     }
     if (gaps.length) missing[stepId] = gaps;
   }
-  return { missing, surplus, unkeyable };
+  return { missing, surplus, unkeyable, pendingGap };
 }
 
 // Encode a `{ stepId: [ordinal…] }` map into the `missing=` wire form the
@@ -7494,6 +7535,21 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
   // either — there is nothing to key against.
   merged.generation = (merged.cursor && response
     && Number.isInteger(response.generation)) ? response.generation : null;
+  // The bundle's server-declared pending window (cursor DECLARES these ordinals
+  // but its records have not caught up — still streaming from the daemon). Rides
+  // on EVERY delivery so the caller's completeness self-check can tell a cursor
+  // gap that is "still coming" apart from a real hole; null when the response
+  // carried none (a legacy server / a rejected frame). Kept even on `noop`, for
+  // the same reason `cursor` is — the self-check runs against it there too.
+  merged.pending = (response && response.pending && typeof response.pending === "object")
+    ? response.pending : null;
+  // The server could not bind the signed cursor we presented to the current
+  // bundle (expired / rotated after a daemon reconnect) and fell back to a
+  // recoverable full; its progress/signature/generation are authoritative. A
+  // frame the merge REJECTED wholesale (#287 empty-full) is exempt — its
+  // tokens are null and must not be adopted, so a resync off it would strand the
+  // held cursor at null and force a needless full next poll.
+  merged.resync = !!(response && response.resync) && !merged.preserveTokens;
   return merged;
 }
 
@@ -7815,15 +7871,53 @@ function retireUnfillableOrdinals(key, generation, unfillable) {
   return retired;
 }
 
-async function reconcileCursorCompleteness(view, flowId, cursor, generation) {
+// Adopt a server `resync` reply's authoritative cursor state and shed the repair
+// bookkeeping bound to the bundle it just superseded.
+//
+// WHY this path exists at all: a signed progress cursor the client echoes can
+// stop binding the server's bundle when the daemon reconnects and its bundle
+// rotates (a new generation / machine), or when the cursor simply expires. The
+// server CANNOT answer that with a 401 — `require_owner` is cookie-only and
+// resolves BEFORE the cursor is ever decoded, so an owner polling its own flow
+// is authenticated no matter how stale the cursor is (this was the forensic
+// finding behind the field's spurious 401↔reconnect correlation). Instead it
+// falls back to a recoverable `delivery:"full"` tagged `resync:true`, whose
+// progress/signature/generation describe the CURRENT bundle. The caller adopts
+// that token (the normal full-delivery token swap already did so above); this
+// helper additionally voids the repair budget and retired-unfillable set keyed
+// to the now-dead generation, so the fresh bundle's self-check starts clean
+// rather than inheriting verdicts about a bundle that no longer exists.
+//
+// Bounded by construction — no bare-retry loop, no resync storm: the adopted
+// token binds the current generation, so the very next poll echoes a cursor the
+// server CAN bind and gets an ordinary in-sync delta (`resync:false`). The
+// in-flight guard (`backfillInFlight`) is deliberately left alone: a repair
+// already awaiting the server read some prior generation and will settle or
+// no-op itself; clearing it here could let a duplicate request fire.
+function resetRepairStateForResync(view, flowId) {
+  const flightKey = `${view}|${flowId}`;
+  delete state.backfillAttempts[flightKey];
+  delete state.backfillUnfillable[flightKey];
+  // eslint-disable-next-line no-console
+  console.debug(
+    "history cursor resync: stale signed cursor rejected, adopted authoritative bundle for flow=%s (view=%s)",
+    flowId, view);
+}
+
+async function reconcileCursorCompleteness(view, flowId, cursor, generation, pending) {
   if (!flowId || !cursor || typeof cursor !== "object") return;
   if (!viewIsCurrent(view, flowId)) return;
   const flightKey = `${view}|${flowId}`;
   if (state.backfillInFlight[flightKey]) return;
 
   const held = heldHistoryRecords(view);
+  // `pending` (the server-declared still-streaming window, carried by every REST
+  // reply and WS frame) is subtracted from the gap set alongside the retired
+  // numbers: a pending gap is a record the daemon has not yet pushed (the
+  // delivery-livelock backlog crossing many short connection windows), not a
+  // hole, so it must not provoke a backfill nor a giving-up.
   const probe = findMissingOrdinals(
-    held, cursor, retiredOrdinals(flightKey, generation));
+    held, cursor, retiredOrdinals(flightKey, generation), pending);
   const spent = repairBudget(flightKey, generation);
   const progress = view === "flow"
     ? state.flowConversationProgress : state.historyProgress;
@@ -7858,10 +7952,20 @@ async function reconcileCursorCompleteness(view, flowId, cursor, generation) {
   const encoded = probe.surplus ? null : encodeMissingParam(probe.missing);
 
   if (!probe.surplus && !Object.keys(probe.missing).length) {
-    // Healthy: the held set covers every number the bundle declares (bar the
-    // ones the server declared unfillable). Zero extra requests, zero renders —
-    // the idle poll stays as cheap as it was — and the repair budget is released
-    // so a LATER hole in this flow is still repairable.
+    // No REAL hole to repair. Either the held set covers every number the bundle
+    // declares (bar the ones the server declared unfillable), OR the only gaps
+    // left are `pending` — numbers the server says are still streaming from the
+    // daemon (the delivery-livelock backlog crossing many short-lived connection
+    // windows). Both are handled the SAME way here, and deliberately so: no
+    // backfill (a pending number is not in the bundle to slice, and asking every
+    // poll is the request storm the numbering avoids), no giving-up terminal
+    // state, no wedge — the already-rendered records stand. The self-check stays
+    // armed: when the daemon delivers the pending window the cursor advances,
+    // this runs again on the next signal, and any residual real hole is repaired
+    // then, with zero user intervention. The repair budget is released either
+    // way so a LATER hole in this flow is still repairable. (`pendingGap` is not
+    // branched on — a pending-only gap must behave exactly like being in sync,
+    // which is the point of not wedging.)
     delete state.backfillAttempts[flightKey];
     return;
   }
@@ -7872,11 +7976,16 @@ async function reconcileCursorCompleteness(view, flowId, cursor, generation) {
   // repair is a full re-pull.
   const canBackfill = !!(encoded && progress && spent.backfills < MAX_BACKFILL_ATTEMPTS);
   if (!canBackfill && spent.full >= 1) {
-    // The budget is spent and the hole is still open. Stop: repeating the
-    // request every poll would turn a server-side gap into a client-driven
-    // request storm. The budget is handed back by a clean self-check (the flow
-    // actually recovered) or by a new bundle generation, never by a mere new
-    // record arriving.
+    // The budget is spent and a REAL hole is still open — reaching here means
+    // `probe.missing` is non-empty (or surplus), and `missing` already EXCLUDES
+    // every server-declared `pending` number, so this only ever fires for a
+    // genuine void (or a numbering that no longer describes the bundle), never
+    // for records still streaming from the daemon. A pending-only gap took the
+    // healthy branch above and can NEVER reach this giving-up log. Stop:
+    // repeating the request every poll would turn a server-side gap into a
+    // client-driven request storm. The budget is handed back by a clean
+    // self-check (the flow actually recovered) or by a new bundle generation,
+    // never by a mere new record arriving.
     // eslint-disable-next-line no-console
     console.debug(
       "history cursor self-check: gap persists after backfill+full for flow=%s (view=%s) — giving up",
@@ -7923,15 +8032,18 @@ async function reconcileCursorCompleteness(view, flowId, cursor, generation) {
 // `history_data` (records + post-frame cursor) and the records-less
 // `history_cursor` advisory (the frame that REPAIRS a bundle the cache refused to
 // relay) land here, so the push path is self-checkable exactly like the poll.
+// The frame carries the same `pending` window the REST snapshot would (see
+// get_history_bundle_meta), so a push-driven self-check draws the pending line
+// identically to a poll-driven one.
 function applyHistoryCursor(msg) {
   if (!msg || !msg.flow_id || !msg.cursor) return;
   if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
     void reconcileCursorCompleteness(
-      "history", msg.flow_id, msg.cursor, msg.generation);
+      "history", msg.flow_id, msg.cursor, msg.generation, msg.pending);
   }
   if (state.selectedFlowId === msg.flow_id) {
     void reconcileCursorCompleteness(
-      "flow", msg.flow_id, msg.cursor, msg.generation);
+      "flow", msg.flow_id, msg.cursor, msg.generation, msg.pending);
   }
 }
 
