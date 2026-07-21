@@ -118,6 +118,53 @@ def _format_exc(exc: BaseException) -> str:
     return f"{name}: {text}" if text else name
 
 
+def _close_code_name(code: int) -> str:
+    """Return the symbolic name for a WebSocket close *code* (or "").
+
+    ``1000 NORMAL_CLOSURE`` / ``1008 POLICY_VIOLATION`` (a server-initiated
+    close) reads very differently from ``1006 ABNORMAL_CLOSURE`` (a transport
+    drop with no close frame — the proxy/timeout class of failure this project's
+    livelock lived behind). Surfacing the symbolic name is what lets a human tell
+    the two apart in ``daemon.log`` at a glance. Resolved via the websockets
+    ``CloseCode`` enum, imported lazily because websockets is an optional dep.
+    """
+    try:
+        from websockets.frames import CloseCode  # type: ignore
+
+        return CloseCode(code).name
+    except Exception:  # pragma: no cover - unknown/custom code or missing dep
+        return ""
+
+
+def _format_close_reason(ws: Any, exc: Optional[BaseException] = None) -> str:
+    """Return a non-empty, credential-safe description of why a session ended.
+
+    The daemon used to unwind a dropped session silently — the only trace was
+    the *next* ``Dialing`` line, so a server-initiated close was indistinguishable
+    from a proxy idle-timeout. This formats the close the peer/transport reported:
+
+    - When a close code is known (``ws.close_code``), the code, its symbolic name
+      and any UTF-8 close reason are rendered — a server close carries a real
+      code/reason; a transport drop with no close frame surfaces as
+      ``1006 ABNORMAL_CLOSURE``, itself a distinguishable network-class signal.
+    - When no close code is available, the raised exception (if any) is formatted
+      via :func:`_format_exc` so the reason is still non-empty and diagnosable.
+
+    Neither the close frame nor any exception raised on this path carries the
+    daemon key (the credential only ever travels on the HELLO wire), so the
+    formatted reason is safe to log and to record in ``last_error``.
+    """
+    code = getattr(ws, "close_code", None)
+    reason = (getattr(ws, "close_reason", None) or "").strip()
+    if code is None:
+        if exc is not None:
+            return _format_exc(exc)
+        return "connection closed without a close frame"
+    label = _close_code_name(code)
+    detail = f"{code} {label}" if label else str(code)
+    return f"close {detail}: {reason}" if reason else f"close {detail}"
+
+
 def _normalize_ws_url(server_url: str) -> str:
     """Return a ``ws(s)://host:port/ws`` URL from a user-supplied server URL.
 
@@ -535,11 +582,28 @@ class DaemonClient:
             )
             for task in pending:
                 task.cancel()
+            # Capture the first real (non-cancellation) exception a raced task
+            # raised — a ConnectionClosedError from the receive/push loop carries
+            # the close code/reason — so the disconnect can be reported instead of
+            # unwinding silently. Cancellation of the pending tasks is expected.
+            task_exc: Optional[BaseException] = None
             for task in (*done, *pending):
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):  # pragma: no cover
+                except asyncio.CancelledError:  # pragma: no cover - shutdown
                     pass
+                except Exception as exc:  # pragma: no cover - exercised via stub
+                    if task_exc is None:
+                        task_exc = exc
+            # A session that ends while neither shutting down nor auth-rejected
+            # means the socket closed on us (server close or transport drop). Log
+            # the close code/reason so a network-class drop and a server-initiated
+            # close are distinguishable in daemon.log — the auth-rejected path is
+            # reported by ``run`` and a clean shutdown needs no disconnect notice.
+            if not stop_event.is_set() and not self._auth_rejected:
+                reason = _format_close_reason(ws, task_exc)
+                self._last_error = reason
+                logger.warning("Central server connection closed: %s", reason)
 
     async def _receive_loop(self, ws: Any, stop_event: asyncio.Event) -> None:
         """Read and dispatch inbound server messages until the socket closes."""

@@ -43,7 +43,10 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
+from se3.daemon.client import (
+    DaemonClient,
+    _format_close_reason,
+)
 from se3.daemon.history import (
     DaemonHistoryReader,
     MAX_BYTES_PER_REPORT,
@@ -345,3 +348,186 @@ def test_truncated_round_rearms_fast_push(tmp_path):
         assert len(ws.history_frames(flow_id)) == rounds
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# G2 — disconnect observability: close code / reason logging
+# --------------------------------------------------------------------------
+#
+# The livelock lived behind a socket recycled ~every 40 s, but the daemon
+# unwound each dropped session *silently* — the only trace in daemon.log was the
+# *next* ``Dialing`` line, so a server-initiated close was indistinguishable from
+# a proxy idle-timeout. These tests pin the fix: every session that ends without
+# a clean shutdown or an auth rejection now logs a close code / reason (and
+# records it in ``last_error``), and that reason never leaks the daemon key.
+
+
+class _ClosingWS:
+    """A socket stub that (optionally) yields a frame, then reports itself closed.
+
+    The receive loop's ``async for`` ends the moment ``__anext__`` raises: a
+    :class:`StopAsyncIteration` models a clean 1000/1001 iteration end while a
+    supplied exception models a non-1000 close. Either way ``close_code`` /
+    ``close_reason`` are already populated as the transport would leave them, and
+    :func:`_format_close_reason` reads them off the socket regardless of which
+    task raised.
+    """
+
+    def __init__(
+        self,
+        *,
+        close_code=None,
+        close_reason: str = "",
+        raise_exc: Optional[BaseException] = None,
+        preframes: Optional[List[str]] = None,
+    ) -> None:
+        self.close_code = close_code
+        self.close_reason = close_reason
+        self._raise_exc = raise_exc
+        self._preframes = list(preframes or [])
+        self.sent: List[str] = []
+
+    def __aiter__(self) -> "_ClosingWS":
+        return self
+
+    async def __anext__(self) -> str:
+        if self._preframes:
+            return self._preframes.pop(0)
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        raise StopAsyncIteration
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+
+
+class _FakeConnect:
+    """The async context manager ``websockets.connect(...)`` returns."""
+
+    def __init__(self, ws: _ClosingWS) -> None:
+        self._ws = ws
+
+    async def __aenter__(self) -> _ClosingWS:
+        return self._ws
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _FakeWebsockets:
+    """A stand-in for the ``websockets`` module passed into ``_session``."""
+
+    def __init__(self, ws: _ClosingWS) -> None:
+        self._ws = ws
+
+    def connect(self, *args: Any, **kwargs: Any) -> _FakeConnect:
+        return _FakeConnect(self._ws)
+
+
+def _session_client(*, daemon_key: str = "") -> DaemonClient:
+    """A client with no providers — ``_session`` runs HELLO + primer then races."""
+    return DaemonClient(
+        "ws://test.invalid",
+        machine_id="m1",
+        hostname="testhost",
+        se3_version="0.0.0",
+        snapshot_provider=lambda: {"machine_id": "m1", "flows": []},
+        daemon_key=daemon_key,
+        # Fast cadences so the (immediately-cancelled) push loop never stalls the
+        # session teardown behind a default-length idle tick.
+        status_interval=0.05,
+        history_poll_interval=0.02,
+    )
+
+
+def _run_session(client: DaemonClient, ws: _ClosingWS) -> None:
+    """Drive one full ``_session`` against *ws* to its (non-shutdown) unwind."""
+
+    async def scenario():
+        await asyncio.wait_for(
+            client._session(asyncio.Event(), _FakeWebsockets(ws)), timeout=5.0
+        )
+
+    asyncio.run(scenario())
+
+
+def test_format_close_reason_variants():
+    """The formatter renders each close class into a non-empty, readable reason."""
+    # A server-initiated close carries a real code + reason.
+    ws = _ClosingWS(close_code=1008, close_reason="policy violation")
+    text = _format_close_reason(ws)
+    assert "1008" in text and "POLICY_VIOLATION" in text and "policy violation" in text
+
+    # A transport drop leaves ABNORMAL_CLOSURE (1006) with no reason — still a
+    # distinguishable, non-empty network-class signal.
+    text = _format_close_reason(_ClosingWS(close_code=1006, close_reason=""))
+    assert "1006" in text and "ABNORMAL_CLOSURE" in text
+
+    # No close frame *and* no code: fall back to the raised exception so the
+    # reason is never empty.
+    text = _format_close_reason(
+        _ClosingWS(close_code=None), exc=ConnectionError("transport reset")
+    )
+    assert "transport reset" in text and text.strip()
+
+    # No code and no exception still yields a non-empty reason.
+    assert _format_close_reason(_ClosingWS(close_code=None)).strip()
+
+
+def test_session_logs_server_initiated_close(caplog):
+    """A server close (code + reason) is logged and recorded, not swallowed."""
+    client = _session_client()
+    ws = _ClosingWS(close_code=1001, close_reason="server going away")
+
+    with caplog.at_level("WARNING", logger="se3.daemon.client"):
+        _run_session(client, ws)
+
+    messages = [r.getMessage() for r in caplog.records]
+    closed = [m for m in messages if "Central server connection closed" in m]
+    assert closed, "the server-initiated close must be logged, not silent"
+    assert "1001" in closed[0] and "server going away" in closed[0]
+    assert client.last_error and "1001" in client.last_error
+
+
+def test_session_logs_transport_drop_with_distinguishable_reason(caplog):
+    """A transport drop with no close frame logs a distinguishable, safe reason."""
+    from websockets.exceptions import ConnectionClosedError
+
+    client = _session_client(daemon_key="SUPER-SECRET-DAEMON-KEY")
+    # No close frame was exchanged: the peer's ConnectionClosedError carries no
+    # rcvd/sent Close, and the transport marks the socket ABNORMAL_CLOSURE (1006).
+    ws = _ClosingWS(
+        close_code=1006,
+        close_reason="",
+        raise_exc=ConnectionClosedError(None, None),
+    )
+
+    with caplog.at_level("WARNING", logger="se3.daemon.client"):
+        _run_session(client, ws)
+
+    messages = [r.getMessage() for r in caplog.records]
+    closed = [m for m in messages if "Central server connection closed" in m]
+    assert closed, "a transport drop must not unwind silently"
+    reason = closed[0]
+    # Distinguishable network-class signal, non-empty, and no credential leak.
+    assert "1006" in reason and "ABNORMAL_CLOSURE" in reason
+    assert "SUPER-SECRET-DAEMON-KEY" not in reason
+    assert client.last_error and "SUPER-SECRET-DAEMON-KEY" not in client.last_error
+
+
+def test_auth_rejected_session_does_not_log_a_disconnect(caplog):
+    """The auth-rejected branch is untouched: no spurious disconnect warning."""
+    client = _session_client()
+    # A real WELCOME(accepted=false): the receive loop dispatches it, which flags
+    # ``_auth_rejected`` and unwinds the session via the abort event.
+    welcome = protocol.make_welcome("srv", accepted=False, reason="unknown daemon key")
+    ws = _ClosingWS(preframes=[welcome.to_json()])
+
+    with caplog.at_level("WARNING", logger="se3.daemon.client"):
+        _run_session(client, ws)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert not [m for m in messages if "Central server connection closed" in m]
+    # The rejection reason (set by _handle_welcome) is preserved untouched.
+    assert client._auth_rejected is True
+    assert client.last_error == "unknown daemon key"
