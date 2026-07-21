@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.23.1 - 2026-07-21
+
+- Fix history delivery livelock where a large backlog exceeding a single ~40s connection window was discarded whole every reconnect, permanently freezing the WebUI chat panel on the implement step
+- Deliver daemon→server history in bounded byte-sized chunks with per-chunk acknowledgement and cursor advancement, so progress is monotonic and resumes from the last confirmed point across reconnects
+- Distinguish pending (not yet delivered from daemon) from unfillable (never serviceable) history gaps in the /api/history response so the frontend responds correctly to each
+- Stop the frontend gap self-check from wedging or giving up on pending gaps: keep rendering existing records, halt useless repeated backfills, and auto-recover as later records arrive; only stop retrying for server-declared unfillable ranges
+- Fix intermittent 401 responses on signed history cursor polling during daemon reconnect storms; expired signatures now get a recoverable response so the client resyncs its cursor instead of retrying bare 401s
+- Log the close code and reason on every daemon-server disconnect so network drops can be distinguished from server-initiated closes in daemon.log
 ## 11.23.0 - 2026-07-17
 
 - Add browser-presence gearing: the daemon drops to a low-power heartbeat when no WebUI viewer is connected and returns to real-time cadence when a page opens, driving idle CPU toward zero

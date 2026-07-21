@@ -513,8 +513,9 @@ class DaemonClient:
         ) as ws:
             self._connected = True
             self._last_error = None
-            # A new session: forget prior history state so the server gets a
-            # fresh index and full active-flow snapshots after every reconnect.
+            # A new session forgets the INDEX baseline so the server gets a fresh
+            # full index after every reconnect — the index is a small per-flow
+            # metadata list, cheap to re-establish in full.
             self._last_index = None
             self._last_index_by_flow = {}
             self._index_primed = False
@@ -522,7 +523,24 @@ class DaemonClient:
             # WELCOME reveals the server's protocol_version; the primer push is a
             # full frame regardless, so this never withholds the baseline.
             self._peer_supports_reduction = False
-            self._history_cursors = {}
+            # INVARIANT: the history DELIVERY cursor is PRESERVED across
+            # reconnects — it must NOT be reset here. WHY: on the confirmed
+            # failure environment the daemon↔server link is force-recycled roughly
+            # every ~40 s; wiping the cursor made every new session re-read each
+            # flow from line 0 (mode=full) and re-deliver the same leading
+            # chunk(s), so a backlog larger than one connection window can carry
+            # (the 8.4 MB ``06_implement``) never advanced past its first chunk —
+            # the delivery livelock (Defect A). Combined with the byte-bounded
+            # chunking (MAX_BYTES_PER_REPORT), retaining the cursor makes each new
+            # window RESUME from the last CONFIRMED chunk, so a large backlog is
+            # caught up monotonically across successive windows. This is safe even
+            # when the peer lost the flow's bundle (a server restart, or a
+            # reconnect to a peer that never saw the flow): the resumed frame
+            # declares its coverage window (``cursor_base`` → ``cursor``), the
+            # server's cursor-gap guard sees it start past its empty water mark and
+            # arms ``requires_full`` so a self-heal full pull rebuilds the bundle
+            # from scratch. The change-detection SIGNATURE is still reset (below),
+            # so the reconnect always drives a fresh push that resumes the drain.
             self._last_history_signature = {}
             self._last_calls_signature = {}
             # Forget the prior status signature and peer version: a fresh (or
@@ -711,7 +729,18 @@ class DaemonClient:
                 if clear_gate is not None:
                     clear_gate()
             history_changed = await asyncio.to_thread(self._history_changed)
-            if status_due or history_changed or presence_wake:
+            # ``woke_for_fast_push`` must ALSO drive the history push, not only a
+            # STATUS_UPDATE. WHY: a truncated history round re-arms fast-push (see
+            # _push_history) precisely so the NEXT chunk of a large backlog drains
+            # at link rate instead of one chunk per status heartbeat. But a static
+            # (fully-written, terminal) backlog produces NO disk change, so
+            # ``_history_changed()`` stays False and, in the idle gear, ``status_due``
+            # is up to 60 s away — draining an 8.4 MB backlog one 256 KB chunk per
+            # 60 s (and, under ~40 s connection windows, at most one chunk per
+            # window) is still the livelock in slow motion. Including the fast-push
+            # wake here converts the re-arm into the very next _push_history call,
+            # so consecutive chunks drain back-to-back within one connection window.
+            if status_due or history_changed or presence_wake or woke_for_fast_push:
                 # A real disk change (engine.json rewrite / jsonl append) means
                 # the on-disk state diverged from the cached index.  Invalidate
                 # so the next build_index() rebuilds from disk instead of
@@ -1485,37 +1514,72 @@ class DaemonClient:
             return
         project_root = str(payload.get("project_root") or "") or None
         cursor = payload.get("cursor") or {}
-        try:
-            # Disk I/O is offloaded to a thread so a large session's jsonl read
-            # cannot block the event loop past the server's pull timeout or the
-            # heartbeat-loss threshold (which would briefly mark the daemon
-            # offline and grey out the machine in the web UI).
-            read = await asyncio.to_thread(
-                provider.read_flow, flow_id, project_root=project_root, cursor=cursor
-            )
-        except Exception:
-            logger.exception("HISTORY_REQUEST read failed for flow %s", flow_id)
-            return
-        try:
-            await self._send(
-                ws,
-                protocol.make_history_data(
-                    read.flow_id,
-                    read.mode,
-                    read.records,
-                    cursor=read.cursor,
-                    cursor_base=read.cursor_base,
-                    seq=self._next_seq(),
-                ),
-            )
-            logger.info(
-                "HISTORY_REQUEST answered for flow %s (%d record(s), %s)",
-                flow_id,
-                len(read.records),
-                read.mode,
-            )
-        except Exception:
-            logger.debug("HISTORY_DATA send failed", exc_info=True)
+        # WHY: a HISTORY_REQUEST is a ONE-SHOT on-demand pull — the server issues a
+        # single request and caches whatever the reply carries; it does not
+        # re-request while a reply is truncated, and an inactive flow is never
+        # covered by the push loop's ``read_active_flows``. But ``read_flow`` is
+        # byte-bounded (MAX_BYTES_PER_REPORT), so a flow whose history exceeds one
+        # chunk (an archived session over a few hundred KB, still well under the
+        # 2000-record cap that used to bound this) would answer with only its first
+        # chunk. The server would then cache that prefix as the WHOLE history — its
+        # cursor equals the truncation point, so the bundle looks self-consistent
+        # and every later poll answers ``not_modified`` — silently truncating an
+        # archived session's history pane forever. So the pull itself must drain
+        # the entire backlog here: keep reading and sending chunks from the
+        # advancing cursor until the read is no longer truncated. The first frame
+        # is a full snapshot; each subsequent chunk is an append whose declared
+        # ``cursor_base`` makes it contiguous, so the server extends one bundle.
+        records_sent = 0
+        frames_sent = 0
+        while True:
+            try:
+                # Disk I/O is offloaded to a thread so a large session's jsonl read
+                # cannot block the event loop past the server's pull timeout or the
+                # heartbeat-loss threshold (which would briefly mark the daemon
+                # offline and grey out the machine in the web UI).
+                read = await asyncio.to_thread(
+                    provider.read_flow,
+                    flow_id,
+                    project_root=project_root,
+                    cursor=cursor,
+                )
+            except Exception:
+                logger.exception("HISTORY_REQUEST read failed for flow %s", flow_id)
+                return
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_history_data(
+                        read.flow_id,
+                        read.mode,
+                        read.records,
+                        cursor=read.cursor,
+                        cursor_base=read.cursor_base,
+                        seq=self._next_seq(),
+                    ),
+                )
+            except Exception:
+                logger.debug("HISTORY_DATA send failed", exc_info=True)
+                return
+            records_sent += len(read.records)
+            frames_sent += 1
+            if not read.truncated:
+                break
+            # A truncated read that failed to advance the cursor cannot make
+            # progress (a reader bug, or a file that cannot move forward); stop and
+            # let the delivered prefix stand rather than spin forever.
+            if read.cursor == cursor:
+                logger.warning(
+                    "HISTORY_REQUEST for flow %s truncated but cursor did not "
+                    "advance (%s); stopping to avoid a spin",
+                    flow_id, read.cursor,
+                )
+                break
+            cursor = read.cursor
+        logger.info(
+            "HISTORY_REQUEST answered for flow %s (%d record(s) across %d frame(s))",
+            flow_id, records_sent, frames_sent,
+        )
 
     async def _handle_history_index_request(self, ws: Any) -> None:
         """Force a fresh rebuild + re-push of the history index.

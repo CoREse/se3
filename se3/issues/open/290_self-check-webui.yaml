@@ -1,0 +1,126 @@
+id: '290'
+description: "有一个项目里已经进入self check阶段了，但webui的聊天记录还是停留在implement，console显示：\nFailed\
+  \ to load resource: the server responded with a status of 404 ()\n(index):1 Uncaught\
+  \ (in promise) Error: Could not establish connection. Receiving end does not exist.\n\
+  content_main.js:4847 This page uses Chrome's Built-In AI features (LanguageDetector)!\
+  \ We're always improving our models; please submit your feedback here: https://issues.chromium.org/issues/new?component=1583316\n\
+  2contentscript.js:14083 ObjectMultiplex - orphaned data for stream \"app-init-liveness\"\
+  \nwarn @ contentscript.js:14083\n2contentscript.js:14083 ObjectMultiplex - orphaned\
+  \ data for stream \"background-liveness\"\nwarn @ contentscript.js:14083\n/api/history/20260720-094743_fdd8b013:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/flows/20260720-094743_fdd8b013:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-094743_fdd8b013:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/flows/20260720-094743_fdd8b013:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-094743_fdd8b013:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/flows/20260720-094743_fdd8b013:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n20260720-163316_2df2d504:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n/api/history/20260720-163316_2df2d504?after=eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam81TWl3aWRpSTZNWDA9IiwicyI6ImFmZmZlZTAwNzFmMGY5NjFkN2I1MTliYmQzNzExMTRkY2YwYjQ4ZmNhYzU5NTRmNjhmNzQxODA0ZWJjOWY4NWIifQ%3D%3D&sig=9871445766ed3b9d:1\
+  \  Failed to load resource: the server responded with a status of 401 ()\n828app.js:7881\
+  \ history cursor self-check: gap persists after backfill+full for flow=20260720-163316_2df2d504\
+  \ (view=flow) — giving up\nnetwork的一对包是这样的：\n{\n    \"machine_id\": \"node007.pi.sjtu.edu.cn-7c8ae1d30d71\"\
+  ,\n    \"flow\": {\n        \"flow_id\": \"20260720-163316_2df2d504\",\n       \
+  \ \"project_root\": \"/dssg/home/acct-zhangzd/zhangzd/workspace/lrsim\",\n     \
+  \   \"task_description\": \"上个任务似乎没有成功：\\n✨ Pixi task (eval-smk in eval): snakemake\
+  \ --profile eval/profiles/cluster\\nUsing profile eval/profiles/cluster for setting\
+  \ default command line arguments.\\nConfig file eval/config/workflow.yaml is extended\
+  \ by additional config specified via the command line.\\neval/workflow running at\
+  \ Git commit dc0815d (dc0815dff95c1a6ca544b028bfcb3055d2a3796f)\\n\\nSNAKEMAKE\\\
+  n=========\\n  Date: 2026-07-20 16:25:26\\n  Workflow ID: dcff2de8-103c-44cb-b692-3c548a47e35f\\\
+  n  Platform: Linux-4.18.0-553.83.1.el8_10.x86_64-x86_64-with-glibc2.28\\n  Host:\
+  \ node007.pi.sjtu.edu.cn\\n  User: zhangzd\\n  Snakemake version: 9.22.0\\n  Python\
+  \ version: 3.11.15 | packaged by conda-forge | (main, Mar  5 2026, 16:45:40) [GCC\
+  \ 14.3.0]\\n  Command: /dssg/home/acct-zhangzd/zhangzd/workspace/lrsim/.pixi/envs/eval/bin/snakemake\
+  \ --profile eval/profiles/cluster\\n  Snakefile: /dssg/home/acct-zhangzd/zhangzd/workspace/lrsim/eval/workflow/Snakefile\\\
+  n  Base directory: /dssg/home/acct-zhangzd/zhangzd/workspace/lrsim/eval/workflow\\\
+  n  Run directory: /dssg/home/acct-zhangzd/zhangzd/workspace/lrsim\\n  Working directory:\
+  \ /dssg/home/acct-zhangzd/zhangzd/workspace/lrsim\\n  Config file(s): [PosixPath('/dssg/home/acct-zhangzd/zhangzd/workspace/lrsim/eval/config/workflow.yaml'),\
+  \ 'eval/config/workflow.yaml']\\n  Config MD5: 896d37e1365a995bc88b5160c7491f93\\\
+  n\\nBuilding DAG of jobs...\\nProtectedOutputException in rule subsample in file\
+  \ \\\"/dssg/home/acct-zhangzd/zhangzd/workspace/lrsim/eval/workflow/rules/preprocess/subsample.smk\\\
+  \", line 53:\\nWrite-protected output files for rule subsample:\\n    output: /dssg/home/acct-zhangzd/zhangzd/data/lrsim-eval/fastq/_subsampled/HG002_ONT_pbsim3_30x_raw1.fastq.gz\\\
+  n    wildcards: datatype=ONT, datasource=pbsim3, depth=30, shard=1\\n    affected\
+  \ files:\\n        /dssg/home/acct-zhangzd/zhangzd/data/lrsim-eval/fastq/_subsampled/HG002_ONT_pbsim3_30x_raw1.fastq.gz\"\
+  ,\n        \"task_type\": \"discovery\",\n        \"status\": \"running\",\n   \
+  \     \"current_step\": \"self_check\",\n        \"current_step_index\": 6,\n  \
+  \      \"total_steps\": 12,\n        \"progress\": 0.5,\n        \"updated_at\"\
+  : \"2026-07-21T15:04:20.312683\",\n        \"summary\": null,\n        \"pending_calls\"\
+  : [],\n        \"step_history\": [],\n        \"waiting_for_lock\": false,\n   \
+  \     \"resumable\": false\n    }\n}\n{\n    \"flow_id\": \"20260720-163316_2df2d504\"\
+  ,\n    \"cached\": true,\n    \"machine_id\": \"node007.pi.sjtu.edu.cn-7c8ae1d30d71\"\
+  ,\n    \"mode\": \"append\",\n    \"delivery\": \"not_modified\",\n    \"records\"\
+  : [],\n    \"progress\": \"eyJwIjoiZXlKbklqbzFMQ0p0SWpvaWJtOWtaVEF3Tnk1d2FTNXphblIxTG1Wa2RTNWpiaTAzWXpoaFpURmtNekJrTnpFaUxDSnZJam94TlRNMExDSjJJam94ZlE9PSIsInMiOiIzZDFjMWRjNTdjMGMzMzNkZWIwNmQ0MjNlODFhYmM5NjUyNWRiYWQ5MDA4YTAxN2E4ZTI5NTk5MGYzMWE0MWI2In0=\"\
+  ,\n    \"signature\": \"8546c9b1478170a9\",\n    \"cursor\": {\n        \"01_discovery_0796dd2e.jsonl\"\
+  : 94,\n        \"02_analyze_70e12596.jsonl\": 9,\n        \"03_plan_8c4073e4.jsonl\"\
+  : 63,\n        \"04_confirm_f63b6960.jsonl\": 13,\n        \"05_confirm_6fee46a2.jsonl\"\
+  : 7,\n        \"06_implement_398863d6.jsonl\": 48,\n        \"06_implement_398863d6_G1.jsonl\"\
+  : 93,\n        \"06_implement_398863d6_G2.jsonl\": 29,\n        \"06_implement_398863d6_G3.jsonl\"\
+  : 48,\n        \"06_implement_398863d6_G5.jsonl\": 134,\n        \"06_implement_398863d6_G4.jsonl\"\
+  : 81,\n        \"06_implement_398863d6_G6.jsonl\": 80,\n        \"06_implement_398863d6_G7.jsonl\"\
+  : 101,\n        \"06_implement_398863d6_G8.jsonl\": 210,\n        \"06_implement_398863d6_G9.jsonl\"\
+  : 174,\n        \"06_implement_398863d6_G10.jsonl\": 75\n    },\n    \"generation\"\
+  : 5,\n    \"unfillable\": {},\n    \"updated_at\": 1784613271.2112224\n}"
+status: in-progress
+tags: []
+source: human
+created_at: '2026-07-21T15:16:44.633597'
+updated_at: '2026-07-21T15:16:52.795425'
+type: bug

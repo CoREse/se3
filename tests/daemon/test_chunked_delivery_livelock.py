@@ -120,6 +120,13 @@ class _Provider:
             for flow_id in self._flow_ids
         ]
 
+    def read_flow(self, flow_id, *, project_root=None, cursor=None):
+        # The on-demand HISTORY_REQUEST path calls read_flow directly; delegate to
+        # the real reader so the byte-bounded chunking is the genuine one.
+        return self._reader.read_flow(
+            flow_id, project_root=project_root or self._root, cursor=cursor
+        )
+
     def live_flow_ids(self) -> set:
         return set(self._flow_ids)
 
@@ -531,3 +538,206 @@ def test_auth_rejected_session_does_not_log_a_disconnect(caplog):
     # The rejection reason (set by _handle_welcome) is preserved untouched.
     assert client._auth_rejected is True
     assert client.last_error == "unknown daemon key"
+
+
+# --------------------------------------------------------------------------
+# the delivery cursor survives a reconnect (Defect A core — the livelock)
+# --------------------------------------------------------------------------
+#
+# The byte-bounded chunking + per-chunk commit only defeat the livelock if the
+# delivery cursor SURVIVES the ~40 s reconnect. The original _session zeroed
+# ``_history_cursors`` on every connection, so each new window re-read every flow
+# from line 0 and re-delivered the same leading chunk — net cross-window progress
+# of zero once the backlog exceeded one window. These pin that the reset is gone.
+
+
+def test_session_preserves_delivery_cursor_across_reconnect():
+    """A new session must NOT wipe the history delivery cursor."""
+    client = _session_client()
+    # A committed delivery water mark left by the previous (now-dropped) session.
+    prior = {"20260720-163316_2df2d504": {"06_implement_398863d6.jsonl": 42}}
+    client._history_cursors = {
+        flow: dict(cur) for flow, cur in prior.items()
+    }
+    # A socket that closes immediately (transport drop): _session runs HELLO +
+    # primer, then unwinds. With no history provider the primer touches no cursor,
+    # so what survives here is exactly what the old reset would have zeroed.
+    ws = _ClosingWS(close_code=1006, close_reason="")
+    _run_session(client, ws)
+
+    # The cursor is inherited by the fresh session; the next window therefore
+    # resumes from the last confirmed chunk instead of re-reading from line 0.
+    assert client._history_cursors == prior
+
+
+def test_reconnect_resumes_drain_instead_of_restarting_from_zero(tmp_path):
+    """Across real reconnects (cursor preserved), the backlog catches up once.
+
+    Unlike ``test_short_lived_windows_...`` (one client, direct _push_history), this
+    reuses the client's real reset path by re-priming a fresh session's per-session
+    state between windows the way _session does — except the cursor, which the fix
+    now preserves — and asserts the server assembles the whole backlog exactly once
+    with no re-delivery of the leading chunk every window.
+    """
+
+    async def scenario():
+        from se3.server.state import ServerState
+
+        flow_id = "20260720-163316_2df2d504"
+        step = "06_implement_398863d6.jsonl"
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+        provider = _Provider(reader, tmp_path, [flow_id])
+        total = 60
+        bodies = _write_backlog(tmp_path, flow_id, step, total)
+
+        client = _client(provider)
+        state = ServerState()
+        window_budget = MAX_BYTES_PER_REPORT + 32 * 1024
+
+        windows = 0
+        while _cursor_line(client, flow_id, step) < total and windows < 50:
+            windows += 1
+            # Emulate _session's per-connection reset of the NON-cursor session
+            # state (the parts the fix still zeroes). The cursor is deliberately
+            # left intact — that is the whole fix.
+            client._last_history_signature = {}
+            client._index_primed = False
+            client._last_index = None
+            client._fast_push_event = asyncio.Event()
+            ws = _ShortLivedWS(window_budget)
+            while not ws.dead and _cursor_line(client, flow_id, step) < total:
+                client._fast_push_event.clear()
+                await client._push_history(ws)
+            for frame in ws.history_frames(flow_id):
+                await state.apply_history_frame(
+                    frame["flow_id"],
+                    frame["mode"],
+                    frame["records"],
+                    cursor=frame.get("cursor"),
+                    machine_id="m1",
+                )
+
+        assert windows >= 3  # no single window sufficed
+        cached = await state.get_history(flow_id)
+        # The whole backlog assembled once each, in order — not a leading chunk
+        # re-delivered every window (which would duplicate ordinals).
+        assert _bodies(cached["records"]) == bodies
+        assert len(set(_keys(cached["records"]))) == total
+        assert cached["cursor"] == {step: total}
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# a fast-push wake actually DRIVES the drain in the push loop (Task 2)
+# --------------------------------------------------------------------------
+
+
+def test_push_loop_fast_push_wake_drains_static_backlog(tmp_path):
+    """A truncated-round fast-push wake drives the drain with NO disk change.
+
+    A fully-written (terminal) backlog produces no disk change, so
+    ``_history_changed()`` stays False and, in the idle gear, ``status_due`` is up
+    to 60 s away. Only by converting the fast-push wake into a history push does the
+    drain proceed at link rate; before the fix the loop consumed the wake as a bare
+    STATUS_UPDATE and the cursor never moved.
+    """
+
+    async def scenario():
+        flow_id = "20260720-163316_2df2d504"
+        step = "06_implement_398863d6.jsonl"
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+        provider = _Provider(reader, tmp_path, [flow_id])
+        total = 60
+        _write_backlog(tmp_path, flow_id, step, total)
+
+        client = _client(provider)
+        ws = _ShortLivedWS(None)  # one never-dying window
+        stop = asyncio.Event()
+
+        # Neutralise every OTHER push driver so the ONLY thing that can advance the
+        # drain is the fast-push wake: no disk-change signal, no calls change, and a
+        # status interval so long that ``status_due`` never fires within the test.
+        client._history_changed = lambda: False
+        client._calls_changed = lambda: False
+        client._effective_intervals = lambda: (0.001, 10_000.0)
+
+        # Report a fast-push wake on every tick (as a truncated round's re-arm
+        # would), stopping once the backlog is fully caught up.
+        async def fake_wait(stop_event):
+            if _cursor_line(client, flow_id, step) >= total:
+                stop.set()
+                return False
+            client._fast_push_event.clear()
+            return True
+
+        client._wait_next_tick = fake_wait
+
+        await asyncio.wait_for(client._push_loop(ws, stop), timeout=5.0)
+
+        # The whole backlog drained purely on fast-push wakes — no status tick and
+        # no disk change ever fired. Before the fix the wake drove only a
+        # STATUS_UPDATE and this timed out with the cursor pinned at line 0.
+        assert _cursor_line(client, flow_id, step) == total
+        assert len(ws.history_frames(flow_id)) >= 3
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# an on-demand pull delivers the COMPLETE history despite the byte cap (Task 3)
+# --------------------------------------------------------------------------
+
+
+def test_history_request_delivers_full_backlog_despite_byte_cap(tmp_path):
+    """A HISTORY_REQUEST for a large inactive flow still delivers every record.
+
+    The byte cap must not silently truncate an on-demand pull: the server issues a
+    single request and caches whatever the reply carries, so the daemon must drain
+    the whole backlog across chunk frames itself. Before the fix only the first
+    ~256 KB chunk shipped and the archived history pane rendered a few dozen records
+    forever.
+    """
+
+    async def scenario():
+        from se3.server.state import ServerState
+
+        flow_id = "20260714-120000_archived1"
+        step = "06_implement_deadbeef.jsonl"
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+        provider = _Provider(reader, tmp_path, [flow_id])
+        total = 60  # well under the 2000-record cap; only the BYTE cap chunks it
+        bodies = _write_backlog(tmp_path, flow_id, step, total)
+
+        client = _client(provider)
+        ws = _ShortLivedWS(None)
+
+        await client._handle_history_request(
+            ws, {"flow_id": flow_id, "project_root": str(tmp_path)}
+        )
+
+        frames = ws.history_frames(flow_id)
+        # Multiple chunk frames left the socket (byte cap, not record cap).
+        assert len(frames) >= 3
+        # First frame is the full baseline; the rest are contiguous appends.
+        assert frames[0]["mode"] == protocol.HISTORY_MODE_FULL
+        assert all(
+            f["mode"] == protocol.HISTORY_MODE_APPEND for f in frames[1:]
+        )
+
+        # Replay into a real server: the assembled bundle is the COMPLETE history.
+        state = ServerState()
+        for frame in frames:
+            await state.apply_history_frame(
+                frame["flow_id"],
+                frame["mode"],
+                frame["records"],
+                cursor=frame.get("cursor"),
+                machine_id="m1",
+            )
+        cached = await state.get_history(flow_id)
+        assert _bodies(cached["records"]) == bodies
+        assert len(set(_keys(cached["records"]))) == total
+        assert cached["cursor"] == {step: total}
+
+    asyncio.run(scenario())
