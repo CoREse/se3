@@ -2032,6 +2032,31 @@ class DaemonClient:
             if old is not None:
                 committed[flow_id] = old
 
+        def _commit_history_cursors() -> None:
+            """Install ``committed`` as the live push-cursor map without clobbering
+            a cursor a concurrent drain synced onto the live attribute this tick.
+
+            WHY: a flow's multi-frame drain (:meth:`_handle_history_request`) owns
+            its cursor and, on completion, writes the end-of-history water mark
+            DIRECTLY onto ``self._history_cursors`` — which may happen while this
+            push tick is awaiting inside the send loop. Because we rebind the whole
+            map wholesale, that fresh drain cursor must be re-read from the live map
+            for every draining flow immediately before the rebind; otherwise the
+            synced value is reverted to this tick's stale pre-drain snapshot, and the
+            next push re-reads the whole just-drained batch from behind the server's
+            water mark on every tick until the flow happens to re-sync. Read of the
+            live map and the rebind are synchronous (no await between them), so they
+            are atomic against the drain task. ``draining_now`` is consulted at call
+            time, so a flow that only began draining mid-send-loop (added below) is
+            covered too.
+            """
+            live = self._history_cursors
+            for flow_id in draining_now:
+                synced = live.get(flow_id)
+                if synced is not None:
+                    committed[flow_id] = synced
+            self._history_cursors = committed
+
         # Hold back draining flows' old water marks so their records are re-read
         # after the drain ends, and drop them from the send list below.
         for flow_id in draining_now:
@@ -2042,6 +2067,21 @@ class DaemonClient:
             if read.records and read.flow_id not in draining_now
         ]
         for position, read in enumerate(pending):
+            # Re-check drain state immediately before THIS flow's send. WHY: the
+            # tick's ``draining_now`` was frozen before the send loop; a server
+            # HISTORY_REQUEST may have arrived while we awaited an EARLIER flow's
+            # send and started a drain for this (later) pending flow. Its append
+            # frame was already computed off the stale push-side cursor, so letting
+            # it out now would land past the server's half-rebuilt water mark and
+            # trip the cursor-gap guard mid-drain — the very interleave the drain
+            # marker exists to forbid. Skip it: the drain owns the cursor and syncs
+            # it on completion, and these records are re-read next tick. Fold the
+            # flow into ``draining_now`` so ``_commit_history_cursors`` preserves the
+            # drain's synced cursor for it as well.
+            if self._drain_active(read.flow_id):
+                draining_now.add(read.flow_id)
+                _keep_old(read.flow_id)
+                continue
             # HOP-3 DEBUG (daemon→server send): the actual MSG_HISTORY_DATA frame
             # leaving the daemon. If this line appears for the analyze records but
             # the UI never renders them, the drop is downstream (server
@@ -2075,10 +2115,10 @@ class DaemonClient:
                 # rolling them back would only manufacture duplicate traffic.
                 for unsent in pending[position:]:
                     _keep_old(unsent.flow_id)
-                self._history_cursors = committed
+                _commit_history_cursors()
                 return
             committed[read.flow_id] = read.cursor
-        self._history_cursors = committed
+        _commit_history_cursors()
         # A bounded chunk was emitted for at least one flow that still has
         # backlog on disk past its cursor (read.truncated). Re-arm fast-push so
         # the next chunk goes out on the very next fast tick instead of waiting

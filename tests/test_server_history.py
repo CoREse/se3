@@ -261,15 +261,24 @@ def test_first_sighting_append_heals_via_full_snapshot():
 
 
 def test_full_snapshot_serve_clears_requires_full_latch():
-    """A served full snapshot de-latches requires-full and re-arms recovery.
+    """A served full snapshot de-latches requires-full but keeps recovery armed.
 
     G4: serving a client the COMPLETE bundle is itself an authoritative event
     — the client now holds the full history — so any lingering requires-full
-    flag (which would keep discarding later appends) MUST clear and the
-    self-heal recovery marker MUST re-arm on the read. This pins that invariant
-    guard directly by forcing the pathological (bundle present ∧ flagged
-    requires-full ∧ recovery in flight) coexistence the guard defends against,
-    then asserting one full read heals it and a following append flows.
+    flag (which would keep discarding later appends) MUST clear on the read.
+
+    The in-flight recovery marker, however, must NOT be popped here while a
+    recovery is under way: the livelock repro has the WebUI polling this REST
+    endpoint *during* a large flow's multi-frame recovery drain. That drain's
+    ``full`` HEAD rolls a fresh generation, so the client's progress token is
+    invalid and its very next ~3 s poll falls through to this full-fallback
+    delivery while the drain's ``append`` tails are still arriving. Popping the
+    marker here would reopen the at-most-one dedup window mid-drain — mirroring
+    the ``append_history`` full-HEAD branch, so instead REFRESH the marker (keep
+    it armed) while a recovery is in flight; the TTL still guarantees eventual
+    re-arm. This pins both halves by forcing the pathological (bundle present ∧
+    flagged requires-full ∧ recovery in flight) coexistence, then asserting one
+    full read clears the flag, keeps the marker, and a following append flows.
     """
     state = ServerState()
 
@@ -286,7 +295,9 @@ def test_full_snapshot_serve_clears_requires_full_latch():
         snap = await state.get_history_snapshot("f1")
         assert snap["delivery"] == "full"
         assert "f1" not in state._history_requires_full
-        assert "f1" not in state._history_recovery_inflight
+        # The marker stays armed (refreshed) so a rival recovery pull cannot be
+        # dispatched mid-drain — releasing it is the TTL / end-session's job.
+        assert "f1" in state._history_recovery_inflight
 
         # De-latched: a following append extends the bundle instead of dropping.
         assert (

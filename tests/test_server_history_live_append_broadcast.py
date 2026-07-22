@@ -754,15 +754,20 @@ def test_take_recovery_pull_fires_once_per_stuck_flow():
     assert untouched is False  # a healthy flow never arms a recovery
 
 
-def test_recovery_marker_cleared_when_full_frame_heals_bundle():
+def test_recovery_full_head_clears_requires_full_but_keeps_marker_in_flight():
     async def scenario():
         state = ServerState()
         await state.append_history(
             "f1", protocol.HISTORY_MODE_APPEND, [{"line": 1}], machine_id="m1"
         )
         assert await state.take_recovery_pull("f1") is True
-        # The recovery's full reply repopulates the bundle and clears both the
-        # requires_full flag and the in-flight recovery marker.
+        # The recovery's full HEAD repopulates the bundle and clears
+        # ``requires_full`` — but it must NOT clear the in-flight recovery marker.
+        # A large active flow drains as one ``full`` head plus dozens of
+        # ``append`` tails; releasing the marker on the head reopens the dedup
+        # window mid-drain and a cursor-gap discard among the tails would arm a
+        # rival pull (the observed livelock). The marker stays armed for the
+        # whole drain and is released only by the TTL / end-session / de-latch.
         healed = await state.append_history(
             "f1", protocol.HISTORY_MODE_FULL, [{"line": 1}], machine_id="m1"
         )
@@ -771,7 +776,7 @@ def test_recovery_marker_cleared_when_full_frame_heals_bundle():
 
     requires_full, recovery_inflight = asyncio.run(scenario())
     assert "f1" not in requires_full
-    assert "f1" not in recovery_inflight
+    assert "f1" in recovery_inflight
 
 
 def test_clear_recovery_pull_re_arms_after_failed_send():

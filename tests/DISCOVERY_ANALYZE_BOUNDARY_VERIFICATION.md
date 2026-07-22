@@ -160,7 +160,7 @@ All acceptance-criteria suites pass. Key cases:
   `test_restart_at_discovery_analyze_boundary_self_heals_no_reenter`,
   `test_first_sighting_append_dispatches_one_recovery_pull_then_heals`,
   `test_take_recovery_pull_fires_once_per_stuck_flow`,
-  `test_recovery_marker_cleared_when_full_frame_heals_bundle`, and the
+  `test_recovery_full_head_clears_requires_full_but_keeps_marker_in_flight`, and the
   `test_healthy_boundary_never_triggers_recovery_pull` zero-recovery control.
 * **Frontend fallback** (`tests/frontend/progression_refresh.test.mjs` + pytest
   bridge): healthy WS increment → zero silent rebuilds; sustained WS silence →

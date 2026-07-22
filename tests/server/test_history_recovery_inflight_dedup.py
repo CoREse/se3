@@ -126,6 +126,47 @@ def test_recovery_marker_survives_drain_head_no_rival_pull():
     asyncio.run(scenario())
 
 
+def test_rest_full_serve_mid_drain_keeps_recovery_marker():
+    """A REST full-fallback poll DURING a recovery drain must not pop the marker.
+
+    The drain's ``full`` HEAD rolls a fresh bundle generation, which invalidates
+    the polling client's progress token, so the WebUI's next ~3 s poll falls
+    through to the ``delivery="full"`` fallback WHILE the tails are still
+    arriving. If that served-full path popped the in-flight recovery marker, a
+    cursor-gap discard among the remaining tails would re-arm ``requires_full``
+    and ``take_recovery_pull`` would dispatch a RIVAL pull — the same livelock the
+    append-side refresh already closes. The REST path must refresh, not pop.
+    """
+
+    async def scenario():
+        state = ServerState()
+        await _flow(state)
+
+        # Arm a recovery, then land the drain HEAD (marker refreshed, in flight).
+        out = await _append(state, [_record(4)], _cursor(5))
+        assert out.resolves_pull is False
+        assert await state.take_recovery_pull(FLOW) is True
+        await _full(state, [_record(0), _record(1)], _cursor(2))
+        assert FLOW in state._history_recovery_inflight
+
+        # A WebUI poll whose stale token no longer binds the freshly-rolled
+        # generation falls back to the full delivery — mid-drain.
+        snap = await state.get_history_snapshot(FLOW, after="stale-token-xyz")
+        assert snap is not None
+        assert snap["delivery"] == "full"
+
+        # THE FIX: the served-full de-latch refreshed the marker instead of
+        # popping it, so the recovery is still deduped across the drain window.
+        assert FLOW in state._history_recovery_inflight
+
+        # A mid-drain gap discard now must NOT dispatch a rival pull.
+        out = await _append(state, [_record(4)], _cursor(5))
+        assert out.resolves_pull is False
+        assert await state.take_recovery_pull(FLOW) is False
+
+    asyncio.run(scenario())
+
+
 def test_recovery_marker_rearms_after_ttl():
     """A drain that never converges must not wedge the flow forever: once the
     marker ages past the TTL, a fresh recovery pull re-arms."""

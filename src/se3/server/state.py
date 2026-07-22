@@ -2090,18 +2090,38 @@ class ServerState:
                 # frame, so returning its COMPLETE record set means this client
                 # now holds authoritative history for the flow. Any lingering
                 # ``requires_full`` flag (which would keep silently discarding
-                # every later append) MUST clear here, and the self-heal recovery
-                # marker MUST re-arm, so the front-end's periodic full pull is
-                # itself a latch-clearing event rather than depending on the
-                # daemon happening to push a fresh ``full`` frame. This is the
-                # third, independent de-latch path (alongside the append_history
-                # full branch and the ws.py recovery pull): together they ensure
-                # no flow can stay frozen behind a stale flag until the user
-                # exits and re-enters the chat. It is a no-op on the common path
-                # (a present bundle already implies the flag is clear), but keeps
-                # the "full served ⇒ not latched" invariant true unconditionally.
+                # every later append) MUST clear here, so the front-end's
+                # periodic full pull is itself a latch-clearing event rather than
+                # depending on the daemon happening to push a fresh ``full``
+                # frame. This is the third, independent de-latch path (alongside
+                # the append_history full branch and the ws.py recovery pull):
+                # together they ensure no flow can stay frozen behind a stale
+                # flag until the user exits and re-enters the chat. It is a no-op
+                # on the common path (a present bundle already implies the flag
+                # is clear), but keeps the "full served ⇒ not latched" invariant
+                # true unconditionally.
                 self._history_requires_full.discard(flow_id)
-                self._history_recovery_inflight.pop(flow_id, None)
+                # INVARIANT: this REST full-serve MUST NOT pop an IN-FLIGHT
+                # recovery marker — mirror the append_history full branch and
+                # only REFRESH it while a recovery drain is running.
+                #
+                # WHY: a recovery pull of a large active flow drains as a ``full``
+                # HEAD followed by dozens of ``append`` TAILS. The HEAD rolls a
+                # fresh bundle generation, which invalidates the polling client's
+                # progress token, so the WebUI's very next ~3 s poll falls through
+                # to this full-fallback delivery WHILE the drain's tails are still
+                # arriving. Popping the marker here would REOPEN the at-most-one
+                # dedup window mid-drain: a cursor-gap discard among the remaining
+                # tails re-arms ``requires_full``, ``take_recovery_pull`` — finding
+                # no marker — dispatches a RIVAL full pull, and the two pulls keep
+                # discarding each other's tails (the observed periodic cursor-gap
+                # DISCARD ⇄ multi-frame HISTORY_REQUEST livelock). Refreshing to
+                # now extends the dedup across the whole drain window; the TTL
+                # still guarantees an eventual re-arm if the drain never converges.
+                # When NO recovery is in flight the pop was a no-op anyway, so
+                # leaving the marker absent preserves the prior behaviour exactly.
+                if flow_id in self._history_recovery_inflight:
+                    self._history_recovery_inflight[flow_id] = time.monotonic()
 
             return {
                 "flow_id": cached["flow_id"],

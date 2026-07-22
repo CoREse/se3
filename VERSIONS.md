@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.23.2 - 2026-07-22
+
+- Serialize daemon full-pull history drain with the push loop per flow so append frames no longer interleave into an in-progress drain and create cursor gaps
+- Sync the daemon push cursor to the drain-end cursor after a full pull so subsequent append frames align with the server's actual watermark
+- Add an in-flight dedup guard to the server requires_full recovery path so a flow with an unfinished recovery pull no longer triggers repeated full pulls
+- Stop the WebUI chat panel from jumping between flow steps and repeatedly re-fetching the whole bundle for large active flows
+- Preserve the existing protocol frame format and cursor-gap guard semantics so genuine frame-loss is still detected
+- Add regression tests for the drain/push race, post-drain cursor sync, and server recovery in-flight dedup
 ## 11.23.1 - 2026-07-21
 
 - Fix history delivery livelock where a large backlog exceeding a single ~40s connection window was discarded whole every reconnect, permanently freezing the WebUI chat panel on the implement step

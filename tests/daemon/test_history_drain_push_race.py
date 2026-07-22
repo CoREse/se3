@@ -350,6 +350,115 @@ def test_drain_syncs_push_cursor_so_next_append_is_accepted(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# a drain that COMPLETES during a concurrent push's send loop keeps its sync
+# --------------------------------------------------------------------------
+
+
+def test_drain_synced_cursor_survives_concurrent_push_rebind(tmp_path):
+    """With a second active flow producing records, a push tick that awaits inside
+    its send loop must not revert a flow whose drain finished (and synced its
+    cursor) during that await back to the stale pre-drain snapshot."""
+
+    async def scenario():
+        flow_f = "20260722-104526_a82315a9"  # mid-drain
+        flow_g = "20260722-090000_bbbbbbbb"  # still producing
+        step_f = "05_implement_9772ce1d.jsonl"
+        step_g = "01_discovery_11111111.jsonl"
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+        provider = _Provider(reader, tmp_path, [flow_f, flow_g])
+
+        _append_backlog(tmp_path, flow_f, step_f, start=0, count=20)
+        # G's push cursor is behind its tail, so this tick has a real G frame to
+        # send — the frame the push loop awaits through while F's drain completes.
+        _append_backlog(tmp_path, flow_g, step_g, start=0, count=5)
+
+        client = _client(provider)
+        f_old = {step_f: 3}
+        f_synced = {step_f: 20}
+        client._history_cursors = {flow_f: dict(f_old), flow_g: {step_g: 0}}
+        # F's drain is in flight for the whole tick, so the push loop skips it.
+        client._history_draining.add(flow_f)
+
+        completed = {"done": False}
+
+        async def on_frame(count: int, frame: dict) -> None:
+            payload = frame.get("payload") or {}
+            if payload.get("flow_id") != flow_g or completed["done"]:
+                return
+            completed["done"] = True
+            # While the push tick awaits G's send, F's drain finishes and writes
+            # its end-of-history water mark straight onto the live cursor map, then
+            # clears the draining marker — exactly the interleave issue 1 describes.
+            client._history_cursors[flow_f] = dict(f_synced)
+            client._history_draining.discard(flow_f)
+
+        push_ws = _RecordingWS(on_frame=on_frame)
+        await client._push_history(push_ws)
+
+        assert completed["done"]
+        # F emitted no push frame (drain owned delivery) and — the fix — the tick's
+        # wholesale rebind preserved F's drain-synced cursor rather than reverting
+        # it to the stale ``f_old`` snapshot.
+        assert push_ws.history_frames(flow_f) == []
+        assert client._history_cursors[flow_f] == f_synced
+        # G advanced normally through the same tick.
+        assert push_ws.history_frames(flow_g)
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# a drain that STARTS mid-send-loop skips that (later pending) flow's append
+# --------------------------------------------------------------------------
+
+
+def test_drain_starting_mid_send_loop_skips_that_flows_append(tmp_path):
+    """If a drain for a later pending flow starts while the send loop is awaiting
+    an earlier flow's send, that flow's already-computed append must not go out —
+    the per-flow drain re-check before each send holds the serialization."""
+
+    async def scenario():
+        flow_a = "20260722-104526_a82315a9"
+        flow_b = "20260722-090000_bbbbbbbb"
+        step_a = "05_implement_9772ce1d.jsonl"
+        step_b = "01_discovery_11111111.jsonl"
+        reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
+        provider = _Provider(reader, tmp_path, [flow_a, flow_b])
+
+        _append_backlog(tmp_path, flow_a, step_a, start=0, count=5)
+        _append_backlog(tmp_path, flow_b, step_b, start=0, count=5)
+
+        client = _client(provider)
+        b_old = {step_b: 0}
+        client._history_cursors = {flow_a: {step_a: 0}, flow_b: dict(b_old)}
+        # No flow is draining when the tick starts: both A and B are pending.
+
+        started = {"done": False}
+
+        async def on_frame(count: int, frame: dict) -> None:
+            payload = frame.get("payload") or {}
+            if payload.get("flow_id") != flow_a or started["done"]:
+                return
+            started["done"] = True
+            # A server HISTORY_REQUEST for B lands while we await A's send and
+            # starts B's drain (its full HEAD is already on the wire).
+            client._history_draining.add(flow_b)
+
+        push_ws = _RecordingWS(on_frame=on_frame)
+        await client._push_history(push_ws)
+
+        assert started["done"]
+        # A's append went out; B's pre-computed append did NOT — the send loop
+        # re-checked B's drain state immediately before its send and skipped it.
+        assert push_ws.history_frames(flow_a)
+        assert push_ws.history_frames(flow_b) == []
+        # B kept its old water mark so its records are re-read after the drain.
+        assert client._history_cursors[flow_b] == b_old
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
 # a read/send failure mid-drain leaves the push cursor untouched (no dirty write)
 # --------------------------------------------------------------------------
 
