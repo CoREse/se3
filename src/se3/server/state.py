@@ -433,8 +433,13 @@ class ServerState:
         #: re-entered the chat (the only path that previously re-pulled a ``full``
         #: frame). The receive loop consults :meth:`take_recovery_pull` after
         #: every discarded append so it fires at most one recovery pull per stuck
-        #: flow; the marker clears when the authoritative full frame lands (see
-        #: :meth:`append_history`). It is a *timestamp*, not a bare flag, so a
+        #: flow. The marker is held for the WHOLE reply: a full pull of a large
+        #: active flow drains as a ``full`` head plus dozens of ``append`` tails,
+        #: and the head must NOT release the marker or a cursor-gap discard among
+        #: the still-arriving tails would arm a rival pull (see the INVARIANT in
+        #: :meth:`append_history`'s full branch). The TTL below, an end-session
+        #: wipe, or a served-full de-latch release it instead. It is a *timestamp*,
+        #: not a bare flag, so a
         #: pull whose reply never arrives (the daemon swallowed a read error and
         #: returned silently, or disconnected right after the request left the
         #: server) cannot wedge the flow forever: after
@@ -1228,11 +1233,32 @@ class ServerState:
                 # echo a valid token and get an empty delta forever until the
                 # daemon restarts and pushes a real full snapshot.
                 self._history_requires_full.discard(flow_id)
-                # The bundle is now authoritative again: any in-flight self-heal
-                # recovery pull for this flow has been satisfied (this frame is
-                # its reply, or a concurrent full pull beat it). Clear the marker
-                # so a later re-desync can dispatch a fresh recovery.
-                self._history_recovery_inflight.pop(flow_id, None)
+                # INVARIANT: a ``full`` frame that answers an IN-FLIGHT recovery
+                # pull MUST NOT clear the recovery marker here — the marker stays
+                # armed for the whole drain window and is released only when it
+                # ages past ``_HISTORY_RECOVERY_TTL`` (or the flow ends /
+                # machine-changes / a served-full de-latch fires).
+                #
+                # WHY: a full pull of a large active flow does NOT arrive as one
+                # frame. The owning daemon drains it as a ``full`` HEAD followed by
+                # dozens of ``append`` TAILS (a 4.6 MB flow ⇒ 30~39 frames). This
+                # branch runs on the HEAD while the tails are still catching up. If
+                # we popped the marker here, the dedup window would REOPEN mid-drain:
+                # a cursor-gap discard among the still-arriving tails re-arms
+                # ``requires_full``, ``take_recovery_pull`` — finding no marker —
+                # then dispatches a RIVAL full pull, and the two pulls keep
+                # discarding each other's tails forever (the observed periodic
+                # ``reason=cursor-gap`` DISCARD ⇄ multi-frame HISTORY_REQUEST
+                # livelock). So when a recovery IS in flight, REFRESH the marker to
+                # now instead of clearing it, extending the at-most-one-pull dedup
+                # across the entire drain; the TTL still guarantees an eventual
+                # re-arm if the drain never converges, so no flow is permanently
+                # wedged. When NO recovery was in flight this full is a fresh
+                # REST/push reply rather than a recovery drain head — leave the
+                # marker absent, exactly as before, so a later genuine desync can
+                # arm its own recovery immediately.
+                if flow_id in self._history_recovery_inflight:
+                    self._history_recovery_inflight[flow_id] = time.monotonic()
                 # INVARIANT: an identical full replace MUST keep the existing
                 # bundle generation. The running-worktree self-heal reconcile
                 # (see ``is_active_worktree_flow`` / the history endpoint) fires a
@@ -1360,12 +1386,21 @@ class ServerState:
         The FIRST call for a stuck flow (flagged ``requires_full`` with no
         recovery already in flight) returns ``True`` and marks a recovery in
         flight, so the caller sends exactly one ``MSG_HISTORY_REQUEST`` (a
-        cursorless — hence ``full`` — pull) to the owning daemon. Its ``full``
-        reply repopulates the bundle and clears both flags via
+        cursorless — hence ``full`` — pull) to the owning daemon. Its reply
+        repopulates the bundle and clears ``requires_full`` via
         :meth:`append_history`, after which subsequent appends apply and
         broadcast normally. Every later discarded append for the same still-stuck
         flow returns ``False`` so a per-cycle append storm cannot fan out one
         request per frame.
+
+        The in-flight marker deliberately survives the reply's ``full`` HEAD
+        frame and is NOT cleared by :meth:`append_history` there: a large active
+        flow's full pull drains as one ``full`` head plus dozens of ``append``
+        tails, and releasing the marker on the head reopens the dedup window for
+        the whole tail-draining span — a cursor-gap discard among those tails
+        would then arm a RIVAL pull and the two pulls livelock, discarding each
+        other's tails. So a second recovery for the same flow is suppressed for
+        the entire drain; only the TTL below (or the flow ending) re-arms it.
 
         The in-flight marker records the dispatch *time*, not a bare flag: if a
         pull's reply never arrives (the daemon swallowed a read error and

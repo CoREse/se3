@@ -1625,6 +1625,15 @@ async def _handle_message(
             # bundle and clears the flag, so subsequent appends flow again with
             # no manual re-enter. ``take_recovery_pull`` fires at most one pull
             # per stuck flow, so a per-cycle append storm cannot fan out.
+            #
+            # WHY (in-flight dedup spans the whole multi-frame drain): the reply
+            # to a large flow's pull is not one frame — it is a ``full`` head plus
+            # dozens of ``append`` tails, and the state marker deliberately stays
+            # armed until that drain converges (or its TTL expires). So if a
+            # cursor-gap discard among the still-arriving tails re-flags the flow
+            # ``requires_full``, this gate returns ``False`` and we do NOT dispatch
+            # a rival pull that would fight the drain already in flight — closing
+            # the DISCARD ⇄ HISTORY_REQUEST livelock at the dispatch side too.
             if (
                 not applied
                 and mode == protocol.HISTORY_MODE_APPEND
