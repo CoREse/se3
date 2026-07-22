@@ -361,6 +361,26 @@ class DaemonClient:
         # as an unknown type and the index update lost (see protocol docstring).
         self._peer_supports_reduction = False
         self._history_cursors: Dict[str, Dict[str, int]] = {}
+        # Flows with an in-flight multi-frame full-pull drain (the loop in
+        # :meth:`_handle_history_request`).
+        #
+        # WHY: a full pull rebuilds the server's history bundle from a cursorless
+        # snapshot and then advances its OWN local cursor across dozens of append
+        # frames to catch up (a 4.6 MB active step needs 30~39 frames). While that
+        # drain is running, the push loop (:meth:`_push_history`) is a concurrent
+        # task that reads active flows off ``self._history_cursors`` — a cursor map
+        # independent of the drain's local one. A push append emitted mid-drain
+        # declares a ``cursor_base`` computed off the stale push-side water mark,
+        # which lands PAST the server's half-rebuilt water mark and trips the
+        # server's cursor-gap guard: the guard discards the whole bundle and
+        # re-requests a full pull, which restarts the drain — a self-sustaining
+        # loop the WebUI shows as the chat pane jumping between steps. Serialising
+        # the two against this set closes the race: a flow is added for the whole
+        # drain and removed at its end (see ``_drain_active`` and the skip in
+        # ``_push_history``). Same-event-loop tasks only interleave at await
+        # points, so a plain set (checked/mutated synchronously) is sufficient — no
+        # lock is needed.
+        self._history_draining: Set[str] = set()
         # Last active-flow disk signature seen by the push loop; an unchanged
         # signature means there is nothing new to push (debounce).
         self._last_history_signature: Dict[str, Any] = {}
@@ -1497,6 +1517,15 @@ class DaemonClient:
         else:
             raise ValueError(f"unknown issue operation: {operation!r}")
 
+    def _drain_active(self, flow_id: str) -> bool:
+        """Whether *flow_id* has an in-flight multi-frame full-pull drain.
+
+        A non-blocking probe: the push loop uses it to skip a flow whose drain is
+        running so its append frame is not emitted mid-rebuild (see
+        ``self._history_draining``).
+        """
+        return flow_id in self._history_draining
+
     async def _handle_history_request(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Answer a server HISTORY_REQUEST with a HISTORY_DATA reply.
 
@@ -1531,51 +1560,84 @@ class DaemonClient:
         # ``cursor_base`` makes it contiguous, so the server extends one bundle.
         records_sent = 0
         frames_sent = 0
-        while True:
-            try:
-                # Disk I/O is offloaded to a thread so a large session's jsonl read
-                # cannot block the event loop past the server's pull timeout or the
-                # heartbeat-loss threshold (which would briefly mark the daemon
-                # offline and grey out the machine in the web UI).
-                read = await asyncio.to_thread(
-                    provider.read_flow,
-                    flow_id,
-                    project_root=project_root,
-                    cursor=cursor,
-                )
-            except Exception:
-                logger.exception("HISTORY_REQUEST read failed for flow %s", flow_id)
-                return
-            try:
-                await self._send(
-                    ws,
-                    protocol.make_history_data(
-                        read.flow_id,
-                        read.mode,
-                        read.records,
-                        cursor=read.cursor,
-                        cursor_base=read.cursor_base,
-                        seq=self._next_seq(),
-                    ),
-                )
-            except Exception:
-                logger.debug("HISTORY_DATA send failed", exc_info=True)
-                return
-            records_sent += len(read.records)
-            frames_sent += 1
-            if not read.truncated:
-                break
-            # A truncated read that failed to advance the cursor cannot make
-            # progress (a reader bug, or a file that cannot move forward); stop and
-            # let the delivered prefix stand rather than spin forever.
-            if read.cursor == cursor:
-                logger.warning(
-                    "HISTORY_REQUEST for flow %s truncated but cursor did not "
-                    "advance (%s); stopping to avoid a spin",
-                    flow_id, read.cursor,
-                )
-                break
-            cursor = read.cursor
+        # WHY: mark this flow draining for the WHOLE multi-frame drain so the push
+        # loop (:meth:`_push_history`, a concurrent task) skips its append frames
+        # for this flow. Otherwise a mid-drain push append lands past the server's
+        # half-rebuilt water mark and trips the cursor-gap guard, restarting the
+        # drain in a loop (see ``self._history_draining``). The try/finally makes
+        # every exit — clean completion, read/send failure, or an unexpected raise
+        # — release the marker so a flow is never left permanently skipped.
+        self._history_draining.add(flow_id)
+        # The drain's end-of-history water mark, captured on the last frame that
+        # actually left the socket; ``None`` until at least one frame is sent.
+        drain_cursor: Optional[Dict[str, int]] = None
+        drain_completed = False
+        try:
+            while True:
+                try:
+                    # Disk I/O is offloaded to a thread so a large session's jsonl
+                    # read cannot block the event loop past the server's pull
+                    # timeout or the heartbeat-loss threshold (which would briefly
+                    # mark the daemon offline and grey out the machine in the web
+                    # UI).
+                    read = await asyncio.to_thread(
+                        provider.read_flow,
+                        flow_id,
+                        project_root=project_root,
+                        cursor=cursor,
+                    )
+                except Exception:
+                    logger.exception("HISTORY_REQUEST read failed for flow %s", flow_id)
+                    return
+                try:
+                    await self._send(
+                        ws,
+                        protocol.make_history_data(
+                            read.flow_id,
+                            read.mode,
+                            read.records,
+                            cursor=read.cursor,
+                            cursor_base=read.cursor_base,
+                            seq=self._next_seq(),
+                        ),
+                    )
+                except Exception:
+                    logger.debug("HISTORY_DATA send failed", exc_info=True)
+                    return
+                records_sent += len(read.records)
+                frames_sent += 1
+                # Only a frame that actually left the socket may advance the water
+                # mark we later sync into the push cursor — a read/send failure
+                # above returns without touching ``drain_cursor``.
+                drain_cursor = read.cursor
+                if not read.truncated:
+                    drain_completed = True
+                    break
+                # A truncated read that failed to advance the cursor cannot make
+                # progress (a reader bug, or a file that cannot move forward); stop
+                # and let the delivered prefix stand rather than spin forever.
+                if read.cursor == cursor:
+                    logger.warning(
+                        "HISTORY_REQUEST for flow %s truncated but cursor did not "
+                        "advance (%s); stopping to avoid a spin",
+                        flow_id, read.cursor,
+                    )
+                    drain_completed = True
+                    break
+                cursor = read.cursor
+            # WHY: the drain is a cursorless full pull that advanced its OWN local
+            # cursor to the server's true end-of-history water mark. Sync the push
+            # loop's per-flow cursor to that end point so the NEXT push append's
+            # ``cursor_base`` meets the server's water mark exactly — no cursor-gap,
+            # no discard, no rebuild loop. Only on a clean drain completion (both
+            # the not-truncated and the no-progress exits): a read/send failure
+            # returned early above and must leave the push cursor untouched rather
+            # than write a partially-drained (dirty) water mark that would itself
+            # manufacture a gap.
+            if drain_completed and drain_cursor is not None:
+                self._history_cursors[flow_id] = dict(drain_cursor)
+        finally:
+            self._history_draining.discard(flow_id)
         logger.info(
             "HISTORY_REQUEST answered for flow %s (%d record(s) across %d frame(s))",
             flow_id, records_sent, frames_sent,
@@ -1937,9 +1999,30 @@ class DaemonClient:
             for flow_id, cursor in previous.items()
             if flow_id not in candidates and flow_id in resumable
         }
+        # WHY: a flow whose multi-frame full-pull drain (:meth:`_handle_history_request`)
+        # is in flight must be skipped this tick — the drain is rebuilding the
+        # server's bundle from a cursorless snapshot and advancing its own cursor,
+        # so a push append computed off the stale push-side water mark would land
+        # past the server's half-rebuilt mark and trip the cursor-gap guard, which
+        # discards + rebuilds and re-triggers the drain (the WebUI chat-jump loop).
+        # We SKIP (non-blocking) rather than block on the drain: a large drain runs
+        # for tens of seconds, and blocking the shared push loop would stall the
+        # STATUS_UPDATE heartbeat and every other flow's push for that whole window,
+        # risking a false offline mark. A skipped flow keeps its old water mark
+        # (``_keep_old``); the drain syncs the push cursor to its end point on
+        # completion, and this flow's records are re-read on the next tick. Gated on
+        # a non-empty draining set so the common (no-drain) path stays free.
+        draining_now = (
+            {read.flow_id for read in reads if self._drain_active(read.flow_id)}
+            if self._history_draining
+            else set()
+        )
         # A flow with an empty delta ships no frame, so its candidate cursor is
-        # committed unconditionally — there is no delivery that could fail.
+        # committed unconditionally — there is no delivery that could fail. A
+        # draining flow is exempt: its cursor is owned by the drain until it ends.
         for read in reads:
+            if read.flow_id in draining_now:
+                continue
             if not read.records:
                 committed[read.flow_id] = read.cursor
 
@@ -1949,7 +2032,15 @@ class DaemonClient:
             if old is not None:
                 committed[flow_id] = old
 
-        pending = [read for read in reads if read.records]
+        # Hold back draining flows' old water marks so their records are re-read
+        # after the drain ends, and drop them from the send list below.
+        for flow_id in draining_now:
+            _keep_old(flow_id)
+        pending = [
+            read
+            for read in reads
+            if read.records and read.flow_id not in draining_now
+        ]
         for position, read in enumerate(pending):
             # HOP-3 DEBUG (daemon→server send): the actual MSG_HISTORY_DATA frame
             # leaving the daemon. If this line appears for the analyze records but
