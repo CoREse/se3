@@ -7,6 +7,8 @@ daemons and exposes it to the web frontend:
 * ``GET /api/health`` — liveness probe;
 * ``GET /api/machines`` — all connected machines;
 * ``GET /api/machines/{id}/flows`` — flows on one machine;
+* ``GET|POST|DELETE /api/machines/{id}/projects`` — that machine's persistent
+  project registry (list from the mirror; add / remove via a daemon command);
 * ``GET /api/flows/{id}`` — one flow's detail;
 * ``POST /api/flows`` — publish a new task (routed to a daemon as SPAWN_FLOW);
 * ``POST /api/flows/{id}/respond`` — answer a flow's pending interjection/call;
@@ -65,6 +67,7 @@ from .ws import (
     IndexRefreshRegistry,
     InterjectionEventTracker,
     IssueCommandRegistry,
+    ProjectCommandRegistry,
     UiHub,
     _PullAbandoned,
     broadcast_index_refresh,
@@ -131,6 +134,36 @@ HISTORY_INDEX_REFRESH_TIMEOUT = 2.0
 #: the daemon to acknowledge the ``MSG_ISSUE_COMMAND`` before giving up.
 #: Issue operations are lightweight YAML I/O so a short timeout suffices.
 ISSUE_COMMAND_TIMEOUT = 10.0
+
+#: Seconds a project-registry write endpoint (add / remove a project root) waits
+#: for the daemon to acknowledge the ``MSG_PROJECT_COMMAND``. The daemon-side
+#: work is one ``stat`` plus a small-file rewrite, so a short window suffices.
+#: Unlike the issue leg there is deliberately NO reconcile fallback on timeout:
+#: the registry mirror only refreshes on the next STATUS_UPDATE, and reporting
+#: a guessed success for a registry write the daemon may never have applied is
+#: worse than a visible 504 the operator can simply retry.
+PROJECT_COMMAND_TIMEOUT = 10.0
+
+#: Maps the daemon's stable ``error_code`` (see
+#: :func:`~se3.daemon.protocol.make_project_result`) onto an HTTP status. The
+#: code — not the status — is what the frontend localizes, so this table only
+#: has to make the response *semantically* honest to a non-browser client.
+PROJECT_ERROR_STATUS: Dict[str, int] = {
+    "not_found": 404,
+    "not_registered": 404,
+    "not_a_directory": 422,
+    "invalid_path": 422,
+    "live_flow": 409,
+    # The request was well-formed and the entry does exist — the daemon's own
+    # registry file could not be rewritten. 500 (not 4xx) so a non-browser
+    # client reads it as "retry", matching the operator-facing copy.
+    "registry_error": 500,
+}
+
+#: Status for a daemon failure whose ``error_code`` this server revision does
+#: not know (a newer daemon, or a bare ``ok=false`` with no code). 400 says
+#: "the request did not succeed" without claiming a specific cause.
+PROJECT_ERROR_STATUS_DEFAULT = 400
 
 #: Seconds an issue/call detail endpoint waits for the owning daemon to answer
 #: the on-demand ``MSG_DETAIL_REQUEST`` with the full text. A single issue YAML
@@ -339,6 +372,17 @@ class ReopenIssueRequest(BaseModel):
     project_root: str = ""
 
 
+class AddProjectRequest(BaseModel):
+    """Body of ``POST /api/machines/{id}/projects`` — register a project root.
+
+    *project_root* is an absolute path **on the daemon's machine**, so the
+    server can only reject the obviously-malformed shapes; existence and
+    directory-ness are the daemon's to check.
+    """
+
+    project_root: str
+
+
 def _scope_for(identity: OwnerIdentity) -> Optional[str]:
     """Map an authenticated identity to the owner-scoping value for queries.
 
@@ -412,6 +456,7 @@ def create_app(
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
     issue_command_registry = IssueCommandRegistry()
+    project_command_registry = ProjectCommandRegistry()
     detail_registry = DetailRequestRegistry()
     interjection_tracker = InterjectionEventTracker()
 
@@ -443,6 +488,7 @@ def create_app(
     app.state.history_registry = history_registry
     app.state.index_refresh_registry = index_refresh_registry
     app.state.issue_command_registry = issue_command_registry
+    app.state.project_command_registry = project_command_registry
     app.state.detail_registry = detail_registry
     app.state.wire_metrics = wire_metrics
     app.state.interjection_tracker = interjection_tracker
@@ -482,6 +528,7 @@ def create_app(
             identity=identity,
             issue_registry=issue_command_registry,
             detail_registry=detail_registry,
+            project_registry=project_command_registry,
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
@@ -620,6 +667,177 @@ def create_app(
         if flows is None:
             raise HTTPException(status_code=404, detail=f"machine '{machine_id}' not found")
         return {"machine_id": machine_id, "flows": flows, "count": len(flows)}
+
+    # -- project registry management ---------------------------------------
+
+    async def _owned_machine_or_404(machine_id: str, identity_: OwnerIdentity) -> dict:
+        """Resolve *machine_id* within the caller's trust domain or raise 404.
+
+        A machine belonging to another owner is reported exactly like an unknown
+        one, so these endpoints cannot be used to probe whether a given machine
+        id exists on the server.
+        """
+        owned = await state.get_machine(machine_id, owner=_scope_for(identity_))
+        if owned is None:
+            raise HTTPException(
+                status_code=404, detail=f"machine '{machine_id}' not found"
+            )
+        return owned
+
+    def _validated_project_root(raw: str) -> str:
+        """Reject the shapes the server can judge without seeing the filesystem."""
+        project_root = (raw or "").strip()
+        if not project_root:
+            raise HTTPException(
+                status_code=422, detail="'project_root' must not be empty"
+            )
+        if not os.path.isabs(project_root):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "'project_root' must be an absolute path, "
+                    f"got {project_root!r}"
+                ),
+            )
+        return project_root
+
+    async def _send_project_command(
+        machine_id: str, message: protocol.Message, request_id: str
+    ) -> dict:
+        """Dispatch a project-registry command and await the daemon's ack.
+
+        Returns the daemon's :data:`~se3.daemon.protocol.MSG_PROJECT_RESULT`
+        payload. Raises 503 when the frame could not be delivered and 504 when
+        the ack does not arrive inside :data:`PROJECT_COMMAND_TIMEOUT` — in both
+        cases the parked future is discarded so a late ack cannot accumulate
+        waiters.
+        """
+        fut = project_command_registry.register(request_id)
+        sent = await manager.send_to(machine_id, message)
+        if not sent:
+            project_command_registry.discard(request_id, fut)
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver PROJECT_COMMAND to '{machine_id}'",
+            )
+        try:
+            return await asyncio.wait_for(fut, timeout=PROJECT_COMMAND_TIMEOUT)
+        except asyncio.TimeoutError:
+            project_command_registry.discard(request_id, fut)
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "timed out waiting for project command result from "
+                    f"'{machine_id}'"
+                ),
+            )
+
+    def _project_failure(result: dict, fallback: str) -> JSONResponse:
+        """Render a daemon ``ok=false`` as a status-mapped error response.
+
+        The body keeps ``error_code`` at the top level (not nested under
+        ``detail``) because it is the frontend's localization key — burying it
+        in a prose field would force the UI back onto the daemon's untranslated
+        English.
+        """
+        code = str(result.get("error_code") or "")
+        status = PROJECT_ERROR_STATUS.get(code, PROJECT_ERROR_STATUS_DEFAULT)
+        return JSONResponse(
+            status_code=status,
+            content={
+                "detail": str(result.get("error") or fallback),
+                "error_code": code,
+            },
+        )
+
+    @app.get("/api/machines/{machine_id}/projects")
+    async def machine_projects(
+        machine_id: str, identity_: OwnerIdentity = Depends(require_owner)
+    ) -> dict:
+        """List one machine's persistently-registered project roots.
+
+        Served straight from the STATUS_UPDATE mirror — no downlink frame, so
+        the dialog opens instantly and works even while the daemon is offline
+        (showing the last known registry). Freshness comes from the fast push
+        the daemon fires after every registry write.
+        """
+        owned = await _owned_machine_or_404(machine_id, identity_)
+        projects = owned.get("registered_projects") or []
+        return {
+            "machine_id": machine_id,
+            "projects": projects,
+            "count": len(projects),
+        }
+
+    @app.post("/api/machines/{machine_id}/projects")
+    async def add_machine_project(
+        machine_id: str,
+        req: AddProjectRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        """Manually register a project root on one machine's daemon."""
+        project_root = _validated_project_root(req.project_root)
+        await _owned_machine_or_404(machine_id, identity_)
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503, detail=f"machine '{machine_id}' is not connected"
+            )
+        request_id = uuid.uuid4().hex
+        result = await _send_project_command(
+            machine_id,
+            protocol.make_project_command(
+                protocol.PROJECT_OP_ADD, project_root, request_id=request_id
+            ),
+            request_id,
+        )
+        if not result.get("ok"):
+            return _project_failure(result, "project registration failed on daemon")
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": "registered",
+                "machine_id": machine_id,
+                # The daemon echoes the NORMALIZED root it actually stored
+                # (worktree-folded / realpath'd), which may differ from what the
+                # operator typed; fall back to the request when it does not.
+                "project_root": str(result.get("project_root") or project_root),
+            },
+        )
+
+    @app.delete("/api/machines/{machine_id}/projects")
+    async def remove_machine_project(
+        machine_id: str,
+        project_root: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        """Deregister a project root from one machine's daemon.
+
+        Registry-only: the project's on-disk data is never touched.
+        """
+        project_root = _validated_project_root(project_root)
+        await _owned_machine_or_404(machine_id, identity_)
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503, detail=f"machine '{machine_id}' is not connected"
+            )
+        request_id = uuid.uuid4().hex
+        result = await _send_project_command(
+            machine_id,
+            protocol.make_project_command(
+                protocol.PROJECT_OP_REMOVE, project_root, request_id=request_id
+            ),
+            request_id,
+        )
+        if not result.get("ok"):
+            return _project_failure(result, "project removal failed on daemon")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "removed",
+                "machine_id": machine_id,
+                "project_root": str(result.get("project_root") or project_root),
+            },
+        )
 
     @app.get("/api/flows/{flow_id}")
     async def flow_detail(

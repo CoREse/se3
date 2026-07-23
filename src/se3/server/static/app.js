@@ -34,6 +34,12 @@ const state = {
   // whitelist of non-sensitive fields; the break-glass subject is filtered
   // server-side and never appears here).
   users: [],
+  // Machine whose registered-project dialog is open (null when closed), the
+  // registry entries last rendered in it ([{path, exists, active}]), and the
+  // path awaiting the second stage of the remove confirmation.
+  projectMachineId: null,
+  projectEntries: [],
+  projectRemoveTarget: null,
 
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
@@ -652,6 +658,114 @@ function daemonKeyRowModel(key) {
     statusClass: revoked ? "revoked" : "active",
     createdAt: key.created_at || null,
   };
+}
+
+// View model for one row of the per-machine registered-project dialog. `entry`
+// is the {path, exists, active} shape the daemon publishes in its STATUS_UPDATE
+// snapshot (and that GET /api/machines/{id}/projects mirrors verbatim).
+//
+// The list is a faithful mirror of the daemon's registry FILE, not of the
+// filtered project universe: an entry whose directory has vanished is exactly
+// what the operator opened this dialog to clean up, so it is surfaced and
+// flagged rather than hidden. `exists` missing altogether (an older daemon that
+// predates the field) is deliberately read as "present" — flagging an entry
+// stale on absent evidence would invite deleting a live root.
+//
+// I18N-free by design (same rationale as daemonKeyRowModel): copy is injected
+// by the renderer through tf() at paint time, so these projections stay
+// deterministic in the pure tests and re-localize on a language switch.
+function projectRegistryRowModel(entry) {
+  entry = entry && typeof entry === "object" ? entry : {};
+  const path = typeof entry.path === "string" ? entry.path.trim() : "";
+  return {
+    path,
+    // Short label shown ahead of the full path; a worktree-shaped root folds
+    // back to "<project> (worktree)" like everywhere else in the console.
+    name: projectDisplayLabel(path),
+    stale: entry.exists === false,
+    active: Boolean(entry.active),
+    // Removal is offered for any real entry — including an ACTIVE one. The
+    // live-flow refusal is the daemon's call (it alone holds the authoritative
+    // supervisor view); "active" here only means the daemon is polling the
+    // root, which is not the same as a running flow, so pre-judging it here
+    // would hide a legitimate action behind a stale mirror.
+    canRemove: Boolean(path),
+  };
+}
+
+// Windows-style absolute prefixes ('C:\…', UNC '\\host\share'). The daemon is
+// the authority on what its own filesystem calls absolute (os.path.isabs), so
+// this front guard only rejects what is unambiguously relative — it must not
+// refuse a legitimate path just because this browser runs on another OS.
+const WINDOWS_ABS_RE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+
+// Build the POST body for a manual project registration from the raw input.
+// Returns a discriminated result rather than throwing so the caller can render
+// a localized message per rejection reason: {ok:true, body, projectRoot} or
+// {ok:false, reason:"empty"|"not_absolute"}. Pure.
+function buildAddProjectBody(input) {
+  const raw = typeof input === "string" ? input.trim() : "";
+  if (!raw) return { ok: false, reason: "empty" };
+  if (!raw.startsWith("/") && !WINDOWS_ABS_RE.test(raw)) {
+    return { ok: false, reason: "not_absolute" };
+  }
+  return { ok: true, reason: "", projectRoot: raw, body: { project_root: raw } };
+}
+
+// Stable daemon error_code → i18n key map for the project-registry commands.
+// The daemon deliberately answers with a machine-readable code instead of
+// prose so the user-visible copy can live in the language packs; an unknown
+// code (a newer daemon) falls back to the generic key rather than painting an
+// untranslated English string from the wire.
+const PROJECT_ERROR_KEYS = {
+  invalid_path: "projects.errInvalidPath",
+  not_found: "projects.errNotFound",
+  not_a_directory: "projects.errNotADirectory",
+  live_flow: "projects.errLiveFlow",
+  not_registered: "projects.errNotRegistered",
+  registry_error: "projects.errRegistryError",
+  invalid_operation: "projects.errInvalidOperation",
+  unsupported: "projects.errUnsupported",
+};
+
+function projectErrorKey(errorCode) {
+  const code = typeof errorCode === "string" ? errorCode.trim() : "";
+  return PROJECT_ERROR_KEYS[code] || "projects.errGeneric";
+}
+
+// Project-list transforms applied to the local entry array right after a write
+// the daemon has ACKed.
+//
+// WHY these exist instead of simply re-fetching: GET /projects is answered from
+// the server's STATUS_UPDATE mirror, and the daemon sends its PROJECT_RESULT
+// ack BEFORE the fast push that refreshes that mirror. A re-fetch issued on the
+// ack therefore normally repaints the pre-write registry — a just-added project
+// missing, a just-removed one back — next to a success toast. Projecting the
+// daemon's own echoed (normalized) root locally keeps the list truthful until
+// the fast push lands and repaints authoritatively.
+//
+// Both are pure and match the daemon's ordering (sorted by path) so the
+// optimistic paint and the snapshot that replaces it agree.
+function applyProjectAdded(entries, projectRoot) {
+  const path = typeof projectRoot === "string" ? projectRoot.trim() : "";
+  const rows = Array.isArray(entries) ? entries.slice() : [];
+  if (!path) return rows;
+  const at = rows.findIndex((e) => e && e.path === path);
+  // The daemon validated the directory and added it to its polled set, so both
+  // flags are known-true; an existing row is refreshed rather than duplicated
+  // (re-adding a stale entry is how an operator "revives" it).
+  const row = { path, exists: true, active: true };
+  if (at >= 0) rows[at] = row;
+  else rows.push(row);
+  rows.sort((a, b) => String((a && a.path) || "").localeCompare(String((b && b.path) || "")));
+  return rows;
+}
+
+function applyProjectRemoved(entries, projectRoot) {
+  const path = typeof projectRoot === "string" ? projectRoot.trim() : "";
+  const rows = Array.isArray(entries) ? entries.slice() : [];
+  if (!path) return rows;
+  return rows.filter((e) => !e || e.path !== path);
 }
 
 // View model for one user-management row. Normalizes the label / provider /
@@ -1518,6 +1632,11 @@ function applyMachines(machines) {
   renderMachines();
   renderFlows();
 
+  // Keep an open registered-project dialog in step with the snapshot: the
+  // daemon fires a fast push right after every registry write, so mirroring it
+  // here is what makes an add/remove land in the list promptly.
+  if (isModalOpen("project-modal")) syncProjectsFromSnapshot();
+
   // Refresh the issues list if the issues view is open — re-fetch from the
   // REST API so that daemon-side changes (new/closed/reopened issues) are
   // reflected promptly without waiting for a manual filter toggle.
@@ -2006,7 +2125,22 @@ function renderMachines() {
         ? tf("machines.flowCount", `${flowN} flow`, { n: flowN })
         : tf("machines.flowCountPlural", `${flowN} flows`, { n: flowN }));
 
-    li.append(dot, name, count);
+    // Registered-project dialog entry point. The registry is a per-daemon
+    // concept, so the machine row is its only honest anchor in this UI. The
+    // button's sole visible dependency is machine_id, which machinesSignature
+    // already carries — so the diff-aware skip above can never drop it: any
+    // rebuild emits it, and a skipped rebuild means the row (button included)
+    // is still the one that was painted.
+    const manage = el("button", "icon-btn machine-projects-btn", "🗂");
+    manage.type = "button";
+    manage.title = tf("projects.manage", "Manage registered projects");
+    manage.addEventListener("click", (e) => {
+      // The row itself selects the machine; the button must not do that too.
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+      openProjects(m.machine_id);
+    });
+
+    li.append(dot, name, count, manage);
     li.addEventListener("click", () => {
       state.selectedMachineId = m.machine_id;
       // Narrow screens switch to the Flows panel; inert on desktop.
@@ -14118,6 +14252,225 @@ async function revokeDaemonKey(keyId) {
 }
 
 // ---------------------------------------------------------------------------
+// Registered-project management panel (per machine)
+// ---------------------------------------------------------------------------
+//
+// Reads and writes take deliberately different routes. The LIST is served from
+// the server's STATUS_UPDATE mirror, so opening the dialog costs no daemon
+// round-trip and works while the daemon is offline (showing the last known
+// registry). The WRITES go down to the daemon as commands and are answered with
+// a stable error_code, which projectErrorKey() turns into a localized message.
+// Freshness after a write comes from the fast push the daemon fires once the
+// registry file is rewritten — applyMachines repaints an open dialog from it.
+
+function projectsUrl(machineId, query) {
+  const base = "/api/machines/" + encodeURIComponent(machineId) + "/projects";
+  return query ? base + "?" + query : base;
+}
+
+function openProjects(machineId) {
+  if (!machineId) return;
+  state.projectMachineId = machineId;
+  state.projectEntries = [];
+  state.projectRemoveTarget = null;
+  $("project-error").classList.add("hidden");
+  $("project-add-path").value = "";
+  $("project-modal").classList.remove("hidden");
+  loadProjects();
+}
+
+function closeProjects() {
+  $("project-modal").classList.add("hidden");
+  state.projectMachineId = null;
+  state.projectEntries = [];
+}
+
+async function loadProjects() {
+  const machineId = state.projectMachineId;
+  const listBox = $("project-list");
+  listBox.innerHTML = "";
+  listBox.appendChild(el("p", "empty", tf("projects.loading", "Loading projects…")));
+  if (!machineId) {
+    state.projectEntries = [];
+    renderProjects();
+    return;
+  }
+  try {
+    const resp = await authedFetch(projectsUrl(machineId));
+    if (!resp.ok) {
+      state.projectEntries = [];
+      showFormError($("project-error"),
+        tf("projects.errLoad", "Could not load the project list."));
+      renderProjects();
+      return;
+    }
+    const data = await resp.json().catch(() => ({ projects: [] }));
+    state.projectEntries = Array.isArray(data.projects) ? data.projects : [];
+  } catch (_) {
+    state.projectEntries = [];
+    showFormError($("project-error"),
+      tf("projects.errLoad", "Could not load the project list."));
+  }
+  renderProjects();
+}
+
+function renderProjects() {
+  const listBox = $("project-list");
+  listBox.innerHTML = "";
+  if (!state.projectEntries.length) {
+    listBox.appendChild(el("p", "empty", tf("projects.empty", "No registered projects.")));
+    return;
+  }
+  for (const entry of state.projectEntries) {
+    const model = projectRegistryRowModel(entry);
+    if (!model.path) continue;
+    const row = el("div", "project-row" + (model.stale ? " stale" : ""));
+    const main = el("div", "project-row-main");
+    main.append(
+      el("span", "project-row-name", model.name || model.path),
+      el("span", "project-row-path", model.path),
+    );
+    row.appendChild(main);
+    if (model.active) {
+      row.appendChild(el("span", "project-row-badge project-badge-active",
+        tf("projects.active", "active")));
+    }
+    if (model.stale) {
+      row.appendChild(el("span", "project-row-badge project-badge-stale",
+        tf("projects.stale", "missing")));
+    }
+    if (model.canRemove) {
+      const btn = el("button", "ghost-btn project-remove-btn", tf("projects.remove", "Remove"));
+      btn.type = "button";
+      // First click only opens the confirmation — no request leaves here.
+      btn.addEventListener("click", () => confirmRemoveProject(model.path));
+      row.appendChild(btn);
+    }
+    listBox.appendChild(row);
+  }
+}
+
+// Repaint an open dialog from the freshly-arrived STATUS_UPDATE snapshot. This
+// is what makes an add/remove (and any daemon-side registration) show up
+// without a reload: the daemon fast-pushes right after every registry write.
+function syncProjectsFromSnapshot() {
+  const machineId = state.projectMachineId;
+  if (!machineId) return;
+  const machine = state.machines.find((m) => m.machine_id === machineId);
+  const projects = machine && Array.isArray(machine.registered_projects)
+    ? machine.registered_projects
+    : [];
+  state.projectEntries = projects;
+  renderProjects();
+}
+
+// Turn a failed project-command response into localized copy. The server keeps
+// `error_code` at the top level of the body precisely so the UI never has to
+// display the daemon's untranslated English; that prose is used only as the
+// per-key fallback (and for a response carrying no code at all).
+async function projectFailureMessage(resp) {
+  const detail = await resp.json().catch(() => ({}));
+  const prose = (detail && typeof detail.detail === "string" && detail.detail) || "";
+  const code = (detail && typeof detail.error_code === "string" && detail.error_code) || "";
+  if (code) {
+    return tf(projectErrorKey(code), prose || code);
+  }
+  return prose || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
+}
+
+async function addProject(event) {
+  if (event && typeof event.preventDefault === "function") event.preventDefault();
+  const errBox = $("project-error");
+  errBox.classList.add("hidden");
+  const machineId = state.projectMachineId;
+  if (!machineId) return;
+  const built = buildAddProjectBody($("project-add-path").value);
+  if (!built.ok) {
+    showFormError(errBox, built.reason === "not_absolute"
+      ? tf("projects.errNotAbsolute", "Enter an absolute path.")
+      : tf("projects.errEmptyPath", "Enter a project path."));
+    return;
+  }
+  const submit = $("project-add-submit");
+  submit.disabled = true;
+  try {
+    const resp = await authedFetch(projectsUrl(machineId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(built.body),
+    });
+    if (resp.status === 201) {
+      $("project-add-path").value = "";
+      showToast("success", tf("toast.projectAdded", "Project registered."));
+      // Paint the daemon's echoed normalized root locally; re-fetching here
+      // would read the not-yet-refreshed mirror (see applyProjectAdded).
+      const body = await resp.json().catch(() => ({}));
+      const stored = (body && typeof body.project_root === "string" && body.project_root)
+        || built.projectRoot;
+      state.projectEntries = applyProjectAdded(state.projectEntries, stored);
+      renderProjects();
+    } else {
+      showFormError(errBox, await projectFailureMessage(resp));
+    }
+  } catch (_) {
+    showFormError(errBox,
+      tf("projects.errAddNetwork", "Network error — could not register the project."));
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function confirmRemoveProject(projectRoot) {
+  if (!projectRoot) return;
+  state.projectRemoveTarget = projectRoot;
+  $("project-remove-error").classList.add("hidden");
+  $("project-remove-path").textContent = projectRoot;
+  $("project-remove-modal").classList.remove("hidden");
+}
+
+function closeRemoveProject() {
+  $("project-remove-modal").classList.add("hidden");
+  state.projectRemoveTarget = null;
+}
+
+async function removeProject() {
+  const machineId = state.projectMachineId;
+  const projectRoot = state.projectRemoveTarget;
+  const errBox = $("project-remove-error");
+  errBox.classList.add("hidden");
+  if (!machineId || !projectRoot) return;
+  const confirmBtn = $("project-remove-confirm");
+  confirmBtn.disabled = true;
+  try {
+    const resp = await authedFetch(
+      projectsUrl(machineId, "project_root=" + encodeURIComponent(projectRoot)),
+      { method: "DELETE" },
+    );
+    if (resp.ok) {
+      closeRemoveProject();
+      showToast("success", tf("toast.projectRemoved", "Project deregistered."));
+      // Drop the row locally instead of re-fetching the still-stale mirror
+      // (see applyProjectRemoved). Both the clicked spelling and the daemon's
+      // echoed normalized root are dropped — a worktree spelling deregisters
+      // its owning main root, so the two can differ.
+      const body = await resp.json().catch(() => ({}));
+      const stored = (body && typeof body.project_root === "string" && body.project_root) || "";
+      let rows = applyProjectRemoved(state.projectEntries, projectRoot);
+      if (stored && stored !== projectRoot) rows = applyProjectRemoved(rows, stored);
+      state.projectEntries = rows;
+      renderProjects();
+    } else {
+      showFormError(errBox, await projectFailureMessage(resp));
+    }
+  } catch (_) {
+    showFormError(errBox,
+      tf("projects.errRemoveNetwork", "Network error — could not remove the project."));
+  } finally {
+    confirmBtn.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // User-management panel (admin only)
 // ---------------------------------------------------------------------------
 
@@ -14376,6 +14729,8 @@ function rerenderDynamic() {
   // Open daemon-key / user-management modals: both render from cached state.
   if (isModalOpen("keys-modal")) call(renderDaemonKeys);
   if (isModalOpen("users-modal")) call(renderUsers);
+  // Open registered-project dialog: rows render from cached snapshot entries.
+  if (isModalOpen("project-modal")) call(renderProjects);
   // Confirmation/edit modals carry JS-set copy that reflects their current mode
   // (edit-vs-create title, flow-specific end message, action/launch text). The
   // static-translation pass in setLang has just repainted their data-i18n nodes
@@ -14660,6 +15015,13 @@ function init() {
   $("keys-close").addEventListener("click", closeKeys);
   $("keys-create-form").addEventListener("submit", createDaemonKey);
 
+  // Registered-project management panel (opened from a machine row).
+  $("project-close").addEventListener("click", closeProjects);
+  $("project-add-form").addEventListener("submit", addProject);
+  $("project-remove-close").addEventListener("click", closeRemoveProject);
+  $("project-remove-cancel").addEventListener("click", closeRemoveProject);
+  $("project-remove-confirm").addEventListener("click", removeProject);
+
   // User-management panel (admin only).
   $("users-btn").addEventListener("click", openUsers);
   $("users-close").addEventListener("click", closeUsers);
@@ -14939,6 +15301,22 @@ if (typeof module !== "undefined" && module.exports) {
     canOwnerControlMachine,
     visibleMachinesForOwner,
     daemonKeyRowModel,
+    // Registered-project management (G4) — pure helpers plus the DOM-stub
+    // renderer, exposed for tests/frontend/project_registry.test.mjs.
+    projectRegistryRowModel,
+    buildAddProjectBody,
+    projectErrorKey,
+    applyProjectAdded,
+    applyProjectRemoved,
+    renderProjects,
+    openProjects,
+    closeProjects,
+    loadProjects,
+    addProject,
+    confirmRemoveProject,
+    closeRemoveProject,
+    removeProject,
+    syncProjectsFromSnapshot,
     // User-management row model (G3) — exposed for the DOM-free tests in
     // tests/frontend/user_mgmt.test.mjs.
     userRowModel,

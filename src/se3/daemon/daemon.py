@@ -28,12 +28,13 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
-from .aggregator import DaemonAggregator, MachineStatus
+from .aggregator import DaemonAggregator, MachineStatus, ProjectRegistryError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; runtime import is lazy in _gc_once
     from ..engine.merge.worktree_gc import WorktreeGCReport
@@ -58,6 +59,19 @@ LOG_FILENAME = "daemon.log"
 #: and the New Task project dropdown stay populated even when no ``se3 run``
 #: process is currently live — and across daemon restarts.
 PROJECT_ROOTS_FILENAME = "project_roots.json"
+
+#: Serializes every read-modify-write of the project-roots registry file
+#: (:func:`_append_project_root`, :func:`_remove_project_root`,
+#: :func:`_sanitize_project_roots`).
+#:
+#: WHY: each of those is a non-atomic read→rewrite of the whole file, and they
+#: run on *different* threads — the poll loop appends discovered roots from an
+#: ``asyncio.to_thread`` worker while an operator-triggered removal runs from
+#: another. Interleaved, the removal's rewrite can be clobbered by an append
+#: that started from the pre-removal snapshot, resurrecting the entry the
+#: operator just deleted. The lock is held only across one small read + atomic
+#: rename, so there is no meaningful contention cost.
+_REGISTRY_LOCK = threading.Lock()
 
 #: Idle-gear cadence (seconds) for the aggregation poll loop, used when the
 #: outbound client's server (revision >= 4) reports zero browser viewers:
@@ -176,6 +190,29 @@ class DaemonConfig:
         return self.pid_dir / PROJECT_ROOTS_FILENAME
 
 
+class ProjectCommandError(Exception):
+    """A project-registry management request was rejected.
+
+    Carries a stable machine-readable *code* alongside the human message.
+
+    WHY the code: the rejection reason has to reach the WebUI, whose user-facing
+    text must be rendered from a localized key. Shipping only the English
+    message would put untranslatable text on screen; the code is the contract
+    the frontend maps to a key (the message stays as a diagnostic fallback).
+
+    Codes: ``invalid_path`` (not absolute / unresolvable / filesystem root),
+    ``not_found``, ``not_a_directory``, ``live_flow`` (removal refused while a
+    flow runs there), ``not_registered``, ``registry_error`` (the registry file
+    itself could not be rewritten — a retryable machine fault, deliberately
+    distinct from ``not_registered`` so the operator is not told a still-present
+    entry is already gone).
+    """
+
+    def __init__(self, code: str, message: str = "") -> None:
+        super().__init__(message or code)
+        self.code = code
+
+
 class Daemon:
     """The resident control-plane process."""
 
@@ -198,6 +235,12 @@ class Daemon:
             poll_interval=self.config.poll_interval,
             registry_load=lambda: _read_project_roots(registry_file),
             registry_persist=lambda root: _append_project_root(registry_file, root),
+            # Raw (unfiltered) read + durable delete: the management-dialog
+            # surface. It must see the entries the existence filter hides, and
+            # be able to erase them — see DaemonAggregator.registered_projects
+            # and unregister_project_root.
+            registry_load_raw=lambda: _read_project_roots_raw(registry_file),
+            registry_remove=lambda root: _remove_project_root(registry_file, root),
             # Live-process roots for the RUNNING-flow resumable gate. Computed
             # from the same ``supervisor.flows`` + ``is_alive`` view that
             # ``request_resume`` uses for its double-spawn refusal, so the Resume
@@ -433,6 +476,110 @@ class Daemon:
         )
         return spawned
 
+    def request_add_project(self, project_root: str) -> str:
+        """Manually register *project_root* (entry point for remote requests).
+
+        Validates that the path is absolute, is not the filesystem root, exists,
+        and is a directory, then routes it through the aggregator's single
+        registration seam so the worktree→main folding, realpath dedup and
+        registry write-through all apply unchanged. Returns the normalized path
+        that was actually registered, for the caller's receipt.
+
+        The target need not already be an se3 project: starting a task there
+        goes through the existing ensure/init chain, which initializes it.
+
+        The filesystem-root refusal is a foot-gun guard, not a permission check:
+        registering ``/`` would point the history enumeration at a whole-disk
+        walk.
+
+        Raises :class:`ProjectCommandError` with a stable ``code`` the WebUI
+        renders as a localized message.
+        """
+        raw = str(project_root or "").strip()
+        if not raw or not os.path.isabs(raw):
+            raise ProjectCommandError(
+                "invalid_path", f"Project root must be an absolute path: {raw!r}"
+            )
+        main_root = resolve_worktree_main_root(raw)
+        try:
+            resolved = os.path.realpath(str(main_root if main_root is not None else raw))
+        except OSError:  # pragma: no cover - defensive
+            raise ProjectCommandError("invalid_path", f"Unresolvable path: {raw!r}")
+        if not resolved or os.path.dirname(resolved) == resolved:
+            raise ProjectCommandError(
+                "invalid_path", f"Refusing to register the filesystem root: {resolved}"
+            )
+        if not os.path.exists(resolved):
+            raise ProjectCommandError("not_found", f"Path does not exist: {resolved}")
+        if not os.path.isdir(resolved):
+            raise ProjectCommandError(
+                "not_a_directory", f"Path is not a directory: {resolved}"
+            )
+        self.aggregator.add_project_root(resolved)
+        logger.info("Registered project root %s on operator request", resolved)
+        return resolved
+
+    def request_remove_project(self, project_root: str) -> str:
+        """Deregister *project_root* (entry point for remote requests).
+
+        Removal touches the registration only — nothing under the project
+        directory (``se3/`` history, state, issues) is ever deleted — and
+        establishes no blacklist: a later flow in that directory, or a manual
+        re-add, registers it again as normal.
+
+        A root with a live ``se3 run`` process is refused (``live_flow``). WHY:
+        the poll loop re-registers every discovered flow's root within seconds,
+        so deleting it here would appear to succeed and then silently undo
+        itself. ``_live_project_roots`` is the same supervisor + ``is_alive``
+        view ``request_resume``'s double-spawn guard uses, and it is already
+        worktree→main folded, so a flow running inside an isolation worktree
+        protects its main root under the same key ``add_project_root`` writes.
+
+        Returns the normalized path that was deregistered. Raises
+        :class:`ProjectCommandError` (``invalid_path`` / ``live_flow`` /
+        ``not_registered`` / ``registry_error``).
+        """
+        raw = str(project_root or "").strip()
+        if not raw or not os.path.isabs(raw):
+            raise ProjectCommandError(
+                "invalid_path", f"Project root must be an absolute path: {raw!r}"
+            )
+        main_root = resolve_worktree_main_root(raw)
+        try:
+            resolved = os.path.realpath(str(main_root if main_root is not None else raw))
+        except OSError:  # pragma: no cover - defensive
+            raise ProjectCommandError("invalid_path", f"Unresolvable path: {raw!r}")
+        if not resolved:
+            raise ProjectCommandError("invalid_path", f"Unresolvable path: {raw!r}")
+        live = set()
+        for entry in self._live_project_roots():
+            try:
+                live.add(os.path.realpath(str(entry)))
+            except OSError:  # pragma: no cover - defensive
+                live.add(str(entry))
+        if resolved in live:
+            raise ProjectCommandError(
+                "live_flow",
+                f"Project {resolved} has a running flow; stop it before removing",
+            )
+        try:
+            removed = self.aggregator.unregister_project_root(resolved)
+        except ProjectRegistryError as exc:
+            # A registry rewrite that failed (read-only daemon dir, full disk)
+            # must NOT surface as "not registered": the entry is still there and
+            # the operator's correct move is to fix the machine and retry, not
+            # to conclude it is already gone.
+            raise ProjectCommandError(
+                "registry_error",
+                f"Could not update the project registry for {resolved}: {exc}",
+            ) from exc
+        if not removed:
+            raise ProjectCommandError(
+                "not_registered", f"Project is not registered: {resolved}"
+            )
+        logger.info("Deregistered project root %s on operator request", resolved)
+        return resolved
+
     def _live_project_roots(self) -> Set[str]:
         """Return the set of project roots with a live ``se3 run`` process.
 
@@ -533,6 +680,7 @@ class Daemon:
             resume_handler=self._handle_resume_request,
             end_session_handler=self._handle_end_session_request,
             respond_handler=self._handle_respond_request,
+            project_handler=self._handle_project_request,
             history_provider=self.history_reader,
             calls_signature_provider=self.aggregator.pending_calls_signature,
             history_poll_interval=self.config.history_poll_interval,
@@ -583,6 +731,21 @@ class Daemon:
             flow_id,
             project_root=project_root or None,
             reason=reason or "user terminated",
+        )
+
+    def _handle_project_request(self, operation: str, project_root: str) -> str:
+        """Adapt a server PROJECT_COMMAND into a registry request.
+
+        Returns the normalized path that was actually registered / deregistered
+        so the operator's receipt shows what really landed (a worktree copy
+        folds back to its main root, symlinks resolve), not what was typed.
+        """
+        if operation == "add":
+            return self.request_add_project(project_root)
+        if operation == "remove":
+            return self.request_remove_project(project_root)
+        raise ProjectCommandError(
+            "invalid_operation", f"Unknown project operation: {operation!r}"
         )
 
     def _handle_ensure_request(self, project_root: str) -> Any:
@@ -1092,15 +1255,64 @@ def _append_project_root(path: Path, root: object) -> None:
     # persistent list that the read-side / sanitize self-heal exists to keep clean.
     if not os.path.exists(resolved):
         return
-    existing = _read_project_roots_raw(path)
-    # Prune since-deleted roots from the persisted set so the rewrite triggered
-    # by this new root also erases stale entries, rather than carrying them
-    # forward untouched until the next startup sanitize pass.
-    live = [r for r in existing if os.path.exists(r)]
-    if resolved in live:
-        return
-    live.append(resolved)
-    _atomic_write_json(path, {"project_roots": sorted(set(live))})
+    with _REGISTRY_LOCK:
+        existing = _read_project_roots_raw(path)
+        # Prune since-deleted roots from the persisted set so the rewrite
+        # triggered by this new root also erases stale entries, rather than
+        # carrying them forward untouched until the next startup sanitize pass.
+        live = [r for r in existing if os.path.exists(r)]
+        if resolved in live:
+            return
+        live.append(resolved)
+        _atomic_write_json(path, {"project_roots": sorted(set(live))})
+
+
+def _remove_project_root(path: Path, root: object) -> bool:
+    """Delete *root* from the registry file at *path*; the inverse of append.
+
+    Shares :func:`_append_project_root`'s normalization exactly — a worktree
+    isolation copy (``<main>/se3/worktrees/<name>``) folds back to its owning
+    ``<main>``, then ``realpath`` canonicalizes symlinked / relative spellings —
+    so a root can be removed through any spelling it could have been added
+    through. Persisted entries are compared the same way, so an alias entry left
+    by an older daemon (or hand-edited in) still matches.
+
+    Matching is done against the *raw* registry (not the existence-filtered
+    read) because a stale entry whose directory is gone is exactly what an
+    operator-driven removal usually targets.
+
+    Returns whether an entry was actually removed. A miss (including a missing /
+    corrupt registry, which reads as empty) writes nothing at all, leaving the
+    file byte-identical.
+    """
+    main_root = resolve_worktree_main_root(root)
+    if main_root is not None:
+        root = main_root
+    try:
+        resolved = os.path.realpath(str(root))
+    except OSError:  # pragma: no cover - defensive
+        return False
+    if not resolved:
+        return False
+    with _REGISTRY_LOCK:
+        existing = _read_project_roots_raw(path)
+        if not existing:
+            return False
+        kept: List[str] = []
+        removed = False
+        for entry in existing:
+            try:
+                entry_key = os.path.realpath(entry)
+            except OSError:  # pragma: no cover - defensive
+                entry_key = entry
+            if entry_key == resolved:
+                removed = True
+                continue
+            kept.append(entry)
+        if not removed:
+            return False
+        _atomic_write_json(path, {"project_roots": sorted(set(kept))})
+    return True
 
 
 def _sanitize_project_roots(path: Path) -> None:
@@ -1133,27 +1345,29 @@ def _sanitize_project_roots(path: Path) -> None:
     and a write failure is logged, never propagated — sanitation must never
     block daemon startup.
     """
-    try:
-        existing = _read_project_roots_raw(path)
-    except Exception:  # pragma: no cover - defensive
-        return
-    if not existing:
-        return
-    cleaned = [
-        r for r in existing if not is_worktree_copy_root(r) and os.path.exists(r)
-    ]
-    if len(cleaned) == len(existing):
-        # No stale entries — leave the file untouched (no needless write).
-        return
-    try:
-        _atomic_write_json(path, {"project_roots": sorted(set(cleaned))})
-        logger.info(
-            "Sanitized project-roots registry: removed %d stale entr%s",
-            len(existing) - len(cleaned),
-            "y" if len(existing) - len(cleaned) == 1 else "ies",
-        )
-    except OSError:  # pragma: no cover - defensive
-        logger.debug("Failed to rewrite sanitized project roots", exc_info=True)
+    with _REGISTRY_LOCK:
+        try:
+            existing = _read_project_roots_raw(path)
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not existing:
+            return
+        cleaned = [
+            r for r in existing if not is_worktree_copy_root(r) and os.path.exists(r)
+        ]
+        if len(cleaned) == len(existing):
+            # No stale entries — leave the file untouched (no needless write).
+            return
+        try:
+            _atomic_write_json(path, {"project_roots": sorted(set(cleaned))})
+        except OSError:  # pragma: no cover - defensive
+            logger.debug("Failed to rewrite sanitized project roots", exc_info=True)
+            return
+    logger.info(
+        "Sanitized project-roots registry: removed %d stale entr%s",
+        len(existing) - len(cleaned),
+        "y" if len(existing) - len(cleaned) == 1 else "ies",
+    )
 
 
 def start_daemon(

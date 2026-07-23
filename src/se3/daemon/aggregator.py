@@ -249,6 +249,13 @@ class MachineStatus:
     pending_calls: List[PendingCall] = field(default_factory=list)
     project_roots: List[str] = field(default_factory=list)
     issues: List[IssueSnapshot] = field(default_factory=list)
+    # The persistent project-root registry mirrored for the WebUI's project
+    # management dialog: ``[{"path", "exists", "active"}, ...]``. Distinct from
+    # ``project_roots`` (the merged active ∪ registry ∪ disk-history *view*
+    # driving the New Task dropdown), which can neither tell "registered" from
+    # "merely has history on disk" nor surface a stale entry whose directory is
+    # gone — the two things the management dialog exists to act on.
+    registered_projects: List[Dict[str, Any]] = field(default_factory=list)
     generated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, object]:
@@ -265,8 +272,27 @@ class MachineStatus:
             "pending_calls": [c.to_dict(clip_prompt=True) for c in self.pending_calls],
             "project_roots": list(self.project_roots),
             "issues": [i.to_dict() for i in self.issues],
+            # WHY: kept to the three keys the dialog actually renders. This list
+            # rides every STATUS_UPDATE, so any per-entry field added here is
+            # paid on every push for every machine — richer per-project detail
+            # belongs behind an on-demand fetch, not in the snapshot.
+            "registered_projects": [dict(p) for p in self.registered_projects],
             "generated_at": self.generated_at,
         }
+
+
+class ProjectRegistryError(RuntimeError):
+    """The durable project registry could not be rewritten.
+
+    WHY this is *not* swallowed like ``registry_persist`` failures: a failed
+    persist is self-healing (the poll loop re-adds the root every tick, so the
+    next attempt writes it), but a failed *delete* has no retry driver — and the
+    caller cannot tell it apart from "there was nothing to delete" if the seam
+    just returns ``False``. Reporting a read-only / full daemon dir as
+    "not registered" tells the operator the entry is already gone while it is
+    still in the file, so they stop retrying. A distinct exception keeps the two
+    conditions distinguishable all the way up to the WebUI message.
+    """
 
 
 def _stable_machine_id() -> str:
@@ -284,6 +310,8 @@ class DaemonAggregator:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         registry_load: Optional[Callable[[], Iterable[str]]] = None,
         registry_persist: Optional[Callable[[str], None]] = None,
+        registry_load_raw: Optional[Callable[[], Iterable[str]]] = None,
+        registry_remove: Optional[Callable[[str], bool]] = None,
         live_roots_provider: Optional[Callable[[], Iterable[str]]] = None,
     ) -> None:
         """Create the aggregator.
@@ -299,6 +327,16 @@ class DaemonAggregator:
                 one project root. Wired together with *registry_load* it makes
                 :meth:`add_project_root` write through to disk so the history
                 index and New Task dropdown survive a daemon with no live flow.
+            registry_load_raw: Optional zero-arg callable returning the *raw*
+                persisted roots — no existence filtering. Feeds
+                :meth:`registered_projects`, which must show a stale entry
+                (directory deleted) so the operator can remove it; the filtered
+                ``registry_load`` view hides exactly those entries.
+            registry_remove: Optional single-arg callable that durably deletes
+                one project root from the registry, returning whether an entry
+                was actually removed. Wired together with *registry_load_raw* it
+                makes :meth:`unregister_project_root` a full write-through
+                deletion seam (the mirror of ``registry_persist``).
             live_roots_provider: Optional zero-arg callable returning the set of
                 project roots that currently have a *live* ``se3 run`` process,
                 as seen by the daemon supervisor. When supplied it is consulted
@@ -323,6 +361,8 @@ class DaemonAggregator:
         self._persisted_roots: Set[Path] = set()
         self._registry_load = registry_load
         self._registry_persist = registry_persist
+        self._registry_load_raw = registry_load_raw
+        self._registry_remove = registry_remove
         self._live_roots_provider = live_roots_provider
         # engine.json mtime per project root, for change detection.
         self._mtimes: Dict[str, float] = {}
@@ -426,9 +466,113 @@ class DaemonAggregator:
                 self._persisted_roots.add(resolved)
 
     def remove_project_root(self, path: object) -> None:
-        """Stop polling *path*."""
+        """Stop polling *path* (in-memory only; the registry file is untouched).
+
+        Deliberately *not* the deletion counterpart of :meth:`add_project_root`:
+        this only drops the root from the polled set, and a later poll-loop
+        rediscovery legitimately re-adds it. Durable deregistration is
+        :meth:`unregister_project_root`.
+        """
         self._project_roots.discard(Path(path).resolve())
         self._invalidate_hist_roots_cache()
+
+    def registered_projects(self) -> List[Dict[str, Any]]:
+        """Return the registration view backing the WebUI project dialog.
+
+        Emits one ``{"path", "exists", "active"}`` entry per known registration,
+        sorted by path, over the union of the *raw* registry (``registry_load_raw``)
+        and the in-memory active set:
+
+        * ``exists`` — whether the directory is still on disk. WHY the raw
+          registry rather than the existence-filtered ``registry_load``: a stale
+          entry whose directory was deleted is precisely what the operator opens
+          this dialog to remove, and the filtered view drops it before it can be
+          seen (the file keeps carrying it until some unrelated write prunes it).
+        * ``active`` — whether the root is in the polled active set, which also
+          covers a root registered this process lifetime whose persist has not
+          landed yet.
+
+        With no ``registry_load_raw`` callback (legacy construction) this
+        degrades to the active set alone. A failing callback is logged and
+        treated as an empty registry — the same best-effort contract as
+        ``registry_load`` / ``registry_persist``.
+        """
+        active: Set[str] = set()
+        # Snapshot the live set first: this may run in the offloaded snapshot
+        # worker thread while the event loop calls ``add_project_root``.
+        for path in list(self._project_roots):
+            active.add(_safe_realpath(path))
+        registered: Set[str] = set()
+        if self._registry_load_raw is not None:
+            try:
+                for entry in self._registry_load_raw() or []:
+                    if not entry:
+                        continue
+                    registered.add(_safe_realpath(entry))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("aggregator: registry_load_raw failed")
+        rows: List[Dict[str, Any]] = []
+        for path in sorted(registered | active):
+            try:
+                exists = os.path.exists(path)
+            except OSError:  # pragma: no cover - defensive
+                exists = False
+            rows.append(
+                {"path": path, "exists": exists, "active": path in active}
+            )
+        return rows
+
+    def unregister_project_root(self, path: object) -> bool:
+        """Durably deregister *path*; the mirror of :meth:`add_project_root`.
+
+        Applies the same worktree→main + realpath normalization as the add seam
+        (so a worktree spelling deregisters its owning main root), then drops the
+        root from the active set, from the persisted-roots bookkeeping, and from
+        the durable registry via the ``registry_remove`` callback.
+
+        WHY ``_persisted_roots`` must be cleared here: it is the "already written
+        through to disk" memo that keeps the poll loop from re-parsing
+        project_roots.json every tick. Leaving the root in it after deleting the
+        file entry would make a later *legitimate* re-registration (the operator
+        re-adds the project, or a new flow runs there) skip the disk write
+        entirely — the root would live in memory only and vanish again on the
+        next daemon restart.
+
+        Returns whether anything was actually removed (memory or disk). A
+        registry callback that *raises* is surfaced as
+        :class:`ProjectRegistryError` rather than folded into a ``False``
+        return: "the write failed" and "there was nothing registered" are
+        different answers for the operator, and only the former is worth
+        retrying.
+        """
+        main_root = resolve_worktree_main_root(path)
+        resolved = _safe_realpath(main_root if main_root is not None else path)
+        removed = False
+        # Durable delete first, memory second. WHY this order: if the file
+        # rewrite fails we leave the in-memory view untouched, so it still
+        # matches what is on disk instead of drifting into a half-applied state
+        # that the next restart would silently undo.
+        if self._registry_remove is not None:
+            try:
+                if self._registry_remove(resolved):
+                    removed = True
+            except Exception as exc:
+                logger.exception(
+                    "aggregator: failed to deregister project root %s", resolved
+                )
+                raise ProjectRegistryError(str(exc) or type(exc).__name__) from exc
+        # Compare by realpath, not set membership: the active set stores
+        # ``Path.resolve()`` results, but a root seeded through a symlinked or
+        # relative spelling can still differ textually from *resolved*.
+        for existing in list(self._project_roots):
+            if _safe_realpath(existing) != resolved:
+                continue
+            self._project_roots.discard(existing)
+            self._persisted_roots.discard(existing)
+            removed = True
+        self._persisted_roots.discard(Path(resolved))
+        self._invalidate_hist_roots_cache()
+        return removed
 
     def set_project_roots(self, paths: object) -> None:
         """Replace the polled project-root set with *paths*."""
@@ -545,6 +689,14 @@ class DaemonAggregator:
                     root, seen_resumable, live_roots
                 )
             )
+        # The registration view is a management-dialog convenience, never a
+        # reason to lose a whole status tick: a registry read failure degrades
+        # to an empty list rather than aborting the snapshot the WebUI needs.
+        try:
+            registered = self.registered_projects()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("aggregator: registered_projects failed")
+            registered = []
         return MachineStatus(
             machine_id=self.machine_id,
             hostname=self.hostname,
@@ -552,6 +704,7 @@ class DaemonAggregator:
             pending_calls=all_calls,
             project_roots=self._merge_project_roots(),
             issues=all_issues,
+            registered_projects=registered,
         )
 
     def _live_roots(self) -> Optional[Set[str]]:
@@ -1483,6 +1636,20 @@ def _is_resumable_status(status: str) -> bool:
     FlowStatus value verbatim.
     """
     return status.strip().lower() != "completed"
+
+
+def _safe_realpath(path: object) -> str:
+    """``os.path.realpath`` that degrades to the literal string on OS error.
+
+    Used wherever a root has to become a comparable key without the caller being
+    able to tolerate an exception (registration views, deregistration matching).
+    Unlike :func:`_normalize_root` it applies no worktree folding — callers that
+    need it fold first.
+    """
+    try:
+        return os.path.realpath(str(path))
+    except OSError:  # pragma: no cover - defensive
+        return str(path)
 
 
 def _normalize_root(path: object) -> str:

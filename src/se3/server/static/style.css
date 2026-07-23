@@ -2932,6 +2932,75 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 .users-row-actions button { font-size: 12px; padding: 4px 10px; }
 .users-delete-btn { color: var(--red); border-color: var(--red); }
 
+/* -- registered-project panel (G4) ----------------------------------- */
+/* Same row idiom as the daemon-key / user panels so the three per-machine and
+   per-owner admin modals read as one family; only the path-centric row layout
+   (name over full monospace path + badges) is specific here. */
+
+.project-add {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 6px;
+}
+.project-add input { flex: 1; min-width: 120px; }
+
+.project-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+/* A vanished path is dimmed but never hidden — it is the entry the operator
+   opened this dialog to clean up. */
+.project-row.stale { opacity: .7; border-color: var(--yellow); }
+/* min-width:0 lets the flex child actually shrink, which is what makes the
+   ellipsis below take effect instead of the long path widening the card. */
+.project-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.project-row-name { font-size: 13px; color: var(--fg); }
+.project-row-path {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-row-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.project-badge-active { color: var(--green); border: 1px solid var(--green); }
+.project-badge-stale { color: var(--yellow); border: 1px solid var(--yellow); }
+.project-remove-btn { font-size: 12px; padding: 4px 10px; flex-shrink: 0; }
+.project-remove-path {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+/* Per-machine entry point into the dialog above. Kept faint until hover so the
+   machine list stays a list of machines, not a row of buttons. */
+.machine-projects-btn {
+  font-size: 14px;
+  padding: 0 4px;
+  flex-shrink: 0;
+  opacity: .55;
+}
+.machine-projects-btn:hover { opacity: 1; color: var(--accent); }
+
 /* ============================================================================
  * MOBILE PORTRAIT BASELINE  —  @media (max-width: 600px)
  * ============================================================================
@@ -3790,5 +3859,26 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   .login-form button,
   .login-breakglass button[type="submit"] {
     width: 100%;
+  }
+
+  /* -- registered-project panel (G4) ------------------------------------ *
+   * The machine-row entry button is a small glyph on desktop; on a phone it
+   * must still be a comfortable touch target, and it stays fully opaque since
+   * there is no hover to reveal it. The add form and the per-row layout stack
+   * so a long absolute path never widens the modal past the viewport. */
+  .machine-projects-btn {
+    min-width: 40px;
+    font-size: 18px;
+    opacity: 1;
+  }
+  .project-add { flex-wrap: wrap; }
+  .project-add input { flex: 1 1 100%; }
+  .project-add button { width: 100%; }
+  .project-row { flex-wrap: wrap; }
+  .project-row-main { flex: 1 1 100%; }
+  .project-row-path {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-all;
   }
 }

@@ -564,6 +564,65 @@
     </div>
   </div>
 
+  <!-- Registered-project management modal (scoped to one machine).
+       Mirrors the daemon-key modal shell. The registry is a per-daemon
+       physical concept, so this dialog is opened from a machine row and every
+       action it offers is re-enforced server-side by the machine's owner
+       gate — the frontend scoping is a UX nicety only. -->
+  <div id="project-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 data-i18n="projects.title">Registered Projects</h3>
+        <button id="project-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="form-hint" data-i18n="projects.hint">
+          Projects registered on this machine's daemon. They drive the New Task
+          project list, the History grouping and the Issue project filter.
+          Removing one only deregisters it — nothing on disk is deleted.
+        </p>
+
+        <form id="project-add-form" class="project-add">
+          <input type="text" id="project-add-path"
+                 data-i18n-placeholder="projects.pathPlaceholder"
+                 placeholder="/absolute/path/to/project"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" />
+          <button type="submit" id="project-add-submit" data-i18n="projects.add">Add project</button>
+        </form>
+
+        <p id="project-error" class="form-error hidden"></p>
+
+        <div id="project-list" class="project-list">
+          <p class="empty" data-i18n="projects.loading">Loading projects&hellip;</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deregistration confirmation. Removal is irreversible from the UI's point
+       of view (the path must be re-typed to come back), so it is two-stage. -->
+  <div id="project-remove-modal" class="modal hidden">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-head">
+        <h3 data-i18n="projects.removeTitle">Remove project</h3>
+        <button id="project-remove-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p data-i18n="projects.removeMessage">
+          Deregister this project from the machine? Only the registration is
+          removed — the project directory and its se3/ history are left
+          untouched, and a later flow there re-registers it automatically.
+        </p>
+        <p id="project-remove-path" class="project-remove-path"></p>
+        <p id="project-remove-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="project-remove-confirm" class="btn-end" data-i18n="projects.removeConfirm">Remove</button>
+          <button type="button" id="project-remove-cancel" class="ghost-btn" data-i18n="common.cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast notifications -->
   <div id="toast-container" class="toast-container"></div>
 

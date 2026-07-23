@@ -1021,6 +1021,108 @@ def test_issue_endpoints_are_owner_isolated(authz_app):
             assert cross.status_code == 404
 
 
+# --------------------------------------------------------------------------
+# Project-registry REST endpoints — owner isolation
+# --------------------------------------------------------------------------
+
+
+def test_project_endpoints_are_owner_isolated(authz_app):
+    """One owner can neither read nor mutate another owner's project registry.
+
+    The registry names real filesystem paths on the daemon host, so a
+    cross-owner read is a disclosure and a cross-owner write is remote control
+    of somebody else's machine — both must be indistinguishable from "no such
+    machine", never a 403 that confirms the id exists.
+    """
+    from fastapi.testclient import TestClient
+
+    app = authz_app
+    with TestClient(app) as ca, TestClient(app) as cb:
+        login(ca, "A", "pw")
+        login(cb, "B", "pw")
+        with ca.websocket_connect("/ws") as da, cb.websocket_connect("/ws") as db:
+            da.send_text(_owner_hello(app, "A", "mA"))
+            protocol.decode(da.receive_text())
+            db.send_text(_owner_hello(app, "B", "mB"))
+            protocol.decode(db.receive_text())
+            da.send_text(
+                protocol.make_status_update({
+                    "machine_id": "mA",
+                    "flows": [],
+                    "registered_projects": [
+                        {"path": "/pa", "exists": True, "active": True},
+                    ],
+                }).to_json()
+            )
+            db.send_text(
+                protocol.make_status_update({
+                    "machine_id": "mB",
+                    "flows": [],
+                    "registered_projects": [
+                        {"path": "/pb", "exists": False, "active": False},
+                    ],
+                }).to_json()
+            )
+            _await_visible(ca, "mA")
+            _await_visible(cb, "mB")
+
+            # Each owner reads only its own machine's registry.
+            a_projects = ca.get("/api/machines/mA/projects").json()["projects"]
+            assert [p["path"] for p in a_projects] == ["/pa"]
+            b_projects = cb.get("/api/machines/mB/projects").json()["projects"]
+            assert [p["path"] for p in b_projects] == ["/pb"]
+
+            # Cross-owner read is 404, not 403 — no existence leak.
+            assert ca.get("/api/machines/mB/projects").status_code == 404
+            assert cb.get("/api/machines/mA/projects").status_code == 404
+
+            # Cross-owner writes are 404 too, and must not reach the daemon.
+            assert ca.post(
+                "/api/machines/mB/projects", json={"project_root": "/pb"}
+            ).status_code == 404
+            assert ca.request(
+                "DELETE",
+                "/api/machines/mB/projects",
+                params={"project_root": "/pb"},
+            ).status_code == 404
+
+            # A can still register on its OWN machine (proving the 404s above
+            # are the ownership gate, not a blanket rejection).
+            add_result: dict = {}
+
+            def do_add():
+                add_result["resp"] = ca.post(
+                    "/api/machines/mA/projects", json={"project_root": "/pa/new"}
+                )
+
+            worker = threading.Thread(target=do_add)
+            worker.start()
+            try:
+                msg = _next_daemon_frame(da)
+                assert msg.type == protocol.MSG_PROJECT_COMMAND
+                da.send_text(protocol.make_project_result(
+                    msg.payload.get("request_id", ""),
+                    ok=True,
+                    project_root="/pa/new",
+                ).to_json())
+            finally:
+                worker.join(timeout=5)
+            assert add_result["resp"].status_code == 201
+
+
+def test_project_endpoints_require_auth(authz_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(authz_app) as anon:
+        assert anon.get("/api/machines/mA/projects").status_code == 401
+        assert anon.post(
+            "/api/machines/mA/projects", json={"project_root": "/p"}
+        ).status_code == 401
+        assert anon.request(
+            "DELETE", "/api/machines/mA/projects", params={"project_root": "/p"}
+        ).status_code == 401
+
+
 def test_issue_endpoints_require_auth(authz_app):
     from fastapi.testclient import TestClient
 

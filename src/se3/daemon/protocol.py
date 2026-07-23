@@ -24,12 +24,12 @@ Message directions
   :data:`MSG_KEEPALIVE`, :data:`MSG_CALL_NOTIFICATION`, :data:`MSG_PONG`,
   :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_INDEX_DELTA`,
   :data:`MSG_HISTORY_DATA`, :data:`MSG_DETAIL_DATA`, :data:`MSG_ISSUE_RESULT`,
-  :data:`MSG_SPAWN_FAILED`.
+  :data:`MSG_PROJECT_RESULT`, :data:`MSG_SPAWN_FAILED`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
   :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`,
-  :data:`MSG_ISSUE_COMMAND`, :data:`MSG_DETAIL_REQUEST`,
-  :data:`MSG_END_SESSION`, :data:`MSG_VIEWERS`.
+  :data:`MSG_ISSUE_COMMAND`, :data:`MSG_PROJECT_COMMAND`,
+  :data:`MSG_DETAIL_REQUEST`, :data:`MSG_END_SESSION`, :data:`MSG_VIEWERS`.
 
 Backward compatibility
 ----------------------
@@ -250,6 +250,18 @@ MSG_END_SESSION = "end_session"
 #: validates the operation and delegates to :class:`IssueManager`.
 MSG_ISSUE_COMMAND = "issue_command"
 
+#: server → daemon: manage the machine's *project registry* — manually register
+#: (``add``) or deregister (``remove``) a project root. The daemon validates the
+#: path against its own filesystem and routes the change through the aggregator's
+#: single registration seam (worktree→main folding, realpath dedup, registry
+#: write-through), then fast-pushes a fresh snapshot so the web UI's project
+#: views refresh. Like :data:`MSG_END_SESSION`, this is a purely *additive* type:
+#: an older daemon that does not recognise it simply ignores the frame (the
+#: server then surfaces one visible timeout for a low-frequency, human-initiated
+#: action), so no ``PROTOCOL_VERSION`` bump is required. A bump would only be
+#: warranted if an existing behaviour silently degraded — nothing here does.
+MSG_PROJECT_COMMAND = "project_command"
+
 #: server → daemon: report the number of browsers currently watching the web
 #: UI. Sent as an *edge* only on the 0↔non-0 transitions (open the first page /
 #: close the last one) — 1→2 or 2→1 changes are not broadcast, because the
@@ -267,6 +279,15 @@ MSG_VIEWERS = "viewers"
 #: or ``ok=false`` with an ``error`` message.
 MSG_ISSUE_RESULT = "issue_result"
 
+#: daemon → server: acknowledge the result of a :data:`MSG_PROJECT_COMMAND`.
+#: Carries ``request_id`` (echoed from the command) plus ``ok`` and, on success,
+#: the normalized ``project_root`` that was actually registered / deregistered.
+#: On failure it carries both a human ``error`` and a stable ``error_code`` —
+#: the code is what the web UI maps to a localized message (the prose is only a
+#: diagnostic fallback), which is why this reply is not just an ISSUE_RESULT
+#: clone.
+MSG_PROJECT_RESULT = "project_result"
+
 #: server → daemon: pull the *full text* of a single issue or pending call on
 #: demand. STATUS_UPDATE now carries only truncated summaries (issue
 #: descriptions / call prompts clipped for wire economy); when the operator
@@ -283,6 +304,16 @@ DETAIL_KIND_ISSUE = "issue"
 DETAIL_KIND_CALL = "call"
 #: Every recognised detail-request kind.
 DETAIL_KINDS: FrozenSet[str] = frozenset({DETAIL_KIND_ISSUE, DETAIL_KIND_CALL})
+
+# -- project-registry operations ------------------------------------------
+# The ``operation`` field of a MSG_PROJECT_COMMAND payload. Only the two
+# registry mutations exist: listing is served from the STATUS_UPDATE snapshot
+# (``registered_projects``) rather than by a request/response round trip, so no
+# ``list`` operation is needed here.
+PROJECT_OP_ADD = "add"
+PROJECT_OP_REMOVE = "remove"
+#: Every recognised project-registry operation.
+PROJECT_OPERATIONS: FrozenSet[str] = frozenset({PROJECT_OP_ADD, PROJECT_OP_REMOVE})
 
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
@@ -342,6 +373,7 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_KEEPALIVE,
         MSG_DETAIL_DATA,
         MSG_ISSUE_RESULT,
+        MSG_PROJECT_RESULT,
         MSG_SPAWN_FAILED,
     }
 )
@@ -356,6 +388,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_HISTORY_INDEX_REQUEST,
         MSG_INTERJECT_FLOW,
         MSG_ISSUE_COMMAND,
+        MSG_PROJECT_COMMAND,
         MSG_DETAIL_REQUEST,
         MSG_END_SESSION,
         MSG_VIEWERS,
@@ -739,6 +772,74 @@ def make_issue_result(
     if issue_id:
         payload["issue_id"] = issue_id
     return Message(type=MSG_ISSUE_RESULT, payload=payload)
+
+
+def make_project_command(
+    operation: str,
+    project_root: str,
+    *,
+    request_id: str = "",
+) -> Message:
+    """server → daemon: register or deregister a project root.
+
+    *operation* is :data:`PROJECT_OP_ADD` or :data:`PROJECT_OP_REMOVE`;
+    *project_root* is the absolute path on the daemon's machine. The daemon
+    revalidates the path itself — the server cannot see the daemon's filesystem,
+    so its own check is only a cheap early reject.
+
+    When *request_id* is supplied the daemon echoes it in its
+    :data:`MSG_PROJECT_RESULT` reply so the server can wake the waiting REST
+    request.
+
+    Raises :class:`ProtocolError` when *operation* is not a recognised
+    :data:`PROJECT_OPERATIONS` value.
+    """
+    if operation not in PROJECT_OPERATIONS:
+        raise ProtocolError(
+            f"project operation must be one of {sorted(PROJECT_OPERATIONS)}, "
+            f"got {operation!r}"
+        )
+    payload: Dict[str, Any] = {
+        "operation": operation,
+        "project_root": project_root,
+    }
+    if request_id:
+        payload["request_id"] = request_id
+    return Message(type=MSG_PROJECT_COMMAND, payload=payload)
+
+
+def make_project_result(
+    request_id: str,
+    *,
+    ok: bool = True,
+    error: str = "",
+    error_code: str = "",
+    project_root: str = "",
+) -> Message:
+    """daemon → server: acknowledge the result of a project-registry command.
+
+    *request_id* echoes the originating :data:`MSG_PROJECT_COMMAND`. On success
+    *project_root* is the **normalized** path actually registered / deregistered
+    (worktree-folded and realpath'd), which may differ from the one requested —
+    the web UI shows what really landed, not what was typed.
+
+    On failure *error_code* is a stable machine-readable reason
+    (``invalid_path`` / ``not_found`` / ``not_a_directory`` / ``live_flow`` /
+    ``not_registered`` / ``unsupported``) that the server maps to an HTTP status
+    and the web UI maps to a localized message; *error* is the untranslated
+    diagnostic prose kept only as a fallback.
+    """
+    payload: Dict[str, Any] = {
+        "request_id": request_id,
+        "ok": ok,
+    }
+    if error:
+        payload["error"] = error
+    if error_code:
+        payload["error_code"] = error_code
+    if project_root:
+        payload["project_root"] = project_root
+    return Message(type=MSG_PROJECT_RESULT, payload=payload)
 
 
 def make_ping(*, seq: int = 0, viewers: Optional[int] = None) -> Message:

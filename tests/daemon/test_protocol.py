@@ -5,15 +5,25 @@ message and its constructor, the optional ``viewers`` level field piggybacked
 on MSG_PING (byte-compatible with revision 3 when absent), the version bump
 to "4", and the ``supports_presence`` negotiation gate that keeps a daemon at
 full speed against any pre-presence server.
+
+Also covers the additive project-registry management pair (MSG_PROJECT_COMMAND
+/ MSG_PROJECT_RESULT), which deliberately rides on revision 4 without a bump.
 """
 
 from __future__ import annotations
 
+import pytest
+
 from se3.daemon import protocol
 from se3.daemon.protocol import (
     MSG_PING,
+    MSG_PROJECT_COMMAND,
+    MSG_PROJECT_RESULT,
     MSG_VIEWERS,
+    ProtocolError,
     make_ping,
+    make_project_command,
+    make_project_result,
     make_viewers,
     supports_presence,
     supports_traffic_reduction,
@@ -124,3 +134,96 @@ def test_make_ping_viewers_zero_is_carried():
 
 def test_make_ping_coerces_viewers_to_int():
     assert make_ping(viewers=2.0).payload == {"viewers": 2}
+
+
+# -- project-registry management messages ------------------------------------
+
+
+def test_project_messages_registered_in_correct_directions():
+    assert MSG_PROJECT_COMMAND == "project_command"
+    assert MSG_PROJECT_RESULT == "project_result"
+
+    assert MSG_PROJECT_COMMAND in protocol.SERVER_TO_DAEMON
+    assert MSG_PROJECT_COMMAND not in protocol.DAEMON_TO_SERVER
+    assert MSG_PROJECT_RESULT in protocol.DAEMON_TO_SERVER
+    assert MSG_PROJECT_RESULT not in protocol.SERVER_TO_DAEMON
+
+    assert MSG_PROJECT_COMMAND in protocol.ALL_MESSAGE_TYPES
+    assert MSG_PROJECT_RESULT in protocol.ALL_MESSAGE_TYPES
+
+
+def test_project_management_did_not_bump_protocol_version():
+    # The pair is additive the way MSG_END_SESSION was: an older peer that does
+    # not know the type just ignores the frame, and nothing existing degrades —
+    # so the revision stays at 4 on purpose.
+    assert protocol.PROTOCOL_VERSION == "4"
+
+
+def test_project_operations_set():
+    assert protocol.PROJECT_OP_ADD == "add"
+    assert protocol.PROJECT_OP_REMOVE == "remove"
+    assert protocol.PROJECT_OPERATIONS == frozenset({"add", "remove"})
+
+
+@pytest.mark.parametrize("operation", ["add", "remove"])
+def test_make_project_command_round_trip(operation):
+    msg = make_project_command(operation, "/srv/proj", request_id="req-1")
+    assert msg.type == MSG_PROJECT_COMMAND
+
+    decoded = protocol.decode(msg.to_json())
+    assert decoded.type == MSG_PROJECT_COMMAND
+    assert decoded.payload == {
+        "operation": operation,
+        "project_root": "/srv/proj",
+        "request_id": "req-1",
+    }
+
+
+def test_make_project_command_omits_empty_request_id():
+    msg = make_project_command("add", "/srv/proj")
+    assert msg.payload == {"operation": "add", "project_root": "/srv/proj"}
+    assert "request_id" not in msg.payload
+
+
+@pytest.mark.parametrize("operation", ["", "list", "delete", "ADD", None])
+def test_make_project_command_rejects_unknown_operation(operation):
+    with pytest.raises(ProtocolError):
+        make_project_command(operation, "/srv/proj")
+
+
+def test_make_project_result_success_round_trip():
+    msg = make_project_result("req-2", ok=True, project_root="/srv/proj")
+    assert msg.type == MSG_PROJECT_RESULT
+
+    decoded = protocol.decode(msg.to_json())
+    assert decoded.type == MSG_PROJECT_RESULT
+    assert decoded.payload == {
+        "request_id": "req-2",
+        "ok": True,
+        "project_root": "/srv/proj",
+    }
+
+
+def test_make_project_result_omits_empty_optional_fields():
+    # Empty optionals must be absent, not present-as-"" — the server tells
+    # "no code reported" from "code is the empty string" by key presence.
+    msg = make_project_result("req-3")
+    assert msg.payload == {"request_id": "req-3", "ok": True}
+    for key in ("error", "error_code", "project_root"):
+        assert key not in msg.payload
+
+
+def test_make_project_result_failure_carries_code_round_trip():
+    msg = make_project_result(
+        "req-4",
+        ok=False,
+        error="Project /srv/proj has a running flow",
+        error_code="live_flow",
+    )
+    decoded = protocol.decode(msg.to_json())
+    assert decoded.payload == {
+        "request_id": "req-4",
+        "ok": False,
+        "error": "Project /srv/proj has a running flow",
+        "error_code": "live_flow",
+    }

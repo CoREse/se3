@@ -86,6 +86,14 @@ ResumeHandler = Callable[[str, str], Any]
 EndSessionHandler = Callable[[str, str, str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
+#: Type of the project-registry handler — called with (operation, project_root)
+#: when a PROJECT_COMMAND arrives, returning the *normalized* path that was
+#: actually registered / deregistered. It performs blocking disk I/O (registry
+#: rewrite) so the client always invokes it off the event loop. It signals a
+#: refusal by raising an exception carrying a stable ``code`` attribute
+#: (``se3.daemon.daemon.ProjectCommandError``), which the client relays verbatim
+#: as the reply's ``error_code``.
+ProjectHandler = Callable[[str, str], str]
 #: Type of the history provider — a :class:`~se3.daemon.history.DaemonHistoryReader`
 #: (or any object exposing ``build_index`` / ``read_flow`` / ``read_active_flows``).
 HistoryProvider = Any
@@ -235,6 +243,7 @@ class DaemonClient:
         resume_handler: Optional[ResumeHandler] = None,
         end_session_handler: Optional[EndSessionHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
+        project_handler: Optional[ProjectHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         calls_signature_provider: Optional[CallsSignatureProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
@@ -268,6 +277,12 @@ class DaemonClient:
                 subprocess). When ``None`` an END_SESSION is logged and ignored.
             respond_handler: Callable invoked for an incoming RESPOND_CALL;
                 when ``None`` the client writes the response file itself.
+            project_handler: Callable invoked for an incoming PROJECT_COMMAND
+                with ``(operation, project_root)``, returning the normalized
+                path it registered / deregistered. When ``None`` the command is
+                refused with ``error_code="unsupported"`` — a daemon build
+                without registry management must say so rather than let the
+                server's REST caller sit until its timeout.
             history_provider: A :class:`~se3.daemon.history.DaemonHistoryReader`
                 used to report the history index, push active-flow increments
                 and answer HISTORY_REQUEST pulls. When ``None`` history support
@@ -301,6 +316,7 @@ class DaemonClient:
         self._resume_handler = resume_handler
         self._end_session_handler = end_session_handler
         self._respond_handler = respond_handler or _default_respond_handler
+        self._project_handler = project_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
         self._calls_signature_provider = calls_signature_provider
@@ -967,6 +983,8 @@ class DaemonClient:
             await self._handle_end_session(message.payload)
         elif message.type == protocol.MSG_ISSUE_COMMAND:
             await self._handle_issue_command(ws, message.payload)
+        elif message.type == protocol.MSG_PROJECT_COMMAND:
+            await self._handle_project_command(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
@@ -1516,6 +1534,113 @@ class DaemonClient:
 
         else:
             raise ValueError(f"unknown issue operation: {operation!r}")
+
+    async def _handle_project_command(self, ws: Any, payload: Dict[str, Any]) -> None:
+        """Register or deregister a project root on operator request.
+
+        Validates the ``operation`` / ``project_root`` shape cheaply here, then
+        hands the real work to the injected ``project_handler`` (the daemon's
+        ``request_add_project`` / ``request_remove_project``), which owns the
+        filesystem checks, the live-flow refusal and the registry write.
+
+        A refusal travels back as a stable ``error_code`` rather than prose: the
+        web UI's user-facing text must come from a localized key, so the code is
+        the contract and the message is only a diagnostic fallback.
+        """
+        operation = str(payload.get("operation") or "").strip()
+        project_root = str(payload.get("project_root") or "").strip()
+        request_id = str(payload.get("request_id") or "").strip()
+
+        async def _reply(
+            *,
+            ok: bool,
+            error: str = "",
+            error_code: str = "",
+            registered: str = "",
+        ) -> None:
+            """Send a result back if we have a request_id and a live ws."""
+            if not request_id:
+                return
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_project_result(
+                        request_id,
+                        ok=ok,
+                        error=error,
+                        error_code=error_code,
+                        project_root=registered,
+                    ),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to send PROJECT_RESULT for request %s",
+                    request_id,
+                    exc_info=True,
+                )
+
+        if operation not in protocol.PROJECT_OPERATIONS:
+            logger.warning("Ignoring PROJECT_COMMAND with operation %r", operation)
+            await _reply(
+                ok=False,
+                error=f"unknown project operation: {operation!r}",
+                error_code="invalid_operation",
+            )
+            return
+        if not project_root or not Path(project_root).is_absolute():
+            logger.warning(
+                "PROJECT_COMMAND: project_root must be an absolute path, got %r",
+                project_root,
+            )
+            await _reply(
+                ok=False,
+                error="project_root must be an absolute path",
+                error_code="invalid_path",
+            )
+            return
+        handler = self._project_handler
+        if handler is None:
+            logger.warning("PROJECT_COMMAND received but no project handler is wired")
+            await _reply(
+                ok=False,
+                error="project registry management is not available",
+                error_code="unsupported",
+            )
+            return
+
+        # The handler rewrites the on-disk registry — blocking I/O that must
+        # never run on the event loop, which is also serving the status pushes
+        # the web UI depends on.
+        try:
+            registered = await asyncio.to_thread(handler, operation, project_root)
+        except Exception as exc:
+            logger.warning(
+                "PROJECT_COMMAND %s failed for %s: %s", operation, project_root, exc
+            )
+            await _reply(
+                ok=False,
+                error=str(exc) or type(exc).__name__,
+                # Only a ProjectCommandError carries a code; anything else is an
+                # unexpected fault, and an empty code lets the UI fall back to
+                # its generic failure message rather than invent a wrong key.
+                error_code=str(getattr(exc, "code", "") or ""),
+            )
+            return
+
+        # Ack *before* the fast push, for the same reason ISSUE_COMMAND does:
+        # the PROJECT_RESULT frame is what the server blocks on within its
+        # command timeout, while the fast push only schedules a follow-up
+        # STATUS_UPDATE. Pushing first would risk reporting a timeout for a
+        # registry change that already landed on disk.
+        await _reply(ok=True, registered=str(registered or project_root))
+        # The registry just changed, so the cached root set is stale — drop it
+        # so an ISSUE_COMMAND arriving before the next STATUS_UPDATE still sees
+        # a freshly added project (and no longer accepts a removed one).
+        self._last_known_project_roots = None
+        self._trigger_fast_push()
+        logger.info(
+            "PROJECT_COMMAND %s handled for %s", operation, registered or project_root
+        )
 
     def _drain_active(self, flow_id: str) -> bool:
         """Whether *flow_id* has an in-flight multi-frame full-pull drain.

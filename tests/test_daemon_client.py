@@ -812,6 +812,293 @@ def test_issue_command_ack_echoes_request_id_and_issue_id(tmp_path):
     assert ack.payload["issue_id"]
 
 
+# --------------------------------------------------------------------------
+# MSG_PROJECT_COMMAND dispatch
+# --------------------------------------------------------------------------
+
+
+class _RecordingProjectHandler:
+    """Project handler stand-in recording its calls (and optionally raising)."""
+
+    def __init__(self, *, result: str = "", raises: BaseException | None = None):
+        self.calls = []
+        self._result = result
+        self._raises = raises
+
+    def __call__(self, operation, project_root):
+        self.calls.append((operation, project_root))
+        if self._raises is not None:
+            raise self._raises
+        return self._result or project_root
+
+
+def _run_project_command(client, ws, **kw):
+    """Dispatch one PROJECT_COMMAND through the client's real dispatch path."""
+
+    async def scenario():
+        await client._dispatch(ws, protocol.make_project_command(**kw))
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_project_command_add_routes_to_handler(tmp_path):
+    handler = _RecordingProjectHandler(result=str(tmp_path))
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(
+        client, ws, operation="add", project_root=str(tmp_path), request_id="req-add"
+    )
+
+    assert handler.calls == [("add", str(tmp_path))]
+    acks = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT]
+    assert len(acks) == 1
+    assert acks[0].payload["request_id"] == "req-add"
+    assert acks[0].payload["ok"] is True
+    # The ack echoes the *normalized* path the handler actually registered.
+    assert acks[0].payload["project_root"] == str(tmp_path)
+
+
+def test_dispatch_project_command_remove_routes_to_handler(tmp_path):
+    handler = _RecordingProjectHandler(result=str(tmp_path))
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(
+        client, ws, operation="remove", project_root=str(tmp_path), request_id="req-rm"
+    )
+
+    assert handler.calls == [("remove", str(tmp_path))]
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["ok"] is True
+
+
+def test_project_command_ack_echoes_normalized_path(tmp_path):
+    """A worktree-folded / resolved path must come back, not the typed one."""
+    handler = _RecordingProjectHandler(result="/main/repo")
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(
+        client,
+        ws,
+        operation="add",
+        project_root="/main/repo/se3/worktrees/wt-1",
+        request_id="req-norm",
+    )
+
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["project_root"] == "/main/repo"
+
+
+def test_project_command_rejects_empty_operation_without_touching_handler():
+    handler = _RecordingProjectHandler()
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    async def scenario():
+        # Hand-built: make_project_command refuses to encode an empty operation,
+        # so this is the shape only a broken/foreign peer could send.
+        msg = protocol.Message(
+            type=protocol.MSG_PROJECT_COMMAND,
+            payload={"operation": "", "project_root": "/p", "request_id": "req-op"},
+        )
+        await client._dispatch(ws, msg)
+
+    asyncio.run(scenario())
+
+    assert handler.calls == []
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["ok"] is False
+    assert ack.payload["request_id"] == "req-op"
+
+
+def test_project_command_rejects_relative_path_without_touching_handler():
+    handler = _RecordingProjectHandler()
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(
+        client,
+        ws,
+        operation="add",
+        project_root="relative/path",
+        request_id="req-rel",
+    )
+
+    assert handler.calls == []
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["ok"] is False
+    assert ack.payload["error_code"] == "invalid_path"
+
+
+def test_project_command_without_handler_replies_unsupported(tmp_path):
+    """No wired handler must fail fast, not leave the REST caller to time out."""
+    client = _make_client()
+    ws = _FakeWS()
+
+    _run_project_command(
+        client, ws, operation="add", project_root=str(tmp_path), request_id="req-none"
+    )
+
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["ok"] is False
+    assert ack.payload["error_code"] == "unsupported"
+
+
+def test_project_command_propagates_handler_error_code(tmp_path):
+    """A ProjectCommandError's code reaches the wire verbatim."""
+    from se3.daemon.daemon import ProjectCommandError
+
+    handler = _RecordingProjectHandler(
+        raises=ProjectCommandError("live_flow", "has a running flow")
+    )
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(
+        client, ws, operation="remove", project_root=str(tmp_path), request_id="req-live"
+    )
+
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["ok"] is False
+    assert ack.payload["error_code"] == "live_flow"
+    assert ack.payload["error"] == "has a running flow"
+
+
+def test_project_command_codeless_exception_reports_no_code(tmp_path):
+    """A plain fault carries no code, so the UI falls back to a generic message."""
+    handler = _RecordingProjectHandler(raises=OSError("disk gone"))
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(
+        client, ws, operation="add", project_root=str(tmp_path), request_id="req-boom"
+    )
+
+    ack = [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT][0]
+    assert ack.payload["ok"] is False
+    assert "error_code" not in ack.payload
+    assert ack.payload["error"] == "disk gone"
+
+
+def test_project_command_failure_does_not_fast_push(tmp_path):
+    """A refused command changed nothing, so no snapshot push is warranted."""
+    from se3.daemon.daemon import ProjectCommandError
+
+    handler = _RecordingProjectHandler(
+        raises=ProjectCommandError("not_registered", "not registered")
+    )
+    client = _make_client(project_handler=handler)
+    client._last_known_project_roots = {str(tmp_path)}
+    pushes = []
+    client._trigger_fast_push = lambda: pushes.append(1)
+
+    _run_project_command(
+        client, ws := _FakeWS(), operation="remove", project_root=str(tmp_path)
+    )
+
+    assert pushes == []
+    assert client._last_known_project_roots == {str(tmp_path)}
+    assert ws.sent == []  # no request_id -> nothing to ack
+
+
+def test_project_command_replies_before_fast_push(tmp_path):
+    """The PROJECT_RESULT ack must be sent before _trigger_fast_push().
+
+    The ack is the frame the server blocks on within its command timeout, so it
+    must precede the heavier fast-push that only schedules a STATUS_UPDATE.
+    """
+    handler = _RecordingProjectHandler(result=str(tmp_path))
+    client = _make_client(project_handler=handler)
+    order = []
+
+    real_send = client._send
+
+    async def _recording_send(ws, message):
+        if message.type == protocol.MSG_PROJECT_RESULT:
+            order.append("ack")
+        return await real_send(ws, message)
+
+    client._send = _recording_send
+    client._trigger_fast_push = lambda: order.append("fast_push")
+
+    _run_project_command(
+        client,
+        _FakeWS(),
+        operation="add",
+        project_root=str(tmp_path),
+        request_id="req-order",
+    )
+
+    assert order == ["ack", "fast_push"]
+
+
+def test_project_command_invalidates_project_roots_cache(tmp_path):
+    """The registry changed, so the cached root set must be dropped."""
+    handler = _RecordingProjectHandler(result=str(tmp_path))
+    client = _make_client(project_handler=handler)
+    client._last_known_project_roots = {"/stale/root"}
+
+    _run_project_command(
+        client, _FakeWS(), operation="add", project_root=str(tmp_path)
+    )
+
+    assert client._last_known_project_roots is None
+
+
+def test_project_command_handler_runs_off_the_event_loop(tmp_path):
+    """The handler does blocking registry I/O — it must run in a worker thread."""
+    seen = {}
+    main_thread = threading.current_thread().ident
+
+    def _handler(operation, project_root):
+        seen["thread"] = threading.current_thread().ident
+        return project_root
+
+    client = _make_client(project_handler=_handler)
+    _run_project_command(
+        client, _FakeWS(), operation="add", project_root=str(tmp_path)
+    )
+
+    assert seen["thread"] != main_thread
+
+
+def test_project_command_without_request_id_sends_no_ack(tmp_path):
+    handler = _RecordingProjectHandler(result=str(tmp_path))
+    client = _make_client(project_handler=handler)
+    ws = _FakeWS()
+
+    _run_project_command(client, ws, operation="add", project_root=str(tmp_path))
+
+    assert handler.calls == [("add", str(tmp_path))]
+    assert [m for m in ws.sent if m.type == protocol.MSG_PROJECT_RESULT] == []
+
+
+def test_daemon_project_request_adapter_dispatches(tmp_path, monkeypatch):
+    """The daemon's adapter routes add/remove and rejects anything else."""
+    from se3.daemon.daemon import ProjectCommandError
+
+    daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "pids"))
+    seen = []
+    monkeypatch.setattr(
+        daemon, "request_add_project", lambda p: seen.append(("add", p)) or "/added"
+    )
+    monkeypatch.setattr(
+        daemon,
+        "request_remove_project",
+        lambda p: seen.append(("remove", p)) or "/removed",
+    )
+
+    assert daemon._handle_project_request("add", "/p") == "/added"
+    assert daemon._handle_project_request("remove", "/p") == "/removed"
+    assert seen == [("add", "/p"), ("remove", "/p")]
+
+    with pytest.raises(ProjectCommandError) as excinfo:
+        daemon._handle_project_request("list", "/p")
+    assert excinfo.value.code == "invalid_operation"
+
+
 def test_push_status_refreshes_project_roots_cache(tmp_path):
     """A successful _push_status populates the project_roots cache."""
     client = _make_client(

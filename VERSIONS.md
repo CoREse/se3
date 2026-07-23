@@ -1,5 +1,15 @@
 # SE3 Framework Version History
 
+## 11.24.0 - 2026-07-23
+
+- Add a project management dialog to each machine card in the WebUI, listing that machine's registered projects with add and delete actions
+- Support manually registering a project by absolute path, validated on the target daemon as an existing directory before being written through the normal registry channel (worktree→main-repo normalization and realpath dedup preserved)
+- Support removing a registered project from both the persistent registry file and the daemon's in-memory active set, so it disappears from the New Task dropdown, History grouping and Issue filter — without ever touching any data on disk under that project
+- Mark stale registry entries whose path no longer exists, and require a confirmation step before deletion to prevent accidental removal
+- Reject deletion of a project that still has a live running flow, returning a clear error instead of letting the daemon discovery loop silently re-register it
+- Add REST endpoints for listing, adding and removing registered projects, guarded by the existing machine-owner authorization model
+- Add PROJECT_COMMAND / PROJECT_RESULT daemon protocol messages with request correlation and timeout handling, and push a refreshed status snapshot after each change so the WebUI updates promptly
+- Add en-US and zh-CN localization for all new project management strings
 ## 11.23.2 - 2026-07-22
 
 - Serialize daemon full-pull history drain with the push loop per flow so append frames no longer interleave into an in-progress drain and create cursor gaps

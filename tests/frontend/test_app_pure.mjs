@@ -7401,4 +7401,16 @@ check("renderInterventions: phase / target / pendingSend changes each rebuild", 
     "Send disabled while a submission is in flight");
 });
 
+// ---------------------------------------------------------------------------
+// Registered-project management dialog (G4)
+// ---------------------------------------------------------------------------
+//
+// The per-machine project registry gains manual add/remove from the WebUI. The
+// dialog mirrors the daemon's registry FILE (not the filtered project
+// universe), so a vanished path stays visible and flagged — it is exactly what
+// the operator opened the dialog to clean up. Removal is two-stage, and every
+// daemon refusal travels as a stable error_code the UI localizes itself.
+const projectRegistryMod = await import("./project_registry.test.mjs");
+await projectRegistryMod.registerProjectRegistryTests({ app, check, checkAsync, findOne, findAll });
+
 console.log(`\n${passed} checks passed.`);

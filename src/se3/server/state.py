@@ -324,6 +324,14 @@ class MachineRecord:
     online: bool = True
     flows: Dict[str, FlowSnapshot] = field(default_factory=dict)
     project_roots: List[str] = field(default_factory=list)
+    #: Mirror of the daemon's *persistent* project registry — one
+    #: ``{"path", "exists", "active"}`` entry per registered root, including
+    #: entries whose directory has vanished (``exists`` False). Distinct from
+    #: ``project_roots``, which is the merged active∪registry∪history view the
+    #: project pickers use and therefore cannot express "registered but stale".
+    #: Empty for a daemon predating the field — the management dialog then
+    #: simply shows nothing rather than failing.
+    registered_projects: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self, *, include_flows: bool = True) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -337,10 +345,40 @@ class MachineRecord:
             "online": self.online,
             "flow_count": len(self.flows),
             "project_roots": list(self.project_roots),
+            "registered_projects": [dict(p) for p in self.registered_projects],
         }
         if include_flows:
             data["flows"] = [f.to_dict() for f in self.flows.values()]
         return data
+
+
+def _sanitize_registered_projects(raw: Any) -> List[Dict[str, Any]]:
+    """Normalize a snapshot's ``registered_projects`` into the three-key shape.
+
+    WHY the defensive regrind rather than passing the payload through: this list
+    is rendered directly by the management dialog, and the daemon is a *remote*
+    peer whose revision the server does not control. A pre-field daemon sends
+    nothing (→ empty list, dialog simply shows no rows), and a malformed or
+    extended payload is clipped to exactly ``path``/``exists``/``active`` so no
+    unvetted daemon-supplied key ever reaches the browser.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        if not path:
+            continue
+        out.append(
+            {
+                "path": path,
+                "exists": bool(entry.get("exists")),
+                "active": bool(entry.get("active")),
+            }
+        )
+    return out
 
 
 def _owned(record: "MachineRecord", owner: Optional[str]) -> bool:
@@ -590,6 +628,9 @@ class ServerState:
                 record.project_roots = [str(p) for p in raw_roots if p]
             else:
                 record.project_roots = []
+            record.registered_projects = _sanitize_registered_projects(
+                snapshot.get("registered_projects")
+            )
             flows: Dict[str, FlowSnapshot] = {}
             for raw in snapshot.get("flows") or []:
                 if not isinstance(raw, dict):

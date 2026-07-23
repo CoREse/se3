@@ -412,6 +412,44 @@ class IssueCommandRegistry:
             self._waiters.pop(request_id, None)
 
 
+class ProjectCommandRegistry:
+    """Tracks in-flight project-registry commands awaiting a daemon result.
+
+    The registry-management REST handlers (add / remove a project root) park an
+    :class:`asyncio.Future` here keyed by ``request_id`` and wake on the
+    daemon's :data:`protocol.MSG_PROJECT_RESULT`. Deliberately a separate
+    registry from :class:`IssueCommandRegistry` rather than a shared one: the
+    two legs mint their ids independently, so sharing a keyspace would let an
+    issue ack resolve a project waiter (and vice versa) on an id collision.
+    Lives entirely in process memory.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: Dict[str, list] = {}
+
+    def register(self, request_id: str) -> "asyncio.Future":
+        """Park and return a future that resolves when *request_id* lands."""
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiters.setdefault(request_id, []).append(fut)
+        return fut
+
+    def resolve(self, request_id: str, data: Any) -> None:
+        """Resolve every waiter parked for *request_id* with *data*."""
+        for fut in self._waiters.pop(request_id, []):
+            if not fut.done():
+                fut.set_result(data)
+
+    def discard(self, request_id: str, fut: "asyncio.Future") -> None:
+        """Drop a single waiter (e.g. after a timeout) without resolving it."""
+        waiters = self._waiters.get(request_id)
+        if not waiters:
+            return
+        if fut in waiters:
+            waiters.remove(fut)
+        if not waiters:
+            self._waiters.pop(request_id, None)
+
+
 class DetailRequestRegistry:
     """Tracks in-flight on-demand issue/call detail pulls awaiting a daemon reply.
 
@@ -1172,6 +1210,7 @@ async def handle_daemon_connection(
     identity: Optional["IdentityService"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
+    project_registry: Optional["ProjectCommandRegistry"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -1300,6 +1339,7 @@ async def handle_daemon_connection(
             interjection_tracker,
             issue_registry,
             detail_registry,
+            project_registry,
         )
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
@@ -1327,6 +1367,7 @@ async def _serve_loop(
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
+    project_registry: Optional["ProjectCommandRegistry"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -1350,6 +1391,7 @@ async def _serve_loop(
                 interjection_tracker,
                 issue_registry,
                 detail_registry,
+                project_registry,
                 manager=manager,
                 connection=websocket,
             )
@@ -1412,6 +1454,7 @@ async def _handle_message(
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
+    project_registry: Optional["ProjectCommandRegistry"] = None,
     *,
     manager: Optional["ConnectionManager"] = None,
     connection: Any = None,
@@ -1700,5 +1743,22 @@ async def _handle_message(
         request_id = str(message.payload.get("request_id") or "")
         if request_id and issue_registry is not None:
             issue_registry.resolve(request_id, message.payload)
+    elif message.type == protocol.MSG_PROJECT_RESULT:
+        # Daemon acknowledges a project-registry add / remove. The ack lands
+        # BEFORE the daemon's follow-up fast push, so resolving here is what
+        # lets the REST handler answer without waiting on a status round-trip.
+        await state.touch(machine_id)
+        request_id = str(message.payload.get("request_id") or "")
+        if not request_id or project_registry is None:
+            # An unwired registry (bare test harness) or an ack the daemon sent
+            # without echoing an id: nothing to wake, and dropping it is safe —
+            # the waiting REST call simply degrades to its own timeout.
+            logger.debug(
+                "Ignoring PROJECT_RESULT from %s with no waiter (request_id=%r)",
+                machine_id,
+                request_id,
+            )
+        else:
+            project_registry.resolve(request_id, message.payload)
     else:  # pragma: no cover - decode() restricts to known daemon->server types
         logger.debug("Ignoring unexpected daemon message type %s", message.type)

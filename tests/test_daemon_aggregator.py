@@ -14,8 +14,14 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from se3.daemon import protocol
-from se3.daemon.aggregator import DaemonAggregator, PendingCall
+from se3.daemon.aggregator import (
+    DaemonAggregator,
+    PendingCall,
+    ProjectRegistryError,
+)
 
 
 def _write(path: Path, payload: object) -> None:
@@ -1167,3 +1173,221 @@ def test_all_project_roots_never_lists_a_worktree_path(tmp_path: Path) -> None:
     roots = agg.all_project_roots()
     assert str(main.resolve()) in roots
     assert all("/se3/worktrees/" not in r for r in roots)
+
+
+# ---- registered_projects / unregister_project_root -------------------------
+
+
+def _registry_backed_aggregator(roots: list) -> DaemonAggregator:
+    """An aggregator whose registry callbacks are backed by the *roots* list."""
+
+    def _remove(root: str) -> bool:
+        target = os.path.realpath(root)
+        kept = [r for r in roots if os.path.realpath(r) != target]
+        if len(kept) == len(roots):
+            return False
+        roots[:] = kept
+        return True
+
+    return DaemonAggregator(
+        machine_id="m1",
+        registry_load=lambda: [r for r in roots if os.path.exists(r)],
+        registry_load_raw=lambda: list(roots),
+        registry_persist=lambda root: roots.append(root),
+        registry_remove=_remove,
+    )
+
+
+def test_registered_projects_marks_vanished_entry_as_stale(tmp_path: Path) -> None:
+    """A registered root whose directory is gone must still be listed.
+
+    Regression guard for the data source: the existence-*filtered* registry view
+    hides exactly the entries the management dialog exists to clean up, so the
+    raw view is the only correct source.
+    """
+    live = tmp_path / "live"
+    live.mkdir()
+    gone = tmp_path / "gone"
+    agg = _registry_backed_aggregator([str(live.resolve()), str(gone)])
+
+    rows = {r["path"]: r for r in agg.registered_projects()}
+    assert rows[str(live.resolve())]["exists"] is True
+    assert rows[str(gone)]["exists"] is False
+
+
+def test_registered_projects_flags_active_and_registry_only_roots(
+    tmp_path: Path,
+) -> None:
+    persisted = tmp_path / "persisted"
+    persisted.mkdir()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    agg = DaemonAggregator(
+        machine_id="m1",
+        registry_load_raw=lambda: [str(persisted.resolve())],
+    )
+    # Registered in memory only (no persist callback wired) — must still show up.
+    agg.add_project_root(str(fresh))
+
+    rows = {r["path"]: r for r in agg.registered_projects()}
+    assert rows[str(fresh.resolve())]["active"] is True
+    assert rows[str(persisted.resolve())]["active"] is False
+    assert [r["path"] for r in agg.registered_projects()] == sorted(rows)
+    assert all(set(r) == {"path", "exists", "active"} for r in rows.values())
+
+
+def test_registered_projects_degrades_to_active_set_without_raw_callback(
+    tmp_path: Path,
+) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    agg = DaemonAggregator(machine_id="m1")
+    agg.add_project_root(str(proj))
+
+    assert agg.registered_projects() == [
+        {"path": str(proj.resolve()), "exists": True, "active": True}
+    ]
+
+
+def test_registered_projects_swallows_callback_failure(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    def _boom():
+        raise RuntimeError("registry unreadable")
+
+    agg = DaemonAggregator(machine_id="m1", registry_load_raw=_boom)
+    agg.add_project_root(str(proj))
+
+    assert [r["path"] for r in agg.registered_projects()] == [str(proj.resolve())]
+
+
+def test_snapshot_carries_registered_projects(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    (proj / "se3" / "state").mkdir(parents=True)
+    agg = _registry_backed_aggregator([str(proj.resolve())])
+
+    payload = agg.get_snapshot().to_dict()
+    assert payload["registered_projects"] == [
+        {"path": str(proj.resolve()), "exists": True, "active": False}
+    ]
+
+
+def test_unregister_clears_persisted_memo_so_readd_writes_through(
+    tmp_path: Path,
+) -> None:
+    """Deleting a root must let a later legitimate re-add persist again.
+
+    ``_persisted_roots`` is the "already on disk" memo that keeps the poll loop
+    from re-parsing the registry; if it survived deletion, the re-add would skip
+    the write and the root would live in memory only until the next restart.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    roots: list = []
+    agg = _registry_backed_aggregator(roots)
+
+    agg.add_project_root(str(proj))
+    assert roots == [str(proj.resolve())]
+
+    assert agg.unregister_project_root(str(proj)) is True
+    assert roots == []
+    assert Path(str(proj.resolve())) not in agg._persisted_roots
+    assert Path(str(proj.resolve())) not in agg._project_roots
+
+    agg.add_project_root(str(proj))
+    assert roots == [str(proj.resolve())]
+
+
+def test_unregister_drops_root_from_all_project_roots(tmp_path: Path) -> None:
+    """Its own on-disk history must not resurrect a deregistered root."""
+    proj = tmp_path / "proj"
+    (proj / "se3" / "history" / "flow-1").mkdir(parents=True)
+    (proj / "se3" / "history" / "flow-1" / "_meta.json").write_text(
+        json.dumps({"project_root": str(proj.resolve())}), encoding="utf-8"
+    )
+    roots: list = []
+    agg = _registry_backed_aggregator(roots)
+    agg.add_project_root(str(proj))
+    assert str(proj.resolve()) in agg.all_project_roots()
+
+    agg.unregister_project_root(str(proj))
+
+    assert str(proj.resolve()) not in agg.all_project_roots()
+
+
+def test_unregister_folds_worktree_spelling_to_main_root(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    (main / "se3" / "state").mkdir(parents=True)
+    wt = _make_worktree_dir(main)
+    roots: list = []
+    agg = _registry_backed_aggregator(roots)
+    agg.add_project_root(str(main))
+
+    assert agg.unregister_project_root(str(wt)) is True
+    assert roots == []
+    assert agg.project_roots == []
+
+
+def test_unregister_unknown_root_reports_false(tmp_path: Path) -> None:
+    agg = _registry_backed_aggregator([])
+    assert agg.unregister_project_root(str(tmp_path / "nope")) is False
+
+
+def test_unregister_raises_on_registry_callback_failure(tmp_path: Path) -> None:
+    """A failed durable delete is NOT reported as "nothing was registered"."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    def _boom(root: str) -> bool:
+        raise RuntimeError("disk full")
+
+    agg = DaemonAggregator(machine_id="m1", registry_remove=_boom)
+    agg.add_project_root(str(proj))
+
+    with pytest.raises(ProjectRegistryError) as excinfo:
+        agg.unregister_project_root(str(proj))
+    assert "disk full" in str(excinfo.value)
+    # The in-memory view stays in lockstep with the (unchanged) registry file:
+    # a half-applied removal would be silently undone on the next restart.
+    assert agg.project_roots == [proj.resolve()]
+
+
+def test_unregister_registry_failure_keeps_persisted_bookkeeping(
+    tmp_path: Path,
+) -> None:
+    """The failed delete leaves the persist memo intact, matching the file."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    roots: list = []
+
+    def _boom(root: str) -> bool:
+        raise OSError("read-only file system")
+
+    agg = DaemonAggregator(
+        machine_id="m1",
+        registry_load=lambda: list(roots),
+        registry_persist=lambda root: roots.append(root),
+        registry_remove=_boom,
+    )
+    agg.add_project_root(str(proj))
+    assert roots == [str(proj.resolve())]
+
+    with pytest.raises(ProjectRegistryError):
+        agg.unregister_project_root(str(proj))
+
+    assert roots == [str(proj.resolve())]
+    assert Path(str(proj.resolve())) in agg._persisted_roots
+
+
+def test_remove_project_root_leaves_registry_file_alone(tmp_path: Path) -> None:
+    """The legacy in-memory ``remove_project_root`` must not touch the registry."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    roots: list = []
+    agg = _registry_backed_aggregator(roots)
+    agg.add_project_root(str(proj))
+
+    agg.remove_project_root(str(proj))
+
+    assert roots == [str(proj.resolve())]
